@@ -85,6 +85,13 @@ for dir in "$HOME/nvidia"/dynamo*; do
         continue
     fi
     
+    # Skip dynamo-utils directory
+    DIR_NAME=$(basename "$dir")
+    if [ "$DIR_NAME" = "dynamo-utils" ]; then
+        log_message "INFO: Skipping dynamo-utils directory"
+        continue
+    fi
+    
     # Copy each cursor file with warning comment
     for source_file in "${!SRC_CURSOR_FILES[@]}"; do
         target_filename="${SRC_CURSOR_FILES[$source_file]}"
@@ -110,8 +117,11 @@ for dir in "$HOME/nvidia"/dynamo*; do
                 # Extract directory name for name customization
                 DIR_NAME=$(basename "$dir")
                 
-                # Simply substitute the name field and copy
-                sed "s|\"name\": \"NVIDIA Dynamo Development\"|\"name\": \"[$DIR_NAME] $USER Dev Container\"|g" "$source_file" > "$TEMP_CURSORFILE"
+                # Apply customizations to JSON file
+                # 1. Replace display name with directory-specific name
+                # 2. Replace container name with directory-specific name
+                sed "s|\"name\": \"NVIDIA Dynamo Development\"|\"name\": \"[$DIR_NAME] $USER Dev Container\"|g" "$source_file" | \
+                sed "s|\"dynamo-dev-container\"|\"$DIR_NAME-$USER-devcontainer\"|g" > "$TEMP_CURSORFILE"
                 log_message "SUCCESS: JSON copied with name customized for $DIR_NAME"
             else
                 # For non-JSON files: add header and copy content
@@ -135,6 +145,26 @@ for dir in "$HOME/nvidia"/dynamo*; do
         fi
     done
 
+    # Handle build directory management for dynamo* directories
+    if [[ "$DIR_NAME" == dynamo* ]]; then
+        if [ "$DRY_RUN" = true ]; then
+            log_message "  Would manage build directory for $DIR_NAME"
+        else
+            # Ensure .build/target exists
+            mkdir -p "$dir/.build/target"
+            
+            # If target is a real directory (not symlink), move it and create symlink
+            if [ -d "$dir/target" ] && [ ! -L "$dir/target" ]; then
+                rm -rf "$dir/.build/target"/* 2>/dev/null
+                if [ "$(ls -A "$dir/target" 2>/dev/null)" ]; then
+                    mv "$dir/target"/* "$dir/target"/.* "$dir/.build/target/" 2>/dev/null
+                fi
+                rm -rf "$dir/target"
+                ln -s ".build/target" "$dir/target"
+                log_message "SUCCESS: Moved target to .build/target and created symlink in $DIR_NAME"
+            fi
+        fi
+    fi
     
     ((SYNC_COUNT++))
 done
