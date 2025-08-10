@@ -124,6 +124,8 @@ done
 # ==============================================================================
 # Determine workspace directory early for all operations
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 if [ -d "$HOME/dynamo" ] && [ -f "$HOME/dynamo/README.md" ]; then
     WORKSPACE_DIR=$HOME/dynamo
 elif [ -d "/workspace" ] && [ -f "/workspace/README.md" ]; then
@@ -141,6 +143,18 @@ else
 fi
 
 # ==============================================================================
+# CARGO TARGET DIRECTORY SETUP
+# ==============================================================================
+# Set up CARGO_TARGET_DIR early so it's available for all operations
+
+if [ -n "$WORKSPACE_DIR" ]; then
+    # Use cargo target directory for wheels (follows Rust conventions)
+    CARGO_TARGET_DIR=$(cargo metadata --format-version=1 --no-deps 2>/dev/null | jq -r '.target_directory' 2>/dev/null || echo "$WORKSPACE_DIR/target")
+else
+    CARGO_TARGET_DIR=""
+fi
+
+# ==============================================================================
 # 1. PYTHON CLEAN (if requested, do this first and exit)
 # ==============================================================================
 
@@ -152,8 +166,7 @@ if [ "$PYTHON_CLEAN" = true ]; then
     if [ -n "$WORKSPACE_DIR" ]; then
         echo "Workspace: $WORKSPACE_DIR"
         # Show cargo target directory for wheels
-        local target_dir=$(cargo metadata --format-version=1 --no-deps 2>/dev/null | jq -r '.target_directory' 2>/dev/null || echo "$WORKSPACE_DIR/target")
-        echo "Wheel directory: $target_dir/wheels"
+        echo "Wheel directory: $CARGO_TARGET_DIR/wheels"
     else
         echo "No workspace found, system-wide cleanup only"
     fi
@@ -286,12 +299,6 @@ cleanup_all_dynamo_installations() {
         fi
     fi
 
-    if [ "$cleanup_performed" = true ]; then
-        echo "      ✅ Complete cleanup performed - no ambiguous installations remain"
-    else
-        echo "      • No existing installations found to remove"
-    fi
-
     # Verify clean state
     echo "      Verifying clean state..."
     local remaining_issues=false
@@ -391,7 +398,8 @@ get_package_files() {
         # Check .pth files
     for pth_file in "$python_site_packages"/*${package_name}*.pth "$python_site_packages"/_*${package_name}*.pth; do
             if [ -f "$pth_file" ]; then
-            echo "      $pth_file"
+            local pth_date=$(TZ=America/Los_Angeles date -d "@$(stat -c '%Y' "$pth_file" 2>/dev/null)" +'%Y-%m-%d %H:%M:%S %Z' 2>/dev/null)
+            echo "      $pth_file (modified: $pth_date)"
             files_found=true
             fi
         done
@@ -399,7 +407,8 @@ get_package_files() {
     # Check for specific .pth patterns
     for pth_file in "$python_site_packages"/${dist_name}.pth; do
         if [ -f "$pth_file" ]; then
-            echo "      $pth_file"
+            local pth_date=$(TZ=America/Los_Angeles date -d "@$(stat -c '%Y' "$pth_file" 2>/dev/null)" +'%Y-%m-%d %H:%M:%S %Z' 2>/dev/null)
+            echo "      $pth_file (modified: $pth_date)"
             files_found=true
         fi
     done
@@ -414,12 +423,7 @@ check_package_status() {
     echo "Package Status:"
 
     # Show Cargo target directory first
-    if command -v jq >/dev/null 2>&1; then
-        local target_dir=$(cargo metadata --format-version=1 --no-deps 2>/dev/null | jq -r '.target_directory' 2>/dev/null || echo "unknown")
-        echo "Cargo target directory: $target_dir"
-    else
-        echo "Cargo target directory: jq not available, cannot retrieve"
-    fi
+    echo "Cargo target directory: ${CARGO_TARGET_DIR:-'unknown'}"
 
     # Show last cargo build time if available (stored in a temp file during builds)
     if [ -f "/tmp/dynamo_cargo_build_time" ]; then
@@ -438,7 +442,18 @@ check_package_status() {
     if uv pip show ai-dynamo-runtime >/dev/null 2>&1; then
         local runtime_version=$(uv pip show ai-dynamo-runtime 2>/dev/null | grep "^Version:" | cut -d' ' -f2)
         local runtime_source=$(get_package_source "ai-dynamo-runtime")
-        echo "   ✅ ai-dynamo-runtime ($runtime_version) - $runtime_source"
+
+        # Get creation date from .dist-info directory
+        local dist_name="ai_dynamo_runtime"
+        local install_date="unknown"
+        for dist_info in "$python_site_packages"/${dist_name}-*.dist-info; do
+            if [ -d "$dist_info" ]; then
+                install_date=$(TZ=America/Los_Angeles date -d "@$(stat -c '%Y' "$dist_info" 2>/dev/null)" +'%Y-%m-%d %H:%M:%S %Z' 2>/dev/null)
+                break
+            fi
+        done
+
+        echo "   ✅ ai-dynamo-runtime ($runtime_version) - $runtime_source (created: $install_date)"
         get_package_files "ai-dynamo-runtime" "$python_site_packages"
     else
         echo "   ❌ ai-dynamo-runtime"
@@ -446,7 +461,18 @@ check_package_status() {
     if uv pip show ai-dynamo >/dev/null 2>&1; then
         local dynamo_version=$(uv pip show ai-dynamo 2>/dev/null | grep "^Version:" | cut -d' ' -f2)
         local dynamo_source=$(get_package_source "ai-dynamo")
-        echo "   ✅ ai-dynamo ($dynamo_version) - $dynamo_source"
+
+        # Get creation date from .dist-info directory
+        local dist_name="ai_dynamo"
+        local install_date="unknown"
+        for dist_info in "$python_site_packages"/${dist_name}-*.dist-info; do
+            if [ -d "$dist_info" ]; then
+                install_date=$(TZ=America/Los_Angeles date -d "@$(stat -c '%Y' "$dist_info" 2>/dev/null)" +'%Y-%m-%d %H:%M:%S %Z' 2>/dev/null)
+                break
+            fi
+        done
+
+        echo "   ✅ ai-dynamo         ($dynamo_version) - $dynamo_source (created: $install_date)"
         get_package_files "ai-dynamo" "$python_site_packages"
     else
         echo "   ❌ ai-dynamo"
@@ -459,7 +485,8 @@ check_package_status() {
         for wheel_file in "$WHEEL_OUTPUT_DIR"/*.whl; do
             if [ -f "$wheel_file" ]; then
                 local wheel_size=$(ls -lh "$wheel_file" | awk '{print $5}')
-                echo "   $wheel_file ($wheel_size)"
+                local wheel_date=$(TZ=America/Los_Angeles date -d "@$(stat -c '%Y' "$wheel_file" 2>/dev/null)" +'%Y-%m-%d %H:%M:%S %Z' 2>/dev/null)
+                echo "   $wheel_file ($wheel_size, created: $wheel_date)"
                 wheel_count=$((wheel_count + 1))
             fi
         done
@@ -470,66 +497,20 @@ check_package_status() {
         echo "   ❌ No wheel directory ($WHEEL_OUTPUT_DIR)"
     fi
 
-    # Test import capability and show component sources
-    echo "Components:"
-
-        # Dynamically discover ai-dynamo-runtime components with paths
-    echo "   From ai-dynamo-runtime (e.g. pyo3/Rust bindings):"
-    local runtime_components=()
-
-    # Always include _core (compiled Rust module)
-    runtime_components+=("dynamo._core")
-
-    # Discover other runtime components from filesystem structure
-    if [ -n "$WORKSPACE_DIR" ] && [ -d "$WORKSPACE_DIR/lib/bindings/python/src/dynamo" ]; then
-        for runtime_dir in "$WORKSPACE_DIR/lib/bindings/python/src/dynamo"/*; do
-            if [ -d "$runtime_dir" ]; then
-                local runtime_name=$(basename "$runtime_dir")
-                # Check that the component has proper Python module structure
-                if [ -f "$runtime_dir/__init__.py" ]; then
-                    runtime_components+=("dynamo.$runtime_name")
-                fi
-            fi
-        done
-    fi
-
-    # Test discovered runtime components
-    for component in "${runtime_components[@]}"; do
-        local path_info=$(python3 -c "
-try:
-    import $component
-    import os
-    if hasattr($component, '__file__') and $component.__file__:
-        print(os.path.dirname($component.__file__))
-    else:
-        print('built-in/compiled')
-except Exception:
-    print('failed')
-" 2>/dev/null)
-
-        if [ "$path_info" != "failed" ]; then
-            echo "      ✅ $component ($path_info)"
-        else
-            echo "      ❌ $component"
-        fi
-    done
-
-    # Dynamically discover ai-dynamo components from filesystem
-    echo "   From ai-dynamo:"
+    # Discover source paths for PYTHONPATH recommendations
     local source_paths=()
     local site_package_components=()
-    local discovered_components=()
 
-    # Discover components from filesystem structure
-if [ -n "$WORKSPACE_DIR" ]; then
-                # Find direct components (frontend, planner, etc.)
+    # Find all available source components for PYTHONPATH recommendations
+    if [ -n "$WORKSPACE_DIR" ]; then
+        # Find direct components (frontend, planner, etc.)
         if [ -d "$WORKSPACE_DIR/components" ]; then
             for comp_dir in "$WORKSPACE_DIR/components"/*; do
                 if [ -d "$comp_dir/src" ]; then
                     local comp_name=$(basename "$comp_dir")
-                    # Check that the component has proper Python module structure
                     if [ -f "$comp_dir/src/dynamo/$comp_name/__init__.py" ]; then
-                        discovered_components+=("dynamo.$comp_name")
+                        source_paths+=("$comp_dir/src")
+                        site_package_components+=("dynamo.$comp_name")
                     fi
                 fi
             done
@@ -540,74 +521,14 @@ if [ -n "$WORKSPACE_DIR" ]; then
             for backend_dir in "$WORKSPACE_DIR/components/backends"/*; do
                 if [ -d "$backend_dir/src" ]; then
                     local backend_name=$(basename "$backend_dir")
-                    # Check that the backend has proper Python module structure
                     if [ -f "$backend_dir/src/dynamo/$backend_name/__init__.py" ]; then
-                        discovered_components+=("dynamo.$backend_name")
+                        source_paths+=("$backend_dir/src")
+                        site_package_components+=("dynamo.$backend_name")
                     fi
                 fi
             done
         fi
     fi
-
-    # Test discovered components
-    for component in "${discovered_components[@]}"; do
-        local path_info=$(python3 -c "
-try:
-    import $component
-    import os
-    if hasattr($component, '__file__') and $component.__file__:
-        print(os.path.dirname($component.__file__))
-    else:
-        print('built-in/compiled')
-except Exception:
-    print('failed')
-" 2>/dev/null)
-
-        if [ "$path_info" != "failed" ]; then
-            echo "      ✅ $component ($path_info)"
-
-            # Check if component is loading from site-packages vs source
-            if [[ "$path_info" == *"site-packages"* ]]; then
-                # Component is from installed package - find corresponding source
-                local component_name=$(echo "$component" | cut -d'.' -f2)
-                local potential_source=""
-
-                # Look for source in direct components first
-                if [ -d "$WORKSPACE_DIR/components/$component_name/src" ]; then
-                    potential_source="$WORKSPACE_DIR/components/$component_name/src"
-                # Then look in backends
-                elif [ -d "$WORKSPACE_DIR/components/backends/$component_name/src" ]; then
-                    potential_source="$WORKSPACE_DIR/components/backends/$component_name/src"
-                fi
-
-                # Add to recommendations if source directory exists
-                if [ -n "$potential_source" ]; then
-                    source_paths+=("$potential_source")
-                    site_package_components+=("$component")
-                fi
-            fi
-        else
-            echo "      ❌ $component"
-
-            # Component failed to import - check if source exists anyway
-            local component_name=$(echo "$component" | cut -d'.' -f2)
-            local potential_source=""
-
-            # Look for source in direct components first
-            if [ -d "$WORKSPACE_DIR/components/$component_name/src" ]; then
-                potential_source="$WORKSPACE_DIR/components/$component_name/src"
-            # Then look in backends
-            elif [ -d "$WORKSPACE_DIR/components/backends/$component_name/src" ]; then
-                potential_source="$WORKSPACE_DIR/components/backends/$component_name/src"
-            fi
-
-            # Add to recommendations if source directory exists
-            if [ -n "$potential_source" ]; then
-                source_paths+=("$potential_source")
-                site_package_components+=("$component")
-            fi
-        fi
-    done
 
     # Show PYTHONPATH and source recommendations compactly
     if [ -n "$PYTHONPATH" ]; then
@@ -634,9 +555,9 @@ except Exception:
         done
 
         # Replace /home/ubuntu with $HOME for portability
-        local portable_pythonpath=$(echo "$pythonpath_recommendation" | sed "s|/home/ubuntu|\$HOME|g")
-        echo "For hot-reload of Python components, export your PYTHONPATH:"
-        echo "   export PYTHONPATH=\"$portable_pythonpath:\$PYTHONPATH\""
+        # local portable_pythonpath=$(echo "$pythonpath_recommendation" | sed "s|/home/ubuntu|\$HOME|g")
+        # echo "Source components available for PYTHONPATH:"
+        # echo "   export PYTHONPATH=\"$portable_pythonpath:\$PYTHONPATH\""
     fi
 
     return 0
@@ -648,8 +569,6 @@ except Exception:
 # Set up paths (needed for both build and check operations)
 
 if [ -n "$WORKSPACE_DIR" ]; then
-    # Use cargo target directory for wheels (follows Rust conventions)
-    CARGO_TARGET_DIR=$(cargo metadata --format-version=1 --no-deps 2>/dev/null | jq -r '.target_directory' 2>/dev/null || echo "$WORKSPACE_DIR/target")
     WHEEL_OUTPUT_DIR="$CARGO_TARGET_DIR/wheels"
     PYTHON_BINDINGS_PATH="$WORKSPACE_DIR/lib/bindings/python"
     # Get dynamic version from Cargo.toml
@@ -702,8 +621,6 @@ if [ ! -e /.dockerenv ]; then
         echo "   docker run -it --rm -v \$(pwd):/workspace dynamo-container ./bin/pybuild.sh"
     exit 1
 fi
-
-echo "✅ Running inside Docker container - environment validated"
 
 echo ""
     echo "Build configuration summary:"
@@ -763,9 +680,6 @@ else
     echo "   → CARGO_INCREMENTAL=$CARGO_INCREMENTAL (0=disabled)"
 fi
 
-# Verify environment variable is properly set
-echo "   ✅ Compilation configuration applied"
-
 # ==============================================================================
 # RUST COMPILATION
 # ==============================================================================
@@ -797,8 +711,6 @@ if [ "$BUILD_TYPE" = "development" ]; then
     end_time=$(date +%s.%N)
     build_duration=$(echo "$end_time - $start_time" | bc 2>/dev/null || echo "unknown")
 
-    echo ""
-    echo "   ✅ Rust components built successfully (DEVELOPMENT mode - fast compilation)"
     if [ "$build_duration" != "unknown" ]; then
         echo "   Cargo build time: ${build_duration}s"
         # Store build time for --check to display later
@@ -837,11 +749,10 @@ echo "Cleaning up previous wheel files..."
 if ls $WHEEL_OUTPUT_DIR/*.whl 1> /dev/null 2>&1; then
     echo "   → Found existing wheel files, removing them..."
     ls $WHEEL_OUTPUT_DIR/*.whl | head -3 | while read file; do
-        echo "     - Removing: $(basename $file)"
+        echo "     $ rm -f $file"
     done
     rm -f $WHEEL_OUTPUT_DIR/*.whl
     rmdir $WHEEL_OUTPUT_DIR
-    echo "   ✅ Existing wheel files removed"
 else
     echo "   → No existing wheel files found (clean slate)"
     echo "   Expected wheel name: ai_dynamo_runtime-${DYNAMO_VERSION}-cp3XX-cp3XX-linux_x86_64.whl"
@@ -859,17 +770,19 @@ if ! uv pip show maturin >/dev/null 2>&1; then
     echo ""
     echo "Setting up Python-Rust build tools..."
     echo "   → maturin not found, installing with patchelf support..."
-    uv pip install maturin[patchelf]
+    uv pip install maturin[patchelf] 2>&1 | sed 's/^/[uv] /'
     echo "   ✅ maturin installed successfully"
 fi
 
 # ==============================================================================
-# PYTHON PACKAGE CREATION
+# AI-DYNAMO-RUNTIME PACKAGE CREATION (RUST EXTENSIONS + PYTHON BINDINGS)
 # ==============================================================================
 # Create the ai-dynamo-runtime Python package with Rust extensions
 
 echo ""
-echo "Creating Python package ai-dynamo-runtime with Rust extensions..."
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "BUILDING PACKAGE 1/2: ai-dynamo-runtime (Rust extensions + Python bindings)"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
 # Build Python package with native Rust extension using maturin
 # This creates the ai-dynamo-runtime wheel containing the dynamo Python package with:
@@ -893,23 +806,22 @@ if [ "$BUILD_TYPE" = "development" ]; then
     cleanup_all_dynamo_installations "development installation"
     echo ""
 
-    echo "   Files that will be generated:"
-    echo "      • .pth files in site-packages (pointing to source)"
-    echo "      • Symlinks to source directories"
-    echo "      • Debug build of dynamo._core.so"
+    echo "   Files that will be generated by maturin develop:"
+    PYTHON_SITE_PACKAGES=$(python3 -c "import site; print(site.getsitepackages()[0])")
+    echo "      • .pth files: $PYTHON_SITE_PACKAGES/"
+    echo "      • Rust extension: $CARGO_TARGET_DIR/debug/dynamo/_core.so"
+    echo "      • Source links: $WORKSPACE_DIR/lib/bindings/python/src/"
     echo "      • No wheel file created - direct source linking"
     echo ""
     echo "   Benefits: Python changes live, Rust changes need rebuild"
     echo ""
-    echo "   $ CARGO_INCREMENTAL=1 RUSTFLAGS=\"-C opt-level=0 -C codegen-units=256\" maturin develop --uv --features block-manager --quiet"
-    echo ""
+    echo "   $ cd $WORKSPACE_DIR/lib/bindings/python && CARGO_INCREMENTAL=1 RUSTFLAGS=\"-C opt-level=0 -C codegen-units=256\" maturin develop --uv --features block-manager"
 
-    (cd $WORKSPACE_DIR/lib/bindings/python && CARGO_INCREMENTAL=1 RUSTFLAGS="-C opt-level=0 -C codegen-units=256" maturin develop --uv --features block-manager --quiet)
-
-    echo ""
-    echo "✅ SUCCESS: Development mode package installed!"
+    (cd $WORKSPACE_DIR/lib/bindings/python && CARGO_INCREMENTAL=1 RUSTFLAGS="-C opt-level=0 -C codegen-units=256" maturin develop --uv --features block-manager 2>&1 | sed 's/^/[maturin] /')
+    echo "✅ SUCCESS: ai-dynamo-runtime development mode package installed!"
+    echo "   Package: ai-dynamo-runtime (Rust extensions + Python bindings)"
     echo "   Type: Editable installation (linked to source)"
-    echo "   Python import: import dynamo"
+    echo "   Python import: import dynamo._core, dynamo.runtime, dynamo.llm"
     if [ "$DEBUG" = true ]; then
         echo ""
         echo "   .pth file locations (editable install links):"
@@ -937,30 +849,30 @@ else
     cleanup_all_dynamo_installations "release installation"
     echo ""
 
-    echo "   Files that will be generated:"
-    echo "      • ai_dynamo_runtime-${DYNAMO_VERSION}-*.whl (~60MB total)"
-    echo "      • Contains: dynamo/_core.so (~45MB Rust), Python modules (~16MB)"
-    echo "      • Location: $WHEEL_OUTPUT_DIR/"
+    echo "   Files that will be generated by maturin build:"
+    echo "      • Wheel file: $WHEEL_OUTPUT_DIR/ai_dynamo_runtime-${DYNAMO_VERSION}-*.whl (~16MB)"
+    echo "      • Rust extension: $CARGO_TARGET_DIR/release/dynamo/_core.so (~45MB optimized)"
+    echo "      • Python modules: lib/bindings/python/src/dynamo/ (~16MB)"
+    echo "      • Bundled libs: wheel includes NVIDIA NixL libraries"
     echo ""
-    echo "   $ maturin build --release --features block-manager --out $WHEEL_OUTPUT_DIR --quiet"
-    echo ""
+    echo "   $ cd $WORKSPACE_DIR/lib/bindings/python && maturin build --release --features block-manager --out $WHEEL_OUTPUT_DIR"
 
-    (cd $WORKSPACE_DIR/lib/bindings/python && maturin build --release --features block-manager --out $WHEEL_OUTPUT_DIR --quiet)
+    (cd $WORKSPACE_DIR/lib/bindings/python && maturin build --release --features block-manager --out $WHEEL_OUTPUT_DIR 2>&1 | sed 's/^/[maturin] /')
 
-    echo ""
     echo "Installing wheel package..."
     if ls $WHEEL_OUTPUT_DIR/*.whl 1> /dev/null 2>&1; then
         WHEEL_FILE=$(ls $WHEEL_OUTPUT_DIR/*.whl)
         WHEEL_SIZE=$(du -h "$WHEEL_FILE" | cut -f1)
         echo "   → Found wheel: $(basename $WHEEL_FILE) ($WHEEL_SIZE)"
         echo "   $ uv pip install --upgrade --force-reinstall --no-deps"
-        uv pip install --upgrade --force-reinstall --no-deps $WHEEL_FILE
+        uv pip install --upgrade --force-reinstall --no-deps $WHEEL_FILE 2>&1 | sed 's/^/[uv] /'
         echo ""
-        echo "✅ SUCCESS: Wheel package built and installed!"
+        echo "✅ SUCCESS: ai-dynamo-runtime package built and installed!"
+        echo "   Package: ai-dynamo-runtime (Rust extensions + Python bindings)"
         echo "   Wheel location: $WHEEL_FILE"
         echo "   Wheel size: $WHEEL_SIZE"
         echo "   Contains: dynamo._core.so (~45MB Rust), Python modules (~16MB)"
-        echo "   Python import: import dynamo"
+        echo "   Python import: import dynamo._core, dynamo.runtime, dynamo.llm"
     else
         echo ""
         echo "❌ ERROR: No wheel files found in $WHEEL_OUTPUT_DIR/"
@@ -968,15 +880,19 @@ else
         exit 1
     fi
 
-    # Build ai-dynamo package (complete framework)
+    # ==============================================================================
+    # AI-DYNAMO PACKAGE CREATION (COMPLETE FRAMEWORK)
+    # ==============================================================================
+
     echo ""
-    echo "Building ai-dynamo package (complete framework)..."
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo "BUILDING PACKAGE 2/2: ai-dynamo (Complete framework with all components)"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     echo "   → Building complete Dynamo framework with all components"
     echo "   → Contains: frontend, planner, backends (vllm, sglang, trtllm, llama_cpp, mocker)"
     echo "   $ pip wheel --no-deps --wheel-dir $WHEEL_OUTPUT_DIR ."
-    echo ""
 
-    pip wheel --no-deps --wheel-dir $WHEEL_OUTPUT_DIR .
+    pip wheel --no-deps --wheel-dir $WHEEL_OUTPUT_DIR . 2>&1 | sed 's/^/[pip wheel] /'
 
     echo ""
     echo "Installing ai-dynamo package..."
@@ -985,13 +901,14 @@ else
         AI_DYNAMO_SIZE=$(du -h "$AI_DYNAMO_WHEEL" | cut -f1)
         echo "   → Found wheel: $(basename $AI_DYNAMO_WHEEL) ($AI_DYNAMO_SIZE)"
         echo "   $ uv pip install --upgrade --find-links $WHEEL_OUTPUT_DIR"
-        uv pip install --upgrade --find-links $WHEEL_OUTPUT_DIR $AI_DYNAMO_WHEEL
+        uv pip install --upgrade --find-links $WHEEL_OUTPUT_DIR $AI_DYNAMO_WHEEL 2>&1 | sed 's/^/[uv] /'
         echo ""
         echo "✅ SUCCESS: ai-dynamo package built and installed!"
+        echo "   Package: ai-dynamo (Complete framework with all components)"
         echo "   Wheel location: $AI_DYNAMO_WHEEL"
         echo "   Wheel size: $AI_DYNAMO_SIZE"
         echo "   Contains: Complete Dynamo framework (frontend, planner, all backends)"
-        echo "   Python import: import dynamo.frontend, dynamo.planner, etc."
+        echo "   Python import: import dynamo.frontend, dynamo.planner, dynamo.vllm, etc."
     else
         echo ""
         echo "❌ ERROR: No ai-dynamo wheel files found in $WHEEL_OUTPUT_DIR/"
@@ -1001,7 +918,9 @@ else
 fi
 
 echo ""
-echo "Final verification of installation state..."
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "FINAL VERIFICATION: Installation state and Python environment"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
 # Show PYTHONPATH information
 echo "Python Environment Information:"
@@ -1036,7 +955,6 @@ fi
 
 echo ""
 echo "Build completed successfully!"
-echo "   You can now use 'import dynamo' in Python to access the runtime"
 echo ""
 echo "Installation verification:"
 if [ "$BUILD_TYPE" = "development" ]; then
@@ -1064,4 +982,10 @@ if [ "$CHECK" = true ]; then
     fi
     echo "=============================================="
     check_package_status
+
+    # Run Python import check
+    echo ""
+
+    echo "$ $SCRIPT_DIR/python_import_check.py --imports"
+    python3 "$SCRIPT_DIR/python_import_check.py" --imports
 fi
