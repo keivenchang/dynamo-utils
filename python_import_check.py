@@ -213,8 +213,8 @@ class DynamoChecker:
             print("   export PYTHONPATH=\"$HOME/dynamo/components/*/src\"")
 
         print("\n5. Build Packages:")
-        print("   ./bin/pybuild.sh              # Development mode")
-        print("   ./bin/pybuild.sh --release    # Production wheels")
+        print("   pybuild.sh --dev              # Development mode")
+        print("   pybuild.sh --release          # Production wheels")
 
     def _get_pythonpath(self) -> str:
         """Generate PYTHONPATH recommendation string."""
@@ -259,16 +259,16 @@ class DynamoChecker:
 
         print(f"\nFound {len(failed_imports)} failed import(s). Common Issues:")
         print("1. ImportError for runtime components:")
-        print("   → Run: ./bin/pybuild.sh")
+        print("   → Run: pybuild.sh --dev")
 
         print("\n2. ImportError for framework components:")
         print("   → Set PYTHONPATH to include component src directories")
 
         print("\n3. Package not found:")
-        print("   → Run: ./bin/pybuild.sh --release")
+        print("   → Run: pybuild.sh --release")
 
         print("\n4. Check current status:")
-        print("   → Run: ./bin/pybuild.sh --check")
+        print("   → Run: pybuild.sh --check")
 
         if not self.workspace_dir:
             print("\n⚠️  Workspace not found!")
@@ -280,35 +280,15 @@ class DynamoChecker:
         print("\nSummary")
         print("=" * 40)
 
-        # Package status
-        pkg_results = self.results.get('packages', {})
-        import_results = self.results.get('imports', {})
-
-        # Check if all packages are installed
-        all_packages_installed = pkg_results and all('✅' in result for result in pkg_results.values())
-
-        # Check if all imports passed
-        all_imports_passed = import_results and all(result.startswith('✅') for result in import_results.values())
-
-        if all_packages_installed and all_imports_passed:
-            print("✅ Dynamo packages are installed")
-        elif pkg_results or import_results:
-            print("⚠️ Dynamo packages are partially installed")
-        else:
-            print("❌ Dynamo packages need installation")
-
         # Import status
         import_results = self.results.get('imports', {})
         if import_results:
             total = len(import_results)
             passed = sum(1 for r in import_results.values() if r.startswith('✅'))
-            print(f"Import tests: {passed}/{total} passed")
-
-        # Workspace status
-        if self.workspace_dir:
-            print(f"Workspace: {self.workspace_dir}")
-        else:
-            print("⚠️  Workspace: Not found")
+            if passed == total:
+                print(f"✅ Import tests: {passed}/{total} passed")
+            else:
+                print(f"❌ Import tests: {passed}/{total} passed")
 
     # ====================================================================
     # MAIN ORCHESTRATION
