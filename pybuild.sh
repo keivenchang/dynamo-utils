@@ -531,7 +531,8 @@ check_package_status() {
     fi
 
     # Show PYTHONPATH and source recommendations compactly
-    if [ -n "$PYTHONPATH" ]; then
+    # PYTHONPATH may not be set; check if it is non-empty before using
+    if [ -n "${PYTHONPATH:-}" ]; then
         local path_count=$(echo "$PYTHONPATH" | tr ':' '\n' | grep -v '^$' | wc -l)
         echo "Current env: PYTHONPATH ($path_count paths) + site-packages"
     else
@@ -591,381 +592,378 @@ if [ -n "$BUILD_TYPE" ]; then
         exit 1
     fi
 
-echo ""
+    echo ""
     echo "Setting up build configuration..."
 
-# Development builds automatically use incremental compilation for faster rebuilds
-if [ "$BUILD_TYPE" = "development" ]; then
-    INCREMENTAL=true
-    echo "   → Development mode: Enabling incremental compilation for faster rebuilds"
-else
-    INCREMENTAL=false
-    echo "   → Release mode: Using full compilation for maximum optimization"
-fi
+    # Development builds automatically use incremental compilation for faster rebuilds
+    if [ "$BUILD_TYPE" = "development" ]; then
+        INCREMENTAL=true
+        echo "   → Development mode: Enabling incremental compilation for faster rebuilds"
+    else
+        INCREMENTAL=false
+        echo "   → Release mode: Using full compilation for maximum optimization"
+    fi
 
-# ==============================================================================
-# ENVIRONMENT VALIDATION
-# ==============================================================================
-# Ensure we're running in the correct environment (Docker container)
+    # ==============================================================================
+    # ENVIRONMENT VALIDATION
+    # ==============================================================================
+    # Ensure we're running in the correct environment (Docker container)
 
-echo ""
+    echo ""
     echo "Validating execution environment..."
 
-# Check if we're running inside a Docker container by looking for .dockerenv file
-if [ ! -e /.dockerenv ]; then
-    echo "❌ ERROR: This script must be run inside a Docker container."
-    echo "   The build process requires specific dependencies and environment setup"
-    echo "   that are provided by the Dynamo Docker container."
-    echo ""
-    echo "   Please run this script from within the Dynamo container:"
-        echo "   docker run -it --rm -v \$(pwd):/workspace dynamo-container ./bin/pybuild.sh"
-    exit 1
-fi
+    # Check if we're running inside a Docker container by looking for .dockerenv file
+    if [ ! -e /.dockerenv ]; then
+        echo "❌ ERROR: This script must be run inside a Docker container."
+        echo "   The build process requires specific dependencies and environment setup"
+        echo "   that are provided by the Dynamo Docker container."
+        exit 1
+    fi
 
-echo ""
+    echo ""
     echo "Build configuration summary:"
-echo "   Build type: $BUILD_TYPE"
-echo "   Incremental compilation: $INCREMENTAL"
+    echo "   Build type: $BUILD_TYPE"
+    echo "   Incremental compilation: $INCREMENTAL"
     echo "   Cargo clean: $CARGO_CLEAN"
-echo "   Workspace directory: ${WORKSPACE_DIR:-'Not found'}"
-echo "   Python bindings source: ${PYTHON_BINDINGS_PATH:-'Not available'}"
-echo "   Wheel output directory: ${WHEEL_OUTPUT_DIR:-'Not available'}"
-echo ""
-
-# ==============================================================================
-# WORKSPACE SETUP
-# ==============================================================================
-# Prepare the workspace for building
-
-echo "Setting up workspace..."
-
-# Change to workspace directory where the source code is mounted
-cd $WORKSPACE_DIR
-echo "   → Changed to workspace directory: $WORKSPACE_DIR"
-
-# Clean build artifacts if requested (before setting incremental config)
-# This ensures a completely fresh build but takes longer
-if [ "$CARGO_CLEAN" = true ]; then
-    echo "   → Cleaning all build artifacts (this may take a moment)..."
-    cargo clean
-    echo "   ✅ Build artifacts cleaned"
-else
-    echo "   → Skipping clean (using incremental build for speed)"
-fi
-
-# Create target directory and fix file permissions
-# Docker can sometimes create files with wrong ownership
-USER_ID=$(stat -c "%u" .)   # Get the owner of the current directory
-GROUP_ID=$(stat -c "%g" .)  # Get the group of the current directory
-chown -R $USER_ID:$GROUP_ID .
-echo "   → Target directory created and permissions fixed (UID: $USER_ID, GID: $GROUP_ID)"
-
-# ==============================================================================
-# COMPILATION CONFIGURATION
-# ==============================================================================
-# Configure Rust compiler settings for optimal build performance
-
-echo ""
-echo "Configuring Rust compilation settings..."
-
-# Configure incremental compilation if requested
-# Incremental compilation reuses previous build results for faster rebuilds
-if [ "$INCREMENTAL" = true ]; then
-    echo "   → Enabling incremental compilation for faster development builds"
-    export CARGO_INCREMENTAL=1
-    echo "   → CARGO_INCREMENTAL=$CARGO_INCREMENTAL (1=enabled)"
-else
-    echo "   → Using standard compilation for maximum optimization"
-    export CARGO_INCREMENTAL=0
-    echo "   → CARGO_INCREMENTAL=$CARGO_INCREMENTAL (0=disabled)"
-fi
-
-# ==============================================================================
-# RUST COMPILATION
-# ==============================================================================
-# Build the Rust components that will become the Python extension
-
-echo ""
-echo "Building Rust components..."
-
-# Build Rust components that will be compiled into the Python extension
-# This creates the core native code that powers the dynamo._core module
-#
-# Key compilation flags explained:
-# --locked: Use exact dependency versions from Cargo.lock (reproducible builds)
-# --features dynamo-llm/block-manager: Enable block manager for efficient memory management
-# --workspace: Build all workspace members (runtime, llm, bindings, etc.)
-#
-# Fast development compilation flags:
-# CARGO_INCREMENTAL=1: Enable incremental compilation for faster rebuilds
-# RUSTFLAGS="-C opt-level=0 -C codegen-units=256": Minimize optimization (0) and maximize parallelism (256 units)
-
-if [ "$BUILD_TYPE" = "development" ]; then
-    echo "   → DEVELOPMENT mode: Fastest build with incremental compilation and debug optimization"
-    echo "   $ CARGO_INCREMENTAL=1 RUSTFLAGS=\"-C opt-level=0 -C codegen-units=256\" cargo build --locked --features dynamo-llm/block-manager --workspace"
+    echo "   Workspace directory: ${WORKSPACE_DIR:-'Not found'}"
+    echo "   Python bindings source: ${PYTHON_BINDINGS_PATH:-'Not available'}"
+    echo "   Wheel output directory: ${WHEEL_OUTPUT_DIR:-'Not available'}"
     echo ""
 
-    # Measure cargo build time
-    start_time=$(date +%s.%N)
-    CARGO_INCREMENTAL=1 RUSTFLAGS="-C opt-level=0 -C codegen-units=256" cargo build --locked --features dynamo-llm/block-manager --workspace
-    end_time=$(date +%s.%N)
-    build_duration=$(echo "$end_time - $start_time" | bc 2>/dev/null || echo "unknown")
+    # ==============================================================================
+    # WORKSPACE SETUP
+    # ==============================================================================
+    # Prepare the workspace for building
 
-    if [ "$build_duration" != "unknown" ]; then
-        echo "   Cargo build time: ${build_duration}s"
-        # Store build time for --check to display later
-        echo "$build_duration" > /tmp/dynamo_cargo_build_time
+    echo "Setting up workspace..."
+
+    # Change to workspace directory where the source code is mounted
+    cd $WORKSPACE_DIR
+    echo "   → Changed to workspace directory: $WORKSPACE_DIR"
+
+    # Clean build artifacts if requested (before setting incremental config)
+    # This ensures a completely fresh build but takes longer
+    if [ "$CARGO_CLEAN" = true ]; then
+        echo "   → Cleaning all build artifacts (this may take a moment)..."
+        cargo clean
+        echo "   ✅ Build artifacts cleaned"
+    else
+        echo "   → Skipping clean (using incremental build for speed)"
     fi
-else
-    echo "   → RELEASE mode: Full optimization, slower build, faster runtime"
-    echo "   $ cargo build --release --locked --features dynamo-llm/block-manager --workspace"
-    echo ""
 
-    # Measure cargo build time
-    start_time=$(date +%s.%N)
-    cargo build --release --locked --features dynamo-llm/block-manager --workspace
-    end_time=$(date +%s.%N)
-    build_duration=$(echo "$end_time - $start_time" | bc 2>/dev/null || echo "unknown")
+    # Create target directory and fix file permissions
+    # Docker can sometimes create files with wrong ownership
+    USER_ID=$(stat -c "%u" .)   # Get the owner of the current directory
+    GROUP_ID=$(stat -c "%g" .)  # Get the group of the current directory
+    chown -R $USER_ID:$GROUP_ID .
+    echo "   → Target directory created and permissions fixed (UID: $USER_ID, GID: $GROUP_ID)"
+
+    # ==============================================================================
+    # COMPILATION CONFIGURATION
+    # ==============================================================================
+    # Configure Rust compiler settings for optimal build performance
 
     echo ""
-    echo "   ✅ Rust components built successfully (RELEASE mode)"
-    if [ "$build_duration" != "unknown" ]; then
-        echo "   Cargo build time: ${build_duration}s"
-        # Store build time for --check to display later
-        echo "$build_duration" > /tmp/dynamo_cargo_build_time
+    echo "Configuring Rust compilation settings..."
+
+    # Configure incremental compilation if requested
+    # Incremental compilation reuses previous build results for faster rebuilds
+    if [ "$INCREMENTAL" = true ]; then
+        echo "   → Enabling incremental compilation for faster development builds"
+        export CARGO_INCREMENTAL=1
+        echo "   → CARGO_INCREMENTAL=$CARGO_INCREMENTAL (1=enabled)"
+    else
+        echo "   → Using standard compilation for maximum optimization"
+        export CARGO_INCREMENTAL=0
+        echo "   → CARGO_INCREMENTAL=$CARGO_INCREMENTAL (0=disabled)"
     fi
-fi
 
-# ==============================================================================
-# WHEEL CLEANUP
-# ==============================================================================
-# Remove any existing wheel files to ensure clean output
+    # ==============================================================================
+    # RUST COMPILATION
+    # ==============================================================================
+    # Build the Rust components that will become the Python extension
 
-echo ""
-echo "Cleaning up previous wheel files..."
-
-# Clean up any existing wheel files from previous builds
-# Wheel filename format: ai_dynamo_runtime-0.4.0-cp310-cp310-linux_x86_64.whl
-if ls $WHEEL_OUTPUT_DIR/*.whl 1> /dev/null 2>&1; then
-    echo "   → Found existing wheel files, removing them..."
-    ls $WHEEL_OUTPUT_DIR/*.whl | head -3 | while read file; do
-        echo "     $ rm -f $file"
-    done
-    rm -f $WHEEL_OUTPUT_DIR/*.whl
-    rmdir $WHEEL_OUTPUT_DIR
-else
-    echo "   → No existing wheel files found (clean slate)"
-    echo "   Expected wheel name: ai_dynamo_runtime-${DYNAMO_VERSION}-cp3XX-cp3XX-linux_x86_64.whl"
-fi
-
-# ==============================================================================
-# MATURIN TOOL SETUP
-# ==============================================================================
-# Install maturin - the tool that bridges Rust and Python
-
-# Install maturin with patchelf support for building Python extensions (if not already installed)
-# maturin: Specialized tool for building Python packages with Rust code
-# patchelf: Handles shared library dependencies and RPATH settings in Linux binaries
-if ! uv pip show maturin >/dev/null 2>&1; then
     echo ""
-    echo "Setting up Python-Rust build tools..."
-    echo "   → maturin not found, installing with patchelf support..."
-    uv pip install maturin[patchelf] 2>&1 | sed 's/^/[uv] /'
-    echo "   ✅ maturin installed successfully"
-fi
+    echo "Building Rust components..."
 
-# ==============================================================================
-# AI-DYNAMO-RUNTIME PACKAGE CREATION (RUST EXTENSIONS + PYTHON BINDINGS)
-# ==============================================================================
-# Create the ai-dynamo-runtime Python package with Rust extensions
+    # Build Rust components that will be compiled into the Python extension
+    # This creates the core native code that powers the dynamo._core module
+    #
+    # Key compilation flags explained:
+    # --locked: Use exact dependency versions from Cargo.lock (reproducible builds)
+    # --features dynamo-llm/block-manager: Enable block manager for efficient memory management
+    # --workspace: Build all workspace members (runtime, llm, bindings, etc.)
+    #
+    # Fast development compilation flags:
+    # CARGO_INCREMENTAL=1: Enable incremental compilation for faster rebuilds
+    # RUSTFLAGS="-C opt-level=0 -C codegen-units=256": Minimize optimization (0) and maximize parallelism (256 units)
 
-echo ""
-echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo "BUILDING PACKAGE 1/2: ai-dynamo-runtime (Rust extensions + Python bindings)"
-echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-
-# Build Python package with native Rust extension using maturin
-# This creates the ai-dynamo-runtime wheel containing the dynamo Python package with:
-#   - dynamo._core.so (45MB Rust extension with runtime, LLM, metrics)
-#   - dynamo.runtime (Python APIs and utilities)
-#   - dynamo.llm (LLM inference functionality)
-#   - dynamo.nixl_connect (NVIDIA connectivity layer)
-#
-# Key maturin flags explained:
-# --features block-manager: Enable block manager feature for memory optimization
-# --out: Specify output directory for the built wheel
-# --uv: Use uv package manager for faster dependency resolution
-# --debug: Include debug symbols for development builds
-
-if [ "$BUILD_TYPE" = "development" ]; then
-    # DEVELOPMENT MODE: Install package in editable mode for hot-reload
-    echo "   → DEVELOPMENT MODE: Creating editable installation for development"
-    echo ""
-
-    # Clean up any existing installations to ensure no ambiguity
-    cleanup_all_dynamo_installations "development installation"
-    echo ""
-
-    echo "   Files that will be generated by maturin develop:"
-    PYTHON_SITE_PACKAGES=$(python3 -c "import site; print(site.getsitepackages()[0])")
-    echo "      • .pth files: $PYTHON_SITE_PACKAGES/"
-    echo "      • Rust extension: $CARGO_TARGET_DIR/debug/dynamo/_core.so"
-    echo "      • Source links: $WORKSPACE_DIR/lib/bindings/python/src/"
-    echo "      • No wheel file created - direct source linking"
-    echo ""
-    echo "   Benefits: Python changes live, Rust changes need rebuild"
-    echo ""
-    echo "   $ cd $WORKSPACE_DIR/lib/bindings/python && CARGO_INCREMENTAL=1 RUSTFLAGS=\"-C opt-level=0 -C codegen-units=256\" maturin develop --uv --features block-manager"
-
-    (cd $WORKSPACE_DIR/lib/bindings/python && CARGO_INCREMENTAL=1 RUSTFLAGS="-C opt-level=0 -C codegen-units=256" maturin develop --uv --features block-manager 2>&1 | sed 's/^/[maturin] /')
-    echo "✅ SUCCESS: ai-dynamo-runtime development mode package installed!"
-    echo "   Package: ai-dynamo-runtime (Rust extensions + Python bindings)"
-    echo "   Type: Editable installation (linked to source)"
-    echo "   Python import: import dynamo._core, dynamo.runtime, dynamo.llm"
-    if [ "$DEBUG" = true ]; then
+    if [ "$BUILD_TYPE" = "development" ]; then
+        echo "   → DEVELOPMENT mode: Fastest build with incremental compilation and debug optimization"
+        echo "   $ CARGO_INCREMENTAL=1 RUSTFLAGS=\"-C opt-level=0 -C codegen-units=256\" cargo build --locked --features dynamo-llm/block-manager --workspace"
         echo ""
-        echo "   .pth file locations (editable install links):"
-        PYTHON_SITE_PACKAGES=$(python3 -c "import site; print(site.getsitepackages()[0])")
-        echo "      Site-packages: $PYTHON_SITE_PACKAGES"
-        if [ -f "$PYTHON_SITE_PACKAGES/__editables_finder__.py" ]; then
-            echo "      Found: __editables_finder__.py (modern editable install)"
+
+        # Measure cargo build time
+        start_time=$(date +%s.%N)
+        CARGO_INCREMENTAL=1 RUSTFLAGS="-C opt-level=0 -C codegen-units=256" cargo build --locked --features dynamo-llm/block-manager --workspace
+        end_time=$(date +%s.%N)
+        build_duration=$(echo "$end_time - $start_time" | bc 2>/dev/null || echo "unknown")
+
+        if [ "$build_duration" != "unknown" ]; then
+            echo "   Cargo build time: ${build_duration}s"
+            # Store build time for --check to display later
+            echo "$build_duration" > /tmp/dynamo_cargo_build_time
         fi
-        if ls "$PYTHON_SITE_PACKAGES"/*.pth 1> /dev/null 2>&1; then
-            echo "      .pth files found:"
-            ls "$PYTHON_SITE_PACKAGES"/*.pth | grep -E "(dynamo|editables)" | head -3 | while read pth_file; do
-                echo "         • $(basename $pth_file)"
-                echo "           Content: $(head -1 $pth_file)"
-            done
-        fi
+    else
+        echo "   → RELEASE mode: Full optimization, slower build, faster runtime"
+        echo "   $ cargo build --release --locked --features dynamo-llm/block-manager --workspace"
         echo ""
+
+        # Measure cargo build time
+        start_time=$(date +%s.%N)
+        cargo build --release --locked --features dynamo-llm/block-manager --workspace
+        end_time=$(date +%s.%N)
+        build_duration=$(echo "$end_time - $start_time" | bc 2>/dev/null || echo "unknown")
+
+        echo ""
+        echo "   ✅ Rust components built successfully (RELEASE mode)"
+        if [ "$build_duration" != "unknown" ]; then
+            echo "   Cargo build time: ${build_duration}s"
+            # Store build time for --check to display later
+            echo "$build_duration" > /tmp/dynamo_cargo_build_time
+        fi
     fi
-    echo "   Tip: Python changes are live, Rust changes need rebuild"
-else
-    # RELEASE MODE: Build distributable wheel for production deployment
-    echo "   → RELEASE MODE: Creating optimized wheel for distribution"
+
+    # ==============================================================================
+    # WHEEL CLEANUP
+    # ==============================================================================
+    # Remove any existing wheel files to ensure clean output
+
     echo ""
+    echo "Cleaning up previous wheel files..."
 
-    # Clean up any existing installations to ensure no ambiguity
-    cleanup_all_dynamo_installations "release installation"
-    echo ""
-
-    echo "   Files that will be generated by maturin build:"
-    echo "      • Wheel file: $WHEEL_OUTPUT_DIR/ai_dynamo_runtime-${DYNAMO_VERSION}-*.whl (~16MB)"
-    echo "      • Rust extension: $CARGO_TARGET_DIR/release/dynamo/_core.so (~45MB optimized)"
-    echo "      • Python modules: lib/bindings/python/src/dynamo/ (~16MB)"
-    echo "      • Bundled libs: wheel includes NVIDIA NixL libraries"
-    echo ""
-    echo "   $ cd $WORKSPACE_DIR/lib/bindings/python && maturin build --release --features block-manager --out $WHEEL_OUTPUT_DIR"
-
-    (cd $WORKSPACE_DIR/lib/bindings/python && maturin build --release --features block-manager --out $WHEEL_OUTPUT_DIR 2>&1 | sed 's/^/[maturin] /')
-
-    echo "Installing wheel package..."
+    # Clean up any existing wheel files from previous builds
+    # Wheel filename format: ai_dynamo_runtime-0.4.0-cp310-cp310-linux_x86_64.whl
     if ls $WHEEL_OUTPUT_DIR/*.whl 1> /dev/null 2>&1; then
-        WHEEL_FILE=$(ls $WHEEL_OUTPUT_DIR/*.whl)
-        WHEEL_SIZE=$(du -h "$WHEEL_FILE" | cut -f1)
-        echo "   → Found wheel: $(basename $WHEEL_FILE) ($WHEEL_SIZE)"
-        echo "   $ uv pip install --upgrade --force-reinstall --no-deps"
-        uv pip install --upgrade --force-reinstall --no-deps $WHEEL_FILE 2>&1 | sed 's/^/[uv] /'
+        echo "   → Found existing wheel files, removing them..."
+        ls $WHEEL_OUTPUT_DIR/*.whl | head -3 | while read file; do
+            echo "     $ rm -f $file"
+        done
+        rm -f $WHEEL_OUTPUT_DIR/*.whl
+        rmdir $WHEEL_OUTPUT_DIR
+    else
+        echo "   → No existing wheel files found (clean slate)"
+        echo "   Expected wheel name: ai_dynamo_runtime-${DYNAMO_VERSION}-cp3XX-cp3XX-linux_x86_64.whl"
+    fi
+
+    # ==============================================================================
+    # MATURIN TOOL SETUP
+    # ==============================================================================
+    # Install maturin - the tool that bridges Rust and Python
+
+    # Install maturin with patchelf support for building Python extensions (if not already installed)
+    # maturin: Specialized tool for building Python packages with Rust code
+    # patchelf: Handles shared library dependencies and RPATH settings in Linux binaries
+    if ! uv pip show maturin >/dev/null 2>&1; then
         echo ""
-        echo "✅ SUCCESS: ai-dynamo-runtime package built and installed!"
+        echo "Setting up Python-Rust build tools..."
+        echo "   → maturin not found, installing with patchelf support..."
+        uv pip install maturin[patchelf] 2>&1 | sed 's/^/[uv] /'
+        echo "   ✅ maturin installed successfully"
+    fi
+
+    # ==============================================================================
+    # AI-DYNAMO-RUNTIME PACKAGE CREATION (RUST EXTENSIONS + PYTHON BINDINGS)
+    # ==============================================================================
+    # Create the ai-dynamo-runtime Python package with Rust extensions
+
+    echo ""
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo "BUILDING PACKAGE 1/2: ai-dynamo-runtime (Rust extensions + Python bindings)"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+    # Build Python package with native Rust extension using maturin
+    # This creates the ai-dynamo-runtime wheel containing the dynamo Python package with:
+    #   - dynamo._core.so (45MB Rust extension with runtime, LLM, metrics)
+    #   - dynamo.runtime (Python APIs and utilities)
+    #   - dynamo.llm (LLM inference functionality)
+    #   - dynamo.nixl_connect (NVIDIA connectivity layer)
+    #
+    # Key maturin flags explained:
+    # --features block-manager: Enable block manager feature for memory optimization
+    # --out: Specify output directory for the built wheel
+    # --uv: Use uv package manager for faster dependency resolution
+    # --debug: Include debug symbols for development builds
+
+    if [ "$BUILD_TYPE" = "development" ]; then
+        # DEVELOPMENT MODE: Install package in editable mode for hot-reload
+        echo "   → DEVELOPMENT MODE: Creating editable installation for development"
+        echo ""
+
+        # Clean up any existing installations to ensure no ambiguity
+        cleanup_all_dynamo_installations "development installation"
+        echo ""
+
+        echo "   Files that will be generated by maturin develop:"
+        PYTHON_SITE_PACKAGES=$(python3 -c "import site; print(site.getsitepackages()[0])")
+        echo "      • .pth files: $PYTHON_SITE_PACKAGES/"
+        echo "      • Rust extension: $CARGO_TARGET_DIR/debug/dynamo/_core.so"
+        echo "      • Source links: $WORKSPACE_DIR/lib/bindings/python/src/"
+        echo "      • No wheel file created - direct source linking"
+        echo ""
+        echo "   Benefits: Python changes live, Rust changes need rebuild"
+        echo ""
+        echo "   $ cd $WORKSPACE_DIR/lib/bindings/python && CARGO_INCREMENTAL=1 RUSTFLAGS=\"-C opt-level=0 -C codegen-units=256\" maturin develop --uv --features block-manager"
+
+        (cd $WORKSPACE_DIR/lib/bindings/python && CARGO_INCREMENTAL=1 RUSTFLAGS="-C opt-level=0 -C codegen-units=256" maturin develop --uv --features block-manager 2>&1 | sed 's/^/[maturin] /')
+        echo "✅ SUCCESS: ai-dynamo-runtime development mode package installed!"
         echo "   Package: ai-dynamo-runtime (Rust extensions + Python bindings)"
-        echo "   Wheel location: $WHEEL_FILE"
-        echo "   Wheel size: $WHEEL_SIZE"
-        echo "   Contains: dynamo._core.so (~45MB Rust), Python modules (~16MB)"
+        echo "   Type: Editable installation (linked to source)"
         echo "   Python import: import dynamo._core, dynamo.runtime, dynamo.llm"
+        if [ "$DEBUG" = true ]; then
+            echo ""
+            echo "   .pth file locations (editable install links):"
+            PYTHON_SITE_PACKAGES=$(python3 -c "import site; print(site.getsitepackages()[0])")
+            echo "      Site-packages: $PYTHON_SITE_PACKAGES"
+            if [ -f "$PYTHON_SITE_PACKAGES/__editables_finder__.py" ]; then
+                echo "      Found: __editables_finder__.py (modern editable install)"
+            fi
+            if ls "$PYTHON_SITE_PACKAGES"/*.pth 1> /dev/null 2>&1; then
+                echo "      .pth files found:"
+                ls "$PYTHON_SITE_PACKAGES"/*.pth | grep -E "(dynamo|editables)" | head -3 | while read pth_file; do
+                    echo "         • $(basename $pth_file)"
+                    echo "           Content: $(head -1 $pth_file)"
+                done
+            fi
+            echo ""
+        fi
+        echo "   Tip: Python changes are live, Rust changes need rebuild"
     else
+        # RELEASE MODE: Build distributable wheel for production deployment
+        echo "   → RELEASE MODE: Creating optimized wheel for distribution"
         echo ""
-        echo "❌ ERROR: No wheel files found in $WHEEL_OUTPUT_DIR/"
-        echo "   Check the maturin build output above for errors"
-        exit 1
-    fi
 
-    # ==============================================================================
-    # AI-DYNAMO PACKAGE CREATION (COMPLETE FRAMEWORK)
-    # ==============================================================================
+        # Clean up any existing installations to ensure no ambiguity
+        cleanup_all_dynamo_installations "release installation"
+        echo ""
+
+        echo "   Files that will be generated by maturin build:"
+        echo "      • Wheel file: $WHEEL_OUTPUT_DIR/ai_dynamo_runtime-${DYNAMO_VERSION}-*.whl (~16MB)"
+        echo "      • Rust extension: $CARGO_TARGET_DIR/release/dynamo/_core.so (~45MB optimized)"
+        echo "      • Python modules: lib/bindings/python/src/dynamo/ (~16MB)"
+        echo "      • Bundled libs: wheel includes NVIDIA NixL libraries"
+        echo ""
+        echo "   $ cd $WORKSPACE_DIR/lib/bindings/python && maturin build --release --features block-manager --out $WHEEL_OUTPUT_DIR"
+
+        (cd $WORKSPACE_DIR/lib/bindings/python && maturin build --release --features block-manager --out $WHEEL_OUTPUT_DIR 2>&1 | sed 's/^/[maturin] /')
+
+        echo "Installing wheel package..."
+        if ls $WHEEL_OUTPUT_DIR/*.whl 1> /dev/null 2>&1; then
+            WHEEL_FILE=$(ls $WHEEL_OUTPUT_DIR/*.whl)
+            WHEEL_SIZE=$(du -h "$WHEEL_FILE" | cut -f1)
+            echo "   → Found wheel: $(basename $WHEEL_FILE) ($WHEEL_SIZE)"
+            echo "   $ uv pip install --upgrade --force-reinstall --no-deps"
+            uv pip install --upgrade --force-reinstall --no-deps $WHEEL_FILE 2>&1 | sed 's/^/[uv] /'
+            echo ""
+            echo "✅ SUCCESS: ai-dynamo-runtime package built and installed!"
+            echo "   Package: ai-dynamo-runtime (Rust extensions + Python bindings)"
+            echo "   Wheel location: $WHEEL_FILE"
+            echo "   Wheel size: $WHEEL_SIZE"
+            echo "   Contains: dynamo._core.so (~45MB Rust), Python modules (~16MB)"
+            echo "   Python import: import dynamo._core, dynamo.runtime, dynamo.llm"
+        else
+            echo ""
+            echo "❌ ERROR: No wheel files found in $WHEEL_OUTPUT_DIR/"
+            echo "   Check the maturin build output above for errors"
+            exit 1
+        fi
+
+        # ==============================================================================
+        # AI-DYNAMO PACKAGE CREATION (COMPLETE FRAMEWORK)
+        # ==============================================================================
+
+        echo ""
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        echo "BUILDING PACKAGE 2/2: ai-dynamo (Complete framework with all components)"
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        echo "   → Building complete Dynamo framework with all components"
+        echo "   → Contains: frontend, planner, backends (vllm, sglang, trtllm, llama_cpp, mocker)"
+        echo "   $ pip wheel --no-deps --wheel-dir $WHEEL_OUTPUT_DIR ."
+
+        pip wheel --no-deps --wheel-dir $WHEEL_OUTPUT_DIR . 2>&1 | sed 's/^/[pip wheel] /'
+
+        echo ""
+        echo "Installing ai-dynamo package..."
+        if ls $WHEEL_OUTPUT_DIR/ai_dynamo-*.whl 1> /dev/null 2>&1; then
+            AI_DYNAMO_WHEEL=$(ls $WHEEL_OUTPUT_DIR/ai_dynamo-*.whl)
+            AI_DYNAMO_SIZE=$(du -h "$AI_DYNAMO_WHEEL" | cut -f1)
+            echo "   → Found wheel: $(basename $AI_DYNAMO_WHEEL) ($AI_DYNAMO_SIZE)"
+            echo "   $ uv pip install --upgrade --find-links $WHEEL_OUTPUT_DIR"
+            uv pip install --upgrade --find-links $WHEEL_OUTPUT_DIR $AI_DYNAMO_WHEEL 2>&1 | sed 's/^/[uv] /'
+            echo ""
+            echo "✅ SUCCESS: ai-dynamo package built and installed!"
+            echo "   Package: ai-dynamo (Complete framework with all components)"
+            echo "   Wheel location: $AI_DYNAMO_WHEEL"
+            echo "   Wheel size: $AI_DYNAMO_SIZE"
+            echo "   Contains: Complete Dynamo framework (frontend, planner, all backends)"
+            echo "   Python import: import dynamo.frontend, dynamo.planner, dynamo.vllm, etc."
+        else
+            echo ""
+            echo "❌ ERROR: No ai-dynamo wheel files found in $WHEEL_OUTPUT_DIR/"
+            echo "   Check the pip wheel output above for errors"
+            exit 1
+        fi
+    fi
 
     echo ""
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-    echo "BUILDING PACKAGE 2/2: ai-dynamo (Complete framework with all components)"
+    echo "FINAL VERIFICATION: Installation state and Python environment"
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-    echo "   → Building complete Dynamo framework with all components"
-    echo "   → Contains: frontend, planner, backends (vllm, sglang, trtllm, llama_cpp, mocker)"
-    echo "   $ pip wheel --no-deps --wheel-dir $WHEEL_OUTPUT_DIR ."
 
-    pip wheel --no-deps --wheel-dir $WHEEL_OUTPUT_DIR . 2>&1 | sed 's/^/[pip wheel] /'
+    # Show PYTHONPATH information
+    echo "Python Environment Information:"
+    if [ -n "$PYTHONPATH" ]; then
+        echo "   PYTHONPATH is set - Python will search these directories for modules:"
+        echo "$PYTHONPATH" | tr ':' '\n' | sed 's/^/      • /'
+        echo "   This allows importing dynamo.frontend, dynamo.planner, etc. directly from source"
+    else
+        echo "   PYTHONPATH: Not set (using default Python paths only)"
+        echo "   To import dynamo components from source, set PYTHONPATH to include component directories"
+    fi
+    echo "   Python site-packages: $(python3 -c "import site; print(site.getsitepackages()[0])")"
+    echo ""
+
+    # Check final state consistency
+    PIP_RUNTIME=$(pip show ai-dynamo-runtime >/dev/null 2>&1 && echo "detected" || echo "not found")
+    UV_RUNTIME=$(uv pip show ai-dynamo-runtime >/dev/null 2>&1 && echo "detected" || echo "not found")
+    PIP_DYNAMO=$(pip show ai-dynamo >/dev/null 2>&1 && echo "detected" || echo "not found")
+    UV_DYNAMO=$(uv pip show ai-dynamo >/dev/null 2>&1 && echo "detected" || echo "not found")
+
+    echo "   Package detection:"
+    echo "      ai-dynamo-runtime: pip=$PIP_RUNTIME, uv=$UV_RUNTIME"
+    echo "      ai-dynamo: pip=$PIP_DYNAMO, uv=$UV_DYNAMO"
+
+    # Test import
+    echo "   Testing Python import..."
+    if python3 -c "import dynamo; print('✅ dynamo imported successfully')" 2>/dev/null; then
+        echo "      ✅ 'import dynamo' works correctly"
+    else
+        echo "      ❌ 'import dynamo' failed"
+    fi
 
     echo ""
-    echo "Installing ai-dynamo package..."
-    if ls $WHEEL_OUTPUT_DIR/ai_dynamo-*.whl 1> /dev/null 2>&1; then
-        AI_DYNAMO_WHEEL=$(ls $WHEEL_OUTPUT_DIR/ai_dynamo-*.whl)
-        AI_DYNAMO_SIZE=$(du -h "$AI_DYNAMO_WHEEL" | cut -f1)
-        echo "   → Found wheel: $(basename $AI_DYNAMO_WHEEL) ($AI_DYNAMO_SIZE)"
-        echo "   $ uv pip install --upgrade --find-links $WHEEL_OUTPUT_DIR"
-        uv pip install --upgrade --find-links $WHEEL_OUTPUT_DIR $AI_DYNAMO_WHEEL 2>&1 | sed 's/^/[uv] /'
-        echo ""
-        echo "✅ SUCCESS: ai-dynamo package built and installed!"
-        echo "   Package: ai-dynamo (Complete framework with all components)"
-        echo "   Wheel location: $AI_DYNAMO_WHEEL"
-        echo "   Wheel size: $AI_DYNAMO_SIZE"
-        echo "   Contains: Complete Dynamo framework (frontend, planner, all backends)"
-        echo "   Python import: import dynamo.frontend, dynamo.planner, dynamo.vllm, etc."
+    echo "Build completed successfully!"
+    echo ""
+    echo "Installation verification:"
+    if [ "$BUILD_TYPE" = "development" ]; then
+        echo "   • Development mode: Changes to Python files are immediately available"
+        echo "   • For Rust changes: Re-run ./bin/pybuild.sh --development"
+        echo "   • Check .pth files: ls $(python3 -c "import site; print(site.getsitepackages()[0])")/*dynamo*.pth"
     else
-        echo ""
-        echo "❌ ERROR: No ai-dynamo wheel files found in $WHEEL_OUTPUT_DIR/"
-        echo "   Check the pip wheel output above for errors"
-        exit 1
+        echo "   • Release mode: Optimized wheel installed"
+        echo "   • Wheel location: $(ls $WHEEL_OUTPUT_DIR/*.whl 2>/dev/null | head -1 || echo 'Not found')"
+        echo "   • For updates: Re-run ./bin/pybuild.sh --release"
     fi
-fi
-
-echo ""
-echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo "FINAL VERIFICATION: Installation state and Python environment"
-echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-
-# Show PYTHONPATH information
-echo "Python Environment Information:"
-if [ -n "$PYTHONPATH" ]; then
-    echo "   PYTHONPATH is set - Python will search these directories for modules:"
-    echo "$PYTHONPATH" | tr ':' '\n' | sed 's/^/      • /'
-    echo "   This allows importing dynamo.frontend, dynamo.planner, etc. directly from source"
-else
-    echo "   PYTHONPATH: Not set (using default Python paths only)"
-    echo "   To import dynamo components from source, set PYTHONPATH to include component directories"
-fi
-echo "   Python site-packages: $(python3 -c "import site; print(site.getsitepackages()[0])")"
-echo ""
-
-# Check final state consistency
-PIP_RUNTIME=$(pip show ai-dynamo-runtime >/dev/null 2>&1 && echo "detected" || echo "not found")
-UV_RUNTIME=$(uv pip show ai-dynamo-runtime >/dev/null 2>&1 && echo "detected" || echo "not found")
-PIP_DYNAMO=$(pip show ai-dynamo >/dev/null 2>&1 && echo "detected" || echo "not found")
-UV_DYNAMO=$(uv pip show ai-dynamo >/dev/null 2>&1 && echo "detected" || echo "not found")
-
-echo "   Package detection:"
-echo "      ai-dynamo-runtime: pip=$PIP_RUNTIME, uv=$UV_RUNTIME"
-echo "      ai-dynamo: pip=$PIP_DYNAMO, uv=$UV_DYNAMO"
-
-# Test import
-echo "   Testing Python import..."
-if python3 -c "import dynamo; print('✅ dynamo imported successfully')" 2>/dev/null; then
-    echo "      ✅ 'import dynamo' works correctly"
-else
-    echo "      ❌ 'import dynamo' failed"
-fi
-
-echo ""
-echo "Build completed successfully!"
-echo ""
-echo "Installation verification:"
-if [ "$BUILD_TYPE" = "development" ]; then
-    echo "   • Development mode: Changes to Python files are immediately available"
-    echo "   • For Rust changes: Re-run ./bin/pybuild.sh --development"
-    echo "   • Check .pth files: ls $(python3 -c "import site; print(site.getsitepackages()[0])")/*dynamo*.pth"
-else
-    echo "   • Release mode: Optimized wheel installed"
-    echo "   • Wheel location: $(ls $WHEEL_OUTPUT_DIR/*.whl 2>/dev/null | head -1 || echo 'Not found')"
-    echo "   • For updates: Re-run ./bin/pybuild.sh --release"
-fi
 
 fi  # End of BUILD_TYPE block
 
