@@ -206,7 +206,7 @@ class DynamoChecker:
         print("        -H 'Content-Type: application/json' \\")
         print("        -d '{\"model\": \"Qwen/Qwen2.5-0.5B\", \"prompt\": \"Hello\", \"max_tokens\": 50}'")
 
-        print("\n4. Development Setup:")
+        print("\n4. Optional Development Setup (hot-reload all the ai-dynamo components, no build required):")
         if self.workspace_dir:
             print(f"   export PYTHONPATH=\"{self._get_pythonpath()}\"")
         else:

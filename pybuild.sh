@@ -474,7 +474,7 @@ check_package_status() {
     echo "Components:"
 
         # Dynamically discover ai-dynamo-runtime components with paths
-    echo "   From ai-dynamo-runtime:"
+    echo "   From ai-dynamo-runtime (e.g. pyo3/Rust bindings):"
     local runtime_components=()
 
     # Always include _core (compiled Rust module)
@@ -612,16 +612,16 @@ except Exception:
     # Show PYTHONPATH and source recommendations compactly
     if [ -n "$PYTHONPATH" ]; then
         local path_count=$(echo "$PYTHONPATH" | tr ':' '\n' | grep -v '^$' | wc -l)
-        echo "Environment: PYTHONPATH ($path_count paths) + site-packages"
+        echo "Current env: PYTHONPATH ($path_count paths) + site-packages"
     else
-        echo "Environment: site-packages only"
+        echo "Current env: site-packages only"
     fi
 
     # Generate dynamic PYTHONPATH recommendation based on found components
     if [ ${#source_paths[@]} -gt 0 ]; then
-        echo -n "Source available: "
-        printf '%s ' "${site_package_components[@]}"
-        echo ""
+        #echo -n "Source available: "
+        #printf '%s ' "${site_package_components[@]}"
+        #echo ""
 
         # Build PYTHONPATH string
         local pythonpath_recommendation=""
@@ -635,6 +635,7 @@ except Exception:
 
         # Replace /home/ubuntu with $HOME for portability
         local portable_pythonpath=$(echo "$pythonpath_recommendation" | sed "s|/home/ubuntu|\$HOME|g")
+        echo "For hot-reload of Python components, export your PYTHONPATH:"
         echo "   export PYTHONPATH=\"$portable_pythonpath:\$PYTHONPATH\""
     fi
 
