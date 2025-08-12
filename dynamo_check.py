@@ -6,11 +6,11 @@ Combines version checking, import testing, and usage examples into a single tool
 Features dynamic component discovery and comprehensive troubleshooting guidance.
 
 Usage:
-    ./bin/python_import_check.py                        # Run all checks
-    ./bin/python_import_check.py --imports              # Only test imports
-    ./bin/python_import_check.py --examples             # Only show examples
-    ./bin/python_import_check.py --try-pythonpath      # Test imports with workspace paths
-    ./bin/python_import_check.py --help                 # Show help
+    ./bin/dynamo_check.py                        # Run all checks
+    ./bin/dynamo_check.py --imports              # Only test imports
+    ./bin/dynamo_check.py --examples             # Only show examples
+    ./bin/dynamo_check.py --try-pythonpath      # Test imports with workspace paths
+    ./bin/dynamo_check.py --help                 # Show help
 """
 
 import sys
@@ -19,8 +19,17 @@ import argparse
 import asyncio
 import importlib.metadata
 import logging
+import subprocess
+import datetime
+import json
 from pathlib import Path
-from typing import Dict, List, Tuple, Any
+from typing import Dict, List, Tuple, Any, Optional
+
+try:
+    import pytz
+    PYTZ_AVAILABLE = True
+except ImportError:
+    PYTZ_AVAILABLE = False
 
 
 class DynamoChecker:
@@ -163,6 +172,190 @@ class DynamoChecker:
 
         return components
 
+    def _is_dynamo_build_available(self) -> bool:
+        """Check if dynamo_build.sh is available in the same directory as this script.
+
+        Returns:
+            True if dynamo_build.sh exists in the same directory as dynamo_check.py
+        """
+        script_dir = Path(__file__).parent
+        dynamo_build_path = script_dir / "dynamo_build.sh"
+        return dynamo_build_path.exists()
+
+    def _format_timestamp_pdt(self, timestamp: float) -> str:
+        """Format a timestamp in PDT timezone.
+
+        Args:
+            timestamp: Unix timestamp
+
+        Returns:
+            Formatted timestamp string in PDT or local timezone
+            Example: '2025-08-10 22:22:52 PDT'
+        """
+        if PYTZ_AVAILABLE:
+            try:
+                pdt = pytz.timezone('US/Pacific')
+                dt = datetime.datetime.fromtimestamp(timestamp, tz=pdt)
+                return dt.strftime("%Y-%m-%d %H:%M:%S %Z")
+            except Exception:
+                # Fallback to UTC if PDT conversion fails
+                try:
+                    dt = datetime.datetime.fromtimestamp(timestamp, tz=pytz.UTC)
+                    return dt.strftime("%Y-%m-%d %H:%M:%S %Z")
+                except Exception:
+                    pass
+
+        # Fallback to local time with manual PDT offset approximation
+        # PDT is UTC-7, so subtract 7 hours from UTC
+        dt_utc = datetime.datetime.utcfromtimestamp(timestamp)
+        dt_pdt = dt_utc - datetime.timedelta(hours=7)
+        return dt_pdt.strftime("%Y-%m-%d %H:%M:%S PDT")
+
+    def _get_cargo_info(self) -> Tuple[Optional[str], Optional[str]]:
+        """Get cargo target directory and cargo home directory.
+
+        Returns:
+            Tuple of (target_directory, cargo_home) or (None, None) if cargo not available
+            Example: ('~/dynamo/.build/target', '/home/ubuntu/.cargo')
+        """
+        # First check if cargo is available
+        try:
+            subprocess.run(
+                ["cargo", "--version"],
+                capture_output=True,
+                text=True,
+                timeout=5
+            )
+        except FileNotFoundError:
+            print("⚠️  Warning: cargo command not found. Install Rust toolchain to see cargo target directory.")
+            return None, None
+        except subprocess.TimeoutExpired:
+            print("⚠️  Warning: cargo command timed out")
+            return None, None
+
+        # Get cargo home directory
+        cargo_home = os.environ.get("CARGO_HOME")
+        if not cargo_home:
+            cargo_home = os.path.expanduser("~/.cargo")
+
+        # Get cargo target directory
+        target_directory = None
+        try:
+            # Run cargo metadata command to get target directory
+            result = subprocess.run(
+                ["cargo", "metadata", "--format-version=1", "--no-deps"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                cwd=self.workspace_dir if self.workspace_dir else None
+            )
+
+            if result.returncode == 0:
+                # Parse JSON output to extract target_directory
+                import json
+                metadata = json.loads(result.stdout)
+                target_directory = metadata.get("target_directory")
+        except (subprocess.TimeoutExpired, subprocess.CalledProcessError,
+                json.JSONDecodeError):
+            # cargo metadata failed or JSON parsing failed
+            pass
+
+        return target_directory, cargo_home
+
+    def _find_so_file(self, target_directory: str) -> Optional[str]:
+        """Find the compiled *.so file in target directory or Python bindings.
+
+        Args:
+            target_directory: Path to cargo target directory
+
+        Returns:
+            Path to *.so file or None if not found
+            Example: '~/dynamo/target/debug/libdynamo_core.so'
+        """
+        if not target_directory or not os.path.exists(target_directory):
+            return None
+
+        # Look for *.so files in debug and release directories
+        for profile in ["debug", "release"]:
+            profile_dir = os.path.join(target_directory, profile)
+            if os.path.exists(profile_dir):
+                try:
+                    for root, dirs, files in os.walk(profile_dir):
+                        for file in files:
+                            if file.endswith(".so"):
+                                return os.path.join(root, file)
+                except OSError:
+                    continue
+
+        # Also check Python bindings directory for installed *.so
+        if self.workspace_dir:
+            bindings_dir = f"{self.workspace_dir}/lib/bindings/python/src/dynamo"
+            if os.path.exists(bindings_dir):
+                try:
+                    for root, dirs, files in os.walk(bindings_dir):
+                        for file in files:
+                            if file.endswith(".so") and "_core" in file:
+                                return os.path.join(root, file)
+                except OSError:
+                    pass
+
+        return None
+
+    def _get_cargo_build_profile(self, target_directory: str) -> Optional[str]:
+        """Determine which cargo build profile (debug/release) was used most recently.
+
+        Args:
+            target_directory: Path to cargo target directory
+
+        Returns:
+            'debug', 'release', 'debug/release', or None if cannot determine
+            Example: 'debug'
+        """
+        # First check environment variables that indicate current build profile
+        profile_env = os.environ.get("PROFILE")
+        if profile_env:
+            if profile_env == "dev":
+                return "debug"
+            elif profile_env == "release":
+                return "release"
+
+        # Check OPT_LEVEL as secondary indicator
+        opt_level = os.environ.get("OPT_LEVEL")
+        if opt_level:
+            if opt_level == "0":
+                return "debug"
+            elif opt_level in ["2", "3"]:
+                return "release"
+
+        # Fall back to filesystem inspection
+        if not target_directory or not os.path.exists(target_directory):
+            return None
+
+        debug_dir = os.path.join(target_directory, "debug")
+        release_dir = os.path.join(target_directory, "release")
+
+        debug_exists = os.path.exists(debug_dir)
+        release_exists = os.path.exists(release_dir)
+
+        if not debug_exists and not release_exists:
+            return None
+        elif debug_exists and not release_exists:
+            return "debug"
+        elif release_exists and not debug_exists:
+            return "release"
+        else:
+            # Both exist, check which was modified more recently
+            try:
+                debug_mtime = os.path.getmtime(debug_dir)
+                release_mtime = os.path.getmtime(release_dir)
+
+                if abs(debug_mtime - release_mtime) < 1.0:  # Same timestamp (within 1 second)
+                    return "debug/release"  # Both available, runtime choice depends on invocation
+                else:
+                    return "release" if release_mtime > debug_mtime else "debug"
+            except OSError:
+                return None
+
     def _setup_pythonpath(self):
         """Set up PYTHONPATH for component imports."""
         if not self.workspace_dir:
@@ -270,16 +463,41 @@ class DynamoChecker:
                 # Get module path for location info
                 module_path = getattr(module, '__file__', 'built-in')
                 if module_path and module_path != 'built-in':
+                    # Only show timestamps for generated files (*.so, *.pth, etc.), not __init__.py
+                    timestamp_str = ""
+                    show_timestamp = False
+
+                    # Check if this is a generated file we want to show timestamps for
+                    if any(module_path.endswith(ext) for ext in ['.so', '.pth', '.dll', '.dylib']):
+                        show_timestamp = True
+
+                    if show_timestamp:
+                        try:
+                            if os.path.exists(module_path):
+                                mtime = os.path.getmtime(module_path)
+                                timestamp_str = f" (modified: {self._format_timestamp_pdt(mtime)})"
+                        except OSError:
+                            pass
+
                     if self.workspace_dir and module_path.startswith(self.workspace_dir):
                         # From workspace source
                         rel_path = os.path.relpath(module_path, self.workspace_dir)
-                        print(f"   ✅ {component:<{max_width}} {rel_path}")
+                        if show_timestamp:
+                            print(f"   ✅ {component:<{max_width}} {rel_path}{timestamp_str}")
+                        else:
+                            print(f"   ✅ {component:<{max_width}} {rel_path}")
                     elif site_packages and module_path.startswith(site_packages):
                         # From installed package - show full path
-                        print(f"   ✅ {component:<{max_width}} {module_path}")
+                        if show_timestamp:
+                            print(f"   ✅ {component:<{max_width}} {module_path}{timestamp_str}")
+                        else:
+                            print(f"   ✅ {component:<{max_width}} {module_path}")
                     else:
                         # Other location
-                        print(f"   ✅ {component:<{max_width}} {module_path}")
+                        if show_timestamp:
+                            print(f"   ✅ {component:<{max_width}} {module_path}{timestamp_str}")
+                        else:
+                            print(f"   ✅ {component:<{max_width}} {module_path}")
                 else:
                     built_in_suffix = " (built-in)" if group_name.lower().startswith('framework') else " built-in"
                     print(f"   ✅ {component:<{max_width}}{built_in_suffix}")
@@ -315,6 +533,12 @@ class DynamoChecker:
         """
         results = {}
 
+        # Show relevant .pth files and Python package info FIRST
+        # so users see installation status before import checks
+        self._show_relevant_pth_files()
+        # Add a blank line before component import results for readability
+        print()
+
         # Discover all components
         runtime_components = self._discover_runtime_components()
         framework_components = self._discover_framework_components()
@@ -347,17 +571,246 @@ class DynamoChecker:
         )
         results.update(framework_results)
 
+        # (Package info already shown at the top of this method)
+
         # Show PYTHONPATH recommendation if any framework components failed
         if framework_failures and self.workspace_dir:
             pythonpath = self._get_pythonpath()
             if pythonpath:
                 print("\nMissing framework components detected. To resolve this, choose one of the following options:")
                 print("1. For local development, set the PYTHONPATH environment variable:")
-                print(f"   ./bin/python_import_check.py --try-pythonpath --imports\n   export PYTHONPATH=\"{pythonpath}\"")
+                print(f"   ./bin/dynamo_check.py --try-pythonpath --imports\n   export PYTHONPATH=\"{pythonpath}\"")
+                not_found_suffix = "" if self._is_dynamo_build_available() else "  # (dynamo_build.sh not found)"
                 print("2. For a production-release (slower build time), build the packages with:")
-                print("   pybuild.sh --release")
+                print(f"   dynamo_build.sh --release{not_found_suffix}")
+
+        # Show Rust cargo information (moved to bottom)
+        cargo_target, cargo_home = self._get_cargo_info()
+        if cargo_target or cargo_home:
+            print()  # Add blank line before cargo info
+
+            if cargo_home:
+                cargo_home_env = os.environ.get("CARGO_HOME")
+                if cargo_home_env:
+                    print(f"Cargo home directory: {cargo_home} (CARGO_HOME is set)")
+                else:
+                    print(f"Cargo home directory: {cargo_home}")
+
+            if cargo_target:
+                cargo_target_env = os.environ.get("CARGO_TARGET_DIR")
+                build_profile = self._get_cargo_build_profile(cargo_target)
+
+                # Build the target directory message
+                if cargo_target_env:
+                    target_msg = f"Cargo target directory: {cargo_target} (CARGO_TARGET_DIR is set)"
+                else:
+                    target_msg = f"Cargo target directory: {cargo_target}"
+
+                # Build profile information is shown in the debug/release directory details below
+                # No need to show it in the main target directory line
+
+                print(target_msg)
+
+                # Show debug and release directories on separate lines
+                debug_dir = os.path.join(cargo_target, "debug")
+                release_dir = os.path.join(cargo_target, "release")
+
+                debug_exists = os.path.exists(debug_dir)
+                release_exists = os.path.exists(release_dir)
+
+                # Find *.so file
+                so_file = self._find_so_file(cargo_target)
+                has_so_file = so_file is not None
+
+                if debug_exists:
+                    # Use ├─ if there are more items below
+                    symbol = "├─" if release_exists or has_so_file else "└─"
+                    try:
+                        debug_mtime = os.path.getmtime(debug_dir)
+                        debug_time = self._format_timestamp_pdt(debug_mtime)
+                        print(f"  {symbol} Debug:   {debug_dir} (modified: {debug_time})")
+                    except OSError:
+                        print(f"  {symbol} Debug:   {debug_dir} (unable to read timestamp)")
+
+                if release_exists:
+                    # Use ├─ if there's a *.so file below
+                    symbol = "├─" if has_so_file else "└─"
+                    try:
+                        release_mtime = os.path.getmtime(release_dir)
+                        release_time = self._format_timestamp_pdt(release_mtime)
+                        print(f"  {symbol} Release: {release_dir} (modified: {release_time})")
+                    except OSError:
+                        print(f"  {symbol} Release: {release_dir} (unable to read timestamp)")
+
+                # Show *.so file if found
+                if has_so_file:
+                    try:
+                        so_mtime = os.path.getmtime(so_file)
+                        so_time = self._format_timestamp_pdt(so_mtime)
+                        print(f"  └─ Binary:  {so_file} (modified: {so_time})")
+                    except OSError:
+                        print(f"  └─ Binary:  {so_file} (unable to read timestamp)")
 
         return results
+
+    def _show_relevant_pth_files(self):
+        """Show .pth files that are relevant to dynamo imports."""
+        # Get site-packages directories
+        import site
+        site_packages_dirs = site.getsitepackages()
+        if hasattr(site, 'getusersitepackages'):
+            site_packages_dirs.append(site.getusersitepackages())
+
+        if not site_packages_dirs:
+            return
+
+        # Show site-packages location first
+        main_site_packages = site_packages_dirs[0] if site_packages_dirs else None
+
+        pth_files = []
+        dist_info_dirs = []
+
+        for site_dir in site_packages_dirs:
+            if not os.path.exists(site_dir):
+                continue
+
+            try:
+                # Find .pth files
+                for file in os.listdir(site_dir):
+                    if file.endswith('.pth') and ('dynamo' in file.lower() or 'ai_dynamo' in file.lower()):
+                        pth_path = os.path.join(site_dir, file)
+                        try:
+                            mtime = os.path.getmtime(pth_path)
+                            # Read the content to see what path it adds
+                            with open(pth_path, 'r') as f:
+                                content = f.read().strip()
+                            pth_files.append((pth_path, mtime, content))
+                        except OSError:
+                            pass
+
+                    # Find distribution info directories
+                    if (file.endswith('.dist-info') and
+                        ('dynamo' in file.lower() or 'ai_dynamo' in file.lower())):
+                        dist_info_path = os.path.join(site_dir, file)
+                        if os.path.isdir(dist_info_path):
+                            dist_info_dirs.append(dist_info_path)
+
+            except OSError:
+                continue
+
+        if pth_files or dist_info_dirs:
+            # Determine if every path is under a known site-packages dir
+            def _is_under_any_site_dir(path: str) -> bool:
+                try:
+                    for sdir in site_packages_dirs:
+                        sdir_norm = os.path.join(sdir, '')
+                        if path.startswith(sdir_norm):
+                            return True
+                except Exception:
+                    pass
+                return False
+
+            all_under_site = True
+            for d in dist_info_dirs:
+                if not _is_under_any_site_dir(d):
+                    all_under_site = False
+                    break
+            if all_under_site:
+                for pth_path, _, _ in pth_files:
+                    if not _is_under_any_site_dir(pth_path):
+                        all_under_site = False
+                        break
+
+            # Print header without a leading blank line
+            print("Python package installation status:")
+
+            # Only print the absolute Site-packages root if entries won't already
+            # include the normalized "site-packages/..." prefix
+            if (main_site_packages and not all_under_site):
+                print(f"Site-packages: {main_site_packages}")
+
+            # Normalize and print distribution info similar to Runtime/Framework sections
+            entries = []
+            for dist_info_dir in dist_info_dirs:
+                dist_name = os.path.basename(dist_info_dir)
+                try:
+                    # Determine install type (editable vs wheel)
+                    direct_url_path = os.path.join(dist_info_dir, "direct_url.json")
+                    install_type = None
+                    if os.path.exists(direct_url_path):
+                        try:
+                            with open(direct_url_path, 'r') as f:
+                                direct_url_data = json.load(f)
+                                is_editable = (direct_url_data.get("editable") or
+                                               (direct_url_data.get("dir_info", {}).get("editable")))
+                                install_type = ".pth (editable)" if is_editable else ".whl (wheel)"
+                        except (json.JSONDecodeError, OSError):
+                            pass
+                    # Fallback when direct_url.json missing
+                    if install_type is None:
+                        install_type = ".whl (wheel)"
+
+                    # Created time
+                    try:
+                        ctime = os.path.getctime(dist_info_dir)
+                        created_time = self._format_timestamp_pdt(ctime)
+                    except OSError:
+                        created_time = None
+
+                    package_name = dist_name.replace('.dist-info', '').replace('_', '-')
+                    entries.append({
+                        'name': package_name,
+                        'path': dist_info_dir,
+                        'created': created_time,
+                        'type': install_type,
+                    })
+                except OSError:
+                    continue
+
+            # Sort runtime first, then others alphabetically
+            def sort_key(e):
+                name = e['name']
+                return (0 if name.startswith('ai-dynamo-runtime') else 1, name)
+
+            entries.sort(key=sort_key)
+
+            # Determine alignment width like component lists
+            max_width = max((len(e['name']) for e in entries), default=0)
+
+            for e in entries:
+                created_suffix = f" (created: {e['created']})" if e['created'] else ""
+                # Normalize paths under site-packages to a concise relative form
+                display_path = e['path']
+                try:
+                    for site_dir in site_packages_dirs:
+                        # Ensure trailing slash match semantics
+                        site_dir_norm = os.path.join(site_dir, '')
+                        path_norm = os.path.join(display_path, '')
+                        if display_path.startswith(site_dir_norm):
+                            rel = os.path.relpath(display_path, site_dir)
+                            display_path = f"site-packages/{rel}"
+                            break
+                except Exception:
+                    pass
+                # Match indentation: checkmark, padded name, then normalized path; include created time at the end
+                print(f"   ✅ {e['name']:<{max_width}} {display_path}{created_suffix}")
+
+            # Show .pth files (only present in editable installs)
+            for pth_path, mtime, content in pth_files:
+                timestamp_str = self._format_timestamp_pdt(mtime)
+                # Normalize pth path relative to a known site-packages dir
+                display_pth = pth_path
+                try:
+                    for site_dir in site_packages_dirs:
+                        site_dir_norm = os.path.join(site_dir, '')
+                        if pth_path.startswith(site_dir_norm):
+                            rel = os.path.relpath(pth_path, site_dir)
+                            display_pth = f"site-packages/{rel}"
+                            break
+                except Exception:
+                    pass
+                print(f"      {display_pth} (modified: {timestamp_str})")
+                print(f"      └─ Points to: {content}")
 
     # ====================================================================
     # USAGE EXAMPLES AND GUIDANCE
@@ -400,16 +853,17 @@ Usage Examples
         -d '{"model": "Qwen/Qwen2.5-0.5B", "prompt": "Hello", "max_tokens": 50}'
 
 4. For local development: Set PYTHONPATH to use workspace sources without rebuilding:
-   • Discover what PYTHONPATH to set: ./bin/python_import_check.py --try-pythonpath --imports""")
+   • Discover what PYTHONPATH to set: ./bin/dynamo_check.py --try-pythonpath --imports""")
         if self.workspace_dir:
             print(f"   • Then set in your shell: export PYTHONPATH=\"{self._get_pythonpath()}\"")
         else:
             print("   • Then set in your shell: export PYTHONPATH=\"$HOME/dynamo/components/*/src\"")
 
-        print("""
+        not_found_suffix = "" if self._is_dynamo_build_available() else " (dynamo_build.sh not found)"
+        print(f"""
 5. Build Packages:
-   pybuild.sh --dev              # Development mode
-   pybuild.sh --release          # Production wheels""")
+   dynamo_build.sh --dev              # Development mode{not_found_suffix}
+   dynamo_build.sh --release          # Production wheels{not_found_suffix}""")
 
     def _get_pythonpath(self) -> str:
         """Generate PYTHONPATH recommendation string.
@@ -456,7 +910,8 @@ Usage Examples
         if not failed_imports:
             return  # No failures, skip troubleshooting section
 
-        print(f"""
+        not_found_suffix = "" if self._is_dynamo_build_available() else "  # (dynamo_build.sh not found)"
+        troubleshooting_msg = f"""
 Troubleshooting
 ========================================
 
@@ -465,10 +920,12 @@ Found {len(failed_imports)} failed import(s). Common Issues:
    $ export PYTHONPATH=...
 
 2. Package not found:
-   $ pybuild.sh --release
+   $ dynamo_build.sh --release{not_found_suffix}
 
 3. Check current status:
-   $ pybuild.sh --check""")
+   $ dynamo_build.sh --check{not_found_suffix}"""
+
+        print(troubleshooting_msg)
 
         if not self.workspace_dir:
             print("""

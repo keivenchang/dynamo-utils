@@ -1,0 +1,278 @@
+# Keiven's Cursor Rules for Dynamo Project 2025-08-12 10:00:28
+# This file helps guide AI behavior when working with this codebase
+# https://docs.google.com/document/d/1rm1GWt9AOPkKSDWUJQEDOy1Z-FhPkfZ272eUpMz9-AQ/edit?tab=t.0
+
+## Project Overview
+# This is a Rust-based and Python-based project with Python bindings and web components
+# The project uses cargo for Rust builds, uv for Python package management, and Docker for containerization
+
+## Code Style and Conventions
+
+# Rust Code Style
+# - Use snake_case for variables and functions
+# - Use PascalCase for types and traits
+# - Prefer explicit types over type inference when it improves readability
+# - Add doc comments (///) for public APIs
+# - Use clippy for linting: cargo clippy
+# - Prefer tracing::error over eprintln
+# - When possible, use a shorted reference like `MyStuff` instead of `crate::my_service::MyStuff`
+
+# All code style (*.md, Python, bash, Rust, etc...)
+# - Emojis are childish looking and extremely unprofessional. Do NOT use them.
+# - If absolutely necessary, the excepts are: ✅, 🚫, ❌, ⚠️ for rare exceptions.
+
+# Python Code Style
+# - Follow PEP 8 conventions
+# - Use snake_case for variables and functions
+# - Use PascalCase for classes
+# - Add type hints where beneficial
+# - Use docstrings for functions and classes
+
+# JavaScript/TypeScript Code Style
+# - Use camelCase for variables and functions
+# - Use PascalCase for components and classes
+# - Prefer const over let, avoid var
+# - Use async/await over .then() chains
+# - Add JSDoc comments for complex functions
+
+## File Organization
+
+# Rust files should be organized as:
+# - lib.rs: Main library entry point
+# - mod.rs: Module definitions
+# - Separate files for each module
+# - Tests in tests/ directory or inline with #[cfg(test)]
+
+# Python files should follow:
+# - __init__.py for package initialization
+# - Clear module separation
+# - Tests in tests/ directory
+
+# Rust type inference on example code and directories
+# - When working on any example directories in "lib/runtime/examples/<dir>", do the followings:
+# - Look at the top level Cargo.toml file, in the [workspace] members section
+# - For each directory in "lib/runtime/examples/", add the line "lib/runtime/examples/<directory name>"
+# - Make a clear comment before and after the added lines: `# ======== AUTO ADDED FOR TYPE-INFERENCE, SHOULD BE REMOVED BEFORE COMMIT ========`
+# - Never git add or commit this change (top level Cargo.toml and Cargo.lock) unless explicitly told to
+# - If committing, always remove these added lines first
+
+## Build and Development
+
+# Formatting
+# - When adding an empty line, do not add trailing spaces or tabs
+# - Don't remove TODO comments or the commented lines below it
+
+# Key build commands:
+# - cargo build --locked: Build Rust components
+# - uv build: Build Python packages
+# - maturin build: Build Python extensions
+
+# Cargo Build Rules:
+# - When building, set CARGO_INCREMENTAL=1 before any cargo build commands unless explicitly told otherwise. This ensures faster incremental compilation during development
+# - Example: CARGO_INCREMENTAL=1 cargo build --locked
+# - Only disable incremental compilation when specifically requested for release builds
+
+# Development workflow for Rust:
+# - for all cargo test, cargo build, and cargo install, make sure to add "--locked"
+# - Test changes with: cargo test --locked
+# - Use "cargo clean" if you encounter build issues
+# - If there are permission problems, make sure the uid/gid are correct:
+#    USER_ID=$(stat -c "%u" .)
+#    GROUP_ID=$(stat -c "%g" .)
+#    chown -R $USER_ID:$GROUP_ID .
+# - When Rust dependencies are updated, validate with: 
+#   - (cargo-deny --version || cargo install --locked cargo-deny@0.16.4)
+#   - (cargo-deny --no-default-features check --hide-inclusion-graph licenses bans --config deny.toml)
+# - When to run: cargo fmt
+#   - After significant changes to Rust (*.rs files), run: cargo fmt && cargo clippy --no-deps --all-targets -- -D warnings
+#   - After making Rust changes exceeding 50 lines, run: cargo fmt
+#   - If Rust changes are over 300 lines, occasionally execute: cargo clippy --no-deps --all-targets -- -D warnings && cargo test --locked
+
+# Testing Rules
+# - If HF_TOKEN is blank, then unset it
+# - During tests, if it is building/compiling, then show the progress
+# - When integration tests are mentioned, it means to use "--features integration"
+#   - Example run: cargo test --locked --features integration -- --nocapture
+# - For specific integration tests that I typically ask (such as http_server), add the "--lib <name>" flag:
+#   - Example run: cargo test --locked -p dynamo-runtime --features integration --lib http_server -- --nocapture
+# - Below is an example to run an integration test, in mod `test_metricsregistry_trait`, a test called `test_drt_nats_metrics`
+#   cargo test --locked -p dynamo-runtime --features integration test_metricsregistry_trait::test_drt_nats_metrics -- --nocapture
+# - The full integration test is run as follows, and is only done so when asked explicitly because it is very slow:
+#   Example run: cargo test --locked --features integration -- --nocapture
+
+# Wheel creation rules
+# - When asked to create Python wheel, do the followings, in fewer steps (combined steps using "&&" in shell), when possible:
+# - cargo build --locked --features dynamo-llm/block-manager --workspace
+# - If Python bindings changed, run: (cd lib/bindings/python && maturin develop)
+# - If uv errors or not installed:
+#   - install via the commmand: uv pip install maturin[patchelf]
+
+## Git Instructions
+
+# Move files
+# - When moving files, check if a file is under git
+# - If it's under git, then use "git mv <src_file> <dest_file>", never use plain mv
+# - If it's not under git, then go ahead with "mv ..." command
+
+# Merge conflicts
+# - After git merge conflicts are resolved, perform:
+#   1. "git add <file(s)>" where the resolved <file(s)>
+#   2. see if you're inside a git rebase operation. If so, perform "git rebase --continue", and make sure to open the Terminal for the user
+#   3. cargo fmt
+
+# Git messages
+# - Follow conventional commits format for the title (the very first line of the message. Be very terse.
+# - Examples:
+#   feat: add new user authentication system
+#   fix: resolve memory leak in data processing
+#   docs: update API documentation
+#   test: add unit tests for user module
+#   ci: configure continuous integration pipeline
+#   refactor: restructure code for better readability
+#   perf: optimize data processing for speed
+#   chore: update dependencies and clean up
+#   revert: undo previous commit due to issues
+#   style: apply code formatting and style fixes
+#   build: update build scripts for new environment
+
+# Git commit
+# - When asked to commit and there are Rust changes, make sure to run through "cargo fmt" first before the commit
+# - Never ever add untracked files unless explicitly told
+# - List untracked files on the same line. Then separately, list all the files that were modified and will be committed
+# - Prompt if I want to "git add" these modified files
+# - Then diff through the changes since the last commit and then generate a message that describes the changes.
+# - If the change is straightforward, a single line message is preferred
+
+## GitHub PR Description
+# - When asked to generate a GitHub PR Description, look at the chain of continuous previous git commits from the same user/login (me, the author).
+# - Then, use the following template to output a GitHub PR Description (aka "github pr"), in plain text. Make the output terse, in plain text, and surrounded by the triple-backquote chars (```) so that special #### characters are escaped.
+```
+#### Overview:
+
+<!-- Describe your pull request here, based on your commits. Terse, no more than 3 sentences, but 2 is better. -->
+
+#### Details:
+
+<!-- Describe the changes made in this PR, in bullet -->
+
+#### Where should the reviewer start?
+
+<!-- call out specific files that should be looked at closely -->
+
+#### Related Issues: (use one of the action keywords Closes / Fixes / Resolves / Relates to)
+
+<!-- put in Linear ticket here, like DIS-123 or DYN-789, by extracting the Linear ticket number from commit messages, if possible. If there is nothing, then leave this field blank. -->
+```
+# - Again, output in plain-text-- do NOT add formatting, because I want to see the quadriple pound signs (e.g. "#### Something Here:")
+
+## Common Design Patterns
+
+# Error Handling in Rust:
+# - Use Result<T, E> for fallible operations
+# - Use Option<T> for nullable values
+# - Prefer ? operator over match for error propagation
+# - Use anyhow for application-level error handling
+
+# Example:
+# pub fn process_data(data: &str) -> Result<ProcessedData, anyhow::Error> {
+#     let parsed = parse_input(data)?;
+#     let result = transform_data(parsed)?;
+#     Ok(result)
+# }
+
+# If you see a pattern below, where a mut_var is used all over the place:
+# ```Rust
+# let mut mut_var = ...; 
+# mut_var.some_mutable_operation();
+# // and mut_var is used all over the code, which is undesirable...
+# ```
+# Then try to limit the scope of var with this pattern:
+# ```Rust
+# let var = {
+#   let mut mut_var = ...;
+#   mut_var.some_mutable_operation();
+#   mut_var;
+# };
+# ```
+
+# Python Error Handling:
+# - Use try/except for exception handling
+# - Raise specific exceptions rather than generic ones
+# - Use context managers (with statements) for resource management
+
+# Example:
+# def process_file(filename: str) -> None:
+#     try:
+#         with open(filename, 'r') as f:
+#             data = f.read()
+#         process_data(data)
+#     except FileNotFoundError:
+#         logger.error(f"File {filename} not found")
+#         raise
+
+## Testing Guidelines
+
+# Rust Testing:
+# - Write unit tests in the same file as the code
+# - Use integration tests in tests/ directory
+# - Use #[cfg(test)] for test-only code
+# - Mock external dependencies
+
+# Python Testing:
+# - Use pytest for testing framework
+# - Write unit tests in tests/ directory
+# - Use fixtures for common test setup
+# - Mock external services
+
+## Documentation
+
+# Always add comments for:
+# - Complex algorithms
+# - Business logic
+# - API endpoints
+# - Configuration options
+# - Non-obvious code decisions
+
+# Use clear, concise comments that explain "why" not "what"
+# Bad: "Loop through items" (obvious from code)
+# Good: "Process items in batches to avoid memory issues"
+
+## Security Considerations
+
+# - Never commit API keys or secrets
+# - Use environment variables for configuration
+# - Validate all user inputs
+# - Use parameterized queries for database operations
+# - Follow principle of least privilege
+
+## Performance Guidelines
+
+# Rust:
+# - Profile before optimizing
+# - Use appropriate data structures
+# - Consider memory allocation patterns
+# - Use async/await for I/O operations
+
+# Python:
+# - Use list comprehensions over loops when appropriate
+# - Profile with cProfile for performance issues
+# - Use appropriate data structures (dict vs list)
+# - Consider using numpy/pandas for numerical operations
+
+## Docker and Deployment
+
+# - Use multi-stage builds for smaller images
+# - Set appropriate user permissions
+# - Use .dockerignore to exclude unnecessary files
+# - Pin dependency versions for reproducibility
+
+# Example Dockerfile pattern:
+# FROM rust:1.70 as builder
+# WORKDIR /app
+# COPY . .
+# RUN cargo build --release
+#
+# FROM debian:bullseye-slim
+# COPY --from=builder /app/target/release/app /usr/local/bin/
+# CMD ["app"]
+#
