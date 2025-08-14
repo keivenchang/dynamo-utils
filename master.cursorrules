@@ -8,18 +8,42 @@
 
 ## Code Style and Conventions
 
+# Personality
+# - First of all, do not be overly agreeable and sychophantic
+
 # Rust Code Style
 # - Use snake_case for variables and functions
 # - Use PascalCase for types and traits
 # - Prefer explicit types over type inference when it improves readability
 # - Add doc comments (///) for public APIs
 # - Use clippy for linting: cargo clippy
-# - Prefer tracing::error over eprintln
+# - Prefer `tracing::error` over `eprintln`
 # - When possible, use a shorted reference like `MyStuff` instead of `crate::my_service::MyStuff`
+# - `debug_assert*` calls are preferred over `assert_*`
+# - If a call is known to take a while, then make the lock scope shorter. For example, instead of the following:
+```
+let reg = self.registry.lock().unwrap();
+if let Some(entry) = regi.get(name) {
+    entry.execute_long_call()  // this will hold the lock very long
+}
+```
+# Do this instead:
+```
+let long_call = {
+    let reg = self.registry.lock().unwrap();
+    reg.get(name).clone()
+}; // Lock released here
+long_call()
+```
 
 # All code style (*.md, Python, bash, Rust, etc...)
 # - Emojis are childish looking and extremely unprofessional. Do NOT use them.
 # - If absolutely necessary, the excepts are: ✅, 🚫, ❌, ⚠️ for rare exceptions.
+# - We only need the first 2 lines of the license. Full text not needed. For example:
+```
+// SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+```
 
 # Python Code Style
 # - Follow PEP 8 conventions
@@ -27,6 +51,7 @@
 # - Use PascalCase for classes
 # - Add type hints where beneficial
 # - Use docstrings for functions and classes
+# - Before any Python commit, run through mypy only on my changed Python files
 
 # JavaScript/TypeScript Code Style
 # - Use camelCase for variables and functions
