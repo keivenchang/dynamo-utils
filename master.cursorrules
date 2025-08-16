@@ -1,4 +1,4 @@
-# Keiven's Cursor Rules for Dynamo Project 2025-08-12 10:00:28
+# Keiven's Cursor Rules for Dynamo Project 2025-08-14 16:04:24
 # This file helps guide AI behavior when working with this codebase
 # https://docs.google.com/document/d/1rm1GWt9AOPkKSDWUJQEDOy1Z-FhPkfZ272eUpMz9-AQ/edit?tab=t.0
 
@@ -11,6 +11,17 @@
 # Personality
 # - First of all, do not be overly agreeable and sychophantic
 
+# All code style (*.md, Python, bash, Rust, etc...)
+# - Emojis are childish looking and extremely unprofessional. Do NOT use them.
+# - If absolutely necessary, the excepts are: ✅, 🚫, ❌, ⚠️ for rare exceptions.
+# - We only need the first 2 lines of the license. Full text not needed. For example:
+```
+// SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+```
+
+## Rust Development Guidelines
+
 # Rust Code Style
 # - Use snake_case for variables and functions
 # - Use PascalCase for types and traits
@@ -19,8 +30,114 @@
 # - Use clippy for linting: cargo clippy
 # - Prefer `tracing::error` over `eprintln`
 # - When possible, use a shorted reference like `MyStuff` instead of `crate::my_service::MyStuff`
+# - Run "cargo fmt"  whenever:
+#   - there are significant changes to Rust (*.rs files), run: cargo fmt && cargo clippy --no-deps --all-targets -- -D warnings
+#   - there are Rust changes exceeding 50 lines, run: cargo fmt
+#   - and whenever there are over 300 lines, occasionally execute: cargo clippy --no-deps --all-targets -- -D warnings && cargo test --locked
+# - Prefer `.to_string()` over use of `format!`
+
+# Rust File Organization
+# Rust files should be organized as:
+# - lib.rs: Main library entry point
+# - mod.rs: Module definitions
+# - Separate files for each module
+# - Tests in tests/ directory or inline with #[cfg(test)]
+
+# Rust Type Inference on Example Code and Directories
+# - When working on any example directories in "lib/runtime/examples/<dir>", do the followings:
+# - Look at the top level Cargo.toml file, in the [workspace] members section
+# - And for each directory in "lib/runtime/examples/", add the line "lib/runtime/examples/<directory name>"
+# - Make a clear comment before and after the added lines: `# ======== AUTO ADDED FOR TYPE-INFERENCE, SHOULD BE REMOVED BEFORE COMMIT ========`
+# - Never git add or commit this change to the top level Cargo.toml nor Cargo.lock, unless explicitly told to
+# - When committing code, **always** remove these added lines.
+
+# Rust Build Commands and Rules
+# - When building, set CARGO_INCREMENTAL=1 before any cargo build commands unless explicitly told otherwise. This ensures faster incremental compilation during development
+# - Example: CARGO_INCREMENTAL=1 cargo build --locked
+# - Only disable incremental compilation when specifically requested for release builds
+# - for all cargo test, cargo build, and cargo install, make sure to add "--locked"
+# - Test changes with: cargo test --locked
+# - Use "cargo clean" if you encounter build issues
+# - If there are permission problems, make sure the uid/gid are correct:
+#    USER_ID=$(stat -c "%u" .)
+#    GROUP_ID=$(stat -c "%g" .)
+#    chown -R $USER_ID:$GROUP_ID .
+# - When Rust dependencies are updated, validate with: 
+#   - (cargo-deny --version || cargo install --locked cargo-deny@0.16.4)
+#   - (cargo-deny --no-default-features check --hide-inclusion-graph licenses bans --config deny.toml)
+# - If you make any changes in lib/bindings/python/rust/* make sure you run maturin develop
+
+# Rust Testing Guidelines
+# - Write unit tests in the same file as the code unless told otherwise
+# - Use `#[cfg(test)]` for test-only code
+# - Mock external dependencies when mocks are available
+# - When integration tests are mentioned, it means to use `--features integration`
+#   - Example: `cargo test --locked --features integration ... -- --nocapture`
+# - For specific integration tests that I typically ask (such as http_server), add the "--lib <name>" flag:
+#   - Example: `cargo test --locked -p dynamo-runtime --features integration --lib http_server -- --nocapture`
+# - Below is an example to run an integration test that:
+#   - has a feature called `integration`
+#   - is in mod `test_metricsregistry_trait`
+#   - and the test is called `test_drt_nats_metrics`
+```
+cargo test --locked -p dynamo-runtime --features integration test_metricsregistry_trait::test_drt_nats_metrics -- --nocapture
+```
+# - To run ALL the integration tests, the command is as follows. Only run this when asked explicitly:
+```
+cargo test --locked --features integration -- --nocapture
+```
+# - When asked to run a test, check whether it's inside a feature
+#   - For example, if test_xyz is inside an integration feature marked as: `#[cfg(feature = "integration")]`
+#   - Then make sure to run like this
+```
+cargo run ... --features integration --lib mod_name::test_xyz ...
+```
+# - During tests, if it is building/compiling, then show the progress
+# - When running tests, always list which tests failed (up to 10), and number of passed/failed broken down by unit vs. integration tests
+
+# Rust Wheel Creation Rules
+# - When asked to create Python wheel, do the followings, in fewer steps (combined steps using "&&" in shell), when possible:
+# - cargo build --locked --features dynamo-llm/block-manager --workspace
+# - If Python bindings changed, run: (cd lib/bindings/python && maturin develop)
+# - If uv errors or not installed:
+#   - install via the commmand: uv pip install maturin[patchelf]
+
+# Rust Error Handling
+# - Use Result<T, E> for fallible operations
+# - Use Option<T> for nullable values
+# - Prefer ? operator over match for error propagation
+# - Use anyhow for application-level error handling
+#    Example:
+```
+pub fn process_data(data: &str) -> Result<ProcessedData, anyhow::Error> {
+    let parsed = parse_input(data)?;
+    let result = transform_data(parsed)?;
+    Ok(result)
+}
+```
+
+# Rust Mutability Patterns
+# If you a mut_var is used all over the place:
+# ```Rust
+# let mut mut_var = ...; 
+# mut_var.some_mutable_operation();
+# // and mut_var is used all over the code, which is undesirable...
+# ```
+# Then try to limit the scope of var with this pattern:
+# ```Rust
+# let var = {
+#   let mut mut_var = ...;
+#   mut_var.some_mutable_operation();
+#   mut_var;
+# };
+# ```
+
+# Rust Assertions and Debugging
 # - `debug_assert*` calls are preferred over `assert_*`
-# - If a call is known to take a while, then make the lock scope shorter. For example, instead of the following:
+
+# Rust Lock Management
+# - If a call is known to take a while, then make the lock scope shorter
+# For example, instead of the following long call after a lock:
 ```
 let reg = self.registry.lock().unwrap();
 if let Some(entry) = regi.get(name) {
@@ -36,14 +153,13 @@ let long_call = {
 long_call()
 ```
 
-# All code style (*.md, Python, bash, Rust, etc...)
-# - Emojis are childish looking and extremely unprofessional. Do NOT use them.
-# - If absolutely necessary, the excepts are: ✅, 🚫, ❌, ⚠️ for rare exceptions.
-# - We only need the first 2 lines of the license. Full text not needed. For example:
-```
-// SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-// SPDX-License-Identifier: Apache-2.0
-```
+# Rust Performance Guidelines
+# - Profile before optimizing
+# - Use appropriate data structures
+# - Consider memory allocation patterns
+# - Use async/await for I/O operations
+
+## Python Development Guidelines
 
 # Python Code Style
 # - Follow PEP 8 conventions
@@ -51,7 +167,44 @@ long_call()
 # - Use PascalCase for classes
 # - Add type hints where beneficial
 # - Use docstrings for functions and classes
-# - Before any Python commit, run through mypy only on my changed Python files
+# - Before any Python commit, always run through:
+#   mypy and precommit ruff
+# - If there are 3 or more print statements, tidy up and use the triple quote method, like: """ <code here> """
+
+# Python File Organization
+# Python files should follow:
+# - __init__.py for package initialization
+# - Clear module separation
+# - Tests in tests/ directory
+
+# Python Error Handling
+# - Use try/except for exception handling
+# - Raise specific exceptions rather than generic ones
+# - Use context managers (with statements) for resource management
+
+# Example:
+# def process_file(filename: str) -> None:
+#     try:
+#         with open(filename, 'r') as f:
+#             data = f.read()
+#         process_data(data)
+#     except FileNotFoundError:
+#         logger.error(f"File {filename} not found")
+#         raise
+
+# Python Testing Guidelines
+# - Use pytest for testing framework
+# - Write unit tests in tests/ directory
+# - Use fixtures for common test setup
+# - Mock external services
+
+# Python Performance Guidelines
+# - Use list comprehensions over loops when appropriate
+# - Profile with cProfile for performance issues
+# - Use appropriate data structures (dict vs list)
+# - Consider using numpy/pandas for numerical operations
+
+## JavaScript/TypeScript Development Guidelines
 
 # JavaScript/TypeScript Code Style
 # - Use camelCase for variables and functions
@@ -59,27 +212,6 @@ long_call()
 # - Prefer const over let, avoid var
 # - Use async/await over .then() chains
 # - Add JSDoc comments for complex functions
-
-## File Organization
-
-# Rust files should be organized as:
-# - lib.rs: Main library entry point
-# - mod.rs: Module definitions
-# - Separate files for each module
-# - Tests in tests/ directory or inline with #[cfg(test)]
-
-# Python files should follow:
-# - __init__.py for package initialization
-# - Clear module separation
-# - Tests in tests/ directory
-
-# Rust type inference on example code and directories
-# - When working on any example directories in "lib/runtime/examples/<dir>", do the followings:
-# - Look at the top level Cargo.toml file, in the [workspace] members section
-# - For each directory in "lib/runtime/examples/", add the line "lib/runtime/examples/<directory name>"
-# - Make a clear comment before and after the added lines: `# ======== AUTO ADDED FOR TYPE-INFERENCE, SHOULD BE REMOVED BEFORE COMMIT ========`
-# - Never git add or commit this change (top level Cargo.toml and Cargo.lock) unless explicitly told to
-# - If committing, always remove these added lines first
 
 ## Build and Development
 
@@ -91,46 +223,6 @@ long_call()
 # - cargo build --locked: Build Rust components
 # - uv build: Build Python packages
 # - maturin build: Build Python extensions
-
-# Cargo Build Rules:
-# - When building, set CARGO_INCREMENTAL=1 before any cargo build commands unless explicitly told otherwise. This ensures faster incremental compilation during development
-# - Example: CARGO_INCREMENTAL=1 cargo build --locked
-# - Only disable incremental compilation when specifically requested for release builds
-
-# Development workflow for Rust:
-# - for all cargo test, cargo build, and cargo install, make sure to add "--locked"
-# - Test changes with: cargo test --locked
-# - Use "cargo clean" if you encounter build issues
-# - If there are permission problems, make sure the uid/gid are correct:
-#    USER_ID=$(stat -c "%u" .)
-#    GROUP_ID=$(stat -c "%g" .)
-#    chown -R $USER_ID:$GROUP_ID .
-# - When Rust dependencies are updated, validate with: 
-#   - (cargo-deny --version || cargo install --locked cargo-deny@0.16.4)
-#   - (cargo-deny --no-default-features check --hide-inclusion-graph licenses bans --config deny.toml)
-# - When to run: cargo fmt
-#   - After significant changes to Rust (*.rs files), run: cargo fmt && cargo clippy --no-deps --all-targets -- -D warnings
-#   - After making Rust changes exceeding 50 lines, run: cargo fmt
-#   - If Rust changes are over 300 lines, occasionally execute: cargo clippy --no-deps --all-targets -- -D warnings && cargo test --locked
-
-# Testing Rules
-# - If HF_TOKEN is blank, then unset it
-# - During tests, if it is building/compiling, then show the progress
-# - When integration tests are mentioned, it means to use "--features integration"
-#   - Example run: cargo test --locked --features integration -- --nocapture
-# - For specific integration tests that I typically ask (such as http_server), add the "--lib <name>" flag:
-#   - Example run: cargo test --locked -p dynamo-runtime --features integration --lib http_server -- --nocapture
-# - Below is an example to run an integration test, in mod `test_metricsregistry_trait`, a test called `test_drt_nats_metrics`
-#   cargo test --locked -p dynamo-runtime --features integration test_metricsregistry_trait::test_drt_nats_metrics -- --nocapture
-# - The full integration test is run as follows, and is only done so when asked explicitly because it is very slow:
-#   Example run: cargo test --locked --features integration -- --nocapture
-
-# Wheel creation rules
-# - When asked to create Python wheel, do the followings, in fewer steps (combined steps using "&&" in shell), when possible:
-# - cargo build --locked --features dynamo-llm/block-manager --workspace
-# - If Python bindings changed, run: (cd lib/bindings/python && maturin develop)
-# - If uv errors or not installed:
-#   - install via the commmand: uv pip install maturin[patchelf]
 
 ## Git Instructions
 
@@ -162,6 +254,7 @@ long_call()
 
 # Git commit
 # - When asked to commit and there are Rust changes, make sure to run through "cargo fmt" first before the commit
+# - If there are any example Rust files changed, cd into lib/runtime/examples/* and run: cargo fmt -- --check
 # - Never ever add untracked files unless explicitly told
 # - List untracked files on the same line. Then separately, list all the files that were modified and will be committed
 # - Prompt if I want to "git add" these modified files
@@ -192,62 +285,7 @@ long_call()
 
 ## Common Design Patterns
 
-# Error Handling in Rust:
-# - Use Result<T, E> for fallible operations
-# - Use Option<T> for nullable values
-# - Prefer ? operator over match for error propagation
-# - Use anyhow for application-level error handling
-
-# Example:
-# pub fn process_data(data: &str) -> Result<ProcessedData, anyhow::Error> {
-#     let parsed = parse_input(data)?;
-#     let result = transform_data(parsed)?;
-#     Ok(result)
-# }
-
-# If you see a pattern below, where a mut_var is used all over the place:
-# ```Rust
-# let mut mut_var = ...; 
-# mut_var.some_mutable_operation();
-# // and mut_var is used all over the code, which is undesirable...
-# ```
-# Then try to limit the scope of var with this pattern:
-# ```Rust
-# let var = {
-#   let mut mut_var = ...;
-#   mut_var.some_mutable_operation();
-#   mut_var;
-# };
-# ```
-
-# Python Error Handling:
-# - Use try/except for exception handling
-# - Raise specific exceptions rather than generic ones
-# - Use context managers (with statements) for resource management
-
-# Example:
-# def process_file(filename: str) -> None:
-#     try:
-#         with open(filename, 'r') as f:
-#             data = f.read()
-#         process_data(data)
-#     except FileNotFoundError:
-#         logger.error(f"File {filename} not found")
-#         raise
-
 ## Testing Guidelines
-
-# Rust Testing:
-# - Write unit tests in the same file as the code
-# - Use integration tests in tests/ directory
-# - Use #[cfg(test)] for test-only code
-# - Mock external dependencies
-
-# Python Testing:
-# - Use pytest for testing framework
-# - Write unit tests in tests/ directory
-# - Use fixtures for common test setup
-# - Mock external services
 
 ## Documentation
 
@@ -269,20 +307,6 @@ long_call()
 # - Validate all user inputs
 # - Use parameterized queries for database operations
 # - Follow principle of least privilege
-
-## Performance Guidelines
-
-# Rust:
-# - Profile before optimizing
-# - Use appropriate data structures
-# - Consider memory allocation patterns
-# - Use async/await for I/O operations
-
-# Python:
-# - Use list comprehensions over loops when appropriate
-# - Profile with cProfile for performance issues
-# - Use appropriate data structures (dict vs list)
-# - Consider using numpy/pandas for numerical operations
 
 ## Docker and Deployment
 
