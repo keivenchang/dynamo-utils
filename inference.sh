@@ -170,6 +170,12 @@ if [ "$AGG_MODE" = true ]; then
         # Set up trap to kill all background processes on exit
         trap 'echo Cleaning up...; kill $(jobs -p) 2>/dev/null || true; exit' INT TERM EXIT
 
+        # Import check for dynamo.frontend before launching
+        if ! python -c "import dynamo.frontend" >/dev/null 2>&1; then
+            echo "❌ Import check failed: cannot import dynamo.frontend"
+            exit 1
+        fi
+
         # Start background processes
         python -m dynamo.frontend &
         FRONTEND_PID=$!
@@ -183,6 +189,7 @@ if [ "$AGG_MODE" = true ]; then
         echo "Launched frontend and vllm processes. Press Ctrl+C to exit."
         wait $FRONTEND_PID $VLLM_PID
     else
+        dry_run_echo "Would perform import check: python -c \"import dynamo.frontend\""
         dry_run_echo "Would start background processes:"
         dry_run_echo "  - python -m dynamo.frontend"
         dry_run_echo "  - DYN_SYSTEM_ENABLED=true DYN_SYSTEM_PORT=8081 python -m dynamo.vllm --model Qwen/Qwen3-0.6B --enforce-eager --no-enable-prefix-caching"
