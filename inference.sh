@@ -148,7 +148,7 @@ fi
 
 set -x
 cd $WORKSPACE_DIR
-export PYTHONPATH=$WORKSPACE_DIR/deploy/sdk/src:$WORKSPACE_DIR/components/planner/src
+#export PYTHONPATH=$WORKSPACE_DIR/deploy/sdk/src:$WORKSPACE_DIR/components/planner/src
 #PYTHONPATH_SRC=$(find $WORKSPACE_DIR -type d -path "*/src/dynamo" -exec dirname {} \; | sort -u | paste -sd: -)
 #export PYTHONPATH=$PYTHONPATH_SRC:$PYTHONPATH
 
@@ -175,7 +175,8 @@ if [ "$AGG_MODE" = true ]; then
         FRONTEND_PID=$!
 
         unset HF_TOKEN
-        DYN_SYSTEM_ENABLED=true DYN_SYSTEM_PORT=8081 python -m dynamo.vllm --model Qwen/Qwen3-0.6B --enforce-eager --no-enable-prefix-caching &
+        DYN_SYSTEM_ENABLED=true DYN_SYSTEM_PORT=8081 \
+        python -m dynamo.vllm --model Qwen/Qwen3-0.6B --gpu-memory-utilization 0.50 --enforce-eager --no-enable-prefix-caching &
         VLLM_PID=$!
 
         # Wait for both processes
