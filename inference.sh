@@ -41,8 +41,7 @@ Run Dynamo inference in the development environment.
 
 OPTIONS:
     -h, --help    Show this help message and exit
-    --agg         Run in aggregation mode (dynamo serve)
-                  Default: run in standard mode (dynamo run)
+    
     --model MODEL Specify the model to use
                   Options: "deepseek" (DeepSeek-R1-Distill-Qwen-1.5B)
                           Default: "qwen" (Qwen/Qwen3-0.6B)
@@ -53,16 +52,13 @@ OPTIONS:
                        (dry run mode)
 
 DESCRIPTION:
-    This script builds the workspace and runs Dynamo inference.
-    When --agg is specified, it runs "dynamo serve" for aggregation mode.
-    Otherwise, it runs "dynamo run" for standard inference mode.
+    This script builds the workspace and runs Dynamo inference in aggregation mode.
     Use --model to specify which model to use for inference.
     Use --dryrun or --dry-run to see what would be executed without running.
 EOF
 }
 
 # Parse command line arguments
-AGG_MODE=false
 MODEL_SPECIFIED=false
 DRY_RUN=false
 QWEN_MODEL="Qwen/Qwen3-0.6B"
@@ -76,10 +72,7 @@ while [[ $# -gt 0 ]]; do
             show_help
             exit 0
             ;;
-        --agg)
-            AGG_MODE=true
-            shift
-            ;;
+
         --model)
             MODEL_SPECIFIED=true
             if [ "$2" = "deepseek" ]; then
@@ -103,11 +96,7 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# Validate that if --agg is used, then --model cannot be specified
-if [ "$AGG_MODE" = true ] && [ "$MODEL_SPECIFIED" = true ]; then
-    echo "Error: If --agg is specified, then --model cannot be specified"
-    exit 1
-fi
+# Note: The script now runs in aggregation mode by default, so --model can be used
 
 # Show dry run indicator
 if [ "$DRY_RUN" = true ]; then
@@ -140,17 +129,8 @@ if [ ! -d "$WORKSPACE_DIR/$BACKENDS/$FRAMEWORK" ]; then
     exit 1
 fi
 
-# Execute init.sh to set up the environment
-# dry_run_echo "Setting up environment with init.sh..."
-# if [ "$DRY_RUN" = false ]; then
-#     $(dirname "$0")/init.sh
-# fi
-
 set -x
 cd $WORKSPACE_DIR
-#export PYTHONPATH=$WORKSPACE_DIR/deploy/sdk/src:$WORKSPACE_DIR/components/planner/src
-#PYTHONPATH_SRC=$(find $WORKSPACE_DIR -type d -path "*/src/dynamo" -exec dirname {} \; | sort -u | paste -sd: -)
-#export PYTHONPATH=$PYTHONPATH_SRC:$PYTHONPATH
 
 #time CARGO_INCREMENTAL=1 cargo build --workspace --bin dynamo-run
 #    --bin http --bin llmctl
@@ -160,51 +140,59 @@ if [ "$DRY_RUN" = false ]; then
     pkill -f "python3.*--endpoint" || true
 fi
 
-if [ "$AGG_MODE" = true ]; then
-    dry_run_echo "Running in aggregation mode (dynamo serve)"
-    dry_run_exec "cd $BACKENDS/$FRAMEWORK"
-    # look at launch/agg.sh
-    dry_run_exec "grep 'model' deploy/agg.yaml"
+# Run aggregation mode by default
+dry_run_echo "Running Dynamo inference in aggregation mode"
+dry_run_exec "cd $BACKENDS/$FRAMEWORK"
+# look at launch/agg.sh
+dry_run_exec "grep 'model' deploy/agg.yaml"
 
-    if [ "$DRY_RUN" = false ]; then
-        # Set up trap to kill all background processes on exit
-        trap 'echo Cleaning up...; kill $(jobs -p) 2>/dev/null || true; exit' INT TERM EXIT
+if [ "$DRY_RUN" = false ]; then
+    # Set up trap to kill all background processes on exit
+    trap 'echo Cleaning up...; kill $(jobs -p) 2>/dev/null || true; exit' INT TERM EXIT
 
-        # Import check for dynamo.frontend before launching
-        if ! python -c "import dynamo.frontend" >/dev/null 2>&1; then
-            echo "❌ Import check failed: cannot import dynamo.frontend"
-            exit 1
-        fi
+    export PYTHONPATH="$HOME/dynamo/components/router/src:$HOME/dynamo/components/metrics/src:$HOME/dynamo/components/frontend/src:$HOME/dynamo/components/planner/src:$HOME/dynamo/components/backends/mocker/src:$HOME/dynamo/components/backends/trtllm/src:$HOME/dynamo/components/backends/vllm/src:$HOME/dynamo/components/backends/sglang/src:$HOME/dynamo/components/backends/llama_cpp/src"
 
-        # Start background processes
-        python -m dynamo.frontend &
-        FRONTEND_PID=$!
-
-        unset HF_TOKEN
-        DYN_SYSTEM_ENABLED=true DYN_SYSTEM_PORT=8081 \
-        python -m dynamo.vllm --model Qwen/Qwen3-0.6B --gpu-memory-utilization 0.50 --enforce-eager --no-enable-prefix-caching &
-        VLLM_PID=$!
-
-        # Wait for both processes
-        echo "Launched frontend and vllm processes. Press Ctrl+C to exit."
-        wait $FRONTEND_PID $VLLM_PID
-    else
-        dry_run_echo "Would perform import check: python -c \"import dynamo.frontend\""
-        dry_run_echo "Would start background processes:"
-        dry_run_echo "  - python -m dynamo.frontend"
-        dry_run_echo "  - DYN_SYSTEM_ENABLED=true DYN_SYSTEM_PORT=8081 python -m dynamo.vllm --model Qwen/Qwen3-0.6B --enforce-eager --no-enable-prefix-caching"
-        dry_run_echo "Would wait for both processes to complete"
+    # Check torch import and CUDA availability after PYTHONPATH is set
+    echo "Checking torch import and CUDA availability..."
+    if ! python -c "import torch" >/dev/null 2>&1; then
+        echo "❌ Error: Cannot import torch. Please ensure PyTorch is installed."
+        exit 1
     fi
+
+    # Check if CUDA is available
+    if ! python -c "import torch; print('CUDA available:', torch.cuda.is_available())" 2>/dev/null | grep -q "CUDA available: True"; then
+        echo "❌ Error: CUDA is not available. Please ensure CUDA drivers and PyTorch CUDA support are properly installed."
+        echo "CUDA status:"
+        python -c "import torch; print('CUDA available:', torch.cuda.is_available()); print('CUDA device count:', torch.cuda.device_count() if torch.cuda.is_available() else 'N/A')" 2>/dev/null || echo "Failed to get CUDA status"
+        exit 1
+    fi
+
+    echo "Torch import successful and CUDA is available"
+    echo "CUDA device count: $(python -c "import torch; print(torch.cuda.device_count())" 2>/dev/null || echo 'Unknown')"
+
+    # Import check for dynamo.frontend before launching
+    if ! python -c "import dynamo.frontend" >/dev/null 2>&1; then
+        echo "❌ Import check failed: cannot import dynamo.frontend"
+        exit 1
+    fi
+
+    # Start background processes
+    python -m dynamo.frontend &
+    FRONTEND_PID=$!
+
+    unset HF_TOKEN
+    DYN_SYSTEM_ENABLED=true DYN_SYSTEM_PORT=8081 \
+    python -m dynamo.vllm --model Qwen/Qwen3-0.6B --gpu-memory-utilization 0.50 --enforce-eager --no-enable-prefix-caching &
+    VLLM_PID=$!
+
+    # Wait for both processes
+    echo "Launched frontend and vllm processes. Press Ctrl+C to exit."
+    wait $FRONTEND_PID $VLLM_PID
 else
-    dry_run_echo "Running in standard mode (dynamo run)"
-    dry_run_echo "Using model: $MODEL"
-
-    if [ "$DRY_RUN" = false ]; then
-        # Set up trap to kill all child processes on exit
-        trap 'echo Cleaning up...; kill $(jobs -p) 2>/dev/null || true; pkill -P $$ 2>/dev/null || true; exit' INT TERM EXIT
-
-        dynamo run out=vllm $MODEL
-    else
-        dry_run_echo "Would execute: dynamo run out=vllm $MODEL"
-    fi
+    dry_run_echo "python -c \"import torch\""
+    dry_run_echo "python -c \"import torch; print('CUDA available:', torch.cuda.is_available())\""
+    dry_run_echo "python -c \"import dynamo.frontend\""
+    dry_run_echo "python -m dynamo.frontend &"
+    dry_run_echo "DYN_SYSTEM_ENABLED=true DYN_SYSTEM_PORT=8081 python -m dynamo.vllm --model Qwen/Qwen3-0.6B --enforce-eager --no-enable-prefix-caching &"
+    dry_run_echo "wait \$FRONTEND_PID \$VLLM_PID"
 fi
