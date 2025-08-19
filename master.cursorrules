@@ -88,6 +88,11 @@
 # - Write unit tests in the same file as the code unless told otherwise
 # - Use `#[cfg(test)]` for test-only code
 # - Mock external dependencies when mocks are available
+# - When running `cargo test ...`:
+#   - pipe it to `grep -v` if any of the following content exists:
+#      `running 0 tests`
+#      `test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out`
+#      `tower_http::trace::on_failure:`
 # - When integration tests are mentioned, it means to use `--features integration`
 #   - Example: `cargo test --locked --features integration ... -- --nocapture`
 # - For specific integration tests, add the "--lib <name>" flag:
