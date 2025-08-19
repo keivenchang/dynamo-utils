@@ -3,6 +3,43 @@
 set -euo pipefail
 
 BACKENDS=components/backends
+# Use existing environment variables if set, otherwise use defaults
+: ${DYN_FRONTEND_PORT:=8080}
+: ${DYN_BACKEND_PORT:=8081}
+
+# Function to check if ports are already bound
+check_ports_available() {
+    local port_frontend_in_use=false
+    local port_backend_in_use=false
+
+    # Check if frontend port is in use
+    if netstat -tuln 2>/dev/null | grep -q ":$DYN_FRONTEND_PORT "; then
+        port_frontend_in_use=true
+    elif ss -tuln 2>/dev/null | grep -q ":$DYN_FRONTEND_PORT "; then
+        port_frontend_in_use=true
+    fi
+
+    # Check if backend port is in use
+    if netstat -tuln 2>/dev/null | grep -q ":$DYN_BACKEND_PORT "; then
+        port_backend_in_use=true
+    elif ss -tuln 2>/dev/null | grep -q ":$DYN_BACKEND_PORT "; then
+        port_backend_in_use=true
+    fi
+
+    if [ "$port_frontend_in_use" = true ] || [ "$port_backend_in_use" = true ]; then
+        echo "❌ Error: Required ports are already in use:"
+        if [ "$port_frontend_in_use" = true ]; then
+            echo "  - Port $DYN_FRONTEND_PORT (frontend) is already bound"
+        fi
+        if [ "$port_backend_in_use" = true ]; then
+            echo "  - Port $DYN_BACKEND_PORT (backend) is already bound"
+        fi
+        echo "Please free up these ports before running the script."
+        exit 1
+    fi
+
+    echo "✅ Ports $DYN_FRONTEND_PORT (frontend) and $DYN_BACKEND_PORT (backend) are available"
+}
 
 # Function to get available frameworks
 get_available_frameworks() {
@@ -41,7 +78,7 @@ Run Dynamo inference in the development environment.
 
 OPTIONS:
     -h, --help    Show this help message and exit
-    
+
     --model MODEL Specify the model to use
                   Options: "deepseek" (DeepSeek-R1-Distill-Qwen-1.5B)
                           Default: "qwen" (Qwen/Qwen3-0.6B)
@@ -176,12 +213,15 @@ if [ "$DRY_RUN" = false ]; then
         exit 1
     fi
 
+    # Check if required ports are available before starting services
+    check_ports_available
+
     # Start background processes
     python -m dynamo.frontend &
     FRONTEND_PID=$!
 
     unset HF_TOKEN
-    DYN_SYSTEM_ENABLED=true DYN_SYSTEM_PORT=8081 \
+    DYN_SYSTEM_ENABLED=true DYN_SYSTEM_PORT=$DYN_BACKEND_PORT \
     python -m dynamo.vllm --model Qwen/Qwen3-0.6B --gpu-memory-utilization 0.50 --enforce-eager --no-enable-prefix-caching &
     VLLM_PID=$!
 
@@ -189,10 +229,35 @@ if [ "$DRY_RUN" = false ]; then
     echo "Launched frontend and vllm processes. Press Ctrl+C to exit."
     wait $FRONTEND_PID $VLLM_PID
 else
+    # Set up trap to kill all background processes on exit
+    dry_run_echo "trap 'echo Cleaning up...; kill \$(jobs -p) 2>/dev/null || true; exit' INT TERM EXIT"
+
+    dry_run_echo "export PYTHONPATH=\"$HOME/dynamo/components/router/src:$HOME/dynamo/components/metrics/src:$HOME/dynamo/components/frontend/src:$HOME/dynamo/components/planner/src:$HOME/dynamo/components/backends/mocker/src:$HOME/dynamo/components/backends/trtllm/src:$HOME/dynamo/components/backends/vllm/src:$HOME/dynamo/components/backends/sglang/src:$HOME/dynamo/components/backends/llama_cpp/src\""
+
+    # Check torch import and CUDA availability after PYTHONPATH is set
+    dry_run_echo "Checking torch import and CUDA availability..."
     dry_run_echo "python -c \"import torch\""
+
+    # Check if CUDA is available
     dry_run_echo "python -c \"import torch; print('CUDA available:', torch.cuda.is_available())\""
+    dry_run_echo "echo \"Torch import successful and CUDA is available\""
+    dry_run_echo "echo \"CUDA device count: \$(python -c \"import torch; print(torch.cuda.device_count())\" 2>/dev/null || echo 'Unknown')\""
+
+    # Import check for dynamo.frontend before launching
     dry_run_echo "python -c \"import dynamo.frontend\""
+
+    # Check if required ports are available before starting services
+    dry_run_echo "check_ports_available"
+
+    # Start background processes
     dry_run_echo "python -m dynamo.frontend &"
-    dry_run_echo "DYN_SYSTEM_ENABLED=true DYN_SYSTEM_PORT=8081 python -m dynamo.vllm --model Qwen/Qwen3-0.6B --enforce-eager --no-enable-prefix-caching &"
+    dry_run_echo "FRONTEND_PID=\$!"
+
+    dry_run_echo "unset HF_TOKEN"
+    dry_run_echo "DYN_SYSTEM_ENABLED=true DYN_SYSTEM_PORT=$DYN_BACKEND_PORT python -m dynamo.vllm --model Qwen/Qwen3-0.6B --gpu-memory-utilization 0.50 --enforce-eager --no-enable-prefix-caching &"
+    dry_run_echo "VLLM_PID=\$!"
+
+    # Wait for both processes
+    dry_run_echo "echo \"Launched frontend and vllm processes. Press Ctrl+C to exit.\""
     dry_run_echo "wait \$FRONTEND_PID \$VLLM_PID"
 fi
