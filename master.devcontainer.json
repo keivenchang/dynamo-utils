@@ -32,8 +32,8 @@
     "customizations": {
         "vscode": {
             "extensions": [
-                //"ms-python.python",
-                //"ms-python.vscode-pylance",
+                "ms-python.python",
+//                "ms-python.vscode-pylance",
                 "rust-lang.rust-analyzer",
                 "eamodio.gitlens"
             ],
