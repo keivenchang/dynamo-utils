@@ -68,6 +68,7 @@ CHECK=false               # Flag for --check mode
 DEBUG=false               # Flag for --debug mode
 BUILD_RUST=true          # Flag for --rust-only/--rust (default: true)
 BUILD_PYTHON=true        # Flag for --py-only/--py (default: true)
+DRY_RUN=false            # Flag for --dryrun/--dry-run mode
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -109,33 +110,58 @@ while [[ $# -gt 0 ]]; do
             DEBUG=true
             shift
             ;;
+        --dryrun|--dry-run)
+            DRY_RUN=true
+            shift
+            ;;
         --help|-h)
-            echo "Usage: $0 [--development|--dev|--release] [--rust-only|--rust|--py-only|--py] [--cargo-clean] [--python-clean] [--check] [--debug]"
-            echo ""
-            echo "Build Type (mutually exclusive, --dev is default if none specified):"
-            echo "  --development, --dev: Build ai-dynamo-runtime in development mode (editable install) [DEFAULT]"
-            echo "  --release: Build both ai-dynamo-runtime and ai-dynamo wheels for production"
-            echo ""
-            echo "Build Components (mutually exclusive):"
-            echo "  --rust-only, --rust: Build only Rust components (cargo build)"
-            echo "  --py-only, --py: Build only Python components (wheel/maturin/uv)"
-            echo "  Default: Build both Rust and Python components"
-            echo ""
-            echo "Other Options:"
-            echo "  --cargo-clean: Clean Rust build artifacts (can be used standalone or with build)"
-            echo "  --python-clean: Remove all dynamo packages (.pth, .whl, pip/uv) and exit"
-            echo "  --check: Check status of dynamo packages (.pth, .whl, pip/uv) and exit"
-            echo "  --debug: Show detailed .pth file information during development builds"
-            echo ""
-            echo "Standalone operations:"
-            echo "  • --check: Only show package status"
-            echo "  • --cargo-clean: Only clean Rust build artifacts"
-            echo "  • --python-clean: Only remove Python packages"
-            echo "Combined operations:"
-            echo "  • $0 --check: Build in development mode then show status (--dev is default)"
-            echo "  • $0 --release --cargo-clean: Clean then build optimized wheels"
-            echo "  • $0 --rust-only: Build only Rust components in development mode"
-            echo "  • $0 --py-only: Build only Python components in development mode"
+            cat << 'EOF'
+Usage: compile.sh [OPTIONS]
+
+Builds and installs Python packages for the Dynamo distributed inference framework.
+
+BUILD MODES (mutually exclusive, --dev is default if none specified):
+  --development, --dev    Build ai-dynamo-runtime in development mode (editable install) [DEFAULT]
+  --release               Build both ai-dynamo-runtime and ai-dynamo wheels for production
+
+BUILD COMPONENTS (mutually exclusive):
+  --rust-only, --rust     Build only Rust components (cargo build)
+  --py-only, --py         Build only Python components (wheel/maturin/uv)
+                          Default: Build both Rust and Python components
+
+OTHER OPTIONS:
+  --cargo-clean           Clean Rust build artifacts (can be used standalone or with build)
+  --python-clean          Remove all dynamo packages (.pth, .whl, pip/uv) and exit
+  --check                 Check status of dynamo packages (.pth, .whl, pip/uv) and exit
+  --debug                 Show detailed .pth file information during development builds
+  --dryrun, --dry-run     Show what would be executed without running (dry run mode)
+
+EXAMPLES:
+  Standalone operations:
+    • ./compile.sh --check              # Only show package status
+    • ./compile.sh --cargo-clean        # Only clean Rust build artifacts
+    • ./compile.sh --python-clean       # Only remove Python packages
+
+  Combined operations:
+    • ./compile.sh                      # Build in development mode then show status
+    • ./compile.sh --release --cargo-clean  # Clean then build optimized wheels
+    • ./compile.sh --rust-only          # Build only Rust components in development mode
+    • ./compile.sh --py-only            # Build only Python components in development mode
+    • ./compile.sh --dev --dry-run      # Show what would be built in development mode
+
+PACKAGES BUILT:
+  ai-dynamo-runtime: Core Rust extensions + Python bindings
+     - Python Import: dynamo._core, dynamo.runtime, dynamo.llm, dynamo.nixl_connect
+     - Contains: Compiled Rust extension (~45MB), Python modules (~16MB)
+  ai-dynamo: Complete framework with all components
+     - Python Import: dynamo.frontend, dynamo.planner, dynamo.vllm, etc.
+     - Contains: Frontend, planner, and backend components (~90KB)
+
+REQUIREMENTS:
+  - Docker container environment
+  - Python >= 3.10 with maturin and uv
+  - Workspace at $HOME/dynamo or /workspace
+EOF
             exit 0
             ;;
         *)
@@ -242,6 +268,26 @@ fi
 # FUNCTION DEFINITIONS
 # ==============================================================================
 # Define all functions used by this script
+
+# Function to handle dry run output
+dry_run_echo() {
+    if [ "$DRY_RUN" = true ]; then
+        echo "[DRY RUN] $*"
+    else
+        echo "$*"
+    fi
+}
+
+# Command wrapper that always shows commands using set -x format
+cmd() {
+    # Always show what will be executed using shell tracing format
+    ( set -x; : "$@" ) 2>&1 | sed 's/^+ : /+ /'
+
+    # Only execute if not in dry-run mode
+    if [ "$DRY_RUN" = false ]; then
+        "$@"
+    fi
+}
 
 get_dynamo_version() {
     # Extract version from Cargo.toml workspace.package section
@@ -574,11 +620,13 @@ fi
 # 3. BUILD (if development or release requested, or if rust/python only flags used)
 # ==============================================================================
 
+# Show dry run indicator removed - [DRY RUN] prefix is sufficient
+
 # Default to development mode if no build type specified but build flags are used
 if [ -z "$BUILD_TYPE" ] && ([ "$BUILD_RUST" = true ] || [ "$BUILD_PYTHON" = true ]); then
-    # If no build type specified and either Rust or Python is enabled, default to development
+    # If no build type specified and either Rust or Python is enabled, default to development mode
     BUILD_TYPE="development"
-    echo "   → No build type specified, defaulting to development mode"
+    dry_run_echo "   → No build type specified, defaulting to development mode"
 fi
 
 if [ -n "$BUILD_TYPE" ]; then
@@ -602,26 +650,23 @@ if [ -n "$BUILD_TYPE" ]; then
         exit 1
     fi
 
-    echo "Build: $BUILD_TYPE mode (Rust=$BUILD_RUST, Python=$BUILD_PYTHON)"
+    dry_run_echo "Build: $BUILD_TYPE mode (Rust=$BUILD_RUST, Python=$BUILD_PYTHON)"
 
     # ==============================================================================
     # WORKSPACE SETUP
     # ==============================================================================
     # Prepare the workspace for building
 
-    echo "$ cd $WORKSPACE_DIR"
-    cd $WORKSPACE_DIR
+    cmd cd $WORKSPACE_DIR
 
     if [ "$CARGO_CLEAN" = true ]; then
-        echo "$ cargo clean"
-        cargo clean
+        cmd cargo clean
     fi
 
     # Fix file permissions
     USER_ID=$(stat -c "%u" .)
     GROUP_ID=$(stat -c "%g" .)
-    echo "$ chown -R $USER_ID:$GROUP_ID ."
-    chown -R $USER_ID:$GROUP_ID .
+    cmd chown -R $USER_ID:$GROUP_ID .
 
     # ==============================================================================
     # COMPILATION CONFIGURATION
@@ -629,11 +674,9 @@ if [ -n "$BUILD_TYPE" ]; then
     # Configure Rust compiler settings for optimal build performance
 
     if [ "$INCREMENTAL" = true ]; then
-        echo "$ export CARGO_INCREMENTAL=1"
-        export CARGO_INCREMENTAL=1
+        cmd export CARGO_INCREMENTAL=1
     else
-        echo "$ export CARGO_INCREMENTAL=0"
-        export CARGO_INCREMENTAL=0
+        cmd export CARGO_INCREMENTAL=0
     fi
 
     # ==============================================================================
@@ -643,27 +686,33 @@ if [ -n "$BUILD_TYPE" ]; then
 
     if [ "$BUILD_RUST" = true ]; then
         if [ "$BUILD_TYPE" = "development" ]; then
-            start_time=$(date +%s.%N)
-            echo "$ CARGO_INCREMENTAL=1 RUSTFLAGS=\"-C opt-level=0 -C codegen-units=256\" cargo build --locked --features dynamo-llm/block-manager --workspace"
-            CARGO_INCREMENTAL=1 RUSTFLAGS="-C opt-level=0 -C codegen-units=256" cargo build --locked --features dynamo-llm/block-manager --workspace
-            end_time=$(date +%s.%N)
-            build_duration=$(echo "$end_time - $start_time" | bc 2>/dev/null || echo "unknown")
-            if [ "$build_duration" != "unknown" ]; then
-                echo "$build_duration" > /tmp/dynamo_cargo_build_time
+            if [ "$DRY_RUN" = false ]; then
+                start_time=$(date +%s.%N)
+            fi
+            cmd bash -c "CARGO_INCREMENTAL=1 RUSTFLAGS=\"-C opt-level=0 -C codegen-units=256\" cargo build --locked --features dynamo-llm/block-manager --workspace"
+            if [ "$DRY_RUN" = false ]; then
+                end_time=$(date +%s.%N)
+                build_duration=$(echo "$end_time - $start_time" | bc 2>/dev/null || echo "unknown")
+                if [ "$build_duration" != "unknown" ]; then
+                    echo "$build_duration" > /tmp/dynamo_cargo_build_time
+                fi
             fi
         else
-            start_time=$(date +%s.%N)
-            echo "$ cargo build --release --locked --features dynamo-llm/block-manager --workspace"
-            cargo build --release --locked --features dynamo-llm/block-manager --workspace
-            end_time=$(date +%s.%N)
-            build_duration=$(echo "$end_time - $start_time" | bc 2>/dev/null || echo "unknown")
-            if [ "$build_duration" != "unknown" ]; then
-                echo "$build_duration" > /tmp/dynamo_cargo_build_time
+            if [ "$DRY_RUN" = false ]; then
+                start_time=$(date +%s.%N)
+            fi
+            cmd cargo build --release --locked --features dynamo-llm/block-manager --workspace
+            if [ "$DRY_RUN" = false ]; then
+                end_time=$(date +%s.%N)
+                build_duration=$(echo "$end_time - $start_time" | bc 2>/dev/null || echo "unknown")
+                if [ "$build_duration" != "unknown" ]; then
+                    echo "$build_duration" > /tmp/dynamo_cargo_build_time
+                fi
             fi
         fi
     else
-        echo ""
-        echo "Skipping Rust build (--py-only mode)"
+        dry_run_echo ""
+        dry_run_echo "Skipping Rust build (--py-only mode)"
     fi
 
     # ==============================================================================
@@ -672,74 +721,74 @@ if [ -n "$BUILD_TYPE" ]; then
     # Build Python packages and wheels
 
     if [ "$BUILD_PYTHON" = true ]; then
-        echo ""
-        echo "========== Building Python components... =========="
+        dry_run_echo ""
+        dry_run_echo "========== Building Python components... =========="
 
         # Clean up any existing wheel files
         if ls $WHEEL_OUTPUT_DIR/*.whl 1> /dev/null 2>&1; then
-            rm -f $WHEEL_OUTPUT_DIR/*.whl
-            rmdir $WHEEL_OUTPUT_DIR 2>/dev/null || true
+            cmd rm -f $WHEEL_OUTPUT_DIR/*.whl
+            cmd rmdir $WHEEL_OUTPUT_DIR 2>/dev/null || true
         fi
 
-        # Install maturin if needed
-        if ! uv pip show maturin >/dev/null 2>&1; then
-            echo "$ uv pip install maturin[patchelf]"
-            uv pip install maturin[patchelf] 2>&1 | sed 's/^/[uv] /'
+        # Install maturin if needed (skip in dry-run mode)
+        if [ "$DRY_RUN" = false ] && ! uv pip show maturin >/dev/null 2>&1; then
+            cmd uv pip install maturin[patchelf]
         fi
 
-        echo "Building ai-dynamo-runtime package..."
+        dry_run_echo "Building ai-dynamo-runtime package..."
 
         if [ "$BUILD_TYPE" = "development" ]; then
-        echo "$ cd $WORKSPACE_DIR/lib/bindings/python && CARGO_INCREMENTAL=1 RUSTFLAGS=\"-C opt-level=0 -C codegen-units=256\" maturin develop --uv --features block-manager"
-
-        (cd $WORKSPACE_DIR/lib/bindings/python && CARGO_INCREMENTAL=1 RUSTFLAGS="-C opt-level=0 -C codegen-units=256" maturin develop --uv --features block-manager 2>&1 | sed 's/^/[maturin] /')
-        echo "Successfully installed ai-dynamo-runtime package (editable mode)"
-    else
-        echo "$ cd $WORKSPACE_DIR/lib/bindings/python && maturin build --release --features block-manager --out $WHEEL_OUTPUT_DIR"
-
-        (cd $WORKSPACE_DIR/lib/bindings/python && maturin build --release --features block-manager --out $WHEEL_OUTPUT_DIR 2>&1 | sed 's/^/[maturin] /')
-
-        if ls $WHEEL_OUTPUT_DIR/*.whl 1> /dev/null 2>&1; then
-            WHEEL_FILE=$(ls $WHEEL_OUTPUT_DIR/*.whl)
-            echo "$ uv pip install --upgrade --force-reinstall --no-deps"
-            uv pip install --upgrade --force-reinstall --no-deps $WHEEL_FILE 2>&1 | sed 's/^/[uv] /'
-            echo "Sucessfully installed ai-dynamo-runtime package"
+            cmd bash -c "cd $WORKSPACE_DIR/lib/bindings/python && CARGO_INCREMENTAL=1 RUSTFLAGS=\"-C opt-level=0 -C codegen-units=256\" maturin develop --uv --features block-manager"
         else
-            echo "❌ ERROR: No wheel files found in $WHEEL_OUTPUT_DIR/"
-            exit 1
+            cmd bash -c "cd $WORKSPACE_DIR/lib/bindings/python && maturin build --release --features block-manager --out $WHEEL_OUTPUT_DIR"
+
+            if [ "$DRY_RUN" = false ]; then
+                if ls $WHEEL_OUTPUT_DIR/*.whl 1> /dev/null 2>&1; then
+                    WHEEL_FILE=$(ls $WHEEL_OUTPUT_DIR/*.whl)
+                    cmd uv pip install --upgrade --force-reinstall --no-deps $WHEEL_FILE
+                else
+                    echo "❌ ERROR: No wheel files found in $WHEEL_OUTPUT_DIR/"
+                    exit 1
+                fi
+            else
+                dry_run_echo "Check for wheel files and install ai-dynamo-runtime package"
+            fi
+
+            dry_run_echo "Building ai-dynamo package..."
+            cmd pip wheel --no-deps --wheel-dir $WHEEL_OUTPUT_DIR .
+
+            if [ "$DRY_RUN" = false ]; then
+                if ls $WHEEL_OUTPUT_DIR/ai_dynamo-*.whl 1> /dev/null 2>&1; then
+                    AI_DYNAMO_WHEEL=$(ls $WHEEL_OUTPUT_DIR/ai_dynamo-*.whl)
+                    cmd uv pip install --upgrade --find-links $WHEEL_OUTPUT_DIR $AI_DYNAMO_WHEEL
+                else
+                    echo "❌ ERROR: No ai-dynamo wheel files found in $WHEEL_OUTPUT_DIR/"
+                    exit 1
+                fi
+            else
+                dry_run_echo "Check for ai-dynamo wheel files and install package"
+            fi
         fi
-
-        echo "Building ai-dynamo package..."
-        echo "$ pip wheel --no-deps --wheel-dir $WHEEL_OUTPUT_DIR ."
-
-        pip wheel --no-deps --wheel-dir $WHEEL_OUTPUT_DIR . 2>&1 | sed 's/^/[pip wheel] /'
-
-        if ls $WHEEL_OUTPUT_DIR/ai_dynamo-*.whl 1> /dev/null 2>&1; then
-            AI_DYNAMO_WHEEL=$(ls $WHEEL_OUTPUT_DIR/ai_dynamo-*.whl)
-            echo "$ uv pip install --upgrade --find-links $WHEEL_OUTPUT_DIR"
-            uv pip install --upgrade --find-links $WHEEL_OUTPUT_DIR $AI_DYNAMO_WHEEL 2>&1 | sed 's/^/[uv] /'
-            echo "Sucessfully installed ai-dynamo package"
-        else
-            echo "❌ ERROR: No ai-dynamo wheel files found in $WHEEL_OUTPUT_DIR/"
-            exit 1
-        fi
-    fi
     else
-        echo ""
-        echo "Skipping Python build (--rust-only mode)"
+        dry_run_echo ""
+        dry_run_echo "Skipping Python build (--rust-only mode)"
     fi  # End of BUILD_PYTHON conditional block
 
     if [ "$BUILD_PYTHON" = true ]; then
-        echo "$ python3 -c \"import dynamo\""
-        if python3 -c "import dynamo" 2>/dev/null; then
-            echo "Python import test PASSED"
+        cmd python3 -c "import dynamo"
+        if [ "$DRY_RUN" = false ]; then
+            if python3 -c "import dynamo" 2>/dev/null; then
+                dry_run_echo "Python import test PASSED"
+            else
+                echo "❌ Python import failed"
+            fi
         else
-            echo "❌ Python import failed"
+            dry_run_echo "Python import test PASSED (dry-run mode)"
         fi
     fi
 
-    echo ""
-    echo "✅ Build completed successfully!"
+    dry_run_echo ""
+    dry_run_echo "✅ Build completed successfully!"
 
 fi  # End of BUILD_TYPE block
 
