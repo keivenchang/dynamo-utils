@@ -18,17 +18,17 @@ declare -A SRC_FILES=(
 
 # Get the absolute path of the script's directory and prepend it to SRC_FILES keys
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-declare -A TEMP_FILES
+declare -A TEMP_SRC_FILES
 for key in "${!SRC_FILES[@]}"; do
-    TEMP_FILES["$SCRIPT_DIR/$key"]="${SRC_FILES[$key]}"
+    TEMP_SRC_FILES["$SCRIPT_DIR/$key"]="${SRC_FILES[$key]}"
 done
 SRC_FILES=()
-for key in "${!TEMP_FILES[@]}"; do
-    SRC_FILES["$key"]="${TEMP_FILES[$key]}"
+for key in "${!TEMP_SRC_FILES[@]}"; do
+    SRC_FILES["$key"]="${TEMP_SRC_FILES[$key]}"
 done
-unset TEMP_FILES
+unset TEMP_SRC_FILES
 
-TEMP_FILE="/tmp/dev_configs.tmp"
+TEMP_SHA_FILE="/tmp/dev_configs.tmp"
 LOG_FILE="/tmp/dev_configs_sync.log"
 
 # Check for flags
@@ -102,8 +102,8 @@ done
 CURRENT_HASH="${SRC_FILES_HASH}"
 
 # Check if we have a previous hash stored
-if [ -f "$TEMP_FILE" ]; then
-    PREVIOUS_HASH=$(cat "$TEMP_FILE")
+if [ -f "$TEMP_SHA_FILE" ]; then
+    PREVIOUS_HASH=$(cat "$TEMP_SHA_FILE")
 else
     PREVIOUS_HASH=""
 fi
@@ -146,7 +146,7 @@ for dir in "$DEST_SOURCE_DIRS"*; do
             cmd mkdir -p "$target_dir"
         fi
         
-        TEMP_FILE=$(mktemp)
+        TEMP_OUTPUT_FILE=$(mktemp)
         
         # Check if this is a JSON file
         if [[ "$source_file" == *.json ]] || [[ "$target_filename" == *.json ]]; then
@@ -158,24 +158,24 @@ for dir in "$DEST_SOURCE_DIRS"*; do
             # 1. Replace display name with directory-specific name
             # 2. Replace container name with directory-specific name
             sed "s|\"name\": \"NVIDIA Dynamo.*\"|\"name\": \"[$DIR_NAME] $USER Dev Container\"|g" "$source_file" | \
-            sed "s|\"dynamo-dev-container\"|\"$DIR_NAME-$USER-devcontainer\"|g" > "$TEMP_FILE"
+            sed "s|\"dynamo-dev-container\"|\"$DIR_NAME-$USER-devcontainer\"|g" > "$TEMP_OUTPUT_FILE"
         else
             # For non-JSON files: add header and copy content
-            echo "# DO NOT EDIT - THIS IS AN AUTOMATICALLY GENERATED COPY" > "$TEMP_FILE"
-            echo "# Original file: $source_file" >> "$TEMP_FILE"
-            echo "# Last updated: $(date)" >> "$TEMP_FILE"
-            echo "" >> "$TEMP_FILE"
-            cat "$source_file" >> "$TEMP_FILE"
+            echo "# DO NOT EDIT - THIS IS AN AUTOMATICALLY GENERATED COPY" > "$TEMP_OUTPUT_FILE"
+            echo "# Original file: $source_file" >> "$TEMP_OUTPUT_FILE"
+            echo "# Last updated: $(date)" >> "$TEMP_OUTPUT_FILE"
+            echo "" >> "$TEMP_OUTPUT_FILE"
+            cat "$source_file" >> "$TEMP_OUTPUT_FILE"
         fi
         
         # Copy the temporary file to the destination (cp will overwrite existing file)
-        cmd cp "$TEMP_FILE" "$target_path"
+        cmd cp "$TEMP_OUTPUT_FILE" "$target_path"
         if [ $? -ne 0 ]; then
             echo "❌ ERROR: Failed to copy $target_filename to $dir"
         fi
         
         # Clean up temporary file
-        rm -f "$TEMP_FILE" 2>/dev/null
+        rm -f "$TEMP_OUTPUT_FILE" 2>/dev/null
     done
 
     # Handle build directory management for dynamo* directories
@@ -205,5 +205,5 @@ if [ "$SYNC_COUNT" -eq 0 ] && [ "$FORCE" = true ]; then
 fi
 
 # Store the new hash
-cmd bash -c "echo '$CURRENT_HASH' > '$TEMP_FILE'"
+cmd bash -c "echo '$CURRENT_HASH' > '$TEMP_SHA_FILE'"
 dry_run_echo "INFO: Sync completed. Updated $SYNC_COUNT directories." 
