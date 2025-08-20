@@ -1,0 +1,409 @@
+# Keiven's Cursor Rules for Dynamo Project
+# This file helps guide AI behavior when working with this codebase
+# Last updated: 2025-08-17 22:01:08
+# https://docs.google.com/document/d/1rm1GWt9AOPkKSDWUJQEDOy1Z-FhPkfZ272eUpMz9-AQ/edit?tab=t.0
+
+# =============================================================================
+# PROJECT OVERVIEW
+# =============================================================================
+# This is a Rust-based and Python-based project with Python bindings and web components
+# The project uses cargo for Rust builds, uv for Python package management, and Docker for containerization
+# 
+# Key project components:
+# - Rust runtime and core libraries
+# - Python bindings via maturin
+# - Web components and interfaces
+# - Docker containerization support
+
+# =============================================================================
+# AI PERSONALITY AND BEHAVIOR
+# =============================================================================
+# - Do not be overly agreeable, sycophantic, and use too many positive words
+# - Be as a matter of fact, direct, and honest about technical challenges
+# - Suggest alternatives when current approach has issues
+# - Ask clarifying questions when requirements are unclear
+
+# =============================================================================
+# UNIVERSAL CODE STYLE RULES
+# =============================================================================
+# All code style (*.md, Python, bash, Rust, etc...)
+# - Emojis are childish looking and extremely unprofessional. Do NOT use them.
+# - If absolutely necessary, the exceptions are: ✅, 🚫, ❌, ⚠️ for rare exceptions.
+# - We only need the first 2 lines of the license. Full text not needed. For example:
+```
+// SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+```
+
+# =============================================================================
+# RUST DEVELOPMENT GUIDELINES
+# =============================================================================
+
+## Code Style
+# - Use snake_case for variables and functions
+# - Use PascalCase for types and traits
+# - Prefer explicit types over type inference when it improves readability
+# - Add doc comments (///) for public APIs
+# - Use clippy for linting: cargo clippy
+# - Prefer `tracing::error` over `eprintln`
+# - When possible, use a shorter reference like `MyStuff` instead of `crate::my_service::MyStuff`
+# - Prefer `.to_string()` over use of `format!`
+
+## File Organization
+# Rust files should be organized as:
+# - lib.rs: Main library entry point
+# - mod.rs: Module definitions
+# - Separate files for each module
+# - Tests in tests/ directory or inline with #[cfg(test)]
+
+## Build Commands and Rules
+# - For all cargo test, cargo build, and cargo install, make sure to add `--locked`
+# - Test changes with: `cargo test --locked`
+# - Use `cargo clean` if you encounter build issues
+
+## Formatting and Linting
+# - When asked to `cargo fmt`, do this in one step:
+```
+(cd $DYNAMO_HOME/lib/runtime/examples && cargo fmt); (cd $DYNAMO_HOME/lib/bindings/python && cargo fmt); (cd $DYNAMO_HOME && cargo fmt)
+```
+# - Run `cargo fmt` whenever there are significant changes to Rust (*.rs files)
+# - Also periodically run `cargo clippy --no-deps --all-targets -- -D warnings`
+
+## Type Inference for Examples
+# When working on any example directories in "lib/runtime/examples/<dir>" or "lib/bindings/python":
+# - Look at the top level Cargo.toml file, in the [workspace] members section
+# - And insert the temporary content below, in order to allow rust-analyzer to perform type inference:
+```
+    # ======== AUTO ADDED FOR TYPE-INFERENCE, SHOULD BE REMOVED BEFORE COMMIT ========
+    "lib/runtime/examples/system_metrics",
+    "lib/runtime/examples/hello_world",
+    "lib/runtime/examples/service_metrics",
+    //"lib/bindings/python",
+    # ======== AUTO ADDED FOR TYPE-INFERENCE, SHOULD BE REMOVED BEFORE COMMIT ========
+```
+# - Never git add or commit this change to the top level Cargo.toml nor Cargo.lock, unless explicitly told to
+# - Before git commit, **always** remove these added lines.
+
+## Testing Guidelines
+# - Write unit tests in the same file as the code unless told otherwise
+# - Use `#[cfg(test)]` for test-only code
+# - Mock external dependencies when mocks are available
+# - When running `cargo test ...`:
+#   - pipe it to `grep -v` if any of the following content exists:
+#      `running 0 tests`
+#      `test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out`
+#      `tower_http::trace::on_failure:`
+# - When integration tests are mentioned, it means to use `--features integration`
+#   - Example: `cargo test --locked --features integration ... -- --nocapture`
+# - For specific integration tests, add the "--lib <name>" flag:
+#   - Example: `cargo test --locked -p dynamo-runtime --features integration --lib http_server -- --nocapture`
+# - Example integration test command:
+```
+cargo test --locked -p dynamo-runtime --features integration test_metricsregistry_trait::test_drt_nats_metrics -- --nocapture
+```
+# - To run ALL the integration tests (only when asked explicitly):
+```
+cargo test --locked --features integration -- --nocapture
+```
+# - When asked to run a test, check whether it's inside a feature
+#   - For example, if test_xyz is inside an integration feature marked as: `#[cfg(feature = "integration")]`
+#   - Then make sure to run like this:
+```
+cargo run ... --features integration --lib mod_name::test_xyz ...
+```
+# - During tests, if it is building/compiling, then show the progress
+# - When running tests, always list which tests failed (up to 10), and number of passed/failed broken down by unit vs. integration tests
+
+## Wheel Creation Rules
+# When asked to create Python wheel, do the followings, in fewer steps (combined steps using "&&" in shell), when possible:
+# - cargo build --locked --features dynamo-llm/block-manager --workspace
+# - If Python bindings changed, run: (cd lib/bindings/python && maturin develop)
+# - If uv errors or not installed:
+#   - install via the command: uv pip install maturin[patchelf]
+
+## Error Handling
+# - Use Result<T, E> for fallible operations
+# - Use Option<T> for nullable values
+# - Prefer ? operator over match for error propagation
+# - Use anyhow for application-level error handling
+# Example:
+```
+pub fn process_data(data: &str) -> Result<ProcessedData, anyhow::Error> {
+    let parsed = parse_input(data)?;
+    let result = transform_data(parsed)?;
+    Ok(result)
+}
+```
+
+## Mutability Patterns
+# If a mut_var is used all over the place:
+# ```Rust
+# let mut mut_var = ...; 
+# mut_var.some_mutable_operation();
+# // and mut_var is used all over the code, which is undesirable...
+# ```
+# Then try to limit the scope of var with this pattern:
+# ```Rust
+# let var = {
+#   let mut mut_var = ...;
+#   mut_var.some_mutable_operation();
+#   mut_var;
+# };
+# ```
+
+## Lock Management
+# - If a call is known to take a while, then make the lock scope shorter
+# For example, instead of the following long call after a lock:
+```
+let reg = self.registry.lock().unwrap();
+if let Some(entry) = regi.get(name) {
+    entry.execute_long_call()  // this will hold the lock very long
+}
+```
+# Do this instead:
+```
+let long_call = {
+    let reg = self.registry.lock().unwrap();
+    reg.get(name).clone()
+}; // Lock released here
+long_call()
+```
+
+## Performance Guidelines
+# - Profile before optimizing
+# - Use appropriate data structures
+# - Consider memory allocation patterns
+# - Use async/await for I/O operations
+
+## Assertions and Debugging
+# - `debug_assert*` calls are preferred over `assert_*`
+
+## Dependency Management
+# When Rust dependencies are updated, validate with: 
+# - (cargo-deny --version || cargo install --locked cargo-deny@0.16.4)
+# - (cargo-deny --no-default-features check --hide-inclusion-graph licenses bans --config deny.toml)
+
+## Python Bindings
+# If you make any changes in lib/bindings/python/rust/* make sure you run `maturin develop`
+
+# =============================================================================
+# PYTHON DEVELOPMENT GUIDELINES
+# =============================================================================
+
+## Code Style
+# - Follow PEP 8 conventions
+# - Use snake_case for variables and functions
+# - Use PascalCase for classes
+# - Add type hints where beneficial
+# - Use docstrings for functions and classes
+# - Before any Python commit, always run through: mypy and precommit ruff
+# - If there are 3 or more print statements, tidy up and use the triple quote method, like: """ <code here> """
+
+## File Organization
+# Python files should follow:
+# - __init__.py for package initialization
+# - Clear module separation
+# - Tests in tests/ directory
+
+## Error Handling
+# - Use try/except for exception handling
+# - Raise specific exceptions rather than generic ones
+# - Use context managers (with statements) for resource management
+# Example:
+```
+def process_file(filename: str) -> None:
+    try:
+        with open(filename, 'r') as f:
+            data = f.read()
+        process_data(data)
+    except FileNotFoundError:
+        logger.error(f"File {filename} not found")
+        raise
+```
+
+## Testing Guidelines
+# - Use pytest for testing framework
+# - Write unit tests in tests/ directory
+# - Use fixtures for common test setup
+# - Mock external services
+
+## Performance Guidelines
+# - Use list comprehensions over loops when appropriate
+# - Profile with cProfile for performance issues
+# - Use appropriate data structures (dict vs list)
+# - Consider using numpy/pandas for numerical operations
+
+# =============================================================================
+# JAVASCRIPT/TYPESCRIPT DEVELOPMENT GUIDELINES
+# =============================================================================
+
+## Code Style
+# - Use camelCase for variables and functions
+# - Use PascalCase for components and classes
+# - Prefer const over let, avoid var
+# - Use async/await over .then() chains
+# - Add JSDoc comments for complex functions
+
+# =============================================================================
+# BUILD AND DEVELOPMENT WORKFLOW
+# =============================================================================
+
+## Key Build Commands
+# - cargo build --locked: Build Rust components
+# - uv build: Build Python packages
+# - maturin build: Build Python extensions
+
+## Formatting
+# - When adding an empty line, do not add trailing spaces or tabs
+# - Don't remove TODO comments or the commented lines below it
+
+## Permission Issues
+# If there are permission problems, make sure the uid/gid are correct:
+```
+USER_ID=$(stat -c "%u" .)
+GROUP_ID=$(stat -c "%g" .)
+chown -R $USER_ID:$GROUP_ID .
+```
+
+# =============================================================================
+# GIT WORKFLOW AND COMMIT GUIDELINES
+# =============================================================================
+
+## File Operations
+# - When moving files, check if a file is under git
+# - If it's under git, then use `git mv <src_file> <dest_file>` instead of plain mv
+# - If it's not under git, then go ahead with `mv ...` command
+
+## Merge Conflicts
+# After git merge conflicts are resolved, perform:
+# 1. `git add <file(s)>` where the resolved <file(s)>
+# 2. see if you're inside a git rebase operation. If so, perform `git rebase --continue`, and make sure to open the Terminal for the user
+# 3. Then, `cargo fmt` on a series of directories in one shot
+
+## Commit Message Format
+# - Follow conventional commits format for the title (the very first line of the message). Be very terse.
+# - Examples:
+#   feat: add new user authentication system
+#   fix: resolve memory leak in data processing
+#   docs: update API documentation
+#   test: add unit tests for user module
+#   ci: configure continuous integration pipeline
+#   refactor: restructure code for better readability
+#   perf: optimize data processing for speed
+#   chore: update dependencies and clean up
+#   revert: undo previous commit due to issues
+#   style: apply code formatting and style fixes
+#   build: update build scripts for new environment
+
+## Commit Process
+# - When asked to commit and there are Rust changes, make sure to run through the `cargo fmt` (on a bunch of directories) first.
+# - Never ever add untracked files, unless explicitly told
+# - List untracked files on the same line. Then separately, list all the files that were modified and will be committed
+# - Prompt if I want to `git add` these modified files
+# - Then diff through the changes since the last commit and then generate a message that describes the changes.
+# - If the change is straightforward, a single line message is preferred
+
+# =============================================================================
+# GITHUB PR DESCRIPTION TEMPLATE
+# =============================================================================
+# When asked to generate a GitHub PR Description, look at the chain of continuous previous git commits from the same user/login (me, the author).
+# Then, use the following template to output a GitHub PR Description (aka "github pr"), in plain text. The output should be terse, in plain text, and surrounded by the triple-backquote chars (```) so that special #### characters are escaped.
+```
+#### Overview:
+
+<!-- Describe your pull request here, based on your commits. Terse, no more than 3 sentences, but 2 is better. -->
+
+#### Details:
+
+<!-- Describe the changes made in this PR, in bullet -->
+
+#### Where should the reviewer start?
+
+<!-- call out specific files that should be looked at closely -->
+
+#### Related Issues: (use one of the action keywords Closes / Fixes / Resolves / Relates to)
+
+<!-- put in Linear ticket here, like DIS-123 or DYN-789, by extracting the Linear ticket number from commit messages, if possible. If there is nothing, then leave this field blank. -->
+```
+# - Again, output in plain-text-- do NOT add formatting, because I want to see the quadriple pound signs (e.g. "#### Something Here:")
+
+# =============================================================================
+# TESTING STRATEGIES
+# =============================================================================
+# - Write tests for all new functionality
+# - Ensure test coverage for edge cases
+# - Use integration tests for critical workflows
+# - Mock external dependencies appropriately
+# - Run tests before committing changes
+
+# =============================================================================
+# DOCUMENTATION STANDARDS
+# =============================================================================
+# Always add comments for:
+# - Complex algorithms
+# - Business logic
+# - API endpoints
+# - Configuration options
+# - Non-obvious code decisions
+
+# Use clear, concise comments that explain "why" not "what"
+# Bad: "Loop through items" (obvious from code)
+# Good: "Process items in batches to avoid memory issues"
+
+# =============================================================================
+# SECURITY CONSIDERATIONS
+# =============================================================================
+# - Never commit API keys or secrets
+# - Use environment variables for configuration
+# - Validate all user inputs
+# - Use parameterized queries for database operations
+# - Follow principle of least privilege
+
+# =============================================================================
+# DOCKER AND DEPLOYMENT
+# =============================================================================
+# - Use multi-stage builds for smaller images
+# - Set appropriate user permissions
+# - Use .dockerignore to exclude unnecessary files
+# - Pin dependency versions for reproducibility
+
+# Example Dockerfile pattern:
+```
+FROM rust:1.70 as builder
+WORKDIR /app
+COPY . .
+RUN cargo build --release
+
+FROM debian:bullseye-slim
+COPY --from=builder /app/target/release/app /usr/local/bin/
+CMD ["app"]
+```
+
+# =============================================================================
+# PERFORMANCE AND OPTIMIZATION
+# =============================================================================
+# - Profile before optimizing
+# - Use appropriate data structures for the use case
+# - Consider memory allocation patterns
+# - Use async/await for I/O operations
+# - Cache expensive computations when appropriate
+# - Monitor resource usage in production
+
+# =============================================================================
+# DEBUGGING AND TROUBLESHOOTING
+# =============================================================================
+# - Use appropriate logging levels (debug, info, warn, error)
+# - Add context to error messages
+# - Use structured logging when possible
+# - Include relevant stack traces for errors
+# - Document common issues and solutions
+
+# =============================================================================
+# CODE REVIEW GUIDELINES
+# =============================================================================
+# - Review for security vulnerabilities
+# - Check for performance issues
+# - Ensure proper error handling
+# - Verify test coverage
+# - Look for code duplication
+# - Check adherence to project conventions
