@@ -8,9 +8,9 @@
 # Define cursor-related files to sync (add new files here as needed)
 # Format: [source_file]=target_filename
 declare -A SRC_CURSOR_FILES=(
-    ["$HOME/nvidia/master.devcontainer.json"]=".devcontainer/keiven/devcontainer.json"
-    ["$HOME/nvidia/master.cursorrules"]=".cursorrules"
-    ["$HOME/nvidia/master.cursorignore"]=".cursorignore"
+    ["$HOME/nvidia/devcontainer.json"]=".devcontainer/keiven/devcontainer.json"
+    ["$HOME/nvidia/.cursorrules"]=".cursorrules"
+    ["$HOME/nvidia/.cursorignore"]=".cursorignore"
 )
 
 DEVCONTAINER_SOURCE_DIR="$HOME/nvidia"
