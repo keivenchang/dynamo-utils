@@ -29,8 +29,7 @@
                 "eamodio.gitlens"  // Keiven's custom extension
             ],
             "settings": {
-                // Disable automatic copying of .gitconfig to avoid errors
-                "dev.containers.copyGitConfig": false,
+                "dev.containers.copyGitConfig": true,
                 "terminal.integrated.defaultProfile.linux": "bash",
                 "terminal.integrated.cwd": "~/dynamo",
 
@@ -67,12 +66,15 @@
         "DYNAMO_HOME": "~/dynamo",
         "CARGO_HOME": "~/dynamo/.build/.cargo",
         "RUSTUP_HOME": "~/dynamo/.build/.rustup",
-        "CARGO_TARGET_DIR": "~/dynamo/.build/target"
+        "CARGO_TARGET_DIR": "~/dynamo/.build/target",
+        "CARGO_PROFILE_DEV_OPT_LEVEL": "0",  // keiven's custom env var
+        "CARGO_BUILD_JOBS": "32"  // keiven's custom env var
     },
     "remoteEnv": {
         // These are optional, but are convenient to have, especially the SSH_AUTH_SOCK.
         "GITHUB_TOKEN": "${localEnv:GITHUB_TOKEN}",
         "HF_TOKEN": "${localEnv:HF_TOKEN}"
+        // "SSH_AUTH_SOCK": "${env:SSH_AUTH_SOCK}" // Optional: only if you also bind-mount the socket path
     },
     "mounts": [
         // These are for convenience, so that the history and pre-commit cache are persisted between sessions
@@ -82,8 +84,9 @@
         "source=/tmp/,target=/tmp/,type=bind",
         "source=${localEnv:HOME}/.cache/huggingface,target=/home/ubuntu/.cache/huggingface,type=bind",
         // Keiven's custom mounts
-        "source=${localEnv:HOME}/nvidia/dynamo-utils,target=~/dynamo/bin,type=bind",
         //"source=${localEnv:HOME}/.ssh,target=/home/ubuntu/.ssh,type=bind,readonly",
-        "source=${localEnv:HOME}/.gnupg,target=/home/ubuntu/.gnupg,type=bind"
+        "source=${localEnv:HOME}/nvidia/dynamo-utils,target=~/dynamo/bin,type=bind",
+        "source=${localEnv:HOME}/.gnupg,target=/home/ubuntu/.gnupg,type=bind",
+        //"source=${localEnv:HOME}/.gitconfig,target=/home/ubuntu/.gitconfig,type=bind,readonly"
     ]
 }
