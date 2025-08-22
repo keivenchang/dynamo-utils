@@ -378,6 +378,27 @@ if [ -n "$BUILD_TYPE" ]; then
     # ==============================================================================
     # Configure Rust compiler settings for optimal build performance
 
+    # Detect number of CPU cores for optimal build performance
+    if command -v nproc >/dev/null 2>&1; then
+        # Linux systems
+        CPU_CORES=$(nproc)
+    elif command -v sysctl >/dev/null 2>&1; then
+        # macOS systems
+        CPU_CORES=$(sysctl -n hw.ncpu)
+    else
+        # Fallback to a reasonable default
+        CPU_CORES=8
+    fi
+
+    # Use detected cores for CARGO_BUILD_JOBS, but cap at 32 for memory considerations
+    if [ "$CPU_CORES" -gt 32 ]; then
+        CARGO_BUILD_JOBS=32
+    else
+        CARGO_BUILD_JOBS=$CPU_CORES
+    fi
+
+    dry_run_echo "Detected $CPU_CORES CPU cores, using CARGO_BUILD_JOBS=$CARGO_BUILD_JOBS"
+
     if [ "$BUILD_TYPE" = "development" ]; then
         cmd export CARGO_INCREMENTAL=1
     else
@@ -391,7 +412,7 @@ if [ -n "$BUILD_TYPE" ]; then
 
     if [ "$BUILD_RUST" = true ]; then
         if [ "$BUILD_TYPE" = "development" ]; then
-            cmd bash -c "RUSTFLAGS=\"-C opt-level=0 -C codegen-units=256\" cargo build --locked --features dynamo-llm/block-manager --workspace"
+            cmd bash -c "CARGO_PROFILE_DEV_OPT_LEVEL=0 CARGO_BUILD_JOBS=$CARGO_BUILD_JOBS CARGO_PROFILE_DEV_CODEGEN_UNITS=256 cargo build --locked --features dynamo-llm/block-manager --workspace"
         else
             cmd cargo build --release --locked --features dynamo-llm/block-manager --workspace
         fi
