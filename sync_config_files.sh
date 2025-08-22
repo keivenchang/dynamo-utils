@@ -6,6 +6,7 @@
 #          --force to run sync regardless of MD5 hash changes
 #          --silent to suppress all output (useful for cron jobs)
 
+USER=$(whoami)
 DEST_SOURCE_DIRS="${DEVCONTAINER_SRC_DIR:-$HOME/nvidia/dynamo}"
 
 # Define development-related config files to sync (add new files here as needed)
@@ -28,8 +29,8 @@ for key in "${!TEMP_SRC_FILES[@]}"; do
 done
 unset TEMP_SRC_FILES
 
-TEMP_SHA_FILE="/tmp/dev_configs.tmp"
-LOG_FILE="/tmp/dev_configs_sync.log"
+TEMP_SHA_FILE="/tmp/.sync_config_files.sha"
+LOG_FILE="/tmp/sync_config_files.log"
 
 # Check for flags
 DRYRUN=false
