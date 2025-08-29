@@ -81,8 +81,6 @@
     //"lib/bindings/python",
     # ======== AUTO ADDED FOR TYPE-INFERENCE, SHOULD BE REMOVED BEFORE COMMIT ========
 ```
-# - Never git add or commit this change to the top level Cargo.toml nor Cargo.lock, unless explicitly told to
-# - Before git commit, **always** remove these added lines.
 
 ## Testing Guidelines
 # - Write unit tests in the same file as the code unless told otherwise
@@ -113,6 +111,7 @@ cargo run ... --features integration --lib mod_name::test_xyz ...
 ```
 # - During tests, if it is building/compiling, then show the progress
 # - When running tests, always list which tests failed (up to 10), and number of passed/failed broken down by unit vs. integration tests
+# - When creating new tests related to DistributedRuntime/Runtime/drt, make sure to name all the Namespace, Component, and Endpoints with unique names that do not exist anywhere else in the code base, like: ns515, comp515, ep515. The tests in lib/runtime/src/metrics.rs offer examples.
 
 ## Wheel Creation Rules
 # When asked to create Python wheel, do the followings, in fewer steps (combined steps using "&&" in shell), when possible:
@@ -280,6 +279,16 @@ chown -R $USER_ID:$GROUP_ID .
 # 2. see if you're inside a git rebase operation. If so, perform `git rebase --continue`, and make sure to open the Terminal for the user
 # 3. Then, `cargo fmt` on a series of directories in one shot
 
+## Commit Process
+# - Never git add or commit top level Cargo.toml nor Cargo.lock, unless explicitly told to
+# - When git commit, always include a signoff (`--signoff`)
+# - When committing Rust changes, make sure to run through the `cargo fmt` (on a bunch of directories) first.
+#   - Never ever add untracked files, unless explicitly told
+#   - List untracked files on the same line. Then separately, list all the files that were modified and will be committed
+#   - Prompt if I want to `git add` these modified files
+#   - Then diff through the changes since the last commit and then generate a message that describes the changes.
+#   - If the change is straightforward, a single line message is preferred
+
 ## Commit Message Format
 # - Follow conventional commits format for the title (the very first line of the message). Be very terse.
 # - Examples:
@@ -294,14 +303,6 @@ chown -R $USER_ID:$GROUP_ID .
 #   revert: undo previous commit due to issues
 #   style: apply code formatting and style fixes
 #   build: update build scripts for new environment
-
-## Commit Process
-# - When asked to commit and there are Rust changes, make sure to run through the `cargo fmt` (on a bunch of directories) first.
-# - Never ever add untracked files, unless explicitly told
-# - List untracked files on the same line. Then separately, list all the files that were modified and will be committed
-# - Prompt if I want to `git add` these modified files
-# - Then diff through the changes since the last commit and then generate a message that describes the changes.
-# - If the change is straightforward, a single line message is preferred
 
 # =============================================================================
 # GITHUB PR DESCRIPTION TEMPLATE
