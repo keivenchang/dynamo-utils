@@ -97,6 +97,11 @@ while [[ $# -gt 0 ]]; do
             PYTHON_CLEAN=true
             shift
             ;;
+        --clean)
+            CARGO_CLEAN=true
+            PYTHON_CLEAN=true
+            shift
+            ;;
 
         --debug)
             DEBUG=true
@@ -122,6 +127,7 @@ BUILD COMPONENTS (mutually exclusive):
                           Default: Build both Rust and Python components
 
 OTHER OPTIONS:
+  --clean                 Clean both Rust build artifacts and Python packages (can be used standalone or with build)
   --cargo-clean           Clean Rust build artifacts (can be used standalone or with build)
   --python-clean          Remove all dynamo packages (.pth, .whl, pip/uv) and exit
   --debug                 Show detailed .pth file information during development builds
@@ -129,6 +135,7 @@ OTHER OPTIONS:
 
 EXAMPLES:
   Standalone operations:
+    • ./compile.sh --clean              # Clean both Rust and Python artifacts
     • ./compile.sh --cargo-clean        # Only clean Rust build artifacts
     • ./compile.sh --python-clean       # Only remove Python packages
 
@@ -442,7 +449,7 @@ if [ -n "$BUILD_TYPE" ]; then
         dry_run_echo "Building ai-dynamo-runtime package..."
 
         if [ "$BUILD_TYPE" = "development" ]; then
-            cmd bash -c "cd $WORKSPACE_DIR/lib/bindings/python && RUSTFLAGS=\"-C opt-level=0 -C codegen-units=256\" maturin develop --uv --features block-manager"
+            cmd bash -c "cd $WORKSPACE_DIR/lib/bindings/python && CARGO_PROFILE_DEV_OPT_LEVEL=0 CARGO_BUILD_JOBS=$CARGO_BUILD_JOBS CARGO_PROFILE_DEV_CODEGEN_UNITS=256 maturin develop --uv --features block-manager"
         else
             cmd bash -c "cd $WORKSPACE_DIR/lib/bindings/python && maturin build --release --features block-manager --out $WHEEL_OUTPUT_DIR"
 
