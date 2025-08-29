@@ -1,10 +1,50 @@
 #!/bin/bash
 
-# Script to sync development config files (.cursorrules, .cursorignore, devcontainer.json, etc.) to all subdirectories when they change
-# Usage: This script should be run via crontab to monitor changes
-# Options: --dryrun or --dry-run to show what would be done without actually doing it
-#          --force to run sync regardless of MD5 hash changes
-#          --silent to suppress all output (useful for cron jobs)
+# ==============================================================================
+# sync_config_files.sh - Development Configuration Synchronization Tool
+# ==============================================================================
+#
+# PURPOSE:
+#   Automatically syncs development configuration files from a master location
+#   (dynamo-utils) to all Dynamo project directories, ensuring consistent
+#   development environments across multiple working copies.
+#
+# HOW IT WORKS:
+#   1. Scans for directories matching 'dynamo*' pattern in parent directory
+#   2. Copies configuration files from dynamo-utils to each found directory
+#   3. Customizes devcontainer.json for each directory (unique container names)
+#   4. Tracks changes via MD5 hashes to avoid unnecessary syncs
+#
+# EXAMPLE SCENARIO:
+#   Directory structure:
+#   ~/nvidia/
+#   ├── dynamo-utils/           # This repository (master configs)
+#   │   ├── .cursorrules        # Master cursor rules
+#   │   ├── .cursorignore       # Master ignore patterns
+#   │   ├── devcontainer.json   # Master container config
+#   │   └── sync_config_files.sh
+#   ├── dynamo1/                # Clone for feature development
+#   ├── dynamo2/                # Clone for bug fixes
+#   └── dynamo3/                # Clone for experiments
+#
+#   Running ./sync_config_files.sh will:
+#   - Copy .cursorrules → dynamo1/.cursorrules, dynamo2/.cursorrules, etc.
+#   - Copy .cursorignore → dynamo1/.cursorignore, dynamo2/.cursorignore, etc.
+#   - Copy devcontainer.json → dynamo1/.devcontainer/[user]/devcontainer.json
+#     with customizations:
+#     * Container name: dynamo1-[user]-devcontainer
+#     * Display name: [dynamo1] [user] Dev Container
+#
+# USAGE:
+#   ./sync_config_files.sh           # Normal sync operation
+#   ./sync_config_files.sh --dry-run # Preview changes without applying
+#   ./sync_config_files.sh --force   # Force sync even if no changes detected
+#   ./sync_config_files.sh --silent  # No output (for cron jobs)
+#
+# CRON EXAMPLE:
+#   */5 * * * * /home/user/nvidia/dynamo-utils/sync_config_files.sh --silent
+#
+# ==============================================================================
 
 USER=$(whoami)
 DEST_SOURCE_DIRS="${DEVCONTAINER_SRC_DIR:-$HOME/nvidia/dynamo}"
