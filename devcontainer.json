@@ -4,12 +4,12 @@
         "SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.",
         "SPDX-License-Identifier: Apache-2.0"
     ],
-    "name": "NVIDIA Dynamo Dev Container Development",
+    "name": "NVIDIA Dynamo Dev Container",
     "remoteUser": "ubuntu", // Matches our container user
     "updateRemoteUserUID": true, // Updates the UID of the remote user to match the host user, avoids permission errors
     "image": "dynamo:latest-vllm-local-dev", // Use the latest VLLM local dev image
     "runArgs": [
-        "--name", "dynamo-dev-container",
+        "--name", "dynamo-vllm-devcontainer",
         "--gpus=all",
         "--network=host",
         "--ipc=host",
@@ -86,8 +86,10 @@
         // Keiven's custom mounts
         //"source=${localEnv:HOME}/.ssh,target=/home/ubuntu/.ssh,type=bind,readonly",
         "source=${localEnv:HOME}/nvidia/dynamo-utils,target=~/dynamo/bin,type=bind",
+        "source=${localEnv:HOME}/nvidia/dynamo-utils/.cursorignore,target=~/dynamo/.cursorignore,type=bind",
+        "source=${localEnv:HOME}/nvidia/dynamo-utils/.cursorrules,target=~/dynamo/.cursorrules,type=bind",
         "source=${localEnv:HOME}/.gnupg,target=/home/ubuntu/.gnupg,type=bind",
         "source=${localEnv:HOME}/.bash_aliases,target=/home/ubuntu/.bash_aliases,type=bind",
-        "source=${localEnv:HOME}/.gitconfig,target=/home/ubuntu/.gitconfig,type=bind,readonly"
+        "source=${localEnv:HOME}/.gitconfig,target=/home/ubuntu/.gitconfig,type=bind"
     ]
 }
