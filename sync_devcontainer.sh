@@ -1,7 +1,7 @@
 _file#!/bin/bash
 
 # ==============================================================================
-# sync_config_files.sh - Development Configuration Synchronization Tool
+# sync_devcontainer.sh - Development Configuration Synchronization Tool
 # ==============================================================================
 #
 # PURPOSE:
@@ -20,25 +20,25 @@ _file#!/bin/bash
 #   ~/nvidia/
 #   ├── dynamo-utils/           # This repository (master configs)
 #   │   ├── devcontainer.json   # Master container config
-#   │   └── sync_config_files.sh
+#   │   └── sync_devcontainer.sh
 #   ├── dynamo1/                # Clone for feature development
 #   ├── dynamo2/                # Clone for bug fixes
 #   └── dynamo3/                # Clone for experiments
 #
-#   Running ./sync_config_files.sh will:
+#   Running ./sync_devcontainer.sh will:
 #   - Copy devcontainer.json → dynamo1/.devcontainer/[user]/devcontainer.json
 #     with customizations:
 #     * Container name: dynamo1-[user]-devcontainer
 #     * Display name: [dynamo1] [user] Dev Container
 #
 # USAGE:
-#   ./sync_config_files.sh           # Normal sync operation
-#   ./sync_config_files.sh --dry-run # Preview changes without applying
-#   ./sync_config_files.sh --force   # Force sync even if no changes detected
-#   ./sync_config_files.sh --silent  # No output (for cron jobs)
+#   ./sync_devcontainer.sh           # Normal sync operation
+#   ./sync_devcontainer.sh --dryrun  # Preview changes without applying
+#   ./sync_devcontainer.sh --force   # Force sync even if no changes detected
+#   ./sync_devcontainer.sh --silent  # No output (for cron jobs)
 #
 # CRON EXAMPLE:
-#   */5 * * * * /home/user/nvidia/dynamo-utils/sync_config_files.sh --silent
+#   */5 * * * * /home/user/nvidia/dynamo-utils/sync_devcontainer.sh --silent
 #
 # ==============================================================================
 
@@ -56,8 +56,8 @@ DEVCONTAINER_DEST=".devcontainer/{framework}/devcontainer.json"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DEVCONTAINER_SRC_PATH="${SCRIPT_DIR}/${DEVCONTAINER_SRC}"
 
-TEMP_SHA_FILE="/tmp/.sync_config_files.sha"
-LOG_FILE="/tmp/sync_config_files.log"
+TEMP_SHA_FILE="/tmp/.sync_devcontainer.sha"
+LOG_FILE="/tmp/sync_devcontainer.log"
 
 # Check for flags
 DRYRUN=false
