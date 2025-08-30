@@ -27,7 +27,7 @@ dynamo-utils/
 ├── compile.sh              # Build and install Dynamo Python packages
 ├── curl.sh                 # Test models via chat completions API
 ├── inference.sh            # Launch Dynamo inference services
-├── sync_config_files.sh   # Sync dev configs across projects
+├── sync_devcontainer.sh   # Sync dev configs across projects
 ├── devcontainer.json       # VS Code Dev Container configuration
 └── devcontainer/           # Dev container specific files
 ```
@@ -101,31 +101,31 @@ Launches Dynamo inference services (frontend and backend).
 
 ### Configuration Management
 
-#### `sync_config_files.sh`
+#### `sync_devcontainer.sh`
 Automatically syncs development configuration files across multiple Dynamo project directories.
 
 ```bash
 # Sync configurations
-./sync_config_files.sh
+./sync_devcontainer.sh
 
 # Dry run to preview changes
-./sync_config_files.sh --dry-run
+./sync_devcontainer.sh --dryrun
 
 # Force sync regardless of changes
-./sync_config_files.sh --force
+./sync_devcontainer.sh --force
 
 # Silent mode for cron jobs
-./sync_config_files.sh --silent
+./sync_devcontainer.sh --silent
 ```
 
 **How it works - Example:**
 
-Before running `sync_config_files.sh`:
+Before running `sync_devcontainer.sh`:
 ```
 ~/nvidia/
 ├── dynamo-utils/           # This repository with master config files
 │   ├── devcontainer.json   # Master devcontainer config
-│   └── sync_config_files.sh
+│   └── sync_devcontainer.sh
 ├── dynamo1/                # Clone of dynamo repo for feature A
 │   └── (existing dynamo files...)
 ├── dynamo2/                # Clone of dynamo repo for feature B
@@ -134,12 +134,12 @@ Before running `sync_config_files.sh`:
     └── (existing dynamo files...)
 ```
 
-After running `./sync_config_files.sh`:
+After running `./sync_devcontainer.sh`:
 ```
 ~/nvidia/
 ├── dynamo-utils/           # This repository (unchanged)
 │   ├── devcontainer.json
-│   └── sync_config_files.sh
+│   └── sync_devcontainer.sh
 ├── dynamo1/
 │   ├── .devcontainer/
 │   │   └── [username]/
@@ -178,7 +178,7 @@ The typical workflow for setting up a development environment:
 
 1. **Development Mode**: Use `./compile.sh --dev` for faster iteration during development
 2. **Testing**: Always test API endpoints with `./curl.sh` after starting services
-3. **Configuration Sync**: Run `sync_config_files.sh` periodically or via cron to keep configs updated
+3. **Configuration Sync**: Run `sync_devcontainer.sh` periodically or via cron to keep configs updated
 4. **Container Development**: Use the Dev Container for a consistent development environment
 5. **Port Conflicts**: Check port availability before running inference services
 
