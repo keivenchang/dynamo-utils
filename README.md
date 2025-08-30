@@ -28,7 +28,7 @@ dynamo-utils/
 ├── curl.sh                 # Test models via chat completions API
 ├── inference.sh            # Launch Dynamo inference services
 ├── sync_devcontainer.sh   # Sync dev configs across projects
-├── devcontainer.json       # VS Code Dev Container configuration
+├── devcontainer.json       # VS Code Dev Container configuration    
 └── devcontainer/           # Dev container specific files
 ```
 
