@@ -29,9 +29,7 @@ dynamo-utils/
 ├── inference.sh            # Launch Dynamo inference services
 ├── sync_config_files.sh   # Sync dev configs across projects
 ├── devcontainer.json       # VS Code Dev Container configuration
-├── devcontainer/           # Dev container specific files
-├── .cursorrules            # Cursor IDE configuration rules
-└── .cursorignore           # Cursor IDE ignore patterns
+└── devcontainer/           # Dev container specific files
 ```
 
 ## Key Scripts
@@ -126,8 +124,6 @@ Before running `sync_config_files.sh`:
 ```
 ~/nvidia/
 ├── dynamo-utils/           # This repository with master config files
-│   ├── .cursorrules        # Master cursor rules
-│   ├── .cursorignore       # Master cursor ignore patterns
 │   ├── devcontainer.json   # Master devcontainer config
 │   └── sync_config_files.sh
 ├── dynamo1/                # Clone of dynamo repo for feature A
@@ -142,27 +138,19 @@ After running `./sync_config_files.sh`:
 ```
 ~/nvidia/
 ├── dynamo-utils/           # This repository (unchanged)
-│   ├── .cursorrules
-│   ├── .cursorignore
 │   ├── devcontainer.json
 │   └── sync_config_files.sh
 ├── dynamo1/
-│   ├── .cursorrules        # ← Copied from dynamo-utils
-│   ├── .cursorignore       # ← Copied from dynamo-utils
 │   ├── .devcontainer/
 │   │   └── [username]/
 │   │       └── devcontainer.json  # ← Customized: container name = dynamo1-[username]-devcontainer
 │   └── (existing dynamo files...)
 ├── dynamo2/
-│   ├── .cursorrules        # ← Copied from dynamo-utils
-│   ├── .cursorignore       # ← Copied from dynamo-utils
 │   ├── .devcontainer/
 │   │   └── [username]/
 │   │       └── devcontainer.json  # ← Customized: container name = dynamo2-[username]-devcontainer
 │   └── (existing dynamo files...)
 └── dynamo3/
-    ├── .cursorrules        # ← Copied from dynamo-utils
-    ├── .cursorignore       # ← Copied from dynamo-utils
     ├── .devcontainer/
     │   └── [username]/
     │       └── devcontainer.json  # ← Customized: container name = dynamo3-[username]-devcontainer
@@ -177,8 +165,6 @@ Key points:
 
 **Files synced:**
 - `.devcontainer/` configurations
-- `.cursorrules` (Cursor IDE settings)
-- `.cursorignore` (Cursor IDE ignore patterns)
 
 ## Environment Setup
 
@@ -187,18 +173,6 @@ The typical workflow for setting up a development environment:
 1. Clone the Dynamo repository
 2. Use `./compile.sh --dev` to build in development mode
 3. Test with `./inference.sh` and `./curl.sh`
-
-## Configuration Files
-
-### `.cursorrules`
-Contains rules and guidelines for the Cursor IDE, including:
-- Commit process guidelines
-- Test naming conventions
-- Code formatting standards
-- Development best practices
-
-### `.cursorignore`
-Specifies files and directories to ignore in Cursor IDE, preventing unnecessary indexing of build artifacts and temporary files.
 
 ## Tips & Best Practices
 
@@ -240,7 +214,6 @@ docker run --rm --gpus all nvidia/cuda:11.8.0-base-ubuntu22.04 nvidia-smi
 ## Contributing
 
 When contributing to this repository:
-1. Follow the guidelines in `.cursorrules`
-2. Test scripts thoroughly before committing
-3. Update this README if adding new scripts or features
-4. Use meaningful commit messages with `--signoff`
+1. Test scripts thoroughly before committing
+2. Update this README if adding new scripts or features
+3. Use meaningful commit messages with `--signoff`
