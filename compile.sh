@@ -372,7 +372,7 @@ if [ -n "$BUILD_TYPE" ]; then
     # Fix file permissions
     USER_ID=$(stat -c "%u" .)
     GROUP_ID=$(stat -c "%g" .)
-    cmd chown -R $USER_ID:$GROUP_ID .
+    cmd chown -R $USER_ID:$GROUP_ID . || true
 
     # ==============================================================================
     # DEFAULT PYTHON CLEANUP
