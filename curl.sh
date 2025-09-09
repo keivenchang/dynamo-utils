@@ -17,7 +17,7 @@ Usage: $0 [OPTIONS]
 A convenient script to test a model via the chat completions API.
 
 OPTIONS:
-  --port <port>           Port number for the API server (default: 8080)
+  --port <port>           Port number for the API server (default: 8000)
   --prompt <prompt>       User prompt to send to the model (default: "Hello!")
   --preprompt <preprompt> System prompt/instruction for the model (default: "You are a helpful assistant.")
   --max-tokens <tokens>   Maximum number of tokens to generate (default: 300)
@@ -30,10 +30,10 @@ OPTIONS:
   --help                  Show this help message
 
 EXAMPLES:
-  $0 --port 8080 --prompt "Hello world"
-  $0 --port 8080 --prompt "Write a Python function" --preprompt "You are a coding assistant."
-  $0 --port 8080 --prompt "Hello world" --stream --retry
-  $0 --port 8080 --prompt "Hello world" --loop --metrics
+  $0 --port 8000 --prompt "Hello world"
+  $0 --port 8000 --prompt "Write a Python function" --preprompt "You are a coding assistant."
+  $0 --port 8000 --prompt "Hello world" --stream --retry
+  $0 --port 8000 --prompt "Hello world" --loop --metrics
 
 EOF
 }
@@ -43,7 +43,7 @@ validate_response() {
   local response="$1"
   local message_content
   message_content=$(echo "$response" | jq -r '.choices[0].message.content // empty' 2>/dev/null)
-  
+
   if [ -z "$message_content" ] || [ "$message_content" = "null" ] || [ "$message_content" = "empty" ]; then
     echo "NO_MESSAGE_FAILURE: Response received but no message content found" >&2
     echo "Response was: $response" >&2
@@ -57,21 +57,24 @@ execute_curl() {
   local payload="$1"
   local retry_mode="$2"
   local stream="$3"
-  
+
   if [ "$stream" = true ]; then
     printf "<STREAM>"
     curl -s localhost:$PORT/v1/chat/completions -H "Content-Type: application/json" -d "$payload" | \
       while IFS= read -r line; do
+        # Line looks like the following:
+        # data: {"id":"chatcmpl-9c9bd040-c5e4-4cec-b811-2935eda99ec6","choices":[{"index":0,"delta":{"content":" refine","function_call":null,"tool_calls":null,"role":"assistant","refusal":null,"reasoning_content":null}}],"created":1757115652,"model":"Qwen/Qwen3-0.6B","service_tier":null,"system_fingerprint":null,"object":"chat.completion.chunk","usage":{"prompt_tokens":15,"completion_tokens":283,"total_tokens":298}}
         if [[ "$line" == data:* ]]; then
-          content=$(echo "$line" | sed 's/^data: //' | jq -r '.choices[0].delta.content // empty' 2>/dev/null)
-          if [ -n "$content" ] && [ "$content" != "null" ]; then
+          # Try both content and reasoning_content fields for compatibility
+          content=$(echo "$line" | sed 's/^data: //' | jq -r '.choices[0].delta.content // .choices[0].delta.reasoning_content // empty' 2>/dev/null)
+          if [ -n "$content" ] && [ "$content" != "null" ] && [ "$content" != "empty" ]; then
             printf "%s" "$content"
           fi
         fi
       done
     local curl_exit_code=${PIPESTATUS[0]}
     echo "</STREAM>"
-    
+
     if [ $curl_exit_code -ne 0 ] && [ "$retry_mode" = true ]; then
       echo "CURL_FAILURE: curl command failed with exit code $curl_exit_code" >&2
       return 1
@@ -80,7 +83,7 @@ execute_curl() {
     local response
     response=$(curl -s localhost:$PORT/v1/chat/completions -H "Content-Type: application/json" -d "$payload")
     local curl_exit_code=$?
-    
+
     if [ $curl_exit_code -ne 0 ]; then
       if [ "$retry_mode" = true ]; then
         echo "CURL_FAILURE: curl command failed with exit code $curl_exit_code" >&2
@@ -89,12 +92,12 @@ execute_curl() {
       echo "$response"
       return 1
     fi
-    
+
     # Validate response if in retry mode
     if [ "$retry_mode" = true ]; then
       validate_response "$response" || return $?
     fi
-    
+
     echo "$response"
   fi
   return 0
@@ -143,7 +146,7 @@ test_model() {
   if [ "$retry_until_succ" = true ]; then
     echo "Retrying until success (with message validation)..."
     local retry_count=0
-    
+
     while ! make_curl_request "$model" "$prompt" "$preprompt" "$stream" "$use_random" "$max_tokens" "$retry_until_succ"; do
       retry_count=$((retry_count + 1))
       case $? in
@@ -153,10 +156,10 @@ test_model() {
       esac
       sleep $PAUSE_SEC
     done
-    
+
     [ $retry_count -gt 0 ] && echo "Success after $retry_count retries!"
   else
-    make_curl_request "$model" "$prompt" "$preprompt" "$stream" "$use_random" "$max_tokens" false || 
+    make_curl_request "$model" "$prompt" "$preprompt" "$stream" "$use_random" "$max_tokens" false ||
       echo "Request failed, but not set to retry."
   fi
   echo ""
@@ -171,11 +174,11 @@ get_metrics() {
 get_default_model() {
   #echo "Checking for available models..." >&2
   local retry_count=0
-  
+
   while true; do
     local response=$(curl -s "http://localhost:$PORT/v1/models" 2>/dev/null)
     local curl_exit_code=$?
-    
+
     if [ $curl_exit_code -eq 0 ]; then
       local model_id=$(echo "$response" | jq -r '.data[0].id' 2>/dev/null)
       if [ -n "$model_id" ] && [ "$model_id" != "null" ] && [ "$model_id" != "empty" ]; then
@@ -184,7 +187,7 @@ get_default_model() {
         return 0
       fi
     fi
-    
+
     retry_count=$((retry_count + 1))
     echo "Retry $retry_count: No models found or API unavailable, retrying in $PAUSE_SEC seconds..." >&2
     sleep $PAUSE_SEC
@@ -192,7 +195,7 @@ get_default_model() {
 }
 
 # Default values for command line arguments
-PORT=8080
+PORT=8000
 PROMPT="Hello!"
 PREPROMPT="You are a helpful assistant."
 MAX_TOKENS=300
