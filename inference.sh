@@ -4,7 +4,7 @@ set -euo pipefail
 
 BACKENDS=components/backends
 # Use existing environment variables if set, otherwise use defaults
-: ${DYN_FRONTEND_PORT:=8080}
+: ${DYN_FRONTEND_PORT:=8000}
 : ${DYN_BACKEND_PORT:=8081}
 
 # Function to check if ports are already bound
@@ -166,7 +166,7 @@ if [ ! -d "$WORKSPACE_DIR/$BACKENDS/$FRAMEWORK" ]; then
     exit 1
 fi
 
-set -x
+#set -x
 cd $WORKSPACE_DIR
 
 #time CARGO_INCREMENTAL=1 cargo build --workspace --bin dynamo-run
