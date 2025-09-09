@@ -1,4 +1,4 @@
-_file#!/bin/bash
+#!/bin/bash
 
 # ==============================================================================
 # sync_devcontainer.sh - Development Configuration Synchronization Tool
@@ -167,9 +167,9 @@ for destdir in "$DEST_SRC_DIR_GLOB"*; do
     for framework_uppercase in "${FRAMEWORKS[@]}"; do
         # Convert framework to lowercase for path and name consistency
         framework_lowercase="${framework_uppercase,,}"
-        # Replace {framework} placeholder with lowercase framework name
-        framework_target_filename="${DEVCONTAINER_DEST//\{framework\}/${framework_lowercase}}"
-        framework_target_path="${destdir}/${framework_target_filename}"
+        # Replace {framework} placeholder with username_framework format
+        username_framework_target_filename="${DEVCONTAINER_DEST//\{framework\}/${USER}_${framework_lowercase}}"
+        framework_target_path="${destdir}/${username_framework_target_filename}"
         framework_target_dir=$(dirname "${framework_target_path}")
 
         # Create framework-specific target directory if needed
@@ -182,7 +182,7 @@ for destdir in "$DEST_SRC_DIR_GLOB"*; do
         # 2. Replace container name with directory-specific name
         # 3. Replace -vllm with -lowercase_framework in the image name
         sed "s|\"name\": \"NVIDIA Dynamo.*\"|\"name\": \"[${DEST_BASE_DIRNAME}-${USER}] ${framework_uppercase}\"|g" "${DEVCONTAINER_SRC_PATH}" | \
-        sed "s|\"dynamo-vllm-devcontainer\"|\"${DEST_BASE_DIRNAME}-${USER}-${framework_lowercase}-devcontainer\"|g" | \
+        sed "s|\"dynamo-vllm-dev\"|\"${DEST_BASE_DIRNAME}-${USER}-${framework_lowercase}-devcontainer\"|g" | \
         sed "s|-vllm-|-${framework_lowercase}-|g" > "${TEMP_OUTPUT_FILE}"
 
         # Copy the framework-specific file to the destination
