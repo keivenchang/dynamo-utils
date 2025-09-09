@@ -1,4 +1,4 @@
-# Keiven's Cursor Rules for Dynamo Project
+ # Keiven's Cursor Rules for Dynamo Project
 # This file helps guide AI behavior when working with this codebase
 # Last updated: 2025-08-17 22:01:08
 # https://docs.google.com/document/d/1rm1GWt9AOPkKSDWUJQEDOy1Z-FhPkfZ272eUpMz9-AQ/edit?tab=t.0
@@ -60,6 +60,7 @@
 # - For all cargo test, cargo build, and cargo install, make sure to add `--locked`
 # - Test changes with: `cargo test --locked`
 # - Use `cargo clean` if you encounter build issues
+# - Do not EVER use "!" (exclamation marks) inside shell quotes
 
 ## Formatting and Linting
 # - When asked to `cargo fmt`, do this in one step:
@@ -268,10 +269,13 @@ chown -R $USER_ID:$GROUP_ID .
 # GIT WORKFLOW AND COMMIT GUIDELINES
 # =============================================================================
 
+## Cursor Rules -- periodically review this .cursorrules before any git operation
+
 ## File Operations
 # - When moving files, check if a file is under git
 # - If it's under git, then use `git mv <src_file> <dest_file>` instead of plain mv
 # - If it's not under git, then go ahead with `mv ...` command
+# - There is no reason to stash *.lock files, you can just delete them when needed
 
 ## Merge Conflicts
 # After git merge conflicts are resolved, perform:
@@ -280,8 +284,9 @@ chown -R $USER_ID:$GROUP_ID .
 # 3. Then, `cargo fmt` on a series of directories in one shot
 
 ## Commit Process
-# - Never git add or commit top level Cargo.toml nor Cargo.lock, unless explicitly told to
-# - When git commit, always include a signoff (`--signoff`)
+# - Never git add or commit top level Cargo.toml nor Cargo.lock, unless explicitly told to.
+# - Never ever commit using `--no-verify`, I don't want that to appear, ever.
+# - When git commit, always include a signoff using the `git commit --signoff ...` in the command.
 # - When committing Rust changes, make sure to run through the `cargo fmt` (on a bunch of directories) first.
 #   - Never ever add untracked files, unless explicitly told
 #   - List untracked files on the same line. Then separately, list all the files that were modified and will be committed
@@ -290,7 +295,8 @@ chown -R $USER_ID:$GROUP_ID .
 #   - If the change is straightforward, a single line message is preferred
 
 ## Commit Message Format
-# - Follow conventional commits format for the title (the very first line of the message). Be very terse.
+# - Follow conventional commits format for the title (the very first line of the message). Terse format.
+
 # - Examples:
 #   feat: add new user authentication system
 #   fix: resolve memory leak in data processing
@@ -350,6 +356,9 @@ chown -R $USER_ID:$GROUP_ID .
 # Use clear, concise comments that explain "why" not "what"
 # Bad: "Loop through items" (obvious from code)
 # Good: "Process items in batches to avoid memory issues"
+
+# Use non-bullshit jargons
+# Reframe from using the following bullshit jargon words: intuitive, comprehensive, optimal, seamless, next-generation, holistic, cutting-edge.
 
 # =============================================================================
 # SECURITY CONSIDERATIONS
