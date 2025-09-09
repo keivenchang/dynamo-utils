@@ -1,5 +1,5 @@
 {
-    "$schema": "https://json-schema.org/draft-07/schema#",
+    "$schema": "https://raw.githubusercontent.com/devcontainers/spec/main/schemas/devContainer.schema.json",
     "copyright": [
         "SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.",
         "SPDX-License-Identifier: Apache-2.0"
@@ -7,9 +7,8 @@
     "name": "NVIDIA Dynamo Dev Container",
     "remoteUser": "ubuntu", // Matches our container user
     "updateRemoteUserUID": true, // Updates the UID of the remote user to match the host user, avoids permission errors
-    "image": "dynamo:latest-vllm-local-dev", // Use the latest VLLM local dev image
+    "image": "dynamo:latest-vllm-local-dev", // Use the latest VLLM dev image
     "runArgs": [
-        "--name", "dynamo-vllm-devcontainer",
         "--gpus=all",
         "--network=host",
         "--ipc=host",
@@ -29,7 +28,7 @@
                 "eamodio.gitlens"  // Keiven's custom extension
             ],
             "settings": {
-                "dev.containers.copyGitConfig": true,
+                "dev.containers.copyGitConfig": false,
                 "terminal.integrated.defaultProfile.linux": "bash",
                 "terminal.integrated.cwd": "~/dynamo",
 
