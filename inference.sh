@@ -80,7 +80,8 @@ OPTIONS:
     -h, --help    Show this help message and exit
 
     --model MODEL Specify the model to use
-                  Options: "deepseek" (DeepSeek-R1-Distill-Qwen-1.5B)
+                  Options: "deepseek" (deepseek-ai/DeepSeek-R1-Distill-Llama-8B)
+                           "tinyllama" (TinyLlama/TinyLlama-1.1B-Chat-v1.0)
                           Default: "qwen" (Qwen/Qwen3-0.6B)
     --framework FRAMEWORK Specify the framework directory
                          Available: $available_frameworks
@@ -150,6 +151,7 @@ fi
 
 (ps -ef --forest|grep multiprocess|awk '{print $2}'|xargs kill) && true
 (ps -ef|grep "python3.*\/tmp"|awk '{print $2}'|xargs kill) && true
+(ps -ef|grep "VLLM::EngineCore"|awk '{print $2}'|xargs kill) && true
 if [ -d "~/dynamo" ]; then
     WORKSPACE_DIR="~/dynamo"
 elif [ -d "/workspace" ]; then
@@ -222,7 +224,7 @@ if [ "$DRY_RUN" = false ]; then
 
     unset HF_TOKEN
     DYN_SYSTEM_ENABLED=true DYN_SYSTEM_PORT=$DYN_BACKEND_PORT \
-    python -m dynamo.vllm --model Qwen/Qwen3-0.6B --gpu-memory-utilization 0.50 --enforce-eager --no-enable-prefix-caching &
+    python -m dynamo.vllm --model Qwen/Qwen3-0.6B --gpu-memory-utilization 0.20 --enforce-eager --no-enable-prefix-caching &
     VLLM_PID=$!
 
     # Wait for both processes
@@ -254,7 +256,7 @@ else
     dry_run_echo "FRONTEND_PID=\$!"
 
     dry_run_echo "unset HF_TOKEN"
-    dry_run_echo "DYN_SYSTEM_ENABLED=true DYN_SYSTEM_PORT=$DYN_BACKEND_PORT python -m dynamo.vllm --model Qwen/Qwen3-0.6B --gpu-memory-utilization 0.50 --enforce-eager --no-enable-prefix-caching &"
+    dry_run_echo "DYN_SYSTEM_ENABLED=true DYN_SYSTEM_PORT=$DYN_BACKEND_PORT python -m dynamo.vllm --model Qwen/Qwen3-0.6B --gpu-memory-utilization 0.20 --enforce-eager --no-enable-prefix-caching &"
     dry_run_echo "VLLM_PID=\$!"
 
     # Wait for both processes
