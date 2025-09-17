@@ -4,7 +4,7 @@
 
 """
 Load test script for LLM backend with support for streaming and non-streaming requests.
-Usage: ./soak_llm.py --duration_sec 60 --workers 50 --requests_per_worker 100
+Usage: ./soak_llm.py --duration_sec 60 --workers 1 --requests_per_worker 100
 """
 
 import argparse
@@ -15,7 +15,7 @@ import sys
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import aiohttp
 
@@ -25,11 +25,11 @@ class LoadTestConfig:
 
     def __init__(self):
         self.duration_sec = 60
-        self.workers = 50
+        self.workers = 1
         self.requests_per_worker = 100
         self.port = 8000
         self.model = "Qwen/Qwen3-0.6B"
-        self.max_tokens = 20
+        self.max_tokens = 300
         self.streaming = False
         self.output_responses = False
         self.log_file = "/tmp/soak_llm.log"
@@ -39,13 +39,13 @@ class LoadTestConfig:
 class LoadTestStats:
     """Statistics tracking for the load test."""
 
-    def __init__(self, config: 'LoadTestConfig' = None):
+    def __init__(self, config: Optional['LoadTestConfig'] = None):
         self.total_requests = 0
         self.successful_requests = 0
         self.failed_requests = 0
         self.start_time = time.time()
-        self.end_time = None
-        self.results = []
+        self.end_time: Optional[float] = None
+        self.results: List[Dict[str, Any]] = []
         self.config = config
 
     def add_result(self, worker_id: int, request_id: int, success: bool,
@@ -129,10 +129,17 @@ class LoadTestWorker:
 
     async def run(self, session: aiohttp.ClientSession) -> None:
         """Run the worker's requests."""
-        for request_id in range(1, self.config.requests_per_worker + 1):
-            if self.cancelled:
-                break
+        # Phase 1: Keep trying to get model information until success
+        await self._wait_for_model_availability(session)
 
+        if self.cancelled:
+            return
+
+        # Phase 2: Blast queries continuously until timeout or all requests completed
+        print(f"Worker {self.worker_id}: Model available, starting to blast queries...", file=sys.stderr)
+
+        request_id = 1
+        while request_id <= self.config.requests_per_worker and not self.cancelled:
             try:
                 if self.config.streaming:
                     success, duration, status_code, content = await self._make_streaming_request(session, request_id)
@@ -143,6 +150,18 @@ class LoadTestWorker:
                     self.worker_id, request_id, success, duration, status_code, content
                 )
 
+                # If HTTP fails, go back to Phase 1 (model checking)
+                if not success:
+                    print(f"Worker {self.worker_id}: HTTP failure during queries, returning to model check", file=sys.stderr)
+                    await self._wait_for_model_availability(session)
+                    if self.cancelled:
+                        break
+                    print(f"Worker {self.worker_id}: Model available again, resuming queries...", file=sys.stderr)
+                    # Continue with same request_id (retry the failed request)
+                else:
+                    # Success, move to next request
+                    request_id += 1
+
             except asyncio.CancelledError:
                 print(f"Worker {self.worker_id} cancelled", file=sys.stderr)
                 break
@@ -151,10 +170,71 @@ class LoadTestWorker:
                 self.stats.add_result(
                     self.worker_id, request_id, False, 0.0, 0, ""
                 )
+                # Exception occurred, go back to model check
+                print(f"Worker {self.worker_id}: Exception during queries, returning to model check", file=sys.stderr)
+                await self._wait_for_model_availability(session)
+                if self.cancelled:
+                    break
+                print(f"Worker {self.worker_id}: Model available again, resuming queries...", file=sys.stderr)
+                # Continue with same request_id (retry the failed request)
 
     def cancel(self):
         """Cancel this worker."""
         self.cancelled = True
+
+    async def _wait_for_model_availability(self, session: aiohttp.ClientSession) -> None:
+        """Wait until we can successfully get model information."""
+        while not self.cancelled:
+            try:
+                print(f"Worker {self.worker_id}: Checking model availability...", file=sys.stderr)
+                url = f"http://localhost:{self.config.port}/v1/models"
+                timeout = aiohttp.ClientTimeout(total=10)
+
+                async with session.get(url, timeout=timeout) as response:
+                    if response.status == 200:
+                        data = await response.json()
+                        models = data.get('data', [])
+                        if models:
+                            model_names = [model.get('id', '') for model in models]
+                            print(f"Worker {self.worker_id}: Models available: {model_names}", file=sys.stderr)
+                            return
+                        else:
+                            print(f"Worker {self.worker_id}: No models found in response", file=sys.stderr)
+                    else:
+                        print(f"Worker {self.worker_id}: Model check failed with status {response.status}", file=sys.stderr)
+
+            except Exception as e:
+                print(f"Worker {self.worker_id}: Model check failed: {e}", file=sys.stderr)
+
+            # Wait 3 seconds before retrying
+            print(f"Worker {self.worker_id}: Waiting 3 seconds before retrying model check...", file=sys.stderr)
+            await asyncio.sleep(3.0)
+
+    async def _retry_request(self, request_func) -> Tuple[bool, float, int, str]:
+        """Retry a request function forever until success or non-connection error."""
+        attempt = 0
+        while not self.cancelled:
+            attempt += 1
+            try:
+                return await request_func()
+            except Exception as e:
+                error_str = str(e).lower()
+                # Check for connection-related errors
+                if any(conn_error in error_str for conn_error in [
+                    "cannot connect to host", "connection refused", "connection reset",
+                    "connection aborted", "timeout", "network is unreachable"
+                ]):
+                    wait_time = 3.0  # 3 seconds as requested
+                    print(f"Worker {self.worker_id}: Connection error (attempt {attempt}): {e}. Retrying in {wait_time}s...", file=sys.stderr)
+                    await asyncio.sleep(wait_time)
+                    continue
+                else:
+                    # Non-connection error, don't retry
+                    print(f"Worker {self.worker_id}: Non-connection error: {e}", file=sys.stderr)
+                    return False, 0.0, 0, ""
+
+        # Cancelled
+        return False, 0.0, 0, ""
 
     def _build_payload_and_url(self, prompt: str, streaming: bool) -> Tuple[Dict, str]:
         """Build the appropriate payload and URL based on the API version."""
@@ -214,50 +294,56 @@ class LoadTestWorker:
         prompt = f"Write a long and complete story about Lincoln ({request_id} / {self.worker_id})"
         payload, url = self._build_payload_and_url(prompt, streaming=True)
 
-        start_time = time.time()
-        try:
-            timeout = aiohttp.ClientTimeout(total=30)
-            async with session.post(url, json=payload, timeout=timeout) as response:
-                duration = time.time() - start_time
+        async def _do_streaming_request() -> Tuple[bool, float, int, str]:
+            start_time = time.time()
+            try:
+                timeout = aiohttp.ClientTimeout(total=30)
+                async with session.post(url, json=payload, timeout=timeout) as response:
+                    duration = time.time() - start_time
 
-                if response.status == 200:
-                    content = ""
-                    if self.config.output_responses and self.config.workers == 1:
-                        # Stream tokens in real-time for single worker
-                        content = await self._stream_response_realtime(response, request_id)
-                    elif self.config.output_responses:
-                        # Parse streaming response normally for multiple workers
-                        response_text = await response.text()
-                        content = StreamingParser.parse_streaming_response(response_text)
+                    if response.status == 200:
+                        content = ""
+                        if self.config.output_responses and self.config.workers == 1:
+                            # Stream tokens in real-time for single worker
+                            content = await self._stream_response_realtime(response, request_id)
+                        elif self.config.output_responses:
+                            # Parse streaming response normally for multiple workers
+                            response_text = await response.text()
+                            content = StreamingParser.parse_streaming_response(response_text)
+                        else:
+                            # Always capture content for word/char counting, but don't display
+                            response_text = await response.text()
+                            content = StreamingParser.parse_streaming_response(response_text)
+
+                        return True, duration, response.status, content
                     else:
-                        # Still need to consume the response even if not outputting
-                        await response.text()
+                        print(f"Worker {self.worker_id}: HTTP error {response.status}", file=sys.stderr)
+                        return False, duration, response.status, ""
 
-                    return True, duration, response.status, content
-                else:
-                    return False, duration, response.status, ""
+            except asyncio.CancelledError:
+                raise  # Re-raise cancellation
+            except Exception as e:
+                duration = time.time() - start_time
+                # Re-raise connection errors so retry logic can handle them
+                raise e
 
-        except asyncio.CancelledError:
-            raise  # Re-raise cancellation
-        except Exception as e:
-            duration = time.time() - start_time
-            print(f"Streaming request error: {e}", file=sys.stderr)
-            return False, duration, 0, ""
+        return await self._retry_request(_do_streaming_request)
 
     async def _make_non_streaming_request(self, session: aiohttp.ClientSession, request_id: int) -> Tuple[bool, float, int, str]:
         """Make a non-streaming request."""
         prompt = f"Write a long and complete story about Lincoln ({request_id} / {self.worker_id})"
         payload, url = self._build_payload_and_url(prompt, streaming=False)
 
-        start_time = time.time()
-        try:
-            timeout = aiohttp.ClientTimeout(total=30)
-            async with session.post(url, json=payload, timeout=timeout) as response:
-                duration = time.time() - start_time
+        async def _do_non_streaming_request() -> Tuple[bool, float, int, str]:
+            start_time = time.time()
+            try:
+                timeout = aiohttp.ClientTimeout(total=30)
+                async with session.post(url, json=payload, timeout=timeout) as response:
+                    duration = time.time() - start_time
 
-                if response.status == 200:
-                    content = ""
-                    if self.config.output_responses:
+                    if response.status == 200:
+                        content = ""
+                        # Always capture content for word/char counting
                         try:
                             data = await response.json()
                             choices = data.get('choices', [])
@@ -272,16 +358,19 @@ class LoadTestWorker:
                         except (json.JSONDecodeError, KeyError, IndexError):
                             content = ""
 
-                    return True, duration, response.status, content
-                else:
-                    return False, duration, response.status, ""
+                        return True, duration, response.status, content
+                    else:
+                        print(f"Worker {self.worker_id}: HTTP error {response.status}", file=sys.stderr)
+                        return False, duration, response.status, ""
 
-        except asyncio.CancelledError:
-            raise  # Re-raise cancellation
-        except Exception as e:
-            duration = time.time() - start_time
-            print(f"Non-streaming request error: {e}", file=sys.stderr)
-            return False, duration, 0, ""
+            except asyncio.CancelledError:
+                raise  # Re-raise cancellation
+            except Exception as e:
+                duration = time.time() - start_time
+                # Re-raise connection errors so retry logic can handle them
+                raise e
+
+        return await self._retry_request(_do_non_streaming_request)
 
 
 class LoadTester:
@@ -291,8 +380,8 @@ class LoadTester:
         self.config = config
         self.stats = LoadTestStats(config)
         self.running = True
-        self.workers = []
-        self.tasks = []
+        self.workers: List[LoadTestWorker] = []
+        self.tasks: List[asyncio.Task] = []
         self.interrupted = False
 
         # Set up signal handlers
@@ -314,7 +403,7 @@ class LoadTester:
         """Run the load test."""
         print("Starting load test...")
         print(f"Backend URL: localhost:{self.config.port}")
-        print(f"Duration: {self.config.duration_sec} seconds")
+        print(f"Max duration: {self.config.duration_sec} seconds")
         print(f"Workers: {self.config.workers}")
         print(f"Requests per worker: {self.config.requests_per_worker}")
         print(f"Total requests: {self.config.workers * self.config.requests_per_worker}")
@@ -339,8 +428,9 @@ class LoadTester:
                 # Create tasks for all workers
                 self.tasks = [asyncio.create_task(worker.run(session)) for worker in workers]
 
-                # Monitor progress
+                # Monitor progress - update stats start time to actual test start
                 start_time = time.time()
+                self.stats.start_time = start_time  # Update stats to use actual test start time
                 last_report = 0
 
                 while self.running and time.time() - start_time < self.config.duration_sec:
@@ -353,7 +443,25 @@ class LoadTester:
                     # Report progress every 5 seconds
                     if int(current_time) >= last_report + 5:
                         active_workers = sum(1 for task in self.tasks if not task.done())
-                        print(f"Elapsed: {int(current_time)}s, Active workers: {active_workers}")
+
+                        # Calculate words and characters per second
+                        total_words = 0
+                        total_chars = 0
+                        for result in self.stats.results:
+                            if result.get('response_content'):
+                                content = result['response_content']
+                                # Simple word count (split by spaces)
+                                words = len(content.split())
+                                chars = len(content)
+                                total_words += words
+                                total_chars += chars
+
+                        words_per_second = total_words / current_time if current_time > 0 else 0
+                        chars_per_second = total_chars / current_time if current_time > 0 else 0
+
+                        print(f"Elapsed: {int(current_time)}s, Active workers: {active_workers}, "
+                              f"Requests completed: {self.stats.total_requests}, "
+                              f"Words/sec: {words_per_second:.1f}, Chars/sec: {chars_per_second:.1f}")
                         last_report = int(current_time)
 
                     # Check if all workers completed
@@ -429,18 +537,47 @@ class LoadTester:
 
     def _print_summary(self) -> None:
         """Print test summary."""
-        duration = self.stats.get_duration()
+        actual_duration = self.stats.get_duration()
         rps = self.stats.get_rps()
         success_rate = (self.stats.successful_requests / self.stats.total_requests * 100) if self.stats.total_requests > 0 else 0
 
+        # Calculate total words, characters and their rates per second
+        total_words = 0
+        total_chars = 0
+        for result in self.stats.results:
+            if result.get('response_content'):
+                content = result['response_content']
+                words = len(content.split())
+                chars = len(content)
+                total_words += words
+                total_chars += chars
+
+        words_per_second = total_words / actual_duration if actual_duration > 0 else 0
+        chars_per_second = total_chars / actual_duration if actual_duration > 0 else 0
+
+        # Determine overall result indicator
+        if self.stats.total_requests > 0 and self.stats.failed_requests == 0:
+            result_indicator = "✅"
+        elif self.stats.failed_requests > 0:
+            result_indicator = "❌"
+        else:
+            result_indicator = ""  # No requests made
+
         print("=== LOAD TEST RESULTS ===")
-        print(f"Actual duration: {duration:.0f} seconds")
-        print(f"Total requests: {self.stats.total_requests}")
-        print(f"Successful requests: {self.stats.successful_requests}")
-        print(f"Failed requests: {self.stats.failed_requests}")
-        print(f"Requests per second: {rps:.0f}")
+        if result_indicator:
+            print(f"Result:                {result_indicator}")
+        print(f"Max duration:          {self.config.duration_sec} seconds")
+        print(f"Actual duration:       {actual_duration:.0f} seconds")
+        print(f"Total requests:        {self.stats.total_requests}")
+        print(f"Successful requests:   {self.stats.successful_requests}")
+        print(f"Failed requests:       {self.stats.failed_requests}")
+        print(f"Requests per second:   {rps:.0f}")
+        print(f"Total words:           {total_words}")
+        print(f"Words per second:      {words_per_second:.1f}")
+        print(f"Total characters:      {total_chars}")
+        print(f"Characters per second: {chars_per_second:.1f}")
         if self.stats.total_requests > 0:
-            print(f"Success rate: {success_rate:.1f}%")
+            print(f"Success rate:          {success_rate:.1f}%")
         print()
         print(f"Detailed logs are in: {self.config.log_file}")
         print("Results saved permanently. No cleanup needed.")
@@ -453,7 +590,7 @@ def parse_args() -> LoadTestConfig:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  %(prog)s                                    # Use defaults (5000 total requests)
+  %(prog)s                                    # Use defaults (100 total requests)
   %(prog)s --duration_sec 30 --workers 20    # 30s with 20 workers
   %(prog)s --workers 100 --requests_per_worker 50  # High concurrency
   %(prog)s --port 8080 --duration_sec 120    # Use port 8080 for 2 minutes
@@ -466,16 +603,16 @@ Examples:
 
     parser.add_argument('--duration_sec', '--duration', type=int, default=60,
                         help='Duration in seconds (default: 60)')
-    parser.add_argument('--workers', type=int, default=50,
-                        help='Number of concurrent workers (default: 50)')
+    parser.add_argument('--workers', type=int, default=1,
+                        help='Number of concurrent workers (default: 1)')
     parser.add_argument('--requests_per_worker', type=int, default=100,
                         help='Requests per worker (default: 100)')
     parser.add_argument('--port', type=int, default=8000,
                         help='Backend port (default: 8000)')
     parser.add_argument('--model', default="Qwen/Qwen3-0.6B",
                         help='Model name (default: Qwen/Qwen3-0.6B)')
-    parser.add_argument('--max-tokens', type=int, default=20,
-                        help='Maximum tokens to generate (default: 20)')
+    parser.add_argument('--max-tokens', type=int, default=300,
+                        help='Maximum tokens to generate (default: 300)')
     parser.add_argument('--version', choices=['v1_chat_completion', 'v1_completion'],
                         default='v1_chat_completion',
                         help='API version to use (default: v1_chat_completion)')
