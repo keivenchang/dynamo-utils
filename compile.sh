@@ -369,10 +369,10 @@ if [ -n "$BUILD_TYPE" ]; then
         cmd cargo clean
     fi
 
-    # Fix file permissions
+    # Fix file permissions due to the run.sh running as root, causing countless headaches
     USER_ID=$(stat -c "%u" .)
     GROUP_ID=$(stat -c "%g" .)
-    cmd chown -R $USER_ID:$GROUP_ID . || true
+    cmd sudo chown -R $USER_ID:$GROUP_ID . || true
 
     # ==============================================================================
     # DEFAULT PYTHON CLEANUP
