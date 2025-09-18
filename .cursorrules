@@ -1,4 +1,4 @@
- # Keiven's Cursor Rules for Dynamo Project
+# Keiven's Cursor Rules for Dynamo Project
 # This file helps guide AI behavior when working with this codebase
 # Last updated: 2025-08-17 22:01:08
 # https://docs.google.com/document/d/1rm1GWt9AOPkKSDWUJQEDOy1Z-FhPkfZ272eUpMz9-AQ/edit?tab=t.0
@@ -34,6 +34,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 ```
+# - Don't remove TODO comments or the commented lines below it
 
 # =============================================================================
 # RUST DEVELOPMENT GUIDELINES
@@ -60,13 +61,8 @@
 # - For all cargo test, cargo build, and cargo install, make sure to add `--locked`
 # - Test changes with: `cargo test --locked`
 # - Use `cargo clean` if you encounter build issues
-# - Do not EVER use "!" (exclamation marks) inside shell quotes
 
 ## Formatting and Linting
-# - When asked to `cargo fmt`, do this in one step:
-```
-(cd $DYNAMO_HOME/lib/runtime/examples && cargo fmt); (cd $DYNAMO_HOME/lib/bindings/python && cargo fmt); (cd $DYNAMO_HOME && cargo fmt)
-```
 # - Run `cargo fmt` whenever there are significant changes to Rust (*.rs files)
 # - Also periodically run `cargo clippy --no-deps --all-targets -- -D warnings`
 
@@ -87,11 +83,6 @@
 # - Write unit tests in the same file as the code unless told otherwise
 # - Use `#[cfg(test)]` for test-only code
 # - Mock external dependencies when mocks are available
-# - When running `cargo test ...`:
-#   - pipe it to `grep -v` if any of the following content exists:
-#      `running 0 tests`
-#      `test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out`
-#      `tower_http::trace::on_failure:`
 # - When integration tests are mentioned, it means to use `--features integration`
 #   - Example: `cargo test --locked --features integration ... -- --nocapture`
 # - For specific integration tests, add the "--lib <name>" flag:
@@ -113,13 +104,6 @@ cargo run ... --features integration --lib mod_name::test_xyz ...
 # - During tests, if it is building/compiling, then show the progress
 # - When running tests, always list which tests failed (up to 10), and number of passed/failed broken down by unit vs. integration tests
 # - When creating new tests related to DistributedRuntime/Runtime/drt, make sure to name all the Namespace, Component, and Endpoints with unique names that do not exist anywhere else in the code base, like: ns515, comp515, ep515. The tests in lib/runtime/src/metrics.rs offer examples.
-
-## Wheel Creation Rules
-# When asked to create Python wheel, do the followings, in fewer steps (combined steps using "&&" in shell), when possible:
-# - cargo build --locked --features dynamo-llm/block-manager --workspace
-# - If Python bindings changed, run: (cd lib/bindings/python && maturin develop)
-# - If uv errors or not installed:
-#   - install via the command: uv pip install maturin[patchelf]
 
 ## Error Handling
 # - Use Result<T, E> for fallible operations
@@ -169,12 +153,6 @@ let long_call = {
 long_call()
 ```
 
-## Performance Guidelines
-# - Profile before optimizing
-# - Use appropriate data structures
-# - Consider memory allocation patterns
-# - Use async/await for I/O operations
-
 ## Assertions and Debugging
 # - `debug_assert*` calls are preferred over `assert_*`
 
@@ -185,6 +163,13 @@ long_call()
 
 ## Python Bindings
 # If you make any changes in lib/bindings/python/rust/* make sure you run `maturin develop`
+
+## Wheel Creation Rules
+# When asked to create Python wheel, do the followings, in fewer steps (combined steps using "&&" in shell), when possible:
+# - cargo build --locked --features dynamo-llm/block-manager --workspace
+# - If Python bindings changed, run: (cd lib/bindings/python && maturin develop)
+# - If uv errors or not installed:
+#   - install via the command: uv pip install maturin[patchelf]
 
 # =============================================================================
 # PYTHON DEVELOPMENT GUIDELINES
@@ -227,12 +212,6 @@ def process_file(filename: str) -> None:
 # - Use fixtures for common test setup
 # - Mock external services
 
-## Performance Guidelines
-# - Use list comprehensions over loops when appropriate
-# - Profile with cProfile for performance issues
-# - Use appropriate data structures (dict vs list)
-# - Consider using numpy/pandas for numerical operations
-
 # =============================================================================
 # JAVASCRIPT/TYPESCRIPT DEVELOPMENT GUIDELINES
 # =============================================================================
@@ -245,6 +224,50 @@ def process_file(filename: str) -> None:
 # - Add JSDoc comments for complex functions
 
 # =============================================================================
+# UNIX/SHELL COMMANDS AND GUIDELINES
+# =============================================================================
+
+## General Shell Rules
+# - Do not EVER use "!" (exclamation marks) inside shell quotes
+# - When adding an empty line, do not add trailing spaces or tabs
+# - Use proper quoting to prevent word splitting and globbing issues
+
+## File Operations
+# - When moving files, check if a file is under git
+# - If it's under git, then use `git mv <src_file> <dest_file>` instead of plain mv
+# - If it's not under git, then go ahead with `mv ...` command
+# - There is no reason to stash *.lock files, you can just delete them when needed
+
+## Permission Management
+# If there are permission problems, make sure the uid/gid are correct:
+```
+USER_ID=$(stat -c "%u" .)
+GROUP_ID=$(stat -c "%g" .)
+chown -R $USER_ID:$GROUP_ID .
+```
+
+## Piping and Filtering
+# - When running `cargo test ...`:
+#   - filter out unimportant lines using `grep -v` on the followings:
+#      `running 0 tests`
+#      `test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out`
+#      `tower_http::trace::on_failure:`
+
+## Multi-directory Commands
+# - When asked to `cargo fmt`, do this in one step:
+```
+(cd $DYNAMO_HOME/lib/runtime/examples && cargo fmt); (cd $DYNAMO_HOME/lib/bindings/python && cargo fmt); (cd $DYNAMO_HOME && cargo fmt)
+```
+
+## Pre-commit command
+# - Before commit, run a pre-commit
+
+## Using ~ instead of the full path
+# - When possible, find out your $HOME
+# - When possible, try to use the tilde (~) to make the output nicer. For example, `~/path` is preferred over `/home/ubuntu/path`.
+
+
+# =============================================================================
 # BUILD AND DEVELOPMENT WORKFLOW
 # =============================================================================
 
@@ -253,29 +276,11 @@ def process_file(filename: str) -> None:
 # - uv build: Build Python packages
 # - maturin build: Build Python extensions
 
-## Formatting
-# - When adding an empty line, do not add trailing spaces or tabs
-# - Don't remove TODO comments or the commented lines below it
-
-## Permission Issues
-# If there are permission problems, make sure the uid/gid are correct:
-```
-USER_ID=$(stat -c "%u" .)
-GROUP_ID=$(stat -c "%g" .)
-chown -R $USER_ID:$GROUP_ID .
-```
-
 # =============================================================================
 # GIT WORKFLOW AND COMMIT GUIDELINES
 # =============================================================================
 
 ## Cursor Rules -- periodically review this .cursorrules before any git operation
-
-## File Operations
-# - When moving files, check if a file is under git
-# - If it's under git, then use `git mv <src_file> <dest_file>` instead of plain mv
-# - If it's not under git, then go ahead with `mv ...` command
-# - There is no reason to stash *.lock files, you can just delete them when needed
 
 ## Merge Conflicts
 # After git merge conflicts are resolved, perform:
@@ -296,7 +301,6 @@ chown -R $USER_ID:$GROUP_ID .
 
 ## Commit Message Format
 # - Follow conventional commits format for the title (the very first line of the message). Terse format.
-
 # - Examples:
 #   feat: add new user authentication system
 #   fix: resolve memory leak in data processing
@@ -313,7 +317,7 @@ chown -R $USER_ID:$GROUP_ID .
 # =============================================================================
 # GITHUB PR DESCRIPTION TEMPLATE
 # =============================================================================
-# When asked to generate a GitHub PR Description, look at the chain of continuous previous git commits from the same user/login (me, the author).
+# When asked to generate a "GitHub PR Desc", look at the chain of continuous previous git commits from the same user/login (me, the author).
 # Then, use the following template to output a GitHub PR Description (aka "github pr"), in plain text. The output should be terse, in plain text, and surrounded by the triple-backquote chars (```) so that special #### characters are escaped.
 ```
 #### Overview:
@@ -331,43 +335,10 @@ chown -R $USER_ID:$GROUP_ID .
 #### Related Issues: (use one of the action keywords Closes / Fixes / Resolves / Relates to)
 
 <!-- put in Linear ticket here, like DIS-123 or DYN-789, by extracting the Linear ticket number from commit messages, if possible. If there is nothing, then leave this field blank. -->
+
+/coderabbit profile chill
 ```
 # - Again, output in plain-text-- do NOT add formatting, because I want to see the quadriple pound signs (e.g. "#### Something Here:")
-
-# =============================================================================
-# TESTING STRATEGIES
-# =============================================================================
-# - Write tests for all new functionality
-# - Ensure test coverage for edge cases
-# - Use integration tests for critical workflows
-# - Mock external dependencies appropriately
-# - Run tests before committing changes
-
-# =============================================================================
-# DOCUMENTATION STANDARDS
-# =============================================================================
-# Always add comments for:
-# - Complex algorithms
-# - Business logic
-# - API endpoints
-# - Configuration options
-# - Non-obvious code decisions
-
-# Use clear, concise comments that explain "why" not "what"
-# Bad: "Loop through items" (obvious from code)
-# Good: "Process items in batches to avoid memory issues"
-
-# Use non-bullshit jargons
-# Reframe from using the following bullshit jargon words: intuitive, comprehensive, optimal, seamless, next-generation, holistic, cutting-edge.
-
-# =============================================================================
-# SECURITY CONSIDERATIONS
-# =============================================================================
-# - Never commit API keys or secrets
-# - Use environment variables for configuration
-# - Validate all user inputs
-# - Use parameterized queries for database operations
-# - Follow principle of least privilege
 
 # =============================================================================
 # DOCKER AND DEPLOYMENT
@@ -398,6 +369,32 @@ CMD ["app"]
 # - Use async/await for I/O operations
 # - Cache expensive computations when appropriate
 # - Monitor resource usage in production
+
+# =============================================================================
+# SECURITY CONSIDERATIONS
+# =============================================================================
+# - Never commit API keys or secrets
+# - Use environment variables for configuration
+# - Validate all user inputs
+# - Use parameterized queries for database operations
+# - Follow principle of least privilege
+
+# =============================================================================
+# DOCUMENTATION STANDARDS
+# =============================================================================
+# Always add comments for:
+# - Complex algorithms
+# - Business logic
+# - API endpoints
+# - Configuration options
+# - Non-obvious code decisions
+
+# Use clear, concise comments that explain "why" not "what"
+# Bad: "Loop through items" (obvious from code)
+# Good: "Process items in batches to avoid memory issues"
+
+# Using bullshit (BS) jargons
+# **DO NOT ** use the following BS jargon words in documentations nor comments: intuitive, comprehensive, optimal, seamless, next-generation, holistic, cutting-edge.
 
 # =============================================================================
 # DEBUGGING AND TROUBLESHOOTING
