@@ -1,7 +1,7 @@
 # Keiven's Cursor Rules for Dynamo Project
 # This file helps guide AI behavior when working with this codebase
-# Last updated: 2025-08-17 22:01:08
-# https://docs.google.com/document/d/1rm1GWt9AOPkKSDWUJQEDOy1Z-FhPkfZ272eUpMz9-AQ/edit?tab=t.0
+# Last updated: 2025-09-18 11:21:35
+# https://github.com/keivenchang/dynamo-utils/blob/main/.cursorrules
 
 # =============================================================================
 # PROJECT OVERVIEW
@@ -300,6 +300,7 @@ chown -R $USER_ID:$GROUP_ID .
 #   - If the change is straightforward, a single line message is preferred
 
 ## Commit Message Format
+# - Make the message terse (not verbose)
 # - Follow conventional commits format for the title (the very first line of the message). Terse format.
 # - Examples:
 #   feat: add new user authentication system
