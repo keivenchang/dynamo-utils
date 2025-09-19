@@ -20,6 +20,18 @@ from typing import Any, Dict, List, Optional, Tuple
 import aiohttp
 
 
+class SharedModelState:
+    """Shared state for model availability across all workers."""
+
+    def __init__(self):
+        self.model_available = False
+        self.model_names = []
+        self.lock = asyncio.Lock()
+        self.model_ready_event = asyncio.Event()
+        self.refetch_requested_event = asyncio.Event()  # Signal to request model re-fetch
+        self.last_check_time = 0
+
+
 class LoadTestConfig:
     """Configuration for the load test."""
 
@@ -28,12 +40,14 @@ class LoadTestConfig:
         self.workers = 1
         self.requests_per_worker = 100
         self.port = 8000
-        self.model = "Qwen/Qwen3-0.6B"
+        self.model = None  # Available models: "Qwen/Qwen3-0.6B", "deepseek-ai/DeepSeek-R1-Distill-Llama-8B", etc.
         self.max_tokens = 300
         self.streaming = False
         self.output_responses = False
+        self.verbose = False
         self.log_file = "/tmp/soak_llm.log"
         self.version = "v1_chat_completion"  # Default to chat completions
+        self.model_fetch_retry_interval = 2.0  # Seconds between model fetch retries
 
 
 class LoadTestStats:
@@ -118,19 +132,94 @@ class StreamingParser:
         return ''.join(content_parts)
 
 
+class ModelFetcher:
+    """Dedicated worker that fetches model information when needed."""
+
+    def __init__(self, config: LoadTestConfig, shared_state: SharedModelState):
+        self.config = config
+        self.shared_state = shared_state
+        self.cancelled = False
+
+    def cancel(self):
+        """Cancel this model fetcher."""
+        self.cancelled = True
+
+    async def invalidate_models(self):
+        """Invalidate current model information and trigger re-fetch."""
+        async with self.shared_state.lock:
+            self.shared_state.model_available = False
+            self.shared_state.model_ready_event.clear()
+            self.shared_state.refetch_requested_event.set()
+        print("ModelFetcher: Model information invalidated, re-fetch requested", file=sys.stderr)
+
+    async def ensure_model_available(self, session: aiohttp.ClientSession, retry_interval: float = 2.0) -> bool:
+        """Ensure model information is available. Retries every retry_interval seconds forever until successful."""
+        async with self.shared_state.lock:
+            # Check if model is already available
+            if self.shared_state.model_available:
+                return True
+
+        # Need to fetch model information - retry forever
+        print("ModelFetcher: Fetching model information...", file=sys.stderr)
+        while not self.cancelled:
+            success = await self._fetch_models(session)
+
+            async with self.shared_state.lock:
+                if success:
+                    self.shared_state.model_available = True
+                    self.shared_state.model_ready_event.set()
+                    print(f"ModelFetcher: Models found: {self.shared_state.model_names}", file=sys.stderr)
+                    return True
+                else:
+                    self.shared_state.model_available = False
+                    self.shared_state.model_ready_event.clear()
+
+            print(f"ModelFetcher: Failed to fetch models, retrying in {retry_interval} seconds...", file=sys.stderr)
+            await asyncio.sleep(retry_interval)
+
+        return False  # Only if cancelled
+
+    async def _fetch_models(self, session: aiohttp.ClientSession) -> bool:
+        """Fetch models from the API endpoint."""
+        try:
+            url = f"http://localhost:{self.config.port}/v1/models"
+            timeout = aiohttp.ClientTimeout(total=10)
+
+            async with session.get(url, timeout=timeout) as response:
+                if response.status == 200:
+                    data = await response.json()
+                    models = data.get('data', [])
+                    if models:
+                        model_names = [model.get('id', '') for model in models]
+                        self.shared_state.model_names = model_names
+                        return True
+                    else:
+                        print("ModelFetcher: No models found in response", file=sys.stderr)
+                        return False
+                else:
+                    print(f"ModelFetcher: Model check failed with status {response.status}", file=sys.stderr)
+                    return False
+
+        except Exception as e:
+            print(f"ModelFetcher: Model fetch exception: {e}", file=sys.stderr)
+            return False
+
+
 class LoadTestWorker:
     """Worker that performs load test requests."""
 
-    def __init__(self, worker_id: int, config: LoadTestConfig, stats: LoadTestStats):
+    def __init__(self, worker_id: int, config: LoadTestConfig, stats: LoadTestStats, shared_state: SharedModelState, model_fetcher: 'ModelFetcher'):
         self.worker_id = worker_id
         self.config = config
         self.stats = stats
+        self.shared_state = shared_state
+        self.model_fetcher = model_fetcher
         self.cancelled = False
 
     async def run(self, session: aiohttp.ClientSession) -> None:
         """Run the worker's requests."""
-        # Phase 1: Keep trying to get model information until success
-        await self._wait_for_model_availability(session)
+        # Phase 1: Wait for model information to be available
+        await self._wait_for_model_availability()
 
         if self.cancelled:
             return
@@ -152,8 +241,11 @@ class LoadTestWorker:
 
                 # If HTTP fails, go back to Phase 1 (model checking)
                 if not success:
-                    print(f"Worker {self.worker_id}: HTTP failure during queries, returning to model check", file=sys.stderr)
-                    await self._wait_for_model_availability(session)
+                    print(f"Worker {self.worker_id}: HTTP failure during queries, requesting model re-fetch", file=sys.stderr)
+                    # Request model re-fetch through ModelFetcher
+                    await self.model_fetcher.invalidate_models()
+
+                    await self._wait_for_model_availability()
                     if self.cancelled:
                         break
                     print(f"Worker {self.worker_id}: Model available again, resuming queries...", file=sys.stderr)
@@ -171,8 +263,11 @@ class LoadTestWorker:
                     self.worker_id, request_id, False, 0.0, 0, ""
                 )
                 # Exception occurred, go back to model check
-                print(f"Worker {self.worker_id}: Exception during queries, returning to model check", file=sys.stderr)
-                await self._wait_for_model_availability(session)
+                print(f"Worker {self.worker_id}: Exception during queries, requesting model re-fetch", file=sys.stderr)
+                # Request model re-fetch through ModelFetcher
+                await self.model_fetcher.invalidate_models()
+
+                await self._wait_for_model_availability()
                 if self.cancelled:
                     break
                 print(f"Worker {self.worker_id}: Model available again, resuming queries...", file=sys.stderr)
@@ -182,33 +277,24 @@ class LoadTestWorker:
         """Cancel this worker."""
         self.cancelled = True
 
-    async def _wait_for_model_availability(self, session: aiohttp.ClientSession) -> None:
-        """Wait until we can successfully get model information."""
+    async def _wait_for_model_availability(self) -> None:
+        """Wait until model information is available."""
         while not self.cancelled:
+            async with self.shared_state.lock:
+                if self.shared_state.model_available:
+                    print(f"Worker {self.worker_id}: Model available: {self.shared_state.model_names}", file=sys.stderr)
+                    return
+
+            # Wait for model to become available
+            print(f"Worker {self.worker_id}: Waiting for model availability...", file=sys.stderr)
             try:
-                print(f"Worker {self.worker_id}: Checking model availability...", file=sys.stderr)
-                url = f"http://localhost:{self.config.port}/v1/models"
-                timeout = aiohttp.ClientTimeout(total=10)
-
-                async with session.get(url, timeout=timeout) as response:
-                    if response.status == 200:
-                        data = await response.json()
-                        models = data.get('data', [])
-                        if models:
-                            model_names = [model.get('id', '') for model in models]
-                            print(f"Worker {self.worker_id}: Models available: {model_names}", file=sys.stderr)
-                            return
-                        else:
-                            print(f"Worker {self.worker_id}: No models found in response", file=sys.stderr)
-                    else:
-                        print(f"Worker {self.worker_id}: Model check failed with status {response.status}", file=sys.stderr)
-
-            except Exception as e:
-                print(f"Worker {self.worker_id}: Model check failed: {e}", file=sys.stderr)
-
-            # Wait 3 seconds before retrying
-            print(f"Worker {self.worker_id}: Waiting 3 seconds before retrying model check...", file=sys.stderr)
-            await asyncio.sleep(3.0)
+                await asyncio.wait_for(self.shared_state.model_ready_event.wait(), timeout=2.0)
+                if self.shared_state.model_available:
+                    print(f"Worker {self.worker_id}: Model became available", file=sys.stderr)
+                    return
+            except asyncio.TimeoutError:
+                print(f"Worker {self.worker_id}: Model not available, retrying in 2 seconds...", file=sys.stderr)
+                continue
 
     async def _retry_request(self, request_func) -> Tuple[bool, float, int, str]:
         """Retry a request function forever until success or non-connection error."""
@@ -238,10 +324,17 @@ class LoadTestWorker:
 
     def _build_payload_and_url(self, prompt: str, streaming: bool) -> Tuple[Dict, str]:
         """Build the appropriate payload and URL based on the API version."""
+        # Use configured model or first available model if None
+        model_name = self.config.model
+        if model_name is None and self.shared_state.model_names:
+            model_name = self.shared_state.model_names[0]
+        elif model_name is None:
+            model_name = "unknown"  # Fallback, should not happen if model check succeeded
+
         if self.config.version == "v1_completion":
             # Use v1/completions endpoint with prompt-based payload
             payload = {
-                "model": self.config.model,
+                "model": model_name,
                 "prompt": prompt,
                 "stream": streaming,
                 "max_tokens": self.config.max_tokens
@@ -250,7 +343,7 @@ class LoadTestWorker:
         else:
             # Use v1/chat/completions endpoint with messages-based payload (default)
             payload = {
-                "model": self.config.model,
+                "model": model_name,
                 "messages": [
                     {"role": "developer", "content": "You are a helpful assistant."},
                     {"role": "user", "content": prompt}
@@ -294,6 +387,10 @@ class LoadTestWorker:
         prompt = f"Write a long and complete story about Lincoln ({request_id} / {self.worker_id})"
         payload, url = self._build_payload_and_url(prompt, streaming=True)
 
+        # Print curl command for first request if output is enabled
+        if request_id == 1 and self.config.output_responses:
+            self._print_request_curl_command(payload, url)
+
         async def _do_streaming_request() -> Tuple[bool, float, int, str]:
             start_time = time.time()
             try:
@@ -334,6 +431,10 @@ class LoadTestWorker:
         prompt = f"Write a long and complete story about Lincoln ({request_id} / {self.worker_id})"
         payload, url = self._build_payload_and_url(prompt, streaming=False)
 
+        # Print curl command for first request if output is enabled
+        if request_id == 1 and self.config.output_responses:
+            self._print_request_curl_command(payload, url)
+
         async def _do_non_streaming_request() -> Tuple[bool, float, int, str]:
             start_time = time.time()
             try:
@@ -352,9 +453,9 @@ class LoadTestWorker:
                                     # v1/completions format - uses 'content'
                                     content = choices[0].get('text', '')
                                 else:
-                                    # v1_chat_completion format - uses 'reasoning_content'
+                                    # v1_chat_completion format - try both content and reasoning_content
                                     message = choices[0].get('message', {})
-                                    content = message.get('reasoning_content', '')
+                                    content = message.get('content', '') or message.get('reasoning_content', '')
                         except (json.JSONDecodeError, KeyError, IndexError):
                             content = ""
 
@@ -372,6 +473,26 @@ class LoadTestWorker:
 
         return await self._retry_request(_do_non_streaming_request)
 
+    def _print_request_curl_command(self, payload: dict, url: str) -> None:
+        """Print curl command for making requests."""
+        import json
+        payload_json = json.dumps(payload, indent=2)
+
+        endpoint_name = "chat/completions" if "/chat/completions" in url else "completions"
+
+        print(f"# Make {endpoint_name} request:")
+        if self.config.streaming:
+            print("curl -N \\")
+            print(f"  -X POST {url} \\")
+            print("  -H 'Content-Type: application/json' \\")
+            print(f"  -d '{payload_json}'")
+        else:
+            print("curl \\")
+            print(f"  -X POST {url} \\")
+            print("  -H 'Content-Type: application/json' \\")
+            print(f"  -d '{payload_json}' | jq")
+        print()
+
 
 class LoadTester:
     """Main load tester class."""
@@ -379,6 +500,8 @@ class LoadTester:
     def __init__(self, config: LoadTestConfig):
         self.config = config
         self.stats = LoadTestStats(config)
+        self.shared_state = SharedModelState()
+        self.model_fetcher = ModelFetcher(config, self.shared_state)
         self.running = True
         self.workers: List[LoadTestWorker] = []
         self.tasks: List[asyncio.Task] = []
@@ -391,9 +514,12 @@ class LoadTester:
     def _signal_handler(self, signum, frame):
         """Handle interrupt signals."""
         if not self.interrupted:
-            print("\nInterrupt received. Cleaning up workers...")
+            if self.config.verbose:
+                print("\nInterrupt received. Cleaning up workers...")
             self.interrupted = True
             self.running = False
+            # Cancel model fetcher
+            self.model_fetcher.cancel()
             # Cancel all running tasks
             for task in self.tasks:
                 if not task.done():
@@ -401,23 +527,33 @@ class LoadTester:
 
     async def run(self) -> None:
         """Run the load test."""
-        print("Starting load test...")
-        print(f"Backend URL: localhost:{self.config.port}")
-        print(f"Max duration: {self.config.duration_sec} seconds")
-        print(f"Workers: {self.config.workers}")
-        print(f"Requests per worker: {self.config.requests_per_worker}")
-        print(f"Total requests: {self.config.workers * self.config.requests_per_worker}")
-        print(f"Streaming: {self.config.streaming}")
-        print()
-        print(f"Results will be stored in: {self.config.log_file}")
+        # Print curl commands first if output is enabled (before any network attempts)
+        if self.config.output_responses:
+            print(f"# List available models:")
+            print(f"curl http://localhost:{self.config.port}/v1/models | jq")
+            print()
+
+        if self.config.verbose:
+            print("Starting load test...")
+            print(f"Backend URL: localhost:{self.config.port}")
+            print(f"Model: {self.config.model or 'Auto-detect first available model'}")
+            print(f"Max duration: {self.config.duration_sec} seconds")
+            print(f"Workers: {self.config.workers}")
+            print(f"Requests per worker: {self.config.requests_per_worker}")
+            print(f"Total requests: {self.config.workers * self.config.requests_per_worker}")
+            print(f"Streaming: {self.config.streaming}")
+            print()
+            print(f"Results will be stored in: {self.config.log_file}")
+            print()
 
         # Create workers
         workers = []
         for worker_id in range(1, self.config.workers + 1):
-            worker = LoadTestWorker(worker_id, self.config, self.stats)
+            worker = LoadTestWorker(worker_id, self.config, self.stats, self.shared_state, self.model_fetcher)
             workers.append(worker)
 
-        print(f"Starting {len(workers)} workers...")
+        if self.config.verbose:
+            print(f"Starting {len(workers)} workers...")
 
         # Create HTTP session
         connector = aiohttp.TCPConnector(limit=self.config.workers * 2)
@@ -425,8 +561,24 @@ class LoadTester:
 
         async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
             try:
+                # First, ensure model information is available
+                if self.config.verbose:
+                    print("Fetching model information...")
+                model_available = await self.model_fetcher.ensure_model_available(session, self.config.model_fetch_retry_interval)
+                if not model_available:
+                    if self.config.verbose:
+                        print("ModelFetcher was cancelled. Exiting.", file=sys.stderr)
+                    return
+
+                if self.config.verbose:
+                    print(f"Model information ready. Available models: {self.shared_state.model_names}")
+
+                # Create a background task to handle model re-fetching when needed
+                model_monitor_task = asyncio.create_task(self._monitor_model_availability(session))
+
                 # Create tasks for all workers
                 self.tasks = [asyncio.create_task(worker.run(session)) for worker in workers]
+                self.tasks.append(model_monitor_task)  # Include monitor task for cleanup
 
                 # Monitor progress - update stats start time to actual test start
                 start_time = time.time()
@@ -464,9 +616,15 @@ class LoadTester:
                               f"Words/sec: {words_per_second:.1f}, Chars/sec: {chars_per_second:.1f}")
                         last_report = int(current_time)
 
-                    # Check if all workers completed
+                    # Check if all workers completed or all requests finished
+                    total_expected_requests = self.config.workers * self.config.requests_per_worker
                     if all(task.done() for task in self.tasks):
                         print("All workers completed before time limit.")
+                        break
+                    elif self.stats.total_requests >= total_expected_requests:
+                        print(f"All {total_expected_requests} requests completed before time limit.")
+                        # Signal workers to stop
+                        self.running = False
                         break
 
                     await asyncio.sleep(0.1)
@@ -475,6 +633,8 @@ class LoadTester:
                     print("Interrupted by user.")
                 elif time.time() - start_time >= self.config.duration_sec:
                     print("Time limit reached. Stopping workers...")
+                else:
+                    print("All requests completed successfully.")
 
             except KeyboardInterrupt:
                 print("\nKeyboard interrupt received during execution.")
@@ -484,7 +644,8 @@ class LoadTester:
             # Clean shutdown of remaining workers
             remaining_tasks = [task for task in self.tasks if not task.done()]
             if remaining_tasks:
-                print("Cleaning up remaining workers...")
+                if self.config.verbose:
+                    print("Cleaning up remaining workers...")
                 # Cancel remaining tasks
                 for task in remaining_tasks:
                     task.cancel()
@@ -497,18 +658,44 @@ class LoadTester:
 
         self._finalize_and_report()
 
+    async def _monitor_model_availability(self, session: aiohttp.ClientSession) -> None:
+        """Background task that monitors for model re-fetch requests."""
+        while self.running and not self.interrupted:
+            try:
+                # Wait for a re-fetch request
+                await self.shared_state.refetch_requested_event.wait()
+
+                if self.interrupted:
+                    break
+
+                print("ModelFetcher: Re-fetch request received", file=sys.stderr)
+                # Clear the event and re-fetch models
+                self.shared_state.refetch_requested_event.clear()
+                await self.model_fetcher.ensure_model_available(session, self.config.model_fetch_retry_interval)
+
+            except asyncio.CancelledError:
+                if self.config.verbose:
+                    print("ModelFetcher: Monitor task cancelled", file=sys.stderr)
+                break
+            except Exception as e:
+                print(f"ModelFetcher: Monitor task error: {e}", file=sys.stderr)
+                await asyncio.sleep(1.0)
+
+
     def _finalize_and_report(self) -> None:
         """Finalize statistics and generate report."""
         self.stats.finalize()
 
-        print("Collecting results...")
-        print()
+        if self.config.verbose:
+            print("Collecting results...")
+            print()
 
         # Write detailed logs
         self._write_logs()
 
         # Print summary
-        self._print_summary()
+        if self.config.verbose:
+            self._print_summary()
 
     def _write_logs(self) -> None:
         """Write detailed logs to file."""
@@ -571,7 +758,7 @@ class LoadTester:
         print(f"Total requests:        {self.stats.total_requests}")
         print(f"Successful requests:   {self.stats.successful_requests}")
         print(f"Failed requests:       {self.stats.failed_requests}")
-        print(f"Requests per second:   {rps:.0f}")
+        print(f"Requests per second:   {rps:.2f}")
         print(f"Total words:           {total_words}")
         print(f"Words per second:      {words_per_second:.1f}")
         print(f"Total characters:      {total_chars}")
@@ -609,8 +796,8 @@ Examples:
                         help='Requests per worker (default: 100)')
     parser.add_argument('--port', type=int, default=8000,
                         help='Backend port (default: 8000)')
-    parser.add_argument('--model', default="Qwen/Qwen3-0.6B",
-                        help='Model name (default: Qwen/Qwen3-0.6B)')
+    parser.add_argument('--model', default=None,
+                        help='Model name (default: None - will use first available model)')
     parser.add_argument('--max-tokens', type=int, default=300,
                         help='Maximum tokens to generate (default: 300)')
     parser.add_argument('--version', choices=['v1_chat_completion', 'v1_completion'],
@@ -620,6 +807,10 @@ Examples:
                         help='Enable streaming responses')
     parser.add_argument('--output', action='store_true',
                         help='Show server responses in output')
+    parser.add_argument('--verbose', action='store_true',
+                        help='Show verbose startup and progress information')
+    parser.add_argument('--model-fetch-retry-interval', type=float, default=2.0,
+                        help='Seconds between model fetch retries (default: 2.0)')
 
     args = parser.parse_args()
 
@@ -632,7 +823,9 @@ Examples:
     config.max_tokens = args.max_tokens
     config.streaming = args.stream
     config.output_responses = args.output
+    config.verbose = args.verbose
     config.version = args.version
+    config.model_fetch_retry_interval = args.model_fetch_retry_interval
 
     return config
 
