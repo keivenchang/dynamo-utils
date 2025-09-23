@@ -46,7 +46,7 @@ USER=$(whoami)
 DEST_SRC_DIR_GLOB="${DEVCONTAINER_SRC_DIR:-$HOME/nvidia/dynamo}"
 
 # Define list of elements
-FRAMEWORKS=("VLLM" "SGLANG" "TRTLLM""NONE")
+FRAMEWORKS=("VLLM" "SGLANG" "TRTLLM")
 
 # Define development-related config files to sync
 DEVCONTAINER_SRC="devcontainer.json"
