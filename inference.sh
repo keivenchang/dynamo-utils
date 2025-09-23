@@ -50,6 +50,109 @@ get_available_frameworks() {
     fi
 }
 
+# Function to detect which frameworks are actually installed
+detect_installed_frameworks() {
+    local installed_frameworks=""
+
+    # Check for vLLM
+    if python -c "import vllm" >/dev/null 2>&1; then
+        installed_frameworks="$installed_frameworks vllm"
+    fi
+
+    # Check for TensorRT-LLM
+    if python -c "import tensorrt_llm" >/dev/null 2>&1; then
+        installed_frameworks="$installed_frameworks trtllm"
+    fi
+
+    # Check for SGLang
+    if python -c "import sglang" >/dev/null 2>&1; then
+        installed_frameworks="$installed_frameworks sglang"
+    fi
+
+    echo "$installed_frameworks" | sed 's/^ *//'
+}
+
+# Function to resolve model type to actual model path
+resolve_model() {
+    local model_input="$1"
+
+    # Handle empty or unspecified model (default to qwen)
+    if [ -z "$model_input" ] || [ "$model_input" = "" ]; then
+        model_input="qwen"
+    fi
+
+    # Map predefined model shortcuts to actual model paths
+    case "$model_input" in
+        "deepseek")
+            echo "$DEEPSEEK_MODEL"
+            ;;
+        "tinyllama")
+            echo "$TINYLLAMA_MODEL"
+            ;;
+        "qwen")
+            echo "$QWEN_MODEL"
+            ;;
+        *)
+            # Use custom model path as specified by user
+            echo "$model_input"
+            ;;
+    esac
+}
+
+# Function to validate model availability
+validate_model() {
+    local model="$1"
+
+    # Try to validate the model using Python
+    if python -c "
+import sys
+try:
+    from transformers import AutoTokenizer
+    tokenizer = AutoTokenizer.from_pretrained('$model', trust_remote_code=True)
+    print('Model validation successful')
+    sys.exit(0)
+except Exception as e:
+    print(f'Model validation failed: {e}')
+    sys.exit(1)
+" >/dev/null 2>&1; then
+        echo "✅ Model(s) found: $model"
+        return 0
+    else
+        echo "❌ Error: Model '$model' not found or not accessible"
+        echo "Please ensure the model exists and is accessible"
+        return 1
+    fi
+}
+
+# Function to auto-select framework
+auto_select_framework() {
+    local installed=$(detect_installed_frameworks)
+    local available=$(get_available_frameworks)
+
+    if [ "$installed" = "" ]; then
+        echo "❌ Error: No supported frameworks are installed"
+        echo "Available framework directories: $available"
+        echo "Please install one of: vllm, tensorrt_llm, sglang, llama_cpp"
+        exit 1
+    fi
+
+    # Priority order: vllm > trtllm > sglang > llama_cpp
+    for framework in vllm trtllm sglang llama_cpp; do
+        if echo "$installed" | grep -q "$framework"; then
+            # Also check if the backend directory exists
+            if [ -d "$BACKENDS/$framework" ]; then
+                echo "$framework"
+                return
+            fi
+        fi
+    done
+
+    # If we get here, frameworks are installed but no backend directories exist
+    echo "❌ Error: Frameworks installed ($installed) but no matching backend directories found"
+    echo "Available backend directories: $available"
+    exit 1
+}
+
 # Function to handle dry run output
 dry_run_echo() {
     if [ "$DRY_RUN" = true ]; then
@@ -71,6 +174,9 @@ dry_run_exec() {
 # Help function
 show_help() {
     local available_frameworks=$(get_available_frameworks)
+    local installed_frameworks=$(detect_installed_frameworks)
+    local auto_selected=$(auto_select_framework 2>/dev/null || echo "none")
+
     cat << EOF
 Usage: $0 [OPTIONS]
 
@@ -80,30 +186,37 @@ OPTIONS:
     -h, --help    Show this help message and exit
 
     --model MODEL Specify the model to use
-                  Options: "deepseek" (deepseek-ai/DeepSeek-R1-Distill-Llama-8B)
-                           "tinyllama" (TinyLlama/TinyLlama-1.1B-Chat-v1.0)
-                          Default: "qwen" (Qwen/Qwen3-0.6B)
-    --framework FRAMEWORK Specify the framework directory
-                         Available: $available_frameworks
-                         Default: "vllm"
+                  Predefined options: "deepseek" (deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B)
+                                     "tinyllama" (TinyLlama/TinyLlama-1.1B-Chat-v1.0)
+                                     "qwen" (Qwen/Qwen3-0.6B)
+                  Or specify any custom model path (e.g., "microsoft/DialoGPT-medium")
+                  Default: "qwen" (Qwen/Qwen3-0.6B)
+    --framework FRAMEWORK Specify the framework to use
+                         Available directories: $available_frameworks
+                         Installed frameworks: $installed_frameworks
+                         Auto-selected: $auto_selected
+                         Default: auto-detect (or "vllm" if auto-detection fails)
     --dryrun, --dry-run Show what would be executed without running
                        (dry run mode)
 
 DESCRIPTION:
     This script builds the workspace and runs Dynamo inference in aggregation mode.
+    The script will automatically detect which framework is installed and available.
+    Use --framework to override auto-detection.
     Use --model to specify which model to use for inference.
     Use --dryrun or --dry-run to see what would be executed without running.
 EOF
 }
 
 # Parse command line arguments
-MODEL_SPECIFIED=false
 DRY_RUN=false
+FRAMEWORK_SPECIFIED=false
 QWEN_MODEL="Qwen/Qwen3-0.6B"
+TINYLLAMA_MODEL="TinyLlama/TinyLlama-1.1B-Chat-v1.0"
 # deepseek-ai/DeepSeek-R1-Distill-Llama-8B
 DEEPSEEK_MODEL="deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"
-MODEL="$QWEN_MODEL"
-FRAMEWORK="vllm"
+MODEL_INPUT=""  # Will store the user's model input, empty means default
+FRAMEWORK=""  # Will be auto-detected if not specified
 while [[ $# -gt 0 ]]; do
     case $1 in
         -h|--help)
@@ -112,14 +225,12 @@ while [[ $# -gt 0 ]]; do
             ;;
 
         --model)
-            MODEL_SPECIFIED=true
-            if [ "$2" = "deepseek" ]; then
-                MODEL="$DEEPSEEK_MODEL"
-            fi
+            MODEL_INPUT="$2"
             shift 2
             ;;
         --framework)
             FRAMEWORK="$2"
+            FRAMEWORK_SPECIFIED=true
             shift 2
             ;;
         --dryrun|--dry-run)
@@ -133,6 +244,29 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
+
+# Resolve model input to actual model path
+MODEL=$(resolve_model "$MODEL_INPUT")
+
+# Auto-detect framework if not specified
+if [ "$FRAMEWORK_SPECIFIED" = false ]; then
+    echo "Auto-detecting framework..."
+    FRAMEWORK=$(auto_select_framework)
+    echo "✅ Auto-selected framework: $FRAMEWORK"
+else
+    echo "Using specified framework: $FRAMEWORK"
+fi
+
+# Validate model availability
+if [ "$DRY_RUN" = false ]; then
+    echo "Validating model: $MODEL"
+    if ! validate_model "$MODEL"; then
+        exit 1
+    fi
+else
+    dry_run_echo "Would validate model: $MODEL"
+    dry_run_echo "✅ Model(s) found: $MODEL"
+fi
 
 # Note: The script now runs in aggregation mode by default, so --model can be used
 
@@ -218,18 +352,30 @@ if [ "$DRY_RUN" = false ]; then
     # Check if required ports are available before starting services
     check_ports_available
 
+    # Set framework-specific arguments
+    if [ "$FRAMEWORK" = "vllm" ]; then
+        FRAMEWORK_ARGS="--gpu-memory-utilization 0.20 --enforce-eager --no-enable-prefix-caching --max-num-seqs 64"
+    elif [ "$FRAMEWORK" = "trtllm" ]; then
+        FRAMEWORK_ARGS="--free-gpu-memory-fraction 0.20 --max-num-tokens 8192 --max-batch-size 64"
+    elif [ "$FRAMEWORK" = "sglang" ]; then
+        FRAMEWORK_ARGS="--mem-fraction-static 0.20 --max-running-requests 64"
+    else
+        FRAMEWORK_ARGS=""
+    fi
     # Start background processes
+    set -x
     python -m dynamo.frontend &
     FRONTEND_PID=$!
-
     unset HF_TOKEN
+
     DYN_SYSTEM_ENABLED=true DYN_SYSTEM_PORT=$DYN_BACKEND_PORT \
-    python -m dynamo.vllm --model Qwen/Qwen3-0.6B --gpu-memory-utilization 0.20 --enforce-eager --no-enable-prefix-caching &
-    VLLM_PID=$!
+    python -m dynamo.$FRAMEWORK --model "$MODEL" $FRAMEWORK_ARGS &
+    BACKEND_PID=$!
+    set +x > /dev/null
 
     # Wait for both processes
-    echo "Launched frontend and vllm processes. Press Ctrl+C to exit."
-    wait $FRONTEND_PID $VLLM_PID
+    echo "Launched frontend and $FRAMEWORK processes. Press Ctrl+C to exit."
+    wait $FRONTEND_PID $BACKEND_PID
 else
     # Set up trap to kill all background processes on exit
     dry_run_echo "trap 'echo Cleaning up...; kill \$(jobs -p) 2>/dev/null || true; exit' INT TERM EXIT"
@@ -256,10 +402,20 @@ else
     dry_run_echo "FRONTEND_PID=\$!"
 
     dry_run_echo "unset HF_TOKEN"
-    dry_run_echo "DYN_SYSTEM_ENABLED=true DYN_SYSTEM_PORT=$DYN_BACKEND_PORT python -m dynamo.vllm --model Qwen/Qwen3-0.6B --gpu-memory-utilization 0.20 --enforce-eager --no-enable-prefix-caching &"
-    dry_run_echo "VLLM_PID=\$!"
+    # Set framework-specific arguments
+    if [ "$FRAMEWORK" = "vllm" ]; then
+        FRAMEWORK_ARGS="--gpu-memory-utilization 0.20 --enforce-eager --no-enable-prefix-caching"
+    elif [ "$FRAMEWORK" = "trtllm" ]; then
+        FRAMEWORK_ARGS="--free-gpu-memory-fraction 0.20 --max-batch-size 64 --max-num-tokens 8192"
+    elif [ "$FRAMEWORK" = "sglang" ]; then
+        FRAMEWORK_ARGS="--mem-fraction-static 0.20"
+    else
+        FRAMEWORK_ARGS=""
+    fi
+    dry_run_echo "DYN_SYSTEM_ENABLED=true DYN_SYSTEM_PORT=$DYN_BACKEND_PORT python -m dynamo.$FRAMEWORK --model \"$MODEL\" \$FRAMEWORK_ARGS &"
+    dry_run_echo "BACKEND_PID=\$!"
 
     # Wait for both processes
-    dry_run_echo "echo \"Launched frontend and vllm processes. Press Ctrl+C to exit.\""
-    dry_run_echo "wait \$FRONTEND_PID \$VLLM_PID"
+    dry_run_echo "echo \"Launched frontend and $FRAMEWORK processes. Press Ctrl+C to exit.\""
+    dry_run_echo "wait \$FRONTEND_PID \$BACKEND_PID"
 fi
