@@ -22,7 +22,7 @@ import tempfile
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 try:
     import psutil
@@ -49,25 +49,31 @@ class DynamoBuilderTester:
         self.no_checkout = False
         self.force_run = False
         self.dest_email = None
+        self.targets = ["dev", "local-dev"]  # Default targets
+        self.repo_sha = None  # SHA to checkout
         
         # Lock file for preventing concurrent runs
         self.lock_file = self.script_dir / f".{Path(__file__).name}.lock"
     
     def log_info(self, message: str) -> None:
         """Log info message"""
-        print(f"[INFO] {message}")
+        prefix = "DRYRUN [INFO]" if self.dry_run else "[INFO]"
+        print(f"{prefix} {message}")
     
     def log_success(self, message: str) -> None:
         """Log success message"""
-        print(f"[SUCCESS] {message}")
+        prefix = "DRYRUN [SUCCESS]" if self.dry_run else "[SUCCESS]"
+        print(f"{prefix} {message}")
     
     def log_error(self, message: str) -> None:
         """Log error message"""
-        print(f"[ERROR] {message}")
+        prefix = "DRYRUN [ERROR]" if self.dry_run else "[ERROR]"
+        print(f"{prefix} {message}")
     
     def log_warning(self, message: str) -> None:
         """Log warning message"""
-        print(f"[WARNING] {message}")
+        prefix = "DRYRUN [WARNING]" if self.dry_run else "[WARNING]"
+        print(f"{prefix} {message}")
     
     def convert_pr_links(self, message: str) -> str:
         """Convert PR references like (#3107) to GitHub links"""
@@ -80,6 +86,40 @@ class DynamoBuilderTester:
             return f'(<a href="https://github.com/ai-dynamo/dynamo/pull/{pr_number}" style="color: #0066cc;">#{pr_number}</a>)'
         
         return re.sub(pr_pattern, replace_pr, message)
+    
+    def convert_target_for_build(self, target: str) -> Optional[str]:
+        """Convert target name for build commands. 'dev' becomes None, others stay as-is"""
+        return None if target == "dev" else target
+    
+    def html_escape(self, text: str) -> str:
+        """Escape HTML special characters"""
+        return (text.replace("&", "&amp;")
+                   .replace("<", "&lt;")
+                   .replace(">", "&gt;")
+                   .replace('"', "&quot;")
+                   .replace("'", "&#x27;"))
+    
+    def format_author_html(self, author: str) -> str:
+        """Format author information as proper HTML with mailto link"""
+        import re
+        
+        # Pattern to match "Name <email> (login)" or "Name <email>"
+        pattern = r'^(.+?)\s*<([^>]+)>(?:\s*\(([^)]+)\))?$'
+        match = re.match(pattern, author.strip())
+        
+        if match:
+            name = match.group(1).strip()
+            email = match.group(2).strip()
+            login = match.group(3).strip() if match.group(3) else None
+            
+            # Create HTML with clickable email
+            if login:
+                return f'{self.html_escape(name)} &lt;<a href="mailto:{email}" style="color: #0066cc; text-decoration: none;">{email}</a>&gt; ({self.html_escape(login)})'
+            else:
+                return f'{self.html_escape(name)} &lt;<a href="mailto:{email}" style="color: #0066cc; text-decoration: none;">{email}</a>&gt;'
+        else:
+            # Fallback: just escape the whole string
+            return self.html_escape(author)
     
     def get_failure_details(self, framework: str, docker_target_type: str) -> str:
         """Get failure details from log files for a failed test"""
@@ -106,7 +146,7 @@ class DynamoBuilderTester:
         except Exception as e:
             return f"Error reading log file: {e}"
     
-    def send_email_notification(self, results: dict, failure_details: dict = None) -> None:
+    def send_email_notification(self, results: dict, failure_details: Optional[Dict[str, str]] = None) -> None:
         """Send email notification with test results
         
         Args:
@@ -186,8 +226,23 @@ h2 {{ margin: 0; font-size: 1.1em; font-weight: normal; }}
 <div class="git-info">
 <p><strong>Commit SHA:</strong> {git_info['sha']}</p>
 <p><strong>Commit Date:</strong> {git_info['date']}</p>
-<p><strong>Commit Message:</strong> {self.convert_pr_links(git_info['message'])}</p>
-<p><strong>Author:</strong> {git_info['author']}</p>
+<p><strong>Commit Message:</strong> {self.convert_pr_links(self.html_escape(git_info['message']))}</p>
+<p><strong>Author:</strong> {self.format_author_html(git_info['author'])}</p>"""
+            
+            # Add file changes information if available
+            if git_info.get('changed_files') or git_info.get('diff_stats'):
+                html_content += f"""
+<p><strong>Changes Summary:</strong> +{git_info.get('total_additions', 0)}/-{git_info.get('total_deletions', 0)} lines</p>"""
+                
+                # Add detailed diff stats (combine files and line changes in one section)
+                if git_info.get('diff_stats'):
+                    html_content += "<p><strong>Files Changed with Line Counts:</strong></p>"
+                    html_content += '<div style="background-color: #f8f9fa; padding: 6px; border-radius: 3px; font-family: monospace; font-size: 0.9em; margin: 3px 0;">'
+                    for stat in git_info['diff_stats']:
+                        html_content += f"• {self.html_escape(stat)}<br>"
+                    html_content += "</div>"
+            
+            html_content += """
 </div>
 
 <div class="results">
@@ -202,17 +257,23 @@ h2 {{ margin: 0; font-size: 1.1em; font-weight: normal; }}
             for framework in sorted(tested_frameworks):
                 html_content += f'<div class="framework"><h4>Dockerfile.{framework.lower()} targets:</h4>'
                 
-                for target in ['dev', 'local-dev']:
+                # Get all targets tested for this framework
+                framework_targets = set()
+                for key in results.keys():
+                    if key.startswith(f"{framework}_"):
+                        target = key[len(f"{framework}_"):]
+                        framework_targets.add(target)
+                
+                for target in sorted(framework_targets):
                     key = f"{framework}_{target}"
                     if key in results:  # Only show targets that were actually tested
                         status = "SUCCESS" if results[key] else "FAILURE"
                         css_class = "success" if status == "SUCCESS" else "failure"
-                        target_display = "dev" if target == "dev" else "local-dev"
                         
                         if status == "SUCCESS":
-                            html_content += f'<p>✅ {target_display} target: <span class="{css_class}">PASSED</span></p>'
+                            html_content += f'<p>✅ {target} target: <span class="{css_class}">PASSED</span></p>'
                         else:
-                            html_content += f'<p>❌ {target_display} target: <span class="{css_class}">FAILED</span></p>'
+                            html_content += f'<p>❌ {target} target: <span class="{css_class}">FAILED</span></p>'
                             # Add error output if available
                             if key in failure_details and failure_details[key]:
                                 error_lines = failure_details[key].split('\\n')
@@ -269,7 +330,8 @@ h2 {{ margin: 0; font-size: 1.1em; font-weight: normal; }}
         """Execute command with dry-run support"""
         # Show command in shell tracing format
         cmd_str = " ".join(shlex.quote(str(arg)) for arg in command)
-        print(f"+ {cmd_str}")
+        prefix = "DRYRUN +" if self.dry_run else "+"
+        print(f"{prefix} {cmd_str}")
         
         # Only execute if not in dry-run mode
         if not self.dry_run:
@@ -366,7 +428,7 @@ h2 {{ margin: 0; font-size: 1.1em; font-weight: normal; }}
         """Setup or update dynamo_ci repository"""
         self.log_info("Setting up dynamo_ci repository...")
         
-        if self.no_checkout:
+        if self.no_checkout and not self.repo_sha:
             self.log_info("NO-CHECKOUT MODE: Skipping git operations, using existing repository")
             
             if not self.dynamo_ci_dir.exists():
@@ -376,21 +438,58 @@ h2 {{ margin: 0; font-size: 1.1em; font-weight: normal; }}
             
             self.log_success(f"Using existing repository at {self.dynamo_ci_dir}")
             return
+        elif self.no_checkout and self.repo_sha:
+            self.log_info(f"NO-CHECKOUT MODE with SHA override: Will checkout specific SHA {self.repo_sha} but skip other git operations")
+            
+            if not self.dynamo_ci_dir.exists():
+                self.log_error(f"dynamo_ci directory does not exist at {self.dynamo_ci_dir}")
+                self.log_error("Cannot use --no-checkout without existing repository")
+                sys.exit(1)
         
         if not self.dynamo_ci_dir.exists():
             self.log_info(f"Cloning dynamo repository to {self.dynamo_ci_dir}")
             self.cmd(["git", "clone", "git@github.com:ai-dynamo/dynamo.git", str(self.dynamo_ci_dir)])
+            
+            # If we need to checkout a specific SHA after cloning, we'll do it below
         else:
-            self.log_info("dynamo_ci directory exists, updating from main branch")
+            if self.repo_sha:
+                self.log_info(f"dynamo_ci directory exists, will checkout specific SHA: {self.repo_sha}")
+            else:
+                self.log_info("dynamo_ci directory exists, updating from main branch")
             
             # Check if it's a git repository (only in non-dry-run mode)
             if not self.dry_run and not (self.dynamo_ci_dir / ".git").exists():
                 self.log_error("dynamo_ci exists but is not a git repository")
                 sys.exit(1)
-            
-            # Fetch and pull from main
-            os.chdir(self.dynamo_ci_dir)
+        
+        # Change to repository directory for git operations
+        os.chdir(self.dynamo_ci_dir)
+        
+        # Only fetch if not in no-checkout mode (unless we need to checkout a SHA)
+        if not self.no_checkout:
+            # Fetch latest changes from origin
             self.cmd(["git", "fetch", "origin"])
+        
+        if self.repo_sha:
+            # Checkout specific SHA
+            self.log_info(f"Checking out specific SHA: {self.repo_sha}")
+            self.cmd(["git", "checkout", self.repo_sha])
+            
+            # Validate that we're on the correct SHA
+            if not self.dry_run:
+                result = subprocess.run(["git", "rev-parse", "HEAD"], 
+                                      capture_output=True, text=True)
+                if result.returncode == 0:
+                    current_sha = result.stdout.strip()
+                    if current_sha.startswith(self.repo_sha) or self.repo_sha.startswith(current_sha):
+                        self.log_success(f"Successfully checked out SHA: {current_sha}")
+                    else:
+                        self.log_error(f"SHA mismatch: requested {self.repo_sha}, got {current_sha}")
+                        sys.exit(1)
+                else:
+                    self.log_warning("Could not verify current SHA")
+        elif not self.no_checkout:
+            # Default behavior: checkout and pull main (only if not in no-checkout mode)
             self.cmd(["git", "checkout", "main"])
             self.cmd(["git", "pull", "origin", "main"])
         
@@ -402,10 +501,11 @@ h2 {{ margin: 0; font-size: 1.1em; font-weight: normal; }}
         if not self.dry_run:
             self.log_dir.mkdir(parents=True, exist_ok=True)
         else:
-            print(f"+ mkdir -p {self.log_dir}")
+            prefix = "DRYRUN +" if self.dry_run else "+"
+            print(f"{prefix} mkdir -p {self.log_dir}")
         self.log_success(f"Date-based log directory created at {self.log_dir}")
     
-    def cleanup_existing_logs(self, framework: str = None) -> None:
+    def cleanup_existing_logs(self, framework: Optional[str] = None) -> None:
         """Clean up existing log files for current date and optionally specific framework"""
         if framework:
             self.log_info(f"Cleaning up existing log files for date: {self.date}, framework: {framework}")
@@ -454,7 +554,8 @@ h2 {{ margin: 0; font-size: 1.1em; font-weight: normal; }}
                 patterns = [f"{self.date}.*.log", f"{self.date}.*.SUCC", f"{self.date}.*.FAIL"]
             
             for pattern in patterns:
-                print(f"+ rm -f {self.log_dir}/{pattern}")
+                prefix = "DRYRUN +" if self.dry_run else "+"
+                print(f"{prefix} rm -f {self.log_dir}/{pattern}")
             
             if framework:
                 self.log_info(f"Would remove existing log files for {self.date} and {framework} (dry-run)")
@@ -531,15 +632,74 @@ h2 {{ margin: 0; font-size: 1.1em; font-weight: normal; }}
             commit_message = msg_result.stdout.strip() if msg_result.returncode == 0 else "unknown"
             
             # Get author (the actual person who wrote the code)
-            author_result = subprocess.run(['git', 'log', '-1', '--format=%an <%ae>'], 
+            author_result = subprocess.run(['git', 'log', '-1', '--format=%an <%ae> (%al)'], 
                                          capture_output=True, text=True)
-            author = author_result.stdout.strip() if author_result.returncode == 0 else "unknown"
+            if author_result.returncode == 0 and author_result.stdout.strip():
+                author = author_result.stdout.strip()
+            else:
+                # Fallback: try to get name, email, and login separately
+                name_result = subprocess.run(['git', 'log', '-1', '--format=%an'], 
+                                           capture_output=True, text=True)
+                email_result = subprocess.run(['git', 'log', '-1', '--format=%ae'], 
+                                            capture_output=True, text=True)
+                login_result = subprocess.run(['git', 'log', '-1', '--format=%al'], 
+                                            capture_output=True, text=True)
+                if name_result.returncode == 0 and email_result.returncode == 0:
+                    name = name_result.stdout.strip()
+                    email = email_result.stdout.strip()
+                    login = login_result.stdout.strip() if login_result.returncode == 0 else ""
+                    if name and email:
+                        author = f"{name} <{email}> ({login})" if login else f"{name} <{email}>"
+                    else:
+                        author = "unknown"
+                else:
+                    author = "unknown"
+            
+            # Get files changed in the commit
+            files_result = subprocess.run(['git', 'diff-tree', '--no-commit-id', '--name-only', '-r', 'HEAD'], 
+                                        capture_output=True, text=True)
+            changed_files = []
+            if files_result.returncode == 0 and files_result.stdout.strip():
+                changed_files = [f.strip() for f in files_result.stdout.strip().split('\n') if f.strip()]
+            
+            # Get diff statistics (lines added/removed)
+            stats_result = subprocess.run(['git', 'diff-tree', '--no-commit-id', '--numstat', '-r', 'HEAD'], 
+                                        capture_output=True, text=True)
+            diff_stats = []
+            total_additions = 0
+            total_deletions = 0
+            
+            if stats_result.returncode == 0 and stats_result.stdout.strip():
+                for line in stats_result.stdout.strip().split('\n'):
+                    if line.strip():
+                        parts = line.strip().split('\t')
+                        if len(parts) >= 3:
+                            additions = parts[0]
+                            deletions = parts[1] 
+                            filename = parts[2]
+                            
+                            # Handle binary files (marked with '-')
+                            if additions == '-' or deletions == '-':
+                                diff_stats.append(f"{filename}: Binary file")
+                            else:
+                                try:
+                                    add_count = int(additions)
+                                    del_count = int(deletions)
+                                    total_additions += add_count
+                                    total_deletions += del_count
+                                    diff_stats.append(f"{filename}: +{add_count}/-{del_count}")
+                                except ValueError:
+                                    diff_stats.append(f"{filename}: Invalid stats")
             
             return {
                 'sha': commit_sha,
                 'date': commit_date,
                 'message': commit_message,
-                'author': author
+                'author': author,
+                'changed_files': changed_files,
+                'diff_stats': diff_stats,
+                'total_additions': total_additions,
+                'total_deletions': total_deletions
             }
         except Exception as e:
             self.log_warning(f"Could not get git info: {e}")
@@ -547,7 +707,11 @@ h2 {{ margin: 0; font-size: 1.1em; font-weight: normal; }}
                 'sha': "unknown",
                 'date': "unknown", 
                 'message': "unknown",
-                'author': "unknown"
+                'author': "Unknown Author <unknown@unknown.com> (unknown)",
+                'changed_files': [],
+                'diff_stats': [],
+                'total_additions': 0,
+                'total_deletions': 0
             }
 
     def get_git_commit_sha(self) -> str:
@@ -567,21 +731,21 @@ h2 {{ margin: 0; font-size: 1.1em; font-weight: normal; }}
     
     def get_stored_sha(self) -> str:
         """Get stored SHA from file"""
-        sha_file = self.dynamo_ci_dir / ".last_build_sha"
+        sha_file = self.dynamo_ci_dir / ".last_build_composite_sha"
         if sha_file.exists():
             return sha_file.read_text().strip()
         return ""
     
     def store_composite_sha(self, sha: str) -> None:
         """Store current composite SHA to file"""
-        sha_file = self.dynamo_ci_dir / ".last_build_sha"
+        sha_file = self.dynamo_ci_dir / ".last_build_composite_sha"
         sha_file.write_text(sha)
         self.log_info(f"Stored composite SHA in repository: {sha}")
     
     def check_if_rebuild_needed(self) -> bool:
         """Check if rebuild is needed based on composite SHA"""
         self.log_info("Checking if rebuild is needed based on file changes...")
-        self.log_info(f"Composite SHA file location: {self.dynamo_ci_dir}/.last_build_sha")
+        self.log_info(f"Composite SHA file location: {self.dynamo_ci_dir}/.last_build_composite_sha")
         
         # Generate current composite SHA
         current_sha = self.generate_composite_sha()
@@ -725,7 +889,8 @@ h2 {{ margin: 0; font-size: 1.1em; font-weight: normal; }}
                 
                 for i, docker_cmd in enumerate(docker_commands):
                     self.log_info(f"Executing docker build command {i+1}/{len(docker_commands)}")
-                    print(f"+ {docker_cmd}")
+                    prefix = "DRYRUN +" if self.dry_run else "+"
+                    print(f"{prefix} {docker_cmd}")
                     f.write(f"+ {docker_cmd}\n")
                     f.flush()
                     
@@ -737,14 +902,15 @@ h2 {{ margin: 0; font-size: 1.1em; font-weight: normal; }}
                     )
                     
                     # Stream output line by line
-                    while True:
-                        output = process.stdout.readline()
-                        if output == '' and process.poll() is not None:
-                            break
-                        if output:
-                            print(output.strip())  # Show on console
-                            f.write(output)  # Write to log file
-                            f.flush()  # Ensure immediate write
+                    if process.stdout:
+                        while True:
+                            output = process.stdout.readline()
+                            if output == '' and process.poll() is not None:
+                                break
+                            if output:
+                                print(output.strip())  # Show on console
+                                f.write(output)  # Write to log file
+                                f.flush()  # Ensure immediate write
                     
                     if process.returncode != 0:
                         self.log_error(f"Docker build command {i+1} failed for {framework}")
@@ -784,7 +950,7 @@ h2 {{ margin: 0; font-size: 1.1em; font-weight: normal; }}
         commit_sha = self.get_git_commit_sha()
         
         # Get image tag using our build commands method (reuse the tag discovery logic)
-        target_param = None if docker_target_type == "dev" else docker_target_type
+        target_param = self.convert_target_for_build(docker_target_type)
         success, _, image_name = self.get_build_commands(framework, target_param)
         if not success:
             self.log_error(f"Failed to discover image tag for {framework} {docker_target_type}")
@@ -826,7 +992,7 @@ h2 {{ margin: 0; font-size: 1.1em; font-weight: normal; }}
             print("=" * 60)
             
             # Get build commands
-            target_param = None if docker_target_type == "dev" else docker_target_type
+            target_param = self.convert_target_for_build(docker_target_type)
             success, docker_commands, image_tag = self.get_build_commands(framework, target_param)
             if not success:
                 if not self.dry_run:
@@ -875,7 +1041,8 @@ h2 {{ margin: 0; font-size: 1.1em; font-weight: normal; }}
                         break
                 
                 if docker_cmd and not self.dry_run:
-                    print(f"+ timeout 30 {docker_cmd}")
+                    prefix = "DRYRUN +" if self.dry_run else "+"
+                    print(f"{prefix} timeout 30 {docker_cmd}")
                     try:
                         with open(log_file, 'a') as f:
                             # Run container test with real-time output
@@ -886,14 +1053,15 @@ h2 {{ margin: 0; font-size: 1.1em; font-weight: normal; }}
                             )
                             
                             # Stream output line by line
-                            while True:
-                                output = process.stdout.readline()
-                                if output == '' and process.poll() is not None:
-                                    break
-                                if output:
-                                    print(output.strip())  # Show on console
-                                    f.write(output)  # Write to log file
-                                    f.flush()  # Ensure immediate write
+                            if process.stdout:
+                                while True:
+                                    output = process.stdout.readline()
+                                    if output == '' and process.poll() is not None:
+                                        break
+                                    if output:
+                                        print(output.strip())  # Show on console
+                                        f.write(output)  # Write to log file
+                                        f.flush()  # Ensure immediate write
                             
                             result = process
                             result.returncode = process.poll()
@@ -921,7 +1089,8 @@ h2 {{ margin: 0; font-size: 1.1em; font-weight: normal; }}
                         return False
                         
                 elif docker_cmd:
-                    self.cmd(["timeout", "30", "bash", "-c", docker_cmd])
+                    prefix = "DRYRUN +" if self.dry_run else "+"
+                    print(f"{prefix} timeout 30 {docker_cmd}")
                     self.log_success(f"Container test completed for {framework} (dry-run)")
                     self.log_info(f"Would write success to: {success_file}")
                 else:
@@ -946,24 +1115,19 @@ h2 {{ margin: 0; font-size: 1.1em; font-weight: normal; }}
         return True
     
     def test_framework(self, framework: str) -> bool:
-        """Test a framework (both dev and local-dev images)"""
+        """Test a framework with configured targets"""
         overall_success = True
         
-        self.log_info(f"Starting tests for framework: {framework} (both dev and local-dev images)")
+        targets_str = ", ".join(self.targets)
+        self.log_info(f"Starting tests for framework: {framework} (targets: {targets_str})")
         
-        # Test the regular dev image
-        if self.test_framework_image(framework, "dev"):
-            self.log_success(f"Framework {framework} dev image test completed successfully")
-        else:
-            self.log_error(f"Framework {framework} dev image test failed")
-            overall_success = False
-        
-        # Test the local-dev image
-        if self.test_framework_image(framework, "local-dev"):
-            self.log_success(f"Framework {framework} local-dev image test completed successfully")
-        else:
-            self.log_error(f"Framework {framework} local-dev image test failed")
-            overall_success = False
+        # Test each configured target
+        for target in self.targets:
+            if self.test_framework_image(framework, target):
+                self.log_success(f"Framework {framework} {target} image test completed successfully")
+            else:
+                self.log_error(f"Framework {framework} {target} image test failed")
+                overall_success = False
         
         if overall_success:
             self.log_success(f"All tests completed successfully for framework: {framework}")
@@ -1014,18 +1178,22 @@ h2 {{ margin: 0; font-size: 1.1em; font-weight: normal; }}
         print("Usage: python dynamo_docker_builder.py [OPTIONS]")
         print("")
         print("Options:")
-        print("  -f, --framework FRAMEWORK    Test specific framework (VLLM, SGLANG, TRTLLM)")
+        print("  -f, --framework FRAMEWORK    Test specific framework (VLLM, SGLANG, TRTLLM) - case insensitive")
         print("  -a, --all                    Test all frameworks (default)")
         print("  --test-only                  Skip build step and only run container tests")
-        print("  --no-checkout                Skip git operations and use existing repository")
+        print("  --no-checkout                Skip git operations and use existing repository (except when --repo-sha is used)")
         print("  --force-run                  Force run even if files haven't changed")
         print("  --dry-run, --dryrun          Show commands that would be executed without running them")
+        print("  --target TARGETS             Comma-separated Docker build targets to test: dev, local-dev (default: dev,local-dev)")
+        print("  --repo-sha SHA               Git SHA to checkout instead of latest main branch")
         print("  -h, --help                   Show this help message")
         print("")
         print("Examples:")
         print("  python dynamo_docker_builder.py                           # Test all frameworks")
         print("  python dynamo_docker_builder.py --all                     # Test all frameworks")
         print("  python dynamo_docker_builder.py --framework VLLM          # Test only VLLM framework")
+        print("  python dynamo_docker_builder.py --framework vllm          # Same as above (case insensitive)")
+        print("  python dynamo_docker_builder.py --framework sglang        # Test only SGLANG framework (case insensitive)")
         print("  python dynamo_docker_builder.py --test-only               # Skip build and only run tests for all frameworks")
         print("  python dynamo_docker_builder.py --framework VLLM --test-only  # Skip build and test only VLLM framework")
         print("  python dynamo_docker_builder.py --no-checkout             # Use existing repo without git operations")
@@ -1034,13 +1202,19 @@ h2 {{ margin: 0; font-size: 1.1em; font-weight: normal; }}
         print("  python dynamo_docker_builder.py --dry-run                 # Show what would be executed without running")
         print("  python dynamo_docker_builder.py --dryrun                  # Same as --dry-run")
         print("  python dynamo_docker_builder.py --dest-email user@nvidia.com  # Send email notifications")
+        print("  python dynamo_docker_builder.py --target dev              # Test only dev target")
+        print("  python dynamo_docker_builder.py --target local-dev        # Test only local-dev target")
+        print("  python dynamo_docker_builder.py --target dev,local-dev,custom  # Test multiple targets")
+        print("  python dynamo_docker_builder.py --repo-sha abc123def        # Test specific git commit")
+        print("  python dynamo_docker_builder.py --framework VLLM --repo-sha abc123def  # Test specific commit with VLLM only")
+        print("  python dynamo_docker_builder.py --no-checkout --repo-sha abc123def   # Use existing repo but checkout specific SHA")
         print("")
     
     def main(self) -> int:
         """Main function"""
         parser = argparse.ArgumentParser(description="DynamoDockerBuilder - Automated Docker Build and Test System")
-        parser.add_argument("-f", "--framework", choices=self.FRAMEWORKS,
-                          help="Test specific framework")
+        parser.add_argument("-f", "--framework", type=str,
+                          help="Test specific framework (VLLM, SGLANG, TRTLLM) - case insensitive")
         parser.add_argument("-a", "--all", action="store_true", default=True,
                           help="Test all frameworks (default)")
         parser.add_argument("--test-only", action="store_true",
@@ -1055,6 +1229,10 @@ h2 {{ margin: 0; font-size: 1.1em; font-weight: normal; }}
                           help="Path to the dynamo repository (default: ../dynamo_ci)")
         parser.add_argument("--dest-email", type=str, default=None,
                           help="Destination email address for notifications (sends email if specified)")
+        parser.add_argument("--target", type=str, default="dev,local-dev",
+                          help="Comma-separated Docker build targets to test: dev, local-dev (default: dev,local-dev)")
+        parser.add_argument("--repo-sha", type=str, default=None,
+                          help="Git SHA to checkout instead of latest main branch")
         
         args = parser.parse_args()
         
@@ -1069,11 +1247,34 @@ h2 {{ margin: 0; font-size: 1.1em; font-weight: normal; }}
         self.no_checkout = args.no_checkout
         self.force_run = args.force_run
         self.dest_email = args.dest_email
+        self.repo_sha = args.repo_sha
         
-        # If framework is specified, disable --all
+        # Parse targets
+        self.targets = [target.strip() for target in args.target.split(',') if target.strip()]
+        if not self.targets:
+            self.targets = ["dev", "local-dev"]  # Fallback to default
+        
+        # Validate targets - only allow known Docker build targets
+        valid_targets = ["dev", "local-dev", "runtime", "dynamo_base", "framework"]
+        invalid_targets = [t for t in self.targets if t not in valid_targets]
+        if invalid_targets:
+            valid_targets_str = ", ".join(valid_targets)
+            invalid_targets_str = ", ".join(invalid_targets)
+            self.log_error(f"Invalid target(s) '{invalid_targets_str}'. Valid Docker build targets are: {valid_targets_str}")
+            self.log_error("Note: Targets are Docker build targets (dev, local-dev, runtime, dynamo_base, framework), not framework names (VLLM, SGLANG, TRTLLM)")
+            return 1
+        
+        # If framework is specified, disable --all and validate framework name (case insensitive)
         if args.framework:
+            # Normalize framework name to uppercase for case-insensitive matching
+            framework_upper = args.framework.upper()
+            if framework_upper not in self.FRAMEWORKS:
+                valid_frameworks = ", ".join(self.FRAMEWORKS)
+                self.log_error(f"Invalid framework '{args.framework}'. Valid options are: {valid_frameworks} (case insensitive)")
+                return 1
+            
             test_all = False
-            test_framework_only = args.framework
+            test_framework_only = framework_upper  # Use the normalized uppercase version
         else:
             test_all = True
             test_framework_only = None
@@ -1093,6 +1294,8 @@ h2 {{ margin: 0; font-size: 1.1em; font-weight: normal; }}
             self.log_info("NO-CHECKOUT MODE: Skipping git operations and using existing repository")
         if self.force_run:
             self.log_info("FORCE-RUN MODE: Will run even if files haven't changed or another process is running")
+        if self.repo_sha:
+            self.log_info(f"REPO-SHA MODE: Will checkout specific SHA: {self.repo_sha}")
         
         self.log_info(f"Date: {self.date}")
         self.log_info(f"Dynamo CI Directory: {self.dynamo_ci_dir}")
@@ -1121,20 +1324,16 @@ h2 {{ margin: 0; font-size: 1.1em; font-weight: normal; }}
             self.cleanup_existing_logs(framework=test_framework_only)
             self.log_info(f"Testing single framework: {test_framework_only}")
             
-            # Collect results for both dev and local-dev targets
-            dev_success = self.test_framework_image(test_framework_only, "dev")
-            local_dev_success = self.test_framework_image(test_framework_only, "local-dev")
-            
-            test_results[f"{test_framework_only}_dev"] = dev_success
-            test_results[f"{test_framework_only}_local-dev"] = local_dev_success
-            
-            # Collect failure details for failed tests
-            if not dev_success:
-                failure_details[f"{test_framework_only}_dev"] = self.get_failure_details(test_framework_only, "dev")
-            if not local_dev_success:
-                failure_details[f"{test_framework_only}_local-dev"] = self.get_failure_details(test_framework_only, "local-dev")
-            
-            framework_success = dev_success and local_dev_success
+            # Collect results for configured targets
+            framework_success = True
+            for target in self.targets:
+                target_success = self.test_framework_image(test_framework_only, target)
+                test_results[f"{test_framework_only}_{target}"] = target_success
+                
+                # Collect failure details for failed tests
+                if not target_success:
+                    failure_details[f"{test_framework_only}_{target}"] = self.get_failure_details(test_framework_only, target)
+                    framework_success = False
             overall_success = framework_success
             
             if framework_success:
@@ -1149,22 +1348,20 @@ h2 {{ margin: 0; font-size: 1.1em; font-weight: normal; }}
             
             # Test all frameworks and collect detailed results
             for framework in self.FRAMEWORKS:
-                self.log_info(f"Starting tests for framework: {framework} (both dev and local-dev images)")
+                targets_str = ", ".join(self.targets)
+                self.log_info(f"Starting tests for framework: {framework} (targets: {targets_str})")
                 
-                # Test both dev and local-dev targets
-                dev_success = self.test_framework_image(framework, "dev")
-                local_dev_success = self.test_framework_image(framework, "local-dev")
+                # Test all configured targets
+                framework_success = True
+                for target in self.targets:
+                    target_success = self.test_framework_image(framework, target)
+                    test_results[f"{framework}_{target}"] = target_success
+                    
+                    # Collect failure details for failed tests
+                    if not target_success:
+                        failure_details[f"{framework}_{target}"] = self.get_failure_details(framework, target)
+                        framework_success = False
                 
-                test_results[f"{framework}_dev"] = dev_success
-                test_results[f"{framework}_local-dev"] = local_dev_success
-                
-                # Collect failure details for failed tests
-                if not dev_success:
-                    failure_details[f"{framework}_dev"] = self.get_failure_details(framework, "dev")
-                if not local_dev_success:
-                    failure_details[f"{framework}_local-dev"] = self.get_failure_details(framework, "local-dev")
-                
-                framework_success = dev_success and local_dev_success
                 if not framework_success:
                     overall_success = False
                 
