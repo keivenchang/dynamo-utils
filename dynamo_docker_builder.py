@@ -31,7 +31,7 @@ except ImportError:
     HAS_PSUTIL = False
 
 
-class DynamoBuildTester:
+class DynamoBuilderTester:
     """DynamoDockerBuilder - Main class for automated Docker build testing and reporting"""
     
     # Framework constants
@@ -175,17 +175,15 @@ h2 {{ margin: 0; font-size: 1.1em; font-weight: normal; }}
 </div>
 
 <div class="summary">
-<h3>Test Summary</h3>
 <p><strong>Total Tests:</strong> {total_tests}</p>
 <p><strong>Passed:</strong> <span class="success">{passed_tests}</span></p>
 <p><strong>Failed:</strong> <span class="failure">{failed_tests}</span></p>
-<p><strong>Date:</strong> {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</p>
+<p><strong>Build & Test Date:</strong> {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} PDT</p>
 </div>"""
 
             html_content += f"""
 
 <div class="git-info">
-<h3>Git Information</h3>
 <p><strong>Commit SHA:</strong> {git_info['sha']}</p>
 <p><strong>Commit Date:</strong> {git_info['date']}</p>
 <p><strong>Commit Message:</strong> {self.convert_pr_links(git_info['message'])}</p>
@@ -193,7 +191,6 @@ h2 {{ margin: 0; font-size: 1.1em; font-weight: normal; }}
 </div>
 
 <div class="results">
-<h3>Test Results</h3>
 """
             
             # Add framework results (only show frameworks that were actually tested)
@@ -513,10 +510,20 @@ h2 {{ margin: 0; font-size: 1.1em; font-weight: normal; }}
                                       capture_output=True, text=True)
             commit_sha = sha_result.stdout.strip() if sha_result.returncode == 0 else "unknown"
             
-            # Get commit date
-            date_result = subprocess.run(['git', 'log', '-1', '--format=%cd', '--date=iso'], 
-                                       capture_output=True, text=True)
-            commit_date = date_result.stdout.strip() if date_result.returncode == 0 else "unknown"
+            # Get commit date in both UTC and Pacific time
+            utc_result = subprocess.run(['git', 'log', '-1', '--format=%cd', '--date=iso'], 
+                                      capture_output=True, text=True)
+            utc_date = utc_result.stdout.strip() if utc_result.returncode == 0 else "unknown"
+            
+            pacific_result = subprocess.run(['git', 'log', '-1', '--format=%cd', '--date=format-local:%Y-%m-%d %H:%M:%S %Z'], 
+                                          capture_output=True, text=True, env={**os.environ, 'TZ': 'America/Los_Angeles'})
+            pacific_date = pacific_result.stdout.strip() if pacific_result.returncode == 0 else "unknown"
+            
+            # Combine both timezones
+            if utc_date != "unknown" and pacific_date != "unknown":
+                commit_date = f"{utc_date} UTC / {pacific_date}"
+            else:
+                commit_date = utc_date
             
             # Get commit message
             msg_result = subprocess.run(['git', 'log', '-1', '--format=%s'], 
@@ -1180,5 +1187,5 @@ h2 {{ margin: 0; font-size: 1.1em; font-weight: normal; }}
 
 
 if __name__ == "__main__":
-    tester = DynamoBuildTester()
+    tester = DynamoBuilderTester()
     sys.exit(tester.main())
