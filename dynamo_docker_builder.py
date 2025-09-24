@@ -3,9 +3,13 @@
 SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 SPDX-License-Identifier: Apache-2.0
 
-Dynamo Local Dev Build Test Script
-Tests VLLM, SGLANG, and TRTLLM frameworks with daily logging
-Build timeout: 1 hour, Container test timeout: 2 minutes
+DynamoDockerBuilder - Automated Docker Build and Test System
+Tests Dockerfile.vllm, Dockerfile.sglang, and Dockerfile.trtllm with comprehensive reporting
+- Builds and tests both dev and local-dev Docker targets
+- HTML email notifications with failure details and GitHub PR links
+- SHA-based rebuild detection to avoid unnecessary builds
+- Ultra-compact email formatting for quick scanning
+- Build timeout: 1 hour, Container test timeout: 2 minutes
 """
 
 import argparse
@@ -28,7 +32,7 @@ except ImportError:
 
 
 class DynamoBuildTester:
-    """Main class for handling Dynamo build testing"""
+    """DynamoDockerBuilder - Main class for automated Docker build testing and reporting"""
     
     # Framework constants
     FRAMEWORKS = ["VLLM", "SGLANG", "TRTLLM"]
@@ -44,6 +48,7 @@ class DynamoBuildTester:
         self.test_only = False
         self.no_checkout = False
         self.force_run = False
+        self.dest_email = None
         
         # Lock file for preventing concurrent runs
         self.lock_file = self.script_dir / f".{Path(__file__).name}.lock"
@@ -63,6 +68,205 @@ class DynamoBuildTester:
     def log_warning(self, message: str) -> None:
         """Log warning message"""
         print(f"[WARNING] {message}")
+    
+    def convert_pr_links(self, message: str) -> str:
+        """Convert PR references like (#3107) to GitHub links"""
+        import re
+        # Pattern to match (#number)
+        pr_pattern = r'\(#(\d+)\)'
+        
+        def replace_pr(match):
+            pr_number = match.group(1)
+            return f'(<a href="https://github.com/ai-dynamo/dynamo/pull/{pr_number}" style="color: #0066cc;">#{pr_number}</a>)'
+        
+        return re.sub(pr_pattern, replace_pr, message)
+    
+    def get_failure_details(self, framework: str, docker_target_type: str) -> str:
+        """Get failure details from log files for a failed test"""
+        try:
+            commit_sha = self.get_git_commit_sha()
+            framework_lower = framework.lower()
+            
+            # Determine log file suffix
+            if docker_target_type == "local-dev":
+                log_suffix = f"{commit_sha}.{framework_lower}.local-dev"
+            else:
+                log_suffix = f"{commit_sha}.{framework_lower}.dev"
+            
+            log_file = self.log_dir / f"{self.date}.{log_suffix}.log"
+            
+            if log_file.exists():
+                # Read last 20 lines of the log file
+                result = subprocess.run(['tail', '-20', str(log_file)], 
+                                      capture_output=True, text=True)
+                if result.returncode == 0 and result.stdout.strip():
+                    return result.stdout.strip()
+            
+            return f"No log file found at {log_file}"
+        except Exception as e:
+            return f"Error reading log file: {e}"
+    
+    def send_email_notification(self, results: dict, failure_details: dict = None) -> None:
+        """Send email notification with test results
+        
+        Args:
+            results: Dict mapping test keys (e.g. 'VLLM_dev') to success boolean
+            failure_details: Dict mapping failed test keys to error output strings
+        """
+        if not self.dest_email:
+            return
+            
+        if failure_details is None:
+            failure_details = {}
+            
+        if self.dry_run:
+            self.log_info(f"DRY-RUN: Would send email notification to {self.dest_email}")
+            return
+            
+        try:
+            # Get git information
+            git_info = self.get_git_info()
+            
+            # Count results (only count tests that were actually run)
+            total_tests = len(results)
+            passed_tests = sum(1 for success in results.values() if success)
+            failed_tests = sum(1 for success in results.values() if not success)
+            
+            # Collect failed tests for summary
+            failed_tests_list = [key for key, success in results.items() if not success]
+            
+            # Determine overall status
+            overall_status = "SUCCESS" if failed_tests == 0 else "FAILURE"
+            status_color = "#28a745" if failed_tests == 0 else "#dc3545"
+            
+            # Create HTML email content
+            status_prefix = "SUCC" if overall_status == "SUCCESS" else "FAIL"
+            
+            # Add failure summary to subject if there are failures
+            if failed_tests_list:
+                failure_summary = ", ".join(failed_tests_list)
+                subject = f"{status_prefix}: DynamoDockerBuilder - {git_info['sha']} ({failure_summary})"
+            else:
+                subject = f"{status_prefix}: DynamoDockerBuilder - {git_info['sha']}"
+            
+            html_content = f"""<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<style>
+body {{ font-family: Arial, sans-serif; margin: 10px; line-height: 1.3; }}
+.header {{ background-color: {status_color}; color: white; padding: 4px 6px; border-radius: 2px; margin-bottom: 5px; }}
+.summary {{ background-color: #f8f9fa; padding: 4px 6px; border-radius: 2px; margin: 3px 0; }}
+.results {{ margin: 3px 0; }}
+.framework {{ margin: 3px 0; padding: 3px; border-left: 2px solid #007bff; }}
+.success {{ color: #28a745; font-weight: bold; }}
+.failure {{ color: #dc3545; font-weight: bold; }}
+.git-info {{ background-color: #e9ecef; padding: 4px 6px; border-radius: 2px; font-family: monospace; font-size: 0.9em; }}
+.error-output {{ background-color: #2d3748; color: #e2e8f0; padding: 8px; border-radius: 3px; font-family: 'Courier New', monospace; font-size: 0.85em; margin: 5px 0; overflow-x: auto; white-space: pre-wrap; }}
+p {{ margin: 1px 0; }}
+h3 {{ margin: 4px 0 2px 0; font-size: 1.0em; }}
+h4 {{ margin: 3px 0 1px 0; font-size: 0.95em; }}
+h2 {{ margin: 0; font-size: 1.1em; font-weight: normal; }}
+</style>
+</head>
+<body>
+<div class="header">
+<h2>DynamoDockerBuilder - {overall_status}</h2>
+</div>
+
+<div class="summary">
+<h3>Test Summary</h3>
+<p><strong>Total Tests:</strong> {total_tests}</p>
+<p><strong>Passed:</strong> <span class="success">{passed_tests}</span></p>
+<p><strong>Failed:</strong> <span class="failure">{failed_tests}</span></p>
+<p><strong>Date:</strong> {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</p>
+</div>"""
+
+            html_content += f"""
+
+<div class="git-info">
+<h3>Git Information</h3>
+<p><strong>Commit SHA:</strong> {git_info['sha']}</p>
+<p><strong>Commit Date:</strong> {git_info['date']}</p>
+<p><strong>Commit Message:</strong> {self.convert_pr_links(git_info['message'])}</p>
+<p><strong>Author:</strong> {git_info['author']}</p>
+</div>
+
+<div class="results">
+<h3>Test Results</h3>
+"""
+            
+            # Add framework results (only show frameworks that were actually tested)
+            tested_frameworks = set()
+            for key in results.keys():
+                framework = key.split('_')[0]  # Extract framework from key like "VLLM_dev"
+                tested_frameworks.add(framework)
+            
+            for framework in sorted(tested_frameworks):
+                html_content += f'<div class="framework"><h4>Dockerfile.{framework.lower()} targets:</h4>'
+                
+                for target in ['dev', 'local-dev']:
+                    key = f"{framework}_{target}"
+                    if key in results:  # Only show targets that were actually tested
+                        status = "SUCCESS" if results[key] else "FAILURE"
+                        css_class = "success" if status == "SUCCESS" else "failure"
+                        target_display = "dev" if target == "dev" else "local-dev"
+                        
+                        if status == "SUCCESS":
+                            html_content += f'<p>✅ {target_display} target: <span class="{css_class}">PASSED</span></p>'
+                        else:
+                            html_content += f'<p>❌ {target_display} target: <span class="{css_class}">FAILED</span></p>'
+                            # Add error output if available
+                            if key in failure_details and failure_details[key]:
+                                error_lines = failure_details[key].split('\\n')
+                                if len(error_lines) > 25:
+                                    error_output = '\\n'.join(error_lines[-25:])  # Show last 25 lines
+                                    error_output = "... (showing last 25 lines)\\n" + error_output
+                                else:
+                                    error_output = failure_details[key]
+                                html_content += f'<div class="error-output">{error_output}</div>'
+                
+                html_content += '</div>'
+            
+            html_content += f"""
+</div>
+
+<div class="summary">
+<p><strong>Repository:</strong> {self.dynamo_ci_dir}</p>
+<p><strong>Log Directory:</strong> {self.log_dir}</p>
+</div>
+
+<p><em>This email was generated automatically by DynamoDockerBuilder.</em></p>
+</body>
+</html>"""
+            
+            # Create email file with proper CRLF formatting
+            email_file = Path(f"/tmp/dynamo_email_{os.getpid()}.txt")
+            
+            # Use printf to create proper CRLF formatting like our successful test
+            subprocess.run([
+                'printf', 
+                f'Subject: {subject}\\r\\nFrom: DynamoDockerBuilder <dynamo-docker-builder@nvidia.com>\\r\\nTo: {self.dest_email}\\r\\nMIME-Version: 1.0\\r\\nContent-Type: text/html; charset=UTF-8\\r\\n\\r\\n{html_content}\\r\\n'
+            ], stdout=open(email_file, 'w'))
+            
+            # Send email using curl
+            result = subprocess.run([
+                'curl', '--url', 'smtp://smtp.nvidia.com:25',
+                '--mail-from', 'dynamo-docker-builder@nvidia.com',
+                '--mail-rcpt', self.dest_email,
+                '--upload-file', str(email_file)
+            ], capture_output=True, text=True)
+            
+            # Clean up
+            email_file.unlink(missing_ok=True)
+            
+            if result.returncode == 0:
+                self.log_success(f"Email notification sent to {self.dest_email}")
+            else:
+                self.log_error(f"Failed to send email: {result.stderr}")
+                
+        except Exception as e:
+            self.log_error(f"Error sending email notification: {e}")
     
     def cmd(self, command: List[str], **kwargs) -> subprocess.CompletedProcess:
         """Execute command with dry-run support"""
@@ -299,6 +503,46 @@ class DynamoBuildTester:
             finally:
                 temp_path.unlink(missing_ok=True)
     
+    def get_git_info(self) -> dict:
+        """Get comprehensive git information"""
+        try:
+            os.chdir(self.dynamo_ci_dir)
+            
+            # Get commit SHA
+            sha_result = subprocess.run(['git', 'rev-parse', '--short', 'HEAD'], 
+                                      capture_output=True, text=True)
+            commit_sha = sha_result.stdout.strip() if sha_result.returncode == 0 else "unknown"
+            
+            # Get commit date
+            date_result = subprocess.run(['git', 'log', '-1', '--format=%cd', '--date=iso'], 
+                                       capture_output=True, text=True)
+            commit_date = date_result.stdout.strip() if date_result.returncode == 0 else "unknown"
+            
+            # Get commit message
+            msg_result = subprocess.run(['git', 'log', '-1', '--format=%s'], 
+                                      capture_output=True, text=True)
+            commit_message = msg_result.stdout.strip() if msg_result.returncode == 0 else "unknown"
+            
+            # Get author (the actual person who wrote the code)
+            author_result = subprocess.run(['git', 'log', '-1', '--format=%an <%ae>'], 
+                                         capture_output=True, text=True)
+            author = author_result.stdout.strip() if author_result.returncode == 0 else "unknown"
+            
+            return {
+                'sha': commit_sha,
+                'date': commit_date,
+                'message': commit_message,
+                'author': author
+            }
+        except Exception as e:
+            self.log_warning(f"Could not get git info: {e}")
+            return {
+                'sha': "unknown",
+                'date': "unknown", 
+                'message': "unknown",
+                'author': "unknown"
+            }
+
     def get_git_commit_sha(self) -> str:
         """Get the current git commit SHA (short version)"""
         try:
@@ -760,7 +1004,7 @@ class DynamoBuildTester:
     
     def show_usage(self) -> None:
         """Show usage information"""
-        print("Usage: python test_local_dev_build.py [OPTIONS]")
+        print("Usage: python dynamo_docker_builder.py [OPTIONS]")
         print("")
         print("Options:")
         print("  -f, --framework FRAMEWORK    Test specific framework (VLLM, SGLANG, TRTLLM)")
@@ -772,21 +1016,22 @@ class DynamoBuildTester:
         print("  -h, --help                   Show this help message")
         print("")
         print("Examples:")
-        print("  python test_local_dev_build.py                           # Test all frameworks")
-        print("  python test_local_dev_build.py --all                     # Test all frameworks")
-        print("  python test_local_dev_build.py --framework VLLM          # Test only VLLM framework")
-        print("  python test_local_dev_build.py --test-only               # Skip build and only run tests for all frameworks")
-        print("  python test_local_dev_build.py --framework VLLM --test-only  # Skip build and test only VLLM framework")
-        print("  python test_local_dev_build.py --no-checkout             # Use existing repo without git operations")
-        print("  python test_local_dev_build.py --test-only --no-checkout # Skip both build and git operations")
-        print("  python test_local_dev_build.py --force-run               # Force run even if no files changed")
-        print("  python test_local_dev_build.py --dry-run                 # Show what would be executed without running")
-        print("  python test_local_dev_build.py --dryrun                  # Same as --dry-run")
+        print("  python dynamo_docker_builder.py                           # Test all frameworks")
+        print("  python dynamo_docker_builder.py --all                     # Test all frameworks")
+        print("  python dynamo_docker_builder.py --framework VLLM          # Test only VLLM framework")
+        print("  python dynamo_docker_builder.py --test-only               # Skip build and only run tests for all frameworks")
+        print("  python dynamo_docker_builder.py --framework VLLM --test-only  # Skip build and test only VLLM framework")
+        print("  python dynamo_docker_builder.py --no-checkout             # Use existing repo without git operations")
+        print("  python dynamo_docker_builder.py --test-only --no-checkout # Skip both build and git operations")
+        print("  python dynamo_docker_builder.py --force-run               # Force run even if no files changed")
+        print("  python dynamo_docker_builder.py --dry-run                 # Show what would be executed without running")
+        print("  python dynamo_docker_builder.py --dryrun                  # Same as --dry-run")
+        print("  python dynamo_docker_builder.py --dest-email user@nvidia.com  # Send email notifications")
         print("")
     
     def main(self) -> int:
         """Main function"""
-        parser = argparse.ArgumentParser(description="Dynamo Local Dev Build Test Script")
+        parser = argparse.ArgumentParser(description="DynamoDockerBuilder - Automated Docker Build and Test System")
         parser.add_argument("-f", "--framework", choices=self.FRAMEWORKS,
                           help="Test specific framework")
         parser.add_argument("-a", "--all", action="store_true", default=True,
@@ -801,6 +1046,8 @@ class DynamoBuildTester:
                           help="Show commands that would be executed without running them")
         parser.add_argument("--repo-path", type=str, default=None,
                           help="Path to the dynamo repository (default: ../dynamo_ci)")
+        parser.add_argument("--dest-email", type=str, default=None,
+                          help="Destination email address for notifications (sends email if specified)")
         
         args = parser.parse_args()
         
@@ -814,6 +1061,7 @@ class DynamoBuildTester:
         self.test_only = args.test_only
         self.no_checkout = args.no_checkout
         self.force_run = args.force_run
+        self.dest_email = args.dest_email
         
         # If framework is specified, disable --all
         if args.framework:
@@ -823,7 +1071,9 @@ class DynamoBuildTester:
             test_all = True
             test_framework_only = None
         
-        self.log_info("Starting Dynamo Local Dev Build Test Script")
+        print("=" * 60)
+        self.log_info(f"Starting DynamoDockerBuilder - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        print("=" * 60)
         
         # Check if another instance is already running
         self.check_if_running()
@@ -854,29 +1104,79 @@ class DynamoBuildTester:
             self.log_info("Preserving existing log files")
             return 0
         
-        # Run tests
+        # Run tests and collect detailed results for email notification
+        test_results = {}
+        failure_details = {}
+        overall_success = True
+        
         if test_framework_only:
             # Only clean up logs for the specific framework being tested
             self.cleanup_existing_logs(framework=test_framework_only)
             self.log_info(f"Testing single framework: {test_framework_only}")
-            if self.test_framework(test_framework_only):
+            
+            # Collect results for both dev and local-dev targets
+            dev_success = self.test_framework_image(test_framework_only, "dev")
+            local_dev_success = self.test_framework_image(test_framework_only, "local-dev")
+            
+            test_results[f"{test_framework_only}_dev"] = dev_success
+            test_results[f"{test_framework_only}_local-dev"] = local_dev_success
+            
+            # Collect failure details for failed tests
+            if not dev_success:
+                failure_details[f"{test_framework_only}_dev"] = self.get_failure_details(test_framework_only, "dev")
+            if not local_dev_success:
+                failure_details[f"{test_framework_only}_local-dev"] = self.get_failure_details(test_framework_only, "local-dev")
+            
+            framework_success = dev_success and local_dev_success
+            overall_success = framework_success
+            
+            if framework_success:
                 self.log_success(f"Framework {test_framework_only} test completed successfully")
-                return 0
             else:
                 self.log_error(f"Framework {test_framework_only} test failed")
-                return 1
+                
         elif test_all:
             # Clean up all logs when testing all frameworks
             self.cleanup_existing_logs()
             self.log_info("Testing all frameworks")
-            if self.run_all_tests():
-                self.log_success("All tests completed successfully")
-                return 0
-            else:
-                self.log_error("Some tests failed")
-                return 1
+            
+            # Test all frameworks and collect detailed results
+            for framework in self.FRAMEWORKS:
+                self.log_info(f"Starting tests for framework: {framework} (both dev and local-dev images)")
+                
+                # Test both dev and local-dev targets
+                dev_success = self.test_framework_image(framework, "dev")
+                local_dev_success = self.test_framework_image(framework, "local-dev")
+                
+                test_results[f"{framework}_dev"] = dev_success
+                test_results[f"{framework}_local-dev"] = local_dev_success
+                
+                # Collect failure details for failed tests
+                if not dev_success:
+                    failure_details[f"{framework}_dev"] = self.get_failure_details(framework, "dev")
+                if not local_dev_success:
+                    failure_details[f"{framework}_local-dev"] = self.get_failure_details(framework, "local-dev")
+                
+                framework_success = dev_success and local_dev_success
+                if not framework_success:
+                    overall_success = False
+                
+                if framework_success:
+                    self.log_success(f"All tests completed successfully for framework: {framework}")
+                else:
+                    self.log_error(f"Some tests failed for framework: {framework}")
         
-        return 0
+        # Send email notification if destination email is specified and tests actually ran
+        if self.dest_email:
+            self.send_email_notification(test_results, failure_details)
+        
+        # Return appropriate exit code
+        if overall_success:
+            self.log_success("All tests completed successfully")
+            return 0
+        else:
+            self.log_error("Some tests failed")
+            return 1
 
 
 if __name__ == "__main__":
