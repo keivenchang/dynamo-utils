@@ -58,6 +58,9 @@ class DynamoBuilderTester:
         
         # Set up logger
         self._setup_logger()
+        
+        # Track build times for email reporting
+        self.build_times: Dict[str, float] = {}
     
     def _setup_logger(self) -> None:
         """Set up the logger with appropriate formatting"""
@@ -183,12 +186,13 @@ class DynamoBuilderTester:
         except Exception as e:
             return f"Error reading log file: {e}"
     
-    def send_email_notification(self, results: Dict[str, bool], failure_details: Optional[Dict[str, str]] = None) -> None:
+    def send_email_notification(self, results: Dict[str, bool], failure_details: Optional[Dict[str, str]] = None, build_times: Optional[Dict[str, float]] = None) -> None:
         """Send email notification with test results
         
         Args:
             results: Dict[str, bool] mapping test keys (e.g. 'VLLM_dev') to success boolean
             failure_details: Optional[Dict[str, str]] mapping failed test keys to error output strings
+            build_times: Optional[Dict[str, float]] mapping timing keys to duration in seconds
         """
         if not self.dest_email:
             return
@@ -307,10 +311,27 @@ h2 {{ margin: 0; font-size: 1.1em; font-weight: normal; }}
                         status = "SUCCESS" if results[key] else "FAILURE"
                         css_class = "success" if status == "SUCCESS" else "failure"
                         
+                        # Get timing information if available
+                        timing_info = ""
+                        if build_times:
+                            total_time_key = f"{key}_total"
+                            build_time_key = f"{key}_build"
+                            
+                            if total_time_key in build_times:
+                                total_time = build_times[total_time_key]
+                                timing_parts = [f"total: {total_time:.1f}s"]
+                                
+                                if build_time_key in build_times:
+                                    build_time = build_times[build_time_key]
+                                    test_time = total_time - build_time
+                                    timing_parts = [f"build: {build_time:.1f}s", f"dynamo_check.py: {test_time:.1f}s"]
+                                
+                                timing_info = f" ({', '.join(timing_parts)})"
+                        
                         if status == "SUCCESS":
-                            html_content += f'<p>✅ {target} target: <span class="{css_class}">PASSED</span></p>'
+                            html_content += f'<p>✅ {target} target: <span class="{css_class}">PASSED</span>{timing_info}</p>'
                         else:
-                            html_content += f'<p>❌ {target} target: <span class="{css_class}">FAILED</span></p>'
+                            html_content += f'<p>❌ {target} target: <span class="{css_class}">FAILED</span>{timing_info}</p>'
                             # Add error output if available
                             if key in failure_details and failure_details[key]:
                                 error_lines = failure_details[key].split('\\n')
@@ -596,15 +617,31 @@ h2 {{ margin: 0; font-size: 1.1em; font-weight: normal; }}
             else:
                 self.log_info(f"Would remove existing log files for {self.date} (dry-run)")
     
-    def generate_composite_sha(self) -> Optional[str]:
-        """Generate composite SHA from key container files"""
-        files_to_hash = [
-            "container/Dockerfile.sglang",
-            "container/Dockerfile.trtllm", 
-            "container/Dockerfile.vllm",
-            "container/run.sh",
-            "container/build.sh"
-        ]
+    def generate_composite_sha_from_container_dir(self) -> Optional[str]:
+        """Generate composite SHA from all container files recursively, ignoring .cache directory"""
+        container_dir = self.dynamo_ci_dir / "container"
+        
+        if not container_dir.exists():
+            self.log_error(f"Container directory not found: {container_dir}")
+            return None
+        
+        # Get all files in container directory recursively, sorted for consistent hashing
+        # Ignore .cache directories
+        files_to_hash = []
+        for file_path in sorted(container_dir.rglob('*')):
+            if file_path.is_file():
+                # Skip files in .cache directories
+                if '.cache' in file_path.parts:
+                    continue
+                # Store relative path from dynamo_ci_dir for consistent hashing
+                rel_path = file_path.relative_to(self.dynamo_ci_dir)
+                files_to_hash.append(rel_path)
+        
+        if not files_to_hash:
+            self.log_error("No files found in container directory for composite SHA calculation")
+            return None
+        
+        self.log_info(f"Hashing {len(files_to_hash)} files from container directory")
         
         with tempfile.NamedTemporaryFile(mode='w+b', delete=False) as temp_file:
             temp_path = Path(temp_file.name)
@@ -615,8 +652,12 @@ h2 {{ margin: 0; font-size: 1.1em; font-weight: normal; }}
                 for file_rel_path in files_to_hash:
                     full_path = self.dynamo_ci_dir / file_rel_path
                     if full_path.exists():
+                        # Write file path first (for uniqueness), then file content
+                        temp_file.write(str(file_rel_path).encode('utf-8'))
+                        temp_file.write(b'\n')
                         with open(full_path, 'rb') as f:
                             temp_file.write(f.read())
+                        temp_file.write(b'\n')
                         found_files += 1
                     else:
                         self.log_warning(f"File not found for composite SHA calculation: {file_rel_path}")
@@ -630,6 +671,7 @@ h2 {{ margin: 0; font-size: 1.1em; font-weight: normal; }}
                 with open(temp_path, 'rb') as f:
                     sha = hashlib.sha256(f.read()).hexdigest()
                 
+                self.log_debug(f"Generated composite SHA from {found_files} container files: {sha[:12]}...")
                 return sha
                 
             finally:
@@ -782,7 +824,7 @@ h2 {{ margin: 0; font-size: 1.1em; font-weight: normal; }}
         self.log_info(f"Composite SHA file location: {self.dynamo_ci_dir}/.last_build_composite_sha")
         
         # Generate current composite SHA
-        current_sha = self.generate_composite_sha()
+        current_sha = self.generate_composite_sha_from_container_dir()
         if current_sha is None:
             self.log_error("Failed to generate current composite SHA")
             return False
@@ -1001,6 +1043,12 @@ h2 {{ margin: 0; font-size: 1.1em; font-weight: normal; }}
         
         self.log_info(f"Testing framework: {framework} ({docker_target_type} image)")
         
+        # Track timing for this framework/target combination
+        test_key = f"{framework}_{docker_target_type}"
+        start_time = time.time()
+        build_start_time = None
+        build_end_time = None
+        
         # Change to dynamo_ci directory
         os.chdir(self.dynamo_ci_dir)
         
@@ -1024,6 +1072,8 @@ h2 {{ margin: 0; font-size: 1.1em; font-weight: normal; }}
             self.log_info(f"Step 1: Building {framework} framework ({docker_target_type} target)...")
             print("=" * 60)
             
+            build_start_time = time.time()
+            
             # Get build commands
             target_param = self.convert_target_for_build(docker_target_type)
             success, docker_commands, image_tag = self.get_build_commands(framework, target_param)
@@ -1045,6 +1095,8 @@ h2 {{ margin: 0; font-size: 1.1em; font-weight: normal; }}
                 # Execute the commands
                 if not self.execute_build_commands(framework, docker_commands, log_file, fail_file):
                     return False
+            
+            build_end_time = time.time()
         else:
             self.log_info(f"Skipping build step for {framework} (test-only mode)")
             if not self.dry_run:
@@ -1053,7 +1105,7 @@ h2 {{ margin: 0; font-size: 1.1em; font-weight: normal; }}
         
         # Step 2: Run the container with dynamo_check.py
         print("=" * 60)
-        self.log_info(f"Step 2: Running container test for {framework} ({docker_target_type} target)...")
+        self.log_info(f"Step 2: Running dynamo_check.py test for {framework} ({docker_target_type} target)...")
         print("=" * 60)
         
         # Get the docker command from container/run.sh dry-run, then execute without -it flags
@@ -1144,6 +1196,20 @@ h2 {{ margin: 0; font-size: 1.1em; font-weight: normal; }}
                 f.write("Overall Status: SUCCESS\n\n")
         else:
             self.log_info(f"Would write framework test end to: {log_file}")
+        
+        # Store timing information for email reporting
+        end_time = time.time()
+        total_time = end_time - start_time
+        
+        # Calculate build time if build was performed
+        if build_start_time is not None and build_end_time is not None:
+            build_time = build_end_time - build_start_time
+            self.build_times[f"{test_key}_build"] = build_time
+            self.log_debug(f"Build time for {test_key}: {build_time:.1f}s")
+        
+        # Store total time (build + test)
+        self.build_times[f"{test_key}_total"] = total_time
+        self.log_debug(f"Total time for {test_key}: {total_time:.1f}s")
         
         return True
     
@@ -1405,7 +1471,7 @@ h2 {{ margin: 0; font-size: 1.1em; font-weight: normal; }}
         
         # Send email notification if destination email is specified and tests actually ran
         if self.dest_email:
-            self.send_email_notification(test_results, failure_details)
+            self.send_email_notification(test_results, failure_details, self.build_times)
         
         # Return appropriate exit code
         if overall_success:
