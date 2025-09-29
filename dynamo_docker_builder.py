@@ -14,6 +14,7 @@ Tests Dockerfile.vllm, Dockerfile.sglang, and Dockerfile.trtllm with comprehensi
 
 import argparse
 import hashlib
+import logging
 import os
 import shlex
 import subprocess
@@ -54,26 +55,62 @@ class DynamoBuilderTester:
         
         # Lock file for preventing concurrent runs
         self.lock_file = self.script_dir / f".{Path(__file__).name}.lock"
+        
+        # Set up logger
+        self._setup_logger()
+    
+    def _setup_logger(self) -> None:
+        """Set up the logger with appropriate formatting"""
+        self.logger = logging.getLogger('DynamoDockerBuilder')
+        self.logger.setLevel(logging.DEBUG)
+        
+        # Remove any existing handlers
+        self.logger.handlers.clear()
+        
+        # Create console handler
+        console_handler = logging.StreamHandler()
+        console_handler.setLevel(logging.DEBUG)
+        
+        # Create custom formatter that handles DRYRUN prefix
+        class DryRunFormatter(logging.Formatter):
+            def __init__(self, dry_run_instance):
+                super().__init__()
+                self.dry_run_instance = dry_run_instance
+            
+            def format(self, record):
+                if self.dry_run_instance.dry_run:
+                    return f"DRYRUN {record.levelname} - {record.getMessage()}"
+                else:
+                    return f"{record.levelname} - {record.getMessage()}"
+        
+        formatter = DryRunFormatter(self)
+        console_handler.setFormatter(formatter)
+        
+        # Add handler to logger
+        self.logger.addHandler(console_handler)
+        
+        # Prevent propagation to root logger
+        self.logger.propagate = False
     
     def log_info(self, message: str) -> None:
         """Log info message"""
-        prefix = "DRYRUN [INFO]" if self.dry_run else "[INFO]"
-        print(f"{prefix} {message}")
+        self.logger.info(message)
     
     def log_success(self, message: str) -> None:
         """Log success message"""
-        prefix = "DRYRUN [SUCCESS]" if self.dry_run else "[SUCCESS]"
-        print(f"{prefix} {message}")
+        self.logger.info(f"SUCCESS: {message}")
     
     def log_error(self, message: str) -> None:
         """Log error message"""
-        prefix = "DRYRUN [ERROR]" if self.dry_run else "[ERROR]"
-        print(f"{prefix} {message}")
+        self.logger.error(message)
     
     def log_warning(self, message: str) -> None:
         """Log warning message"""
-        prefix = "DRYRUN [WARNING]" if self.dry_run else "[WARNING]"
-        print(f"{prefix} {message}")
+        self.logger.warning(message)
+    
+    def log_debug(self, message: str) -> None:
+        """Log debug message"""
+        self.logger.debug(message)
     
     def convert_pr_links(self, message: str) -> str:
         """Convert PR references like (#3107) to GitHub links"""
@@ -146,12 +183,12 @@ class DynamoBuilderTester:
         except Exception as e:
             return f"Error reading log file: {e}"
     
-    def send_email_notification(self, results: dict, failure_details: Optional[Dict[str, str]] = None) -> None:
+    def send_email_notification(self, results: Dict[str, bool], failure_details: Optional[Dict[str, str]] = None) -> None:
         """Send email notification with test results
         
         Args:
-            results: Dict mapping test keys (e.g. 'VLLM_dev') to success boolean
-            failure_details: Dict mapping failed test keys to error output strings
+            results: Dict[str, bool] mapping test keys (e.g. 'VLLM_dev') to success boolean
+            failure_details: Optional[Dict[str, str]] mapping failed test keys to error output strings
         """
         if not self.dest_email:
             return
@@ -330,8 +367,7 @@ h2 {{ margin: 0; font-size: 1.1em; font-weight: normal; }}
         """Execute command with dry-run support"""
         # Show command in shell tracing format
         cmd_str = " ".join(shlex.quote(str(arg)) for arg in command)
-        prefix = "DRYRUN +" if self.dry_run else "+"
-        print(f"{prefix} {cmd_str}")
+        self.log_debug(f"+ {cmd_str}")
         
         # Only execute if not in dry-run mode
         if not self.dry_run:
@@ -501,8 +537,7 @@ h2 {{ margin: 0; font-size: 1.1em; font-weight: normal; }}
         if not self.dry_run:
             self.log_dir.mkdir(parents=True, exist_ok=True)
         else:
-            prefix = "DRYRUN +" if self.dry_run else "+"
-            print(f"{prefix} mkdir -p {self.log_dir}")
+            self.log_debug(f"+ mkdir -p {self.log_dir}")
         self.log_success(f"Date-based log directory created at {self.log_dir}")
     
     def cleanup_existing_logs(self, framework: Optional[str] = None) -> None:
@@ -554,8 +589,7 @@ h2 {{ margin: 0; font-size: 1.1em; font-weight: normal; }}
                 patterns = [f"{self.date}.*.log", f"{self.date}.*.SUCC", f"{self.date}.*.FAIL"]
             
             for pattern in patterns:
-                prefix = "DRYRUN +" if self.dry_run else "+"
-                print(f"{prefix} rm -f {self.log_dir}/{pattern}")
+                self.log_debug(f"+ rm -f {self.log_dir}/{pattern}")
             
             if framework:
                 self.log_info(f"Would remove existing log files for {self.date} and {framework} (dry-run)")
@@ -889,8 +923,7 @@ h2 {{ margin: 0; font-size: 1.1em; font-weight: normal; }}
                 
                 for i, docker_cmd in enumerate(docker_commands):
                     self.log_info(f"Executing docker build command {i+1}/{len(docker_commands)}")
-                    prefix = "DRYRUN +" if self.dry_run else "+"
-                    print(f"{prefix} {docker_cmd}")
+                    self.log_debug(f"+ {docker_cmd}")
                     f.write(f"+ {docker_cmd}\n")
                     f.flush()
                     
@@ -1042,7 +1075,7 @@ h2 {{ margin: 0; font-size: 1.1em; font-weight: normal; }}
                 
                 if docker_cmd and not self.dry_run:
                     prefix = "DRYRUN +" if self.dry_run else "+"
-                    print(f"{prefix} timeout 30 {docker_cmd}")
+                    self.log_debug(f"+ timeout 30 {docker_cmd}")
                     try:
                         with open(log_file, 'a') as f:
                             # Run container test with real-time output
@@ -1090,7 +1123,7 @@ h2 {{ margin: 0; font-size: 1.1em; font-weight: normal; }}
                         
                 elif docker_cmd:
                     prefix = "DRYRUN +" if self.dry_run else "+"
-                    print(f"{prefix} timeout 30 {docker_cmd}")
+                    self.log_debug(f"+ timeout 30 {docker_cmd}")
                     self.log_success(f"Container test completed for {framework} (dry-run)")
                     self.log_info(f"Would write success to: {success_file}")
                 else:
@@ -1315,8 +1348,8 @@ h2 {{ margin: 0; font-size: 1.1em; font-weight: normal; }}
             return 0
         
         # Run tests and collect detailed results for email notification
-        test_results = {}
-        failure_details = {}
+        test_results: Dict[str, bool] = {}
+        failure_details: Dict[str, str] = {}
         overall_success = True
         
         if test_framework_only:
