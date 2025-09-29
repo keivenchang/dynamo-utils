@@ -179,11 +179,9 @@ for destdir in "$DEST_SRC_DIR_GLOB"*; do
 
         # Apply customizations to JSON file for this framework
         # 1. Replace display name with directory-specific name and lowercase framework
-        # 2. Replace container name with directory-specific name
-        # 3. Replace -vllm with -lowercase_framework in the image name
+        # 2. Replace -framework- with -lowercase_framework- in the image name
         sed "s|\"name\": \"NVIDIA Dynamo.*\"|\"name\": \"[${DEST_BASE_DIRNAME}-${USER}] ${framework_uppercase}\"|g" "${DEVCONTAINER_SRC_PATH}" | \
-        sed "s|\"dynamo-vllm-dev\"|\"${DEST_BASE_DIRNAME}-${USER}-${framework_lowercase}-devcontainer\"|g" | \
-        sed "s|-vllm-|-${framework_lowercase}-|g" > "${TEMP_OUTPUT_FILE}"
+        sed "s|-framework-|-${framework_lowercase}-|g" > "${TEMP_OUTPUT_FILE}"
 
         # Copy the framework-specific file to the destination
         if ! cmd cp "${TEMP_OUTPUT_FILE}" "${framework_target_path}"; then
