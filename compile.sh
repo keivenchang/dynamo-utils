@@ -218,7 +218,9 @@ dry_run_echo() {
     fi
 }
 
-# Command wrapper that always shows commands using set -x format
+# Command wrapper that shows commands and executes them if not in dry-run mode
+# - If DRY_RUN=false: Shows command with shell tracing format (+ prefix) and executes it
+# - If DRY_RUN=true: Only shows command with shell tracing format (+ prefix), does not execute
 cmd() {
     # Always show what will be executed using shell tracing format
     ( set -x; : "$@" ) 2>&1 | sed 's/^+ : /+ /'
