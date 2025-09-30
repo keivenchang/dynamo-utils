@@ -311,6 +311,52 @@ class DynamoBranchChecker:
                 print(f"⚠️  Error getting branches from {repo_dir.name}: {e}")
             return []
     
+    def get_branch_tracking_status(self, repo_dir: Path, branch: str) -> Dict[str, Optional[str]]:
+        """Get tracking information for a branch including if remote is gone"""
+        try:
+            # Get verbose branch info with tracking details
+            result = subprocess.run(
+                ['git', 'branch', '-vv'],
+                cwd=repo_dir,
+                capture_output=True,
+                text=True,
+                check=True
+            )
+            
+            for line in result.stdout.strip().split('\n'):
+                line = line.strip()
+                # Remove leading * for current branch
+                if line.startswith('*'):
+                    line = line[1:].strip()
+                
+                # Parse line: branch_name commit [remote: status] message
+                parts = line.split(None, 1)
+                if not parts:
+                    continue
+                
+                branch_name = parts[0]
+                if branch_name != branch:
+                    continue
+                
+                # Check if remote is gone
+                is_gone = ': gone]' in line
+                
+                # Extract upstream branch name if present
+                upstream = None
+                if '[' in line and ']' in line:
+                    bracket_content = line[line.find('[')+1:line.find(']')]
+                    upstream = bracket_content.split(':')[0].strip()
+                
+                return {
+                    'upstream': upstream,
+                    'is_gone': is_gone
+                }
+            
+            return {'upstream': None, 'is_gone': False}
+            
+        except subprocess.CalledProcessError:
+            return {'upstream': None, 'is_gone': False}
+    
     def get_current_branch(self, repo_dir: Path) -> Optional[str]:
         """Get the current branch of a git repository"""
         try:
@@ -339,7 +385,7 @@ class DynamoBranchChecker:
         except subprocess.CalledProcessError:
             return None
     
-    def format_pr_info(self, pr: Dict, branch_name: str = "", is_current: bool = False, review_summary: Optional[Dict] = None, status_checks: Optional[Dict] = None) -> str:
+    def format_pr_info(self, pr: Dict, branch_name: str = "", is_current: bool = False, is_gone: bool = False, review_summary: Optional[Dict] = None, status_checks: Optional[Dict] = None) -> str:
         """Format PR information for display"""
         number = pr.get('number', 'Unknown')
         title = pr.get('title', 'No title')
@@ -356,6 +402,9 @@ class DynamoBranchChecker:
             'closed': '🔴',
             'merged': '🟣'
         }.get(state, '⚪')
+        
+        # Add gone indicator
+        gone_info = " [GONE]" if is_gone else ""
         
         # Add review status indicators
         review_info = ""
@@ -384,9 +433,9 @@ class DynamoBranchChecker:
                 branch_display = f"\033[1m{branch_name}\033[0m"  # Bold
             else:
                 branch_display = branch_name
-            return f"     {state_emoji} {branch_display}: PR #{number} - {title}{review_info}{ci_info}\n       {url}"
+            return f"     {state_emoji} {branch_display}: PR #{number} - {title}{gone_info}{review_info}{ci_info}\n       {url}"
         else:
-            return f"  {state_emoji} PR #{number}: {title}{review_info}{ci_info}\n     {url}"
+            return f"  {state_emoji} PR #{number}: {title}{gone_info}{review_info}{ci_info}\n     {url}"
     
     def check_directory(self, repo_dir: Path) -> Dict:
         """Check a single dynamo directory for branches and PRs"""
@@ -418,10 +467,15 @@ class DynamoBranchChecker:
         
         # Check each branch
         for branch in local_branches:
+            # Get tracking status (whether remote is gone)
+            tracking_status = self.get_branch_tracking_status(repo_dir, branch)
+            
             branch_info = {
                 'exists_on_github': False,
                 'prs': [],
-                'is_current': branch == current_branch
+                'is_current': branch == current_branch,
+                'is_gone': tracking_status['is_gone'],
+                'upstream': tracking_status['upstream']
             }
             
             if branch in ['main', 'master']:
@@ -433,28 +487,27 @@ class DynamoBranchChecker:
                 
                 branch_info['exists_on_github'] = self.github.branch_exists(branch)
                 
-                if branch_info['exists_on_github']:
-                    # Look for PRs
-                    prs = self.github.find_prs_for_branch(branch)
-                    if not prs:
-                        # Try searching for PRs that mention this branch
-                        prs = self.github.search_prs_by_branch(branch)
-                    
-                    # Get review status and CI checks for each PR
-                    prs_with_reviews = []
-                    for pr in prs:
-                        pr_data = pr.copy()
-                        pr_number = pr.get('number')
-                        if pr_number and pr.get('state') == 'open':
-                            review_summary = self.github.get_pr_reviews(pr_number)
-                            pr_data['review_summary'] = review_summary
-                            
-                            # Get CI status checks
-                            status_checks = self.github.get_pr_status_checks(pr_number)
-                            pr_data['status_checks'] = status_checks
-                        prs_with_reviews.append(pr_data)
-                    
-                    branch_info['prs'] = prs_with_reviews
+                # Look for PRs even if branch doesn't exist (it might be gone/merged)
+                prs = self.github.find_prs_for_branch(branch)
+                if not prs:
+                    # Try searching for PRs that mention this branch
+                    prs = self.github.search_prs_by_branch(branch)
+                
+                # Get review status and CI checks for each PR
+                prs_with_reviews = []
+                for pr in prs:
+                    pr_data = pr.copy()
+                    pr_number = pr.get('number')
+                    if pr_number and pr.get('state') == 'open':
+                        review_summary = self.github.get_pr_reviews(pr_number)
+                        pr_data['review_summary'] = review_summary
+                        
+                        # Get CI status checks
+                        status_checks = self.github.get_pr_status_checks(pr_number)
+                        pr_data['status_checks'] = status_checks
+                    prs_with_reviews.append(pr_data)
+                
+                branch_info['prs'] = prs_with_reviews
             
             result['branch_info'][branch] = branch_info
         
@@ -466,8 +519,9 @@ class DynamoBranchChecker:
         print("=" * 50)
         
         # Show PR status guide
-        print("PR Status: [OPEN] | [CLOSED] | [MERGED]")
+        print("PR Status: 🟢 [OPEN] | 🔴 [CLOSED] | 🟣 [MERGED]")
         print("Review Status: ✅ Approved | [CHANGES] | [Unresolved Comments]")
+        print("Branch Status: [GONE] = Remote branch deleted (likely merged/closed)")
         
         # Show token status
         if self.github.token:
@@ -524,12 +578,15 @@ class DynamoBranchChecker:
         branches_with_prs = []
         branches_on_github = []
         local_only_branches = []
+        gone_branches = []
         
         for branch, info in result['branch_info'].items():
             current_marker = " (current)" if info['is_current'] else ""
             
             if info['prs']:
-                branches_with_prs.append((branch, info['prs'], current_marker))
+                branches_with_prs.append((branch, info['prs'], current_marker, info['is_gone']))
+            elif info['is_gone']:
+                gone_branches.append((branch, current_marker))
             elif info['exists_on_github']:
                 branches_on_github.append((branch, current_marker))
             else:
@@ -538,12 +595,12 @@ class DynamoBranchChecker:
         # Display branches with PRs
         if branches_with_prs:
             print("   Branches with PRs:")
-            for branch, prs, marker in branches_with_prs:
+            for branch, prs, marker, is_gone in branches_with_prs:
                 is_current = "(current)" in marker
                 for pr in prs:
                     review_summary = pr.get('review_summary')
                     status_checks = pr.get('status_checks')
-                    print(f"{self.format_pr_info(pr, branch, is_current, review_summary, status_checks)}")
+                    print(f"{self.format_pr_info(pr, branch, is_current, is_gone, review_summary, status_checks)}")
         
         # Display branches on GitHub (no PRs found)
         if branches_on_github:
@@ -555,6 +612,17 @@ class DynamoBranchChecker:
                 else:
                     branch_display = branch
                 print(f"     • {branch_display}")
+        
+        # Display gone branches (remote deleted but no PR found)
+        if gone_branches:
+            print("   Gone branches (remote deleted):")
+            for branch, marker in gone_branches:
+                is_current = "(current)" in marker
+                if is_current:
+                    branch_display = f"\033[1m{branch}\033[0m (current)"  # Bold
+                else:
+                    branch_display = branch
+                print(f"     • {branch_display} [GONE]")
         
         # Display local-only branches
         if local_only_branches:
