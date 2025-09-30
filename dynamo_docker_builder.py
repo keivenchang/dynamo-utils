@@ -55,7 +55,7 @@ class DynamoBuilderTester:
         self.test_only = False
         self.no_checkout = False
         self.force_run = False
-        self.dest_email = None
+        self.email = None
         self.targets = ["dev", "local-dev"]  # Default targets
         self.repo_sha = None  # SHA to checkout
         
@@ -121,6 +121,66 @@ class DynamoBuilderTester:
         """Log debug message"""
         self.logger.debug(message)
     
+    def get_docker_image_info(self, image_tag: str) -> Dict[str, str]:
+        """Get Docker image information including size and full repo:tag
+        
+        Args:
+            image_tag: Docker image tag to inspect
+            
+        Returns:
+            Dict with 'repo_tag', 'size', 'size_bytes' keys
+        """
+        try:
+            # Get image size using docker images command
+            result = subprocess.run([
+                'docker', 'images', '--format', 'table {{.Repository}}:{{.Tag}}\t{{.Size}}', 
+                '--no-trunc', image_tag
+            ], capture_output=True, text=True)
+            
+            if result.returncode == 0 and result.stdout.strip():
+                lines = result.stdout.strip().split('\n')
+                # Skip header line if present
+                data_lines = [line for line in lines if not line.startswith('REPOSITORY')]
+                if data_lines:
+                    # Docker output uses spaces for alignment, not tabs
+                    # Split on whitespace and take the last part as size
+                    line = data_lines[0].strip()
+                    parts = line.split()
+                    if len(parts) >= 2:
+                        # Last part is the size, everything else is the repo:tag
+                        size = parts[-1]
+                        repo_tag = ' '.join(parts[:-1])
+                        
+                        # Also get size in bytes for sorting/comparison
+                        inspect_result = subprocess.run([
+                            'docker', 'inspect', '--format', '{{.Size}}', image_tag
+                        ], capture_output=True, text=True)
+                        
+                        size_bytes = "0"
+                        if inspect_result.returncode == 0 and inspect_result.stdout.strip():
+                            size_bytes = inspect_result.stdout.strip()
+                        
+                        return {
+                            'repo_tag': repo_tag,
+                            'size': size,
+                            'size_bytes': size_bytes
+                        }
+            
+            # Fallback if docker images command fails
+            return {
+                'repo_tag': image_tag,
+                'size': 'Unknown',
+                'size_bytes': '0'
+            }
+            
+        except Exception as e:
+            self.log_warning(f"Failed to get Docker image info for {image_tag}: {e}")
+            return {
+                'repo_tag': image_tag,
+                'size': 'Unknown',
+                'size_bytes': '0'
+            }
+    
     def get_email_template(self) -> str:
         """Get the Jinja2 email template"""
         return """<!DOCTYPE html>
@@ -129,10 +189,18 @@ class DynamoBuilderTester:
 <meta charset="UTF-8">
 <style>
 body { font-family: Arial, sans-serif; margin: 10px; line-height: 1.3; }
-.header { background-color: {{ status_color }}; color: white; padding: 4px 6px; border-radius: 2px; margin-bottom: 5px; }
+.header { background-color: {{ status_color }}; color: white; padding: 15px 20px; border-radius: 4px; margin-bottom: 10px; text-align: center; }
 .summary { background-color: #f8f9fa; padding: 4px 6px; border-radius: 2px; margin: 3px 0; }
-.results { margin: 3px 0; }
-.framework { margin: 3px 0; padding: 3px; border-left: 2px solid #007bff; }
+.results { margin: 10px 0; }
+.framework { margin: 10px 0; padding: 8px; border: 1px solid #dee2e6; border-radius: 4px; background-color: #ffffff; }
+.framework-header { background-color: #007bff; color: white; padding: 8px 12px; margin: -8px -8px 8px -8px; border-radius: 4px 4px 0 0; font-weight: bold; }
+.results-chart { display: table; width: 100%; border-collapse: collapse; margin: 8px 0; }
+.chart-row { display: table-row; }
+.chart-cell { display: table-cell; padding: 6px 12px; border: 1px solid #dee2e6; vertical-align: middle; }
+.chart-header { background-color: #f8f9fa; font-weight: bold; text-align: center; }
+.chart-target { font-weight: bold; background-color: #f1f3f4; }
+.chart-status { text-align: center; }
+.chart-timing { text-align: right; font-family: monospace; font-size: 0.9em; }
 .success { color: #28a745; font-weight: bold; }
 .failure { color: #dc3545; font-weight: bold; }
 .git-info { background-color: #e9ecef; padding: 4px 6px; border-radius: 2px; font-family: monospace; font-size: 0.9em; }
@@ -140,7 +208,7 @@ body { font-family: Arial, sans-serif; margin: 10px; line-height: 1.3; }
 p { margin: 1px 0; }
 h3 { margin: 4px 0 2px 0; font-size: 1.0em; }
 h4 { margin: 3px 0 1px 0; font-size: 0.95em; }
-h2 { margin: 0; font-size: 1.1em; font-weight: normal; }
+h2 { margin: 0; font-size: 1.2em; font-weight: bold; }
 </style>
 </head>
 <body>
@@ -149,10 +217,9 @@ h2 { margin: 0; font-size: 1.1em; font-weight: normal; }
 </div>
 
 <div class="summary">
-<p><strong>Total Tests:</strong> {{ total_tests }}</p>
-<p><strong>Passed:</strong> <span class="success">{{ passed_tests }}</span></p>
-<p><strong>Failed:</strong> <span class="failure">{{ failed_tests }}</span></p>
 <p><strong>Build & Test Date:</strong> {{ build_date }}</p>
+<p><strong>Total Builds:</strong> {{ total_builds }} | <strong>Total Tests:</strong> {{ total_tests }}</p>
+<p><strong>Passed:</strong> <span class="success">{{ passed_tests }}</span> | <strong>Failed:</strong> <span class="failure">{{ failed_tests }}</span></p>
 </div>
 
 <div class="git-info">
@@ -176,19 +243,40 @@ h2 { margin: 0; font-size: 1.1em; font-weight: normal; }
 <div class="results">
 {% for framework in frameworks %}
 <div class="framework">
-<h4>Dockerfile.{{ framework.name.lower() }} targets:</h4>
+<div class="framework-header">Dockerfile.{{ framework.name.lower() }}</div>
+<div class="results-chart">
+<div class="chart-row">
+<div class="chart-cell chart-header">Target</div>
+<div class="chart-cell chart-header">Status</div>
+<div class="chart-cell chart-header">Docker Image Build Time</div>
+<div class="chart-cell chart-header">dynamo_check.py</div>
+<div class="chart-cell chart-header">Container Size</div>
+<div class="chart-cell chart-header">Image Tag</div>
+</div>
 {% for target in framework.targets %}
-<p>
+<div class="chart-row">
+<div class="chart-cell chart-target">{{ target.name }}</div>
+<div class="chart-cell chart-status">
 {% if target.success %}
-✅ {{ target.name }} target: <span class="success">PASSED</span>{{ target.timing_info }}
+<span class="success">✅ PASSED</span>
 {% else %}
-❌ {{ target.name }} target: <span class="failure">FAILED</span>{{ target.timing_info }}
+<span class="failure">❌ FAILED</span>
 {% endif %}
-</p>
+</div>
+<div class="chart-cell chart-timing">{{ target.build_time }}</div>
+<div class="chart-cell chart-timing">{{ target.test_time }}</div>
+<div class="chart-cell chart-timing">{{ target.container_size if target.container_size else '-' }}</div>
+<div class="chart-cell chart-timing" style="font-family: monospace; font-size: 0.8em;">{{ target.image_tag if target.image_tag else '-' }}</div>
+</div>
 {% if not target.success and target.error_output %}
+<div class="chart-row">
+<div class="chart-cell" colspan="6">
 <div class="error-output">{{ target.error_output }}</div>
+</div>
+</div>
 {% endif %}
 {% endfor %}
+</div>
 </div>
 {% endfor %}
 </div>
@@ -281,14 +369,14 @@ h2 { margin: 0; font-size: 1.1em; font-weight: normal; }
             failure_details: Optional[Dict[str, str]] mapping failed test keys to error output strings
             build_times: Optional[Dict[str, float]] mapping timing keys to duration in seconds
         """
-        if not self.dest_email:
+        if not self.email:
             return
             
         if failure_details is None:
             failure_details = {}
             
         if self.dry_run:
-            self.log_info(f"DRY-RUN: Would send email notification to {self.dest_email}")
+            self.log_info(f"DRY-RUN: Would send email notification to {self.email}")
             return
             
         try:
@@ -305,6 +393,10 @@ h2 { margin: 0; font-size: 1.1em; font-weight: normal; }
             total_tests = len(results)
             passed_tests = sum(1 for success in results.values() if success)
             failed_tests = sum(1 for success in results.values() if not success)
+            
+            # Calculate total builds (same as total tests since each target involves both build and test)
+            # In test-only mode, builds are skipped but we still show the count for clarity
+            total_builds = total_tests
             
             # Collect failed tests for summary
             failed_tests_list = [key for key, success in results.items() if not success]
@@ -336,20 +428,32 @@ h2 { margin: 0; font-size: 1.1em; font-weight: normal; }
                         
                         # Get timing information if available
                         timing_info = ""
+                        build_time_str = ""
+                        test_time_str = ""
+                        
                         if build_times:
-                            total_time_key = f"{framework_target}_total"
                             build_time_key = f"{framework_target}_build"
+                            test_time_key = f"{framework_target}_test"
                             
-                            if total_time_key in build_times:
-                                total_time = build_times[total_time_key]
-                                timing_parts = [f"total: {total_time:.1f}s"]
-                                
-                                if build_time_key in build_times:
-                                    build_time = build_times[build_time_key]
-                                    test_time = total_time - build_time
-                                    timing_parts = [f"build: {build_time:.1f}s", f"dynamo_check.py: {test_time:.1f}s"]
-                                
-                                timing_info = f" ({', '.join(timing_parts)})"
+                            # Get build time (may not exist in test-only mode)
+                            if build_time_key in build_times:
+                                build_time = build_times[build_time_key]
+                                build_time_str = f"{build_time:.1f}s"
+                            else:
+                                build_time_str = "-"  # No build in test-only mode
+                            
+                            # Get test time (should always exist)
+                            if test_time_key in build_times:
+                                test_time = build_times[test_time_key]
+                                test_time_str = f"{test_time:.1f}s"
+                            else:
+                                test_time_str = "-"
+                            
+                            # Create timing info for backward compatibility (used in some places)
+                            if build_time_str != "-" and test_time_str != "-":
+                                timing_info = f" (build: {build_time_str}, dynamo_check.py: {test_time_str})"
+                            elif test_time_str != "-":
+                                timing_info = f" (dynamo_check.py: {test_time_str})"
                         
                         # Get error output if available
                         error_output = ""
@@ -361,11 +465,31 @@ h2 { margin: 0; font-size: 1.1em; font-weight: normal; }
                             else:
                                 error_output = failure_details[framework_target]
                         
+                        # Get Docker image information if build was successful
+                        container_size = ""
+                        image_tag = ""
+                        if success and not self.dry_run:
+                            # Try to get the built image tag for this framework/target combination
+                            try:
+                                # Convert target type for build command discovery
+                                docker_target_type = target if target != "dev" else None
+                                _, _, discovered_tag = self.get_build_commands(framework, docker_target_type)
+                                if discovered_tag:
+                                    docker_info = self.get_docker_image_info(discovered_tag)
+                                    container_size = docker_info['size']
+                                    image_tag = docker_info['repo_tag']
+                            except Exception as e:
+                                self.log_debug(f"Failed to get Docker info for {framework_target}: {e}")
+                        
                         targets.append({
                             'name': target,
                             'success': success,
                             'timing_info': timing_info,
-                            'error_output': error_output
+                            'build_time': build_time_str,
+                            'test_time': test_time_str,
+                            'error_output': error_output,
+                            'container_size': container_size,
+                            'image_tag': image_tag
                         })
                 
                 frameworks.append({
@@ -377,6 +501,7 @@ h2 { margin: 0; font-size: 1.1em; font-weight: normal; }
             context = {
                 'overall_status': overall_status,
                 'status_color': status_color,
+                'total_builds': total_builds,
                 'total_tests': total_tests,
                 'passed_tests': passed_tests,
                 'failed_tests': failed_tests,
@@ -410,17 +535,17 @@ h2 { margin: 0; font-size: 1.1em; font-weight: normal; }
             # Create email file with proper CRLF formatting
             email_file = Path(f"/tmp/dynamo_email_{os.getpid()}.txt")
             
-            # Use printf to create proper CRLF formatting like our successful test
-            subprocess.run([
-                'printf', 
-                f'Subject: {subject}\\r\\nFrom: DynamoDockerBuilder <dynamo-docker-builder@nvidia.com>\\r\\nTo: {self.dest_email}\\r\\nMIME-Version: 1.0\\r\\nContent-Type: text/html; charset=UTF-8\\r\\n\\r\\n{html_content}\\r\\n'
-            ], stdout=open(email_file, 'w'))
+            # Write email content directly to avoid printf format specifier issues
+            email_content = f'Subject: {subject}\r\nFrom: DynamoDockerBuilder <dynamo-docker-builder@nvidia.com>\r\nTo: {self.email}\r\nMIME-Version: 1.0\r\nContent-Type: text/html; charset=UTF-8\r\n\r\n{html_content}\r\n'
+            
+            with open(email_file, 'w', encoding='utf-8') as f:
+                f.write(email_content)
             
             # Send email using curl
             result = subprocess.run([
                 'curl', '--url', 'smtp://smtp.nvidia.com:25',
                 '--mail-from', 'dynamo-docker-builder@nvidia.com',
-                '--mail-rcpt', self.dest_email,
+                '--mail-rcpt', self.email,
                 '--upload-file', str(email_file)
             ], capture_output=True, text=True)
             
@@ -428,7 +553,7 @@ h2 { margin: 0; font-size: 1.1em; font-weight: normal; }
             email_file.unlink(missing_ok=True)
             
             if result.returncode == 0:
-                self.log_success(f"Email notification sent to {self.dest_email} (using Jinja2 template)")
+                self.log_success(f"Email notification sent to {self.email} (using Jinja2 template)")
             else:
                 self.log_error(f"Failed to send email: {result.stderr}")
                 
@@ -1261,8 +1386,15 @@ h2 { margin: 0; font-size: 1.1em; font-weight: normal; }
         # Calculate build time if build was performed
         if build_start_time is not None and build_end_time is not None:
             build_time = build_end_time - build_start_time
+            test_time = total_time - build_time
             self.build_times[f"{test_key}_build"] = build_time
+            self.build_times[f"{test_key}_test"] = test_time
             self.log_debug(f"Build time for {test_key}: {build_time:.1f}s")
+            self.log_debug(f"Test time for {test_key}: {test_time:.1f}s")
+        else:
+            # Test-only mode: no build time, all time is test time
+            self.build_times[f"{test_key}_test"] = total_time
+            self.log_debug(f"Test-only time for {test_key}: {total_time:.1f}s")
         
         # Store total time (build + test)
         self.build_times[f"{test_key}_total"] = total_time
@@ -1357,7 +1489,7 @@ Examples:
   python dynamo_docker_builder.py --force-run               # Force run even if no files changed
   python dynamo_docker_builder.py --dry-run                 # Show what would be executed without running
   python dynamo_docker_builder.py --dryrun                  # Same as --dry-run
-  python dynamo_docker_builder.py --dest-email user@nvidia.com  # Send email notifications
+  python dynamo_docker_builder.py --email user@nvidia.com  # Send email notifications
   python dynamo_docker_builder.py --target dev              # Test only dev target
   python dynamo_docker_builder.py --target local-dev        # Test only local-dev target
   python dynamo_docker_builder.py --target dev,local-dev,custom  # Test multiple targets
@@ -1369,8 +1501,10 @@ Examples:
     def main(self) -> int:
         """Main function"""
         parser = argparse.ArgumentParser(description="DynamoDockerBuilder - Automated Docker Build and Test System")
-        parser.add_argument("-f", "--framework", type=str,
-                          help="Test specific framework (VLLM, SGLANG, TRTLLM) - case insensitive")
+        parser.add_argument("-f", "--framework", "--frameworks", type=str, action='append', dest='framework',
+                          help="Test specific framework (VLLM, SGLANG, TRTLLM) - case insensitive. Can be specified multiple times.")
+        parser.add_argument("--target", type=str, default="dev,local-dev",
+                          help="Comma-separated Docker build targets to test: dev, local-dev (default: dev,local-dev)")
         parser.add_argument("-a", "--all", action="store_true", default=True,
                           help="Test all frameworks (default)")
         parser.add_argument("--test-only", action="store_true",
@@ -1383,10 +1517,8 @@ Examples:
                           help="Show commands that would be executed without running them")
         parser.add_argument("--repo-path", type=str, default=None,
                           help="Path to the dynamo repository (default: ../dynamo_ci)")
-        parser.add_argument("--dest-email", type=str, default=None,
-                          help="Destination email address for notifications (sends email if specified)")
-        parser.add_argument("--target", type=str, default="dev,local-dev",
-                          help="Comma-separated Docker build targets to test: dev, local-dev (default: dev,local-dev)")
+        parser.add_argument("--email", type=str, default=None,
+                          help="Email address for notifications (sends email if specified)")
         parser.add_argument("--repo-sha", type=str, default=None,
                           help="Git SHA to checkout instead of latest main branch")
         
@@ -1402,7 +1534,7 @@ Examples:
         self.test_only = args.test_only
         self.no_checkout = args.no_checkout
         self.force_run = args.force_run
-        self.dest_email = args.dest_email
+        self.email = args.email
         self.repo_sha = args.repo_sha
         
         # Parse targets
@@ -1420,20 +1552,20 @@ Examples:
             self.log_error("Note: Targets are Docker build targets (dev, local-dev, runtime, dynamo_base, framework), not framework names (VLLM, SGLANG, TRTLLM)")
             return 1
         
-        # If framework is specified, disable --all and validate framework name (case insensitive)
+        # Determine which frameworks to test
         if args.framework:
-            # Normalize framework name to uppercase for case-insensitive matching
-            framework_upper = args.framework.upper()
-            if framework_upper not in self.FRAMEWORKS:
-                valid_frameworks = ", ".join(self.FRAMEWORKS)
-                self.log_error(f"Invalid framework '{args.framework}'. Valid options are: {valid_frameworks} (case insensitive)")
-                return 1
-            
-            test_all = False
-            test_framework_only = framework_upper  # Use the normalized uppercase version
+            # Normalize framework names to uppercase for case-insensitive matching
+            frameworks_to_test = []
+            for framework in args.framework:
+                framework_upper = framework.upper()
+                if framework_upper not in self.FRAMEWORKS:
+                    valid_frameworks = ", ".join(self.FRAMEWORKS)
+                    self.log_error(f"Invalid framework '{framework}'. Valid options are: {valid_frameworks} (case insensitive)")
+                    return 1
+                frameworks_to_test.append(framework_upper)
         else:
-            test_all = True
-            test_framework_only = None
+            # Test all frameworks by default
+            frameworks_to_test = list(self.FRAMEWORKS)
         
         print("=" * 60)
         self.log_info(f"Starting DynamoDockerBuilder - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
@@ -1475,59 +1607,49 @@ Examples:
         failure_details: Dict[str, str] = {}
         overall_success = True
         
-        if test_framework_only:
-            # Only clean up logs for the specific framework being tested
-            self.cleanup_existing_logs(framework=test_framework_only)
-            self.log_info(f"Testing single framework: {test_framework_only}")
+        # Log what we're testing
+        if len(frameworks_to_test) == 1:
+            self.log_info(f"Testing single framework: {frameworks_to_test[0]}")
+        elif len(frameworks_to_test) == len(self.FRAMEWORKS):
+            self.log_info("Testing all frameworks")
+        else:
+            frameworks_str = ", ".join(frameworks_to_test)
+            self.log_info(f"Testing multiple frameworks: {frameworks_str}")
+        
+        # Clean up logs (all frameworks if testing all, specific ones if testing subset)
+        if len(frameworks_to_test) == len(self.FRAMEWORKS):
+            self.cleanup_existing_logs()  # Clean all
+        else:
+            for framework in frameworks_to_test:
+                self.cleanup_existing_logs(framework=framework)  # Clean specific ones
+        
+        # Test each framework and collect detailed results
+        overall_success = True
+        for framework in frameworks_to_test:
+            targets_str = ", ".join(self.targets)
+            self.log_info(f"Starting tests for framework: {framework} (targets: {targets_str})")
             
-            # Collect results for configured targets
+            # Test all configured targets
             framework_success = True
             for target in self.targets:
-                target_success = self.test_framework_image(test_framework_only, target)
-                test_results[f"{test_framework_only}_{target}"] = target_success
+                target_success = self.test_framework_image(framework, target)
+                test_results[f"{framework}_{target}"] = target_success
                 
                 # Collect failure details for failed tests
                 if not target_success:
-                    failure_details[f"{test_framework_only}_{target}"] = self.get_failure_details(test_framework_only, target)
+                    failure_details[f"{framework}_{target}"] = self.get_failure_details(framework, target)
                     framework_success = False
-            overall_success = framework_success
+            
+            if not framework_success:
+                overall_success = False
             
             if framework_success:
-                self.log_success(f"Framework {test_framework_only} test completed successfully")
+                self.log_success(f"All tests completed successfully for framework: {framework}")
             else:
-                self.log_error(f"Framework {test_framework_only} test failed")
-                
-        elif test_all:
-            # Clean up all logs when testing all frameworks
-            self.cleanup_existing_logs()
-            self.log_info("Testing all frameworks")
-            
-            # Test all frameworks and collect detailed results
-            for framework in self.FRAMEWORKS:
-                targets_str = ", ".join(self.targets)
-                self.log_info(f"Starting tests for framework: {framework} (targets: {targets_str})")
-                
-                # Test all configured targets
-                framework_success = True
-                for target in self.targets:
-                    target_success = self.test_framework_image(framework, target)
-                    test_results[f"{framework}_{target}"] = target_success
-                    
-                    # Collect failure details for failed tests
-                    if not target_success:
-                        failure_details[f"{framework}_{target}"] = self.get_failure_details(framework, target)
-                        framework_success = False
-                
-                if not framework_success:
-                    overall_success = False
-                
-                if framework_success:
-                    self.log_success(f"All tests completed successfully for framework: {framework}")
-                else:
-                    self.log_error(f"Some tests failed for framework: {framework}")
+                self.log_error(f"Some tests failed for framework: {framework}")
         
-        # Send email notification if destination email is specified and tests actually ran
-        if self.dest_email:
+        # Send email notification if email is specified and tests actually ran
+        if self.email:
             self.send_email_notification(test_results, failure_details, self.build_times)
         
         # Return appropriate exit code
