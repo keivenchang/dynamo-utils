@@ -20,7 +20,7 @@ import subprocess
 import sys
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
-from urllib.parse import urljoin
+from urllib.parse import urljoin, quote
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError, URLError
 
@@ -96,14 +96,18 @@ class GitHubAPI:
     
     def branch_exists(self, branch_name: str) -> bool:
         """Check if a branch exists on GitHub"""
-        endpoint = f"/repos/{self.repo}/branches/{branch_name}"
+        # URL encode the branch name to handle special characters
+        encoded_branch = quote(branch_name, safe='')
+        endpoint = f"/repos/{self.repo}/branches/{encoded_branch}"
         result = self._make_request(endpoint)
         return result is not None
     
     def find_prs_for_branch(self, branch_name: str) -> List[Dict]:
         """Find PRs associated with a branch"""
         # Search for PRs with this branch as head
-        endpoint = f"/repos/{self.repo}/pulls?head=ai-dynamo:{branch_name}&state=all"
+        # URL encode the branch name to handle special characters
+        encoded_branch = quote(branch_name, safe='')
+        endpoint = f"/repos/{self.repo}/pulls?head=ai-dynamo:{encoded_branch}&state=all"
         result = self._make_request(endpoint)
         
         if result is None:
@@ -115,7 +119,9 @@ class GitHubAPI:
         """Search for PRs that might be related to this branch"""
         # GitHub search API for PRs mentioning the branch
         query = f"repo:{self.repo} type:pr {branch_name}"
-        endpoint = f"/search/issues?q={query}"
+        # URL encode the entire query
+        encoded_query = quote(query, safe='')
+        endpoint = f"/search/issues?q={encoded_query}"
         result = self._make_request(endpoint)
         
         if result is None or 'items' not in result:
@@ -390,6 +396,7 @@ class DynamoBranchChecker:
         number = pr.get('number', 'Unknown')
         title = pr.get('title', 'No title')
         state = pr.get('state', 'unknown')
+        merged_at = pr.get('merged_at')
         url = pr.get('html_url', '')
         
         # Truncate long titles to fit on same line with branch name
@@ -397,18 +404,24 @@ class DynamoBranchChecker:
         if len(title) > max_title_length:
             title = title[:max_title_length-3] + "..."
         
+        # GitHub API returns 'closed' for merged PRs, check merged_at field
+        if state == 'closed' and merged_at:
+            display_state = 'merged'
+        else:
+            display_state = state
+        
         state_emoji = {
             'open': '🟢',
             'closed': '🔴',
             'merged': '🟣'
-        }.get(state, '⚪')
+        }.get(display_state, '⚪')
         
         # Add gone indicator
         gone_info = " [GONE]" if is_gone else ""
         
         # Add review status indicators
         review_info = ""
-        if review_summary and state == 'open':
+        if review_summary and display_state == 'open':
             if review_summary['has_changes_requested']:
                 review_info = f" [CHANGES:{review_summary['changes_requested']}]"
             elif review_summary['has_approvals']:
@@ -418,7 +431,7 @@ class DynamoBranchChecker:
         
         # Add CI status indicators
         ci_info = ""
-        if status_checks and state == 'open':
+        if status_checks and display_state == 'open':
             if status_checks['has_required_failures']:
                 failed = status_checks['required_failed']
                 ci_info = f" [CI: ❌ {failed} required failed]"
