@@ -127,7 +127,19 @@ class GitHubAPI:
         if result is None or 'items' not in result:
             return []
         
-        return result['items']
+        # Filter results to only include PRs where head branch matches
+        # Search API can return false positives where branch name words appear in PR text
+        filtered_prs = []
+        for item in result['items']:
+            # Need to fetch full PR details to check head branch
+            pr_number = item.get('number')
+            if pr_number:
+                pr_endpoint = f"/repos/{self.repo}/pulls/{pr_number}"
+                pr_details = self._make_request(pr_endpoint)
+                if pr_details and pr_details.get('head', {}).get('ref') == branch_name:
+                    filtered_prs.append(pr_details)
+        
+        return filtered_prs
     
     def get_pr_reviews(self, pr_number: int) -> Optional[Dict]:
         """Get review status for a PR"""
