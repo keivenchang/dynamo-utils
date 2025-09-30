@@ -161,26 +161,38 @@ class ModelFetcher:
 
         # Need to fetch model information - retry forever
         print("ModelFetcher: Fetching model information...", file=sys.stderr)
+        retry_count = 0
+        last_error_msg = ""
+        
         while not self.cancelled:
-            success = await self._fetch_models(session)
+            success, error_msg = await self._fetch_models(session)
 
             async with self.shared_state.lock:
                 if success:
                     self.shared_state.model_available = True
                     self.shared_state.model_ready_event.set()
-                    print(f"ModelFetcher: Models found: {self.shared_state.model_names}", file=sys.stderr)
+                    if retry_count > 0:
+                        print(f"ModelFetcher: Models found after {retry_count} retries: {self.shared_state.model_names}", file=sys.stderr)
+                    else:
+                        print(f"ModelFetcher: Models found: {self.shared_state.model_names}", file=sys.stderr)
                     return True
                 else:
                     self.shared_state.model_available = False
                     self.shared_state.model_ready_event.clear()
 
-            print(f"ModelFetcher: Failed to fetch models, retrying in {retry_interval} seconds...", file=sys.stderr)
+            retry_count += 1
+            
+            # Only print retry message if error changed or every 5th attempt to reduce spam
+            if error_msg != last_error_msg or retry_count % 5 == 1:
+                print(f"ModelFetcher: {error_msg}, retrying in {retry_interval} seconds... (attempt {retry_count})", file=sys.stderr)
+                last_error_msg = error_msg
+            
             await asyncio.sleep(retry_interval)
 
         return False  # Only if cancelled
 
-    async def _fetch_models(self, session: aiohttp.ClientSession) -> bool:
-        """Fetch models from the API endpoint."""
+    async def _fetch_models(self, session: aiohttp.ClientSession) -> Tuple[bool, str]:
+        """Fetch models from the API endpoint. Returns (success, error_message)."""
         try:
             url = f"http://localhost:{self.config.port}/v1/models"
             timeout = aiohttp.ClientTimeout(total=10)
@@ -192,17 +204,14 @@ class ModelFetcher:
                     if models:
                         model_names = [model.get('id', '') for model in models]
                         self.shared_state.model_names = model_names
-                        return True
+                        return True, ""
                     else:
-                        print("ModelFetcher: No models found in response", file=sys.stderr)
-                        return False
+                        return False, "No models found in response"
                 else:
-                    print(f"ModelFetcher: Model check failed with status {response.status}", file=sys.stderr)
-                    return False
+                    return False, f"Model check failed with status {response.status}"
 
         except Exception as e:
-            print(f"ModelFetcher: Model fetch exception: {e}", file=sys.stderr)
-            return False
+            return False, f"Model fetch exception: {e}"
 
 
 class LoadTestWorker:
