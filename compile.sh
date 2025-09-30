@@ -273,14 +273,14 @@ cleanup_python() {
     fi
 
     # Clean up wheel files if in workspace
-    if [ -n "$WHEEL_OUTPUT_DIR" ] && [ -d "$WHEEL_OUTPUT_DIR" ]; then
+    if [ -n "${WHEEL_OUTPUT_DIR:-}" ] && [ -d "${WHEEL_OUTPUT_DIR:-}" ]; then
         for wheel_file in "$WHEEL_OUTPUT_DIR"/*.whl; do
             if [ -f "$wheel_file" ]; then
                 cmd rm -f "$wheel_file"
             fi
         done
         # Remove wheel directory if empty
-        if [ -d "$WHEEL_OUTPUT_DIR" ] && [ -z "$(ls -A "$WHEEL_OUTPUT_DIR")" ]; then
+        if [ -d "${WHEEL_OUTPUT_DIR:-}" ] && [ -z "$(ls -A "${WHEEL_OUTPUT_DIR:-}")" ]; then
             cmd rmdir "$WHEEL_OUTPUT_DIR"
         fi
     fi
