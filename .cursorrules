@@ -8,12 +8,18 @@
 # =============================================================================
 # This is a Rust-based and Python-based project with Python bindings and web components
 # The project uses cargo for Rust builds, uv for Python package management, and Docker for containerization
-# 
+#
 # Key project components:
 # - Rust runtime and core libraries
 # - Python bindings via maturin
 # - Web components and interfaces
 # - Docker containerization support
+# - Code in `lib/llm/src/http/...` are considered "frontend"
+# - Code in `lib/llm/src/http/service/metrics.rs` is considered frontend metrics
+# - Code in `components/backends/...` are backend component framework code
+# - Code in `lib/runtime/src/system_status_server.rs` is for the backend component code serving metrics
+# - Don't generate a *.md file unless I ask for it
+
 
 # =============================================================================
 # AI PERSONALITY AND BEHAVIOR
@@ -61,6 +67,14 @@
 # - For all cargo test, cargo build, and cargo install, make sure to add `--locked`
 # - Test changes with: `cargo test --locked`
 # - Use `cargo clean` if you encounter build issues
+# - For running "build and test" CI, run (without using tail):
+```
+bash -ec 'rustup component add rustfmt clippy && \
+              cargo fmt -- --check && \
+              cargo clippy --features block-manager --no-deps --all-targets -- -D warnings && \
+              cargo test --locked --all-targets --features=block-manager && \
+              cargo test --locked --features integration -- --nocapture'
+```
 
 ## Formatting and Linting
 # - Run `cargo fmt` whenever there are significant changes to Rust (*.rs files)
@@ -75,9 +89,36 @@
     "lib/runtime/examples/system_metrics",
     "lib/runtime/examples/hello_world",
     "lib/runtime/examples/service_metrics",
-    //"lib/bindings/python",
+    "lib/bindings/python",
     # ======== AUTO ADDED FOR TYPE-INFERENCE, SHOULD BE REMOVED BEFORE COMMIT ========
 ```
+
+## Type Inference for lib/bindings/python specifically
+# To enable rust-analyzer type inference for lib/bindings/python/rust/* files:
+# 1. In top-level Cargo.toml, add "lib/bindings/python" to [workspace] members:
+```
+    # ======== AUTO ADDED FOR TYPE-INFERENCE, SHOULD BE REMOVED BEFORE COMMIT ========
+    "lib/bindings/python",
+    # ======== AUTO ADDED FOR TYPE-INFERENCE, SHOULD BE REMOVED BEFORE COMMIT ========
+```
+# 2. In lib/bindings/python/Cargo.toml, comment out the [workspace] section:
+```
+    # ======== WORKSPACE DECLARATION REMOVED FOR TYPE-INFERENCE, RESTORE BEFORE COMMIT ========
+    # [workspace]
+    # # empty workspace to exclude from top level workspace
+    # # excluded due to pyo3 extension module build issues
+    # ======== WORKSPACE DECLARATION REMOVED FOR TYPE-INFERENCE, RESTORE BEFORE COMMIT ========
+```
+# 3. In lib/bindings/python/Cargo.toml, add empty integration feature (if not present):
+```
+    [features]
+    default = []
+    block-manager = ["dynamo-llm/block-manager", "dep:dlpark", "dep:cudarc"]
+    # Empty feature to satisfy rust-analyzer when workspace has integration feature enabled
+    integration = []
+```
+# 4. Restart rust-analyzer (Cmd/Ctrl+Shift+P → "Rust Analyzer: Restart Server")
+# 5. IMPORTANT: Restore all changes before committing (marked with comment delimiters)
 
 ## Testing Guidelines
 # - Write unit tests in the same file as the code unless told otherwise
@@ -122,7 +163,7 @@ pub fn process_data(data: &str) -> Result<ProcessedData, anyhow::Error> {
 ## Mutability Patterns
 # If a mut_var is used all over the place:
 # ```Rust
-# let mut mut_var = ...; 
+# let mut mut_var = ...;
 # mut_var.some_mutable_operation();
 # // and mut_var is used all over the code, which is undesirable...
 # ```
@@ -157,7 +198,7 @@ long_call()
 # - `debug_assert*` calls are preferred over `assert_*`
 
 ## Dependency Management
-# When Rust dependencies are updated, validate with: 
+# When Rust dependencies are updated, validate with:
 # - (cargo-deny --version || cargo install --locked cargo-deny@0.16.4)
 # - (cargo-deny --no-default-features check --hide-inclusion-graph licenses bans --config deny.toml)
 
@@ -228,6 +269,7 @@ def process_file(filename: str) -> None:
 # =============================================================================
 
 ## General Shell Rules
+# - When Cursor UNIX shell starts, source the .bashrc
 # - Do not EVER use "!" (exclamation marks) inside shell quotes
 # - When adding an empty line, do not add trailing spaces or tabs
 # - Use proper quoting to prevent word splitting and globbing issues
@@ -285,7 +327,7 @@ chown -R $USER_ID:$GROUP_ID .
 ## Merge Conflicts
 # After git merge conflicts are resolved, perform:
 # 1. `git add <file(s)>` where the resolved <file(s)>
-# 2. see if you're inside a git rebase operation. If so, perform `git rebase --continue`, and make sure to open the Terminal for the user
+# 2. see if you're inside a git rebase operation. If so, let the user perform `git rebase --continue`. Don't open terminal by yourself because Cursor gets stuck.
 # 3. Then, `cargo fmt` on a series of directories in one shot
 
 ## Commit Process
@@ -301,7 +343,7 @@ chown -R $USER_ID:$GROUP_ID .
 
 ## Commit Message Format
 # - Make the message terse (not verbose)
-# - Follow conventional commits format for the title (the very first line of the message). Terse format.
+# - For the first commit, follow the title format below (the very first line of the message). Terse format.
 # - Examples:
 #   feat: add new user authentication system
 #   fix: resolve memory leak in data processing
@@ -314,6 +356,7 @@ chown -R $USER_ID:$GROUP_ID .
 #   revert: undo previous commit due to issues
 #   style: apply code formatting and style fixes
 #   build: update build scripts for new environment
+# - But for subsequent commits, no need to add these feat/fix/docs/etc headers. Just a terse message.
 
 # =============================================================================
 # Slack Request For Review (RFR) TEMPLATE
