@@ -452,6 +452,9 @@ if [ -n "$BUILD_TYPE" ]; then
 
         if [ "$BUILD_TYPE" = "development" ]; then
             cmd bash -c "cd $WORKSPACE_DIR/lib/bindings/python && CARGO_PROFILE_DEV_OPT_LEVEL=0 CARGO_BUILD_JOBS=$CARGO_BUILD_JOBS CARGO_PROFILE_DEV_CODEGEN_UNITS=256 maturin develop --uv --features block-manager"
+
+            dry_run_echo "Installing components package in editable mode..."
+            cmd bash -c "cd $WORKSPACE_DIR/ && uv pip install -e ."
         else
             cmd bash -c "cd $WORKSPACE_DIR/lib/bindings/python && maturin build --release --features block-manager --out $WHEEL_OUTPUT_DIR"
 
