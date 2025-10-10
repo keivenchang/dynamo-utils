@@ -392,10 +392,12 @@ if [ "$DRY_RUN" = false ]; then
     (ps -ef --forest|grep multiprocess|awk '{print $2}'|xargs kill) && true
     (ps -ef|grep "python3.*\/tmp"|awk '{print $2}'|xargs kill) && true
     (ps -ef|grep "VLLM::EngineCore"|awk '{print $2}'|xargs kill) && true
+    (ps -ef|grep "python -m dynamo.sglang.main"|awk '{print $2}'|xargs kill) && true
 else
     dry_run_echo "Would kill multiprocess processes: \$(ps -ef --forest|grep multiprocess|awk '{print \$2}')"
     dry_run_echo "Would kill python3 temp processes: \$(ps -ef|grep \"python3.*\/tmp\"|awk '{print \$2}')"
     dry_run_echo "Would kill VLLM processes: \$(ps -ef|grep \"VLLM::EngineCore\"|awk '{print \$2}')"
+    dry_run_echo "Would kill sglang processes: \$(ps -ef|grep \"python -m dynamo.sglang.main\"|awk '{print \$2}')"
 fi
 if [ -d "~/dynamo" ]; then
     WORKSPACE_DIR="~/dynamo"
@@ -454,7 +456,7 @@ else
     cmd trap 'echo "[DRY RUN] Would clean up and kill background processes on exit"; exit' INT TERM EXIT
 fi
 
-#cmd export PYTHONPATH="$HOME/dynamo/components/router/src:$HOME/dynamo/components/metrics/src:$HOME/dynamo/components/frontend/src:$HOME/dynamo/components/planner/src:$HOME/dynamo/components/backends/mocker/src:$HOME/dynamo/components/backends/trtllm/src:$HOME/dynamo/components/backends/vllm/src:$HOME/dynamo/components/backends/sglang/src:$HOME/dynamo/components/backends/llama_cpp/src"
+#cmd export PYTHONPATH="$HOME/dynamo/components/router/src:$HOME/dynamo/components/frontend/src:$HOME/dynamo/components/planner/src:$HOME/dynamo/components/backends/mocker/src:$HOME/dynamo/components/backends/trtllm/src:$HOME/dynamo/components/backends/vllm/src:$HOME/dynamo/components/backends/sglang/src:$HOME/dynamo/components/backends/llama_cpp/src"
 
 # Check torch import and CUDA availability after PYTHONPATH is set (only if backend will be started)
 if [ "$RUN_BACKEND" = true ]; then
@@ -550,11 +552,12 @@ fi
 # Start backend if requested
 if [ "$RUN_BACKEND" = true ]; then
     cmd unset HF_TOKEN
+    metrics="true"
     if [ "$DRY_RUN" = false ]; then
-        ( set -x; DYN_SYSTEM_ENABLED=true DYN_SYSTEM_PORT=$DYN_BACKEND_PORT python -m dynamo.$FRAMEWORK --model "$MODEL" $FRAMEWORK_ARGS ) &
+        ( set -x; DYN_LOG=info DYN_ENGINE_METRICS_ENABLED=$metrics DYN_SYSTEM_ENABLED=true DYN_SYSTEM_PORT=$DYN_BACKEND_PORT python -m dynamo.$FRAMEWORK --model "$MODEL" $FRAMEWORK_ARGS ) &
         BACKEND_PID=$!
     else
-        ( set -x; : DYN_SYSTEM_ENABLED=true DYN_SYSTEM_PORT=$DYN_BACKEND_PORT python -m dynamo.$FRAMEWORK --model "$MODEL" $FRAMEWORK_ARGS ) 2>&1 | sed 's/^+ : /+ /'
+        ( set -x; : DYN_LOG=info DYN_ENGINE_METRICS_ENABLED=$metrics DYN_SYSTEM_ENABLED=true DYN_SYSTEM_PORT=$DYN_BACKEND_PORT python -m dynamo.$FRAMEWORK --model "$MODEL" $FRAMEWORK_ARGS ) 2>&1 | sed 's/^+ : /+ /'
         dry_run_echo "BACKEND_PID=\$!"
     fi
 fi
