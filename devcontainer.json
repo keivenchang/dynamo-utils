@@ -71,8 +71,8 @@
     },
     "remoteEnv": {
         // These are optional, but are convenient to have, especially the SSH_AUTH_SOCK.
-        "GITHUB_TOKEN": "${localEnv:GITHUB_TOKEN}",
-        "HF_TOKEN": "${localEnv:HF_TOKEN}"
+        "GITHUB_TOKEN": "__GITHUB_TOKEN__",
+        "HF_TOKEN": "__HF_TOKEN__"
         // "SSH_AUTH_SOCK": "${env:SSH_AUTH_SOCK}" // Optional: only if you also bind-mount the socket path
     },
     "mounts": [
