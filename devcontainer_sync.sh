@@ -180,8 +180,11 @@ for destdir in "$DEST_SRC_DIR_GLOB"*; do
         # Apply customizations to JSON file for this framework
         # 1. Replace display name with directory-specific name and lowercase framework
         # 2. Replace -framework- with -lowercase_framework- in the image name
+        # 3. Replace __HF_TOKEN__ and __GITHUB_TOKEN__ with actual values from environment
         sed "s|\"name\": \"NVIDIA Dynamo.*\"|\"name\": \"[${DEST_BASE_DIRNAME}-${USER}] ${framework_uppercase}\"|g" "${DEVCONTAINER_SRC_PATH}" | \
-        sed "s|-framework-|-${framework_lowercase}-|g" > "${TEMP_OUTPUT_FILE}"
+        sed "s|-framework-|-${framework_lowercase}-|g" | \
+        sed "s|__HF_TOKEN__|${HF_TOKEN:-}|g" | \
+        sed "s|__GITHUB_TOKEN__|${GITHUB_TOKEN:-}|g" > "${TEMP_OUTPUT_FILE}"
 
         # Copy the framework-specific file to the destination
         if ! cmd cp "${TEMP_OUTPUT_FILE}" "${framework_target_path}"; then
