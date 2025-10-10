@@ -18,8 +18,10 @@ import os
 import re
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib.parse import urljoin, quote
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError, URLError
@@ -59,14 +61,35 @@ def get_github_token_from_cli() -> Optional[str]:
 class GitHubAPI:
     """Simple GitHub API client for checking branches and PRs"""
     
-    def __init__(self, token: Optional[str] = None):
+    def __init__(self, token: Optional[str] = None, verbose: bool = False):
         self.base_url = "https://api.github.com"
-        self.repo = "ai-dynamo/dynamo"
         # Token priority: 1) provided token, 2) environment variable, 3) GitHub CLI config
         self.token = token or os.environ.get('GITHUB_TOKEN') or get_github_token_from_cli()
+        self.verbose = verbose
+        self.api_call_times: List[Tuple[str, float]] = []
+        # Cache for branch protection required checks per (repo, base_branch)
+        self._protection_required_checks_cache: Dict[Tuple[str, str], Set[str]] = {}
+        # Cache for PR details to avoid refetching, keyed by (repo, pr_number)
+        self._pr_details_cache: Dict[Tuple[str, int], Dict] = {}
+        # Cache for rulesets per repo (rulesets are repo-level, not branch-specific)
+        self._rulesets_cache: Dict[str, Set[str]] = {}
         
     def _make_request(self, endpoint: str) -> Optional[Dict]:
-        """Make a request to GitHub API"""
+        """Make a request to GitHub API
+        
+        Args:
+            endpoint: API endpoint path, e.g., "/repos/owner/repo/pulls/123"
+        
+        Returns:
+            Dict with API response, or None on error
+            Example: {
+                "id": 123,
+                "number": 456,
+                "title": "Fix bug",
+                ...
+            }
+        """
+        start_time = time.time()
         url = urljoin(self.base_url, endpoint)
         req = Request(url)
         
@@ -77,7 +100,12 @@ class GitHubAPI:
         
         try:
             with urlopen(req) as response:
-                return json.loads(response.read().decode())
+                result = json.loads(response.read().decode())
+                elapsed = time.time() - start_time
+                self.api_call_times.append((endpoint, elapsed))
+                if self.verbose:
+                    print(f"  API: {endpoint} took {elapsed:.2f}s", file=sys.stderr)
+                return result
         except HTTPError as e:
             if e.code == 404:
                 return None
@@ -94,20 +122,57 @@ class GitHubAPI:
             print(f"⚠️  Unexpected error: {e}", file=sys.stderr)
             return None
     
-    def branch_exists(self, branch_name: str) -> bool:
-        """Check if a branch exists on GitHub"""
+    def branch_exists(self, repo: str, branch_name: str) -> bool:
+        """Check if a branch exists on GitHub
+        
+        Args:
+            repo: Repository in format "owner/repo", e.g., "ai-dynamo/dynamo"
+            branch_name: Branch name, e.g., "main" or "feature/my-branch"
+        
+        Returns:
+            True if branch exists, False otherwise
+        
+        API Response Example:
+            {
+                "name": "main",
+                "commit": {"sha": "abc123...", "url": "..."},
+                "protected": true
+            }
+        """
         # URL encode the branch name to handle special characters
         encoded_branch = quote(branch_name, safe='')
-        endpoint = f"/repos/{self.repo}/branches/{encoded_branch}"
+        endpoint = f"/repos/{repo}/branches/{encoded_branch}"
         result = self._make_request(endpoint)
         return result is not None
     
-    def find_prs_for_branch(self, branch_name: str) -> List[Dict]:
-        """Find PRs associated with a branch"""
+    def find_prs_for_branch(self, repo: str, branch_name: str) -> List[Dict]:
+        """Find PRs associated with a branch
+        
+        Args:
+            repo: Repository in format "owner/repo", e.g., "ai-dynamo/dynamo"
+            branch_name: Branch name, e.g., "feature/my-branch"
+        
+        Returns:
+            List of PR dicts, or empty list if none found
+        
+        API Response Example:
+            [
+                {
+                    "number": 3266,
+                    "title": "feat: implement...",
+                    "state": "open",
+                    "head": {"ref": "feature/my-branch", "sha": "abc123..."},
+                    "base": {"ref": "main"},
+                    "html_url": "https://github.com/...",
+                    ...
+                }
+            ]
+        """
         # Search for PRs with this branch as head
         # URL encode the branch name to handle special characters
         encoded_branch = quote(branch_name, safe='')
-        endpoint = f"/repos/{self.repo}/pulls?head=ai-dynamo:{encoded_branch}&state=all"
+        owner = repo.split('/')[0] if '/' in repo else ''
+        endpoint = f"/repos/{repo}/pulls?head={owner}:{encoded_branch}&state=all"
         result = self._make_request(endpoint)
         
         if result is None:
@@ -115,10 +180,32 @@ class GitHubAPI:
         
         return result
     
-    def search_prs_by_branch(self, branch_name: str) -> List[Dict]:
-        """Search for PRs that might be related to this branch"""
+    def search_prs_by_branch(self, repo: str, branch_name: str) -> List[Dict]:
+        """Search for PRs that might be related to this branch
+        
+        Args:
+            repo: Repository in format "owner/repo", e.g., "ai-dynamo/dynamo"
+            branch_name: Branch name to search for
+        
+        Returns:
+            List of PR dicts matching the branch, or empty list
+        
+        API Response Example (search/issues):
+            {
+                "total_count": 1,
+                "items": [
+                    {
+                        "number": 3266,
+                        "title": "...",
+                        "state": "open",
+                        "pull_request": {...},
+                        ...
+                    }
+                ]
+            }
+        """
         # GitHub search API for PRs mentioning the branch
-        query = f"repo:{self.repo} type:pr {branch_name}"
+        query = f"repo:{repo} type:pr {branch_name}"
         # URL encode the entire query
         encoded_query = quote(query, safe='')
         endpoint = f"/search/issues?q={encoded_query}"
@@ -127,23 +214,76 @@ class GitHubAPI:
         if result is None or 'items' not in result:
             return []
         
-        # Filter results to only include PRs where head branch matches
-        # Search API can return false positives where branch name words appear in PR text
-        filtered_prs = []
-        for item in result['items']:
-            # Need to fetch full PR details to check head branch
-            pr_number = item.get('number')
-            if pr_number:
-                pr_endpoint = f"/repos/{self.repo}/pulls/{pr_number}"
-                pr_details = self._make_request(pr_endpoint)
-                if pr_details and pr_details.get('head', {}).get('ref') == branch_name:
-                    filtered_prs.append(pr_details)
+        # Filter to only include PRs where head branch matches.
+        # Fetch PR details in parallel to avoid sequential latency.
+        items = result['items']
+        pr_numbers = [item.get('number') for item in items if item.get('number')]
+        pr_details_list: List[Dict] = []
+
+        # Use cache where possible, and fetch the rest concurrently
+        remaining_numbers: List[int] = []
+        for num in pr_numbers:
+            cached = self._pr_details_cache.get((repo, num))
+            if cached is not None:
+                pr_details_list.append(cached)
+            else:
+                remaining_numbers.append(num)
+
+        max_workers = min(8, len(remaining_numbers)) or 0
+        if max_workers > 0:
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                future_map = {}
+                for num in remaining_numbers:
+                    pr_endpoint = f"/repos/{repo}/pulls/{num}"
+                    future = executor.submit(self._make_request, pr_endpoint)
+                    future_map[future] = num
+                for future in as_completed(future_map):
+                    num = future_map[future]
+                    data = future.result()
+                    if data is not None:
+                        self._pr_details_cache[(repo, num)] = data
+                        pr_details_list.append(data)
+        
+        # Now filter by exact head ref match
+        filtered_prs = [d for d in pr_details_list if d and d.get('head', {}).get('ref') == branch_name]
         
         return filtered_prs
     
-    def get_pr_reviews(self, pr_number: int) -> Optional[Dict]:
-        """Get review status for a PR"""
-        endpoint = f"/repos/{self.repo}/pulls/{pr_number}/reviews"
+    def get_pr_reviews(self, repo: str, pr_number: int) -> Optional[Dict]:
+        """Get review status for a PR
+        
+        Args:
+            repo: Repository in format "owner/repo", e.g., "ai-dynamo/dynamo"
+            pr_number: PR number, e.g., 3266
+        
+        Returns:
+            Dict with review summary, or None on error
+            Example: {
+                "approved": 2,
+                "changes_requested": 0,
+                "commented": 1,
+                "has_approvals": True,
+                "has_changes_requested": False
+            }
+        
+        API Response Example:
+            [
+                {
+                    "id": 123,
+                    "user": {"login": "reviewer1"},
+                    "state": "APPROVED",
+                    "submitted_at": "2025-01-01T00:00:00Z",
+                    ...
+                },
+                {
+                    "id": 124,
+                    "user": {"login": "reviewer2"},
+                    "state": "COMMENTED",
+                    ...
+                }
+            ]
+        """
+        endpoint = f"/repos/{repo}/pulls/{pr_number}/reviews"
         reviews = self._make_request(endpoint)
         
         if reviews is None:
@@ -191,11 +331,183 @@ class GitHubAPI:
         
         return review_summary
     
-    def get_pr_status_checks(self, pr_number: int) -> Optional[Dict]:
-        """Get CI status checks for a PR"""
-        # First get the PR details to get the head SHA and base branch
-        pr_endpoint = f"/repos/{self.repo}/pulls/{pr_number}"
-        pr_data = self._make_request(pr_endpoint)
+    def _get_required_checks_for_base_branch(self, repo: str, base_branch: str) -> Set[str]:
+        """Return required status check contexts for a base branch, with caching.
+        
+        Args:
+            repo: Repository in format "owner/repo", e.g., "ai-dynamo/dynamo"
+            base_branch: Base branch name, e.g., "main"
+        
+        Returns:
+            Set of required check names, e.g., {"copyright-checks", "pre-commit", "DCO"}
+        
+        API Response Examples:
+            Rulesets API (/repos/{repo}/rulesets):
+                [
+                    {
+                        "id": 4130136,
+                        "name": "Required PR Checks",
+                        "target": "branch",
+                        ...
+                    }
+                ]
+            
+            Ruleset Detail API (/repos/{repo}/rulesets/{id}):
+                {
+                    "id": 4130136,
+                    "rules": [
+                        {
+                            "type": "required_status_checks",
+                            "parameters": {
+                                "required_status_checks": [
+                                    {"context": "copyright-checks"},
+                                    {"context": "pre-commit"}
+                                ]
+                            }
+                        }
+                    ]
+                }
+            
+            Branch Protection API (/repos/{repo}/branches/{branch}/protection):
+                {
+                    "required_status_checks": {
+                        "contexts": ["test", "build"],
+                        "checks": [{"context": "lint"}]
+                    }
+                }
+        """
+        cache_key = (repo, base_branch)
+        if cache_key in self._protection_required_checks_cache:
+            return self._protection_required_checks_cache[cache_key]
+
+        required_checks: Set[str] = set()
+        
+        # Try the rulesets API first (newer, more reliable) - cached per repo
+        if repo in self._rulesets_cache:
+            required_checks = self._rulesets_cache[repo].copy()
+        else:
+            rulesets_endpoint = f"/repos/{repo}/rulesets"
+            rulesets_data = self._make_request(rulesets_endpoint)
+            if rulesets_data and isinstance(rulesets_data, list):
+                for ruleset in rulesets_data:
+                    ruleset_id = ruleset.get('id')
+                    if ruleset_id:
+                        # Get detailed ruleset
+                        detailed_endpoint = f"/repos/{repo}/rulesets/{ruleset_id}"
+                        detailed = self._make_request(detailed_endpoint)
+                        if detailed and 'rules' in detailed:
+                            for rule in detailed['rules']:
+                                if rule.get('type') == 'required_status_checks':
+                                    params = rule.get('parameters', {})
+                                    for check in params.get('required_status_checks', []):
+                                        context = check.get('context', '')
+                                        if context:
+                                            required_checks.add(context)
+            # Cache the rulesets result for this repo
+            self._rulesets_cache[repo] = required_checks.copy()
+        
+        # If rulesets didn't work, try the full protection endpoint (branch-specific)
+        if not required_checks:
+            protection_endpoint = f"/repos/{repo}/branches/{base_branch}/protection"
+            protection_data = self._make_request(protection_endpoint)
+            if protection_data and 'required_status_checks' in protection_data:
+                checks_data = protection_data['required_status_checks'].get('checks', [])
+                for check in checks_data:
+                    context = check.get('context', '')
+                    if context:
+                        required_checks.add(context)
+                contexts = protection_data['required_status_checks'].get('contexts', [])
+                required_checks.update(contexts)
+            else:
+                # If full protection fails (404), try just the required_status_checks endpoint
+                status_checks_endpoint = f"/repos/{repo}/branches/{base_branch}/protection/required_status_checks"
+                status_checks_data = self._make_request(status_checks_endpoint)
+                if status_checks_data:
+                    checks_data = status_checks_data.get('checks', [])
+                    for check in checks_data:
+                        context = check.get('context', '')
+                        if context:
+                            required_checks.add(context)
+                    contexts = status_checks_data.get('contexts', [])
+                    required_checks.update(contexts)
+
+        self._protection_required_checks_cache[cache_key] = required_checks
+        return required_checks
+
+    def get_pr_status_checks(self, repo: str, pr_number: int, pr_data: Optional[Dict] = None) -> Optional[Dict]:
+        """Get CI status checks for a PR
+        
+        Args:
+            repo: Repository in format "owner/repo", e.g., "ai-dynamo/dynamo"
+            pr_number: PR number, e.g., 3266
+            pr_data: Optional pre-fetched PR data to avoid extra API call
+        
+        Returns:
+            Dict with check status summary, or None on error
+            Example: {
+                "total_checks": 25,
+                "passed": 23,
+                "failed": 1,
+                "pending": 1,
+                "required_failed": 1,
+                "optional_failed": 0,
+                "has_failures": True,
+                "has_required_failures": True,
+                "failed_checks": ["copyright-checks"],
+                "required_failed_checks": ["copyright-checks"]
+            }
+        
+        API Response Examples:
+            PR Detail (/repos/{repo}/pulls/{number}):
+                {
+                    "number": 3266,
+                    "head": {"sha": "6bef250...", "ref": "my-branch"},
+                    "base": {"ref": "main"},
+                    ...
+                }
+            
+            Check Runs (/repos/{repo}/commits/{sha}/check-runs):
+                {
+                    "total_count": 25,
+                    "check_runs": [
+                        {
+                            "name": "copyright-checks",
+                            "status": "completed",
+                            "conclusion": "failure",
+                            "started_at": "...",
+                            ...
+                        },
+                        {
+                            "name": "pre-commit",
+                            "status": "completed",
+                            "conclusion": "success",
+                            ...
+                        }
+                    ]
+                }
+            
+            Combined Status (/repos/{repo}/commits/{sha}/status):
+                {
+                    "state": "pending",
+                    "statuses": [
+                        {
+                            "context": "ci/test",
+                            "state": "success",
+                            ...
+                        }
+                    ]
+                }
+        """
+        # First get the PR details to get the head SHA and base branch (use cache if available)
+        if pr_data is None:
+            cache_key = (repo, pr_number)
+            if cache_key in self._pr_details_cache:
+                pr_data = self._pr_details_cache[cache_key]
+            else:
+                pr_endpoint = f"/repos/{repo}/pulls/{pr_number}"
+                pr_data = self._make_request(pr_endpoint)
+                if pr_data:
+                    self._pr_details_cache[cache_key] = pr_data
         
         if not pr_data or 'head' not in pr_data:
             return None
@@ -203,28 +515,20 @@ class GitHubAPI:
         head_sha = pr_data['head']['sha']
         base_branch = pr_data.get('base', {}).get('ref', 'main')
         
-        # Get branch protection rules to know which checks are required
-        protection_endpoint = f"/repos/{self.repo}/branches/{base_branch}/protection"
-        protection_data = self._make_request(protection_endpoint)
-        
-        required_checks = set()
-        if protection_data and 'required_status_checks' in protection_data:
-            checks_data = protection_data['required_status_checks'].get('checks', [])
-            for check in checks_data:
-                context = check.get('context', '')
-                if context:
-                    required_checks.add(context)
-            # Also check legacy format
-            contexts = protection_data['required_status_checks'].get('contexts', [])
-            required_checks.update(contexts)
+        # Get required checks (cached per base branch)
+        required_checks = self._get_required_checks_for_base_branch(repo, base_branch)
         
         # Get combined status for the commit
-        status_endpoint = f"/repos/{self.repo}/commits/{head_sha}/status"
-        combined_status = self._make_request(status_endpoint)
-        
+        status_endpoint = f"/repos/{repo}/commits/{head_sha}/status"
         # Get check runs (GitHub Actions)
-        checks_endpoint = f"/repos/{self.repo}/commits/{head_sha}/check-runs"
-        check_runs = self._make_request(checks_endpoint)
+        checks_endpoint = f"/repos/{repo}/commits/{head_sha}/check-runs"
+
+        # Fetch both endpoints concurrently
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            future_status = executor.submit(self._make_request, status_endpoint)
+            future_checks = executor.submit(self._make_request, checks_endpoint)
+            combined_status = future_status.result()
+            check_runs = future_checks.result()
         
         status_summary = {
             'total_checks': 0,
@@ -234,7 +538,9 @@ class GitHubAPI:
             'required_failed': 0,
             'optional_failed': 0,
             'has_failures': False,
-            'has_required_failures': False
+            'has_required_failures': False,
+            'failed_checks': [],  # List of failed check names
+            'required_failed_checks': []  # List of required failed check names
         }
         
         # Process status checks (older CI systems)
@@ -251,9 +557,11 @@ class GitHubAPI:
                     elif state in ['failure', 'error']:
                         status_summary['failed'] += 1
                         status_summary['has_failures'] = True
+                        status_summary['failed_checks'].append(context)
                         if is_required:
                             status_summary['required_failed'] += 1
                             status_summary['has_required_failures'] = True
+                            status_summary['required_failed_checks'].append(context)
                         else:
                             status_summary['optional_failed'] += 1
                     elif state == 'pending':
@@ -274,9 +582,11 @@ class GitHubAPI:
                     elif conclusion in ['failure', 'timed_out', 'action_required']:
                         status_summary['failed'] += 1
                         status_summary['has_failures'] = True
+                        status_summary['failed_checks'].append(check_name)
                         if is_required:
                             status_summary['required_failed'] += 1
                             status_summary['has_required_failures'] = True
+                            status_summary['required_failed_checks'].append(check_name)
                         else:
                             status_summary['optional_failed'] += 1
                 elif status in ['queued', 'in_progress']:
@@ -289,10 +599,12 @@ class GitHubAPI:
 class DynamoBranchChecker:
     """Main class for checking dynamo branches and PRs"""
     
-    def __init__(self, base_dir: str, github_token: Optional[str] = None, verbose: bool = False):
+    def __init__(self, base_dir: str, github_token: Optional[str] = None, verbose: bool = False, quick: bool = False, max_workers: int = 8):
         self.base_dir = Path(base_dir)
-        self.github = GitHubAPI(github_token)
+        self.github = GitHubAPI(github_token, verbose)
         self.verbose = verbose
+        self.quick = quick
+        self.max_workers = max(1, int(max_workers))
         
     def find_dynamo_directories(self) -> List[Path]:
         """Find all dynamo* directories"""
@@ -306,6 +618,58 @@ class DynamoBranchChecker:
                     print(f"Skipping {item.name} (not a git repository)")
         
         return sorted(dynamo_dirs)
+
+    @staticmethod
+    def parse_owner_repo_from_remote_url(remote_url: Optional[str]) -> Tuple[Optional[str], Optional[str]]:
+        """Parse host and owner/repo from a git remote URL.
+        Supports HTTPS and SSH forms. Returns (host, owner_repo) or (None, None).
+        """
+        if not remote_url:
+            return None, None
+        try:
+            url = remote_url.strip()
+            host = None
+            path = None
+            if url.startswith('git@'):
+                # e.g., git@github.com:owner/repo.git
+                # Split 'git@host:path'
+                at_idx = url.find('@')
+                colon_idx = url.find(':', at_idx + 1)
+                if at_idx != -1 and colon_idx != -1:
+                    host = url[at_idx + 1:colon_idx]
+                    path = url[colon_idx + 1:]
+            elif url.startswith('ssh://'):
+                # e.g., ssh://git@github.com/owner/repo.git
+                # Remove scheme
+                rest = url[len('ssh://'):]
+                # Remove optional user@
+                at_idx = rest.find('@')
+                if at_idx != -1:
+                    rest = rest[at_idx + 1:]
+                slash_idx = rest.find('/')
+                if slash_idx != -1:
+                    host = rest[:slash_idx]
+                    path = rest[slash_idx + 1:]
+            elif url.startswith('https://') or url.startswith('http://'):
+                # e.g., https://github.com/owner/repo.git
+                # Find host between scheme and next '/'
+                scheme_end = url.find('://') + 3
+                slash_idx = url.find('/', scheme_end)
+                if slash_idx != -1:
+                    host = url[scheme_end:slash_idx]
+                    path = url[slash_idx + 1:]
+            # Normalize path to owner/repo
+            if path and host:
+                if path.endswith('.git'):
+                    path = path[:-4]
+                # Ensure it has at least owner/repo
+                parts = path.split('/')
+                if len(parts) >= 2:
+                    owner_repo = f"{parts[0]}/{parts[1]}"
+                    return host, owner_repo
+            return None, None
+        except Exception:
+            return None, None
     
     def get_local_branches(self, repo_dir: Path) -> List[str]:
         """Get all local branches from a git repository"""
@@ -374,6 +738,40 @@ class DynamoBranchChecker:
             
         except subprocess.CalledProcessError:
             return {'upstream': None, 'is_gone': False}
+
+    def get_all_branch_tracking_statuses(self, repo_dir: Path) -> Dict[str, Dict[str, Optional[str]]]:
+        """Get tracking info for all branches in one git call."""
+        try:
+            result = subprocess.run(
+                ['git', 'branch', '-vv'],
+                cwd=repo_dir,
+                capture_output=True,
+                text=True,
+                check=True
+            )
+            tracking: Dict[str, Dict[str, Optional[str]]] = {}
+            for raw_line in result.stdout.strip().split('\n'):
+                line = raw_line.strip()
+                if not line:
+                    continue
+                if line.startswith('*'):
+                    line = line[1:].strip()
+                parts = line.split(None, 1)
+                if not parts:
+                    continue
+                branch_name = parts[0]
+                is_gone = ': gone]' in line
+                upstream = None
+                if '[' in line and ']' in line:
+                    bracket_content = line[line.find('[')+1:line.find(']')]
+                    upstream = bracket_content.split(':')[0].strip()
+                tracking[branch_name] = {
+                    'upstream': upstream,
+                    'is_gone': is_gone
+                }
+            return tracking
+        except subprocess.CalledProcessError:
+            return {}
     
     def get_current_branch(self, repo_dir: Path) -> Optional[str]:
         """Get the current branch of a git repository"""
@@ -423,9 +821,9 @@ class DynamoBranchChecker:
             display_state = state
         
         state_emoji = {
-            'open': '🟢',
-            'closed': '🔴',
-            'merged': '🟣'
+            'open': '📖',
+            'closed': '❌',
+            'merged': '🔀'
         }.get(display_state, '⚪')
         
         # Add gone indicator
@@ -443,12 +841,26 @@ class DynamoBranchChecker:
         
         # Add CI status indicators
         ci_info = ""
+        ci_details = ""
+        # NOTE: "Required Checks" displayed in the CI badge refers to status checks that
+        # are marked as required by GitHub branch protection rules on the PR's base branch.
+        # We build and cache the required set per base branch via the branch protection API
+        # (see GitHubAPI._get_required_checks_for_base_branch). When summarizing CI in
+        # GitHubAPI.get_pr_status_checks, only failures whose context/name is in that
+        # required set count toward 'required_failed' and trigger the
+        # "[CI: ❌ N required failed]" message below. If no protection is configured,
+        # the required set is empty and failures are treated as optional. In --quick mode
+        # CI/review enrichment is skipped entirely, so no CI badge is added.
         if status_checks and display_state == 'open':
             if status_checks['has_required_failures']:
                 failed = status_checks['required_failed']
                 ci_info = f" [CI: ❌ {failed} required failed]"
+                # Add details of failed required checks
+                if status_checks.get('required_failed_checks'):
+                    failed_list = '\n         • '.join(status_checks['required_failed_checks'])
+                    ci_details = f"\n       Required checks failed:\n         • {failed_list}"
             elif status_checks['pending'] > 0:
-                ci_info = f" [CI: pending]"
+                ci_info = f" [CI: ⏳ pending]"
             elif status_checks['total_checks'] > 0:
                 ci_info = f" [CI: ✅ passed]"
         
@@ -458,9 +870,9 @@ class DynamoBranchChecker:
                 branch_display = f"\033[1m{branch_name}\033[0m"  # Bold
             else:
                 branch_display = branch_name
-            return f"     {state_emoji} {branch_display}: PR #{number} - {title}{gone_info}{review_info}{ci_info}\n       {url}"
+            return f"     {state_emoji} {branch_display}: PR #{number} - {title}{gone_info}{review_info}{ci_info}\n       {url}{ci_details}"
         else:
-            return f"  {state_emoji} PR #{number}: {title}{gone_info}{review_info}{ci_info}\n     {url}"
+            return f"  {state_emoji} PR #{number}: {title}{gone_info}{review_info}{ci_info}\n     {url}{ci_details}"
     
     def check_directory(self, repo_dir: Path) -> Dict:
         """Check a single dynamo directory for branches and PRs"""
@@ -472,13 +884,15 @@ class DynamoBranchChecker:
         current_branch = self.get_current_branch(repo_dir)
         local_branches = self.get_local_branches(repo_dir)
         
-        # Check if this is actually pointing to the ai-dynamo/dynamo repo
-        is_dynamo_repo = remote_url and 'ai-dynamo/dynamo' in remote_url
+        # Determine GitHub repo (owner/repo) from remote URL
+        host, owner_repo = self.parse_owner_repo_from_remote_url(remote_url)
+        is_dynamo_repo = bool(owner_repo and host and host.endswith('github.com'))
         
         result = {
             'directory': repo_dir.name,
             'path': str(repo_dir),
             'remote_url': remote_url,
+            'repo': owner_repo,
             'current_branch': current_branch,
             'local_branches': local_branches,
             'is_dynamo_repo': is_dynamo_repo,
@@ -487,14 +901,14 @@ class DynamoBranchChecker:
         
         if not is_dynamo_repo:
             if self.verbose:
-                print(f"  ⚠️  Not pointing to ai-dynamo/dynamo (remote: {remote_url})")
+                print(f"  ⚠️  Unsupported or non-GitHub remote (remote: {remote_url})")
             return result
         
-        # Check each branch
-        for branch in local_branches:
-            # Get tracking status (whether remote is gone)
-            tracking_status = self.get_branch_tracking_status(repo_dir, branch)
-            
+        # Precompute tracking for all branches in one call
+        tracking_map = self.get_all_branch_tracking_statuses(repo_dir)
+
+        def process_branch(branch: str) -> Tuple[str, Dict]:
+            tracking_status = tracking_map.get(branch, {'upstream': None, 'is_gone': False})
             branch_info = {
                 'exists_on_github': False,
                 'prs': [],
@@ -502,39 +916,79 @@ class DynamoBranchChecker:
                 'is_gone': tracking_status['is_gone'],
                 'upstream': tracking_status['upstream']
             }
-            
+
             if branch in ['main', 'master']:
                 branch_info['exists_on_github'] = True
+                return branch, branch_info
+
+            if self.verbose:
+                print(f"  Checking branch: {branch}")
+
+            # Check if branch exists and fetch PRs in parallel
+            with ThreadPoolExecutor(max_workers=min(3, self.max_workers)) as exec_branch:
+                fut_exists = exec_branch.submit(self.github.branch_exists, owner_repo, branch)
+                fut_find = exec_branch.submit(self.github.find_prs_for_branch, owner_repo, branch)
+                fut_search = exec_branch.submit(self.github.search_prs_by_branch, owner_repo, branch)
+                exists = fut_exists.result()
+                find_results = fut_find.result() or []
+                search_results = fut_search.result() or []
+
+            # Prefer head-based find results; otherwise fall back to search
+            prs = find_results if find_results else search_results
+            # If both returned, deduplicate by PR number
+            if find_results and search_results:
+                seen: Set[int] = set()
+                merged: List[Dict] = []
+                for pr in (find_results + search_results):
+                    num = pr.get('number')
+                    if num and num not in seen:
+                        seen.add(num)
+                        merged.append(pr)
+                prs = merged
+
+            # Enrich PRs concurrently across all PRs with a single pool
+            prs_with_reviews: List[Dict] = []
+            if not self.quick and prs:
+                open_prs = [p for p in prs if p.get('state') == 'open']
+                review_futures = {}
+                status_futures = {}
+                max_workers = min(self.max_workers, max(2, len(open_prs) * 2))
+                with ThreadPoolExecutor(max_workers=max_workers) as exec_prs:
+                    for p in open_prs:
+                        num = p.get('number')
+                        if not num:
+                            continue
+                        review_futures[exec_prs.submit(self.github.get_pr_reviews, owner_repo, num)] = num
+                        status_futures[exec_prs.submit(self.github.get_pr_status_checks, owner_repo, num, p)] = num
+
+                    review_results: Dict[int, Optional[Dict]] = {}
+                    status_results: Dict[int, Optional[Dict]] = {}
+                    for f in as_completed(list(review_futures.keys()) + list(status_futures.keys())):
+                        if f in review_futures:
+                            review_results[review_futures[f]] = f.result()
+                        else:
+                            status_results[status_futures[f]] = f.result()
+
+                # Attach results back to PRs
+                for p in prs:
+                    pr_copy = p.copy()
+                    num = p.get('number')
+                    if num and p.get('state') == 'open':
+                        pr_copy['review_summary'] = review_results.get(num)
+                        pr_copy['status_checks'] = status_results.get(num)
+                    prs_with_reviews.append(pr_copy)
             else:
-                # Check if branch exists on GitHub
-                if self.verbose:
-                    print(f"  Checking branch: {branch}")
-                
-                branch_info['exists_on_github'] = self.github.branch_exists(branch)
-                
-                # Look for PRs even if branch doesn't exist (it might be gone/merged)
-                prs = self.github.find_prs_for_branch(branch)
-                if not prs:
-                    # Try searching for PRs that mention this branch
-                    prs = self.github.search_prs_by_branch(branch)
-                
-                # Get review status and CI checks for each PR
-                prs_with_reviews = []
-                for pr in prs:
-                    pr_data = pr.copy()
-                    pr_number = pr.get('number')
-                    if pr_number and pr.get('state') == 'open':
-                        review_summary = self.github.get_pr_reviews(pr_number)
-                        pr_data['review_summary'] = review_summary
-                        
-                        # Get CI status checks
-                        status_checks = self.github.get_pr_status_checks(pr_number)
-                        pr_data['status_checks'] = status_checks
-                    prs_with_reviews.append(pr_data)
-                
-                branch_info['prs'] = prs_with_reviews
-            
-            result['branch_info'][branch] = branch_info
+                # Quick mode or no PRs: copy as-is
+                prs_with_reviews = [p.copy() for p in prs]
+
+            branch_info['exists_on_github'] = exists
+            branch_info['prs'] = prs_with_reviews
+            return branch, branch_info
+
+        # Process branches in parallel
+        with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+            for branch, info in executor.map(process_branch, local_branches):
+                result['branch_info'][branch] = info
         
         return result
     
@@ -544,7 +998,7 @@ class DynamoBranchChecker:
         print("=" * 50)
         
         # Show PR status guide
-        print("PR Status: 🟢 [OPEN] | 🔴 [CLOSED] | 🟣 [MERGED]")
+        print("PR Status: 📖 [OPEN] | ❌ [CLOSED] | 🔀 [MERGED]")
         print("Review Status: ✅ Approved | [CHANGES] | [Unresolved Comments]")
         print("Branch Status: [GONE] = Remote branch deleted (likely merged/closed)")
         
@@ -575,10 +1029,10 @@ class DynamoBranchChecker:
             print(f"   • {d.name}")
         
         all_results = []
-        
-        for repo_dir in dynamo_dirs:
-            result = self.check_directory(repo_dir)
-            all_results.append(result)
+        # Process directories in parallel while preserving order
+        with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+            for res in executor.map(self.check_directory, dynamo_dirs):
+                all_results.append(res)
         
         # Display results
         print("\n" + "=" * 50)
@@ -587,6 +1041,49 @@ class DynamoBranchChecker:
         
         for result in all_results:
             self.display_result(result)
+        
+        # Show timing summary if verbose
+        if self.verbose and self.github.api_call_times:
+            print("\n" + "=" * 50)
+            print("API CALL TIMING SUMMARY")
+            print("=" * 50)
+            total_time = sum(t for _, t in self.github.api_call_times)
+            print(f"Total API calls: {len(self.github.api_call_times)}")
+            print(f"Total API time: {total_time:.2f}s")
+            print(f"Average per call: {total_time/len(self.github.api_call_times):.2f}s")
+            
+            # Group by endpoint type
+            endpoint_times: Dict[str, List[float]] = {}
+            for endpoint, elapsed in self.github.api_call_times:
+                # Extract endpoint type (e.g., /repos/.../branches/... -> branches)
+                if '/branches/' in endpoint and '/protection' not in endpoint:
+                    key = 'branch_exists'
+                elif '/pulls/' in endpoint and '/reviews' in endpoint:
+                    key = 'get_reviews'
+                elif '/commits/' in endpoint and '/status' in endpoint:
+                    key = 'ci_combined_status'
+                elif '/commits/' in endpoint and '/check-runs' in endpoint:
+                    key = 'ci_check_runs'
+                elif '/branches/' in endpoint and '/protection' in endpoint:
+                    key = 'ci_branch_protection'
+                elif '/pulls/' in endpoint and endpoint.count('/') == 5:  # /repos/owner/repo/pulls/number
+                    key = 'get_pr_details'
+                elif '/pulls?' in endpoint:
+                    key = 'find_prs'
+                elif '/search/' in endpoint:
+                    key = 'search_prs'
+                else:
+                    key = 'other'
+                
+                if key not in endpoint_times:
+                    endpoint_times[key] = []
+                endpoint_times[key].append(elapsed)
+            
+            print("\nBy endpoint type:")
+            for key, times in sorted(endpoint_times.items(), key=lambda x: sum(x[1]), reverse=True):
+                total = sum(times)
+                avg = total / len(times)
+                print(f"  {key}: {len(times)} calls, {total:.2f}s total, {avg:.2f}s avg")
     
     def display_result(self, result: Dict) -> None:
         """Display results for a single directory"""
@@ -699,6 +1196,19 @@ GitHub Token:
         help='Base directory to search for dynamo* directories (default: current directory)'
     )
     
+    parser.add_argument(
+        '--quick',
+        action='store_true',
+        help='Quick mode: skip CI status and review checks (much faster)'
+    )
+    
+    parser.add_argument(
+        '--max-workers',
+        type=int,
+        default=16,
+        help='Max worker threads for parallel API calls (default: 8)'
+    )
+    
     args = parser.parse_args()
     
     # Resolve base directory
@@ -714,7 +1224,9 @@ GitHub Token:
     checker = DynamoBranchChecker(
         base_dir=str(base_dir),
         github_token=args.github_token,
-        verbose=args.verbose
+        verbose=args.verbose,
+        quick=args.quick,
+        max_workers=args.max_workers
     )
     
     try:
