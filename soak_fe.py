@@ -163,7 +163,7 @@ class ModelFetcher:
         print("ModelFetcher: Fetching model information...", file=sys.stderr)
         retry_count = 0
         last_error_msg = ""
-        
+
         while not self.cancelled:
             success, error_msg = await self._fetch_models(session)
 
@@ -181,12 +181,12 @@ class ModelFetcher:
                     self.shared_state.model_ready_event.clear()
 
             retry_count += 1
-            
+
             # Only print retry message if error changed or every 5th attempt to reduce spam
             if error_msg != last_error_msg or retry_count % 5 == 1:
                 print(f"ModelFetcher: {error_msg}, retrying in {retry_interval} seconds... (attempt {retry_count})", file=sys.stderr)
                 last_error_msg = error_msg
-            
+
             await asyncio.sleep(retry_interval)
 
         return False  # Only if cancelled
@@ -801,8 +801,8 @@ Examples:
                         help='Duration in seconds (default: 60)')
     parser.add_argument('--workers', type=int, default=1,
                         help='Number of concurrent workers (default: 1)')
-    parser.add_argument('--requests_per_worker', type=int, default=100,
-                        help='Requests per worker (default: 100)')
+    parser.add_argument('--requests_per_worker', type=int, default=1,
+                        help='Requests per worker (default: 1)')
     parser.add_argument('--port', type=int, default=8000,
                         help='Backend port (default: 8000)')
     parser.add_argument('--model', default=None,
