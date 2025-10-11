@@ -225,8 +225,11 @@ h2 { margin: 0; font-size: 1.2em; font-weight: bold; }
 <div class="git-info">
 <p><strong>Commit SHA:</strong> {{ git_info.sha }}</p>
 <p><strong>Commit Date:</strong> {{ git_info.date }}</p>
-<p><strong>Commit Message:</strong> {{ git_info.message | safe }}</p>
 <p><strong>Author:</strong> {{ git_info.author | safe }}</p>
+<div style="background-color: #f8f9fa; padding: 6px; border-radius: 3px; margin: 3px 0;">
+<strong>Commit Message:</strong>
+<pre style="margin: 3px 0; white-space: pre-wrap; font-family: monospace; font-size: 0.9em;">{{ git_info.full_message | e }}</pre>
+</div>
 {% if git_info.total_additions is defined or git_info.total_deletions is defined %}
 <p><strong>Changes Summary:</strong> +{{ git_info.total_additions | default(0) }}/-{{ git_info.total_deletions | default(0) }} lines</p>
 {% endif %}
@@ -884,10 +887,15 @@ h2 { margin: 0; font-size: 1.2em; font-weight: bold; }
             else:
                 commit_date = utc_date
 
-            # Get commit message
+            # Get commit message (subject only)
             msg_result = subprocess.run(['git', 'log', '-1', '--format=%s'],
                                       capture_output=True, text=True)
             commit_message = msg_result.stdout.strip() if msg_result.returncode == 0 else "unknown"
+            
+            # Get full commit message (subject + body)
+            full_msg_result = subprocess.run(['git', 'log', '-1', '--format=%B'],
+                                           capture_output=True, text=True)
+            full_commit_message = full_msg_result.stdout.strip() if full_msg_result.returncode == 0 else "unknown"
 
             # Get author (the actual person who wrote the code)
             author_result = subprocess.run(['git', 'log', '-1', '--format=%an <%ae> (%al)'],
@@ -953,6 +961,7 @@ h2 { margin: 0; font-size: 1.2em; font-weight: bold; }
                 'sha': commit_sha,
                 'date': commit_date,
                 'message': commit_message,
+                'full_message': full_commit_message,
                 'author': author,
                 'changed_files': changed_files,
                 'diff_stats': diff_stats,
@@ -965,6 +974,7 @@ h2 { margin: 0; font-size: 1.2em; font-weight: bold; }
                 'sha': "unknown",
                 'date': "unknown",
                 'message': "unknown",
+                'full_message': "unknown",
                 'author': "Unknown Author <unknown@unknown.com> (unknown)",
                 'changed_files': [],
                 'diff_stats': [],

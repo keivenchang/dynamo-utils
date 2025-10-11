@@ -1,0 +1,3 @@
+# Optional dependencies for test_local_dev_build.py
+# psutil provides better process management but is not required
+psutil>=5.0.0
