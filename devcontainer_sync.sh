@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # ==============================================================================
-# sync_devcontainer.sh - Development Configuration Synchronization Tool
+# devcontainer_sync.sh - Development Configuration Synchronization Tool
 # ==============================================================================
 #
 # PURPOSE:
@@ -11,44 +11,51 @@
 #
 # HOW IT WORKS:
 #   1. Scans for directories matching 'dynamo*' pattern in parent directory
-#   2. Copies configuration files from dynamo-utils to each found directory
-#   3. Customizes devcontainer.json for each directory (unique container names)
-#   4. Tracks changes via MD5 hashes to avoid unnecessary syncs
+#   2. Copies devcontainer.json from dynamo-utils to each found directory
+#   3. Creates framework-specific devcontainer configs (VLLM, SGLANG, TRTLLM)
+#   4. Customizes each config with directory-specific names and framework tags
+#   5. Manages .build/target symlinks for build artifacts
+#   6. Tracks changes via MD5 hashes to avoid unnecessary syncs
 #
 # EXAMPLE SCENARIO:
 #   Directory structure:
 #   ~/nvidia/
 #   ├── dynamo-utils/           # This repository (master configs)
 #   │   ├── devcontainer.json   # Master container config
-#   │   └── sync_devcontainer.sh
+#   │   └── devcontainer_sync.sh
 #   ├── dynamo1/                # Clone for feature development
 #   ├── dynamo2/                # Clone for bug fixes
 #   └── dynamo3/                # Clone for experiments
 #
-#   Running ./sync_devcontainer.sh will:
-#   - Copy devcontainer.json → dynamo1/.devcontainer/[user]/devcontainer.json
-#     with customizations:
-#     * Container name: dynamo1-[user]-devcontainer
-#     * Display name: [dynamo1] [user] Dev Container
+#   Running ./devcontainer_sync.sh will create for each dynamo directory:
+#   - .devcontainer/keivenc_vllm/devcontainer.json
+#     * Display name: [dynamo1-keivenc] VLLM
+#     * Image name: dynamo1-vllm-devcontainer
+#   - .devcontainer/keivenc_sglang/devcontainer.json
+#     * Display name: [dynamo1-keivenc] SGLANG
+#     * Image name: dynamo1-sglang-devcontainer
+#   - .devcontainer/keivenc_trtllm/devcontainer.json
+#     * Display name: [dynamo1-keivenc] TRTLLM
+#     * Image name: dynamo1-trtllm-devcontainer
 #
 # USAGE:
-#   ./sync_devcontainer.sh           # Normal sync operation
-#   ./sync_devcontainer.sh --dryrun  # Preview changes without applying
-#   ./sync_devcontainer.sh --force   # Force sync even if no changes detected
-#   ./sync_devcontainer.sh --silent  # No output (for cron jobs)
+#   ./devcontainer_sync.sh           # Normal sync operation
+#   ./devcontainer_sync.sh --dryrun  # Preview changes without applying
+#   ./devcontainer_sync.sh --force   # Force sync even if no changes detected
+#   ./devcontainer_sync.sh --silent  # No output (for cron jobs)
 #
 # CRON EXAMPLE:
-#   */5 * * * * /home/user/nvidia/dynamo-utils/sync_devcontainer.sh --silent
+#   */5 * * * * /home/user/nvidia/dynamo-utils/devcontainer_sync.sh --silent
 #
 # ==============================================================================
 
 USER=$(whoami)
 DEST_SRC_DIR_GLOB="${DEVCONTAINER_SRC_DIR:-$HOME/nvidia/dynamo}"
 
-# Define list of elements
+# Define supported ML frameworks for devcontainer creation
 FRAMEWORKS=("VLLM" "SGLANG" "TRTLLM")
 
-# Define development-related config files to sync
+# Define devcontainer config file locations
 DEVCONTAINER_SRC="devcontainer.json"
 DEVCONTAINER_DEST=".devcontainer/{framework}/devcontainer.json"
 
@@ -161,13 +168,13 @@ for destdir in "$DEST_SRC_DIR_GLOB"*; do
     # Process the devcontainer.json file
     TEMP_OUTPUT_FILE=$(mktemp)
 
-    # For devcontainer.json: loop through frameworks and create framework-specific versions
+    # Create framework-specific devcontainer configs for VLLM, SGLANG, and TRTLLM
     DEST_BASE_DIRNAME=$(basename "${destdir}")
 
     for framework_uppercase in "${FRAMEWORKS[@]}"; do
-        # Convert framework to lowercase for path and name consistency
+        # Convert framework to lowercase for path and name consistency (e.g., TRTLLM -> trtllm)
         framework_lowercase="${framework_uppercase,,}"
-        # Replace {framework} placeholder with username_framework format
+        # Replace {framework} placeholder with username_framework format (e.g., keivenc_vllm)
         username_framework_target_filename="${DEVCONTAINER_DEST//\{framework\}/${USER}_${framework_lowercase}}"
         framework_target_path="${destdir}/${username_framework_target_filename}"
         framework_target_dir=$(dirname "${framework_target_path}")
@@ -177,10 +184,10 @@ for destdir in "$DEST_SRC_DIR_GLOB"*; do
             cmd mkdir -p "${framework_target_dir}"
         fi
 
-        # Apply customizations to JSON file for this framework
-        # 1. Replace display name with directory-specific name and lowercase framework
-        # 2. Replace -framework- with -lowercase_framework- in the image name
-        # 3. Replace __HF_TOKEN__ and __GITHUB_TOKEN__ with actual values from environment
+        # Apply customizations to devcontainer.json for this framework
+        # 1. Set display name to [dirname-username] FRAMEWORK (e.g., [dynamo3-keivenc] VLLM)
+        # 2. Replace -framework- placeholder with -framework_lowercase- in image name
+        # 3. Substitute __HF_TOKEN__ and __GITHUB_TOKEN__ placeholders with environment values
         sed "s|\"name\": \"NVIDIA Dynamo.*\"|\"name\": \"[${DEST_BASE_DIRNAME}-${USER}] ${framework_uppercase}\"|g" "${DEVCONTAINER_SRC_PATH}" | \
         sed "s|-framework-|-${framework_lowercase}-|g" | \
         sed "s|__HF_TOKEN__|${HF_TOKEN:-}|g" | \
