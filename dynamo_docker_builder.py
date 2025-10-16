@@ -663,6 +663,42 @@ class DockerUtils(BaseUtils):
             self.logger.error(f"Multiple --tag arguments found in command: {tags}")
             self.logger.error(f"Command: {docker_cmd}")
             raise ValueError(f"Multiple --tag arguments found: {tags}")
+    
+    def normalize_command(self, docker_command: str) -> str:
+        """
+        Normalize a docker command for comparison by:
+        1. Removing extra whitespace
+        2. Sorting build arguments for consistent ordering
+        3. Standardizing format
+        
+        Args:
+            docker_command: Raw docker build command
+            
+        Returns:
+            Normalized command string for comparison
+        """
+        # Remove extra whitespace and split into parts
+        parts = docker_command.strip().split()
+        
+        # Find build args and sort them for consistent comparison
+        build_args = []
+        other_parts = []
+        i = 0
+        
+        while i < len(parts):
+            if parts[i] == '--build-arg' and i + 1 < len(parts):
+                build_args.append(f"--build-arg {parts[i + 1]}")
+                i += 2
+            else:
+                other_parts.append(parts[i])
+                i += 1
+        
+        # Sort build args for consistent ordering
+        build_args.sort()
+        
+        # Reconstruct normalized command
+        normalized_parts = other_parts + build_args
+        return ' '.join(normalized_parts)
 
 
 class BuildShUtils(BaseUtils):
@@ -1443,6 +1479,9 @@ class DynamoDockerBuilder(BaseUtils):
         self.date = datetime.now().strftime("%Y-%m-%d")
         self.log_dir = self.dynamo_ci_dir / "logs" / self.date
         
+        # Lock file for preventing concurrent runs
+        self.lock_file = self.script_dir / f".{Path(__file__).name}.lock"
+        
         # Configuration flags (will be set from args)
         self.sanity_check_only = False
         self.no_checkout = False
@@ -1451,6 +1490,9 @@ class DynamoDockerBuilder(BaseUtils):
         self.email = None
         self.targets = ["dev", "local-dev"]  # Default targets
         self.repo_sha = None
+        
+        # Existing run detection
+        self.executed_commands: Set[str] = set()  # Track executed docker commands
         
         # Initialize utility classes
         self.git_utils = GitUtils(dry_run=self.dry_run)
@@ -1462,6 +1504,117 @@ class DynamoDockerBuilder(BaseUtils):
         
         # Track seen commands to avoid duplicates
         self.seen_commands: Dict[str, str] = {}  # command -> task_id
+    
+    def check_if_rebuild_needed(self) -> bool:
+        """Check if rebuild is needed based on composite SHA"""
+        self.logger.info("Checking if rebuild is needed based on file changes...")
+        self.logger.info(f"Composite SHA file location: {self.dynamo_ci_dir}/.last_build_composite_sha")
+
+        # Generate current composite SHA
+        current_sha = self.git_utils.generate_composite_sha_from_container_dir(self.dynamo_ci_dir)
+        if current_sha is None:
+            self.logger.error("Failed to generate current composite SHA")
+            return True  # Assume rebuild needed if we can't determine
+
+        # Get stored composite SHA
+        stored_sha = self.git_utils.get_stored_composite_sha(self.dynamo_ci_dir)
+
+        if stored_sha:
+            if current_sha == stored_sha:
+                if self.force_run:
+                    self.logger.info(f"Composite SHA unchanged ({current_sha}) but --force-run specified - proceeding")
+                    return True  # Rebuild needed (forced)
+                else:
+                    self.logger.info(f"Composite SHA unchanged ({current_sha}) - skipping rebuild")
+                    self.logger.info("Use --force-run to force rebuild")
+                    return False  # Rebuild not needed
+            else:
+                self.logger.info("Composite SHA changed:")
+                self.logger.info(f"  Previous: {stored_sha}")
+                self.logger.info(f"  Current:  {current_sha}")
+                self.logger.info("Rebuild needed")
+                self.git_utils.store_composite_sha(self.dynamo_ci_dir, current_sha)
+                return True  # Rebuild needed
+        else:
+            self.logger.info("No previous composite SHA found - rebuild needed")
+            self.git_utils.store_composite_sha(self.dynamo_ci_dir, current_sha)
+            return True  # Rebuild needed
+
+    def is_command_executed(self, docker_command: str) -> bool:
+        """Check if a docker command has already been executed
+        
+        Args:
+            docker_command: Complete docker build command as a string
+            
+        Returns:
+            True if command was already executed, False otherwise
+        """
+        # Normalize the command by removing extra whitespace and sorting build args
+        # This helps catch functionally identical commands with different formatting
+        normalized_cmd = self.docker_utils.normalize_command(docker_command)
+        return normalized_cmd in self.executed_commands
+
+    def mark_command_executed(self, docker_command: str) -> None:
+        """Mark a docker command as executed
+        
+        Args:
+            docker_command: Complete docker build command as a string
+        """
+        normalized_cmd = self.docker_utils.normalize_command(docker_command)
+        self.executed_commands.add(normalized_cmd)
+        self.logger.debug(f"Marked command as executed: {normalized_cmd[:100]}...")
+
+    def check_if_running(self) -> None:
+        """Check if another instance of this script is already running"""
+        script_name = Path(__file__).name
+        current_pid = os.getpid()
+
+        # Skip lock check if --force-run is specified
+        if self.force_run:
+            self.logger.warning("FORCE-RUN MODE: Bypassing process lock check")
+            # Still create our own lock file
+            self.lock_file.write_text(str(current_pid))
+            self.logger.info(f"Created process lock file: {self.lock_file} (PID: {current_pid})")
+            import atexit
+            atexit.register(lambda: self.lock_file.unlink(missing_ok=True))
+            return
+
+        # Check if lock file exists
+        if self.lock_file.exists():
+            try:
+                existing_pid = int(self.lock_file.read_text().strip())
+
+                # Check if the process is still running and is our script
+                if psutil.pid_exists(existing_pid):
+                    try:
+                        proc = psutil.Process(existing_pid)
+                        if script_name in " ".join(proc.cmdline()):
+                            self.logger.error(f"Another instance of {script_name} is already running (PID: {existing_pid})")
+                            self.logger.error(f"If you're sure no other instance is running, remove the lock file:")
+                            self.logger.error(f"  rm '{self.lock_file}'")
+                            self.logger.error(f"Or kill the existing process:")
+                            self.logger.error(f"  kill {existing_pid}")
+                            sys.exit(1)
+                    except (psutil.NoSuchProcess, psutil.AccessDenied):
+                        # Process exists but it's not our script, remove stale lock file
+                        self.logger.warning(f"Removing stale lock file (PID {existing_pid} is not our script)")
+                        self.lock_file.unlink()
+                else:
+                    # Process doesn't exist, remove stale lock file
+                    self.logger.warning(f"Removing stale lock file (PID {existing_pid} no longer exists)")
+                    self.lock_file.unlink()
+            except (ValueError, FileNotFoundError):
+                # Invalid lock file content, remove it
+                self.logger.warning("Removing invalid lock file")
+                self.lock_file.unlink(missing_ok=True)
+
+        # Create lock file with current PID
+        self.lock_file.write_text(str(current_pid))
+        self.logger.info(f"Created process lock file: {self.lock_file} (PID: {current_pid})")
+
+        # Set up cleanup on exit
+        import atexit
+        atexit.register(lambda: self.lock_file.unlink(missing_ok=True))
     
     def _build_dependency_tree(self, frameworks: List[str], targets: List[str]) -> None:
         """
@@ -2155,12 +2308,22 @@ class DynamoDockerBuilder(BaseUtils):
     
     def _execute_build_task(self, task: BuildTask) -> bool:
         """Execute a build task (docker build command)"""
+        # Check if this command was already executed
+        if self.is_command_executed(task.docker_command):
+            self.logger.info(f"  Command already executed, skipping: {task.task_id}")
+            task.status = 'skipped'
+            return True
+        
         # Execute the docker build command (no timeout for builds)
         success = self._execute_command(
             task=task,
             command=task.docker_command,
             timeout=float('inf')  # No timeout for builds
         )
+        
+        # Mark command as executed if successful
+        if success:
+            self.mark_command_executed(task.docker_command)
         
         # If successful, extract image ID from log file
         if success and not self.dry_run:
@@ -2388,6 +2551,10 @@ class DynamoDockerBuilder(BaseUtils):
         else:
             frameworks_to_test = list(self.FRAMEWORKS)
 
+        # Check if another instance is already running (unless in sanity-check-only mode)
+        if not self.sanity_check_only:
+            self.check_if_running()
+
         # Print header
         print("=" * 80)
         self.logger.info(f"Starting DynamoDockerBuilder - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
@@ -2417,6 +2584,15 @@ class DynamoDockerBuilder(BaseUtils):
         # Setup repository
         if not self.no_checkout:
             self.git_utils.setup_dynamo_ci(self.dynamo_ci_dir, self.repo_sha, self.no_checkout)
+        
+        # Check if rebuild is needed based on file changes (unless in sanity-check-only mode)
+        if not self.sanity_check_only:
+            rebuild_needed = self.check_if_rebuild_needed()
+            if not rebuild_needed:
+                self.logger.info("SUCCESS: No rebuild needed - all files unchanged")
+                self.logger.info("Exiting early (use --force-run to force rebuild)")
+                self.logger.info("Preserving existing log files")
+                return 0
         
         # Build dependency tree
         self._build_dependency_tree(frameworks_to_test, self.targets)
