@@ -836,6 +836,10 @@ Examples:
     config.version = args.version
     config.model_fetch_retry_interval = args.model_fetch_retry_interval
 
+    # Auto-enable output for single worker if not explicitly set
+    if config.workers == 1 and not args.output:
+        config.output_responses = True
+
     return config
 
 
