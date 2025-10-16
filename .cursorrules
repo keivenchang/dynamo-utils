@@ -8,6 +8,7 @@
 # =============================================================================
 # This is a Rust-based and Python-based project with Python bindings and web components
 # The project uses cargo for Rust builds, uv for Python package management, and Docker for containerization
+# You will re-read this file from time to time to refresh your memory.
 #
 # Key project components:
 # - Rust runtime and core libraries
@@ -55,6 +56,8 @@
 # - Prefer `tracing::error` over `eprintln`
 # - When possible, use a shorter reference like `MyStuff` instead of `crate::my_service::MyStuff`
 # - Prefer `.to_string()` over use of `format!`
+# - Prefer the positive if/else statements. For example, use `if True then A else B` instead of `if not True then B else A`
+# - The exception is that if there is a `if not True then A` (without the else), then that is fine. I don't ever want to see `if not True then pass else A`
 
 ## File Organization
 # Rust files should be organized as:
@@ -218,12 +221,17 @@ long_call()
 
 ## Code Style
 # - Follow PEP 8 conventions
+# - When importing, try to put the imports on top of the file. Don't put it inside def.
+# - Always double check the indentation of your code changes; in Python it must be perfect, not over or under-indent
+# - If creating a new dict with more than 4 elements, prefer using dataclass for better type inference
+# - For string manipulations that take a couple of lines, try to use simple regex instead to reduce lines
 # - Use snake_case for variables and functions
 # - Use PascalCase for classes
 # - Add type hints where beneficial
 # - Use docstrings for functions and classes
 # - Before any Python commit, always run through: mypy and precommit ruff
 # - If there are 3 or more print statements, tidy up and use the triple quote method, like: """ <code here> """
+# - If you're not in Docker, try to execute this virtualenv first: `source ~/bin/$(uname).$(uname -m)/venv.3.*/bin/activate`
 
 ## File Organization
 # Python files should follow:
@@ -343,8 +351,7 @@ chown -R $USER_ID:$GROUP_ID .
 
 ## Commit Message Format
 # - Make the message terse (not verbose)
-# - For the first commit, follow the title format below (the very first line of the message). Terse format.
-# - Examples:
+# - For the first commit, follow the title format below (the very first line of the message). Terse format:
 #   feat: add new user authentication system
 #   fix: resolve memory leak in data processing
 #   docs: update API documentation
