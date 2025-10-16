@@ -599,12 +599,13 @@ class GitHubAPI:
 class DynamoBranchChecker:
     """Main class for checking dynamo branches and PRs"""
     
-    def __init__(self, base_dir: str, github_token: Optional[str] = None, verbose: bool = False, quick: bool = False, max_workers: int = 8):
+    def __init__(self, base_dir: str, github_token: Optional[str] = None, verbose: bool = False, quick: bool = False, max_workers: int = 8, pull_main: bool = False):
         self.base_dir = Path(base_dir)
         self.github = GitHubAPI(github_token, verbose)
         self.verbose = verbose
         self.quick = quick
         self.max_workers = max(1, int(max_workers))
+        self.pull_main = pull_main
         
     def find_dynamo_directories(self) -> List[Path]:
         """Find all dynamo* directories"""
@@ -787,6 +788,126 @@ class DynamoBranchChecker:
         except subprocess.CalledProcessError:
             return None
     
+    def pull_main_branch(self, repo_dir: Path) -> bool:
+        """Pull latest on main branch, returning to the original branch after
+        
+        Stashes any uncommitted changes before switching branches and reapplies them after.
+        
+        Returns:
+            True if successful, False otherwise
+        """
+        stashed = False
+        try:
+            # Get current branch to return to it later
+            current_branch = self.get_current_branch(repo_dir)
+            
+            if self.verbose:
+                print(f"  Pulling latest on main for {repo_dir.name}...")
+            
+            # Check if there are uncommitted changes
+            status_result = subprocess.run(
+                ['git', 'status', '--porcelain'],
+                cwd=repo_dir,
+                capture_output=True,
+                text=True,
+                check=True
+            )
+            
+            has_changes = bool(status_result.stdout.strip())
+            
+            # Stash changes if any exist
+            if has_changes:
+                if self.verbose:
+                    print(f"  Stashing uncommitted changes...")
+                subprocess.run(
+                    ['git', 'stash', 'push', '-u', '-m', 'Auto-stash by show_dynamo_branches.py'],
+                    cwd=repo_dir,
+                    capture_output=True,
+                    text=True,
+                    check=True
+                )
+                stashed = True
+            
+            # Fetch latest from remote
+            subprocess.run(
+                ['git', 'fetch', 'origin'],
+                cwd=repo_dir,
+                capture_output=True,
+                text=True,
+                check=True
+            )
+            
+            # Checkout main
+            subprocess.run(
+                ['git', 'checkout', 'main'],
+                cwd=repo_dir,
+                capture_output=True,
+                text=True,
+                check=True
+            )
+            
+            # Pull latest
+            result = subprocess.run(
+                ['git', 'pull', '--ff-only'],
+                cwd=repo_dir,
+                capture_output=True,
+                text=True,
+                check=True
+            )
+            
+            if self.verbose:
+                print(f"  ✓ Updated main: {result.stdout.strip()}")
+            
+            # Return to original branch if it wasn't main
+            if current_branch and current_branch != 'main':
+                subprocess.run(
+                    ['git', 'checkout', current_branch],
+                    cwd=repo_dir,
+                    capture_output=True,
+                    text=True,
+                    check=True
+                )
+                if self.verbose:
+                    print(f"  Returned to branch: {current_branch}")
+            
+            # Pop stashed changes if we stashed them
+            if stashed:
+                if self.verbose:
+                    print(f"  Restoring stashed changes...")
+                subprocess.run(
+                    ['git', 'stash', 'pop'],
+                    cwd=repo_dir,
+                    capture_output=True,
+                    text=True,
+                    check=True
+                )
+            
+            return True
+            
+        except subprocess.CalledProcessError as e:
+            if self.verbose:
+                print(f"  ⚠️  Error pulling main in {repo_dir.name}: {e}")
+                if e.stderr:
+                    print(f"      {e.stderr.strip()}")
+            
+            # Try to restore state if something went wrong and we stashed
+            if stashed:
+                try:
+                    if self.verbose:
+                        print(f"  Attempting to restore stashed changes after error...")
+                    subprocess.run(
+                        ['git', 'stash', 'pop'],
+                        cwd=repo_dir,
+                        capture_output=True,
+                        text=True,
+                        check=True
+                    )
+                except subprocess.CalledProcessError:
+                    print(f"  ⚠️  Failed to restore stashed changes in {repo_dir.name}")
+                    print(f"      You may need to manually run 'git stash pop' in {repo_dir}")
+            
+            return False
+    
     def get_remote_url(self, repo_dir: Path) -> Optional[str]:
         """Get the remote origin URL"""
         try:
@@ -878,6 +999,10 @@ class DynamoBranchChecker:
         """Check a single dynamo directory for branches and PRs"""
         if self.verbose:
             print(f"\nChecking {repo_dir.name}...")
+        
+        # Pull latest on main if requested
+        if self.pull_main:
+            self.pull_main_branch(repo_dir)
         
         # Get repository info
         remote_url = self.get_remote_url(repo_dir)
@@ -1209,6 +1334,12 @@ GitHub Token:
         help='Max worker threads for parallel API calls (default: 8)'
     )
     
+    parser.add_argument(
+        '--pull-main',
+        action='store_true',
+        help='Pull latest on main branch before checking (returns to original branch after)'
+    )
+    
     args = parser.parse_args()
     
     # Resolve base directory
@@ -1226,7 +1357,8 @@ GitHub Token:
         github_token=args.github_token,
         verbose=args.verbose,
         quick=args.quick,
-        max_workers=args.max_workers
+        max_workers=args.max_workers,
+        pull_main=args.pull_main
     )
     
     try:
