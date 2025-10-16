@@ -22,9 +22,10 @@ import subprocess
 import sys
 import tempfile
 import time
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple, Any
+from typing import Dict, List, Optional, Tuple, Any, Set
 
 from jinja2 import Template
 import psutil
@@ -36,9 +37,43 @@ import zoneinfo
 class BaseUtils:
     """Base class for all utility classes with common logger and cmd functionality"""
     
-    def __init__(self, dry_run: bool = False, logger=None):
+    def __init__(self, dry_run: bool = False):
         self.dry_run = dry_run
-        self.logger = logger or logging.getLogger(self.__class__.__name__)
+        
+        # Set up logger with class name
+        self.logger = logging.getLogger(self.__class__.__name__)
+        self.logger.setLevel(logging.DEBUG)
+        
+        # Remove any existing handlers
+        self.logger.handlers.clear()
+        
+        # Create console handler
+        console_handler = logging.StreamHandler()
+        console_handler.setLevel(logging.DEBUG)
+        
+        # Create custom formatter that handles DRYRUN prefix and shows class/method
+        class DryRunFormatter(logging.Formatter):
+            def __init__(self, dry_run_instance) -> None:
+                super().__init__()
+                self.dry_run_instance = dry_run_instance
+            
+            def format(self, record: logging.LogRecord) -> str:
+                # Build the location info (class.method or just method)
+                location = f"{record.name}.{record.funcName}" if record.funcName != '<module>' else record.name
+                
+                if self.dry_run_instance.dry_run:
+                    return f"DRYRUN {record.levelname} - [{location}] {record.getMessage()}"
+                else:
+                    return f"{record.levelname} - [{location}] {record.getMessage()}"
+        
+        formatter = DryRunFormatter(self)
+        console_handler.setFormatter(formatter)
+        
+        # Add handler to logger
+        self.logger.addHandler(console_handler)
+        
+        # Prevent propagation to root logger
+        self.logger.propagate = False
     
     def cmd(self, command: List[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
         """Execute command with dry-run support - base implementation"""
@@ -58,8 +93,8 @@ class BaseUtils:
 class GitUtils(BaseUtils):
     """Utility class for Git operations"""
     
-    def __init__(self, dry_run: bool = False, logger=None):
-        super().__init__(dry_run, logger)
+    def __init__(self, dry_run: bool = False):
+        super().__init__(dry_run)
         # Cache for git.Repo objects to avoid repeated instantiation
         self._repo_cache: Dict[str, git.Repo] = {}
     
@@ -81,7 +116,10 @@ class GitUtils(BaseUtils):
         sha = commit.hexsha[:7]
         
         commit_datetime = commit.committed_datetime
-        utc_timestamp = commit_datetime.strftime('%Y-%m-%d %H:%M:%S %z')
+        
+        # Convert to UTC and Pacific timezones
+        utc_datetime = commit_datetime.astimezone(zoneinfo.ZoneInfo("UTC"))
+        utc_timestamp = utc_datetime.strftime('%Y-%m-%d %H:%M:%S %Z')
         
         pacific_tz = zoneinfo.ZoneInfo("America/Los_Angeles")
         pacific_datetime = commit_datetime.astimezone(pacific_tz)
@@ -314,8 +352,8 @@ class GitUtils(BaseUtils):
 class DockerUtils(BaseUtils):
     """Utility class for Docker operations"""
     
-    def __init__(self, dry_run: bool = False, logger=None):
-        super().__init__(dry_run, logger)
+    def __init__(self, dry_run: bool = False):
+        super().__init__(dry_run)
         
         # Initialize Docker client - required for operation
         try:
@@ -583,23 +621,65 @@ class DockerUtils(BaseUtils):
             self.logger.info(f"Filtered {len(filtered_args)} unused base image build args: {', '.join(sorted(filtered_args))}")
         
         return ' '.join(filtered_parts)
+    
+    def extract_base_image_from_command(self, docker_cmd: str) -> str:
+        """Extract the base/FROM image from docker build command arguments"""
+        # Look for --build-arg DYNAMO_BASE_IMAGE=... (framework-specific builds)
+        match = re.search(r'--build-arg\s+DYNAMO_BASE_IMAGE=([^\s]+)', docker_cmd)
+        if match:
+            return match.group(1)
+        
+        # Look for --build-arg BASE_IMAGE=... and BASE_IMAGE_TAG=... (base builds)
+        base_image_match = re.search(r'--build-arg\s+BASE_IMAGE=([^\s]+)', docker_cmd)
+        base_tag_match = re.search(r'--build-arg\s+BASE_IMAGE_TAG=([^\s]+)', docker_cmd)
+        
+        if base_image_match and base_tag_match:
+            return f"{base_image_match.group(1)}:{base_tag_match.group(1)}"
+        elif base_image_match:
+            return base_image_match.group(1)
+        
+        # Look for --build-arg DEV_BASE=... (local-dev builds)
+        dev_base_match = re.search(r'--build-arg\s+DEV_BASE=([^\s]+)', docker_cmd)
+        if dev_base_match:
+            return dev_base_match.group(1)
+        
+        return ""
+    
+    def extract_image_tag_from_command(self, docker_cmd: str) -> str:
+        """
+        Extract the output tag from docker build command --tag argument.
+        Returns the tag string, or empty string if no tag found.
+        Raises error if multiple tags are found (should not happen after get_build_commands validation).
+        """
+        # Find all --tag arguments in the command
+        tags = re.findall(r'--tag\s+([^\s]+)', docker_cmd)
+        
+        if len(tags) == 0:
+            return ""
+        elif len(tags) == 1:
+            return tags[0]
+        else:
+            # This should not happen if get_build_commands validation is working
+            self.logger.error(f"Multiple --tag arguments found in command: {tags}")
+            self.logger.error(f"Command: {docker_cmd}")
+            raise ValueError(f"Multiple --tag arguments found: {tags}")
 
 
 class BuildShUtils(BaseUtils):
     """Utility class for build.sh-related operations"""
     
-    def __init__(self, dynamo_ci_dir: Path, docker_utils: 'DockerUtils', dry_run: bool = False, logger=None):
-        super().__init__(dry_run, logger)
+    def __init__(self, dynamo_ci_dir: Path, docker_utils: 'DockerUtils', dry_run: bool = False):
+        super().__init__(dry_run)
         self.dynamo_ci_dir = dynamo_ci_dir
         self.docker_utils = docker_utils
         # Cache for build commands to avoid repeated expensive calls
-        self._build_commands_cache: Dict[str, Tuple[bool, List[str], str]] = {}
+        self._build_commands_cache: Dict[str, Tuple[bool, List[str]]] = {}
     
     def extract_base_image_tag(self, framework: str) -> str:
         """Extract the dynamo-base image tag from build commands for a framework"""
         try:
             # Get build commands for the framework
-            success, docker_commands, _ = self.get_build_commands(framework, None)
+            success, docker_commands = self.get_build_commands(framework, None)
             if not success:
                 return ""
             for cmd in docker_commands:
@@ -614,7 +694,7 @@ class BuildShUtils(BaseUtils):
             self.logger.debug(f"Failed to extract base image tag for {framework}: {e}")
             return ""
     
-    def get_build_commands(self, framework: str, docker_target_type: Optional[str]) -> Tuple[bool, List[str], str]:
+    def get_build_commands(self, framework: str, docker_target_type: Optional[str]) -> Tuple[bool, List[str]]:
         """Get docker build commands from build.sh --dry-run and filter out latest tags"""
         # Create cache key from parameters
         cache_key = f"{framework}:{docker_target_type or 'dev'}"
@@ -639,25 +719,27 @@ class BuildShUtils(BaseUtils):
             self.logger.error(f"Failed to get build commands for {framework}")
             if build_result.stderr:
                 self.logger.error(f"Error: {build_result.stderr}")
-            return False, [], ""
+            return False, []
 
         # Extract and filter docker commands to remove latest tags
         docker_commands = []
-        versioned_tags = []
-        framework_lower = framework.lower()
         output_lines = build_result.stdout.split('\n') + build_result.stderr.split('\n')
 
+        # parse the --dry-run output to get the docker build commands
         for line in output_lines:
             line = line.strip()
             if line.startswith("docker build"):
                 # Remove --tag arguments containing ":latest" using regex
                 line = re.sub(r'--tag\s+\S*:latest\S*(?:\s|$)', '', line)
                 
-                # Extract versioned tags for image discovery
+                # Validate: only one --tag should remain after filtering out :latest tags
                 tag_matches = re.findall(r'--tag\s+(\S+)', line)
-                for tag in tag_matches:
-                    if framework_lower in tag:
-                        versioned_tags.append(tag)
+                
+                if len(tag_matches) > 1:
+                    self.logger.error(f"Multiple --tag arguments found in docker build command for {framework}")
+                    self.logger.error(f"Command: {line}")
+                    self.logger.error(f"Tags found: {tag_matches}")
+                    return False, []
 
                 if line.strip():
                     # Apply unused argument filtering
@@ -667,29 +749,9 @@ class BuildShUtils(BaseUtils):
 
         if not docker_commands:
             self.logger.error(f"No docker build commands found for {framework}")
-            return False, [], ""
+            return False, []
 
-        # Discover the appropriate image tag for this target type
-        image_tag = ""
-        if docker_target_type == "local-dev":
-            # Look for local-dev tag
-            for tag in versioned_tags:
-                if "local-dev" in tag and framework_lower in tag:
-                    image_tag = tag
-                    break
-        else:
-            # Look for dev tag (without local-dev)
-            for tag in versioned_tags:
-                if "local-dev" not in tag and framework_lower in tag:
-                    image_tag = tag
-                    break
-
-        if image_tag:
-            result = True, docker_commands, image_tag
-        else:
-            target_desc = "dev" if docker_target_type is None else docker_target_type
-            self.logger.error(f"Could not find versioned tag for {framework} {target_desc} image")
-            result: Tuple[bool, List[str], str] = False, [], ""
+        result = True, docker_commands
         
         # Cache the result for future calls
         self._build_commands_cache[cache_key] = result
@@ -703,6 +765,242 @@ class EmailTemplateRenderer:
         """Initialize the EmailTemplateRenderer"""
         pass
     
+    def generate_v2_report(
+        self,
+        task_tree: Dict[str, 'BaseTask'],
+        git_info: Dict[str, Any],
+        date: str,
+        docker_utils: 'DockerUtils',
+        repo_path: str = None,
+        log_dir: str = None
+    ) -> str:
+        """
+        Generate HTML report from task tree using the existing email template
+        
+        Args:
+            task_tree: Dictionary of task_id -> BaseTask
+            git_info: Git commit information
+            date: Build date string
+            docker_utils: DockerUtils instance for fetching image info (required)
+            repo_path: Path to the repository (optional)
+            log_dir: Path to the log directory (optional)
+        
+        Returns:
+            HTML report as string
+        """
+        from jinja2 import Template
+        
+        # Count task results
+        total_tasks = len(task_tree)
+        build_tasks = sum(1 for t in task_tree.values() if t.task_type == 'build')
+        test_tasks = sum(1 for t in task_tree.values() if t.task_type in ('sanity_check', 'compilation'))
+        succeeded = sum(1 for t in task_tree.values() if t.status == 'success')
+        failed = sum(1 for t in task_tree.values() if t.status == 'failed')
+        skipped = sum(1 for t in task_tree.values() if t.status == 'skipped')
+        
+        # Organize tasks by framework
+        # Template expects framework objects with 'name' and 'targets' list
+        frameworks_list = []
+        frameworks_dict = {}
+        
+        # Collect compilation information
+        compilation_tasks = []
+        for task_id, task in task_tree.items():
+            if task.task_type == 'compilation':
+                compilation_tasks.append(task)
+        
+        for task_id, task in task_tree.items():
+            if not task.framework:
+                continue
+            
+            # Skip compilation tasks for framework-based structure (handled separately)
+            if task.task_type == 'compilation':
+                continue
+            
+            if task.framework not in frameworks_dict:
+                frameworks_dict[task.framework] = {
+                    'name': task.framework,
+                    'targets_dict': {}
+                }
+            
+            # Skip if no target
+            if not task.target:
+                continue
+            
+            target = task.target
+            if target not in frameworks_dict[task.framework]['targets_dict']:
+                frameworks_dict[task.framework]['targets_dict'][target] = {
+                    'name': target,
+                    'success': None,
+                    'build_success': None,
+                    'build_time': '-',
+                    'test_success': None,
+                    'test_time': '-',
+                    'container_size': None,
+                    'image_tag': None,
+                    'image_id': None,
+                    'error_output': None
+                }
+            
+            target_data = frameworks_dict[task.framework]['targets_dict'][target]
+            
+            # Populate based on task type
+            if task.task_type == 'build':
+                # Handle skipped, success, and failure
+                if task.status == 'skipped':
+                    target_data['build_time'] = 'skipped'
+                    target_data['build_success'] = None  # Neither success nor failure
+                elif task.status == 'success':
+                    target_data['build_success'] = True
+                    target_data['build_time'] = f"{task.duration:.1f}s" if task.duration else '-'
+                elif task.status == 'failed':
+                    target_data['build_success'] = False
+                    target_data['build_time'] = f"{task.duration:.1f}s" if task.duration else 'failed'
+                    # Capture error output
+                    if task.error_message:
+                        target_data['error_output'] = task.error_message
+                
+                if hasattr(task, 'image_id') and task.image_id:
+                    target_data['image_id'] = task.image_id
+                if hasattr(task, 'image_tag') and task.image_tag:
+                    target_data['image_tag'] = task.image_tag
+                if hasattr(task, 'image_size') and task.image_size:
+                    target_data['container_size'] = task.image_size
+            elif task.task_type == 'sanity_check':
+                # Handle skipped, success, and failure
+                if task.status == 'skipped':
+                    target_data['test_time'] = 'skipped'
+                    target_data['test_success'] = None  # Neither success nor failure
+                elif task.status == 'success':
+                    target_data['test_success'] = True
+                    target_data['test_time'] = f"{task.duration:.1f}s" if task.duration else '-'
+                elif task.status == 'failed':
+                    target_data['test_success'] = False
+                    target_data['test_time'] = f"{task.duration:.1f}s" if task.duration else 'failed'
+                    # Capture error output
+                    if task.error_message:
+                        if target_data['error_output']:
+                            target_data['error_output'] += '\n\n' + task.error_message
+                        else:
+                            target_data['error_output'] = task.error_message
+        
+        # Calculate overall success for each target (after all tasks are processed)
+        for framework in frameworks_dict.values():
+            for target_data in framework['targets_dict'].values():
+                # Skipped tasks (None) don't count as failure
+                # Only actual failures (False) count as failure
+                has_failure = (target_data['build_success'] is False or target_data['test_success'] is False)
+                has_success = (target_data['build_success'] is True or target_data['test_success'] is True)
+                
+                if has_failure:
+                    target_data['success'] = False
+                elif has_success:
+                    target_data['success'] = True
+                else:
+                    # Everything skipped - show as None (skipped/neutral state)
+                    target_data['success'] = None
+        
+        # Convert dict to list for template iteration
+        for framework in frameworks_dict.values():
+            framework['targets'] = list(framework['targets_dict'].values())
+            del framework['targets_dict']
+        frameworks_list = list(frameworks_dict.values())
+        
+        # Fetch container size and image ID from Docker for existing images
+        for framework in frameworks_list:
+            for target in framework['targets']:
+                if target['image_tag'] and not target['container_size']:
+                    try:
+                        image_info = docker_utils.get_image_info(target['image_tag'])
+                        target['container_size'] = image_info.get('size', '-')
+                        # Get short image ID if available
+                        if not target['image_id']:
+                            image_id = docker_utils.get_image_id(target['image_tag'])
+                            if image_id:
+                                target['image_id'] = image_id[7:19] if image_id.startswith('sha256:') else image_id[:12]
+                    except Exception:
+                        # Image not found or error - leave as '-'
+                        pass
+        
+        # Process compilation information
+        workspace_compilation = None
+        if compilation_tasks:
+            # Combine all compilation tasks into a single compilation report
+            success_tasks = [task for task in compilation_tasks if task.status == 'success']
+            failed_tasks = [task for task in compilation_tasks if task.status == 'failed']
+            skipped_tasks = [task for task in compilation_tasks if task.status == 'skipped']
+            
+            # Determine overall compilation status
+            if skipped_tasks and not success_tasks and not failed_tasks:
+                # All compilation tasks were skipped
+                compilation_success = None  # Neither success nor failure - skipped
+            elif failed_tasks:
+                # At least one compilation task failed
+                compilation_success = False
+            else:
+                # All non-skipped tasks succeeded
+                compilation_success = True
+            
+            total_time = sum(task.duration for task in compilation_tasks if task.duration)
+            
+            # Get output snippets from the last few lines of compilation logs
+            output_snippets = {}
+            for task in compilation_tasks:
+                if task.status == 'failed' and task.error_message:
+                    # For failed compilation, show error output
+                    output_snippets['error'] = task.error_message.split('\n')[-10:]  # Last 10 lines
+                elif task.status == 'success' and log_dir:
+                    # For successful compilation, try to read last few lines from log file
+                    try:
+                        log_file = Path(log_dir) / f"{date.split()[0]}.{git_info.get('sha', 'unknown')}.{task.task_id}.log"
+                        if log_file.exists():
+                            with open(log_file, 'r') as f:
+                                lines = f.readlines()
+                                output_snippets['success'] = [line.rstrip() for line in lines[-10:]]  # Last 10 lines
+                    except Exception:
+                        pass
+            
+            workspace_compilation = {
+                'success': compilation_success,
+                'time': f"{total_time:.1f}s" if total_time else ('skipped' if compilation_success is None else '-'),
+                'output_snippets': output_snippets if output_snippets else None,
+                'frameworks': [task.framework for task in compilation_tasks],
+                'task_count': len(compilation_tasks),
+                'skipped_count': len(skipped_tasks),
+                'success_count': len(success_tasks),
+                'failed_count': len(failed_tasks)
+            }
+        
+        # Overall status
+        overall_status = "✅ ALL TESTS PASSED" if failed == 0 and succeeded > 0 else ("❌ SOME TESTS FAILED" if failed > 0 else "⚠️ NO TESTS RUN")
+        status_color = "#28a745" if failed == 0 and succeeded > 0 else ("#dc3545" if failed > 0 else "#ffc107")
+        
+        # Prepare template data
+        template_data = {
+            'overall_status': overall_status,
+            'status_color': status_color,
+            'build_date': date,
+            'total_builds': build_tasks,
+            'total_tests': test_tasks,
+            'passed_tests': succeeded,
+            'failed_tests': failed,
+            'git_info': git_info,
+            'frameworks': frameworks_list,
+            'workspace_compilation': workspace_compilation,
+            # Add summary boxes data
+            'total_tasks': total_tasks,
+            'succeeded': succeeded,
+            'failed': failed,
+            'skipped': skipped,
+            # Add repository and log directory
+            'repo_path': repo_path or 'N/A',
+            'log_dir': log_dir or 'N/A',
+        }
+        
+        # Render template
+        template = Template(self.get_email_template())
+        return template.render(**template_data)
+
     def get_email_template(self) -> str:
         """Get the Jinja2 email template"""
         return """<!DOCTYPE html>
@@ -713,6 +1011,15 @@ class EmailTemplateRenderer:
 body { font-family: Arial, sans-serif; margin: 10px; line-height: 1.3; }
 .header { background-color: {{ status_color }}; color: white; padding: 15px 20px; border-radius: 4px; margin-bottom: 10px; text-align: center; }
 .summary { background-color: #f8f9fa; padding: 4px 6px; border-radius: 2px; margin: 3px 0; }
+.summary-boxes { width: 100%; margin: 15px 0; }
+.summary-boxes table { width: 100%; border-collapse: separate; border-spacing: 10px; }
+.summary-box { padding: 12px; border-radius: 6px; text-align: center; width: 25%; }
+.summary-box.total { background: #e8f4f8; border-left: 4px solid #3498db; }
+.summary-box.success { background: #e8f8f5; border-left: 4px solid #27ae60; }
+.summary-box.failed { background: #fde8e8; border-left: 4px solid #e74c3c; }
+.summary-box.skipped { background: #f9f9f9; border-left: 4px solid #95a5a6; }
+.summary-box .number { font-size: 28px; font-weight: bold; margin: 5px 0; display: block; }
+.summary-box .label { font-size: 13px; color: #7f8c8d; text-transform: uppercase; font-weight: 600; display: block; }
 .results { margin: 10px 0; }
 .framework { margin: 10px 0; padding: 8px; border: 1px solid #dee2e6; border-radius: 4px; background-color: #ffffff; }
 .framework-header { background-color: #007bff; color: white; padding: 8px 12px; margin: -8px -8px 8px -8px; border-radius: 4px 4px 0 0; font-weight: bold; }
@@ -738,10 +1045,31 @@ h2 { margin: 0; font-size: 1.2em; font-weight: bold; }
 <h2>DynamoDockerBuilder - {{ overall_status }}</h2>
 </div>
 
+<div class="summary-boxes">
+<table>
+<tr>
+<td class="summary-box total">
+<div class="number">{{ total_tasks }}</div>
+<div class="label">Total Tasks</div>
+</td>
+<td class="summary-box success">
+<div class="number">{{ succeeded }}</div>
+<div class="label">Succeeded</div>
+</td>
+<td class="summary-box failed">
+<div class="number">{{ failed }}</div>
+<div class="label">Failed</div>
+</td>
+<td class="summary-box skipped">
+<div class="number">{{ skipped }}</div>
+<div class="label">Skipped</div>
+</td>
+</tr>
+</table>
+</div>
+
 <div class="summary">
 <p><strong>Build & Test Date:</strong> {{ build_date }}</p>
-<p><strong>Total Builds:</strong> {{ total_builds }} | <strong>Total Tests:</strong> {{ total_tests }}</p>
-<p><strong>Passed:</strong> <span class="success">{{ passed_tests }}</span> | <strong>Failed:</strong> <span class="failure">{{ failed_tests }}</span></p>
 </div>
 
 <div class="git-info">
@@ -767,7 +1095,7 @@ h2 { margin: 0; font-size: 1.2em; font-weight: bold; }
 
 {% if workspace_compilation %}
 <div class="framework">
-<div class="framework-header">Workspace Compilation</div>
+<div class="framework-header">Compilation</div>
 <div class="results-chart">
 <div class="chart-row">
 <div class="chart-cell chart-header">Status</div>
@@ -776,7 +1104,9 @@ h2 { margin: 0; font-size: 1.2em; font-weight: bold; }
 </div>
 <div class="chart-row">
 <div class="chart-cell chart-status">
-{% if workspace_compilation.success %}
+{% if workspace_compilation.success is none %}
+<span style="color: #95a5a6; font-weight: bold;">⊘ SKIPPED</span>
+{% elif workspace_compilation.success %}
 <span class="success">✅ PASSED</span>
 {% else %}
 <span class="failure">❌ FAILED</span>
@@ -789,7 +1119,7 @@ h2 { margin: 0; font-size: 1.2em; font-weight: bold; }
 
 {% if workspace_compilation.output_snippets %}
 <div style="margin-top: 12px;">
-<h4 style="margin-bottom: 6px;">Compilation Output Snippets (last 7 lines):</h4>
+<h4 style="margin-bottom: 6px;">Compilation Output (last few lines):</h4>
 
 {% if workspace_compilation.output_snippets.cargo_build %}
 <div style="margin: 8px 0;">
@@ -865,7 +1195,9 @@ h2 { margin: 0; font-size: 1.2em; font-weight: bold; }
 <div class="chart-row">
 <div class="chart-cell chart-target">{{ target.name }}</div>
 <div class="chart-cell chart-status">
-{% if target.success %}
+{% if target.success is none %}
+<span style="color: #95a5a6; font-weight: bold;">⊘ SKIPPED</span>
+{% elif target.success %}
 <span class="success">✅ PASSED</span>
 {% else %}
 <span class="failure">❌ FAILED</span>
@@ -896,18 +1228,18 @@ h2 { margin: 0; font-size: 1.2em; font-weight: bold; }
 <p><em>This email was generated automatically by DynamoDockerBuilder.</em></p>
 </body>
 </html>"""
-    
+
     def convert_pr_links(self, message: str) -> str:
         """Convert PR references like (#3107) to GitHub links"""
         # Pattern to match (#number)
         pr_pattern = r'\(#(\d+)\)'
-        
+
         def replace_pr(match: re.Match[str]) -> str:
             pr_number = match.group(1)
             return f'(<a href="https://github.com/ai-dynamo/dynamo/pull/{pr_number}" style="color: #0066cc;">#{pr_number}</a>)'
-        
+
         return re.sub(pr_pattern, replace_pr, message)
-    
+
     def html_escape(self, text: str) -> str:
         """Escape HTML special characters"""
         return (text.replace("&", "&amp;")
@@ -915,19 +1247,19 @@ h2 { margin: 0; font-size: 1.2em; font-weight: bold; }
                    .replace(">", "&gt;")
                    .replace('"', "&quot;")
                    .replace("'", "&#x27;"))
-    
+
     def format_author_html(self, author: str) -> str:
         """Format author information as proper HTML with mailto link"""
-        
+
         # Pattern to match "Name <email> (login)" or "Name <email>"
         pattern = r'^(.+?)\s*<([^>]+)>(?:\s*\(([^)]+)\))?$'
         match = re.match(pattern, author.strip())
-        
+
         if match:
             name = match.group(1).strip()
             email = match.group(2).strip()
             login = match.group(3).strip() if match.group(3) else None
-            
+
             # Create HTML with clickable email
             if login:
                 return f'{self.html_escape(name)} &lt;<a href="mailto:{email}" style="color: #0066cc; text-decoration: none;">{email}</a>&gt; ({self.html_escape(login)})'
@@ -936,256 +1268,36 @@ h2 { margin: 0; font-size: 1.2em; font-weight: bold; }
         else:
             # Fallback: just escape the whole string
             return self.html_escape(author)
-    
-    def send_email_notification(
+
+    def _send_html_email_via_smtp(
         self,
         email: str,
-        results: Dict[str, bool],
-        git_info: Dict[str, Any],
-        dynamo_ci_dir: Path,
-        log_dir: Path,
-        base_build_times: Dict[str, float],
-        base_image_ids: Dict[str, str],
-        workspace_compile_success: Optional[bool],
-        workspace_compile_time: float,
-        workspace_compile_output: Dict[str, List[str]],
-        failure_details: Optional[Dict[str, str]],
-        build_times: Optional[Dict[str, float]],
-        dry_run: bool,
-        logger,
-        docker_utils,
-        buildsh_utils
+        html_content: str,
+        subject_prefix: str,
+        git_sha: str,
+        failed_tasks: List[str],
+        logger
     ) -> None:
-        """Send email notification with test results using Jinja2 template
-        
-        Args:
-            email: Recipient email address
-            results: Dict[str, bool] mapping test keys (e.g. 'VLLM_dev') to success boolean
-            git_info: Git commit information dictionary
-            dynamo_ci_dir: Path to dynamo CI directory
-            log_dir: Path to log directory
-            base_build_times: Dictionary of base image build times
-            base_image_ids: Dictionary of base image IDs
-            workspace_compile_success: Workspace compilation success status (None if not attempted)
-            workspace_compile_time: Workspace compilation time in seconds
-            workspace_compile_output: Dictionary of output snippets from compilation
-            failure_details: Optional[Dict[str, str]] mapping failed test keys to error output strings
-            build_times: Optional[Dict[str, float]] mapping timing keys to duration in seconds
-            dry_run: Whether this is a dry run
-            logger: Logger instance
-            docker_utils: DockerUtils instance
-            buildsh_utils: BuildShUtils instance
-        """
-        if not email:
-            return
-
-        if failure_details is None:
-            failure_details = {}
-
-        if dry_run:
-            logger.info(f"DRY-RUN: Would send email notification to {email}")
-            return
-
+        """Shared SMTP email sending logic for both v1 and v2"""
         try:
-            # Count results (only count tests that were actually run)
-            total_tests = len(results)
-            passed_tests = sum(1 for success in results.values() if success)
-            failed_tests = sum(1 for success in results.values() if not success)
-
-            # Calculate total builds (same as total tests since each target involves both build and test)
-            # In test-only mode, builds are skipped but we still show the count for clarity
-            total_builds = total_tests
-
-            # Collect failed tests for summary
-            failed_tests_list = [key for key, success in results.items() if not success]
-
             # Determine overall status
-            overall_status = "SUCCESS" if failed_tests == 0 else "FAILURE"
-            status_color = "#28a745" if failed_tests == 0 else "#dc3545"
-
-            # Prepare framework data for template
-            frameworks = []
-            tested_frameworks = set()
-            for key in results.keys():
-                framework = key.split('_')[0]  # Extract framework from key like "VLLM_dev"
-                tested_frameworks.add(framework)
-
-            for framework in sorted(tested_frameworks):
-                # Get all targets tested for this framework
-                framework_targets = set()
-                for key in results.keys():
-                    if key.startswith(f"{framework}_"):
-                        target = key[len(f"{framework}_"):]
-                        framework_targets.add(target)
-
-                targets = []
-                for target in sorted(framework_targets):
-                    framework_target = f"{framework}_{target}"
-                    if framework_target in results:  # Only show targets that were actually tested
-                        success = results[framework_target]
-
-                        # Get timing information if available
-                        timing_info = ""
-                        build_time_str = ""
-                        test_time_str = ""
-
-                        if build_times:
-                            build_time_key = f"{framework_target}_build"
-                            test_time_key = f"{framework_target}_test"
-
-                            # Get build time (may not exist in test-only mode)
-                            if build_time_key in build_times:
-                                build_time = build_times[build_time_key]
-                                build_time_str = f"{build_time:.1f}s"
-                            else:
-                                build_time_str = "-"  # No build in test-only mode
-
-                            # Get test time (should always exist)
-                            if test_time_key in build_times:
-                                test_time = build_times[test_time_key]
-                                test_time_str = f"{test_time:.1f}s"
-                            else:
-                                test_time_str = "-"
-
-                            # Create timing info for backward compatibility (used in some places)
-                            if build_time_str != "-" and test_time_str != "-":
-                                timing_info = f" (build: {build_time_str}, sanity_check.py: {test_time_str})"
-                            elif test_time_str != "-":
-                                timing_info = f" (sanity_check.py: {test_time_str})"
-
-                        # Get error output if available
-                        error_output = ""
-                        if not success and framework_target in failure_details and failure_details[framework_target]:
-                            error_lines = failure_details[framework_target].split('\n')
-                            if len(error_lines) > 25:
-                                error_output = '\n'.join(error_lines[-25:])  # Show last 25 lines
-                                error_output = "... (showing last 25 lines)\n" + error_output
-                            else:
-                                error_output = failure_details[framework_target]
-
-                        # Get Docker image information if build was successful
-                        container_size = ""
-                        image_tag = ""
-                        image_id = ""
-                        if success and not dry_run:
-                            # Try to get the built image tag for this framework/target combination
-                            try:
-                                # Convert target type for build command discovery
-                                docker_target_type = target if target != "dev" else None
-                                _, _, discovered_tag = buildsh_utils.get_build_commands(framework, docker_target_type)
-                                if discovered_tag:
-                                    docker_info = docker_utils.get_image_info(discovered_tag)
-                                    container_size = docker_info['size']
-                                    image_tag = docker_info['repo_tag']
-                                    
-                                    # Get image ID using Docker API
-                                    image_id = docker_utils.get_image_id(discovered_tag)
-                            except Exception as e:
-                                logger.debug(f"Failed to get Docker info for {framework_target}: {e}")
-                                image_id = "Error"
-
-                        targets.append({
-                            'name': target,
-                            'success': success,
-                            'timing_info': timing_info,
-                            'build_time': build_time_str,
-                            'test_time': test_time_str,
-                            'error_output': error_output,
-                            'container_size': container_size,
-                            'image_tag': image_tag,
-                            'image_id': image_id
-                        })
-
-                frameworks.append({
-                    'name': framework,
-                    'targets': targets
-                })
-
-            # Prepare base builds data for template
-            base_builds = []
-            for base_key, base_time in base_build_times.items():
-                # Extract framework name from base_key (e.g., "dynamo-base-TRTLLM" -> "TRTLLM")
-                framework_name = base_key.replace("dynamo-base-", "").upper()
-                
-                # Get the actual dynamo-base tag dynamically from build commands for this specific framework
-                image_tag = buildsh_utils.extract_base_image_tag(framework_name)
-                if not image_tag:
-                    # Fallback to constructed tag if extraction fails
-                    image_tag = f"dynamo-base:v0.1.0.dev.{git_info['sha']}"
-                
-                # Get stored image ID if available
-                image_id = base_image_ids.get(base_key, "-")
-                container_size = "Not Found"  # Will be populated if we can get docker image info
-                
-                # Try to get actual Docker image information in non-dry-run mode
-                # Use the framework-specific image tag to get the correct container size
-                if not dry_run and image_tag:
-                    try:
-                        docker_info = docker_utils.get_image_info(image_tag)
-                        container_size = docker_info['size']
-                        # Update image_id if we get it from Docker API and don't have it stored
-                        if image_id == "-" and docker_info['image_id'] != 'Unknown':
-                            image_id = docker_info['image_id']
-                    except Exception as e:
-                        logger.debug(f"Failed to get Docker info for {framework_name} base image {image_tag}: {e}")
-                        container_size = "Not Found"
-                
-                base_builds.append({
-                    'name': framework_name,
-                    'build_time': f"{base_time:.1f}s",
-                    'container_size': container_size,
-                    'image_tag': image_tag,
-                    'image_id': image_id
-                })
-
-            # Prepare template context
-            context = {
-                'overall_status': overall_status,
-                'status_color': status_color,
-                'total_builds': total_builds,
-                'total_tests': total_tests,
-                'passed_tests': passed_tests,
-                'failed_tests': failed_tests,
-                'build_date': datetime.now().strftime('%Y-%m-%d %H:%M:%S') + ' PDT',
-                'workspace_compilation': {
-                    'attempted': workspace_compile_success is not None,
-                    'success': workspace_compile_success,
-                    'time': f"{workspace_compile_time:.1f}s" if workspace_compile_time > 0 else "0.0s",
-                    'output_snippets': workspace_compile_output
-                } if workspace_compile_success is not None else None,
-                'git_info': {
-                    'sha': git_info['sha'],
-                    'date': git_info['pacific_timestamp'],
-                    'message': self.convert_pr_links(self.html_escape(git_info['commit_message'])),
-                    'full_message': git_info['full_commit_message'],
-                    'author': self.format_author_html(git_info['author']),
-                    'total_additions': git_info.get('total_additions', 0),
-                    'total_deletions': git_info.get('total_deletions', 0),
-                    'diff_stats': git_info.get('diff_stats', [])
-                },
-                'base_builds': base_builds,
-                'frameworks': frameworks,
-                'repo_path': str(dynamo_ci_dir),
-                'log_dir': str(log_dir)
-            }
-
-            # Render template
-            template = Template(self.get_email_template())
-            html_content = template.render(context)
-
+            overall_status = "SUCCESS" if not failed_tasks else "FAILURE"
+            
             # Create subject line
             status_prefix = "SUCC" if overall_status == "SUCCESS" else "FAIL"
-            if failed_tests_list:
-                failure_summary = ", ".join(failed_tests_list)
-                subject = f"{status_prefix}: DynamoDockerBuilder - {git_info['sha']} ({failure_summary})"
+            
+            # Include failed task names in subject if any
+            if failed_tasks:
+                failure_summary = ", ".join(failed_tasks)
+                subject = f"{status_prefix}: {subject_prefix} - {git_sha} ({failure_summary})"
             else:
-                subject = f"{status_prefix}: DynamoDockerBuilder - {git_info['sha']}"
+                subject = f"{status_prefix}: {subject_prefix} - {git_sha}"
 
             # Create email file with proper CRLF formatting
             email_file = Path(f"/tmp/dynamo_email_{os.getpid()}.txt")
 
-            # Write email content directly to avoid printf format specifier issues
-            email_content = f'Subject: {subject}\r\nFrom: DynamoDockerBuilder <dynamo-docker-builder@nvidia.com>\r\nTo: {email}\r\nMIME-Version: 1.0\r\nContent-Type: text/html; charset=UTF-8\r\n\r\n{html_content}\r\n'
+            # Write email content directly
+            email_content = f'Subject: {subject}\r\nFrom: {subject_prefix} <dynamo-docker-builder@nvidia.com>\r\nTo: {email}\r\nMIME-Version: 1.0\r\nContent-Type: text/html; charset=UTF-8\r\n\r\n{html_content}\r\n'
 
             with open(email_file, 'w', encoding='utf-8') as f:
                 f.write(email_content)
@@ -1202,7 +1314,10 @@ h2 { margin: 0; font-size: 1.2em; font-weight: bold; }
             email_file.unlink(missing_ok=True)
 
             if result.returncode == 0:
-                logger.info(f"SUCCESS: Email notification sent to {email} (using Jinja2 template)")
+                logger.info(f"SUCCESS: Email notification sent to {email}")
+                logger.info(f"  Subject: {subject}")
+                if failed_tasks:
+                    logger.info(f"  Failed tasks: {', '.join(failed_tasks)}")
             else:
                 logger.error(f"Failed to send email: {result.stderr}")
 
@@ -1210,925 +1325,1026 @@ h2 { margin: 0; font-size: 1.2em; font-weight: bold; }
             logger.error(f"Error sending email notification: {e}")
 
 
-class DynamoDockerBuilder(BaseUtils):
-    """DynamoDockerBuilder - Main class for automated Docker build testing and reporting"""
+@dataclass
+class BaseTask:
+    """
+    Base class for all tasks in the dependency tree.
+    Contains common fields shared by build and execute tasks.
+    """
+    # Task identification
+    task_id: str                # e.g., "dynamo-base-VLLM", "VLLM-dev", "VLLM-compilation"
+    task_type: str              # e.g., "build", "compilation", "sanity_check"
+    framework: Optional[str] = None     # e.g., "VLLM", "TRTLLM", "SGLANG", or None for dynamo-base
+    target: Optional[str] = None        # e.g., "dev", "local-dev", "runtime"
+    description: str = ""       # e.g., "Build dynamo-base image", "Run workspace compilation"
+    
+    # Dependency tree
+    depends_on: List[str] = field(default_factory=list)  # e.g., ["dynamo-base-VLLM", "VLLM-dev"]
+    children: List[str] = field(default_factory=list)    # e.g., ["VLLM-dev", "TRTLLM-dev"]
+    
+    # Execution state
+    status: str = 'pending'     # e.g., "pending", "ready", "in_progress", "success", "failed", "skipped"
+    started_at: Optional[datetime] = None
+    completed_at: Optional[datetime] = None
+    duration: float = 0.0
+    
+    # Execution results
+    success: Optional[bool] = None
+    error_message: Optional[str] = None
+    log_file: Optional[str] = None
+    
+    def is_ready(self, task_tree: Dict[str, 'BaseTask']) -> bool:
+        """Check if all dependencies are completed successfully or skipped"""
+        if self.status != 'pending':
+            return False
 
+        for dep_id in self.depends_on:
+            dep_task = task_tree.get(dep_id)
+            if not dep_task:
+                return False
+            # A task is ready if all its dependencies are either successful or skipped
+            if dep_task.status not in ('success', 'skipped'):
+                return False
+        
+        return True
+    
+    def add_dependency(self, parent_task_id: str) -> None:
+        """Add a parent dependency"""
+        if parent_task_id not in self.depends_on:
+            self.depends_on.append(parent_task_id)
+    
+    def add_child(self, child_task_id: str) -> None:
+        """Add a child dependency"""
+        if child_task_id not in self.children:
+            self.children.append(child_task_id)
+
+
+@dataclass
+class BuildTask(BaseTask):
+    """
+    Build task - represents a Docker image build operation.
+    Inherits common fields from BaseTask and adds build-specific fields.
+    """
+    # Build-specific fields
+    docker_command: str = ""    # e.g., "docker build -f Dockerfile --target dev --tag dynamo:dev ..."
+    base_image: str = ""        # e.g., "nvidia/cuda:12.4.0-devel-ubuntu22.04" (FROM image)
+    image_tag: str = ""         # e.g., "dynamo-base:v0.1.0.dev.8388e1628" (single output tag)
+    
+    # Build results
+    git_sha: Optional[str] = None               # e.g., "6a1391eb4"
+    container_id: Optional[str] = None          # e.g., "8f3c9d2e1a4b"
+    image_id: Optional[str] = None              # e.g., "sha256:ab155e5b17bd..."
+    image_size: Optional[str] = None            # e.g., "15.2GB"
+    build_log: Optional[str] = None             # e.g., "Step 1/25: FROM nvidia/cuda..."
+    failure_details: Optional[str] = None       # e.g., "ERROR: Package 'vllm' not found"
+    
+    def __post_init__(self):
+        """Ensure task_type is set to 'build'"""
+        self.task_type = "build"
+
+
+@dataclass
+class ExecuteTask(BaseTask):
+    """
+    Execute task - represents running commands in containers (compilation, sanity checks, etc.).
+    Inherits common fields from BaseTask and adds execute-specific fields.
+    """
+    # Execute-specific fields
+    command: str = ""           # e.g., "./container/run.sh --image dynamo:dev --mount-workspace ..."
+    image_name: str = ""        # e.g., "dynamo:v0.1.0.dev.8388e1628-vllm-local-dev"
+    timeout: Optional[float] = None     # e.g., 1800.0 (seconds)
+    
+    # Execution results
+    return_code: Optional[int] = None   # e.g., 0, 1, 137 (killed)
+    stdout: str = ""            # e.g., "All tests passed!"
+    stderr: str = ""            # e.g., "ERROR: Test failed"
+    
+    # Compilation-specific results (for compilation-type execute tasks)
+    compilation_success: Optional[bool] = None  # e.g., True, False
+    compilation_time: float = 0.0               # e.g., 123.4 (seconds)
+    compilation_output: Dict[str, List[str]] = field(default_factory=dict)  # e.g., {"cargo_build": ["line1", "line2"]}
+
+
+class DynamoDockerBuilder(BaseUtils):
+    """DynamoDockerBuilder - Next generation build system with dependency tree"""
+    
     # Framework constants
     FRAMEWORKS: List[str] = ["TRTLLM", "VLLM", "SGLANG"]
-
+    
     def __init__(self) -> None:
         # Configuration flags - set before calling super().__init__
         self.dry_run = False
         
-        # Set up logger first
-        self._setup_logger()
-        
-        # Call parent constructor with logger
-        super().__init__(dry_run=self.dry_run, logger=self.logger)
+        # Call parent constructor (sets up logger automatically)
+        super().__init__(dry_run=self.dry_run)
         
         self.script_dir = Path(__file__).parent.absolute()
         self.dynamo_ci_dir = self.script_dir.parent / "dynamo_ci"
         self.date = datetime.now().strftime("%Y-%m-%d")
         self.log_dir = self.dynamo_ci_dir / "logs" / self.date
-
-        # Additional configuration flags
-        self.test_only = False
+        
+        # Configuration flags (will be set from args)
+        self.sanity_check_only = False
         self.no_checkout = False
         self.force_run = False
+        self.parallel = False
         self.email = None
         self.targets = ["dev", "local-dev"]  # Default targets
-        self.repo_sha = None  # SHA to checkout
-
-        # Lock file for preventing concurrent runs
-        self.lock_file = self.script_dir / f".{Path(__file__).name}.lock"
-
+        self.repo_sha = None
+        
         # Initialize utility classes
-        self.git_utils = GitUtils(dry_run=self.dry_run, logger=self.logger)
-        self.docker_utils = DockerUtils(dry_run=self.dry_run, logger=self.logger)
-        self.buildsh_utils = BuildShUtils(self.dynamo_ci_dir, self.docker_utils, dry_run=self.dry_run, logger=self.logger)
-        self.email_renderer = EmailTemplateRenderer()
-
-        # Track build times for email reporting
-        self.build_times: Dict[str, float] = {}
-
-        # Track base image build times separately
-        self.base_build_times: Dict[str, float] = {}
+        self.git_utils = GitUtils(dry_run=self.dry_run)
+        self.docker_utils = DockerUtils(dry_run=self.dry_run)
+        self.buildsh_utils = BuildShUtils(self.dynamo_ci_dir, self.docker_utils, dry_run=self.dry_run)
         
-        # Track base image IDs separately  
-        # Example: {"dynamo-base-VLLM": "ab155e5b17bd", "dynamo-base-TRTLLM": "5a4b7288c7f6"}
-        self.base_image_ids: Dict[str, str] = {}
-
-        # Track executed docker commands to prevent duplicates
-        self.executed_commands: set = set()
-
-        # Track workspace compilation
-        self.workspace_compiled = False
-        self.workspace_compile_time = 0.0
-        self.workspace_compile_success = None  # None = not attempted, True = success, False = failed
-        self.workspace_compile_output = {}  # Dict of output snippets from compilation steps
-
-    def _setup_logger(self) -> None:
-        """Set up the logger with appropriate formatting"""
-        self.logger = logging.getLogger('DynamoDockerBuilder')
-        self.logger.setLevel(logging.DEBUG)
-
-        # Remove any existing handlers
-        self.logger.handlers.clear()
-
-        # Create console handler
-        console_handler = logging.StreamHandler()
-        console_handler.setLevel(logging.DEBUG)
-
-        # Create custom formatter that handles DRYRUN prefix
-        class DryRunFormatter(logging.Formatter):
-            def __init__(self, dry_run_instance: 'DynamoDockerBuilder') -> None:
-                super().__init__()
-                self.dry_run_instance = dry_run_instance
-
-            def format(self, record: logging.LogRecord) -> str:
-                if self.dry_run_instance.dry_run:
-                    return f"DRYRUN {record.levelname} - {record.getMessage()}"
-                else:
-                    return f"{record.levelname} - {record.getMessage()}"
-
-        formatter = DryRunFormatter(self)
-        console_handler.setFormatter(formatter)
-
-        # Add handler to logger
-        self.logger.addHandler(console_handler)
-
-        # Prevent propagation to root logger
-        self.logger.propagate = False
-
-    def rename_target_for_build(self, target: str) -> Optional[str]:
-        """Convert target name for build commands. 'dev' becomes None, others stay as-is"""
-        return None if target == "dev" else target
-
-    def get_failure_details(self, framework: str, docker_target_type: str) -> str:
-        """Get failure details from log files for a failed test"""
-        try:
-            commit_sha = self.git_utils.get_current_sha(self.dynamo_ci_dir)
-            framework_lower = framework.lower()
-
-            # Determine log file suffix
-            if docker_target_type == "local-dev":
-                log_suffix = f"{commit_sha}.{framework_lower}.local-dev"
-            else:
-                log_suffix = f"{commit_sha}.{framework_lower}.dev"
-
-            log_file = self.log_dir / f"{self.date}.{log_suffix}.log"
-
-            if log_file.exists():
-                # Read last 20 lines of the log file
-                result = self.cmd(['tail', '-20', str(log_file)],
-                                      capture_output=True, text=True)
-                if result.returncode == 0 and result.stdout.strip():
-                    return result.stdout.strip()
-
-            return f"No log file found at {log_file}"
-        except Exception as e:
-            return f"Error reading log file: {e}"
-
-    def cmd(self, command: List[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
-        """Execute command with dry-run support"""
-        # Show command in shell tracing format
-        cmd_str = " ".join(shlex.quote(str(arg)) for arg in command)
-        self.logger.debug(f"+ {cmd_str}")
-
-        # Commands that are safe to execute in dry-run mode (no side effects)
-        is_safe_command = False
+        # Task tree - dictionary mapping task_id to BaseTask instances (BuildTask or ExecuteTask)
+        self.task_tree: Dict[str, BaseTask] = {}
         
-        if len(command) >= 1:
-            cmd_base = command[0]
+        # Track seen commands to avoid duplicates
+        self.seen_commands: Dict[str, str] = {}  # command -> task_id
+    
+    def _build_dependency_tree(self, frameworks: List[str], targets: List[str]) -> None:
+        """
+        Build a dependency tree for all build and execute tasks.
+        
+        Structure:
+        1. Root tasks (can run immediately, in parallel):
+           - dynamo-base builds for each framework (TRTLLM, VLLM, SGLANG)
+        
+        2. Framework dev builds (depend on their dynamo-base):
+           - TRTLLM-dev depends on dynamo-base-TRTLLM
+           - VLLM-dev depends on dynamo-base-VLLM
+           - SGLANG-dev depends on dynamo-base-SGLANG
+           
+        3. Framework local-dev builds (depend on their dev):
+           - TRTLLM-local-dev depends on TRTLLM-dev
+           - VLLM-local-dev depends on VLLM-dev
+           - SGLANG-local-dev depends on SGLANG-dev
+           
+        4. Compilation tasks (depend on their local-dev, run in parallel):
+           - TRTLLM-compilation depends on TRTLLM-local-dev
+           - VLLM-compilation depends on VLLM-local-dev
+           - SGLANG-compilation depends on SGLANG-local-dev
+           
+        5. Sanity checks (depend on ALL compilations):
+           - TRTLLM-sanity depends on all compilations
+           - VLLM-sanity depends on all compilations
+           - SGLANG-sanity depends on all compilations
+        """
+        self.logger.info("Building dependency tree...")
+        self.logger.info("")
+        
+        # Step 1: Create all build tasks for each framework/target
+        for framework in frameworks:
+            self.logger.info(f"Creating tasks for {framework}...")
             
-            # build.sh and run.sh with --dry-run flag (no side effects)
-            if cmd_base in ['./container/build.sh', './container/run.sh']:
-                is_safe_command = '--dry-run' in command
-            
-            # Other read-only commands
-            elif cmd_base in ['ls', 'cat', 'head', 'tail', 'grep', 'find', 'which', 'echo']:
-                is_safe_command = True
-        
-        if self.dry_run and not is_safe_command:
-            # Return a mock completed process for commands with side effects in dry-run
-            mock_result = subprocess.CompletedProcess(command, 0)
-            mock_result.stdout = ""
-            mock_result.stderr = ""
-            return mock_result
-        else:
-            # Execute safe commands and all commands in non-dry-run mode
-            return subprocess.run(command, **kwargs)
-
-    def check_if_running(self) -> None:
-        """Check if another instance of this script is already running"""
-        script_name = Path(__file__).name
-        current_pid = os.getpid()
-
-        # Skip lock check if --force-run is specified
-        if self.force_run:
-            self.logger.warning("FORCE-RUN MODE: Bypassing process lock check")
-            # Still create our own lock file
-            self.lock_file.write_text(str(current_pid))
-            self.logger.info(f"Created process lock file: {self.lock_file} (PID: {current_pid})")
-            import atexit
-            atexit.register(lambda: self.lock_file.unlink(missing_ok=True))
-            return
-
-        # Check if lock file exists
-        if self.lock_file.exists():
-            try:
-                existing_pid = int(self.lock_file.read_text().strip())
-
-                # Check if the process is still running and is our script
-                if psutil.pid_exists(existing_pid):
-                    try:
-                        proc = psutil.Process(existing_pid)
-                        if script_name in " ".join(proc.cmdline()):
-                            self.logger.error(f"Another instance of {script_name} is already running (PID: {existing_pid})")
-                            self.logger.error(f"If you're sure no other instance is running, remove the lock file:")
-                            self.logger.error(f"  rm '{self.lock_file}'")
-                            self.logger.error(f"Or kill the existing process:")
-                            self.logger.error(f"  kill {existing_pid}")
-                            sys.exit(1)
-                    except (psutil.NoSuchProcess, psutil.AccessDenied):
-                        # Process exists but it's not our script, remove stale lock file
-                        self.logger.warning(f"Removing stale lock file (PID {existing_pid} is not our script)")
-                        self.lock_file.unlink()
-                else:
-                    # Process doesn't exist, remove stale lock file
-                    self.logger.warning(f"Removing stale lock file (PID {existing_pid} no longer exists)")
-                    self.lock_file.unlink()
-            except (ValueError, FileNotFoundError):
-                # Invalid lock file content, remove it
-                self.logger.warning("Removing invalid lock file")
-                self.lock_file.unlink(missing_ok=True)
-
-        # Create lock file with current PID
-        self.lock_file.write_text(str(current_pid))
-        self.logger.info(f"Created process lock file: {self.lock_file} (PID: {current_pid})")
-
-        # Set up cleanup on exit
-        import atexit
-        atexit.register(lambda: self.lock_file.unlink(missing_ok=True))
-
-    def setup_logging_dir(self) -> None:
-        """Create date-based log directory"""
-        self.logger.info("Setting up date-based logging directory...")
-        if self.dry_run:
-            self.logger.debug(f"+ mkdir -p {self.log_dir}")
-        else:
-            self.log_dir.mkdir(parents=True, exist_ok=True)
-        self.logger.info(f"SUCCESS: Date-based log directory created at {self.log_dir}")
-
-    def cleanup_existing_logs(self, framework: Optional[str] = None) -> None:
-        """Clean up existing log files for current date and current SHA only (preserve other SHAs)"""
-        # Get current commit SHA for precise cleanup
-        current_sha = self.git_utils.get_current_sha(self.dynamo_ci_dir)
-        
-        if framework:
-            self.logger.info(f"Cleaning up existing log files for date: {self.date}, SHA: {current_sha}, framework: {framework}")
-            framework_lower = framework.lower()
-        else:
-            self.logger.info(f"Cleaning up existing log files for date: {self.date}, SHA: {current_sha}")
-
-        if self.dry_run:
-            # In dry-run mode, just show what would be removed
-            if framework:
-                patterns = [f"{self.date}.{current_sha}.{framework_lower}.*.log",
-                           f"{self.date}.{current_sha}.{framework_lower}.*.SUCC",
-                           f"{self.date}.{current_sha}.{framework_lower}.*.FAIL"]
-            else:
-                patterns = [f"{self.date}.{current_sha}.*.log", 
-                           f"{self.date}.{current_sha}.*.SUCC", 
-                           f"{self.date}.{current_sha}.*.FAIL"]
-
-            for pattern in patterns:
-                self.logger.debug(f"+ rm -f {self.log_dir}/{pattern}")
-
-            if framework:
-                self.logger.info(f"Would remove existing log files for {self.date}.{current_sha} and {framework} (dry-run)")
-            else:
-                self.logger.info(f"Would remove existing log files for {self.date}.{current_sha} (dry-run)")
-        else:
-            # Remove existing log files only for current SHA (preserve other SHAs)
-            if framework:
-                # Framework-specific patterns for current SHA only
-                patterns = [f"{self.date}.{current_sha}.{framework_lower}.*.log",
-                           f"{self.date}.{current_sha}.{framework_lower}.*.SUCC",
-                           f"{self.date}.{current_sha}.{framework_lower}.*.FAIL"]
-            else:
-                # All files for the current SHA only
-                patterns = [f"{self.date}.{current_sha}.*.log", 
-                           f"{self.date}.{current_sha}.*.SUCC", 
-                           f"{self.date}.{current_sha}.*.FAIL"]
-
-            removed_files = []
-
-            for pattern in patterns:
-                for file_path in self.log_dir.glob(pattern):
-                    if file_path.is_file():
-                        file_path.unlink()
-                        removed_files.append(file_path.name)
-                        self.logger.info(f"Removed existing file: {file_path.name}")
-
-            if removed_files:
-                if framework:
-                    self.logger.info(f"SUCCESS: Removed {len(removed_files)} existing log files for {framework} (SHA: {current_sha})")
-                else:
-                    self.logger.info(f"SUCCESS: Removed {len(removed_files)} existing log files (SHA: {current_sha})")
-            else:
-                if framework:
-                    self.logger.info(f"No existing log files found for {self.date}.{current_sha} and {framework}")
-                else:
-                    self.logger.info(f"No existing log files found for {self.date}.{current_sha}")
-                    
-            # Show preserved files from other SHAs
-            if framework:
-                other_sha_pattern = f"{self.date}.*.{framework_lower}.*.log"
-            else:
-                other_sha_pattern = f"{self.date}.*.log"
+            for target in targets:
+                # Get docker build commands from build.sh --dry-run
+                target_arg = None if target == "dev" else target
+                success, docker_commands = self.buildsh_utils.get_build_commands(framework, target_arg)
                 
-            other_files = [f for f in self.log_dir.glob(other_sha_pattern) 
-                          if not f.name.startswith(f"{self.date}.{current_sha}.")]
-            
-            if other_files:
-                self.logger.info(f"Preserved {len(other_files)} log files from other SHAs on {self.date}")
-                # Show a few examples
-                for f in other_files[:3]:
-                    self.logger.debug(f"  Preserved: {f.name}")
-                if len(other_files) > 3:
-                    self.logger.debug(f"  ... and {len(other_files) - 3} more")
-
-    def check_if_rebuild_needed(self) -> bool:
-        """Check if rebuild is needed based on composite SHA"""
-        self.logger.info("Checking if rebuild is needed based on file changes...")
-        self.logger.info(f"Composite SHA file location: {self.dynamo_ci_dir}/.last_build_composite_sha")
-
-        # Generate current composite SHA
-        current_sha = self.git_utils.generate_composite_sha_from_container_dir(self.dynamo_ci_dir)
-        if current_sha is None:
-            self.logger.error("Failed to generate current composite SHA")
-            return False
-
-        # Get stored composite SHA
-        stored_sha = self.git_utils.get_stored_composite_sha(self.dynamo_ci_dir)
-
-        if stored_sha:
-            if current_sha == stored_sha:
-                if self.force_run:
-                    self.logger.info(f"Composite SHA unchanged ({current_sha}) but --force-run specified - proceeding")
-                    return True  # Rebuild needed (forced)
-                else:
-                    self.logger.info(f"Composite SHA unchanged ({current_sha}) - skipping rebuild")
-                    self.logger.info("Use --force-run to force rebuild")
-                    return False  # Rebuild not needed
-            else:
-                self.logger.info("Composite SHA changed:")
-                self.logger.info(f"  Previous: {stored_sha}")
-                self.logger.info(f"  Current:  {current_sha}")
-                self.logger.info("Rebuild needed")
-                self.git_utils.store_composite_sha(self.dynamo_ci_dir, current_sha)
-                return True  # Rebuild needed
-        else:
-            self.logger.info("No previous composite SHA found - rebuild needed")
-            self.git_utils.store_composite_sha(self.dynamo_ci_dir, current_sha)
-            return True  # Rebuild needed
-
-    def is_command_executed(self, docker_command: str) -> bool:
-        """Check if a docker command has already been executed
-
-        Args:
-            docker_command: Complete docker build command as a string
-
-        Returns:
-            True if command was already executed, False otherwise
-        """
-        # Normalize the command by removing extra whitespace and sorting build args
-        # This helps catch functionally identical commands with different formatting
-        normalized_cmd = self.docker_utils.normalize_command(docker_command)
-        return normalized_cmd in self.executed_commands
-
-    def mark_command_executed(self, docker_command: str) -> None:
-        """Mark a docker command as executed to prevent duplicates
-        
-        Args:
-            docker_command: Complete docker build command as a string
-        """
-        normalized_cmd = self.docker_utils.normalize_command(docker_command)
-        self.executed_commands.add(normalized_cmd)
-        self.logger.info(f"Marked command as executed: {normalized_cmd[:100]}...")
-
-
-    def execute_build_commands(self, framework: str, docker_commands: List[str], log_file: Path, fail_file: Path) -> Tuple[bool, Dict[str, float]]:
-        """Execute docker build commands with real-time output, skipping already executed commands
-        
-        Returns:
-            (success: bool, base_build_times: Dict[str, float])
-            base_build_times contains timing for any dynamo-base builds that were executed
-        """
-        base_build_times: Dict[str, float] = {}
-        
-        try:
-            # Filter out already executed commands
-            new_commands = []
-            skipped_commands = []
-            
-            for docker_cmd in docker_commands:
-                if self.is_command_executed(docker_cmd):
-                    skipped_commands.append(docker_cmd)
-                    self.logger.info(f"Skipping already executed command: {docker_cmd[:80]}...")
-                else:
-                    new_commands.append(docker_cmd)
-            
-            with open(log_file, 'a') as f:
-                f.write(f"Extracted {len(docker_commands)} docker build commands\n")
-                if skipped_commands:
-                    f.write(f"Skipped {len(skipped_commands)} already executed commands\n")
-                if new_commands:
-                    f.write(f"Executing {len(new_commands)} new commands\n")
-
-                for i, docker_cmd in enumerate(new_commands):
-                    # Check if this is a base image build using regex to match --tag dynamo-base:
-                    is_base_build = bool(re.search(r'--tag\s+dynamo-base:', docker_cmd))
+                if not success:
+                    self.logger.error(f"  Failed to get build commands for {framework}/{target}")
+                    continue
+                
+                # Process each docker command
+                for docker_cmd in docker_commands:
+                    # Check if we've seen this command before (duplicate detection)
+                    if docker_cmd in self.seen_commands:
+                        self.logger.debug(f"  Skipping duplicate command for {framework}/{target}")
+                        continue
                     
-                    self.logger.info(f"Executing docker build command {i+1}/{len(new_commands)} (of {len(docker_commands)} total)")
-                    if is_base_build:
-                        self.logger.info("  → Building dynamo-base image")
+                    # Extract metadata from command
+                    base_image = self.docker_utils.extract_base_image_from_command(docker_cmd)
+                    image_tag = self.docker_utils.extract_image_tag_from_command(docker_cmd)
                     
-                    self.logger.debug(f"+ {docker_cmd}")
-                    f.write(f"+ {docker_cmd}\n")
-                    f.flush()
-
-                    # Track timing for this specific command
-                    cmd_start_time = time.time()
-
-                    # Run docker command with real-time output
-                    with subprocess.Popen(
-                        docker_cmd,
-                        shell=True, 
-                        stdout=subprocess.PIPE, 
-                        stderr=subprocess.STDOUT,
-                        text=True, 
-                        bufsize=1
-                    ) as process:
-                        # Stream output line by line
-                        for line in iter(process.stdout.readline, ''):
-                            line = line.rstrip()
-                            if line:
-                                print(line)  # Show on console
-                                f.write(line + '\n')  # Write to log file
-                                f.flush()  # Ensure immediate write
-                        
-                        return_code = process.wait()
-
-                    cmd_end_time = time.time()
-                    cmd_duration = cmd_end_time - cmd_start_time
-
-                    if return_code != 0:
-                        self.logger.error(f"Docker build command {i+1} failed for {framework}")
-                        f.write(f"Build Status: FAILED (docker command {i+1})\n")
-                        with open(fail_file, 'a') as fail_f:
-                            fail_f.write(f"{framework} docker build failed at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
-                        return False, base_build_times
+                    if not image_tag:
+                        self.logger.warning(f"  No output tag found for {framework}/{target}")
+                        continue
+                    
+                    # Determine task_id based on output tag
+                    # Use framework as prefix for consistency
+                    # Examples: "VLLM-dynamo-base", "VLLM-dev", "VLLM-local-dev"
+                    if "dynamo-base" in image_tag:
+                        task_id = f"{framework}-dynamo-base"
+                        task_target = "base"
+                    elif "local-dev" in image_tag:
+                        task_id = f"{framework}-local-dev"
+                        task_target = "local-dev"
                     else:
-                        # Mark command as executed on success
-                        self.mark_command_executed(docker_cmd)
-                        
-                        # Track base image build time separately
-                        if is_base_build:
-                            # Use framework key for reliable base image identification
-                            base_key = f"dynamo-base-{framework}"
-                            base_build_times[base_key] = cmd_duration
-                            
-                            # Capture the IMAGE ID from the build output
-                            # Look for the "writing image sha256:..." line in the output
-                            try:
-                                # Read the current log content to find the image ID
-                                with open(log_file, 'r') as log_f:
-                                    log_content = log_f.read()
-                                    
-                                # Look for the Docker image ID in the build output
-                                image_id_match = re.search(r'writing image (sha256:[a-f0-9]+)', log_content)
-                                if image_id_match:
-                                    full_image_id = image_id_match.group(1)
-                                    # Store the short image ID (first 12 chars after sha256:)
-                                    short_image_id = full_image_id[7:19] if full_image_id.startswith('sha256:') else full_image_id[:12]
-                                    self.base_image_ids[base_key] = short_image_id
-                                    self.logger.debug(f"Captured base image ID for {framework}: {short_image_id}")
-                            except Exception as e:
-                                self.logger.debug(f"Failed to capture base image ID for {framework}: {e}")
-                            
-                            self.logger.info(f"  → Base image build for {framework} completed in {cmd_duration:.1f}s")
-
-                if new_commands:
-                    self.logger.info(f"SUCCESS: Build completed for {framework} ({len(new_commands)} new commands executed, {len(skipped_commands)} skipped)")
-                else:
-                    self.logger.info(f"SUCCESS: Build completed for {framework} (all {len(skipped_commands)} commands were already executed)")
-                f.write("Build Status: SUCCESS (no latest tags)\n")
-                return True, base_build_times
-
-        except Exception as e:
-            self.logger.error(f"Build failed for {framework}: {e}")
-            with open(log_file, 'a') as log_f:
-                log_f.write(f"Build Status: FAILED ({e})\n")
-            with open(fail_file, 'a') as fail_f:
-                fail_f.write(f"{framework} build failed at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
-            return False, {}
-
-    def build_framework_image(self, framework: str, docker_target_type: str, log_file: Path, fail_file: Path) -> Tuple[bool, Optional[float]]:
-        """Build a specific framework image
+                        task_id = f"{framework}-dev"
+                        task_target = "dev"
+                    
+                    # Create the build task
+                    task = BuildTask(
+                        task_id=task_id,
+                        task_type="build",
+                        framework=framework,
+                        target=task_target,
+                        description=f"Build {framework} {task_target} image",
+                        docker_command=docker_cmd,
+                        base_image=base_image,
+                        image_tag=image_tag
+                    )
+                    
+                    self.task_tree[task_id] = task
+                    self.seen_commands[docker_cmd] = task_id
+                    self.logger.info(f"  Created task: {task_id}")
         
-        Args:
-            framework: Framework name - one of "VLLM", "SGLANG", or "TRTLLM"
-            docker_target_type: Docker build target type - either "dev" or "local-dev"
-            log_file: Path to log file for build output
-            fail_file: Path to failure file for error tracking
+        self.logger.info("")
+        self.logger.info("Establishing dependencies...")
+        
+        # Step 2: Establish dependencies between build tasks
+        for task_id, task in self.task_tree.items():
+            # Only process build tasks
+            if not isinstance(task, BuildTask):
+                continue
             
-        Returns:
-            (success: bool, build_time: Optional[float])
-            
-            Examples:
-                Success case: (True, 45.2)
-                Failure case: (False, None)
-        """
-        print("=" * 60)
-        self.logger.info(f"Building {framework} framework ({docker_target_type} target)...")
-        print("=" * 60)
-
-        build_start_time = time.time()
-
-        # Get build commands
-        target_param = self.rename_target_for_build(docker_target_type)
-        success, docker_commands, _image_tag = self.buildsh_utils.get_build_commands(framework, target_param)
-        if not success:
-            if not self.dry_run:
-                with open(log_file, 'a') as log_f:
-                    log_f.write("Build Status: FAILED (could not get docker commands)\n")
-                with open(fail_file, 'a') as fail_f:
-                    fail_f.write(f"{framework} build command extraction failed at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
-            return False, None
-
-        if self.dry_run:
-            # Show filtered commands that would be executed, with duplicate detection
-            new_commands = []
-            skipped_commands = []
-            
-            for cmd in docker_commands:
-                if self.is_command_executed(cmd):
-                    skipped_commands.append(cmd)
-                    self.logger.info(f"Skipping already executed command: {cmd[:80]}...")
-                else:
-                    new_commands.append(cmd)
-                    # Mark as executed in dry-run mode too for consistency
-                    self.mark_command_executed(cmd)
-            
-            self.logger.info("Filtered docker commands (removing latest tags and duplicates):")
-            for cmd in new_commands:
-                print(f"+ {cmd}")
-            
-            if skipped_commands:
-                self.logger.info(f"Skipped {len(skipped_commands)} already executed commands in dry-run")
+            # Determine parent dependencies based on base_image
+            if task.base_image:
+                # Find which task produces this base_image
+                # Prefer tasks with matching framework to handle cases where multiple
+                # tasks produce the same tag (before conflict resolution)
+                parent_task_id = None
+                fallback_parent_id = None
                 
-            self.logger.info(f"SUCCESS: Build commands prepared for {framework} (dry-run: {len(new_commands)} new, {len(skipped_commands)} skipped)")
+                for other_id, other_task in self.task_tree.items():
+                    if other_id == task_id:
+                        continue
+                    # Check if other_task is a BuildTask and produces the base_image we need
+                    if isinstance(other_task, BuildTask) and task.base_image == other_task.image_tag:
+                        # Prefer parent with matching framework
+                        if task.framework and other_task.framework == task.framework:
+                            parent_task_id = other_id
+                            break
+                        elif not fallback_parent_id:
+                            fallback_parent_id = other_id
+                
+                # Use framework-matched parent if found, otherwise use fallback
+                parent_task_id = parent_task_id or fallback_parent_id
+                
+                if parent_task_id:
+                    task.add_dependency(parent_task_id)
+                    self.task_tree[parent_task_id].add_child(task_id)
+                    self.logger.info(f"  {task_id} depends on {parent_task_id}")
+        
+        # Step 3: Create compilation tasks (one per framework with local-dev)
+        self.logger.info("")
+        self.logger.info("Creating compilation tasks...")
+        compilation_task_ids = []
+        
+        for framework in frameworks:
+            local_dev_task_id = f"{framework}-local-dev"
+            if local_dev_task_id not in self.task_tree:
+                continue
             
-            # Calculate build time for dry-run (time spent preparing commands)
-            build_end_time = time.time()
-            build_time = build_end_time - build_start_time
-            return True, build_time  # Return early in dry-run mode
-        else:
-            # Execute the commands
-            success, base_times = self.execute_build_commands(framework, docker_commands, log_file, fail_file)
-            if success:
-                # Store base build times in the instance variable for email reporting
-                for base_key, base_time in base_times.items():
-                    self.base_build_times[base_key] = base_time
-            else:
-                return False, None
-
-        build_end_time = time.time()
-        build_time = build_end_time - build_start_time
-        
-        return True, build_time
-
-    def run_workspace_compilation(self, framework: str, docker_target_type: str) -> Tuple[bool, float, Dict[str, List[str]]]:
-        """Run one-time workspace compilation commands for local-dev containers
-        
-        This runs cargo build, maturin develop, and uv pip install to compile the workspace.
-        Only runs once for the very first local-dev container test.
-        
-        Args:
-            framework: Framework name for logging context
-            docker_target_type: Docker target type (should be "local-dev")
+            local_dev_task = self.task_tree[local_dev_task_id]
             
-        Returns:
-            Tuple of (success: bool, compilation_time: float, output_snippets: Dict[str, List[str]])
-        """
-        self.logger.info("Running workspace compilation for local-dev container...")
-        
-        # Determine image name for the container
-        target_param = self.rename_target_for_build(docker_target_type)
-        success, _, image_tag = self.buildsh_utils.get_build_commands(framework, target_param)
-        if not success or not image_tag:
-            self.logger.error("Failed to determine image tag for workspace compilation")
-            return False, 0.0, {}
-        
-        # Commands to run for workspace compilation
-        compile_commands = [
-            "cargo build --locked --profile dev --features dynamo-llm/block-manager",
-            "(cd /workspace/lib/bindings/python && maturin develop)",
-            "uv pip install -e ."
-        ]
-        
-        # Track output snippets for each command
-        output_snippets = {
-            'cargo_build': [],
-            'maturin_develop': [],
-            'uv_install': []
-        }
-        snippet_keys = ['cargo_build', 'maturin_develop', 'uv_install']
-        
-        compile_start_time = time.time()
-        
-        if self.dry_run:
-            self.logger.info("DRY-RUN: Workspace compilation commands:")
-            for cmd in compile_commands:
-                self.logger.debug(f"+ {cmd}")
-            compile_end_time = time.time()
-            compile_time = compile_end_time - compile_start_time
-            self.logger.info(f"DRY-RUN: Workspace compilation completed in {compile_time:.1f}s")
-            return True, compile_time, output_snippets
-        
-        try:
-            # Create the full docker run command similar to sanity check
-            docker_cmd_result = self.cmd(
-                ["./container/run.sh", "--dry-run", "--image", image_tag, "--mount-workspace"],
-                capture_output=True, text=True, cwd=self.dynamo_ci_dir
+            # Ensure it's a build task (should always be true for local-dev)
+            if not isinstance(local_dev_task, BuildTask):
+                self.logger.warning(f"  {local_dev_task_id} is not a BuildTask")
+                continue
+            
+            # Get the local-dev image tag
+            local_dev_image = local_dev_task.image_tag
+            if not local_dev_image or 'local-dev' not in local_dev_image:
+                self.logger.warning(f"  No local-dev image tag found for {framework}")
+                continue
+            
+            # Create compilation execute task
+            compilation_task_id = f"{framework}-compilation"
+            compilation_task = ExecuteTask(
+                task_id=compilation_task_id,
+                task_type="compilation",
+                framework=framework,
+                target="local-dev",
+                description=f"Run workspace compilation in {framework} local-dev container",
+                command=f"./container/run.sh --image {local_dev_image} --mount-workspace -- bash -c 'cargo build --locked --profile dev --features dynamo-llm/block-manager && cd /workspace/lib/bindings/python && maturin develop && uv pip install -e .'",
+                image_name=local_dev_image,
+                timeout=30 * 60.0
             )
             
-            if docker_cmd_result.returncode == 0:
-                # Extract base docker command and remove -it flags
-                docker_lines = [line.strip() for line in docker_cmd_result.stdout.split('\n') if line.strip().startswith('docker run')]
+            # Compilation depends on its local-dev build
+            compilation_task.add_dependency(local_dev_task_id)
+            local_dev_task.add_child(compilation_task_id)
+            
+            self.task_tree[compilation_task_id] = compilation_task
+            compilation_task_ids.append(compilation_task_id)
+            self.logger.info(f"  Created task: {compilation_task_id} (depends on {local_dev_task_id})")
+        
+        # Step 4: Create sanity check tasks (depend on ALL compilations)
+        self.logger.info("")
+        self.logger.info("Creating sanity check tasks...")
+        
+        for framework in frameworks:
+            # Create sanity checks for both dev and local-dev targets
+            for target in ['dev', 'local-dev']:
+                task_id = f"{framework}-{target}"
+                if task_id not in self.task_tree:
+                    continue
                 
-                if docker_lines:
-                    base_docker_cmd = docker_lines[0]
-                    # Remove interactive flags
-                    base_docker_cmd = re.sub(r'-it\b', '', base_docker_cmd)
-                    base_docker_cmd = re.sub(r'\s+', ' ', base_docker_cmd).strip()
-                    
-                    # Run each compilation command in sequence
-                    for i, compile_cmd in enumerate(compile_commands, 1):
-                        self.logger.info(f"Running compilation step {i}/{len(compile_commands)}: {compile_cmd}")
-                        
-                        # Create full command: docker run ... bash -c "compile_cmd"
-                        full_cmd = f'{base_docker_cmd} bash -c "{compile_cmd}"'
-                        
-                        # Execute the command with real-time output
-                        step_start_time = time.time()
-                        try:
-                            with subprocess.Popen(
-                                full_cmd,
-                                shell=True,
-                                stdout=subprocess.PIPE,
-                                stderr=subprocess.STDOUT,
-                                text=True,
-                                bufsize=1
-                            ) as process:
-                                output_lines = []
-                                timeout_seconds = 1800  # 30 minutes per step
-                                
-                                # Stream output with timeout
-                                for line in iter(process.stdout.readline, ''):
-                                    if time.time() - step_start_time > timeout_seconds:
-                                        self.logger.error(f"Compilation step {i} timed out after {timeout_seconds/60:.1f} minutes")
-                                        process.terminate()
-                                        process.wait(timeout=5)
-                                        return False, 0.0, output_snippets
-                                    
-                                    line = line.rstrip()
-                                    if line:
-                                        self.logger.info(f"  {line}")
-                                        output_lines.append(line)
-                                
-                                return_code = process.wait()
-                            
-                            # Store last 7 lines of output for this step
-                            snippet_key = snippet_keys[i-1]
-                            output_snippets[snippet_key] = output_lines[-7:] if len(output_lines) >= 7 else output_lines
-                            
-                            if return_code != 0:
-                                self.logger.error(f"Workspace compilation step {i} failed (exit code: {return_code})")
-                                self.logger.error(f"Command: {compile_cmd}")
-                                if output_lines:
-                                    self.logger.error("Last few lines of output:")
-                                    for line in output_lines[-10:]:
-                                        self.logger.error(line)
-                                return False, 0.0, output_snippets
-                            
-                            step_duration = time.time() - step_start_time
-                            self.logger.info(f"Compilation step {i} completed successfully in {step_duration:.1f}s")
-                                
-                        except subprocess.TimeoutExpired:
-                            self.logger.error(f"Compilation step {i} timed out")
-                            return False, 0.0, output_snippets
-                        except Exception as e:
-                            self.logger.error(f"Exception during compilation step {i}: {e}")
-                            return False, 0.0, output_snippets
+                task = self.task_tree[task_id]
                 
-                compile_end_time = time.time()
-                compile_time = compile_end_time - compile_start_time
-                self.logger.info(f"SUCCESS: Workspace compilation completed in {compile_time:.1f}s")
-                return True, compile_time, output_snippets
+                # Ensure it's a build task
+                if not isinstance(task, BuildTask):
+                    self.logger.warning(f"  {task_id} is not a BuildTask")
+                    continue
                 
-            else:
-                self.logger.error("Failed to get docker run command for workspace compilation")
-                return False, 0.0, output_snippets
+                # Get the image tag
+                image_tag = task.image_tag
+                if not image_tag:
+                    continue
                 
-        except subprocess.TimeoutExpired:
-            self.logger.error("Workspace compilation timed out (30 minutes)")
-            return False, 0.0, output_snippets
-        except Exception as e:
-            self.logger.error(f"Error during workspace compilation: {e}")
-            return False, 0.0, output_snippets
-
-    def run_sanity_check_on_image(self, framework: str, docker_target_type: str) -> bool:
-        """Test a specific framework+target image (optionally building it first)
-
-        This function performs a multi-step process:
-        1. Build the framework image (unless --test-only mode is enabled)
-        1.5. Run workspace compilation (one-time setup) only for the first local-dev container
-        2. Test the image by running sanity_check.py in a container
-
-        Args:
-            framework: Framework name - one of "VLLM", "SGLANG", or "TRTLLM"
-                      - "VLLM": vLLM framework for LLM inference
-                      - "SGLANG": SGLang framework for structured generation
-                      - "TRTLLM": TensorRT-LLM framework for optimized inference
-            docker_target_type: Docker build target type - either "dev" or "local-dev"
-                       - "dev": Regular framework image (e.g., dynamo:v0.1.0.dev.abc123-vllm)
-                       - "local-dev": Local development image with user permissions
-                                     (e.g., dynamo:v0.1.0.dev.abc123-vllm-local-dev)
-                                     
-        Returns:
-            bool: True if both build (if performed) and test succeed, False otherwise
+                # Create sanity check execute task
+                sanity_task_id = f"{framework}-{target}-sanity"
+                
+                # Both dev and local-dev sanity checks should run after compilation
+                compilation_task_id = f"{framework}-compilation"
+                if compilation_task_id not in self.task_tree:
+                    self.logger.warning(f"  No compilation task found for {framework}, skipping {target} sanity check")
+                    continue
+                
+                depends_on_id = compilation_task_id
+                description = f"Run sanity_check.py in {framework} {target} container (after compilation)"
+                
+                sanity_task = ExecuteTask(
+                    task_id=sanity_task_id,
+                    task_type="sanity_check",
+                    framework=framework,
+                    target=target,
+                    description=description,
+                    command=f"./container/run.sh --image {image_tag} --mount-workspace --entrypoint deploy/sanity_check.py",
+                    image_name=image_tag,
+                    timeout=120.0
+                )
+                
+                # Add dependency
+                sanity_task.add_dependency(depends_on_id)
+                self.task_tree[depends_on_id].add_child(sanity_task_id)
+                
+                self.task_tree[sanity_task_id] = sanity_task
+                self.logger.info(f"  Created task: {sanity_task_id} (depends on {depends_on_id})")
+        
+        self.logger.info("")
+        self.logger.info(f"Dependency tree built: {len(self.task_tree)} tasks total")
+    
+    def _cleanup_existing_logs(self, frameworks: List[str]) -> None:
+        """Clean up existing log files for the current SHA and specified frameworks"""
+        commit_sha = self.git_utils.get_current_sha(self.dynamo_ci_dir)
+        
+        self.logger.info("")
+        self.logger.info(f"Cleaning up existing log files for SHA: {commit_sha}")
+        
+        # Build patterns for all tasks related to specified frameworks
+        # Task IDs follow pattern: {framework}-* (e.g., VLLM-dynamo-base, VLLM-dev, VLLM-compilation, VLLM-dev-sanity)
+        patterns = []
+        for framework in frameworks:
+            framework_lower = framework.lower()
+            # Matches all tasks with framework prefix
+            patterns.extend([
+                f"{self.date}.{commit_sha}.{framework_lower}-*.log",
+                f"{self.date}.{commit_sha}.{framework_lower}-*.SUCC",
+                f"{self.date}.{commit_sha}.{framework_lower}-*.FAIL"
+            ])
+        
+        removed_files = []
+        for pattern in patterns:
+            for file_path in self.log_dir.glob(pattern):
+                if file_path.is_file():
+                    file_path.unlink()
+                    removed_files.append(file_path.name)
+        
+        if removed_files:
+            self.logger.info(f"Removed {len(removed_files)} existing log file(s) for {', '.join(frameworks)}")
+            for file_name in removed_files:
+                self.logger.debug(f"  Removed: {file_name}")
+        else:
+            self.logger.info(f"No existing log files found for {', '.join(frameworks)}")
+    
+    def _apply_sanity_check_only_mode(self) -> None:
         """
-        framework_lower = framework.lower()
+        Mark build and compilation tasks as skipped when in sanity-check-only mode.
+        Also verify that required images exist for sanity checks.
+        """
+        if not self.sanity_check_only:
+            return
+        
+        self.logger.info("")
+        self.logger.info("=" * 80)
+        self.logger.info("SANITY-CHECK-ONLY MODE")
+        self.logger.info("=" * 80)
+        self.logger.info("Skipping build and compilation tasks...")
+        self.logger.info("")
+        
+        # Track which images are required for sanity checks
+        required_images: Set[str] = set()
+        
+        # Find all sanity check tasks and collect their required images
+        sanity_tasks = []
+        for task_id, task in self.task_tree.items():
+            if isinstance(task, ExecuteTask):
+                if task.task_type == "sanity_check":
+                    sanity_tasks.append(task)
+                    if task.image_name:
+                        required_images.add(task.image_name)
+                elif task.task_type == "compilation":
+                    # Skip compilation tasks
+                    task.status = 'skipped'
+                    self.logger.info(f"  Skipping: {task_id} (compilation)")
+            elif isinstance(task, BuildTask):
+                # Skip all build tasks
+                task.status = 'skipped'
+                self.logger.info(f"  Skipping: {task_id} (build)")
+        
+        # Verify required images exist
+        self.logger.info("")
+        self.logger.info("Verifying required images exist...")
+        missing_images = []
+        
+        for image_name in sorted(required_images):
+            if self.dry_run:
+                self.logger.info(f"  Would check: {image_name}")
+            else:
+                try:
+                    # Try to get image info to verify it exists
+                    docker_info = self.docker_utils.get_image_info(image_name)
+                    if docker_info['size'] == 'Not Found' or docker_info['size'] == 'Error':
+                        missing_images.append(image_name)
+                        self.logger.error(f"  ❌ Missing: {image_name}")
+                    else:
+                        self.logger.info(f"  ✅ Found: {image_name} ({docker_info['size']})")
+                except Exception as e:
+                    missing_images.append(image_name)
+                    self.logger.error(f"  ❌ Missing: {image_name} ({e})")
+        
+        if missing_images and not self.dry_run:
+            self.logger.error("")
+            self.logger.error("=" * 80)
+            self.logger.error("ERROR: Missing required Docker images")
+            self.logger.error("=" * 80)
+            self.logger.error("The following images are required but not found:")
+            for img in missing_images:
+                self.logger.error(f"  - {img}")
+            self.logger.error("")
+            self.logger.error("Please build the images first by running without --sanity-check-only")
+            sys.exit(1)
+        
+        self.logger.info("")
+        self.logger.info(f"Sanity check mode: {len(sanity_tasks)} sanity checks will run")
+        self.logger.info("=" * 80)
+    
+    def _resolve_duplicate_images(self) -> None:
+        """
+        Resolve conflicts where multiple build tasks produce the same image tag.
+        Rename conflicting tags by appending the framework name.
+        Update the image_tag, docker_command, and any dependent tasks' base_image.
+        """
+        self.logger.info("")
+        self.logger.info("=" * 80)
+        self.logger.info("Resolving image tag conflicts...")
+        self.logger.info("=" * 80)
+        
+        # Track which image tags have been seen
+        image_tag_to_tasks: Dict[str, List[str]] = {}  # image_tag -> [task_ids]
+        
+        # Step 1: Identify all tasks that produce each image tag
+        for task_id, task in self.task_tree.items():
+            if not isinstance(task, BuildTask):
+                continue
+            
+            if not task.image_tag:
+                continue
+            
+            # Skip external registry images (they're not built by us)
+            if '/' in task.image_tag and not task.image_tag.startswith('dynamo'):
+                continue
+            
+            image_tag = task.image_tag
+            if image_tag not in image_tag_to_tasks:
+                image_tag_to_tasks[image_tag] = []
+            image_tag_to_tasks[image_tag].append(task_id)
+        
+        # Step 2: Find conflicts (tags produced by multiple tasks)
+        conflicts: Set[str] = set()
+        for image_tag, task_ids in image_tag_to_tasks.items():
+            if len(task_ids) > 1:
+                conflicts.add(image_tag)
+                self.logger.info(f"  Conflict detected: {image_tag}")
+                for task_id in task_ids:
+                    self.logger.info(f"    - {task_id}")
+        
+        if not conflicts:
+            self.logger.info("  No image tag conflicts found")
+            return
+        
+        # Step 3: Rename conflicting tags by appending framework suffix
+        # Track mapping from old producer task to new tag
+        task_to_new_tag: Dict[str, str] = {}  # task_id -> new_tag
+        
+        for task_id, task in self.task_tree.items():
+            if not isinstance(task, BuildTask):
+                continue
+            
+            if not task.image_tag or task.image_tag not in conflicts:
+                continue
+            
+            # Check if tag already has framework suffix
+            if task.framework and task.image_tag.endswith(f"-{task.framework.lower()}"):
+                continue
+            
+            # Create new tag with framework suffix
+            old_tag = task.image_tag
+            if task.framework:
+                new_tag = f"{old_tag}-{task.framework.lower()}"
+            else:
+                # Fallback: use part of task_id
+                new_tag = f"{old_tag}-{task_id.split('-')[0].lower()}"
+            
+            task_to_new_tag[task_id] = new_tag
+            
+            # Update the task's image_tag
+            task.image_tag = new_tag
+            
+            # Update the docker command to use the new tag
+            if task.docker_command:
+                # Replace the old tag in --tag arguments
+                task.docker_command = re.sub(
+                    rf'--tag\s+{re.escape(old_tag)}(?=\s|$)',
+                    f'--tag {new_tag}',
+                    task.docker_command
+                )
+            
+            self.logger.info(f"  Renamed: {task_id}")
+            self.logger.info(f"    Old: {old_tag}")
+            self.logger.info(f"    New: {new_tag}")
+        
+        # Step 4: Update base_image references in dependent tasks
+        # Each dependent task should use the renamed tag from its parent
+        for task_id, task in self.task_tree.items():
+            if not isinstance(task, BuildTask):
+                continue
+            
+            if not task.base_image or task.base_image not in conflicts:
+                continue
+            
+            # Find which parent task this depends on
+            for parent_task_id in task.depends_on:
+                parent_task = self.task_tree.get(parent_task_id)
+                if not isinstance(parent_task, BuildTask):
+                    continue
+                
+                # Check if parent's image_tag matches our base_image (before renaming)
+                # The parent should have been renamed already
+                if parent_task_id in task_to_new_tag:
+                    old_base = task.base_image
+                    new_base = task_to_new_tag[parent_task_id]
+                    task.base_image = new_base
+                    self.logger.info(f"  Updated base_image: {task_id}")
+                    self.logger.info(f"    {old_base} -> {new_base}")
+                    
+                    # Also update docker command if it references the old tag
+                    if task.docker_command and old_base in task.docker_command:
+                        task.docker_command = task.docker_command.replace(old_base, new_base)
+                    break
+        
+        # Step 5: Update image_name in execute tasks
+        # Build a reverse mapping: for each execute task, find the build task it depends on
+        for task_id, task in self.task_tree.items():
+            if not isinstance(task, ExecuteTask):
+                continue
+            
+            if not task.image_name:
+                continue
+            
+            # Check if image_name references a conflicting tag
+            if task.image_name not in conflicts:
+                continue
+            
+            # Find the build task this execute task depends on (directly or indirectly)
+            for dep_task_id in task.depends_on:
+                dep_task = self.task_tree.get(dep_task_id)
+                if not dep_task:
+                    continue
+                
+                # If the dependency is a build task and it was renamed, use its new tag
+                if isinstance(dep_task, BuildTask) and dep_task_id in task_to_new_tag:
+                    old_image = task.image_name
+                    new_image = task_to_new_tag[dep_task_id]
+                    task.image_name = new_image
+                    self.logger.info(f"  Updated image_name: {task_id}")
+                    self.logger.info(f"    {old_image} -> {new_image}")
+                    
+                    # Also update command if it references the old tag
+                    if task.command and old_image in task.command:
+                        task.command = task.command.replace(old_image, new_image)
+                    break
+                
+                # If the dependency is an execute task, we need to trace back further
+                # For now, we'll handle direct dependencies on build tasks
+        
+        self.logger.info(f"  Resolved {len(conflicts)} tag conflict(s) by renaming {len(task_to_new_tag)} image(s)")
+    
+    def _print_dependency_tree(self) -> None:
+        """
+        Visualize the dependency tree, showing parallel execution opportunities.
+        """
+        self.logger.info("=" * 80)
+        self.logger.info("DEPENDENCY TREE")
+        self.logger.info("=" * 80)
+        self.logger.info("")
+        
+        # Find root tasks (tasks with no dependencies)
+        root_tasks = [task_id for task_id, task in self.task_tree.items() if not task.depends_on]
+        
+        def print_task_tree(task_id: str, indent: int = 0, visited: set = None) -> None:
+            """Recursively print task tree"""
+            if visited is None:
+                visited = set()
+            
+            if task_id in visited:
+                return
+            visited.add(task_id)
+            
+            task = self.task_tree[task_id]
+            prefix = "  " * indent
+            
+            # Status icons
+            status_icon = {
+                'pending': '⏳',
+                'ready': '🔓',
+                'in_progress': '🔄',
+                'success': '✅',
+                'failed': '❌',
+                'skipped': '⏭️'
+            }.get(task.status, '❓')
+            
+            # Task type icons
+            type_icon = {
+                'build': '🔨',
+                'compilation': '⚙️',
+                'sanity_check': '🔍'
+            }.get(task.task_type, '📋')
+            
+            self.logger.info(f"{prefix}{status_icon} {type_icon} {task_id}")
+            self.logger.info(f"{prefix}    Type: {task.task_type}")
+            if task.framework:
+                self.logger.info(f"{prefix}    Framework: {task.framework}")
+            if task.target:
+                self.logger.info(f"{prefix}    Target: {task.target}")
+            
+            # Show build-specific info
+            if isinstance(task, BuildTask):
+                if task.base_image:
+                    self.logger.info(f"{prefix}    From: {task.base_image}")
+                if task.image_tag:
+                    self.logger.info(f"{prefix}    Produces: {task.image_tag}")
+            
+            # Show execute-specific info
+            if isinstance(task, ExecuteTask) and task.image_name:
+                self.logger.info(f"{prefix}    Uses image: {task.image_name}")
+                if task.timeout:
+                    self.logger.info(f"{prefix}    Timeout: {task.timeout}s")
+            
+            if task.depends_on:
+                self.logger.info(f"{prefix}    Depends on: {', '.join(task.depends_on)}")
+            
+            # Print children
+            if task.children:
+                self.logger.info(f"{prefix}    ↓")
+                for child_id in task.children:
+                    print_task_tree(child_id, indent + 1, visited)
+        
+        # Print tree starting from each root
+        self.logger.info("Root tasks (can run in parallel):")
+        self.logger.info("")
+        for root_id in root_tasks:
+            print_task_tree(root_id)
+            self.logger.info("")
+        
+        # Print summary statistics
+        self.logger.info("=" * 80)
+        self.logger.info("SUMMARY")
+        self.logger.info("=" * 80)
+        
+        # Count tasks by type
+        type_counts: Dict[str, int] = {}
+        status_counts: Dict[str, int] = {}
+        
+        for task in self.task_tree.values():
+            type_counts[task.task_type] = type_counts.get(task.task_type, 0) + 1
+            status_counts[task.status] = status_counts.get(task.status, 0) + 1
+        
+        self.logger.info(f"Total tasks: {len(self.task_tree)}")
+        self.logger.info("")
+        self.logger.info("By type:")
+        for task_type, count in sorted(type_counts.items()):
+            self.logger.info(f"  {task_type}: {count}")
+        
+        self.logger.info("")
+        self.logger.info("By status:")
+        for status, count in sorted(status_counts.items()):
+            self.logger.info(f"  {status}: {count}")
+        
+        self.logger.info("=" * 80)
+    
+    def _execute_tasks(self) -> bool:
+        """
+        Execute all tasks in dependency order.
+        Returns True if all tasks succeed, False otherwise.
+        """
+        self.logger.info("")
+        self.logger.info("=" * 80)
+        self.logger.info("EXECUTING TASKS")
+        self.logger.info("=" * 80)
+        self.logger.info("")
+        
+        # Track execution state
+        executed_count = 0
+        failed_count = 0
+        skipped_count = 0
+        
+        # Find all tasks that are ready to execute (no dependencies or all dependencies complete)
+        while True:
+            # Find ready tasks
+            ready_tasks = []
+            for task_id, task in self.task_tree.items():
+                if task.status == 'pending' and task.is_ready(self.task_tree):
+                    ready_tasks.append(task_id)
+                elif task.status == 'skipped':
+                    # Count skipped tasks
+                    if task_id not in [t for t in self.task_tree.values() if t.status == 'skipped']:
+                        skipped_count += 1
+            
+            if not ready_tasks:
+                # Check if all tasks are complete
+                pending_tasks = [t for t in self.task_tree.values() if t.status == 'pending']
+                if not pending_tasks:
+                    break
+                else:
+                    # We have pending tasks but none are ready - deadlock or missing dependencies
+                    self.logger.error("Execution stuck - tasks remain pending but none are ready")
+                    for task in pending_tasks:
+                        self.logger.error(f"  Pending: {task.task_id} (depends on: {', '.join(task.depends_on)})")
+                    return False
 
+            # Execute ready tasks
+            # TODO: Implement parallel execution when self.parallel is True
+            # For now, execute sequentially even if --parallel is specified
+            for task_id in ready_tasks:
+                task = self.task_tree[task_id]
+                
+                # Skip already-skipped tasks (marked by --sanity-check-only mode)
+                if task.status == 'skipped':
+                    # Don't log this - already logged in _apply_sanity_check_only_mode
+                    continue
+                
+                self.logger.info("")
+                self.logger.info(f"Executing: {task_id}")
+                self.logger.info(f"  Type: {task.task_type}")
+                self.logger.info(f"  Description: {task.description}")
+                
+                task.status = 'in_progress'
+                task.started_at = datetime.now()
+                
+                success = False
+                
+                if isinstance(task, BuildTask):
+                    # Execute build task
+                    success = self._execute_build_task(task)
+                elif isinstance(task, ExecuteTask):
+                    # Execute execute task (compilation, sanity check)
+                    # Generate docker command from run.sh and execute it
+                    command = self._generate_docker_command(task.command)
+                    success = self._execute_command(
+                        task=task,
+                        command=command,
+                        original_command=task.command,
+                        timeout=task.timeout if task.timeout else 1800.0
+                    )
+                
+                task.completed_at = datetime.now()
+                task.duration = (task.completed_at - task.started_at).total_seconds()
+                task.success = success
+                
+                if success:
+                    task.status = 'success'
+                    executed_count += 1
+                    self.logger.info(f"  ✅ {task_id}: Success ({task.duration:.1f}s)")
+                else:
+                    task.status = 'failed'
+                    failed_count += 1
+                    self.logger.error(f"  ❌ {task_id}: Failed ({task.duration:.1f}s)")
+                    # Don't continue if a task fails
+                    self.logger.error("Stopping execution due to task failure")
+                    return False
+        
+        # Count skipped tasks
+        skipped_count = sum(1 for t in self.task_tree.values() if t.status == 'skipped')
+        
+        self.logger.info("")
+        self.logger.info("=" * 80)
+        self.logger.info("EXECUTION SUMMARY")
+        self.logger.info("=" * 80)
+        self.logger.info(f"Total tasks: {len(self.task_tree)}")
+        self.logger.info(f"  Executed: {executed_count}")
+        self.logger.info(f"  Failed: {failed_count}")
+        self.logger.info(f"  Skipped: {skipped_count}")
+        self.logger.info("=" * 80)
+        
+        return failed_count == 0
+    
+    def _execute_build_task(self, task: BuildTask) -> bool:
+        """Execute a build task (docker build command)"""
+        # Execute the docker build command (no timeout for builds)
+        success = self._execute_command(
+            task=task,
+            command=task.docker_command,
+            timeout=float('inf')  # No timeout for builds
+        )
+        
+        # If successful, extract image ID from log file
+        if success and not self.dry_run:
+            commit_sha = self.git_utils.get_current_sha(self.dynamo_ci_dir)
+            log_suffix = f"{commit_sha}.{task.task_id.lower()}"
+            log_file = self.log_dir / f"{self.date}.{log_suffix}.log"
+            
+            log_content = log_file.read_text()
+            image_id_match = re.search(r'writing image (sha256:[a-f0-9]+)', log_content)
+            if image_id_match:
+                full_id = image_id_match.group(1)
+                task.image_id = full_id[7:19] if full_id.startswith('sha256:') else full_id[:12]
+        
+        return success
+    
+    def _execute_command(self, task: BaseTask, command: str, original_command: str = None, timeout: float = 1800.0) -> bool:
+        """
+        Execute a command with real-time output streaming to log file.
+        
+        Args:
+            task: The task being executed
+            command: The command to execute
+            original_command: The original command (before transformation), for logging
+            timeout: Timeout in seconds
+        
+        Returns:
+            True if command succeeded, False otherwise
+        """
         # Get git commit SHA for log file naming
         commit_sha = self.git_utils.get_current_sha(self.dynamo_ci_dir)
-
-        # Get image tag using our build commands method (reuse the tag discovery logic)
-        target_param = self.rename_target_for_build(docker_target_type)
-        success, _, image_name = self.buildsh_utils.get_build_commands(framework, target_param)
-        if not success:
-            self.logger.error(f"Failed to discover image tag for {framework} {docker_target_type}")
-            return False
-
-        # Log file suffix
-        if docker_target_type == "local-dev":
-            log_suffix = f"{commit_sha}.{framework_lower}.local-dev"
-        else:
-            log_suffix = f"{commit_sha}.{framework_lower}.dev"
-
+        log_suffix = f"{commit_sha}.{task.task_id.lower()}"
+        
         log_file = self.log_dir / f"{self.date}.{log_suffix}.log"
         success_file = self.log_dir / f"{self.date}.{log_suffix}.SUCC"
         fail_file = self.log_dir / f"{self.date}.{log_suffix}.FAIL"
-
-        self.logger.info(f"Testing framework: {framework} ({docker_target_type} image)")
-
-        # Track timing for this framework/target combination
-        test_key = f"{framework}_{docker_target_type}"
-        start_time = time.time()
-
-        # Change to dynamo_ci directory
-        os.chdir(self.dynamo_ci_dir)
-
-        # Log start of framework test (only in non-dry-run mode)
+        
+        # In dry-run mode, just show what would be executed and return
         if self.dry_run:
-            self.logger.info(f"Would write framework test start to: {log_file}")
-        else:
+            self.logger.info(f"  Would execute: {command[:200]}...")
+            return True
+        
+        # Execute command with real-time output to log file
+        try:
             with open(log_file, 'a') as f:
                 f.write("=" * 42 + "\n")
-                f.write(f"Framework: {framework} ({docker_target_type} image)\n")
-                f.write(f"Image: {image_name}\n")
+                f.write(f"Task: {task.task_id}\n")
+                f.write(f"Type: {task.task_type}\n")
                 f.write(f"Date: {datetime.now().strftime('%c')}\n")
-                f.write(f"Start Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
-                if self.test_only:
-                    f.write("Mode: TEST-ONLY (skipping build)\n")
-                f.write("=" * 42 + "\n")
-
-        # Step 1: Build the framework (skip if TEST_ONLY is true)
-        build_time = None
-        if self.test_only:
-            self.logger.info(f"Skipping build step for {framework} (test-only mode)")
-            if not self.dry_run:
-                with open(log_file, 'a') as f:
-                    f.write("Build Status: SKIPPED (test-only mode)\n")
-        else:
-            self.logger.info(f"Step 1: Building {framework} framework ({docker_target_type} target)...")
-            build_success, build_time = self.build_framework_image(framework, docker_target_type, log_file, fail_file)
-            if not build_success:
-                    return False
-
-        # Step 1.5: Run workspace compilation (one-time setup) only for the first local-dev container
-        # This happens AFTER the image is built so the local-dev image exists
-        if docker_target_type == "local-dev" and not self.workspace_compiled:
-            self.logger.info("Step 1.5: Running workspace compilation (one-time setup for local-dev)...")
-            compile_success, compile_time, output_snippets = self.run_workspace_compilation(framework, docker_target_type)
-            
-            self.workspace_compiled = True
-            self.workspace_compile_time = compile_time
-            self.workspace_compile_success = compile_success
-            self.workspace_compile_output = output_snippets
-            self.build_times['workspace_compilation'] = compile_time
-            
-            if not compile_success:
-                self.logger.error("Workspace compilation failed - aborting test")
-                return False
-            else:
-                self.logger.info(f"SUCCESS: Workspace compilation completed in {compile_time:.1f}s")
-        elif docker_target_type == "local-dev" and self.workspace_compiled:
-            self.logger.info("Workspace compilation already completed - skipping")
-        else:
-            self.logger.debug(f"Skipping workspace compilation for {docker_target_type} target")
-
-        # Step 2: Run the container with sanity_check.py
-        print("=" * 60)
-        self.logger.info(f"Step 2: Running sanity_check.py test for {framework} ({docker_target_type} target)...")
-        print("=" * 60)
-
-        # Get the docker command from container/run.sh dry-run, then execute without -it flags
-        try:
-            docker_cmd_result = self.cmd(
-                ["./container/run.sh", "--dry-run", "--image", image_name, "--mount-workspace", "--entrypoint", "deploy/sanity_check.py"],
-                capture_output=True, text=True, cwd=self.dynamo_ci_dir
-            )
-
-            if docker_cmd_result.returncode == 0:
-                # Extract docker command and remove -it flags
-                docker_cmd = None
-                # Check both stdout and stderr for the docker command
-                output_text = docker_cmd_result.stdout + docker_cmd_result.stderr
-                for line in output_text.split('\n'):
-                    if line.startswith("docker run"):
-                        docker_cmd = line.replace(" -it ", " ")
-                        break
-
-                if docker_cmd and not self.dry_run:
-                    prefix = "DRYRUN +" if self.dry_run else "+"
-                    self.logger.debug(f"+ timeout 30 {docker_cmd}")
-                    try:
-                        with open(log_file, 'a') as f:
-                            # Run container test with real-time output
-                            with subprocess.Popen(
-                                f"timeout 30 {docker_cmd}",
-                                shell=True, 
-                                stdout=subprocess.PIPE, 
-                                stderr=subprocess.STDOUT,
-                                text=True, 
-                                bufsize=1
-                            ) as process:
-                                # Stream output line by line
-                                for line in iter(process.stdout.readline, ''):
-                                    line = line.rstrip()
-                                    if line:
-                                        print(line)  # Show on console
-                                        f.write(line + '\n')  # Write to log file
-                                        f.flush()  # Ensure immediate write
-                                
-                                return_code = process.wait()
-
-                        if return_code == 0:
-                            self.logger.info(f"SUCCESS: Container test completed for {framework}")
-                            with open(log_file, 'a') as log_f:
-                                log_f.write("Container Test Status: SUCCESS\n")
-                            with open(success_file, 'a') as success_f:
-                                success_f.write(f"{framework} test completed successfully at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
-                        else:
-                            self.logger.error(f"Container test failed for {framework}")
-                            with open(log_file, 'a') as log_f:
-                                log_f.write("Container Test Status: FAILED\n")
-                            with open(fail_file, 'a') as fail_f:
-                                fail_f.write(f"{framework} container test failed at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
-                            return False
-
-                    except subprocess.TimeoutExpired:
-                        self.logger.error(f"Container test timeout for {framework}")
-                        with open(log_file, 'a') as log_f:
-                            log_f.write("Container Test Status: TIMEOUT\n")
-                        with open(fail_file, 'a') as fail_f:
-                            fail_f.write(f"{framework} container test timeout at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
-                        return False
-
-                elif docker_cmd:
-                    prefix = "DRYRUN +" if self.dry_run else "+"
-                    self.logger.debug(f"+ timeout 30 {docker_cmd}")
-                    self.logger.info(f"SUCCESS: Container test completed for {framework} (dry-run)")
-                    self.logger.info(f"Would write success to: {success_file}")
+                if original_command:
+                    f.write(f"Original Command: {original_command}\n")
+                    f.write(f"Actual Command: {command}\n")
                 else:
-                    self.logger.error(f"Could not extract docker command for {framework}")
+                    f.write(f"Command: {command}\n")
+                f.write(f"Timeout: {timeout}s\n")
+                f.write("=" * 42 + "\n")
+                f.flush()
+                
+                start_time = time.time()
+                with subprocess.Popen(
+                    command,
+                    shell=True, 
+                    stdout=subprocess.PIPE, 
+                    stderr=subprocess.STDOUT,
+                    text=True, 
+                    bufsize=1,
+                    cwd=self.dynamo_ci_dir
+                ) as process:
+                    for line in iter(process.stdout.readline, ''):
+                        if time.time() - start_time > timeout:
+                            self.logger.error(f"  Command timed out after {timeout}s")
+                            process.terminate()
+                            process.wait(timeout=5)
+                            f.write(f"\nExecution Status: TIMEOUT (after {timeout}s)\n")
+                            with open(fail_file, 'w') as ff:
+                                ff.write(f"{task.task_id} timed out at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+                            task.error_message = f"Timeout after {timeout}s"
+                            return False
+                        
+                        line = line.rstrip()
+                        if line:
+                            print(line)
+                            f.write(line + '\n')
+                            f.flush()
+                    
+                    return_code = process.wait()
+
+                # Store return code if task supports it
+                if hasattr(task, 'return_code'):
+                    task.return_code = return_code
+
+                if return_code == 0:
+                    f.write("Execution Status: SUCCESS\n")
+                    with open(success_file, 'w') as sf:
+                        sf.write(f"{task.task_id} completed at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+                    return True
+                else:
+                    self.logger.error(f"  Command failed with exit code {return_code}")
+                    f.write(f"Execution Status: FAILED (exit code {return_code})\n")
+                    with open(fail_file, 'w') as ff:
+                        ff.write(f"{task.task_id} failed at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+                    
+                    # Capture last 30 lines of log for error reporting
+                    try:
+                        with open(log_file, 'r') as log_f:
+                            log_lines = log_f.readlines()
+                            last_lines = log_lines[-30:] if len(log_lines) > 30 else log_lines
+                            error_output = ''.join(last_lines)
+                            if len(log_lines) > 30:
+                                task.error_message = f"... (showing last 30 lines)\n{error_output}"
+                            else:
+                                task.error_message = error_output
+                    except Exception:
+                        task.error_message = f"Command failed with exit code {return_code}"
+                    
                     return False
-            else:
-                self.logger.error(f"Failed to get docker command for {framework}")
-                return False
 
         except Exception as e:
-            self.logger.error(f"Exception during container test for {framework}: {e}")
+            self.logger.error(f"  Exception during execution: {e}")
+            task.error_message = str(e)
+            with open(log_file, 'a') as f:
+                f.write(f"Execution Status: EXCEPTION ({e})\n")
+            with open(fail_file, 'w') as ff:
+                ff.write(f"{task.task_id} exception at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
             return False
 
-        # Log end of framework test (only in non-dry-run mode)
-        if self.dry_run:
-            self.logger.info(f"Would write framework test end to: {log_file}")
-        else:
-            with open(log_file, 'a') as f:
-                f.write(f"End Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
-                f.write("Overall Status: SUCCESS\n\n")
-
-        # Store timing information for email reporting
-        end_time = time.time()
-        total_time = end_time - start_time
-
-        # Calculate build time if build was performed
-        if build_time is not None:
-            test_time = total_time - build_time
-            self.build_times[f"{test_key}_build"] = build_time
-            self.build_times[f"{test_key}_test"] = test_time
-            self.logger.debug(f"Build time for {test_key}: {build_time:.1f}s")
-            self.logger.debug(f"Test time for {test_key}: {test_time:.1f}s")
-        else:
-            # Test-only mode: no build time, all time is test time
-            self.build_times[f"{test_key}_test"] = total_time
-            self.logger.debug(f"Test-only time for {test_key}: {total_time:.1f}s")
-
-        # Store total time (build + test)
-        self.build_times[f"{test_key}_total"] = total_time
-        self.logger.debug(f"Total time for {test_key}: {total_time:.1f}s")
-
-        return True
-
+    
+    def _generate_docker_command(self, run_sh_command: str) -> str:
+        """
+        Generate docker command from run.sh command.
+        
+        This method:
+        1. Calls run.sh --dry-run to get the base docker command
+        2. Removes -it flags for non-interactive execution
+        3. Appends any container command (after ' -- ') if present
+        
+        Args:
+            run_sh_command: The run.sh command (e.g., './container/run.sh --image foo -- bash -c ...')
+        
+        Returns:
+            The actual docker command to execute
+        """
+        if not run_sh_command.startswith('./container/run.sh'):
+            raise ValueError(f"Expected run.sh command, got: {run_sh_command}")
+        
+        # Split command at ' -- ' to separate run.sh args from container command
+        container_cmd = None
+        run_sh_part = run_sh_command
+        
+        if ' -- ' in run_sh_command:
+            run_sh_part, container_cmd = run_sh_command.split(' -- ', 1)
+        
+        # Run run.sh --dry-run to get the base docker command
+        dry_run_cmd = run_sh_part.replace('./container/run.sh', './container/run.sh --dry-run')
+        try:
+            result = subprocess.run(
+                dry_run_cmd,
+                shell=True,
+                capture_output=True,
+                text=True,
+                cwd=self.dynamo_ci_dir
+            )
+            
+            if result.returncode == 0:
+                # Extract docker command from dry-run output
+                output_text = result.stdout + result.stderr
+                for line in output_text.split('\n'):
+                    if line.strip().startswith('docker run'):
+                        # Remove -it flags for non-interactive execution
+                        docker_cmd = re.sub(r'-it\b', '', line.strip())
+                        docker_cmd = re.sub(r'\s+', ' ', docker_cmd).strip()
+                        
+                        # Append container command if present
+                        if container_cmd:
+                            return f'{docker_cmd} {container_cmd}'
+                        return docker_cmd
+        except Exception as e:
+            self.logger.warning(f"  Failed to extract docker command: {e}, using original")
+        
+        return run_sh_command
+    
     def main(self) -> int:
-        """Main function"""
-        parser = argparse.ArgumentParser(description="DynamoDockerBuilder - Automated Docker Build and Test System")
-        parser.add_argument("-f", "--framework", "--frameworks", type=str, action='append', dest='framework',
-                          help="Test specific framework (VLLM, SGLANG, TRTLLM) - case insensitive. Can be specified multiple times.")
-        parser.add_argument("--target", type=str, default="dev,local-dev",
-                          help="Comma-separated Docker build targets to test: dev, local-dev (default: dev,local-dev)")
-        parser.add_argument("-a", "--all", action="store_true", default=True,
-                          help="Test all frameworks (default)")
-        parser.add_argument("--test-only", action="store_true",
-                          help="Skip build step and only run container tests")
-        parser.add_argument("--no-checkout", action="store_true",
-                          help="Skip git operations and use existing repository")
-        parser.add_argument("--force-run", action="store_true",
-                          help="Force run even if files haven't changed or another process is running")
-        parser.add_argument("--dry-run", "--dryrun", action="store_true",
-                          help="Show commands that would be executed without running them")
-        parser.add_argument("--repo-path", type=str, default=None,
-                          help="Path to the dynamo repository (default: ../dynamo_ci)")
-        parser.add_argument("--email", type=str, default=None,
-                          help="Email address for notifications (sends email if specified)")
-        parser.add_argument("--repo-sha", type=str, default=None,
-                          help="Git SHA to checkout instead of latest main branch")
-
+        """Main function for DynamoDockerBuilder"""
+        parser = create_argument_parser()
+        parser.description = "DynamoDockerBuilder - Automated Docker Build and Test System with Dependency Tree"
         args = parser.parse_args()
 
         # Update repo path if specified
@@ -2138,9 +2354,10 @@ class DynamoDockerBuilder(BaseUtils):
 
         # Set configuration flags
         self.dry_run = args.dry_run
-        self.test_only = args.test_only
+        self.sanity_check_only = args.sanity_check_only
         self.no_checkout = args.no_checkout
         self.force_run = args.force_run
+        self.parallel = args.parallel
         self.email = args.email
         self.repo_sha = args.repo_sha
 
@@ -2149,149 +2366,169 @@ class DynamoDockerBuilder(BaseUtils):
         if not self.targets:
             self.targets = ["dev", "local-dev"]  # Fallback to default
 
-        # Validate targets - only allow known Docker build targets
+        # Validate targets
         valid_targets = ["dev", "local-dev", "runtime", "dynamo_base", "framework"]
         invalid_targets = [t for t in self.targets if t not in valid_targets]
         if invalid_targets:
             valid_targets_str = ", ".join(valid_targets)
             invalid_targets_str = ", ".join(invalid_targets)
             self.logger.error(f"Invalid target(s) '{invalid_targets_str}'. Valid Docker build targets are: {valid_targets_str}")
-            self.logger.error("Note: Targets are Docker build targets (dev, local-dev, runtime, dynamo_base, framework), not framework names (VLLM, SGLANG, TRTLLM)")
             return 1
 
         # Determine which frameworks to test
         if args.framework:
-            # Normalize framework names to uppercase for case-insensitive matching
             frameworks_to_test = []
             for framework in args.framework:
                 framework_upper = framework.upper()
                 if framework_upper not in self.FRAMEWORKS:
                     valid_frameworks = ", ".join(self.FRAMEWORKS)
-                    self.logger.error(f"Invalid framework '{framework}'. Valid options are: {valid_frameworks} (case insensitive)")
+                    self.logger.error(f"Invalid framework '{framework}'. Valid options are: {valid_frameworks}")
                     return 1
                 frameworks_to_test.append(framework_upper)
         else:
-            # Test all frameworks by default
             frameworks_to_test = list(self.FRAMEWORKS)
 
-        print("=" * 60)
+        # Print header
+        print("=" * 80)
         self.logger.info(f"Starting DynamoDockerBuilder - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-        print("=" * 60)
-
-        # Check if another instance is already running
-        self.check_if_running()
+        self.logger.info("V2 Implementation - Dependency Tree Architecture")
+        print("=" * 80)
 
         if self.dry_run:
             self.logger.info("DRY-RUN MODE: Commands will be shown but not executed")
-        if self.test_only:
+        if self.sanity_check_only:
             self.logger.info("TEST-ONLY MODE: Skipping build step and only running tests")
         if self.no_checkout:
             self.logger.info("NO-CHECKOUT MODE: Skipping git operations and using existing repository")
         if self.force_run:
-            self.logger.info("FORCE-RUN MODE: Will run even if files haven't changed or another process is running")
+            self.logger.info("FORCE-RUN MODE: Will run regardless of file changes")
         if self.repo_sha:
             self.logger.info(f"REPO-SHA MODE: Will checkout specific SHA: {self.repo_sha}")
-
-        if not self.dry_run:
-            self.logger.info(f"Date: {self.date}")
+        if self.sanity_check_only:
+            self.logger.info("SANITY-CHECK-ONLY MODE: Will skip builds and compilation, only run sanity checks")
+        if self.parallel:
+            self.logger.info("PARALLEL MODE: Tasks will be executed in parallel when dependencies allow")
+        else:
+            self.logger.info("SERIAL MODE: Tasks will be executed sequentially (use --parallel for parallel execution)")
+        
         self.logger.info(f"Dynamo CI Directory: {self.dynamo_ci_dir}")
         self.logger.info(f"Log Directory: {self.log_dir}")
 
-        # Setup repository and logging
-        self.git_utils.setup_dynamo_ci(self.dynamo_ci_dir, self.repo_sha, self.no_checkout)
-        self.setup_logging_dir()
-
-        # Check if rebuild is needed based on file changes
-        rebuild_needed = self.check_if_rebuild_needed()
-
-        if not rebuild_needed:
-            self.logger.info("SUCCESS:No rebuild needed - all files unchanged")
-            self.logger.info("Exiting early (use --force-run to force rebuild)")
-            self.logger.info("Preserving existing log files")
-            return 0
-
-        # Run tests and collect detailed results for email notification
-        test_results: Dict[str, bool] = {}
-        failure_details: Dict[str, str] = {}
-        overall_success = True
-
-        # Log what we're testing
-        if len(frameworks_to_test) == 1:
-            self.logger.info(f"Testing single framework: {frameworks_to_test[0]}")
-        elif len(frameworks_to_test) == len(self.FRAMEWORKS):
-            self.logger.info("Testing all frameworks")
+        # Setup repository
+        if not self.no_checkout:
+            self.git_utils.setup_dynamo_ci(self.dynamo_ci_dir, self.repo_sha, self.no_checkout)
+        
+        # Build dependency tree
+        self._build_dependency_tree(frameworks_to_test, self.targets)
+        
+        # Resolve duplicate images
+        self._resolve_duplicate_images()
+        
+        # Apply sanity-check-only mode (marks tasks as skipped and verifies images exist)
+        self._apply_sanity_check_only_mode()
+        
+        # Visualize dependency tree
+        self._print_dependency_tree()
+        
+        # Clean up existing log files for the frameworks we're testing
+        self._cleanup_existing_logs(frameworks_to_test)
+        
+        # Execute tasks
+        success = self._execute_tasks()
+        
+        self.logger.info("")
+        self.logger.info("=" * 80)
+        if success:
+            self.logger.info("All tasks completed successfully!")
         else:
-            frameworks_str = ", ".join(frameworks_to_test)
-            self.logger.info(f"Testing multiple frameworks: {frameworks_str}")
-
-        # Clean up logs (all frameworks if testing all, specific ones if testing subset)
-        if len(frameworks_to_test) == len(self.FRAMEWORKS):
-            self.cleanup_existing_logs()  # Clean all
-        else:
-            for framework in frameworks_to_test:
-                self.cleanup_existing_logs(framework=framework)  # Clean specific ones
-
-        # Test each framework and collect detailed results
-        overall_success = True
-        for framework in frameworks_to_test:
-            targets_str = ", ".join(self.targets)
-            self.logger.info(f"Starting tests for framework: {framework} (targets: {targets_str})")
-
-            # Test all configured targets
-            framework_success = True
-            for target in self.targets:
-                target_success = self.run_sanity_check_on_image(framework, target)
-                test_results[f"{framework}_{target}"] = target_success
-
-                # Collect failure details for failed tests
-                if not target_success:
-                    failure_details[f"{framework}_{target}"] = self.get_failure_details(framework, target)
-                    framework_success = False
-
-            if not framework_success:
-                overall_success = False
-
-            if framework_success:
-                self.logger.info(f"SUCCESS: All tests completed successfully for framework: {framework}")
-            else:
-                # Identify which targets failed for this framework
-                failed_targets = [target for target in self.targets 
-                                if not test_results.get(f"{framework}_{target}", True)]
-                failed_targets_str = ", ".join(failed_targets)
-                self.logger.error(f"Some tests failed for framework: {framework} (failed targets: {failed_targets_str})")
-
-        # Send email notification if email is specified and tests actually ran
+            self.logger.error("Some tasks failed")
+        self.logger.info("=" * 80)
+        
+        # Generate HTML report and prepare git info
+        commit_sha = self.git_utils.get_current_sha(self.dynamo_ci_dir)
+        html_file = self.log_dir / f"{self.date}.{commit_sha}.report.html"
+        
+        # Get git information for both report and email
+        git_info = self.git_utils.get_commit_info(self.dynamo_ci_dir)
+        git_info['sha'] = commit_sha
+        
+        # Map git_info keys to template expectations
+        pacific = git_info.get('pacific_timestamp', '')
+        utc = git_info.get('utc_timestamp', '')
+        git_info['date'] = f"{pacific} ({utc})" if pacific and utc else (pacific or utc or '')
+        git_info['message'] = git_info.get('commit_message', '')
+        git_info['full_message'] = git_info.get('full_commit_message', '')
+        
+        # Build & Test Date with both PDT and UTC
+        import zoneinfo
+        now_utc = datetime.now(zoneinfo.ZoneInfo("UTC"))
+        now_pdt = datetime.now(zoneinfo.ZoneInfo("America/Los_Angeles"))
+        build_date = f"{now_pdt.strftime('%Y-%m-%d %H:%M:%S %Z')} ({now_utc.strftime('%Y-%m-%d %H:%M:%S %z')})"
+        
+        # Generate HTML content (for both report and email)
+        email_renderer = EmailTemplateRenderer()
+        html_content = email_renderer.generate_v2_report(
+            task_tree=self.task_tree,
+            git_info=git_info,
+            date=build_date,
+            docker_utils=self.docker_utils,
+            repo_path=str(self.dynamo_ci_dir),
+            log_dir=str(self.log_dir)
+        )
+        
+        # Save HTML report to file (skip in dry-run)
+        if not self.dry_run:
+            try:
+                html_file.write_text(html_content)
+                self.logger.info(f"HTML report saved to: {html_file}")
+            except Exception as e:
+                self.logger.error(f"Failed to generate HTML report: {e}")
+        
+        # Send email notification if requested
         if self.email:
-            # Get git information
-            git_info = self.git_utils.get_commit_info(self.dynamo_ci_dir)
-            
-            # Delegate to EmailTemplateRenderer
-            self.email_renderer.send_email_notification(
-                email=self.email,
-                results=test_results,
-                git_info=git_info,
-                dynamo_ci_dir=self.dynamo_ci_dir,
-                log_dir=self.log_dir,
-                base_build_times=self.base_build_times,
-                base_image_ids=self.base_image_ids,
-                workspace_compile_success=self.workspace_compile_success,
-                workspace_compile_time=self.workspace_compile_time,
-                workspace_compile_output=self.workspace_compile_output,
-                failure_details=failure_details,
-                build_times=self.build_times,
-                dry_run=self.dry_run,
-                logger=self.logger,
-                docker_utils=self.docker_utils,
-                buildsh_utils=self.buildsh_utils
-            )
+            self.logger.info(f"Email notifications requested for: {self.email}")
+            if not self.dry_run:
+                # Use EmailTemplateRenderer's shared SMTP sending logic
+                email_renderer._send_html_email_via_smtp(
+                    email=self.email,
+                    html_content=html_content,
+                    subject_prefix="DynamoDockerBuilder2",
+                    git_sha=git_info.get('sha', 'unknown'),
+                    failed_tasks=[t.task_id for t in self.task_tree.values() if t.status == 'failed'],
+                    logger=self.logger
+                )
+            else:
+                self.logger.info(f"DRY-RUN: Would send email notification to {self.email}")
+            self.logger.info(f"  (HTML report available at: {html_file})")
+        
+        return 0 if success else 1
 
-        # Return appropriate exit code
-        if overall_success:
-            self.logger.info("SUCCESS:All tests completed successfully")
-            return 0
-        else:
-            self.logger.error("Some tests failed")
-            return 1
+def create_argument_parser() -> argparse.ArgumentParser:
+    """Create shared argument parser for DynamoDockerBuilder and DynamoDockerBuilder"""
+    parser = argparse.ArgumentParser(description="DynamoDockerBuilder - Automated Docker Build and Test System")
+    parser.add_argument('-f', '--framework', '--frameworks', action='append', dest='framework',
+                      help="Test specific framework (VLLM, SGLANG, TRTLLM) - case insensitive. Can be specified multiple times.")
+    parser.add_argument('--target', default='dev,local-dev',
+                      help="Comma-separated Docker build targets to test: dev, local-dev (default: dev,local-dev)")
+    parser.add_argument('-a', '--all', action='store_true', dest='all_frameworks',
+                      help="Test all frameworks (default)")
+    parser.add_argument('--sanity-check-only', '--test-only', action='store_true', dest='sanity_check_only',
+                      help="Skip build and compilation steps, only run sanity checks (assumes images already exist)")
+    parser.add_argument('--no-checkout', action='store_true',
+                      help="Skip git operations and use existing repository")
+    parser.add_argument('--force-run', action='store_true',
+                      help="Force run even if files haven't changed or another process is running")
+    parser.add_argument('--dry-run', '--dryrun', action='store_true', dest='dry_run',
+                      help="Show commands that would be executed without running them")
+    parser.add_argument('--repo-path', type=str,
+                      help="Path to the dynamo repository (default: ../dynamo_ci)")
+    parser.add_argument('--email', type=str,
+                      help="Email address for notifications (sends email if specified)")
+    parser.add_argument('--repo-sha', type=str,
+                      help="Git SHA to checkout instead of latest main branch")
+    parser.add_argument('--parallel', action='store_true',
+                      help="Execute tasks in parallel when possible (default: serial execution)")
+    return parser
 
 
 if __name__ == "__main__":
