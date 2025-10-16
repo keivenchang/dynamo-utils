@@ -523,12 +523,13 @@ if [ "$RUN_BACKEND" = true ]; then
 fi
 
 # Set framework-specific arguments
+BATCH_SIZE=16
 if [ "$FRAMEWORK" = "vllm" ]; then
-    FRAMEWORK_ARGS="--gpu-memory-utilization 0.20 --enforce-eager --no-enable-prefix-caching --max-num-seqs 64"
-elif [ "$FRAMEWORK" = "trtllm" ]; then
-    FRAMEWORK_ARGS="--free-gpu-memory-fraction 0.20 --max-num-tokens 8192 --max-batch-size 64"
+    FRAMEWORK_ARGS="--gpu-memory-utilization 0.20 --enforce-eager --no-enable-prefix-caching --max-num-seqs $BATCH_SIZE"
 elif [ "$FRAMEWORK" = "sglang" ]; then
-    FRAMEWORK_ARGS="--mem-fraction-static 0.20 --max-running-requests 64"
+    FRAMEWORK_ARGS="--mem-fraction-static 0.20 --max-running-requests $BATCH_SIZE --enable-metrics"
+elif [ "$FRAMEWORK" = "trtllm" ]; then
+    FRAMEWORK_ARGS="--free-gpu-memory-fraction 0.20 --max-num-tokens 8192 --max-batch-size $BATCH_SIZE --publish-events-and-metrics"
 else
     FRAMEWORK_ARGS=""
 fi
@@ -554,10 +555,10 @@ if [ "$RUN_BACKEND" = true ]; then
     cmd unset HF_TOKEN
     metrics="true"
     if [ "$DRY_RUN" = false ]; then
-        ( set -x; DYN_LOG=info DYN_ENGINE_METRICS_ENABLED=$metrics DYN_SYSTEM_ENABLED=true DYN_SYSTEM_PORT=$DYN_BACKEND_PORT python -m dynamo.$FRAMEWORK --model "$MODEL" $FRAMEWORK_ARGS ) &
+        ( set -x; DYN_LOG=info DYN_SYSTEM_ENABLED=true DYN_SYSTEM_PORT=$DYN_BACKEND_PORT python -m dynamo.$FRAMEWORK --model "$MODEL" $FRAMEWORK_ARGS ) &
         BACKEND_PID=$!
     else
-        ( set -x; : DYN_LOG=info DYN_ENGINE_METRICS_ENABLED=$metrics DYN_SYSTEM_ENABLED=true DYN_SYSTEM_PORT=$DYN_BACKEND_PORT python -m dynamo.$FRAMEWORK --model "$MODEL" $FRAMEWORK_ARGS ) 2>&1 | sed 's/^+ : /+ /'
+        ( set -x; : DYN_LOG=info DYN_SYSTEM_ENABLED=true DYN_SYSTEM_PORT=$DYN_BACKEND_PORT python -m dynamo.$FRAMEWORK --model "$MODEL" $FRAMEWORK_ARGS ) 2>&1 | sed 's/^+ : /+ /'
         dry_run_echo "BACKEND_PID=\$!"
     fi
 fi
