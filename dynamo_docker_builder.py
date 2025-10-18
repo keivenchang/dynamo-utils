@@ -25,76 +25,22 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple, Any, Set
+from typing import Dict, List, Optional, Tuple, Any, Set, Union
 
 from jinja2 import Template
+
+from common import FRAMEWORKS_UPPER, get_framework_display_name, normalize_framework, BaseUtils, DockerUtils, FrameworkInfo
 import psutil
 import docker
 import git
 import zoneinfo
 
 
-class BaseUtils:
-    """Base class for all utility classes with common logger and cmd functionality"""
-    
-    def __init__(self, dry_run: bool = False):
-        self.dry_run = dry_run
-        
-        # Set up logger with class name
-        self.logger = logging.getLogger(self.__class__.__name__)
-        self.logger.setLevel(logging.DEBUG)
-        
-        # Remove any existing handlers
-        self.logger.handlers.clear()
-        
-        # Create console handler
-        console_handler = logging.StreamHandler()
-        console_handler.setLevel(logging.DEBUG)
-        
-        # Create custom formatter that handles DRYRUN prefix and shows class/method
-        class DryRunFormatter(logging.Formatter):
-            def __init__(self, dry_run_instance) -> None:
-                super().__init__()
-                self.dry_run_instance = dry_run_instance
-            
-            def format(self, record: logging.LogRecord) -> str:
-                # Build the location info (class.method or just method)
-                location = f"{record.name}.{record.funcName}" if record.funcName != '<module>' else record.name
-                
-                if self.dry_run_instance.dry_run:
-                    return f"DRYRUN {record.levelname} - [{location}] {record.getMessage()}"
-                else:
-                    return f"{record.levelname} - [{location}] {record.getMessage()}"
-        
-        formatter = DryRunFormatter(self)
-        console_handler.setFormatter(formatter)
-        
-        # Add handler to logger
-        self.logger.addHandler(console_handler)
-        
-        # Prevent propagation to root logger
-        self.logger.propagate = False
-    
-    def cmd(self, command: List[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
-        """Execute command with dry-run support - base implementation"""
-        cmd_str = " ".join(shlex.quote(str(arg)) for arg in command)
-        self.logger.debug(f"+ {cmd_str}")
-        
-        if self.dry_run:
-            # Return a mock completed process in dry-run mode
-            mock_result = subprocess.CompletedProcess(command, 0)
-            mock_result.stdout = ""
-            mock_result.stderr = ""
-            return mock_result
-        else:
-            return subprocess.run(command, **kwargs)
-
-
 class GitUtils(BaseUtils):
     """Utility class for Git operations"""
     
-    def __init__(self, dry_run: bool = False):
-        super().__init__(dry_run)
+    def __init__(self, dry_run: bool = False, verbose: bool = False):
+        super().__init__(dry_run, verbose)
         # Cache for git.Repo objects to avoid repeated instantiation
         self._repo_cache: Dict[str, git.Repo] = {}
     
@@ -105,6 +51,99 @@ class GitUtils(BaseUtils):
             self.logger.debug(f"Opening git repository: {repo_dir}")
             self._repo_cache[repo_key] = git.Repo(repo_dir)
         return self._repo_cache[repo_key]
+    
+    def _get_diff_statistics(self, repo_dir: Path, parent_sha: str, commit_sha: str) -> Dict[str, Any]:
+        """
+        Get git diff statistics between two commits.
+        
+        Returns:
+            Dict containing:
+                - changed_files: List of changed file paths
+                - file_stats: List of dicts with file, additions, deletions, total_changes
+                - diff_stats: List of formatted strings for display
+                - total_additions: Total lines added
+                - total_deletions: Total lines deleted
+        """
+        changed_files = []
+        file_stats = []
+        diff_stats = []
+        total_additions = 0
+        total_deletions = 0
+        
+        self.logger.debug(f"Equivalent: git -C {repo_dir} diff --stat {parent_sha}..{commit_sha}")
+        try:
+            import subprocess
+            result = subprocess.run(
+                ['git', '-C', str(repo_dir), 'diff', '--stat', f'{parent_sha}..{commit_sha}'],
+                capture_output=True, text=True, check=True
+            )
+            
+            # Parse the diff --stat output
+            lines = result.stdout.strip().split('\n')
+            for line in lines:
+                if '|' in line and ('+' in line or '-' in line):
+                    # Parse lines like: " path/to/file.py | 15 ++++++++-------"
+                    parts = line.split('|')
+                    if len(parts) >= 2:
+                        filename = parts[0].strip()
+                        stats_part = parts[1].strip()
+                        
+                        # Extract numbers and +/- symbols
+                        import re
+                        numbers = re.findall(r'\d+', stats_part)
+                        plus_count = stats_part.count('+')
+                        minus_count = stats_part.count('-')
+                        
+                        if numbers:
+                            total_changes = int(numbers[0])
+                            additions = plus_count
+                            deletions = minus_count
+                            
+                            changed_files.append(filename)
+                            file_stats.append({
+                                'file': filename,
+                                'additions': additions,
+                                'deletions': deletions,
+                                'total_changes': total_changes
+                            })
+                            
+                            # Format for display: "path/to/file.py +5/-3"
+                            if additions > 0 and deletions > 0:
+                                diff_stats.append(f"{filename} +{additions}/-{deletions}")
+                            elif additions > 0:
+                                diff_stats.append(f"{filename} +{additions}")
+                            elif deletions > 0:
+                                diff_stats.append(f"{filename} -{deletions}")
+                            else:
+                                diff_stats.append(f"{filename} (no changes)")
+                            
+                            total_additions += additions
+                            total_deletions += deletions
+            
+            # Parse summary line like: " 3 files changed, 25 insertions(+), 8 deletions(-)"
+            summary_line = lines[-1] if lines else ""
+            if 'changed' in summary_line:
+                # Extract totals from summary if our parsing missed anything
+                import re
+                insertions_match = re.search(r'(\d+) insertions?\(\+\)', summary_line)
+                deletions_match = re.search(r'(\d+) deletions?\(-\)', summary_line)
+                
+                if insertions_match:
+                    total_additions = int(insertions_match.group(1))
+                if deletions_match:
+                    total_deletions = int(deletions_match.group(1))
+                    
+        except subprocess.CalledProcessError as e:
+            self.logger.warning(f"Failed to get diff stats: {e}")
+            # Return empty stats on failure
+            
+        return {
+            'changed_files': changed_files,
+            'file_stats': file_stats,
+            'diff_stats': diff_stats,
+            'total_additions': total_additions,
+            'total_deletions': total_deletions
+        }
     
     def get_commit_info(self, repo_dir: Path) -> Dict[str, Any]:
         """Get comprehensive git information using GitPython library"""
@@ -137,24 +176,23 @@ class GitUtils(BaseUtils):
         
         author = f"{author_name} <{author_email}> ({author_login})"
         
-        changed_files = []
-        file_stats = []
-        
+        # Get diff statistics
         self.logger.debug(f"Equivalent: git -C {repo_dir} diff-tree --no-commit-id --name-only -r HEAD")
         if commit.parents:  # If this isn't the initial commit
             parent = commit.parents[0]
-            diff = parent.diff(commit)
-            
-            for diff_item in diff:
-                if diff_item.a_path:
-                    filename = diff_item.a_path
-                    changed_files.append(filename)
-                    
-                    file_stats.append({
-                        'file': filename,
-                        'additions': 'unknown',
-                        'deletions': 'unknown'
-                    })
+            diff_info = self._get_diff_statistics(repo_dir, parent.hexsha, commit.hexsha)
+            changed_files = diff_info['changed_files']
+            file_stats = diff_info['file_stats']
+            diff_stats = diff_info['diff_stats']
+            total_additions = diff_info['total_additions']
+            total_deletions = diff_info['total_deletions']
+        else:
+            # Initial commit - no parent to compare against
+            changed_files = []
+            file_stats = []
+            diff_stats = []
+            total_additions = 0
+            total_deletions = 0
         
         return {
             'sha': sha,
@@ -168,8 +206,56 @@ class GitUtils(BaseUtils):
             'author_login': author_login,
             'changed_files': changed_files,
             'file_stats': file_stats,
-            'total_files_changed': len(changed_files)
+            'diff_stats': diff_stats,
+            'total_files_changed': len(changed_files),
+            'total_additions': total_additions,
+            'total_deletions': total_deletions
         }
+
+    def get_commit_history(self, repo_dir: Path, max_commits: int = 50) -> List[Dict[str, Any]]:
+        """Get commit history with basic information for each commit"""
+        repo = self._get_repo(repo_dir)
+        
+        self.logger.debug(f"Equivalent: git -C {repo_dir} log --oneline -n {max_commits}")
+        
+        commits = []
+        try:
+            # Get commits from the current branch, limited by max_commits
+            for i, commit in enumerate(repo.iter_commits(max_count=max_commits)):
+                if i >= max_commits:
+                    break
+                    
+                sha = commit.hexsha[:7]
+                commit_datetime = commit.committed_datetime
+                
+                # Convert to UTC and Pacific timezones
+                utc_datetime = commit_datetime.astimezone(zoneinfo.ZoneInfo("UTC"))
+                utc_timestamp = utc_datetime.strftime('%Y-%m-%d %H:%M:%S %Z')
+                
+                pacific_tz = zoneinfo.ZoneInfo("America/Los_Angeles")
+                pacific_datetime = commit_datetime.astimezone(pacific_tz)
+                pacific_timestamp = pacific_datetime.strftime('%Y-%m-%d %H:%M:%S %Z')
+                
+                commit_message = commit.summary
+                author_name = commit.author.name
+                author_email = commit.author.email
+                
+                commits.append({
+                    'sha': sha,
+                    'full_sha': commit.hexsha,
+                    'utc_timestamp': utc_timestamp,
+                    'pacific_timestamp': pacific_timestamp,
+                    'commit_message': commit_message,
+                    'author_name': author_name,
+                    'author_email': author_email,
+                    'commit_obj': commit  # Keep reference for checkout operations
+                })
+                
+        except Exception as e:
+            self.logger.error(f"Failed to get commit history: {e}")
+            return []
+            
+        return commits
 
     def setup_repository(self, repo_dir: Path, repo_url: str, repo_sha: str = None, no_checkout: bool = False) -> None:
         """Setup git repository - clone if needed, fetch, and checkout using GitPython"""
@@ -265,7 +351,7 @@ class GitUtils(BaseUtils):
         sha_file.write_text(sha)
         self.logger.info(f"Stored composite SHA in repository: {sha}")
     
-    def generate_composite_sha_from_container_dir(self, repo_dir: Path) -> Optional[str]:
+    def generate_composite_sha_from_container_dir(self, repo_dir: Path) -> Tuple[Optional[str], List[Path]]:
         """Generate composite SHA from all container files recursively"""
         container_dir = repo_dir / "container"
 
@@ -273,7 +359,7 @@ class GitUtils(BaseUtils):
             self.logger.debug(f"Generating composite SHA from container directory: {container_dir}")
         else:
             self.logger.error(f"Container directory not found: {container_dir}")
-            return None
+            return None, []
 
         # Define file extensions and patterns to exclude
         excluded_extensions = {'.md', '.rst', '.log', '.bak', '.tmp', '.swp', '.swo', '.orig', '.rej'}
@@ -311,7 +397,7 @@ class GitUtils(BaseUtils):
 
         if not files_to_hash:
             self.logger.error("No files found in container directory for composite SHA calculation")
-            return None
+            return None, []
 
         with tempfile.NamedTemporaryFile(mode='w+b', delete=False) as temp_file:
             temp_path = Path(temp_file.name)
@@ -334,7 +420,7 @@ class GitUtils(BaseUtils):
 
                 if found_files == 0:
                     self.logger.error("No files found for composite SHA calculation")
-                    return None
+                    return None, []
 
                 # Generate SHA256 of concatenated files
                 temp_file.flush()
@@ -342,363 +428,20 @@ class GitUtils(BaseUtils):
                     sha = hashlib.sha256(f.read()).hexdigest()
 
                 self.logger.info(f"Generated composite SHA from {found_files} container files (excluded {excluded_count}): {sha[:12]}...")
-                return sha
+                
+                # Return the list of files that were actually used
+                used_files = []
+                for file_rel_path in files_to_hash:
+                    full_path = repo_dir / file_rel_path
+                    if full_path.exists():
+                        used_files.append(file_rel_path)
+                
+                return sha, used_files
 
             finally:
                 temp_path.unlink(missing_ok=True)
 
 
-
-class DockerUtils(BaseUtils):
-    """Utility class for Docker operations"""
-    
-    def __init__(self, dry_run: bool = False):
-        super().__init__(dry_run)
-        
-        # Initialize Docker client - required for operation
-        try:
-            self.logger.info("Equivalent: docker version")
-            self.client = docker.from_env()
-            # Test connection
-            self.client.ping()
-            self.logger.debug("Docker client initialized successfully")
-        except Exception as e:
-            self.logger.error(f"Failed to initialize Docker client: {e}")
-            self.logger.error("Docker client is required for this script to function.")
-            self.logger.error("Please ensure Docker daemon is running and accessible.")
-            sys.exit(1)
-    
-    def get_image_info(self, image_tag: str) -> Dict[str, str]:
-        """Get Docker image information including size and full repo:tag"""
-        try:
-            # Primary approach: Use Docker API directly
-            self.logger.info(f"Equivalent: docker inspect {image_tag}")
-            try:
-                image = self.client.images.get(image_tag)
-                
-                # Get image size
-                size_bytes = image.attrs.get('Size', 0)
-                
-                # Format size in human readable format
-                if size_bytes == 0:
-                    size = "0 B"
-                else:
-                    # Convert bytes to human readable format
-                    for unit in ['B', 'KB', 'MB', 'GB', 'TB']:
-                        if size_bytes < 1024.0:
-                            size = f"{size_bytes:.1f} {unit}"
-                            break
-                        size_bytes /= 1024.0
-                    else:
-                        size = f"{size_bytes:.1f} PB"
-                
-                # Get repo:tag from image tags
-                repo_tag = image_tag
-                if image.tags:
-                    # Use the first tag that matches our query or just the first tag
-                    matching_tags = [tag for tag in image.tags if image_tag in tag]
-                    if matching_tags:
-                        repo_tag = matching_tags[0]
-                    else:
-                        repo_tag = image.tags[0]
-                
-                return {
-                    'repo_tag': repo_tag,
-                    'size': size,
-                    'size_bytes': str(image.attrs.get('Size', 0))
-                }
-            except docker.errors.ImageNotFound:
-                self.logger.debug(f"Docker image not found via API: {image_tag}")
-
-                # Try alternative API approach: list images with filter
-                self.logger.info(f"Equivalent: docker images --filter reference={image_tag}")
-                images = self.client.images.list(filters={'reference': image_tag})
-                if images:
-                    image = images[0]
-                    
-                    # Get image size
-                    size_bytes = image.attrs.get('Size', 0)
-                    
-                    # Format size in human readable format
-                    if size_bytes == 0:
-                        size = "0 B"
-                    else:
-                        # Convert bytes to human readable format
-                        for unit in ['B', 'KB', 'MB', 'GB', 'TB']:
-                            if size_bytes < 1024.0:
-                                size = f"{size_bytes:.1f} {unit}"
-                                break
-                            size_bytes /= 1024.0
-                        else:
-                            size = f"{size_bytes:.1f} PB"
-                    
-                    # Get repo:tag from image tags
-                    repo_tag = image_tag
-                    if image.tags:
-                        repo_tag = image.tags[0]
-                    
-                    return {
-                        'repo_tag': repo_tag,
-                        'size': size,
-                        'size_bytes': str(image.attrs.get('Size', 0))
-                    }
-                else:
-                    # Image truly not found
-                    raise docker.errors.ImageNotFound(f"Image {image_tag} not found")
-
-        except docker.errors.ImageNotFound:
-            # Image doesn't exist - return default values
-            return {
-                'repo_tag': image_tag,
-                'size': 'Not Found',
-                'size_bytes': '0'
-            }
-        except Exception as e:
-            self.logger.warning(f"Docker API failed for {image_tag}: {e}")
-            # Only fall back to CLI if Docker API completely fails
-            try:
-                # Final fallback to subprocess only if API is broken
-                # Equivalent: docker images --format 'table {{.Repository}}:{{.Tag}}\t{{.Size}}' --no-trunc <image_tag>
-                result = subprocess.run([
-                    'docker', 'images', '--format', 'table {{.Repository}}:{{.Tag}}\t{{.Size}}',
-                    '--no-trunc', image_tag
-                ], capture_output=True, text=True)
-
-                if result.returncode == 0 and result.stdout.strip():
-                    lines = result.stdout.strip().split('\n')
-                    if len(lines) > 1:  # Skip header line
-                        data_line = lines[1]
-                        parts = data_line.split('\t')
-                        if len(parts) >= 2:
-                            repo_tag = parts[0].strip()
-                            size = parts[1].strip()
-                        else:
-                            repo_tag = image_tag
-                            size = "Unknown"
-                    else:
-                        repo_tag = image_tag
-                        size = "Unknown"
-                    
-                    # Get size in bytes using CLI
-                    # Equivalent: docker inspect --format '{{.Size}}' <image_tag>
-                    try:
-                        inspect_result = subprocess.run([
-                            'docker', 'inspect', '--format', '{{.Size}}', image_tag
-                        ], capture_output=True, text=True)
-                        size_bytes = inspect_result.stdout.strip() if inspect_result.returncode == 0 else "0"
-                    except Exception:
-                        size_bytes = "0"
-
-                    return {
-                        'repo_tag': repo_tag,
-                        'size': size,
-                        'size_bytes': size_bytes
-                    }
-
-                # Fallback if all methods fail
-                return {
-                    'repo_tag': image_tag,
-                    'size': 'Unknown',
-                    'size_bytes': '0'
-                }
-            except Exception as cli_e:
-                self.logger.warning(f"Both Docker API and CLI failed for {image_tag}: API={e}, CLI={cli_e}")
-                return {
-                    'repo_tag': image_tag,
-                    'size': 'Error',
-                    'size_bytes': '0'
-                }
-    
-    def get_image_id(self, image_tag: str) -> str:
-        """Get Docker image ID using Docker API - fails hard if image not found"""
-        self.logger.info(f"Equivalent: docker inspect --format '{{{{.Id}}}}' {image_tag}")
-        image = self.client.images.get(image_tag)
-        full_image_id = image.id
-        # Get short image ID (first 12 chars after sha256:)
-        if full_image_id.startswith('sha256:'):
-            return full_image_id[7:19]
-        else:
-            return full_image_id[:12]
-    
-    def normalize_command(self, docker_command: str) -> str:
-        """
-        Normalize docker command for consistent comparison.
-        
-        This removes variations in whitespace, argument ordering, etc.
-        to enable accurate duplicate detection.
-        
-        Args:
-            docker_command: Raw docker build command string
-            
-        Returns:
-            Normalized command string for comparison
-        """
-        if not docker_command.strip():
-            return ""
-            
-        # Remove extra whitespace and normalize
-        normalized = ' '.join(docker_command.split())
-        
-        # Sort build arguments for consistent comparison
-        # This handles cases where --build-arg arguments appear in different orders
-        parts = normalized.split()
-        build_args = []
-        other_parts = []
-        
-        i = 0
-        while i < len(parts):
-            if parts[i] == '--build-arg' and i + 1 < len(parts):
-                build_args.append(f"--build-arg {parts[i + 1]}")
-                i += 2
-            else:
-                other_parts.append(parts[i])
-                i += 1
-        
-        # Sort build args for consistent ordering
-        build_args.sort()
-        
-        # Reconstruct command with sorted build args
-        if build_args:
-            # Find where to insert build args (after docker build but before context)
-            if 'docker' in other_parts and 'build' in other_parts:
-                try:
-                    build_idx = other_parts.index('build')
-                    # Insert sorted build args after 'build'
-                    result_parts = other_parts[:build_idx + 1] + build_args + other_parts[build_idx + 1:]
-                except ValueError:
-                    result_parts = other_parts + build_args
-            else:
-                result_parts = other_parts + build_args
-        else:
-            result_parts = other_parts
-            
-        return ' '.join(result_parts)
-
-    def filter_unused_build_args(self, docker_command: str) -> str:
-        """
-        Remove unused --build-arg flags from Docker build commands for base images.
-        
-        Base images (dynamo-base) don't use most of the build arguments that are
-        passed to framework-specific builds. Removing unused args helps Docker
-        recognize when builds are truly identical.
-        
-        Args:
-            docker_command: Docker build command string
-            
-        Returns:
-            Filtered command string with unused build args removed
-        """
-        if not re.search(r'--tag\s+dynamo-base:', docker_command):
-            # Only filter base image builds
-            return docker_command
-            
-        # List of build args that are typically unused by base images
-        unused_args = {
-            'PYTORCH_VERSION', 'CUDA_VERSION', 'PYTHON_VERSION',
-            'FRAMEWORK_VERSION', 'TARGET_ARCH', 'BUILD_TYPE'
-        }
-        
-        # Split command into parts
-        parts = docker_command.split()
-        filtered_parts = []
-        filtered_args = []
-        
-        i = 0
-        while i < len(parts):
-            if parts[i] == '--build-arg' and i + 1 < len(parts):
-                arg_name = parts[i + 1].split('=')[0]
-                if arg_name in unused_args:
-                    filtered_args.append(arg_name)
-                    i += 2  # Skip both --build-arg and its value
-                else:
-                    filtered_parts.extend([parts[i], parts[i + 1]])
-                    i += 2
-            else:
-                filtered_parts.append(parts[i])
-                i += 1
-        
-        if filtered_args:
-            self.logger.info(f"Filtered {len(filtered_args)} unused base image build args: {', '.join(sorted(filtered_args))}")
-        
-        return ' '.join(filtered_parts)
-    
-    def extract_base_image_from_command(self, docker_cmd: str) -> str:
-        """Extract the base/FROM image from docker build command arguments"""
-        # Look for --build-arg DYNAMO_BASE_IMAGE=... (framework-specific builds)
-        match = re.search(r'--build-arg\s+DYNAMO_BASE_IMAGE=([^\s]+)', docker_cmd)
-        if match:
-            return match.group(1)
-        
-        # Look for --build-arg BASE_IMAGE=... and BASE_IMAGE_TAG=... (base builds)
-        base_image_match = re.search(r'--build-arg\s+BASE_IMAGE=([^\s]+)', docker_cmd)
-        base_tag_match = re.search(r'--build-arg\s+BASE_IMAGE_TAG=([^\s]+)', docker_cmd)
-        
-        if base_image_match and base_tag_match:
-            return f"{base_image_match.group(1)}:{base_tag_match.group(1)}"
-        elif base_image_match:
-            return base_image_match.group(1)
-        
-        # Look for --build-arg DEV_BASE=... (local-dev builds)
-        dev_base_match = re.search(r'--build-arg\s+DEV_BASE=([^\s]+)', docker_cmd)
-        if dev_base_match:
-            return dev_base_match.group(1)
-        
-        return ""
-    
-    def extract_image_tag_from_command(self, docker_cmd: str) -> str:
-        """
-        Extract the output tag from docker build command --tag argument.
-        Returns the tag string, or empty string if no tag found.
-        Raises error if multiple tags are found (should not happen after get_build_commands validation).
-        """
-        # Find all --tag arguments in the command
-        tags = re.findall(r'--tag\s+([^\s]+)', docker_cmd)
-        
-        if len(tags) == 0:
-            return ""
-        elif len(tags) == 1:
-            return tags[0]
-        else:
-            # This should not happen if get_build_commands validation is working
-            self.logger.error(f"Multiple --tag arguments found in command: {tags}")
-            self.logger.error(f"Command: {docker_cmd}")
-            raise ValueError(f"Multiple --tag arguments found: {tags}")
-    
-    def normalize_command(self, docker_command: str) -> str:
-        """
-        Normalize a docker command for comparison by:
-        1. Removing extra whitespace
-        2. Sorting build arguments for consistent ordering
-        3. Standardizing format
-        
-        Args:
-            docker_command: Raw docker build command
-            
-        Returns:
-            Normalized command string for comparison
-        """
-        # Remove extra whitespace and split into parts
-        parts = docker_command.strip().split()
-        
-        # Find build args and sort them for consistent comparison
-        build_args = []
-        other_parts = []
-        i = 0
-        
-        while i < len(parts):
-            if parts[i] == '--build-arg' and i + 1 < len(parts):
-                build_args.append(f"--build-arg {parts[i + 1]}")
-                i += 2
-            else:
-                other_parts.append(parts[i])
-                i += 1
-        
-        # Sort build args for consistent ordering
-        build_args.sort()
-        
-        # Reconstruct normalized command
-        normalized_parts = other_parts + build_args
-        return ' '.join(normalized_parts)
 
 
 class BuildShUtils(BaseUtils):
@@ -948,12 +691,16 @@ class EmailTemplateRenderer:
                 if target['image_tag'] and not target['container_size']:
                     try:
                         image_info = docker_utils.get_image_info(target['image_tag'])
-                        target['container_size'] = image_info.get('size', '-')
-                        # Get short image ID if available
-                        if not target['image_id']:
-                            image_id = docker_utils.get_image_id(target['image_tag'])
-                            if image_id:
-                                target['image_id'] = image_id[7:19] if image_id.startswith('sha256:') else image_id[:12]
+                        if image_info:
+                            target['container_size'] = image_info.size_human
+                            # Get image ID in docker images format (12 chars)
+                            if not target['image_id'] and image_info.image_id:
+                                # Convert full SHA to docker images format
+                                full_id = image_info.image_id
+                                if full_id.startswith('sha256:'):
+                                    target['image_id'] = full_id[7:19]  # Extract 12 chars after 'sha256:'
+                                else:
+                                    target['image_id'] = full_id[:12]  # First 12 chars if no prefix
                     except Exception:
                         # Image not found or error - leave as '-'
                         pass
@@ -1043,6 +790,7 @@ class EmailTemplateRenderer:
 <html>
 <head>
 <meta charset="UTF-8">
+<title>DynamoDockerBuilder - {{ git_info.sha[:8] }} - {{ overall_status }}</title>
 <style>
 body { font-family: Arial, sans-serif; margin: 10px; line-height: 1.3; }
 .header { background-color: {{ status_color }}; color: white; padding: 15px 20px; border-radius: 4px; margin-bottom: 10px; text-align: center; }
@@ -1078,7 +826,7 @@ h2 { margin: 0; font-size: 1.2em; font-weight: bold; }
 </head>
 <body>
 <div class="header">
-<h2>DynamoDockerBuilder - {{ overall_status }}</h2>
+<h2>DynamoDockerBuilder - {{ git_info.sha[:8] }} - {{ overall_status }}</h2>
 </div>
 
 <div class="summary-boxes">
@@ -1464,15 +1212,15 @@ class ExecuteTask(BaseTask):
 class DynamoDockerBuilder(BaseUtils):
     """DynamoDockerBuilder - Next generation build system with dependency tree"""
     
-    # Framework constants
-    FRAMEWORKS: List[str] = ["TRTLLM", "VLLM", "SGLANG"]
+    # Framework constants (using shared constants)
+    FRAMEWORKS: List[str] = FrameworkInfo.get_frameworks_upper()
     
-    def __init__(self) -> None:
+    def __init__(self, verbose: bool = False) -> None:
         # Configuration flags - set before calling super().__init__
         self.dry_run = False
         
         # Call parent constructor (sets up logger automatically)
-        super().__init__(dry_run=self.dry_run)
+        super().__init__(dry_run=self.dry_run, verbose=verbose)
         
         self.script_dir = Path(__file__).parent.absolute()
         self.dynamo_ci_dir = self.script_dir.parent / "dynamo_ci"
@@ -1505,13 +1253,22 @@ class DynamoDockerBuilder(BaseUtils):
         # Track seen commands to avoid duplicates
         self.seen_commands: Dict[str, str] = {}  # command -> task_id
     
-    def check_if_rebuild_needed(self) -> bool:
+    def _setup_logging_dir(self) -> None:
+        """Create the log directory if it doesn't exist"""
+        try:
+            self.log_dir.mkdir(parents=True, exist_ok=True)
+            self.logger.info(f"Log directory ready: {self.log_dir}")
+        except Exception as e:
+            self.logger.error(f"Failed to create log directory {self.log_dir}: {e}")
+            raise
+    
+    def _check_if_rebuild_needed(self) -> bool:
         """Check if rebuild is needed based on composite SHA"""
         self.logger.info("Checking if rebuild is needed based on file changes...")
         self.logger.info(f"Composite SHA file location: {self.dynamo_ci_dir}/.last_build_composite_sha")
 
         # Generate current composite SHA
-        current_sha = self.git_utils.generate_composite_sha_from_container_dir(self.dynamo_ci_dir)
+        current_sha, _ = self.git_utils.generate_composite_sha_from_container_dir(self.dynamo_ci_dir)
         if current_sha is None:
             self.logger.error("Failed to generate current composite SHA")
             return True  # Assume rebuild needed if we can't determine
@@ -1921,11 +1678,11 @@ class DynamoDockerBuilder(BaseUtils):
                 try:
                     # Try to get image info to verify it exists
                     docker_info = self.docker_utils.get_image_info(image_name)
-                    if docker_info['size'] == 'Not Found' or docker_info['size'] == 'Error':
+                    if docker_info is None:
                         missing_images.append(image_name)
                         self.logger.error(f"  ❌ Missing: {image_name}")
                     else:
-                        self.logger.info(f"  ✅ Found: {image_name} ({docker_info['size']})")
+                        self.logger.info(f"  ✅ Found: {image_name} ({docker_info.size_human})")
                 except Exception as e:
                     missing_images.append(image_name)
                     self.logger.error(f"  ❌ Missing: {image_name} ({e})")
@@ -2335,6 +2092,7 @@ class DynamoDockerBuilder(BaseUtils):
             image_id_match = re.search(r'writing image (sha256:[a-f0-9]+)', log_content)
             if image_id_match:
                 full_id = image_id_match.group(1)
+                # Extract 12 chars in docker images format
                 task.image_id = full_id[7:19] if full_id.startswith('sha256:') else full_id[:12]
         
         return success
@@ -2504,6 +2262,145 @@ class DynamoDockerBuilder(BaseUtils):
         
         return run_sh_command
     
+    def show_composite_sha(self, repo_sha: str = None) -> int:
+        """Show which files are used for composite SHA calculation and the resulting SHA"""
+        # Setup repository if repo_sha is specified
+        if repo_sha:
+            self.logger.info(f"Setting up repository for SHA: {repo_sha}")
+            self.git_utils.setup_dynamo_ci(self.dynamo_ci_dir, repo_sha=repo_sha, no_checkout=False)
+        
+        # Generate composite SHA with file list
+        sha, files_used = self.git_utils.generate_composite_sha_from_container_dir(self.dynamo_ci_dir)
+        
+        if sha is None:
+            self.logger.error("Failed to generate composite SHA")
+            return 1
+        
+        print(f"\nComposite SHA Calculation for {'SHA ' + repo_sha if repo_sha else 'current state'}:")
+        print(f"Repository: {self.dynamo_ci_dir}")
+        print(f"Container directory: {self.dynamo_ci_dir / 'container'}")
+        print(f"\nResulting SHA: {sha}")
+        print(f"\nFiles used in calculation ({len(files_used)} files):")
+        
+        if not files_used:
+            print("  No files found for SHA calculation")
+            return 1
+        
+        # Group files by directory for better readability
+        files_by_dir = {}
+        for file_path in sorted(files_used):
+            dir_path = file_path.parent
+            if dir_path not in files_by_dir:
+                files_by_dir[dir_path] = []
+            files_by_dir[dir_path].append(file_path.name)
+        
+        for dir_path in sorted(files_by_dir.keys()):
+            print(f"\n  {dir_path}/")
+            for filename in sorted(files_by_dir[dir_path]):
+                print(f"    {filename}")
+        
+        # Show exclusion rules
+        print(f"\nExclusion rules applied:")
+        print(f"  - Hidden files/directories (starting with '.')")
+        print(f"  - Extensions: .md, .rst, .log, .bak, .tmp, .swp, .swo, .orig, .rej")
+        print(f"  - Filenames: README, CHANGELOG, LICENSE, NOTICE, AUTHORS, CONTRIBUTORS")
+        print(f"  - Specific files: launch_message.txt")
+        
+        return 0
+    
+    def show_commit_history(self, max_commits: int = 50) -> int:
+        """Show all past commits with their composite SHAs"""
+        self.logger.info("Analyzing commit history and generating composite SHAs...")
+        
+        # Setup repository (use existing or clone if needed)
+        self.git_utils.setup_dynamo_ci(self.dynamo_ci_dir, no_checkout=self.no_checkout)
+        
+        # Get commit history
+        commits = self.git_utils.get_commit_history(self.dynamo_ci_dir, max_commits=max_commits)
+        
+        if not commits:
+            self.logger.error("No commits found in repository")
+            return 1
+        
+        print(f"\nCommit History with Composite SHAs")
+        print(f"Repository: {self.dynamo_ci_dir}")
+        print(f"Showing {len(commits)} most recent commits:\n")
+        print(f"{'Commit SHA':<10} {'Composite SHA':<16} {'Date':<20} {'Author':<25} {'Message'}")
+        print("-" * 120)
+        
+        # Store original HEAD position to restore later
+        repo = self.git_utils._get_repo(self.dynamo_ci_dir)
+        original_head = repo.head.commit.hexsha
+        
+        try:
+            for i, commit_info in enumerate(commits):
+                commit_sha = commit_info['sha']
+                full_sha = commit_info['full_sha']
+                
+                # Format the output first (without composite SHA)
+                date_str = commit_info['pacific_timestamp'][:19]  # Remove timezone for brevity
+                author_str = commit_info['author_name'][:24]  # Truncate long author names
+                message_str = commit_info['commit_message'][:60]  # Truncate long messages
+                
+                # Print the line with "CALCULATING..." placeholder first
+                print(f"{commit_sha:<10} {'CALCULATING...':<16} {date_str:<20} {author_str:<25} {message_str}", end='', flush=True)
+                
+                # Now calculate the composite SHA for this commit
+                if not self.dry_run:
+                    try:
+                        self.logger.debug(f"Checking out commit {commit_sha} for composite SHA calculation")
+                        repo.git.checkout(full_sha)
+                        
+                        # Temporarily suppress the composite SHA generation logging
+                        original_level = self.git_utils.logger.level
+                        self.git_utils.logger.setLevel(logging.WARNING)
+                        
+                        # Generate composite SHA for this commit
+                        composite_sha, _ = self.git_utils.generate_composite_sha_from_container_dir(self.dynamo_ci_dir)
+                        
+                        # Restore original logging level
+                        self.git_utils.logger.setLevel(original_level)
+                        
+                        if composite_sha is None:
+                            composite_sha = "ERROR"
+                        else:
+                            composite_sha = composite_sha[:12]  # Show first 12 characters
+                            
+                    except Exception as e:
+                        self.logger.warning(f"Failed to checkout commit {commit_sha}: {e}")
+                        composite_sha = "UNAVAILABLE"
+                else:
+                    # In dry-run mode, we can't checkout commits
+                    composite_sha = "DRY-RUN"
+                
+                # Go back to beginning of line and overwrite with the actual composite SHA
+                print(f"\r{commit_sha:<10} {composite_sha:<16} {date_str:<20} {author_str:<25} {message_str}")
+                
+                # Add a small delay to avoid overwhelming the system
+                if not self.dry_run and i < len(commits) - 1:
+                    time.sleep(0.1)
+                    
+        except KeyboardInterrupt:
+            self.logger.info("\nOperation interrupted by user")
+            return 1
+        except Exception as e:
+            self.logger.error(f"Error during commit history analysis: {e}")
+            return 1
+        finally:
+            # Restore original HEAD position
+            if not self.dry_run:
+                try:
+                    self.logger.debug(f"Restoring original HEAD position: {original_head[:7]}")
+                    repo.git.checkout(original_head)
+                except Exception as e:
+                    self.logger.warning(f"Failed to restore original HEAD position: {e}")
+        
+        print(f"\nAnalysis complete. Processed {len(commits)} commits.")
+        if self.dry_run:
+            print("Note: Composite SHAs shown as 'DRY-RUN' because --dry-run mode was used.")
+        
+        return 0
+    
     def main(self) -> int:
         """Main function for DynamoDockerBuilder"""
         parser = create_argument_parser()
@@ -2523,6 +2420,15 @@ class DynamoDockerBuilder(BaseUtils):
         self.parallel = args.parallel
         self.email = args.email
         self.repo_sha = args.repo_sha
+
+        # Handle show-composite-sha flag
+        if hasattr(args, 'show_composite_sha') and args.show_composite_sha:
+            return self.show_composite_sha(self.repo_sha)
+        
+        # Handle show-commit-history flag
+        if hasattr(args, 'show_commit_history') and args.show_commit_history:
+            max_commits = getattr(args, 'max_commits', 50)
+            return self.show_commit_history(max_commits)
 
         # Parse targets
         self.targets = [target.strip() for target in args.target.split(',') if target.strip()]
@@ -2587,7 +2493,7 @@ class DynamoDockerBuilder(BaseUtils):
         
         # Check if rebuild is needed based on file changes (unless in sanity-check-only mode)
         if not self.sanity_check_only:
-            rebuild_needed = self.check_if_rebuild_needed()
+            rebuild_needed = self._check_if_rebuild_needed()
             if not rebuild_needed:
                 self.logger.info("SUCCESS: No rebuild needed - all files unchanged")
                 self.logger.info("Exiting early (use --force-run to force rebuild)")
@@ -2605,6 +2511,9 @@ class DynamoDockerBuilder(BaseUtils):
         
         # Visualize dependency tree
         self._print_dependency_tree()
+        
+        # Set up log directory
+        self._setup_logging_dir()
         
         # Clean up existing log files for the frameworks we're testing
         self._cleanup_existing_logs(frameworks_to_test)
@@ -2683,7 +2592,7 @@ def create_argument_parser() -> argparse.ArgumentParser:
     """Create shared argument parser for DynamoDockerBuilder and DynamoDockerBuilder"""
     parser = argparse.ArgumentParser(description="DynamoDockerBuilder - Automated Docker Build and Test System")
     parser.add_argument('-f', '--framework', '--frameworks', action='append', dest='framework',
-                      help="Test specific framework (VLLM, SGLANG, TRTLLM) - case insensitive. Can be specified multiple times.")
+                      help=f"Test specific framework ({', '.join(FRAMEWORKS_UPPER)}) - case insensitive. Can be specified multiple times.")
     parser.add_argument('--target', default='dev,local-dev',
                       help="Comma-separated Docker build targets to test: dev, local-dev (default: dev,local-dev)")
     parser.add_argument('-a', '--all', action='store_true', dest='all_frameworks',
@@ -2704,6 +2613,12 @@ def create_argument_parser() -> argparse.ArgumentParser:
                       help="Git SHA to checkout instead of latest main branch")
     parser.add_argument('--parallel', action='store_true',
                       help="Execute tasks in parallel when possible (default: serial execution)")
+    parser.add_argument('--show-composite-sha', action='store_true',
+                      help="Show which files are used for composite SHA calculation and the resulting SHA for the specified --repo-sha")
+    parser.add_argument('--show-commit-history', action='store_true',
+                      help="Show all past commits with their composite SHAs in chronological order")
+    parser.add_argument('--max-commits', type=int, default=50,
+                      help="Maximum number of commits to show in commit history (default: 50)")
     return parser
 
 
