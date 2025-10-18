@@ -5,8 +5,10 @@ Shared constants and utilities for dynamo Docker management scripts.
 """
 
 import logging
+import os
 import re
 import shlex
+import shutil
 import subprocess
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
@@ -16,149 +18,196 @@ try:
 except ImportError:
     docker = None
 
-class FrameworkInfo:
-    """Framework information and utilities for dynamo Docker images."""
-    
-    # Supported frameworks (canonical lowercase)
-    FRAMEWORKS = ["vllm", "sglang", "trtllm"]
-    
-    # Framework display names
-    FRAMEWORK_NAMES = {
-        "vllm": "VLLM",
-        "sglang": "SGLang", 
-        "trtllm": "TensorRT-LLM"
-    }
-    
-    @staticmethod
-    def get_frameworks() -> List[str]:
-        """Get list of supported frameworks (lowercase)."""
-        return FrameworkInfo.FRAMEWORKS.copy()
-    
-    @staticmethod
-    def get_frameworks_upper() -> List[str]:
-        """Get list of supported frameworks (uppercase) - for backward compatibility."""
-        return [f.upper() for f in FrameworkInfo.FRAMEWORKS]
-    
-    @staticmethod
-    def normalize_framework(framework: str) -> str:
-        """Normalize framework name to canonical lowercase form."""
-        return framework.lower()
-    
-    @staticmethod
-    def get_display_name(framework: str) -> str:
-        """Get display name for framework (handles case conversion)."""
-        normalized = FrameworkInfo.normalize_framework(framework)
-        return FrameworkInfo.FRAMEWORK_NAMES.get(normalized, normalized.upper())
-    
-    @staticmethod
-    def is_valid_framework(framework: str) -> bool:
-        """Check if framework is supported."""
-        return FrameworkInfo.normalize_framework(framework) in FrameworkInfo.FRAMEWORKS
+# Supported frameworks
+# Used by V2 for default framework list and validation
+FRAMEWORKS_UPPER = ["VLLM", "SGLANG", "TRTLLM"]
 
-# Backward compatibility exports
-FRAMEWORKS = FrameworkInfo.get_frameworks()
-FRAMEWORKS_UPPER = FrameworkInfo.get_frameworks_upper()
-FRAMEWORK_NAMES = FrameworkInfo.FRAMEWORK_NAMES.copy()
+# DEPRECATED: V1 and retag script reference only - kept for backward compatibility
+# V2 uses FRAMEWORKS_UPPER directly
+FRAMEWORKS = [f.lower() for f in FRAMEWORKS_UPPER]
+FRAMEWORK_NAMES = {"vllm": "VLLM", "sglang": "SGLang", "trtllm": "TensorRT-LLM"}
 
-# Backward compatibility wrappers (inline for simplicity)
-normalize_framework = FrameworkInfo.normalize_framework
-get_framework_display_name = FrameworkInfo.get_display_name
+def normalize_framework(framework: str) -> str:
+    """Normalize framework name to canonical lowercase form. DEPRECATED: V1/retag only."""
+    return framework.lower()
+
+def get_framework_display_name(framework: str) -> str:
+    """Get display name for framework. DEPRECATED: V1/retag only."""
+    normalized = normalize_framework(framework)
+    return FRAMEWORK_NAMES.get(normalized, normalized.upper())
 
 
-@dataclass
-class DynamoImageInfo:
-    """Dynamo-specific Docker image information."""
-    version: Optional[str] = None      # Parsed version (e.g., "0.1.0.dev.ea07d51fc")
-    framework: Optional[str] = None    # Framework name (vllm, sglang, trtllm)
-    target: Optional[str] = None       # Target type (local-dev, dev, etc.)
-    latest_tag: Optional[str] = None   # Corresponding latest tag
-    
-    def matches_sha(self, sha: str) -> bool:
-        """Check if this image matches the specified SHA."""
-        return self.version and sha in self.version
-    
-    def is_framework_image(self) -> bool:
-        """Check if this has framework information."""
-        return self.framework is not None
-    
-    def get_latest_tag(self, repository: str = "dynamo") -> str:
-        """Get the latest tag for this dynamo image."""
-        if self.latest_tag:
-            return self.latest_tag
-        if self.framework:
-            if self.target == "dev":
-                # dev target maps to just latest-framework (no -dev suffix)
-                return f"{repository}:latest-{self.framework}"
-            elif self.target:
-                # other targets like local-dev keep the suffix
-                return f"{repository}:latest-{self.framework}-{self.target}"
-            else:
-                return f"{repository}:latest-{self.framework}"
-        return f"{repository}:latest"
+# COMMENTED OUT: V2 does not use this. Kept for V1/retag script reference only.
+# Forward declarations for type hints (methods below still use these types)
+DynamoImageInfo = None
+DockerImageInfo = None
+
+# @dataclass
+# class DynamoImageInfo:
+#     """Dynamo-specific Docker image information.
+#
+#     DEPRECATION: retag script only. V1 and V2 do not use this.
+#     """
+#     version: Optional[str] = None      # Parsed version (e.g., "0.1.0.dev.ea07d51fc")
+#     framework: Optional[str] = None    # Framework name (vllm, sglang, trtllm)
+#     target: Optional[str] = None       # Target type (local-dev, dev, etc.)
+#     latest_tag: Optional[str] = None   # Corresponding latest tag
+#
+#     def matches_sha(self, sha: str) -> bool:
+#         """Check if this image matches the specified SHA."""
+#         return self.version and sha in self.version
+#
+#     def is_framework_image(self) -> bool:
+#         """Check if this has framework information."""
+#         return self.framework is not None
+#
+#     def get_latest_tag(self, repository: str = "dynamo") -> str:
+#         """Get the latest tag for this dynamo image."""
+#         if self.latest_tag:
+#             return self.latest_tag
+#         if self.framework:
+#             if self.target == "dev":
+#                 # dev target maps to just latest-framework (no -dev suffix)
+#                 return f"{repository}:latest-{self.framework}"
+#             elif self.target:
+#                 # other targets like local-dev keep the suffix
+#                 return f"{repository}:latest-{self.framework}-{self.target}"
+#             else:
+#                 return f"{repository}:latest-{self.framework}"
+#         return f"{repository}:latest"
 
 
-@dataclass
-class DockerImageInfo:
-    """Comprehensive Docker image information."""
-    name: str                    # Full image name (repo:tag)
-    repository: str              # Repository name
-    tag: str                     # Tag name
-    image_id: str               # Docker image ID
-    created_at: str             # Creation timestamp
-    size_bytes: int             # Size in bytes
-    size_human: str             # Human readable size
-    labels: Dict[str, str]      # Image labels
-    
-    # Dynamo-specific information (optional)
-    dynamo_info: Optional[DynamoImageInfo] = None
-    
-    def matches_sha(self, sha: str) -> bool:
-        """Check if this image matches the specified SHA."""
-        return self.dynamo_info and self.dynamo_info.matches_sha(sha)
-    
-    def is_dynamo_image(self) -> bool:
-        """Check if this is a dynamo image."""
-        return self.repository in ["dynamo", "dynamo-base"]
-    
-    def is_dynamo_framework_image(self) -> bool:
-        """Check if this is a dynamo framework image."""
-        return self.is_dynamo_image() and self.dynamo_info and self.dynamo_info.is_framework_image()
-    
-    def get_latest_tag(self) -> str:
-        """Get the latest tag for this image."""
-        if self.dynamo_info:
-            return self.dynamo_info.get_latest_tag(self.repository)
-        return f"{self.repository}:latest"
+# COMMENTED OUT: V2 does not use this. Kept for retag script reference only.
+# @dataclass
+# class DockerImageInfo:
+#     """Comprehensive Docker image information.
+#
+#     DEPRECATION: retag script only. V1 and V2 do not use this.
+#     """
+#     name: str                    # Full image name (repo:tag)
+#     repository: str              # Repository name
+#     tag: str                     # Tag name
+#     image_id: str               # Docker image ID
+#     created_at: str             # Creation timestamp
+#     size_bytes: int             # Size in bytes
+#     size_human: str             # Human readable size
+#     labels: Dict[str, str]      # Image labels
+#
+#     # Dynamo-specific information (optional)
+#     dynamo_info: Optional[DynamoImageInfo] = None
+#
+#     def matches_sha(self, sha: str) -> bool:
+#         """Check if this image matches the specified SHA."""
+#         return self.dynamo_info and self.dynamo_info.matches_sha(sha)
+#
+#     def is_dynamo_image(self) -> bool:
+#         """Check if this is a dynamo image."""
+#         return self.repository in ["dynamo", "dynamo-base"]
+#
+#     def is_dynamo_framework_image(self) -> bool:
+#         """Check if this is a dynamo framework image."""
+#         return self.is_dynamo_image() and self.dynamo_info and self.dynamo_info.is_framework_image()
+#
+#     def get_latest_tag(self) -> str:
+#         """Get the latest tag for this image."""
+#         if self.dynamo_info:
+#             return self.dynamo_info.get_latest_tag(self.repository)
+#         return f"{self.repository}:latest"
 
 
 def setup_logging(verbose: bool = False, name: str = None) -> logging.Logger:
     """Set up logging configuration for dynamo utilities.
-    
+
     Args:
         verbose: Enable debug logging with timestamps
         name: Logger name (defaults to caller's __name__)
-    
+
     Returns:
         Configured logger instance
     """
     logger = logging.getLogger(name or __name__)
-    
+
     # Avoid adding multiple handlers
     if logger.handlers:
         return logger
-        
+
     handler = logging.StreamHandler()
-    
+
     if verbose:
         logger.setLevel(logging.DEBUG)
         formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
     else:
         logger.setLevel(logging.INFO)
         formatter = logging.Formatter('%(message)s')
-        
+
     handler.setFormatter(formatter)
     logger.addHandler(handler)
     return logger
+
+
+def get_terminal_width(padding: int = 2, default: int = 118) -> int:
+    """
+    Detect terminal width using multiple methods in order of preference.
+
+    This function tries several approaches to detect the terminal width,
+    which is useful in various environments including PTY/TTY contexts:
+
+    1. Check $COLUMNS environment variable (set by interactive shells)
+    2. Try 'tput cols' command (works in more environments than ioctl)
+    3. Use shutil.get_terminal_size() (ioctl-based, may return default 80)
+    4. Fall back to provided default
+
+    Args:
+        padding: Number of characters to subtract from detected width (default: 2)
+        default: Default width to use if detection fails (default: 118, i.e., 120 - 2)
+
+    Returns:
+        Terminal width in columns, minus the specified padding
+
+    Examples:
+        >>> # Get terminal width with default 2-char padding
+        >>> width = get_terminal_width()
+        >>>
+        >>> # Get terminal width with custom padding
+        >>> width = get_terminal_width(padding=4)
+        >>>
+        >>> # Get terminal width with custom default fallback
+        >>> width = get_terminal_width(default=78)  # 80 - 2
+    """
+    term_width = None
+
+    try:
+        # Method 1: Check $COLUMNS environment variable (set by shell)
+        columns_env = os.environ.get('COLUMNS')
+        if columns_env and columns_env.isdigit():
+            term_width = int(columns_env) - padding
+
+        # Method 2: Try tput cols (works in more environments than ioctl)
+        if term_width is None:
+            try:
+                result = subprocess.run(
+                    ['tput', 'cols'],
+                    capture_output=True,
+                    text=True,
+                    timeout=1
+                )
+                if result.returncode == 0 and result.stdout.strip().isdigit():
+                    term_width = int(result.stdout.strip()) - padding
+            except Exception:
+                pass
+
+        # Method 3: Use shutil.get_terminal_size() (ioctl-based)
+        if term_width is None:
+            term_width = shutil.get_terminal_size().columns - padding
+
+    except Exception:
+        term_width = default
+
+    # Final fallback to default
+    if term_width is None:
+        term_width = default
+
+    return term_width
 
 
 class BaseUtils:
@@ -256,16 +305,187 @@ class BaseUtils:
     
 
 
+class DynamoRepositoryUtils(BaseUtils):
+    """Utilities for Dynamo repository operations including composite SHA calculation."""
+
+    def __init__(self, repo_path: Any, dry_run: bool = False, verbose: bool = False):
+        """
+        Initialize DynamoRepositoryUtils.
+
+        Args:
+            repo_path: Path to Dynamo repository (Path object or str)
+            dry_run: Dry-run mode
+            verbose: Verbose logging
+        """
+        super().__init__(dry_run, verbose)
+        from pathlib import Path
+        self.repo_path = Path(repo_path) if not isinstance(repo_path, Path) else repo_path
+
+    def generate_composite_sha(self, full_hash: bool = False) -> str:
+        """
+        Generate composite SHA from container directory files.
+
+        This creates a SHA256 hash of all relevant files in the container directory,
+        excluding documentation, temporary files, etc. This hash can be used to
+        determine if a rebuild is needed.
+
+        Args:
+            full_hash: If True, return full 64-char SHA. If False, return first 12 chars.
+
+        Returns:
+            SHA256 hash string, or error code:
+            - "NO_CONTAINER_DIR": container directory doesn't exist
+            - "NO_FILES": no relevant files found
+            - "ERROR": error during calculation
+        """
+        import hashlib
+        import tempfile
+        from pathlib import Path
+
+        container_dir = self.repo_path / "container"
+        if not container_dir.exists():
+            self.logger.warning(f"Container directory not found: {container_dir}")
+            return "NO_CONTAINER_DIR"
+
+        # Excluded patterns (matching V1)
+        excluded_extensions = {'.md', '.rst', '.log', '.bak', '.tmp', '.swp', '.swo', '.orig', '.rej'}
+        excluded_filenames = {'README', 'CHANGELOG', 'LICENSE', 'NOTICE', 'AUTHORS', 'CONTRIBUTORS'}
+        excluded_specific = {'launch_message.txt'}
+
+        # Collect files to hash
+        files_to_hash = []
+        for file_path in sorted(container_dir.rglob('*')):
+            if not file_path.is_file():
+                continue
+            # Skip hidden files
+            if any(part.startswith('.') for part in file_path.relative_to(container_dir).parts):
+                continue
+            # Skip excluded extensions
+            if file_path.suffix.lower() in excluded_extensions:
+                continue
+            # Skip excluded names
+            if file_path.stem.upper() in excluded_filenames:
+                continue
+            # Skip specific files
+            if file_path.name.lower() in excluded_specific:
+                continue
+            files_to_hash.append(file_path.relative_to(self.repo_path))
+
+        if not files_to_hash:
+            self.logger.warning("No files found to hash in container directory")
+            return "NO_FILES"
+
+        self.logger.debug(f"Hashing {len(files_to_hash)} files from container directory")
+
+        # Calculate composite SHA
+        try:
+            with tempfile.NamedTemporaryFile(mode='w+b', delete=False) as temp_file:
+                temp_path = Path(temp_file.name)
+                try:
+                    for file_rel_path in files_to_hash:
+                        full_path = self.repo_path / file_rel_path
+                        if full_path.exists():
+                            temp_file.write(str(file_rel_path).encode('utf-8'))
+                            temp_file.write(b'\n')
+                            with open(full_path, 'rb') as f:
+                                temp_file.write(f.read())
+                            temp_file.write(b'\n')
+
+                    temp_file.flush()
+                    with open(temp_path, 'rb') as f:
+                        sha_full = hashlib.sha256(f.read()).hexdigest()
+                        result = sha_full if full_hash else sha_full[:12]
+                        self.logger.debug(f"Composite SHA: {result}")
+                        return result
+                finally:
+                    temp_path.unlink(missing_ok=True)
+        except Exception as e:
+            self.logger.error(f"Error calculating composite SHA: {e}")
+            return "ERROR"
+
+    def get_stored_composite_sha(self) -> str:
+        """
+        Get stored composite SHA from file.
+
+        Returns:
+            Stored SHA string, or empty string if not found
+        """
+        sha_file = self.repo_path / ".last_build_composite_sha"
+        if sha_file.exists():
+            stored = sha_file.read_text().strip()
+            self.logger.debug(f"Found stored composite SHA: {stored[:12]}")
+            return stored
+        self.logger.debug("No stored composite SHA found")
+        return ""
+
+    def store_composite_sha(self, sha: str) -> None:
+        """
+        Store current composite SHA to file.
+
+        Args:
+            sha: Composite SHA to store
+        """
+        sha_file = self.repo_path / ".last_build_composite_sha"
+        sha_file.write_text(sha)
+        self.logger.info(f"Stored composite SHA: {sha[:12]}")
+
+    def check_if_rebuild_needed(self, force_run: bool = False) -> bool:
+        """
+        Check if rebuild is needed based on composite SHA comparison.
+
+        Compares current composite SHA with stored SHA to determine if
+        container files have changed since last build.
+
+        Args:
+            force_run: If True, proceed with rebuild even if SHA unchanged
+
+        Returns:
+            True if rebuild is needed, False otherwise
+        """
+        self.logger.info("\nChecking if rebuild is needed based on file changes...")
+        self.logger.info(f"Composite SHA file: {self.repo_path}/.last_build_composite_sha")
+
+        # Generate current composite SHA (full hash, not truncated)
+        current_sha = self.generate_composite_sha(full_hash=True)
+        if current_sha in ("NO_CONTAINER_DIR", "NO_FILES", "ERROR"):
+            self.logger.warning(f"Failed to generate composite SHA: {current_sha}")
+            return True  # Assume rebuild needed
+
+        # Get stored composite SHA
+        stored_sha = self.get_stored_composite_sha()
+
+        if stored_sha:
+            if current_sha == stored_sha:
+                if force_run:
+                    self.logger.info(f"Composite SHA unchanged ({current_sha[:12]}) but --force-run specified - proceeding")
+                    return True
+                else:
+                    self.logger.info(f"Composite SHA unchanged ({current_sha[:12]}) - skipping rebuild")
+                    self.logger.info("Use --force-run to force rebuild")
+                    return False  # No rebuild needed
+            else:
+                self.logger.info("Composite SHA changed:")
+                self.logger.info(f"  Previous: {stored_sha[:12]}")
+                self.logger.info(f"  Current:  {current_sha[:12]}")
+                self.logger.info("Rebuild needed")
+                self.store_composite_sha(current_sha)
+                return True
+        else:
+            self.logger.info(f"No previous composite SHA found - rebuild needed")
+            self.store_composite_sha(current_sha)
+            return True
+
+
 class DockerUtils(BaseUtils):
     """Unified Docker utility class with comprehensive image management."""
-    
+
     def __init__(self, dry_run: bool = False, verbose: bool = False):
         super().__init__(dry_run, verbose)
-        
+
         if docker is None:
             self.logger.error("Docker package not found. Install with: pip install docker")
             raise ImportError("docker package required")
-        
+
         # Initialize Docker client
         try:
             self.logger.debug("Equivalent: docker version")
@@ -314,7 +534,10 @@ class DockerUtils(BaseUtils):
         )
     
     def get_image_info(self, image_name: str) -> Optional[DockerImageInfo]:
-        """Get comprehensive information about a Docker image."""
+        """Get comprehensive information about a Docker image.
+
+        DEPRECATION: V1 + retag script only. V2 uses docker.from_env() directly.
+        """
         self.logger.debug(f"Equivalent: docker inspect {image_name}")
         
         try:
@@ -353,7 +576,9 @@ class DockerUtils(BaseUtils):
     
     def list_images(self, name_filter: str = None) -> List[DockerImageInfo]:
         """List all Docker images with optional name filtering.
-        
+
+        DEPRECATION: retag script only. V1 and V2 do not use this.
+
         Returns:
             List of DockerImageInfo objects sorted by creation date (newest first)
         """
@@ -377,7 +602,10 @@ class DockerUtils(BaseUtils):
             return []
     
     def list_dynamo_images(self, framework: str = None, target: str = None, sha: str = None) -> List[DockerImageInfo]:
-        """List dynamo framework images with optional filtering."""
+        """List dynamo framework images with optional filtering.
+
+        DEPRECATION: retag script only. V1 and V2 do not use this.
+        """
         # Search for both dynamo and dynamo-base images
         dynamo_images = []
         for prefix in ["dynamo:", "dynamo-base:"]:
@@ -400,7 +628,10 @@ class DockerUtils(BaseUtils):
         return dynamo_images
     
     def tag_image(self, source_tag: str, target_tag: str) -> bool:
-        """Tag a Docker image."""
+        """Tag a Docker image.
+
+        DEPRECATION: retag script only. V1 and V2 do not use this.
+        """
         self.logger.debug(f"Equivalent: docker tag {source_tag} {target_tag}")
         
         if self.dry_run:
@@ -426,7 +657,10 @@ class DockerUtils(BaseUtils):
             return False
     
     def retag_to_latest(self, images: List[DockerImageInfo]) -> Dict[str, int]:
-        """Retag multiple images to their latest tags."""
+        """Retag multiple images to their latest tags.
+
+        DEPRECATION: retag script only. V1 and V2 do not use this.
+        """
         results = {'success': 0, 'failed': 0}
         
         for image in images:
@@ -440,18 +674,12 @@ class DockerUtils(BaseUtils):
         return results
     
     def filter_unused_build_args(self, docker_command: str) -> str:
-        """
-        Remove unused --build-arg flags from Docker build commands for base images.
-        
-        Base images (dynamo-base) don't use most of the build arguments that are
-        passed to framework-specific builds. Removing unused args helps Docker
-        recognize when builds are truly identical.
-        
-        Args:
-            docker_command: Docker build command string
-            
-        Returns:
-            Filtered command string with unused build args removed
+        """Remove unused --build-arg flags from Docker build commands for base images.
+
+        DEPRECATION: V1 only. V2 does not use this.
+
+        Base images (dynamo-base) don't use most build arguments. Removing unused
+        args helps Docker recognize when builds are truly identical.
         """
         import re
         
@@ -490,15 +718,11 @@ class DockerUtils(BaseUtils):
         return ' '.join(filtered_parts)
     
     def normalize_command(self, docker_command: str) -> str:
-        """
-        Normalize a Docker command by removing extra whitespace and sorting build args.
-        This helps identify functionally identical commands with different formatting.
-        
-        Args:
-            docker_command: Docker command string
-            
-        Returns:
-            Normalized command string
+        """Normalize Docker command by removing whitespace and sorting build args.
+
+        DEPRECATION: V1 only. V2 does not use this.
+
+        Helps identify functionally identical commands with different formatting.
         """
         import re
         
