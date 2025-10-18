@@ -1,14 +1,14 @@
-# DynamoDockerBuilder V2 - Project Instructions
+# DynamoDockerBuilder - Project Instructions
 
 ## Project Overview
 
-This project contains `dynamo_docker_builder_v2.py`, an automated Docker build and test pipeline system for the Dynamo project. It builds and tests multiple inference frameworks (VLLM, SGLANG, TRTLLM) across different target environments (base, dev, local-dev), generates HTML reports, and sends email notifications.
+This project contains `dynamo_docker_builder.py`, an automated Docker build and test pipeline system for the Dynamo project. It builds and tests multiple inference frameworks (VLLM, SGLANG, TRTLLM) across different target environments (base, dev, local-dev), generates HTML reports, and sends email notifications.
 
 ## Key Files
 
-- **dynamo_docker_builder_v2.py**: Main V2 builder script with parallel execution, HTML reporting, and email notifications
+- **dynamo_docker_builder.py**: Main builder script with parallel execution, HTML reporting, and email notifications
 - **common.py**: Shared utilities including terminal width detection, path helpers, and common functions
-- **docker_build_orchestrator.py**: Legacy orchestrator (V1 system)
+- **dynamo_docker_builder.py.backup**: Previous V1 version (backup)
 - **run_docker_builder.sh**: Shell wrapper for running the builder
 
 ## Code Conventions
@@ -64,7 +64,7 @@ def generate_html_report(
 
 ### Process Management
 - Use lock files to prevent concurrent runs
-- Lock file: `.dynamo_docker_builder_v2.py.lock`
+- Lock file: `.dynamo_docker_builder.py.lock`
 - Store PID in lock file
 - Check if process is still running before acquiring lock
 - Clean up stale locks automatically
@@ -79,17 +79,17 @@ def generate_html_report(
 
 ### Quick Test (Single Framework)
 ```bash
-python3 dynamo_docker_builder_v2.py --sanity-check-only --framework sglang --force-run --email <email>
+python3 dynamo_docker_builder.py --sanity-check-only --framework sglang --force-run --email <email>
 ```
 
 ### Parallel Build with Skip
 ```bash
-python3 dynamo_docker_builder_v2.py --skip-build-if-image-exists --parallel --force-run --email <email>
+python3 dynamo_docker_builder.py --skip-build-if-image-exists --parallel --force-run --email <email>
 ```
 
 ### Full Build
 ```bash
-python3 dynamo_docker_builder_v2.py --parallel --force-run --email <email>
+python3 dynamo_docker_builder.py --parallel --force-run --email <email>
 ```
 
 ## Common Patterns
