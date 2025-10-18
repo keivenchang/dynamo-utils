@@ -922,6 +922,30 @@ class DynamoBranchChecker:
         except subprocess.CalledProcessError:
             return None
     
+    def get_all_remote_urls(self, repo_dir: Path) -> Dict[str, str]:
+        """Get all remote URLs"""
+        try:
+            result = subprocess.run(
+                ['git', 'remote', '-v'],
+                cwd=repo_dir,
+                capture_output=True,
+                text=True,
+                check=True
+            )
+            remotes = {}
+            for line in result.stdout.strip().split('\n'):
+                if line.strip():
+                    parts = line.split()
+                    if len(parts) >= 2:
+                        remote_name = parts[0]
+                        remote_url = parts[1]
+                        # Only keep fetch URLs (ignore push URLs)
+                        if len(parts) < 3 or parts[2] == '(fetch)':
+                            remotes[remote_name] = remote_url
+            return remotes
+        except subprocess.CalledProcessError:
+            return {}
+    
     def format_pr_info(self, pr: Dict, branch_name: str = "", is_current: bool = False, is_gone: bool = False, review_summary: Optional[Dict] = None, status_checks: Optional[Dict] = None) -> str:
         """Format PR information for display"""
         number = pr.get('number', 'Unknown')
@@ -1006,18 +1030,43 @@ class DynamoBranchChecker:
         
         # Get repository info
         remote_url = self.get_remote_url(repo_dir)
+        all_remotes = self.get_all_remote_urls(repo_dir)
         current_branch = self.get_current_branch(repo_dir)
         local_branches = self.get_local_branches(repo_dir)
         
-        # Determine GitHub repo (owner/repo) from remote URL
-        host, owner_repo = self.parse_owner_repo_from_remote_url(remote_url)
-        is_dynamo_repo = bool(owner_repo and host and host.endswith('github.com'))
+        # Find GitHub remote and determine if it's the ai-dynamo/dynamo repo
+        github_remote_url = None
+        github_owner_repo = None
+        
+        # Check all remotes for GitHub URLs, prioritizing common remote names
+        remote_priority = ['tracking', 'upstream', 'origin']
+        for remote_name in remote_priority:
+            if remote_name in all_remotes:
+                host, owner_repo = self.parse_owner_repo_from_remote_url(all_remotes[remote_name])
+                if host and host.endswith('github.com') and owner_repo == 'ai-dynamo/dynamo':
+                    github_remote_url = all_remotes[remote_name]
+                    github_owner_repo = owner_repo
+                    break
+        
+        # If no priority remote found, check all other remotes
+        if not github_remote_url:
+            for remote_name, url in all_remotes.items():
+                if remote_name not in remote_priority:
+                    host, owner_repo = self.parse_owner_repo_from_remote_url(url)
+                    if host and host.endswith('github.com') and owner_repo == 'ai-dynamo/dynamo':
+                        github_remote_url = url
+                        github_owner_repo = owner_repo
+                        break
+        
+        is_dynamo_repo = bool(github_remote_url and github_owner_repo)
         
         result = {
             'directory': repo_dir.name,
             'path': str(repo_dir),
             'remote_url': remote_url,
-            'repo': owner_repo,
+            'github_remote_url': github_remote_url,
+            'all_remotes': all_remotes,
+            'repo': github_owner_repo,
             'current_branch': current_branch,
             'local_branches': local_branches,
             'is_dynamo_repo': is_dynamo_repo,
@@ -1026,7 +1075,12 @@ class DynamoBranchChecker:
         
         if not is_dynamo_repo:
             if self.verbose:
-                print(f"  ⚠️  Unsupported or non-GitHub remote (remote: {remote_url})")
+                github_remotes = [f"{name}: {url}" for name, url in all_remotes.items() 
+                                if 'github.com' in url]
+                if github_remotes:
+                    print(f"  ⚠️  Found GitHub remotes but not ai-dynamo/dynamo: {', '.join(github_remotes)}")
+                else:
+                    print(f"  ⚠️  No GitHub remotes found (origin: {remote_url})")
             return result
         
         # Precompute tracking for all branches in one call
@@ -1051,9 +1105,9 @@ class DynamoBranchChecker:
 
             # Check if branch exists and fetch PRs in parallel
             with ThreadPoolExecutor(max_workers=min(3, self.max_workers)) as exec_branch:
-                fut_exists = exec_branch.submit(self.github.branch_exists, owner_repo, branch)
-                fut_find = exec_branch.submit(self.github.find_prs_for_branch, owner_repo, branch)
-                fut_search = exec_branch.submit(self.github.search_prs_by_branch, owner_repo, branch)
+                fut_exists = exec_branch.submit(self.github.branch_exists, github_owner_repo, branch)
+                fut_find = exec_branch.submit(self.github.find_prs_for_branch, github_owner_repo, branch)
+                fut_search = exec_branch.submit(self.github.search_prs_by_branch, github_owner_repo, branch)
                 exists = fut_exists.result()
                 find_results = fut_find.result() or []
                 search_results = fut_search.result() or []
@@ -1083,8 +1137,8 @@ class DynamoBranchChecker:
                         num = p.get('number')
                         if not num:
                             continue
-                        review_futures[exec_prs.submit(self.github.get_pr_reviews, owner_repo, num)] = num
-                        status_futures[exec_prs.submit(self.github.get_pr_status_checks, owner_repo, num, p)] = num
+                        review_futures[exec_prs.submit(self.github.get_pr_reviews, github_owner_repo, num)] = num
+                        status_futures[exec_prs.submit(self.github.get_pr_status_checks, github_owner_repo, num, p)] = num
 
                     review_results: Dict[int, Optional[Dict]] = {}
                     status_results: Dict[int, Optional[Dict]] = {}
@@ -1219,7 +1273,12 @@ class DynamoBranchChecker:
         print(f"   Current branch: {current_branch or 'Unknown'}")
         
         if not result['is_dynamo_repo']:
-            print(f"   ⚠️  Not ai-dynamo/dynamo repo (remote: {result['remote_url']})")
+            github_remotes = [f"{name}: {url}" for name, url in result['all_remotes'].items() 
+                            if 'github.com' in url]
+            if github_remotes:
+                print(f"   ⚠️  Found GitHub remotes but not ai-dynamo/dynamo: {', '.join(github_remotes)}")
+            else:
+                print(f"   ⚠️  No GitHub remotes found (origin: {result['remote_url']})")
             return
         
         branches_with_prs = []
