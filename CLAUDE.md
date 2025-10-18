@@ -8,7 +8,6 @@ This project contains `dynamo_docker_builder.py`, an automated Docker build and 
 
 - **dynamo_docker_builder.py**: Main builder script with parallel execution, HTML reporting, and email notifications
 - **common.py**: Shared utilities including terminal width detection, path helpers, and common functions
-- **dynamo_docker_builder.py.backup**: Previous V1 version (backup)
 - **run_docker_builder.sh**: Shell wrapper for running the builder
 
 ## Code Conventions
@@ -140,3 +139,17 @@ width = get_terminal_width()
 - Email HTML needs absolute URLs for external viewing
 - All GitHub links should be clickable in HTML output
 - Commit SHAs in headers should have white underline styling for visibility
+
+## Backup File Convention
+
+When creating backup files, use the naming format: `<filename>.<YYYY-MM-DD>.bak`
+
+Example:
+```bash
+cp dynamo_docker_builder.py dynamo_docker_builder.py.2025-10-18.bak
+```
+
+This convention:
+- Makes backup dates immediately visible
+- Allows multiple backups from different dates
+- Is automatically ignored by .gitignore (*.bak pattern)
