@@ -633,9 +633,9 @@ class BranchChecker:
                         elif pr.review_decision == 'CHANGES_REQUESTED':
                             status_parts.append("Review: 🔴 Changes Requested")
 
-                        # Unresolved conversations
+                        # Unresolved conversations (not necessarily blocking)
                         if pr.unresolved_conversations > 0:
-                            status_parts.append(f"🚫 Unresolved: {pr.unresolved_conversations}")
+                            status_parts.append(f"💬 Comments: {pr.unresolved_conversations}")
 
                         # CI status
                         if pr.ci_status:
