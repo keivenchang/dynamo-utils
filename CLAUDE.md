@@ -44,12 +44,12 @@ The `vsc-` prefix indicates VS Code/Cursor dev containers, and the part after it
 
 ### Host-Container Directory Mapping
 
-The `dynamo-utils` directory on the host is mapped to the container's `shared` directory:
+The `dynamo-utils` directory on the host is mapped to the container's `_` directory:
 
 - **Host**: `~/nvidia/dynamo-utils/`
-- **Container**: `~/dynamo/shared/`
+- **Container**: `~/dynamo/_/`
 
-Example: A file at `~/nvidia/dynamo-utils/notes/metrics-vllm.log` on the host appears at `~/dynamo/shared/notes/metrics-vllm.log` inside the container.
+Example: A file at `~/nvidia/dynamo-utils/notes/metrics-vllm.log` on the host appears at `~/dynamo/_/notes/metrics-vllm.log` inside the container.
 
 ### Backup File Convention
 
@@ -79,7 +79,7 @@ This procedure collects Prometheus metrics from a running inference server insid
 
 1. **Start inference server in background**:
 ```bash
-docker exec <container_name> bash -c "cd ~/dynamo && nohup shared/inference.sh > /tmp/inference-<framework>.log 2>&1 &"
+docker exec <container_name> bash -c "cd ~/dynamo && nohup _/inference.sh > /tmp/inference-<framework>.log 2>&1 &"
 ```
 
 2. **Monitor inference server startup** (wait ~30 seconds):
@@ -90,13 +90,13 @@ Look for: "added model model_name=..." indicating the model is ready.
 
 3. **Run soak test** to generate some load:
 ```bash
-docker exec <container_name> bash -c "cd ~/dynamo && python3 shared/soak_fe.py --max-tokens 1000 --requests_per_worker 5"
+docker exec <container_name> bash -c "cd ~/dynamo && python3 _/soak_fe.py --max-tokens 1000 --requests_per_worker 5"
 ```
 Wait for: "All requests completed successfully."
 
-4. **Collect metrics and save to shared directory**:
+4. **Collect metrics and save to _ directory**:
 ```bash
-docker exec <container_name> bash -c "curl -s localhost:8081/metrics > ~/dynamo/shared/notes/metrics-<framework>.log"
+docker exec <container_name> bash -c "curl -s localhost:8081/metrics > ~/dynamo/_/notes/metrics-<framework>.log"
 ```
 
 **Example for VLLM**:
@@ -105,16 +105,16 @@ docker exec <container_name> bash -c "curl -s localhost:8081/metrics > ~/dynamo/
 docker ps --format "table {{.Names}}\t{{.Image}}" | grep dynamo1
 
 # Start inference (example container: epic_satoshi)
-docker exec <container_name> bash -c "cd ~/dynamo && nohup shared/inference.sh > /tmp/inference-vllm.log 2>&1 &"
+docker exec <container_name> bash -c "cd ~/dynamo && nohup _/inference.sh > /tmp/inference-vllm.log 2>&1 &"
 
 # Wait and check log
 sleep 30 && docker exec <container_name> bash -c "tail -20 /tmp/inference-vllm.log"
 
 # Run soak test
-docker exec <container_name> bash -c "cd ~/dynamo && python3 shared/soak_fe.py --max-tokens 1000 --requests_per_worker 5"
+docker exec <container_name> bash -c "cd ~/dynamo && python3 _/soak_fe.py --max-tokens 1000 --requests_per_worker 5"
 
 # Collect metrics
-docker exec <container_name> bash -c "mkdir -p ~/dynamo/shared/notes && curl -s localhost:8081/metrics > ~/dynamo/shared/notes/metrics-vllm.log"
+docker exec <container_name> bash -c "mkdir -p ~/dynamo/_/notes && curl -s localhost:8081/metrics > ~/dynamo/_/notes/metrics-vllm.log"
 ```
 
 **Output**:

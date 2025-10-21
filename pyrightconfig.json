@@ -6,7 +6,7 @@
         "tests",
         "benchmarks",
         "deploy",
-        "shared"
+        "_"
     ],
     "exclude": [
         "**/__pycache__",
