@@ -24,12 +24,19 @@ This repository contains essential development tools, build scripts, and configu
 
 ```
 dynamo-utils/
-├── compile.sh              # Build and install Dynamo Python packages
-├── curl.sh                 # Test models via chat completions API
-├── inference.sh            # Launch Dynamo inference services
-├── sync_devcontainer.sh   # Sync dev configs across projects
-├── devcontainer.json       # VS Code Dev Container configuration    
-└── devcontainer/           # Dev container specific files
+├── compile.sh                    # Build and install Dynamo Python packages
+├── curl.sh                       # Test models via chat completions API
+├── inference.sh                  # Launch Dynamo inference services
+├── devcontainer_sync.sh          # Sync dev configs across projects
+├── devcontainer.json             # VS Code Dev Container configuration
+├── dynamo_docker_builder.py      # Automated Docker build/test pipeline
+├── common.py                     # Shared utilities module
+├── show_dynamo_branches.py       # Branch status checker
+├── update_html_pages.sh          # HTML page update cron script
+├── soak_fe.py                    # Frontend soak testing script
+├── retag_latest_dynamo_images.py # Docker image retagging utility
+├── gpu_reset.sh                  # GPU reset utility
+└── rm_old_dynamo_docker_images.sh # Cleanup old Docker images
 ```
 
 ## Key Scripts
@@ -101,70 +108,200 @@ Launches Dynamo inference services (frontend and backend).
 
 ### Configuration Management
 
-#### `sync_devcontainer.sh`
+#### `devcontainer_sync.sh`
 Automatically syncs development configuration files across multiple Dynamo project directories.
 
 ```bash
 # Sync configurations
-./sync_devcontainer.sh
+./devcontainer_sync.sh
 
 # Dry run to preview changes
-./sync_devcontainer.sh --dryrun
+./devcontainer_sync.sh --dryrun
 
 # Force sync regardless of changes
-./sync_devcontainer.sh --force
+./devcontainer_sync.sh --force
 
 # Silent mode for cron jobs
-./sync_devcontainer.sh --silent
+./devcontainer_sync.sh --silent
 ```
 
-**How it works - Example:**
+---
 
-Before running `sync_devcontainer.sh`:
-```
-~/nvidia/
-├── dynamo-utils/           # This repository with master config files
-│   ├── devcontainer.json   # Master devcontainer config
-│   └── sync_devcontainer.sh
-├── dynamo1/                # Clone of dynamo repo for feature A
-│   └── (existing dynamo files...)
-├── dynamo2/                # Clone of dynamo repo for feature B
-│   └── (existing dynamo files...)
-└── dynamo3/                # Clone of dynamo repo for experiments
-    └── (existing dynamo files...)
-```
+## Python Utilities
 
-After running `./sync_devcontainer.sh`:
-```
-~/nvidia/
-├── dynamo-utils/           # This repository (unchanged)
-│   ├── devcontainer.json
-│   └── sync_devcontainer.sh
-├── dynamo1/
-│   ├── .devcontainer/
-│   │   └── [username]/
-│   │       └── devcontainer.json  # ← Customized: container name = dynamo1-[username]-devcontainer
-│   └── (existing dynamo files...)
-├── dynamo2/
-│   ├── .devcontainer/
-│   │   └── [username]/
-│   │       └── devcontainer.json  # ← Customized: container name = dynamo2-[username]-devcontainer
-│   └── (existing dynamo files...)
-└── dynamo3/
-    ├── .devcontainer/
-    │   └── [username]/
-    │       └── devcontainer.json  # ← Customized: container name = dynamo3-[username]-devcontainer
-    └── (existing dynamo files...)
+### dynamo_docker_builder.py
+
+Automated Docker build and test pipeline system that builds and tests multiple inference frameworks (VLLM, SGLANG, TRTLLM) across different target environments (base, dev, local-dev), generates HTML reports, and sends email notifications.
+
+#### Usage Examples
+
+**Quick Test (Single Framework)**:
+```bash
+python3 dynamo_docker_builder.py --sanity-check-only --framework sglang --force-run --email <email>
 ```
 
-Key points:
-- Each dynamo directory gets its own copy of configuration files
-- The devcontainer.json is customized per directory with unique container names
-- This allows working on multiple features/branches simultaneously with isolated containers
-- All directories stay in sync with the master configurations in dynamo-utils
+**Parallel Build with Skip**:
+```bash
+python3 dynamo_docker_builder.py --skip-build-if-image-exists --parallel --force-run --email <email>
+```
 
-**Files synced:**
-- `.devcontainer/` configurations
+**Full Build**:
+```bash
+python3 dynamo_docker_builder.py --parallel --force-run --email <email>
+```
+
+#### HTML Report Generation
+- Generate two versions when email is requested:
+  - **File version**: relative paths (just filenames)
+  - **Email version**: absolute URLs with hostname
+- Use helper function `get_log_url()` to abstract URL generation
+- Pass `use_absolute_urls` flag to control URL format
+- Default hostname: `keivenc-linux`
+- Default HTML path: `/nvidia/dynamo_ci/logs`
+
+#### Log File Paths
+- Logs stored in: `~/nvidia/dynamo_ci/logs/YYYY-MM-DD/`
+- Log filename format: `YYYY-MM-DD.{sha_short}.{framework}-{target}-{type}.log`
+- HTML report: `YYYY-MM-DD.{sha_short}.report.html`
+- Always use date subdirectories
+- Use `log_dir.parent` to get root logs directory
+
+#### Process Management
+- Use lock files to prevent concurrent runs
+- Lock file: `.dynamo_docker_builder.py.lock`
+- Store PID in lock file
+- Check if process is still running before acquiring lock
+- Clean up stale locks automatically
+
+#### Email Notifications
+- Use SMTP (localhost:25) for emails
+- Email subject format: `[DynamoDockerBuilder] {status} - {sha_short}`
+- HTML email body with clickable links (absolute URLs)
+- Plain text fallback for email clients
+
+#### Commit History Feature
+
+**Overview**: The `--show-commit-history` flag displays recent commits with their composite SHAs. Supports both terminal and HTML output modes with integrated caching for performance.
+
+**Caching System**:
+- Cache file: `~/nvidia/dynamo_ci/.commit_history_cache.json`
+- Format: JSON mapping of commit SHA (full) → composite SHA
+- Purpose: Avoid expensive git checkout + composite SHA recalculation
+- Performance: Cached lookups are nearly instant vs ~1-2 seconds per commit calculation
+
+**Usage Examples**:
+
+Terminal output with caching:
+```bash
+python3 dynamo_docker_builder.py --show-commit-history --max-commits 50 --repo-path ~/nvidia/dynamo_ci
+```
+
+HTML output with caching (generates `~/nvidia/dynamo_ci/logs/commit-history.html`):
+```bash
+python3 dynamo_docker_builder.py --show-commit-history --html --max-commits 50 --repo-path ~/nvidia/dynamo_ci
+```
+
+Verbose mode (shows cache hits/misses):
+```bash
+python3 dynamo_docker_builder.py --show-commit-history --html --max-commits 50 --repo-path ~/nvidia/dynamo_ci --verbose
+```
+
+**HTML Output Features**:
+- Clickable commit SHAs linking to GitHub commit page
+- Clickable PR numbers extracted from commit messages
+- Docker image detection showing expandable list of images containing each commit SHA
+- Expandable sections using HTML `<details>` tag
+- GitHub-style CSS
+
+**Implementation Details**:
+- Commit SHA format: Full SHA for GitHub links, 9-char short SHA for display
+- PR extraction regex: `r'\(#(\d+)\)'`
+- Docker image query: Uses `docker images --format "{{.Repository}}:{{.Tag}}"` once for all commits
+- Cache management: Loaded at start, saved after updates
+
+#### Image Size Population
+
+**Overview**: Docker image sizes are automatically populated in HTML reports for all BUILD tasks, regardless of whether images were just built or were skipped (using `--skip-build-if-image-exists`).
+
+**Implementation**:
+- Location: `dynamo_docker_builder.py:1810-1851` and line 2003-2004
+- Method: `_populate_image_sizes(pipeline: BuildPipeline)`
+- Called after task execution completes (but before HTML report generation)
+- Only runs when NOT in dry-run mode
+- Queries Docker for all BUILD tasks that have an `image_tag`
+- Populates `task.image_size` with format "XX.X GB"
+
+**Why This Approach**:
+- Centralized: All image size detection happens in one place after task execution
+- Works for all scenarios: Handles both newly built images and existing images
+- Non-blocking: Uses try-except to gracefully handle missing images
+- Efficient: Only queries Docker once per image after all tasks complete
+
+---
+
+### update_html_pages.sh
+
+Automated cron script that runs every 5 minutes during daytime (9am-9pm) to update multiple HTML pages.
+
+**Schedule**:
+```cron
+*/5 9-20 * * * $HOME/nvidia/dynamo-utils/update_html_pages.sh
+```
+
+**Tasks Performed**:
+1. **Cleanup old logs** (runs first)
+   - Keeps only the last 10 non-empty dated directories in `~/nvidia/dynamo_ci/logs/`
+   - Deletes older directories to save disk space
+   - Logs all cleanup actions with directory counts
+
+2. Updates branch status HTML (`$HOME/nvidia/index.html`)
+   - Calls `show_dynamo_branches.py --html`
+   - Shows status of all dynamo branches
+
+3. Updates commit history HTML (`~/nvidia/dynamo_ci/logs/commit-history.html`)
+   - Calls `dynamo_docker_builder.py --show-commit-history --html --max-commits 50`
+   - Leverages caching for fast updates (only calculates new commits)
+   - Shows last 50 commits with composite SHAs and Docker images
+
+**Log file**: `~/nvidia/dynamo-utils/update_html_pages.log`
+
+**Performance Optimization**:
+- First run: ~50-100 seconds (calculates all 50 commits)
+- Subsequent runs: ~5-10 seconds (only processes new commits, rest from cache)
+- Cache file size: ~5-10KB for 50 commits
+- No cache invalidation needed: Composite SHAs are deterministic based on file content
+
+---
+
+### common.py
+
+Shared utilities module providing reusable components across all scripts.
+
+**Key Classes**:
+- `GitUtils`: GitPython API wrapper (no subprocess calls)
+- `GitHubAPIClient`: GitHub API client with auto token detection and rate limit handling
+- `DockerUtils`: Docker operations and image management
+- `DynamoImageInfo`, `DockerImageInfo`: Dataclasses for image metadata (used by retag script)
+
+**Utility Functions**:
+- `get_terminal_width()`: Terminal width detection with fallback
+- `normalize_framework()`: Framework name normalization
+- `get_framework_display_name()`: Pretty framework names for output
+
+---
+
+### show_dynamo_branches.py
+
+Branch status checker that displays information about dynamo* repository branches with GitHub PR integration.
+
+**Features**:
+- Scans all dynamo* directories for branch information
+- Queries GitHub API for PR status using `common.GitHubAPIClient`
+- Supports both terminal and HTML output modes
+- Parallel data gathering for improved performance
+- Automatic GitHub token detection (env var, gh CLI config)
+
+---
 
 ## Environment Setup
 
@@ -178,7 +315,7 @@ The typical workflow for setting up a development environment:
 
 1. **Development Mode**: Use `./compile.sh --dev` for faster iteration during development
 2. **Testing**: Always test API endpoints with `./curl.sh` after starting services
-3. **Configuration Sync**: Run `sync_devcontainer.sh` periodically or via cron to keep configs updated
+3. **Configuration Sync**: Run `devcontainer_sync.sh` periodically or via cron to keep configs updated
 4. **Container Development**: Use the Dev Container for a consistent development environment
 5. **Port Conflicts**: Check port availability before running inference services
 
@@ -217,3 +354,8 @@ When contributing to this repository:
 1. Test scripts thoroughly before committing
 2. Update this README if adding new scripts or features
 3. Use meaningful commit messages with `--signoff`
+
+## Additional Documentation
+
+- **CLAUDE.md**: Operational procedures, environment setup, and inference server documentation
+- **.cursorrules**: Coding conventions, style guidelines, and development practices
