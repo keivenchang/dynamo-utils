@@ -22,7 +22,7 @@ except ImportError:
     print("Error: docker package not found. Install with: pip install docker")
     sys.exit(1)
 
-from common import FRAMEWORKS, get_framework_display_name, normalize_framework, BaseUtils, DockerUtils, DockerImageInfo, FrameworkInfo
+from common import FRAMEWORKS, get_framework_display_name, normalize_framework, BaseUtils, DockerUtils, DockerImageInfo
 
 
 class DockerImageRetagger(BaseUtils):
@@ -38,7 +38,7 @@ class DockerImageRetagger(BaseUtils):
         all_images = self.docker_utils.list_dynamo_images(target="local-dev", sha=sha)
         
         # Group by framework
-        retaggable = {framework: [] for framework in FrameworkInfo.get_frameworks()}
+        retaggable = {framework: [] for framework in FRAMEWORKS}
         for image in all_images:
             if image.dynamo_info and image.dynamo_info.framework:
                 retaggable[image.dynamo_info.framework].append(image)
@@ -95,7 +95,7 @@ class DockerImageRetagger(BaseUtils):
         retaggable_images = self.find_retaggable_images(sha)
         
         if frameworks:
-            frameworks = [FrameworkInfo.normalize_framework(f) for f in frameworks]
+            frameworks = [normalize_framework(f) for f in frameworks]
             retaggable_images = {k: v for k, v in retaggable_images.items() if k in frameworks}
             
         total_success = 0
@@ -141,7 +141,7 @@ Examples:
     parser.add_argument(
             "--framework", "--frameworks",
             nargs="*",
-            choices=FrameworkInfo.get_frameworks(),
+            choices=FRAMEWORKS,
             help="Specific frameworks to process (default: all)"
     )
     
