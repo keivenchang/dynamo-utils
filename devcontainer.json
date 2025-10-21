@@ -85,7 +85,7 @@
         // Keiven's custom mounts
         //"source=${localEnv:HOME}/.ssh,target=/home/ubuntu/.ssh,type=bind,readonly",
         "source=/usr/bin/less,target=/usr/bin/less,type=bind,readonly",
-        "source=${localEnv:HOME}/nvidia/dynamo-utils,target=/home/ubuntu/dynamo/bin,type=bind",
+        "source=${localEnv:HOME}/nvidia/dynamo-utils,target=/home/ubuntu/dynamo/shared,type=bind",
         "source=${localEnv:HOME}/nvidia/dynamo-utils/pyrightconfig.json,target=/home/ubuntu/dynamo/pyrightconfig.json,type=bind",
         "source=${localEnv:HOME}/nvidia/dynamo-utils/.cursorignore,target=/home/ubuntu/dynamo/.cursorignore,type=bind",
         "source=${localEnv:HOME}/nvidia/dynamo-utils/.cursorrules,target=/home/ubuntu/dynamo/.cursorrules,type=bind",
