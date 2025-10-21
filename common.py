@@ -10,13 +10,34 @@ import re
 import shlex
 import shutil
 import subprocess
+import sys
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 try:
     import docker
 except ImportError:
     docker = None
+
+try:
+    import yaml
+    HAS_YAML = True
+except ImportError:
+    HAS_YAML = False
+
+try:
+    import requests
+    HAS_REQUESTS = True
+except ImportError:
+    HAS_REQUESTS = False
+
+# GitPython is required - hard error if not installed
+try:
+    import git
+except ImportError as e:
+    raise ImportError("GitPython is required. Install with: pip install gitpython") from e
 
 # Supported frameworks
 # Used by V2 for default framework list and validation
@@ -37,112 +58,77 @@ def get_framework_display_name(framework: str) -> str:
     return FRAMEWORK_NAMES.get(normalized, normalized.upper())
 
 
-# COMMENTED OUT: V2 does not use this. Kept for V1/retag script reference only.
-# Forward declarations for type hints (methods below still use these types)
-DynamoImageInfo = None
-DockerImageInfo = None
+# Used by retag script only. V1 and V2 do not use these dataclasses.
+@dataclass
+class DynamoImageInfo:
+    """Dynamo-specific Docker image information.
 
-# @dataclass
-# class DynamoImageInfo:
-#     """Dynamo-specific Docker image information.
-#
-#     DEPRECATION: retag script only. V1 and V2 do not use this.
-#     """
-#     version: Optional[str] = None      # Parsed version (e.g., "0.1.0.dev.ea07d51fc")
-#     framework: Optional[str] = None    # Framework name (vllm, sglang, trtllm)
-#     target: Optional[str] = None       # Target type (local-dev, dev, etc.)
-#     latest_tag: Optional[str] = None   # Corresponding latest tag
-#
-#     def matches_sha(self, sha: str) -> bool:
-#         """Check if this image matches the specified SHA."""
-#         return self.version and sha in self.version
-#
-#     def is_framework_image(self) -> bool:
-#         """Check if this has framework information."""
-#         return self.framework is not None
-#
-#     def get_latest_tag(self, repository: str = "dynamo") -> str:
-#         """Get the latest tag for this dynamo image."""
-#         if self.latest_tag:
-#             return self.latest_tag
-#         if self.framework:
-#             if self.target == "dev":
-#                 # dev target maps to just latest-framework (no -dev suffix)
-#                 return f"{repository}:latest-{self.framework}"
-#             elif self.target:
-#                 # other targets like local-dev keep the suffix
-#                 return f"{repository}:latest-{self.framework}-{self.target}"
-#             else:
-#                 return f"{repository}:latest-{self.framework}"
-#         return f"{repository}:latest"
-
-
-# COMMENTED OUT: V2 does not use this. Kept for retag script reference only.
-# @dataclass
-# class DockerImageInfo:
-#     """Comprehensive Docker image information.
-#
-#     DEPRECATION: retag script only. V1 and V2 do not use this.
-#     """
-#     name: str                    # Full image name (repo:tag)
-#     repository: str              # Repository name
-#     tag: str                     # Tag name
-#     image_id: str               # Docker image ID
-#     created_at: str             # Creation timestamp
-#     size_bytes: int             # Size in bytes
-#     size_human: str             # Human readable size
-#     labels: Dict[str, str]      # Image labels
-#
-#     # Dynamo-specific information (optional)
-#     dynamo_info: Optional[DynamoImageInfo] = None
-#
-#     def matches_sha(self, sha: str) -> bool:
-#         """Check if this image matches the specified SHA."""
-#         return self.dynamo_info and self.dynamo_info.matches_sha(sha)
-#
-#     def is_dynamo_image(self) -> bool:
-#         """Check if this is a dynamo image."""
-#         return self.repository in ["dynamo", "dynamo-base"]
-#
-#     def is_dynamo_framework_image(self) -> bool:
-#         """Check if this is a dynamo framework image."""
-#         return self.is_dynamo_image() and self.dynamo_info and self.dynamo_info.is_framework_image()
-#
-#     def get_latest_tag(self) -> str:
-#         """Get the latest tag for this image."""
-#         if self.dynamo_info:
-#             return self.dynamo_info.get_latest_tag(self.repository)
-#         return f"{self.repository}:latest"
-
-
-def setup_logging(verbose: bool = False, name: str = None) -> logging.Logger:
-    """Set up logging configuration for dynamo utilities.
-
-    Args:
-        verbose: Enable debug logging with timestamps
-        name: Logger name (defaults to caller's __name__)
-
-    Returns:
-        Configured logger instance
+    DEPRECATION: retag script only. V1 and V2 do not use this.
     """
-    logger = logging.getLogger(name or __name__)
+    version: Optional[str] = None      # Parsed version (e.g., "0.1.0.dev.ea07d51fc")
+    framework: Optional[str] = None    # Framework name (vllm, sglang, trtllm)
+    target: Optional[str] = None       # Target type (local-dev, dev, etc.)
+    latest_tag: Optional[str] = None   # Corresponding latest tag
 
-    # Avoid adding multiple handlers
-    if logger.handlers:
-        return logger
+    def matches_sha(self, sha: str) -> bool:
+        """Check if this image matches the specified SHA."""
+        return self.version and sha in self.version
 
-    handler = logging.StreamHandler()
+    def is_framework_image(self) -> bool:
+        """Check if this has framework information."""
+        return self.framework is not None
 
-    if verbose:
-        logger.setLevel(logging.DEBUG)
-        formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
-    else:
-        logger.setLevel(logging.INFO)
-        formatter = logging.Formatter('%(message)s')
+    def get_latest_tag(self, repository: str = "dynamo") -> str:
+        """Get the latest tag for this dynamo image."""
+        if self.latest_tag:
+            return self.latest_tag
+        if self.framework:
+            if self.target == "dev":
+                # dev target maps to just latest-framework (no -dev suffix)
+                return f"{repository}:latest-{self.framework}"
+            elif self.target:
+                # other targets like local-dev keep the suffix
+                return f"{repository}:latest-{self.framework}-{self.target}"
+            else:
+                return f"{repository}:latest-{self.framework}"
+        return f"{repository}:latest"
 
-    handler.setFormatter(formatter)
-    logger.addHandler(handler)
-    return logger
+
+@dataclass
+class DockerImageInfo:
+    """Comprehensive Docker image information.
+
+    DEPRECATION: retag script only. V1 and V2 do not use this.
+    """
+    name: str                    # Full image name (repo:tag)
+    repository: str              # Repository name
+    tag: str                     # Tag name
+    image_id: str               # Docker image ID
+    created_at: str             # Creation timestamp
+    size_bytes: int             # Size in bytes
+    size_human: str             # Human readable size
+    labels: Dict[str, str]      # Image labels
+
+    # Dynamo-specific information (optional)
+    dynamo_info: Optional[DynamoImageInfo] = None
+
+    def matches_sha(self, sha: str) -> bool:
+        """Check if this image matches the specified SHA."""
+        return self.dynamo_info and self.dynamo_info.matches_sha(sha)
+
+    def is_dynamo_image(self) -> bool:
+        """Check if this is a dynamo image."""
+        return self.repository in ["dynamo", "dynamo-base"]
+
+    def is_dynamo_framework_image(self) -> bool:
+        """Check if this is a dynamo framework image."""
+        return self.is_dynamo_image() and self.dynamo_info and self.dynamo_info.is_framework_image()
+
+    def get_latest_tag(self) -> str:
+        """Get the latest tag for this image."""
+        if self.dynamo_info:
+            return self.dynamo_info.get_latest_tag(self.repository)
+        return f"{self.repository}:latest"
 
 
 def get_terminal_width(padding: int = 2, default: int = 118) -> int:
@@ -520,12 +506,12 @@ class DockerUtils(BaseUtils):
             return None
         
         version_part, framework, target = match.groups()
-        
+
         # Validate framework
-        normalized_framework = FrameworkInfo.normalize_framework(framework)
-        if not FrameworkInfo.is_valid_framework(normalized_framework):
+        normalized_framework = normalize_framework(framework)
+        if normalized_framework not in FRAMEWORKS:
             return None
-        
+
         return DynamoImageInfo(
             version=version_part,
             framework=normalized_framework,
@@ -614,8 +600,8 @@ class DockerUtils(BaseUtils):
         
         # Apply filters
         if framework:
-            framework = FrameworkInfo.normalize_framework(framework)
-            dynamo_images = [img for img in dynamo_images 
+            framework = normalize_framework(framework)
+            dynamo_images = [img for img in dynamo_images
                            if img.dynamo_info and img.dynamo_info.framework == framework]
         
         if target:
@@ -810,5 +796,338 @@ class DockerUtils(BaseUtils):
             # This should not happen if get_build_commands validation is working
             self.logger.error(f"Multiple --tag arguments found in command: {tags}")
             return tags[0]  # Return first tag as fallback
+
+
+# Git utilities using GitPython API (NO subprocess calls)
+class GitUtils(BaseUtils):
+    """Git utilities using GitPython API only - NO subprocess calls to git.
+
+    Provides clean API for git operations without any subprocess calls.
+    All operations use GitPython's native API.
+
+    Example:
+        git_utils = GitUtils(repo_path="/path/to/repo")
+        commits = git_utils.get_recent_commits(max_count=50)
+        git_utils.checkout(commit_sha)
+    """
+
+    def __init__(self, repo_path: Any, dry_run: bool = False, verbose: bool = False):
+        """Initialize GitUtils.
+
+        Args:
+            repo_path: Path to git repository (Path object or str)
+            dry_run: Dry-run mode
+            verbose: Verbose logging
+        """
+        super().__init__(dry_run, verbose)
+
+        from pathlib import Path
+        self.repo_path = Path(repo_path) if not isinstance(repo_path, Path) else repo_path
+
+        try:
+            self.repo = git.Repo(self.repo_path)
+            self.logger.debug(f"Initialized git repo at {self.repo_path}")
+        except Exception as e:
+            self.logger.error(f"Failed to initialize git repository at {self.repo_path}: {e}")
+            raise
+
+    def get_current_branch(self) -> Optional[str]:
+        """Get current branch name.
+
+        Returns:
+            Branch name or None if detached HEAD
+        """
+        try:
+            if self.repo.head.is_detached:
+                return None
+            return self.repo.active_branch.name
+        except Exception as e:
+            self.logger.error(f"Failed to get current branch: {e}")
+            return None
+
+    def get_current_commit(self) -> str:
+        """Get current commit SHA.
+
+        Returns:
+            Full commit SHA (40 characters)
+        """
+        return self.repo.head.commit.hexsha
+
+    def checkout(self, ref: str) -> bool:
+        """Checkout a specific commit, branch, or tag using GitPython API.
+
+        Args:
+            ref: Commit SHA, branch name, or tag name
+
+        Returns:
+            True if successful, False otherwise
+        """
+        if self.dry_run:
+            self.logger.info(f"DRY RUN: Would checkout {ref}")
+            return True
+
+        try:
+            self.repo.git.checkout(ref)
+            self.logger.debug(f"Checked out {ref}")
+            return True
+        except Exception as e:
+            self.logger.error(f"Failed to checkout {ref}: {e}")
+            return False
+
+    def get_commit(self, sha: str) -> Optional[Any]:
+        """Get commit object by SHA using GitPython API.
+
+        Args:
+            sha: Commit SHA (full or short)
+
+        Returns:
+            GitPython commit object or None if not found
+        """
+        try:
+            return self.repo.commit(sha)
+        except Exception as e:
+            self.logger.error(f"Failed to get commit {sha}: {e}")
+            return None
+
+    def get_recent_commits(self, max_count: int = 50, branch: str = 'main') -> List[Any]:
+        """Get recent commits from a branch using GitPython API.
+
+        Args:
+            max_count: Maximum number of commits to retrieve
+            branch: Branch name (default: 'main')
+
+        Returns:
+            List of GitPython commit objects
+        """
+        try:
+            commits = list(self.repo.iter_commits(branch, max_count=max_count))
+            self.logger.debug(f"Retrieved {len(commits)} commits from {branch}")
+            return commits
+        except Exception as e:
+            self.logger.error(f"Failed to get commits from {branch}: {e}")
+            return []
+
+    def get_commit_info(self, commit: Any) -> Dict[str, Any]:
+        """Extract information from a commit object.
+
+        Args:
+            commit: GitPython commit object
+
+        Returns:
+            Dictionary with commit information
+        """
+        from datetime import datetime
+
+        return {
+            'sha_full': commit.hexsha,
+            'sha_short': commit.hexsha[:9],
+            'author_name': commit.author.name,
+            'author_email': commit.author.email,
+            'committer_name': commit.committer.name,
+            'committer_email': commit.committer.email,
+            'date': datetime.fromtimestamp(commit.committed_date),
+            'message': commit.message.strip(),
+            'message_first_line': commit.message.split('\n')[0] if commit.message else '',
+            'parents': [p.hexsha for p in commit.parents]
+        }
+
+    def is_dirty(self) -> bool:
+        """Check if repository has uncommitted changes.
+
+        Returns:
+            True if there are uncommitted changes, False otherwise
+        """
+        return self.repo.is_dirty()
+
+    def get_untracked_files(self) -> List[str]:
+        """Get list of untracked files.
+
+        Returns:
+            List of untracked file paths
+        """
+        return self.repo.untracked_files
+
+    def get_tags(self) -> List[str]:
+        """Get all repository tags.
+
+        Returns:
+            List of tag names
+        """
+        return [tag.name for tag in self.repo.tags]
+
+    def get_branches(self, remote: bool = False) -> List[str]:
+        """Get list of branches.
+
+        Args:
+            remote: If True, return remote branches. If False, return local branches.
+
+        Returns:
+            List of branch names
+        """
+        if remote:
+            return [ref.name for ref in self.repo.remote().refs]
+        else:
+            return [head.name for head in self.repo.heads]
+
+
+# GitHub API utilities
+class GitHubAPIClient:
+    """GitHub API client with automatic token detection and rate limit handling.
+
+    Features:
+    - Automatic token detection (--token arg > GITHUB_TOKEN env > GitHub CLI config)
+    - Request/response handling with proper error messages
+    - Support for parallel API calls with ThreadPoolExecutor
+
+    Example:
+        client = GitHubAPIClient()
+        pr_data = client.get("/repos/owner/repo/pulls/123")
+    """
+
+    @staticmethod
+    def get_github_token_from_cli() -> Optional[str]:
+        """Get GitHub token from GitHub CLI configuration.
+
+        Reads the token from ~/.config/gh/hosts.yml if available.
+
+        Returns:
+            GitHub token string, or None if not found
+        """
+        if not HAS_YAML:
+            return None
+
+        try:
+            gh_config_path = Path.home() / '.config' / 'gh' / 'hosts.yml'
+            if gh_config_path.exists():
+                with open(gh_config_path, 'r') as f:
+                    config = yaml.safe_load(f)
+                    if config and 'github.com' in config:
+                        github_config = config['github.com']
+                        if 'oauth_token' in github_config:
+                            return github_config['oauth_token']
+                        if 'users' in github_config:
+                            for user, user_config in github_config['users'].items():
+                                if 'oauth_token' in user_config:
+                                    return user_config['oauth_token']
+        except Exception:
+            pass
+        return None
+
+    def __init__(self, token: Optional[str] = None):
+        """Initialize GitHub API client.
+
+        Args:
+            token: GitHub personal access token. If not provided, will try:
+                   1. GITHUB_TOKEN environment variable
+                   2. GitHub CLI config (~/.config/gh/hosts.yml)
+        """
+        if not HAS_REQUESTS:
+            raise ImportError("requests package required for GitHub API client. Install with: pip install requests")
+
+        # Token priority: 1) provided token, 2) environment variable, 3) GitHub CLI config
+        self.token = token or os.environ.get('GITHUB_TOKEN') or self.get_github_token_from_cli()
+        self.base_url = "https://api.github.com"
+        self.headers = {'Accept': 'application/vnd.github.v3+json'}
+
+        if self.token:
+            self.headers['Authorization'] = f'token {self.token}'
+
+    def get(self, endpoint: str, params: Optional[Dict[str, Any]] = None, timeout: int = 10) -> Optional[Dict]:
+        """Make GET request to GitHub API.
+
+        Args:
+            endpoint: API endpoint (e.g., "/repos/owner/repo/pulls/123")
+            params: Query parameters
+            timeout: Request timeout in seconds
+
+        Returns:
+            JSON response as dict, or None if request failed
+        """
+        url = f"{self.base_url}{endpoint}" if endpoint.startswith('/') else f"{self.base_url}/{endpoint}"
+
+        try:
+            response = requests.get(url, headers=self.headers, params=params, timeout=timeout)
+
+            if response.status_code == 403:
+                # Check if it's a rate limit error
+                if 'X-RateLimit-Remaining' in response.headers and response.headers['X-RateLimit-Remaining'] == '0':
+                    raise Exception("GitHub API rate limit exceeded. Use --token argument or set GITHUB_TOKEN environment variable.")
+                else:
+                    raise Exception(f"GitHub API returned 403 Forbidden: {response.text}")
+
+            response.raise_for_status()
+            return response.json()
+
+        except requests.exceptions.RequestException as e:
+            raise Exception(f"GitHub API request failed for {endpoint}: {e}")
+
+    def has_token(self) -> bool:
+        """Check if a GitHub token is configured."""
+        return self.token is not None
+
+    def get_ci_status(self, owner: str, repo: str, sha: str) -> Optional[str]:
+        """Get CI status for a commit.
+
+        Args:
+            owner: Repository owner
+            repo: Repository name
+            sha: Commit SHA
+
+        Returns:
+            CI status string ('passed', 'failed', 'pending'), or None if unavailable
+        """
+        endpoint = f"/repos/{owner}/{repo}/commits/{sha}/status"
+        try:
+            data = self.get(endpoint)
+            if data:
+                state = data.get('state')
+                if state == 'success':
+                    return 'passed'
+                elif state == 'failure':
+                    return 'failed'
+                elif state == 'pending':
+                    return 'pending'
+            return None
+        except Exception:
+            return None
+
+    def get_pr_details(self, owner: str, repo: str, pr_number: int) -> Optional[dict]:
+        """Get full PR details including mergeable status.
+
+        Args:
+            owner: Repository owner
+            repo: Repository name
+            pr_number: Pull request number
+
+        Returns:
+            PR details as dict, or None if request failed
+        """
+        endpoint = f"/repos/{owner}/{repo}/pulls/{pr_number}"
+        try:
+            return self.get(endpoint)
+        except Exception:
+            return None
+
+    def count_unresolved_conversations(self, owner: str, repo: str, pr_number: int) -> int:
+        """Count unresolved conversation threads in a PR.
+
+        Args:
+            owner: Repository owner
+            repo: Repository name
+            pr_number: Pull request number
+
+        Returns:
+            Count of unresolved conversations (approximated as top-level comments)
+        """
+        endpoint = f"/repos/{owner}/{repo}/pulls/{pr_number}/comments"
+        try:
+            comments = self.get(endpoint)
+            if not comments:
+                return 0
+            # Count top-level comments (those without in_reply_to_id are conversation starters)
+            unresolved = sum(1 for comment in comments if not comment.get('in_reply_to_id'))
+            return unresolved
+        except Exception:
+            return 0
 
 

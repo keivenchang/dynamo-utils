@@ -3,301 +3,336 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """
-Simplified script to check branches in dynamo* directories and find corresponding PRs.
-
-This version simplifies the original show_dynamo_branches.py by:
-- Removing complex caching mechanisms
-- Simplifying GitHub API interactions
-- Using requests library instead of urllib
-- Clearer class structure with single responsibility
-- Less verbose output by default
-
-Usage:
-    ./show_dynamo_branches2.py [--verbose] [--token TOKEN]
+Show dynamo branches with PR information using a node-based tree structure.
+Supports parallel data gathering for improved performance.
 """
 
 import argparse
+import hashlib
 import json
+import os
+import re
 import subprocess
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import quote
+from zoneinfo import ZoneInfo
 
-try:
-    import requests
-    HAS_REQUESTS = True
-except ImportError:
-    HAS_REQUESTS = False
-    print("Warning: 'requests' library not found. Install with: pip install requests")
-    sys.exit(1)
+import git
+import requests
 
-try:
-    import yaml
-    HAS_YAML = True
-except ImportError:
-    HAS_YAML = False
-
-try:
-    import git
-    HAS_GIT = True
-except ImportError:
-    HAS_GIT = False
-    print("Warning: 'gitpython' library not found. Install with: pip install gitpython")
-    sys.exit(1)
-
-
-def get_github_token_from_cli() -> Optional[str]:
-    """Get GitHub token from GitHub CLI configuration"""
-    if not HAS_YAML:
-        return None
-
-    try:
-        gh_config_path = Path.home() / '.config' / 'gh' / 'hosts.yml'
-        if gh_config_path.exists():
-            with open(gh_config_path, 'r') as f:
-                config = yaml.safe_load(f)
-                if config and 'github.com' in config:
-                    github_config = config['github.com']
-                    # Try oauth_token first
-                    if 'oauth_token' in github_config:
-                        return github_config['oauth_token']
-                    # Try users config
-                    if 'users' in github_config:
-                        for user, user_config in github_config['users'].items():
-                            if 'oauth_token' in user_config:
-                                return user_config['oauth_token']
-    except Exception:
-        pass
-    return None
+# Import GitHub utilities from common module
+from common import GitHubAPIClient
 
 
 @dataclass
-class GitRepo:
-    """Represents a git repository"""
-    path: Path
-    current_branch: Optional[str]
-    branches: List[str]
-    remote_url: Optional[str]
-    owner_repo: Optional[str]  # e.g., "ai-dynamo/dynamo"
-
-
-@dataclass
-class PullRequest:
-    """Represents a GitHub pull request"""
+class PRInfo:
+    """Pull request information"""
     number: int
     title: str
-    state: str  # open, closed, merged
     url: str
-    branch: str
-    author: str
-    review_comments: int = 0
-    unresolved_conversations: int = 0
-    ci_status: Optional[str] = None  # passed, failed, pending, None
-    is_merged: bool = False
-    review_decision: Optional[str] = None  # APPROVED, CHANGES_REQUESTED, REVIEW_REQUIRED, None
+    state: str
+    is_merged: bool
+    review_decision: Optional[str]
+    mergeable_state: str
+    unresolved_conversations: int
+    ci_status: Optional[str]
     has_conflicts: bool = False
-    mergeable_state: Optional[str] = None  # clean, dirty, blocked, unstable, etc.
-    conflict_message: Optional[str] = None  # Message about conflicts
-    blocking_message: Optional[str] = None  # Message about merge being blocked
+    conflict_message: Optional[str] = None
+    blocking_message: Optional[str] = None
 
 
-class GitHelper:
-    """Simple helper for git operations using GitPython API"""
+@dataclass
+class BranchNode:
+    """Base class for tree nodes"""
+    label: str
+    children: List["BranchNode"] = field(default_factory=list)
 
-    def __init__(self, verbose: bool = False):
-        """Initialize with repo cache for better performance"""
-        self._repo_cache: Dict[str, git.Repo] = {}
-        self.verbose = verbose
-        import logging
-        self.logger = logging.getLogger(self.__class__.__name__)
-        if verbose:
-            self.logger.setLevel(logging.DEBUG)
+    def add_child(self, child: "BranchNode") -> "BranchNode":
+        """Add a child node and return it for chaining"""
+        self.children.append(child)
+        return child
 
-    def _get_repo(self, repo_path: Path) -> Optional[git.Repo]:
-        """Get cached git.Repo object or create new one"""
-        repo_key = str(repo_path.absolute())
-        if repo_key not in self._repo_cache:
-            try:
-                self._repo_cache[repo_key] = git.Repo(repo_path)
-                self.logger.debug(f"Initialized git repo: {repo_path}")
-            except (git.exc.InvalidGitRepositoryError, git.exc.NoSuchPathError):
-                return None
-        return self._repo_cache[repo_key]
+    def render(self, prefix: str = "", is_last: bool = True, is_root: bool = True) -> List[str]:
+        """Render the tree node and its children as text lines"""
+        lines = []
 
-    def get_current_branch(self, repo_path: Path) -> Optional[str]:
-        """Get current branch name"""
-        self.logger.debug(f"Equivalent: git -C {repo_path} branch --show-current")
-        try:
-            repo = self._get_repo(repo_path)
-            if not repo:
-                return None
-            return repo.active_branch.name
-        except (git.exc.GitError, TypeError):
-            return None
+        # Determine the connector
+        if not is_root:
+            connector = "└─" if is_last else "├─"
+            current_prefix = prefix + connector + " "
+        else:
+            current_prefix = ""
 
-    def get_all_branches(self, repo_path: Path) -> List[str]:
-        """Get all local branch names"""
-        self.logger.debug(f"Equivalent: git -C {repo_path} branch --format='%(refname:short)'")
-        try:
-            repo = self._get_repo(repo_path)
-            if not repo:
-                return []
-            branches = [head.name for head in repo.heads]
-            return branches
-        except (git.exc.GitError, AttributeError):
+        # Build the line content
+        line_content = self._format_content()
+        # Only render if there's actual content (not just whitespace/prefix)
+        # Example: "└─ keivenchang/DIS-442 [935d949] ⭐"
+        if line_content.strip():
+            lines.append(current_prefix + line_content)
+
+        # Render children
+        # Example child: "   └─ 📖 PR #3676: feat: add TensorRT-LLM Prometheus metrics support"
+        for i, child in enumerate(self.children):
+            is_last_child = i == len(self.children) - 1
+            if is_root:
+                child_prefix = ""
+            else:
+                child_prefix = prefix + ("   " if is_last else "│  ")
+            lines.extend(child.render(child_prefix, is_last_child, False))
+
+        return lines
+
+    def render_html(self, prefix: str = "", is_last: bool = True, is_root: bool = True) -> List[str]:
+        """Render the tree node and its children as HTML lines"""
+        lines = []
+
+        # Determine the connector
+        if not is_root:
+            connector = "└─" if is_last else "├─"
+            current_prefix = prefix + connector + " "
+        else:
+            current_prefix = ""
+
+        # Build the line content
+        line_content = self._format_html_content()
+        # Only render if there's actual content (not just whitespace/prefix)
+        # Example: "└─ keivenchang/DIS-442 [935d949] ⭐"
+        if line_content.strip():
+            lines.append(current_prefix + line_content)
+
+        # Render children
+        # Example child: "   └─ 📖 PR #3676: feat: add TensorRT-LLM Prometheus metrics support"
+        for i, child in enumerate(self.children):
+            is_last_child = i == len(self.children) - 1
+            if is_root:
+                child_prefix = ""
+            else:
+                child_prefix = prefix + ("   " if is_last else "│  ")
+            lines.extend(child.render_html(child_prefix, is_last_child, False))
+
+        return lines
+
+    def print_tree(self) -> None:
+        """Print the tree to console"""
+        for line in self.render():
+            print(line)
+
+    def _format_content(self) -> str:
+        """Format the node content for text output (override in subclasses)"""
+        return self.label
+
+    def _format_html_content(self) -> str:
+        """Format the node content for HTML output (override in subclasses)"""
+        return self.label
+
+
+@dataclass
+class RepoNode(BranchNode):
+    """Repository node"""
+    path: Optional[Path] = None
+    error: Optional[str] = None
+    remote_url: Optional[str] = None
+    is_correct_repo: bool = True
+
+    def _format_content(self) -> str:
+        if self.error:
+            return f"\033[1m{self.label}\033[0m\n  \033[91m⚠️  {self.error}\033[0m"
+        if not self.is_correct_repo:
+            return f"\033[1m{self.label}\033[0m\n  \033[91m⚠️  Not ai-dynamo/dynamo repository\033[0m\n  Remote: {self.remote_url}"
+        return f"\033[1m{self.label}\033[0m"
+
+    def _format_html_content(self) -> str:
+        # Make repo name clickable (relative URL to the directory)
+        # Remove trailing slash from label for URL
+        repo_dirname = self.label.rstrip('/')
+        repo_link = f'<a href="{repo_dirname}/" class="repo-name">{self.label}</a>'
+
+        if self.error:
+            return f'{repo_link}\n<span class="error">⚠️  {self.error}</span>'
+        if not self.is_correct_repo:
+            return f'{repo_link}\n<span class="error">⚠️  Not ai-dynamo/dynamo repository</span>\n  Remote: {self.remote_url}'
+        return repo_link
+
+
+@dataclass
+class SectionNode(BranchNode):
+    """Section node (e.g., 'Branches with PRs', 'Local-only branches')"""
+    pass
+
+
+@dataclass
+class BranchInfoNode(BranchNode):
+    """Branch information node"""
+    sha: Optional[str] = None
+    is_current: bool = False
+    commit_url: Optional[str] = None
+
+    def _format_content(self) -> str:
+        marker = " ⭐" if self.is_current else ""
+        sha_str = f" [{self.sha}]" if self.sha else ""
+        if self.is_current:
+            return f"\033[1m{self.label}\033[0m{sha_str}{marker}"
+        return f"{self.label}{sha_str}{marker}"
+
+    def _format_html_content(self) -> str:
+        marker = " ⭐" if self.is_current else ""
+        sha_str = ""
+        if self.sha:
+            if self.commit_url:
+                sha_str = f' [<a href="{self.commit_url}" target="_blank">{self.sha}</a>]'
+            else:
+                sha_str = f' [{self.sha}]'
+
+        if self.is_current:
+            return f'<span class="current">{self.label}</span>{sha_str}{marker}'
+        return f'{self.label}{sha_str}{marker}'
+
+
+@dataclass
+class PRNode(BranchNode):
+    """Pull request node"""
+    pr: Optional[PRInfo] = None
+
+    def _format_content(self) -> str:
+        if not self.pr:
+            return ""
+        if self.pr.is_merged:
+            emoji = '🔀'
+        elif self.pr.state == 'open':
+            emoji = '📖'
+        else:
+            emoji = '❌'
+
+        # Truncate title at 80 characters
+        title = self.pr.title[:80] + '...' if len(self.pr.title) > 80 else self.pr.title
+        # Return just the PR info, URL will be shown separately
+        return f"{emoji} PR #{self.pr.number}: {title}"
+
+    def _format_html_content(self) -> str:
+        if not self.pr:
+            return ""
+        if self.pr.is_merged:
+            emoji = '🔀'
+        elif self.pr.state == 'open':
+            emoji = '📖'
+        else:
+            emoji = '❌'
+
+        # Truncate title at 80 characters
+        title = self.pr.title[:80] + '...' if len(self.pr.title) > 80 else self.pr.title
+        return f'{emoji} <a href="{self.pr.url}" target="_blank">PR #{self.pr.number}</a>: {title}'
+
+
+@dataclass
+class PRURLNode(BranchNode):
+    """PR URL node"""
+    url: Optional[str] = None
+
+    def _format_content(self) -> str:
+        # Don't show URL separately in terminal - it's already visible in the PR title line
+        # Matches v1 behavior where URL is shown as a separate line
+        if not self.url:
+            return ""
+        return f"URL: {self.url}"
+
+    def _format_html_content(self) -> str:
+        # URL is already in the PR link for HTML, so this can be omitted
+        return ""
+
+
+@dataclass
+class PRStatusNode(BranchNode):
+    """PR status information node"""
+    pr: Optional[PRInfo] = None
+
+    def _format_content(self) -> str:
+        if not self.pr:
+            return ""
+        status_parts = []
+
+        if self.pr.review_decision == 'APPROVED':
+            status_parts.append("Review: ✅ Approved")
+        elif self.pr.review_decision == 'CHANGES_REQUESTED':
+            status_parts.append("Review: 🔴 Changes Requested")
+
+        if self.pr.unresolved_conversations > 0:
+            status_parts.append(f"💬 Unresolved: {self.pr.unresolved_conversations}")
+
+        if self.pr.ci_status:
+            ci_icon = "✅" if self.pr.ci_status == "passed" else "❌" if self.pr.ci_status == "failed" else "⏳"
+            status_parts.append(f"CI: {ci_icon} {self.pr.ci_status}")
+
+        if status_parts:
+            return f"Status: {', '.join(status_parts)}"
+        return ""
+
+    def _format_html_content(self) -> str:
+        return self._format_content()
+
+
+@dataclass
+class BlockedMessageNode(BranchNode):
+    """Blocked message node"""
+
+    def _format_content(self) -> str:
+        return f"🚫 {self.label}"
+
+    def _format_html_content(self) -> str:
+        return self.label
+
+
+@dataclass
+class ConflictWarningNode(BranchNode):
+    """Conflict warning node"""
+
+    def _format_content(self) -> str:
+        return f"⚠️  {self.label}"
+
+    def _format_html_content(self) -> str:
+        return self.label
+
+
+def get_pr_info(github_client: GitHubAPIClient, owner: str, repo: str, branch: str) -> List[PRInfo]:
+    """Get PR information for a branch.
+
+    Args:
+        github_client: GitHubAPIClient instance
+        owner: Repository owner
+        repo: Repository name
+        branch: Branch name
+
+    Returns:
+        List of PRInfo objects
+    """
+    endpoint = f"/repos/{owner}/{repo}/pulls"
+    params = {'head': f'{owner}:{branch}', 'state': 'all'}
+
+    try:
+        prs_data = github_client.get(endpoint, params=params)
+        if not prs_data:
             return []
 
-    def get_remote_url(self, repo_path: Path, remote: str = 'origin') -> Optional[str]:
-        """Get remote URL for given remote name"""
-        self.logger.debug(f"Equivalent: git -C {repo_path} remote get-url {remote}")
-        try:
-            repo = self._get_repo(repo_path)
-            if not repo:
-                return None
-            if remote in repo.remotes:
-                return list(repo.remotes[remote].urls)[0]
-            return None
-        except (git.exc.GitError, IndexError, AttributeError):
-            return None
+        pr_list = []
+        for pr_data in prs_data:
+            # Fetch PR details in parallel using ThreadPoolExecutor
+            with ThreadPoolExecutor(max_workers=3) as executor:
+                # Submit all 3 API calls in parallel
+                future_ci = executor.submit(github_client.get_ci_status, owner, repo, pr_data['head']['sha'])
+                future_conversations = executor.submit(github_client.count_unresolved_conversations, owner, repo, pr_data['number'])
+                future_details = executor.submit(github_client.get_pr_details, owner, repo, pr_data['number'])
 
-    def get_all_remotes(self, repo_path: Path) -> Dict[str, str]:
-        """Get all remotes as dict of {name: url}"""
-        self.logger.debug(f"Equivalent: git -C {repo_path} remote -v")
-        try:
-            repo = self._get_repo(repo_path)
-            if not repo:
-                return {}
-            remotes = {}
-            for remote in repo.remotes:
-                urls = list(remote.urls)
-                if urls:
-                    remotes[remote.name] = urls[0]
-            return remotes
-        except (git.exc.GitError, AttributeError):
-            return {}
+                # Wait for all to complete
+                ci_status = future_ci.result()
+                unresolved_count = future_conversations.result()
+                pr_details = future_details.result()
 
-    @staticmethod
-    def parse_github_repo(remote_url: str) -> Optional[str]:
-        """
-        Parse GitHub owner/repo from remote URL.
-
-        Examples:
-            git@github.com:ai-dynamo/dynamo.git -> ai-dynamo/dynamo
-            https://github.com/ai-dynamo/dynamo.git -> ai-dynamo/dynamo
-        """
-        if not remote_url or 'github.com' not in remote_url:
-            return None
-
-        # Remove .git suffix
-        url = remote_url.rstrip('/')
-        if url.endswith('.git'):
-            url = url[:-4]
-
-        # Extract owner/repo
-        if url.startswith('git@github.com:'):
-            return url.split('git@github.com:')[1]
-        elif 'github.com/' in url:
-            parts = url.split('github.com/')[1].split('/')
-            if len(parts) >= 2:
-                return f"{parts[0]}/{parts[1]}"
-
-        return None
-
-    def find_github_remote(self, repo_path: Path) -> Optional[str]:
-        """
-        Find the GitHub remote that points to ai-dynamo/dynamo.
-        Check remotes in priority order: tracking, upstream, origin.
-        """
-        remotes = self.get_all_remotes(repo_path)
-
-        # Priority order
-        for remote_name in ['tracking', 'upstream', 'origin']:
-            if remote_name in remotes:
-                owner_repo = self.parse_github_repo(remotes[remote_name])
-                if owner_repo == 'ai-dynamo/dynamo':
-                    return owner_repo
-
-        # Check all other remotes
-        for url in remotes.values():
-            owner_repo = self.parse_github_repo(url)
-            if owner_repo == 'ai-dynamo/dynamo':
-                return owner_repo
-
-        return None
-
-
-class GitHubClient:
-    """Simple GitHub API client"""
-
-    def __init__(self, token: Optional[str] = None, verbose: bool = False):
-        self.base_url = "https://api.github.com"
-        # Token priority: 1) provided token, 2) environment variable, 3) GitHub CLI config
-        import os
-        self.token = token or os.environ.get('GITHUB_TOKEN') or get_github_token_from_cli()
-        self.verbose = verbose
-        self.session = requests.Session()
-
-        if self.token:
-            self.session.headers.update({'Authorization': f'token {self.token}'})
-        self.session.headers.update({
-            'Accept': 'application/vnd.github.v3+json',
-            'User-Agent': 'dynamo-branch-checker/2.0'
-        })
-
-    def get(self, endpoint: str) -> Optional[Dict]:
-        """Make GET request to GitHub API"""
-        url = f"{self.base_url}{endpoint}"
-
-        try:
-            response = self.session.get(url, timeout=10)
-
-            if response.status_code == 404:
-                return None
-            elif response.status_code == 403:
-                print(f"  Warning: Rate limit exceeded. Use --token to increase limit.", file=sys.stderr)
-                return None
-            elif response.status_code != 200:
-                if self.verbose:
-                    print(f"  API returned status {response.status_code} for {endpoint}", file=sys.stderr)
-                return None
-
-            return response.json()
-
-        except requests.exceptions.RequestException as e:
-            if self.verbose:
-                print(f"  API error for {endpoint}: {e}", file=sys.stderr)
-            return None
-
-    def find_prs_for_branch(self, owner_repo: str, branch: str) -> List[PullRequest]:
-        """Find all PRs for a given branch"""
-        # Search for PRs with this branch as head
-        endpoint = f"/repos/{owner_repo}/pulls?head={owner_repo.split('/')[0]}:{branch}&state=all"
-        data = self.get(endpoint)
-
-        if not data:
-            return []
-
-        prs = []
-        for pr_data in data:
-            # Get review comments count (top-level conversations)
-            review_comments, unresolved_conversations = self._get_review_comments_count(owner_repo, pr_data['number'])
-
-            # Get CI status
-            ci_status = self._get_ci_status(owner_repo, pr_data)
-
-            # Check if merged
-            is_merged = pr_data.get('merged_at') is not None
-
-            # Get review decision
-            review_decision = self._get_review_decision(owner_repo, pr_data['number'])
-
-            # Get full PR details to check mergeable status (not included in list API)
-            pr_details = self._get_pr_details(owner_repo, pr_data['number'])
             mergeable = pr_details.get('mergeable') if pr_details else None
-            mergeable_state = pr_details.get('mergeable_state') if pr_details else None
+            mergeable_state = pr_details.get('mergeable_state') if pr_details else pr_data.get('mergeable_state', 'unknown')
             has_conflicts = (mergeable == False) or (mergeable_state == 'dirty')
 
             # Generate conflict message
@@ -316,368 +351,291 @@ class GitHubClient:
                 elif mergeable_state == 'behind':
                     blocking_message = "This branch is out of date with the base branch"
 
-            prs.append(PullRequest(
+            pr_info = PRInfo(
                 number=pr_data['number'],
                 title=pr_data['title'],
-                state=pr_data['state'],
                 url=pr_data['html_url'],
-                branch=branch,
-                author=pr_data['user']['login'],
-                review_comments=review_comments,
-                unresolved_conversations=unresolved_conversations,
-                ci_status=ci_status,
-                is_merged=is_merged,
-                review_decision=review_decision,
-                has_conflicts=has_conflicts,
+                state=pr_data['state'],
+                is_merged=pr_data.get('merged', False),
+                review_decision=pr_data.get('reviewDecision'),
                 mergeable_state=mergeable_state,
+                unresolved_conversations=unresolved_count,
+                ci_status=ci_status,
+                has_conflicts=has_conflicts,
                 conflict_message=conflict_message,
                 blocking_message=blocking_message
-            ))
+            )
+            pr_list.append(pr_info)
 
-        return prs
+        return pr_list
 
-    def _get_review_comments_count(self, owner_repo: str, pr_number: int) -> tuple[int, int]:
-        """
-        Get review comment counts for a PR.
-
-        Returns:
-            tuple: (total_comments, unresolved_conversations)
-        """
-        endpoint = f"/repos/{owner_repo}/pulls/{pr_number}/comments"
-        data = self.get(endpoint)
-
-        if not data:
-            return 0, 0
-
-        # Count total comments and top-level conversations (unresolved)
-        total_comments = len(data)
-        unresolved_conversations = sum(1 for comment in data if not comment.get('in_reply_to_id'))
-
-        return total_comments, unresolved_conversations
-
-    def _get_ci_status(self, owner_repo: str, pr_data: Dict) -> Optional[str]:
-        """Get CI status for a PR"""
-        # Try to get status from commits
-        if 'head' in pr_data and 'sha' in pr_data['head']:
-            sha = pr_data['head']['sha']
-            endpoint = f"/repos/{owner_repo}/commits/{sha}/status"
-            status_data = self.get(endpoint)
-
-            if status_data and 'state' in status_data:
-                state = status_data['state']
-                # Map GitHub status states to our simplified states
-                if state == 'success':
-                    return 'passed'
-                elif state == 'failure':
-                    return 'failed'
-                elif state in ['pending', 'error']:
-                    return 'pending'
-
-        return None
-
-    def _get_pr_details(self, owner_repo: str, pr_number: int) -> Optional[Dict]:
-        """Get full PR details (includes mergeable status)"""
-        endpoint = f"/repos/{owner_repo}/pulls/{pr_number}"
-        return self.get(endpoint)
-
-    def _get_review_decision(self, owner_repo: str, pr_number: int) -> Optional[str]:
-        """Get review decision for a PR (APPROVED, CHANGES_REQUESTED, etc.)"""
-        endpoint = f"/repos/{owner_repo}/pulls/{pr_number}/reviews"
-        reviews = self.get(endpoint)
-
-        if not reviews:
-            return None
-
-        # Get the latest review from each reviewer
-        latest_reviews = {}
-        for review in reviews:
-            reviewer = review['user']['login']
-            # Keep only the most recent review per reviewer
-            if reviewer not in latest_reviews or review['id'] > latest_reviews[reviewer]['id']:
-                latest_reviews[reviewer] = review
-
-        # Check review states
-        has_approved = False
-        has_changes_requested = False
-
-        for review in latest_reviews.values():
-            state = review.get('state')
-            if state == 'APPROVED':
-                has_approved = True
-            elif state == 'CHANGES_REQUESTED':
-                has_changes_requested = True
-
-        # Return decision based on reviews
-        if has_changes_requested:
-            return 'CHANGES_REQUESTED'
-        elif has_approved:
-            return 'APPROVED'
-
-        return None
-
-    def branch_exists(self, owner_repo: str, branch: str) -> bool:
-        """Check if branch exists on GitHub"""
-        encoded_branch = quote(branch, safe='')
-        endpoint = f"/repos/{owner_repo}/branches/{encoded_branch}"
-        return self.get(endpoint) is not None
+    except Exception as e:
+        print(f"Error fetching PR info for {branch}: {e}", file=sys.stderr)
+        return []
 
 
-class BranchChecker:
-    """Main class to check branches and PRs"""
+class BranchScanner:
+    """Scanner for repository branches"""
 
-    def __init__(self, base_dir: Path, github_token: Optional[str] = None, verbose: bool = False):
-        self.base_dir = base_dir
-        self.github = GitHubClient(github_token, verbose)
-        self.git = GitHelper(verbose)  # Initialize GitHelper instance with verbose flag
-        self.verbose = verbose
+    def __init__(self, token: Optional[str] = None):
+        self.github_api = GitHubAPIClient(token=token)
 
-    def find_dynamo_repos(self) -> List[GitRepo]:
-        """Find all dynamo* git repositories"""
-        repos = []
+    def scan_repositories(self, base_dir: Path) -> BranchNode:
+        """Scan all dynamo* repositories and build tree structure"""
+        root = BranchNode(label="")
 
-        for item in self.base_dir.iterdir():
-            if not item.is_dir() or not item.name.startswith('dynamo'):
-                continue
+        # Find all dynamo* directories
+        repo_dirs = sorted([d for d in base_dir.iterdir()
+                          if d.is_dir() and d.name.startswith('dynamo')])
 
-            if not (item / '.git').exists():
-                continue
-
-            current_branch = self.git.get_current_branch(item)
-            branches = self.git.get_all_branches(item)
-            remote_url = self.git.get_remote_url(item)
-            owner_repo = self.git.find_github_remote(item)
-
-            repos.append(GitRepo(
-                path=item,
-                current_branch=current_branch,
-                branches=branches,
-                remote_url=remote_url,
-                owner_repo=owner_repo
-            ))
-
-        return sorted(repos, key=lambda r: r.path.name)
-
-    def check_repo(self, repo: GitRepo) -> Dict:
-        """Check a single repository for branches and PRs"""
-        result = {
-            'repo': repo,
-            'branches_with_prs': {},
-            'branches_on_github_no_prs': [],
-            'local_only_branches': []
-        }
-
-        if not repo.owner_repo or repo.owner_repo != 'ai-dynamo/dynamo':
-            result['error'] = 'Not ai-dynamo/dynamo repository'
-            return result
-
-        # Check all branches in parallel
+        # Scan each repository in parallel
         with ThreadPoolExecutor(max_workers=4) as executor:
-            # Submit all branch existence checks in parallel
-            branch_futures = {}
-            for branch in repo.branches:
-                future = executor.submit(self.github.branch_exists, repo.owner_repo, branch)
-                branch_futures[future] = branch
+            future_to_dir = {
+                executor.submit(self._scan_repository, repo_dir): repo_dir
+                for repo_dir in repo_dirs
+            }
 
-            # Wait for all checks to complete
-            branch_exists_map = {}
-            for future in as_completed(branch_futures):
-                branch = branch_futures[future]
-                try:
-                    exists = future.result()
-                    branch_exists_map[branch] = exists
-                except Exception:
-                    branch_exists_map[branch] = False
+            for future in as_completed(future_to_dir):
+                repo_node = future.result()
+                if repo_node:
+                    root.add_child(repo_node)
 
-        # Now fetch PRs for branches that exist on GitHub (also in parallel)
-        branches_on_github = [b for b, exists in branch_exists_map.items() if exists]
+        # Sort children by name
+        root.children.sort(key=lambda n: n.label)
 
-        pr_futures = {}
-        if branches_on_github:
-            with ThreadPoolExecutor(max_workers=4) as executor:
-                for branch in branches_on_github:
-                    future = executor.submit(self.github.find_prs_for_branch, repo.owner_repo, branch)
-                    pr_futures[future] = branch
+        return root
 
-                # Wait for all PR fetches to complete
-                branch_prs_map = {}
-                for future in as_completed(pr_futures):
-                    branch = pr_futures[future]
-                    try:
-                        prs = future.result()
-                        branch_prs_map[branch] = prs
-                    except Exception:
-                        branch_prs_map[branch] = []
+    def _scan_repository(self, repo_dir: Path) -> Optional[RepoNode]:
+        """Scan a single repository"""
+        repo_name = f"{repo_dir.name}/"
+        repo_node = RepoNode(label=repo_name, path=repo_dir)
 
-        # Organize results
+        try:
+            repo = git.Repo(repo_dir)
+        except Exception as e:
+            repo_node.error = f"Not a valid git repository: {e}"
+            return repo_node
+
+        # Check if it's the correct repo
+        try:
+            remote = repo.remote('origin')
+            remote_url = next(remote.urls)
+            repo_node.remote_url = remote_url
+
+            if 'ai-dynamo/dynamo' not in remote_url:
+                repo_node.is_correct_repo = False
+                return repo_node
+        except Exception:
+            repo_node.error = "No origin remote found"
+            return repo_node
+
+        # Get current branch
+        try:
+            current_branch = repo.active_branch.name
+        except Exception:
+            current_branch = None
+
+        # Collect branch information
+        branches_with_prs = {}
+        local_only_branches = []
+
+        # Get remote branches
+        try:
+            remote = repo.remote('origin')
+            remote.fetch()
+        except Exception:
+            pass
+
+        # Scan all local branches
         for branch in repo.branches:
-            is_current = branch == repo.current_branch
+            branch_name = branch.name
 
-            if not branch_exists_map.get(branch, False):
-                # Local-only branch
-                result['local_only_branches'].append({
-                    'name': branch,
-                    'is_current': is_current
-                })
+            # Skip main branches
+            if branch_name in ['main', 'master']:
                 continue
 
-            # Branch exists on GitHub
-            prs = branch_prs_map.get(branch, [])
+            # Check if branch has remote tracking
+            try:
+                tracking_branch = branch.tracking_branch()
+                has_remote = tracking_branch is not None
+            except Exception:
+                has_remote = False
 
-            if prs:
-                # Branch with PR
-                result['branches_with_prs'][branch] = {
+            # Get commit SHA
+            try:
+                sha = branch.commit.hexsha[:7]
+            except Exception:
+                sha = None
+
+            is_current = (branch_name == current_branch)
+
+            if has_remote:
+                # Get PR info in parallel (will be gathered later)
+                branches_with_prs[branch_name] = {
+                    'sha': sha,
                     'is_current': is_current,
-                    'prs': prs
+                    'branch': branch
                 }
             else:
-                # Branch on GitHub but no PR
-                result['branches_on_github_no_prs'].append({
-                    'name': branch,
+                local_only_branches.append({
+                    'name': branch_name,
+                    'sha': sha,
                     'is_current': is_current
                 })
 
-        return result
+        # Fetch PR information in parallel
+        if branches_with_prs:
+            pr_section = SectionNode(label="Branches with PRs")
 
-    def print_results(self, results: List[Dict]):
-        """Print results in a tree structure format"""
-        print("\n" + "=" * 70)
-        print("RESULTS")
-        print("=" * 70)
+            with ThreadPoolExecutor(max_workers=4) as executor:
+                future_to_branch = {
+                    executor.submit(
+                        get_pr_info,
+                        self.github_api,
+                        'ai-dynamo',
+                        'dynamo',
+                        branch_name
+                    ): (branch_name, info)
+                    for branch_name, info in branches_with_prs.items()
+                }
 
-        for result in results:
-            repo = result['repo']
-            # Root: repository name
-            current = f" (on {repo.current_branch})" if repo.current_branch else ""
-            print(f"\n{repo.path.name}/{current}")
+                branch_results = []
+                for future in as_completed(future_to_branch):
+                    branch_name, info = future_to_branch[future]
+                    prs = future.result()
+                    if prs:
+                        branch_results.append((branch_name, info, prs))
 
-            if 'error' in result:
-                print(f"└─ ⚠️  {result['error']}")
-                if repo.remote_url:
-                    print(f"  └─ Remote: {repo.remote_url}")
-                continue
+            # Build branch nodes
+            for branch_name, info, prs in sorted(branch_results):
+                commit_url = f"https://github.com/ai-dynamo/dynamo/commit/{info['sha']}" if info['sha'] else None
+                branch_node = BranchInfoNode(
+                    label=branch_name,
+                    sha=info['sha'],
+                    is_current=info['is_current'],
+                    commit_url=commit_url
+                )
 
-            has_prs = bool(result['branches_with_prs'])
-            has_local = bool(result['local_only_branches'])
+                # Add PR nodes
+                for pr in prs:
+                    pr_node = PRNode(label="", pr=pr)
+                    branch_node.add_child(pr_node)
 
-            sections = []
-            if has_prs:
-                sections.append('prs')
-            if has_local:
-                sections.append('local')
+                    # Add URL node (text only)
+                    url_node = PRURLNode(label="", url=pr.url)
+                    pr_node.add_child(url_node)
 
-            # If nothing to show, print message
-            if not has_prs and not has_local:
-                print(f"└─ No branches with PRs or local-only branches")
-                continue
+                    # Add status node
+                    status_node = PRStatusNode(label="", pr=pr)
+                    pr_node.add_child(status_node)
 
-            # Branches with PRs
-            if has_prs:
-                is_last_section = sections[-1] == 'prs'
-                section_prefix = "└─" if is_last_section else "├─"
-                print(f"{section_prefix} Branches with PRs:")
+                    # Add conflict warning if applicable
+                    if pr.conflict_message:
+                        conflict_node = ConflictWarningNode(label=pr.conflict_message)
+                        pr_node.add_child(conflict_node)
 
-                branch_items = list(result['branches_with_prs'].items())
-                for idx, (branch, info) in enumerate(branch_items):
-                    is_last_branch = (idx == len(branch_items) - 1) and is_last_section
+                    # Add blocking message if applicable
+                    if pr.blocking_message:
+                        blocked_node = BlockedMessageNode(label=pr.blocking_message)
+                        pr_node.add_child(blocked_node)
 
-                    if is_last_section:
-                        branch_prefix = "  └─" if is_last_branch else "  ├─"
-                    else:
-                        branch_prefix = "│ └─" if is_last_branch else "│ ├─"
+                pr_section.add_child(branch_node)
 
-                    # Bold current branch
-                    branch_display = f"\033[1m{branch}\033[0m" if info['is_current'] else branch
-                    current_marker = " ⭐" if info['is_current'] else ""
-                    print(f"{branch_prefix} {branch_display}{current_marker}")
+            if pr_section.children:
+                repo_node.add_child(pr_section)
 
-                    for pr_idx, pr in enumerate(info['prs']):
-                        is_last_pr = pr_idx == len(info['prs']) - 1
+        # Add local-only branches
+        if local_only_branches:
+            local_section = SectionNode(label="Local-only branches")
 
-                        if is_last_section:
-                            if is_last_branch:
-                                pr_prefix = "    └─" if is_last_pr else "    ├─"
-                                detail_prefix = "      " if is_last_pr else "    │ "
-                            else:
-                                pr_prefix = "  │ └─" if is_last_pr else "  │ ├─"
-                                detail_prefix = "  │   " if is_last_pr else "  │ │ "
-                        else:
-                            if is_last_branch:
-                                pr_prefix = "│   └─" if is_last_pr else "│   ├─"
-                                detail_prefix = "│     " if is_last_pr else "│   │ "
-                            else:
-                                pr_prefix = "│ │ └─" if is_last_pr else "│ │ ├─"
-                                detail_prefix = "│ │   " if is_last_pr else "│ │ │ "
+            for branch_info in local_only_branches:
+                branch_node = BranchInfoNode(
+                    label=branch_info['name'],
+                    sha=branch_info['sha'],
+                    is_current=branch_info['is_current']
+                )
+                local_section.add_child(branch_node)
 
-                        # State emoji - check merged first
-                        if pr.is_merged:
-                            state_emoji = '🔀'
-                        elif pr.state == 'open':
-                            state_emoji = '📖'
-                        elif pr.state == 'closed':
-                            state_emoji = '❌'
-                        else:
-                            state_emoji = '📖'
+            repo_node.add_child(local_section)
 
-                        # Truncate title if too long
-                        title = pr.title[:80] + '...' if len(pr.title) > 80 else pr.title
+        # Add "no branches" message if needed
+        if not repo_node.children:
+            no_branches = BranchNode(label="No branches with PRs or local-only branches")
+            repo_node.add_child(no_branches)
 
-                        print(f"{pr_prefix} {state_emoji} PR #{pr.number}: {title}")
-                        print(f"{detail_prefix}URL: {pr.url}")
+        return repo_node
 
-                        # Build status line
-                        status_parts = []
 
-                        # Review decision
-                        if pr.review_decision == 'APPROVED':
-                            status_parts.append("Review: ✅ Approved")
-                        elif pr.review_decision == 'CHANGES_REQUESTED':
-                            status_parts.append("Review: 🔴 Changes Requested")
+def generate_html(root: BranchNode) -> str:
+    """Generate HTML output from tree"""
+    # Get current time in both UTC and PDT
+    now_utc = datetime.now(ZoneInfo('UTC'))
+    now_pdt = datetime.now(ZoneInfo('America/Los_Angeles'))
 
-                        # Unresolved conversations (not necessarily blocking)
-                        if pr.unresolved_conversations > 0:
-                            status_parts.append(f"💬 Comments: {pr.unresolved_conversations}")
+    # Format timestamps
+    utc_str = now_utc.strftime('%Y-%m-%d %H:%M:%S UTC')
+    pdt_str = now_pdt.strftime('%Y-%m-%d %H:%M:%S %Z')
 
-                        # CI status
-                        if pr.ci_status:
-                            ci_icon = "✅" if pr.ci_status == "passed" else "❌" if pr.ci_status == "failed" else "⏳"
-                            status_parts.append(f"CI: {ci_icon} {pr.ci_status}")
+    html = f"""<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>Dynamo Branch Status</title>
+    <style>
+        body {{
+            font-family: 'Courier New', monospace;
+            margin: 20px;
+            background-color: #ffffff;
+            color: #000000;
+            font-size: 13px;
+            line-height: 1.4;
+        }}
+        a {{ color: #0000ee; text-decoration: none; }}
+        a:hover {{ text-decoration: underline; }}
+        .repo-name {{ font-weight: bold; margin-top: 10px; }}
+        .current {{ font-weight: bold; }}
+        .indent {{ margin-left: 20px; }}
+        .error {{ color: #cc0000; }}
+        .timestamp {{ color: #666666; font-size: 12px; margin-bottom: 10px; }}
+    </style>
+</head>
+<body>
+<pre><span class="timestamp">Generated: {pdt_str} / {utc_str}</span>
 
-                        if status_parts:
-                            print(f"{detail_prefix}Status: {', '.join(status_parts)}")
+"""
 
-                        # Merge conflicts (show as separate line for visibility)
-                        if pr.has_conflicts and pr.conflict_message:
-                            print(f"{detail_prefix}⚠️  {pr.conflict_message}")
+    # Render all children (skip root)
+    for i, child in enumerate(root.children):
+        is_last = i == len(root.children) - 1
+        lines = child.render_html(prefix="", is_last=is_last, is_root=True)
+        html += "\n".join(lines) + "\n\n"
 
-                        # Blocking message (show as separate line)
-                        if pr.blocking_message:
-                            print(f"{detail_prefix}🚫 {pr.blocking_message}")
+    html += """</pre>
+</body>
+</html>
+"""
 
-            # Local-only branches
-            if has_local:
-                print(f"└─ Local-only branches:")
+    return html
 
-                for idx, branch_info in enumerate(result['local_only_branches']):
-                    branch = branch_info['name']
-                    is_last = idx == len(result['local_only_branches']) - 1
-                    branch_prefix = "  └─" if is_last else "  ├─"
 
-                    # Bold current branch
-                    if branch_info['is_current']:
-                        branch_display = f"\033[1m{branch}\033[0m ⭐"
-                    else:
-                        branch_display = branch
-
-                    print(f"{branch_prefix} {branch_display}")
+def compute_state_hash(root: BranchNode) -> str:
+    """Compute hash of current state for change detection"""
+    # Render the tree and hash it
+    lines = []
+    for child in root.children:
+        lines.extend(child.render())
+    content = "\n".join(lines)
+    return hashlib.sha256(content.encode()).hexdigest()
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Check branches in dynamo* directories and find corresponding PRs"
+        description='Show dynamo branches with PR information (node-based version)'
     )
     parser.add_argument(
-        '--base-dir',
+        'base_dir',
         type=Path,
+        nargs='?',
         default=Path.cwd(),
         help='Base directory to search for dynamo* repos (default: current directory)'
     )
@@ -686,48 +644,28 @@ def main():
         help='GitHub personal access token (or set GITHUB_TOKEN env var)'
     )
     parser.add_argument(
-        '--verbose', '-v',
+        '--html',
         action='store_true',
-        help='Enable verbose output'
+        help='Output in HTML format'
     )
-
     args = parser.parse_args()
 
-    # Configure logging if verbose
-    if args.verbose:
-        import logging
-        logging.basicConfig(
-            level=logging.DEBUG,
-            format='%(levelname)s - [%(name)s] %(message)s',
-            stream=sys.stderr
-        )
+    base_dir = args.base_dir
 
-    # Token will be auto-detected in GitHubClient (from args, env, or gh CLI config)
-    checker = BranchChecker(args.base_dir, args.token, args.verbose)
+    base_dir = base_dir.resolve()
 
-    if args.verbose:
-        print(f"Scanning for dynamo* repositories in: {args.base_dir}")
+    # Scan repositories
+    scanner = BranchScanner(token=args.token)
+    root = scanner.scan_repositories(base_dir)
 
-    repos = checker.find_dynamo_repos()
-
-    if not repos:
-        print(f"No dynamo* git repositories found in {args.base_dir}")
-        return 1
-
-    if args.verbose:
-        print(f"Found {len(repos)} repositories")
-
-    results = []
-    for repo in repos:
-        if args.verbose:
-            print(f"\nChecking {repo.path.name}...")
-        result = checker.check_repo(repo)
-        results.append(result)
-
-    checker.print_results(results)
-
-    return 0
+    # Output
+    if args.html:
+        print(generate_html(root))
+    else:
+        for child in root.children:
+            child.print_tree()
+            print()
 
 
-if __name__ == "__main__":
-    sys.exit(main())
+if __name__ == '__main__':
+    main()

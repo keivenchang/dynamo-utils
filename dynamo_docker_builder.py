@@ -68,6 +68,7 @@ class Task:
     # Build-specific (for BUILD tasks)
     image_tag: Optional[str] = None
     base_image: Optional[str] = None
+    image_size: Optional[str] = None  # Human-readable image size (e.g., "18.2 GB")
 
     # Execute-specific (for COMPILATION/SANITY_CHECK tasks)
     timeout: float = 3600.0
@@ -798,7 +799,7 @@ class ReportGenerator:
         log_dir: Path,
         date_str: str,
         hostname: str = "keivenc-linux",
-        html_path: str = "/dynamo_ci/logs",
+        html_path: str = "/nvidia/dynamo_ci/logs",
         use_absolute_urls: bool = False
     ) -> str:
         """Generate elegant HTML report matching V1 format with clickable log links
@@ -814,13 +815,14 @@ class ReportGenerator:
             if not task.log_file:
                 return None
             try:
-                # Get relative path from logs directory (includes date subdirectory)
-                rel_path = task.log_file.relative_to(log_dir.parent)
                 if use_absolute_urls:
-                    # Construct absolute URL: http://hostname/html_path/relative_path
+                    # Email: absolute URL with http://
+                    # Get relative path from logs directory (includes date subdirectory)
+                    rel_path = task.log_file.relative_to(log_dir.parent)
                     return f"http://{hostname}{html_path}/{rel_path}"
                 else:
-                    # Return just the log filename (relative to the HTML report)
+                    # File: relative path from HTML report location
+                    # HTML is in same directory as log files, so just use filename
                     return str(task.log_file.name)
             except ValueError:
                 return None
@@ -1032,12 +1034,20 @@ h2 {{ margin: 0; font-size: 1.2em; font-weight: bold; }}
 <div class="chart-cell chart-header">Build Time</div>
 <div class="chart-cell chart-header">Sanity Check</div>
 <div class="chart-cell chart-header">Sanity Time</div>
+<div class="chart-cell chart-header">Image Size</div>
 </div>
 """
             for target_name in sorted(targets.keys()):
                 target_data = targets[target_name]
                 build_task = target_data['build']
                 sanity_task = target_data['sanity']
+
+                # Get image size from either build or sanity task
+                image_size = "-"
+                if build_task and build_task.image_size:
+                    image_size = build_task.image_size
+                elif sanity_task and sanity_task.image_size:
+                    image_size = sanity_task.image_size
 
                 # Build status
                 if build_task:
@@ -1084,6 +1094,7 @@ h2 {{ margin: 0; font-size: 1.2em; font-weight: bold; }}
 <div class="chart-cell chart-timing">{build_time}</div>
 <div class="chart-cell chart-status">{sanity_status}</div>
 <div class="chart-cell chart-timing">{sanity_time}</div>
+<div class="chart-cell chart-timing">{image_size}</div>
 </div>
 """
             html += "</div></div>\n"
@@ -1196,8 +1207,9 @@ class DynamoDockerBuilderV2:
         self.logger.info("Skipping build tasks (compilation and sanity checks will run)...")
         self.logger.info("")
 
-        # Track required images for sanity checks
+        # Track required images for sanity checks and map images to tasks
         required_images: Set[str] = set()
+        image_to_tasks: Dict[str, List[Task]] = {}  # Map image name to tasks that use it
         sanity_tasks = []
         compilation_tasks = []
 
@@ -1209,19 +1221,27 @@ class DynamoDockerBuilderV2:
                 import re
                 match = re.search(r'--image\s+(\S+)', task.command)
                 if match:
-                    required_images.add(match.group(1))
+                    image_name = match.group(1)
+                    required_images.add(image_name)
+                    if image_name not in image_to_tasks:
+                        image_to_tasks[image_name] = []
+                    image_to_tasks[image_name].append(task)
             elif task.task_type == TaskType.COMPILATION:
                 compilation_tasks.append(task)
                 # Extract image name from compilation command
                 import re
                 match = re.search(r'--image\s+(\S+)', task.command)
                 if match:
-                    required_images.add(match.group(1))
+                    image_name = match.group(1)
+                    required_images.add(image_name)
+                    if image_name not in image_to_tasks:
+                        image_to_tasks[image_name] = []
+                    image_to_tasks[image_name].append(task)
             elif task.task_type == TaskType.BUILD:
                 task.status = TaskStatus.SKIPPED
                 self.logger.info(f"  Skipping: {task_id} (build)")
 
-        # Verify required images exist
+        # Verify required images exist and store sizes
         self.logger.info("")
         self.logger.info("Verifying required images exist...")
         missing_images = []
@@ -1231,7 +1251,13 @@ class DynamoDockerBuilderV2:
                 img = self.docker_client.images.get(image_name)
                 size_bytes = img.attrs.get('Size', 0)
                 size_gb = size_bytes / (1024**3)
-                self.logger.info(f"  ✅ Found: {image_name} ({size_gb:.1f} GB)")
+                size_str = f"{size_gb:.1f} GB"
+                self.logger.info(f"  ✅ Found: {image_name} ({size_str})")
+
+                # Store size in all tasks that use this image
+                if image_name in image_to_tasks:
+                    for task in image_to_tasks[image_name]:
+                        task.image_size = size_str
             except docker.errors.ImageNotFound:
                 missing_images.append(image_name)
                 self.logger.error(f"  ❌ Missing: {image_name}")
@@ -1256,68 +1282,133 @@ class DynamoDockerBuilderV2:
         self.logger.info("")
 
 
-    def show_commit_history(self, max_commits: int = 50, verbose: bool = False) -> int:
-        """Show recent commit history with composite SHAs"""
+    def show_commit_history(self, max_commits: int = 50, verbose: bool = False, html_output: bool = False) -> int:
+        """Show recent commit history with composite SHAs
+
+        Args:
+            max_commits: Maximum number of commits to show
+            verbose: Enable verbose output
+            html_output: Generate HTML output instead of terminal output
+        """
         import git
         import time
+        import re
+        import json
 
         # Initialize repo utils for this operation
         repo_utils = DynamoRepositoryUtils(self.repo_path, dry_run=False, verbose=verbose)
 
-        # Get terminal width (minus 2 for padding)
-        term_width = get_terminal_width(padding=2, default=118)
-
-        # Calculate dynamic column widths
-        # Fixed widths for structured columns
-        sha_width = 10
-        composite_width = 13
-        date_width = 20
-        author_width = 20
-        separator_width = 3  # Single space between columns (4 columns = 3 separators)
-
-        # Calculate remaining width for message
-        fixed_width = sha_width + composite_width + date_width + author_width + separator_width
-        message_width = max(30, term_width - fixed_width)  # At least 30 chars for message
+        # Load cache
+        cache_file = Path("~/nvidia/dynamo_ci/.commit_history_cache.json")
+        cache = {}
+        if cache_file.exists():
+            try:
+                cache = json.loads(cache_file.read_text())
+                if verbose:
+                    print(f"Loaded cache with {len(cache)} entries")
+            except Exception as e:
+                self.logger.warning(f"Failed to load cache: {e}")
 
         try:
             repo = git.Repo(self.repo_path)
             commits = list(repo.iter_commits('HEAD', max_count=max_commits))
             original_head = repo.head.commit.hexsha
 
-            print(f"\nCommit History with Composite SHAs")
-            print(f"Repository: {self.repo_path}")
-            print(f"Showing {len(commits)} most recent commits:\n")
-            print(f"{'Commit SHA':<{sha_width}} {'Composite SHA':<{composite_width}} {'Date':<{date_width}} {'Author':<{author_width}} Message")
-            print("-" * term_width)
+            # Collect commit data
+            commit_data = []
+            cache_updated = False
+
+            if not html_output:
+                # Terminal output mode
+                term_width = get_terminal_width(padding=2, default=118)
+                sha_width = 10
+                composite_width = 13
+                date_width = 20
+                author_width = 20
+                separator_width = 3
+                fixed_width = sha_width + composite_width + date_width + author_width + separator_width
+                message_width = max(30, term_width - fixed_width)
+
+                print(f"\nCommit History with Composite SHAs")
+                print(f"Repository: {self.repo_path}")
+                print(f"Showing {len(commits)} most recent commits:\n")
+                print(f"{'Commit SHA':<{sha_width}} {'Composite SHA':<{composite_width}} {'Date':<{date_width}} {'Author':<{author_width}} Message")
+                print("-" * term_width)
 
             try:
                 for i, commit in enumerate(commits):
                     sha_short = commit.hexsha[:9]
+                    sha_full = commit.hexsha
                     date_str = commit.committed_datetime.strftime('%Y-%m-%d %H:%M:%S')
-                    author_str = commit.author.name[:author_width-1]
-                    message_str = commit.message.strip().split('\n')[0][:message_width]
+                    author_name = commit.author.name
+                    message_first_line = commit.message.strip().split('\n')[0]
 
-                    # Print with placeholder first
-                    print(f"{sha_short:<{sha_width}} {'CALCULATING...':<{composite_width}} {date_str:<{date_width}} {author_str:<{author_width}} {message_str}", end='', flush=True)
+                    if not html_output:
+                        # Terminal: show progress with placeholder
+                        author_str = author_name[:author_width-1]
+                        message_str = message_first_line[:message_width]
+                        print(f"{sha_short:<{sha_width}} {'CALCULATING...':<{composite_width}} {date_str:<{date_width}} {author_str:<{author_width}} {message_str}", end='', flush=True)
 
-                    # Checkout commit and calculate composite SHA
-                    try:
-                        repo.git.checkout(commit.hexsha)
-                        composite_sha = repo_utils.generate_composite_sha()
-                    except Exception as e:
-                        composite_sha = "ERROR"
+                    # Check cache first
+                    if sha_full in cache:
+                        composite_sha = cache[sha_full]
+                        if verbose:
+                            print(f"Cache hit for {sha_short}: {composite_sha}")
+                    else:
+                        # Checkout commit and calculate composite SHA
+                        try:
+                            repo.git.checkout(commit.hexsha)
+                            composite_sha = repo_utils.generate_composite_sha()
+                            # Update cache
+                            cache[sha_full] = composite_sha
+                            cache_updated = True
+                            if verbose:
+                                print(f"Calculated and cached {sha_short}: {composite_sha}")
+                        except Exception as e:
+                            composite_sha = "ERROR"
 
-                    # Overwrite line with actual composite SHA
-                    print(f"\r{sha_short:<{sha_width}} {composite_sha:<{composite_width}} {date_str:<{date_width}} {author_str:<{author_width}} {message_str}")
-
-                    # Small delay to avoid overwhelming system
-                    if i < len(commits) - 1:
-                        time.sleep(0.1)
+                    if html_output:
+                        # Collect data for HTML generation
+                        commit_data.append({
+                            'sha_short': sha_short,
+                            'sha_full': sha_full,
+                            'composite_sha': composite_sha,
+                            'date': date_str,
+                            'author': author_name,
+                            'message': message_first_line
+                        })
+                        if verbose:
+                            print(f"Processed commit {i+1}/{len(commits)}: {sha_short}")
+                    else:
+                        # Terminal: overwrite line with actual composite SHA
+                        author_str = author_name[:author_width-1]
+                        message_str = message_first_line[:message_width]
+                        print(f"\r{sha_short:<{sha_width}} {composite_sha:<{composite_width}} {date_str:<{date_width}} {author_str:<{author_width}} {message_str}")
 
             finally:
                 # Restore original HEAD
                 repo.git.checkout(original_head)
-                print(f"\nRestored HEAD to {original_head[:9]}")
+                if not html_output:
+                    print(f"\nRestored HEAD to {original_head[:9]}")
+
+            # Generate HTML if requested
+            if html_output:
+                html_content = self._generate_commit_history_html(commit_data)
+                output_path = Path("~/nvidia/dynamo_ci/logs/commit-history.html")
+                output_path.parent.mkdir(parents=True, exist_ok=True)
+                output_path.write_text(html_content)
+                print(f"\nHTML report generated: {output_path}")
+                print(f"Restored HEAD to {original_head[:9]}")
+
+            # Save cache if updated
+            if cache_updated:
+                try:
+                    cache_file.parent.mkdir(parents=True, exist_ok=True)
+                    cache_file.write_text(json.dumps(cache, indent=2))
+                    if verbose:
+                        print(f"Cache saved with {len(cache)} entries")
+                except Exception as e:
+                    self.logger.warning(f"Failed to save cache: {e}")
 
             return 0
         except KeyboardInterrupt:
@@ -1331,6 +1422,336 @@ class DynamoDockerBuilderV2:
         except Exception as e:
             self.logger.error(f"Failed to get commit history: {e}")
             return 1
+
+    def _generate_commit_history_html(self, commit_data: List[dict]) -> str:
+        """Generate HTML report for commit history with Docker image detection
+
+        Args:
+            commit_data: List of commit dictionaries with sha_short, sha_full, composite_sha, date, author, message
+        """
+        import re
+        import subprocess
+
+        # Get Docker images containing SHAs
+        docker_images = self._get_docker_images_by_sha([c['sha_short'] for c in commit_data])
+
+        html = """<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<title>Dynamo Commit History</title>
+<style>
+body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif;
+    margin: 10px;
+    line-height: 1.3;
+    background-color: #f6f8fa;
+    font-size: 13px;
+}
+.header {
+    background-color: #24292f;
+    color: white;
+    padding: 10px 15px;
+    border-radius: 4px;
+    margin-bottom: 10px;
+}
+.header h1 {
+    margin: 0;
+    font-size: 18px;
+}
+.container {
+    background-color: white;
+    border: 1px solid #d0d7de;
+    border-radius: 4px;
+    overflow: hidden;
+}
+table {
+    width: 100%;
+    border-collapse: collapse;
+}
+th {
+    background-color: #f6f8fa;
+    padding: 6px 8px;
+    text-align: left;
+    font-weight: 600;
+    border-bottom: 1px solid #d0d7de;
+    position: sticky;
+    top: 0;
+    font-size: 12px;
+}
+td {
+    padding: 6px 8px;
+    border-bottom: 1px solid #d0d7de;
+    vertical-align: top;
+}
+tr:hover {
+    background-color: #f6f8fa;
+}
+.sha {
+    font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
+    font-size: 12px;
+}
+.sha a {
+    color: #0969da;
+    text-decoration: none;
+}
+.sha a:hover {
+    text-decoration: underline;
+}
+.message {
+    color: #24292f;
+}
+.pr-link {
+    color: #0969da;
+    text-decoration: none;
+    font-weight: 500;
+}
+.pr-link:hover {
+    text-decoration: underline;
+}
+.docker-images {
+    margin-top: 8px;
+}
+details {
+    margin-top: 4px;
+}
+summary {
+    cursor: pointer;
+    color: #0969da;
+    font-size: 13px;
+    font-weight: 500;
+}
+summary:hover {
+    text-decoration: underline;
+}
+.image-list {
+    margin: 8px 0;
+    padding-left: 20px;
+}
+.image-tag {
+    font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
+    font-size: 12px;
+    background-color: #f6f8fa;
+    padding: 2px 6px;
+    border-radius: 3px;
+    display: block;
+    margin: 4px 0;
+}
+.date {
+    color: #57606a;
+    font-size: 14px;
+}
+.author {
+    color: #24292f;
+    font-size: 14px;
+}
+.composite-sha-link {
+    color: #0969da;
+    text-decoration: none;
+    cursor: pointer;
+    border-bottom: 1px dotted #0969da;
+}
+.composite-sha-link:hover {
+    text-decoration: underline;
+}
+</style>
+<script>
+function toggleDockerImages(event, linkElement) {
+    event.preventDefault();
+    // Find the current row
+    var currentRow = linkElement.closest('tr');
+    // Find the next row (which should be the docker-images-row)
+    var dockerRow = currentRow.nextElementSibling;
+
+    if (dockerRow && dockerRow.classList.contains('docker-images-row')) {
+        // Toggle visibility
+        if (dockerRow.style.display === 'none') {
+            dockerRow.style.display = 'table-row';
+        } else {
+            dockerRow.style.display = 'none';
+        }
+    }
+}
+</script>
+</head>
+<body>
+"""
+        # Add generation timestamp in PDT at the top
+        from datetime import datetime
+        import pytz
+        pdt = pytz.timezone('America/Los_Angeles')
+        generated_time = datetime.now(pdt).strftime('%Y-%m-%d %H:%M:%S %Z')
+
+        html += f"""
+<div class="header">
+<h1>Dynamo Commit History</h1>
+<p style="margin: 5px 0 0 0; opacity: 0.9;">Recent commits with composite SHAs and Docker images</p>
+<p style="margin: 5px 0 0 0; opacity: 0.7; font-size: 12px;">Page generated: {generated_time}</p>
+</div>
+"""
+
+        html += """
+<div class="container">
+<table>
+<thead>
+<tr>
+<th style="width: 120px;">Commit SHA</th>
+<th style="width: 140px;">Composite SHA</th>
+<th style="width: 180px;">Date/Time (PDT)</th>
+<th style="width: 150px;">Author</th>
+<th>Message</th>
+</tr>
+</thead>
+<tbody>
+"""
+
+        for commit in commit_data:
+            sha_short = commit['sha_short']
+            sha_full = commit['sha_full']
+            composite_sha = commit['composite_sha']
+            date_str = commit['date']
+            author = commit['author']
+            message = commit['message']
+
+            # Create GitHub commit link
+            commit_link = f"https://github.com/ai-dynamo/dynamo/commit/{sha_full}"
+
+            # Extract PR number and create PR link
+            pr_match = re.search(r'\(#(\d+)\)', message)
+            if pr_match:
+                pr_number = pr_match.group(1)
+                pr_link = f"https://github.com/ai-dynamo/dynamo/pull/{pr_number}"
+                # Replace (#1234) with clickable link
+                message = re.sub(
+                    r'\(#(\d+)\)',
+                    f'(<a href="{pr_link}" class="pr-link" target="_blank">#{pr_number}</a>)',
+                    message
+                )
+
+            # Check if Docker images exist for this commit
+            has_docker_images = sha_short in docker_images and docker_images[sha_short]
+
+            # Make composite SHA clickable if Docker images exist
+            if has_docker_images:
+                composite_sha_html = f'<a href="#" class="composite-sha-link" onclick="toggleDockerImages(event, this); return false;">{composite_sha}</a>'
+            else:
+                composite_sha_html = composite_sha
+
+            html += f"""
+<tr>
+<td class="sha"><a href="{commit_link}" target="_blank">{sha_short}</a></td>
+<td class="sha">{composite_sha_html}</td>
+<td class="date">{date_str}</td>
+<td class="author">{author}</td>
+<td>
+<div class="message">{message}</div>
+</td>
+</tr>
+"""
+
+            # Add Docker images row if any exist for this SHA
+            if has_docker_images:
+                images = docker_images[sha_short]
+                html += f"""
+<tr class="docker-images-row" style="display: none;">
+<td colspan="5" style="padding: 0; background-color: #f6f8fa;">
+<div style="padding: 4px 8px; border-top: 1px solid #d0d7de;">
+<table style="width: 100%; border: none; background-color: white; border-collapse: collapse;">
+<thead>
+<tr>
+<th style="width: 50%; padding: 3px 6px; border: none;">Image Name:Tag</th>
+<th style="width: 15%; padding: 3px 6px; border: none;">Image ID</th>
+<th style="width: 10%; padding: 3px 6px; border: none;">Size</th>
+<th style="width: 25%; padding: 3px 6px; border: none;">Created (PDT)</th>
+</tr>
+</thead>
+<tbody>
+"""
+                for image in sorted(images, key=lambda x: x['tag']):
+                    html += f"""
+<tr>
+<td style="font-family: monospace; font-size: 11px; padding: 2px 6px; border: none;">{image['tag']}</td>
+<td style="font-family: monospace; font-size: 11px; padding: 2px 6px; border: none;">{image['id']}</td>
+<td style="font-size: 11px; padding: 2px 6px; border: none;">{image['size']}</td>
+<td style="font-size: 11px; padding: 2px 6px; border: none;">{image['created']}</td>
+</tr>
+"""
+                html += """
+</tbody>
+</table>
+</div>
+</td>
+</tr>
+"""
+
+        html += """
+</tbody>
+</table>
+</div>
+</body>
+</html>
+"""
+
+        return html
+
+    def _get_docker_images_by_sha(self, sha_list: List[str]) -> dict:
+        """Get Docker images containing each SHA in their tag
+
+        Args:
+            sha_list: List of short SHAs (9 characters)
+
+        Returns:
+            Dictionary mapping SHA to list of image details (dicts with tag, id, size, created)
+        """
+        import subprocess
+
+        sha_to_images = {sha: [] for sha in sha_list}
+
+        try:
+            # Get all Docker images with detailed information
+            result = subprocess.run(
+                ['docker', 'images', '--format', '{{.Repository}}:{{.Tag}}|{{.ID}}|{{.Size}}|{{.CreatedAt}}'],
+                capture_output=True,
+                text=True,
+                timeout=10
+            )
+
+            if result.returncode == 0:
+                images = result.stdout.strip().split('\n')
+
+                # Filter images containing each SHA and parse details
+                for image_line in images:
+                    if not image_line or '<none>:<none>' in image_line:
+                        continue
+
+                    parts = image_line.split('|')
+                    if len(parts) < 4:
+                        continue
+
+                    tag = parts[0]
+                    image_id = parts[1]
+                    size = parts[2]
+                    # Parse created timestamp: "2025-10-18 09:27:29 -0700 PDT"
+                    # Extract date and time (first two parts)
+                    created_parts = parts[3].split() if parts[3] else []
+                    if len(created_parts) >= 2:
+                        created = f"{created_parts[0]} {created_parts[1]}"  # Date and time
+                    else:
+                        created = parts[3].strip() if parts[3] else ''
+
+                    for sha in sha_list:
+                        if sha in tag:
+                            sha_to_images[sha].append({
+                                'tag': tag,
+                                'id': image_id,
+                                'size': size,
+                                'created': created
+                            })
+
+        except Exception as e:
+            self.logger.warning(f"Failed to get Docker images: {e}")
+
+        return sha_to_images
 
     def _send_html_email_via_smtp(
         self,
@@ -1350,7 +1771,7 @@ class DynamoDockerBuilderV2:
 
             # Include failed task names in subject if any
             if failed_tasks:
-                failure_summary = ", "hhh.join(failed_tasks)
+                failure_summary = ", ".join(failed_tasks)
                 subject = f"{status_prefix}: {subject_prefix} - {git_sha} ({failure_summary})"
             else:
                 subject = f"{status_prefix}: {subject_prefix} - {git_sha}"
@@ -1386,6 +1807,49 @@ class DynamoDockerBuilderV2:
         except Exception as e:
             self.logger.error(f"\n⚠️  Error sending email notification: {e}")
 
+    def _populate_image_sizes(self, pipeline: BuildPipeline) -> None:
+        """Populate image sizes for all BUILD tasks by querying Docker.
+
+        This is called after task execution to populate image sizes for both:
+        - Successfully built images
+        - Skipped images (when using --skip-build-if-image-exists)
+
+        Args:
+            pipeline: The build pipeline with tasks to populate
+        """
+        import docker
+
+        try:
+            docker_client = docker.from_env()
+        except Exception as e:
+            self.logger.warning(f"Could not connect to Docker to get image sizes: {e}")
+            return
+
+        # Collect all BUILD tasks that have an image_tag
+        build_tasks = [
+            task for task in pipeline.tasks.values()
+            if task.task_type == TaskType.BUILD and task.image_tag
+        ]
+
+        if not build_tasks:
+            return
+
+        self.logger.info("")
+        self.logger.info("Populating image sizes...")
+
+        for task in build_tasks:
+            try:
+                img = docker_client.images.get(task.image_tag)
+                size_bytes = img.attrs.get('Size', 0)
+                size_gb = size_bytes / (1024**3)
+                task.image_size = f"{size_gb:.1f} GB"
+                self.logger.info(f"  ✅ {task.image_tag}: {task.image_size}")
+            except docker.errors.ImageNotFound:
+                # Image doesn't exist - this is expected for failed/skipped builds
+                pass
+            except Exception as e:
+                self.logger.warning(f"  ⚠️  Could not get size for {task.image_tag}: {e}")
+
     def run(self, args: argparse.Namespace) -> int:
         """Main entry point"""
         dry_run = args.dry_run
@@ -1402,25 +1866,18 @@ class DynamoDockerBuilderV2:
         # Handle --show-commit-history flag
         if hasattr(args, 'show_commit_history') and args.show_commit_history:
             max_commits = args.max_commits if hasattr(args, 'max_commits') else 50
-            return self.show_commit_history(max_commits, verbose=verbose)
+            html_output = args.html if hasattr(args, 'html') else False
+            return self.show_commit_history(max_commits, verbose=verbose, html_output=html_output)
 
         # Initialize repository utils
         self.repo_utils = DynamoRepositoryUtils(self.repo_path, dry_run=dry_run, verbose=verbose)
-
-        # Check if another instance is running (skip in sanity-check-only mode)
-        if not sanity_check_only:
-            self.check_if_running(force_run=force_run)
-
-            # Check if rebuild is needed based on composite SHA
-            if not self.repo_utils.check_if_rebuild_needed(force_run=force_run):
-                return 0  # Exit early - no rebuild needed
 
         # Validate mutually exclusive flags
         if args.repo_sha and args.no_checkout:
             print("❌ Error: --repo-sha and --no-checkout are mutually exclusive")
             return 1
 
-        # Get or checkout specific SHA
+        # Get or checkout specific SHA (BEFORE composite SHA check)
         import git
         try:
             repo = git.Repo(self.repo_path)
@@ -1436,11 +1893,23 @@ class DynamoDockerBuilderV2:
                     print(f"✅ Checked out {repo_sha}")
                     repo_sha = repo.head.commit.hexsha
             else:
-                # Get current HEAD SHA if not provided
+                # Checkout main and pull latest
+                print("Checking out main branch and pulling latest...")
+                repo.git.checkout('main')
+                repo.remotes.origin.pull()
                 repo_sha = repo.head.commit.hexsha
+                print(f"✅ Using latest main: {repo_sha[:9]}")
         except Exception as e:
             print(f"❌ Failed to get/checkout SHA: {e}")
             return 1
+
+        # Check if another instance is running (skip in sanity-check-only mode)
+        if not sanity_check_only:
+            self.check_if_running(force_run=force_run)
+
+            # Check if rebuild is needed based on composite SHA (AFTER pulling latest)
+            if not self.repo_utils.check_if_rebuild_needed(force_run=force_run):
+                return 0  # Exit early - no rebuild needed
 
         # Determine frameworks - support both --framework vllm --framework sglang and --framework vllm,sglang
         if args.framework:
@@ -1546,6 +2015,10 @@ class DynamoDockerBuilderV2:
         successful, failed = loop.run_until_complete(executor.execute_pipeline(pipeline, parallel))
         loop.close()
 
+        # Populate image sizes for all BUILD tasks (for both built and skipped images)
+        if not dry_run:
+            self._populate_image_sizes(pipeline)
+
         # Final summary
         print("\n" + "=" * 80)
         print("FINAL RESULTS")
@@ -1567,7 +2040,7 @@ class DynamoDockerBuilderV2:
                     log_dir=log_dir,
                     date_str=date_str,
                     hostname=getattr(args, 'hostname', 'keivenc-linux'),
-                    html_path=getattr(args, 'html_path', '/dynamo_ci/logs'),
+                    html_path=getattr(args, 'html_path', '/nvidia/dynamo_ci/logs'),
                     use_absolute_urls=False  # Use relative paths for file
                 )
                 report_file = log_dir / f"{date_str}.{repo_sha[:7]}.report.html"
@@ -1640,12 +2113,14 @@ def main():
                         help="Show recent commit history and exit")
     parser.add_argument("--max-commits", type=int, default=50,
                         help="Maximum number of commits to show in commit history (default: 50)")
+    parser.add_argument("--html", action="store_true",
+                        help="Generate HTML output for commit history (use with --show-commit-history)")
     parser.add_argument("--email", type=str,
                         help="Email address for notifications (sends email if specified)")
     parser.add_argument("--hostname", type=str, default="keivenc-linux",
                         help="Hostname for log file URLs (default: keivenc-linux)")
-    parser.add_argument("--html-path", type=str, default="/dynamo_ci/logs",
-                        help="Web-accessible path prefix for log files (default: /dynamo_ci/logs)")
+    parser.add_argument("--html-path", type=str, default="/nvidia/dynamo_ci/logs",
+                        help="Web-accessible path prefix for log files (default: /nvidia/dynamo_ci/logs)")
 
     args = parser.parse_args()
 
