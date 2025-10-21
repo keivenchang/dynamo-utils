@@ -369,6 +369,35 @@ chown -R $USER_ID:$GROUP_ID .
 #   style: apply code formatting and style fixes
 #   build: update build scripts for new environment
 
+## Git Integration Conventions (for code parsing commit messages)
+# - All commit message parsing expects format: `title (#PR_NUMBER)`
+# - Extract PR numbers using regex: `r'\(#(\d+)\)'`
+# - GitHub repo is always: `https://github.com/ai-dynamo/dynamo`
+# - Use full SHA for GitHub URLs, short SHA (7-9 chars) for display
+#
+# Example: Extract PR number from commit message
+# ```python
+# import re
+# first_line = commit.message.split('\n')[0] if commit.message else ""
+# pr_match = re.search(r'\(#(\d+)\)', first_line)
+# if pr_match:
+#     pr_number = pr_match.group(1)
+#     pr_link = f"https://github.com/ai-dynamo/dynamo/pull/{pr_number}"
+# ```
+
+# =============================================================================
+# COMMON CODE PATTERNS (dynamo-utils specific)
+# =============================================================================
+
+## Terminal Width Detection
+# Use the common.py utility for terminal width detection with fallback:
+# ```python
+# from common import get_terminal_width
+#
+# width = get_terminal_width()
+# # Fallback to 80 if detection fails
+# ```
+
 # =============================================================================
 # Slack Request For Review (RFR) TEMPLATE
 # =============================================================================
