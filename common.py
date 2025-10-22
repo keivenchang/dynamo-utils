@@ -984,6 +984,14 @@ class FailedCheck:
 
 
 @dataclass
+class RunningCheck:
+    """Information about a running CI check"""
+    name: str
+    check_url: str
+    is_required: bool = False
+
+
+@dataclass
 class PRInfo:
     """Pull request information"""
     number: int
@@ -999,6 +1007,7 @@ class PRInfo:
     conflict_message: Optional[str] = None
     blocking_message: Optional[str] = None
     failed_checks: List['FailedCheck'] = field(default_factory=list)
+    running_checks: List['RunningCheck'] = field(default_factory=list)
     rerun_url: Optional[str] = None
 
 
@@ -1100,29 +1109,69 @@ class GitHubAPIClient:
         """Check if a GitHub token is configured."""
         return self.token is not None
 
-    def get_ci_status(self, owner: str, repo: str, sha: str) -> Optional[str]:
-        """Get CI status for a commit.
+    def get_ci_status(self, owner: str, repo: str, sha: str, pr_number: Optional[int] = None) -> Optional[str]:
+        """Get CI status for a commit by checking PR checks.
 
         Args:
             owner: Repository owner
             repo: Repository name
             sha: Commit SHA
+            pr_number: Optional PR number for faster lookup
 
         Returns:
-            CI status string ('passed', 'failed', 'pending'), or None if unavailable
+            CI status string ('passed', 'failed', 'running'), or None if unavailable
         """
-        endpoint = f"/repos/{owner}/{repo}/commits/{sha}/status"
+        # If we don't have PR number, try to find it
+        if not pr_number:
+            # Try to find PR from commit
+            endpoint = f"/repos/{owner}/{repo}/commits/{sha}/pulls"
+            try:
+                pulls = self.get(endpoint)
+                if pulls and len(pulls) > 0:
+                    pr_number = pulls[0]['number']
+                else:
+                    # Fallback to legacy status API
+                    endpoint = f"/repos/{owner}/{repo}/commits/{sha}/status"
+                    data = self.get(endpoint)
+                    if data:
+                        state = data.get('state')
+                        if state == 'success':
+                            return 'passed'
+                        elif state == 'failure':
+                            return 'failed'
+                        elif state == 'pending':
+                            return 'running'
+                    return None
+            except Exception:
+                return None
+
+        # Use gh CLI to get check status (most reliable)
         try:
-            data = self.get(endpoint)
-            if data:
-                state = data.get('state')
-                if state == 'success':
-                    return 'passed'
-                elif state == 'failure':
-                    return 'failed'
-                elif state == 'pending':
-                    return 'pending'
-            return None
+            import subprocess
+            result = subprocess.run(
+                ['gh', 'pr', 'checks', str(pr_number), '--repo', f'{owner}/{repo}'],
+                capture_output=True,
+                text=True,
+                timeout=10
+            )
+
+            # gh pr checks returns non-zero if there are failures or pending checks
+            # We still want to parse the output even if return code is non-zero
+            if not result.stdout:
+                return None
+
+            # Parse output - count pass/fail/pending
+            lines = result.stdout.lower().split('\n')
+            has_fail = any('fail' in line for line in lines)
+            has_pending = any('pending' in line for line in lines)
+
+            if has_fail:
+                return 'failed'
+            elif has_pending:
+                return 'running'
+            else:
+                return 'passed'
+
         except Exception:
             return None
 
@@ -1441,6 +1490,60 @@ class GitHubAPIClient:
             print(f"Error fetching failed checks for {sha}: {e}", file=sys.stderr)
             return [], None
 
+    def get_running_checks(self, pr_number: int, owner: str, repo: str, required_checks: set) -> List[RunningCheck]:
+        """Get running CI checks for a PR using gh CLI.
+
+        Args:
+            pr_number: PR number
+            owner: Repository owner
+            repo: Repository name
+            required_checks: Set of required check names
+
+        Returns:
+            List of RunningCheck objects
+        """
+        try:
+            import subprocess
+            result = subprocess.run(
+                ['gh', 'pr', 'view', str(pr_number), '--repo', f'{owner}/{repo}', '--json', 'statusCheckRollup'],
+                capture_output=True,
+                text=True,
+                timeout=10
+            )
+
+            if result.returncode != 0 or not result.stdout:
+                return []
+
+            import json
+            data = json.loads(result.stdout)
+            checks = data.get('statusCheckRollup', [])
+
+            running_checks = []
+            for check in checks:
+                status = check.get('status', '').upper()
+                # Check if it's running
+                if status in ('IN_PROGRESS', 'QUEUED', 'PENDING'):
+                    name = check.get('name', '')
+                    check_url = check.get('detailsUrl', '')
+                    is_required = check.get('isRequired', False) or (name in required_checks)
+
+                    running_check = RunningCheck(
+                        name=name,
+                        check_url=check_url,
+                        is_required=is_required
+                    )
+                    running_checks.append(running_check)
+
+            # Sort: required checks first, then by name
+            running_checks.sort(key=lambda x: (not x.is_required, x.name))
+
+            return running_checks
+
+        except Exception as e:
+            import sys
+            print(f"Error fetching running checks for PR {pr_number}: {e}", file=sys.stderr)
+            return []
+
     def get_pr_info(self, owner: str, repo: str, branch: str) -> List[PRInfo]:
         """Get PR information for a branch.
 
@@ -1465,7 +1568,7 @@ class GitHubAPIClient:
                 # Fetch PR details in parallel using ThreadPoolExecutor
                 with ThreadPoolExecutor(max_workers=5) as executor:
                     # Submit all 5 API calls in parallel
-                    future_ci = executor.submit(self.get_ci_status, owner, repo, pr_data['head']['sha'])
+                    future_ci = executor.submit(self.get_ci_status, owner, repo, pr_data['head']['sha'], pr_data['number'])
                     future_conversations = executor.submit(self.count_unresolved_conversations, owner, repo, pr_data['number'])
                     future_details = executor.submit(self.get_pr_details, owner, repo, pr_data['number'])
                     future_required = executor.submit(self.get_required_checks, owner, repo, pr_data['number'])
@@ -1473,14 +1576,16 @@ class GitHubAPIClient:
                     # Wait for required checks first (needed for failed_checks)
                     required_checks = future_required.result()
 
-                    # Now get failed checks with required info
+                    # Now get failed checks and running checks with required info
                     future_failed_checks = executor.submit(self.get_failed_checks, owner, repo, pr_data['head']['sha'], required_checks)
+                    future_running_checks = executor.submit(self.get_running_checks, pr_data['number'], owner, repo, required_checks)
 
                     # Wait for all to complete
                     ci_status = future_ci.result()
                     unresolved_count = future_conversations.result()
                     pr_details = future_details.result()
                     failed_checks, rerun_url = future_failed_checks.result()
+                    running_checks = future_running_checks.result()
 
                 mergeable = pr_details.get('mergeable') if pr_details else None
                 mergeable_state = pr_details.get('mergeable_state') if pr_details else pr_data.get('mergeable_state', 'unknown')
@@ -1516,6 +1621,7 @@ class GitHubAPIClient:
                     conflict_message=conflict_message,
                     blocking_message=blocking_message,
                     failed_checks=failed_checks,
+                    running_checks=running_checks,
                     rerun_url=rerun_url
                 )
                 pr_list.append(pr_info)
