@@ -26,7 +26,7 @@ import git
 import requests
 
 # Import GitHub utilities from common module
-from common import GitHubAPIClient, FailedCheck, PRInfo
+from common import GitHubAPIClient, FailedCheck, RunningCheck, PRInfo
 
 
 
@@ -61,7 +61,7 @@ class BranchNode:
             lines.append(current_prefix + line_content)
 
         # Render children
-        # Example child: "   └─ 📖 PR #3676: feat: add TensorRT-LLM Prometheus metrics support"
+        # Example child: "   └─ 📖 PR#3676: feat: add TensorRT-LLM Prometheus metrics support"
         for i, child in enumerate(self.children):
             is_last_child = i == len(self.children) - 1
             if is_root:
@@ -91,7 +91,7 @@ class BranchNode:
             lines.append(current_prefix + line_content)
 
         # Render children
-        # Example child: "   └─ 📖 PR #3676: feat: add TensorRT-LLM Prometheus metrics support"
+        # Example child: "   └─ 📖 PR#3676: feat: add TensorRT-LLM Prometheus metrics support"
         for i, child in enumerate(self.children):
             is_last_child = i == len(self.children) - 1
             if is_root:
@@ -196,7 +196,7 @@ class PRNode(BranchNode):
         # Truncate title at 80 characters
         title = self.pr.title[:80] + '...' if len(self.pr.title) > 80 else self.pr.title
         # Return just the PR info, URL will be shown separately
-        return f"{emoji} PR #{self.pr.number}: {title}"
+        return f"{emoji} PR#{self.pr.number}: {title}"
 
     def _format_html_content(self) -> str:
         if not self.pr:
@@ -210,7 +210,7 @@ class PRNode(BranchNode):
 
         # Truncate title at 80 characters
         title = self.pr.title[:80] + '...' if len(self.pr.title) > 80 else self.pr.title
-        return f'{emoji} <a href="{self.pr.url}" target="_blank">PR #{self.pr.number}</a>: {title}'
+        return f'{emoji} <a href="{self.pr.url}" target="_blank">PR#{self.pr.number}</a>: {title}'
 
 
 @dataclass
@@ -341,6 +341,28 @@ class RerunLinkNode(BranchNode):
         if not self.url or not self.run_id:
             return ""
         return f'🔄 <a href="{self.url}" target="_blank">Restart failed jobs</a> (or: <code>gh run rerun {self.run_id} --repo ai-dynamo/dynamo --failed</code>)'
+
+
+@dataclass
+class RunningCheckNode(BranchNode):
+    """Running check node"""
+    check_name: str = ""
+    is_required: bool = False
+    check_url: Optional[str] = None
+
+    def _format_content(self) -> str:
+        if not self.check_name:
+            return ""
+        required_marker = " [REQUIRED]" if self.is_required else ""
+        return f"⏳ {self.check_name}{required_marker}"
+
+    def _format_html_content(self) -> str:
+        if not self.check_name:
+            return ""
+        required_marker = ' <span style="color: #0066cc; font-weight: bold;">[REQUIRED]</span>' if self.is_required else ""
+        if self.check_url:
+            return f'⏳ <a href="{self.check_url}" target="_blank">{self.check_name}</a>{required_marker}'
+        return f'⏳ {self.check_name}{required_marker}'
 
 
 
@@ -510,6 +532,21 @@ class LocalRepoScanner:
                     if pr.blocking_message:
                         blocked_node = BlockedMessageNode(label=pr.blocking_message)
                         pr_node.add_child(blocked_node)
+
+                    # Add running checks if any (show first, before failed checks)
+                    if pr.running_checks:
+                        for running_check in pr.running_checks[:10]:  # Limit to 10
+                            running_check_node = RunningCheckNode(
+                                label="",
+                                check_name=running_check.name,
+                                is_required=running_check.is_required,
+                                check_url=running_check.check_url
+                            )
+                            pr_node.add_child(running_check_node)
+
+                        if len(pr.running_checks) > 10:
+                            more_node = BranchNode(label=f"... +{len(pr.running_checks) - 10} more running checks")
+                            pr_node.add_child(more_node)
 
                     # Add failed checks if any
                     if pr.failed_checks:
