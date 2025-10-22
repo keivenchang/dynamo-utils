@@ -12,7 +12,7 @@ import shutil
 import subprocess
 import sys
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -971,6 +971,37 @@ class GitUtils(BaseUtils):
 
 
 # GitHub API utilities
+
+@dataclass
+class FailedCheck:
+    """Information about a failed CI check"""
+    name: str
+    job_url: str
+    run_id: str
+    duration: str
+    is_required: bool = False
+    error_summary: Optional[str] = None
+
+
+@dataclass
+class PRInfo:
+    """Pull request information"""
+    number: int
+    title: str
+    url: str
+    state: str
+    is_merged: bool
+    review_decision: Optional[str]
+    mergeable_state: str
+    unresolved_conversations: int
+    ci_status: Optional[str]
+    has_conflicts: bool = False
+    conflict_message: Optional[str] = None
+    blocking_message: Optional[str] = None
+    failed_checks: List['FailedCheck'] = field(default_factory=list)
+    rerun_url: Optional[str] = None
+
+
 class GitHubAPIClient:
     """GitHub API client with automatic token detection and rate limit handling.
 
@@ -1031,6 +1062,10 @@ class GitHubAPIClient:
 
         if self.token:
             self.headers['Authorization'] = f'token {self.token}'
+
+        # Cache for job logs (two-tier: memory + disk)
+        self._job_log_cache: Dict[str, Optional[str]] = {}
+        self._cache_dir = Path.home() / ".cache" / "dynamo-utils" / "job-logs"
 
     def get(self, endpoint: str, params: Optional[Dict[str, Any]] = None, timeout: int = 10) -> Optional[Dict]:
         """Make GET request to GitHub API.
@@ -1129,5 +1164,367 @@ class GitHubAPIClient:
             return unresolved
         except Exception:
             return 0
+
+    def _load_disk_cache(self) -> Dict[str, Optional[str]]:
+        """Load job logs cache from disk."""
+        cache_file = self._cache_dir / "job_logs_cache.json"
+        if cache_file.exists():
+            try:
+                with open(cache_file, 'r') as f:
+                    return json.load(f)
+            except Exception:
+                pass
+        return {}
+
+    def _save_disk_cache(self, cache: Dict[str, Optional[str]]) -> None:
+        """Save job logs cache to disk."""
+        try:
+            self._cache_dir.mkdir(parents=True, exist_ok=True)
+            cache_file = self._cache_dir / "job_logs_cache.json"
+            with open(cache_file, 'w') as f:
+                json.dump(cache, f, indent=2)
+        except Exception:
+            pass  # Fail silently if we can't save cache
+
+    def _save_to_disk_cache(self, job_id: str, error_summary: str) -> None:
+        """Save a single job log to disk cache."""
+        try:
+            disk_cache = self._load_disk_cache()
+            disk_cache[job_id] = error_summary
+            self._save_disk_cache(disk_cache)
+        except Exception:
+            pass  # Fail silently if we can't save cache
+
+    def get_required_checks(self, owner: str, repo: str, pr_number: int) -> set:
+        """Get the list of required check names for a PR using gh CLI.
+
+        Args:
+            owner: Repository owner
+            repo: Repository name
+            pr_number: PR number
+
+        Returns:
+            Set of required check names
+        """
+        try:
+            # Use gh CLI to get required checks (more reliable than API)
+            import subprocess
+            result = subprocess.run(
+                ['gh', 'pr', 'checks', str(pr_number), '--repo', f'{owner}/{repo}', '--required'],
+                capture_output=True,
+                text=True,
+                timeout=10
+            )
+
+            # Note: gh returns exit code 1 if there are failed checks, but still outputs the data
+            # So we check stderr for actual errors, not return code
+            if result.stderr and 'error' in result.stderr.lower():
+                return set()
+
+            # Parse output to extract check names
+            # Format: "check_name\tstatus\tduration\turl"
+            required_checks = set()
+            for line in result.stdout.strip().split('\n'):
+                if line.strip():
+                    # Split on tabs, get first column (check name)
+                    parts = line.split('\t')
+                    if parts:
+                        check_name = parts[0].strip()
+                        if check_name:
+                            required_checks.add(check_name)
+
+            return required_checks
+
+        except Exception as e:
+            # If we can't get required checks, return empty set
+            return set()
+
+    def get_job_error_summary(self, run_id: str, job_url: str, owner: str, repo: str) -> Optional[str]:
+        """Get error summary by fetching job logs via gh CLI (with disk + memory caching).
+
+        Args:
+            run_id: Workflow run ID
+            job_url: Job URL (contains job ID)
+            owner: Repository owner
+            repo: Repository name
+
+        Returns:
+            Error summary string or None
+        """
+        try:
+            # Extract job ID from URL
+            # Example: https://github.com/ai-dynamo/dynamo/actions/runs/18697156351/job/53317461976
+            if '/job/' not in job_url:
+                return None
+
+            job_id = job_url.split('/job/')[1].split('?')[0]
+
+            # Check in-memory cache first (fastest)
+            if job_id in self._job_log_cache:
+                return self._job_log_cache[job_id]
+
+            # Check disk cache second
+            disk_cache = self._load_disk_cache()
+            if job_id in disk_cache:
+                # Load into memory cache for faster subsequent access
+                self._job_log_cache[job_id] = disk_cache[job_id]
+                return disk_cache[job_id]
+
+            # Fetch job logs via gh api (more reliable than gh run view)
+            import subprocess
+            result = subprocess.run(
+                ['gh', 'api', f'/repos/{owner}/{repo}/actions/jobs/{job_id}/logs'],
+                capture_output=True,
+                text=True,
+                timeout=15
+            )
+
+            if result.returncode != 0 or not result.stdout:
+                # If logs aren't available, return placeholder
+                error_msg = result.stderr if result.stderr else "Unknown error"
+                error_summary = f"Could not fetch job logs: {error_msg}\n\nView full logs at:\n{job_url}"
+                self._job_log_cache[job_id] = error_summary
+                self._save_to_disk_cache(job_id, error_summary)
+                return error_summary
+
+            # Get all log lines
+            all_lines = result.stdout.strip().split('\n')
+
+            # Filter for error-related lines with surrounding context
+            error_keywords = ['error', 'fail', 'Error', 'ERROR', 'FAIL', 'fatal', 'FATAL', 'broken']
+            error_indices = []
+
+            # Find all lines with error keywords
+            for i, line in enumerate(all_lines):
+                if line.strip() and not line.startswith('#'):
+                    if any(keyword in line for keyword in error_keywords):
+                        error_indices.append(i)
+
+            # If we found error lines, extract them with surrounding context
+            if error_indices:
+                # For each error, get 10 lines before and 5 lines after
+                context_lines = set()
+                for error_idx in error_indices:
+                    # Add lines before (up to 10)
+                    for i in range(max(0, error_idx - 10), error_idx):
+                        context_lines.add(i)
+                    # Add error line itself
+                    context_lines.add(error_idx)
+                    # Add lines after (up to 5)
+                    for i in range(error_idx + 1, min(len(all_lines), error_idx + 6)):
+                        context_lines.add(i)
+
+                # Sort indices and extract lines
+                sorted_indices = sorted(context_lines)
+                error_lines = []
+                for idx in sorted_indices:
+                    line = all_lines[idx]
+                    if line.strip() and not line.startswith('#'):
+                        error_lines.append(line)
+
+                # Use up to last 80 lines with context (increased from 50)
+                relevant_errors = error_lines[-80:]
+                summary = '\n'.join(relevant_errors)
+
+                # Limit length to 5000 chars (increased from 3000 for more context)
+                if len(summary) > 5000:
+                    summary = summary[:5000] + '\n\n...(truncated, view full logs at job URL above)'
+
+                self._job_log_cache[job_id] = summary
+                self._save_to_disk_cache(job_id, summary)
+                return summary
+
+            # If no error keywords found, get last 40 lines as fallback
+            last_lines = [line for line in all_lines if line.strip() and not line.startswith('#')][-40:]
+            if last_lines:
+                summary = '\n'.join(last_lines)
+                if len(summary) > 5000:
+                    summary = summary[:5000] + '\n\n...(truncated)'
+                self._job_log_cache[job_id] = summary
+                self._save_to_disk_cache(job_id, summary)
+                return summary
+
+            error_summary = f"No error details found in logs.\n\nView full logs at:\n{job_url}"
+            self._job_log_cache[job_id] = error_summary
+            self._save_to_disk_cache(job_id, error_summary)
+            return error_summary
+
+        except subprocess.TimeoutExpired:
+            error_summary = f"Log fetch timed out.\n\nView full logs at:\n{job_url}"
+            self._job_log_cache[job_id] = error_summary
+            self._save_to_disk_cache(job_id, error_summary)
+            return error_summary
+
+        except Exception as e:
+            return f"Error fetching logs: {str(e)}\n\nView full logs at:\n{job_url}"
+
+    def get_failed_checks(self, owner: str, repo: str, sha: str, required_checks: set) -> Tuple[List[FailedCheck], Optional[str]]:
+        """Get failed CI checks for a commit.
+
+        Args:
+            owner: Repository owner
+            repo: Repository name
+            sha: Commit SHA
+            required_checks: Set of required check names
+
+        Returns:
+            Tuple of (List of FailedCheck objects, rerun_url)
+        """
+        endpoint = f"/repos/{owner}/{repo}/commits/{sha}/check-runs"
+
+        try:
+            data = self.get(endpoint)
+            if not data or 'check_runs' not in data:
+                return [], None
+
+            failed_checks = []
+            run_id = None
+
+            for check in data['check_runs']:
+                if check.get('conclusion') == 'failure':
+                    check_name = check['name']
+                    check_run_id = check.get('id')
+
+                    # Extract run ID from html_url
+                    # Example: https://github.com/ai-dynamo/dynamo/actions/runs/18697156351/job/53317461976
+                    html_url = check.get('html_url', '')
+                    if '/runs/' in html_url:
+                        run_id = html_url.split('/runs/')[1].split('/')[0]
+
+                    # Format duration
+                    started = check.get('started_at', '')
+                    completed = check.get('completed_at', '')
+                    duration = ''
+                    if started and completed:
+                        try:
+                            from datetime import datetime
+                            start_time = datetime.fromisoformat(started.replace('Z', '+00:00'))
+                            end_time = datetime.fromisoformat(completed.replace('Z', '+00:00'))
+                            duration_sec = int((end_time - start_time).total_seconds())
+                            if duration_sec >= 60:
+                                duration = f"{duration_sec // 60}m{duration_sec % 60}s"
+                            else:
+                                duration = f"{duration_sec}s"
+                        except:
+                            duration = "unknown"
+
+                    # Check if this is a required check
+                    is_required = check_name in required_checks
+
+                    # Get error summary from job logs
+                    error_summary = None
+                    if run_id and html_url:
+                        error_summary = self.get_job_error_summary(run_id, html_url, owner, repo)
+
+                    failed_check = FailedCheck(
+                        name=check_name,
+                        job_url=html_url,
+                        run_id=run_id or '',
+                        duration=duration,
+                        is_required=is_required,
+                        error_summary=error_summary
+                    )
+                    failed_checks.append(failed_check)
+
+            # Sort: required checks first, then by name
+            failed_checks.sort(key=lambda x: (not x.is_required, x.name))
+
+            # Generate rerun URL if we have a run_id
+            rerun_url = None
+            if run_id:
+                rerun_url = f"https://github.com/{owner}/{repo}/actions/runs/{run_id}"
+
+            return failed_checks, rerun_url
+
+        except Exception as e:
+            import sys
+            print(f"Error fetching failed checks for {sha}: {e}", file=sys.stderr)
+            return [], None
+
+    def get_pr_info(self, owner: str, repo: str, branch: str) -> List[PRInfo]:
+        """Get PR information for a branch.
+
+        Args:
+            owner: Repository owner
+            repo: Repository name
+            branch: Branch name
+
+        Returns:
+            List of PRInfo objects
+        """
+        endpoint = f"/repos/{owner}/{repo}/pulls"
+        params = {'head': f'{owner}:{branch}', 'state': 'all'}
+
+        try:
+            prs_data = self.get(endpoint, params=params)
+            if not prs_data:
+                return []
+
+            pr_list = []
+            for pr_data in prs_data:
+                # Fetch PR details in parallel using ThreadPoolExecutor
+                with ThreadPoolExecutor(max_workers=5) as executor:
+                    # Submit all 5 API calls in parallel
+                    future_ci = executor.submit(self.get_ci_status, owner, repo, pr_data['head']['sha'])
+                    future_conversations = executor.submit(self.count_unresolved_conversations, owner, repo, pr_data['number'])
+                    future_details = executor.submit(self.get_pr_details, owner, repo, pr_data['number'])
+                    future_required = executor.submit(self.get_required_checks, owner, repo, pr_data['number'])
+
+                    # Wait for required checks first (needed for failed_checks)
+                    required_checks = future_required.result()
+
+                    # Now get failed checks with required info
+                    future_failed_checks = executor.submit(self.get_failed_checks, owner, repo, pr_data['head']['sha'], required_checks)
+
+                    # Wait for all to complete
+                    ci_status = future_ci.result()
+                    unresolved_count = future_conversations.result()
+                    pr_details = future_details.result()
+                    failed_checks, rerun_url = future_failed_checks.result()
+
+                mergeable = pr_details.get('mergeable') if pr_details else None
+                mergeable_state = pr_details.get('mergeable_state') if pr_details else pr_data.get('mergeable_state', 'unknown')
+                has_conflicts = (mergeable == False) or (mergeable_state == 'dirty')
+
+                # Generate conflict message
+                conflict_message = None
+                if has_conflicts:
+                    base_branch = pr_data.get('base', {}).get('ref', 'main')
+                    conflict_message = f"This branch has conflicts that must be resolved (merge {base_branch} into this branch)"
+
+                # Generate blocking message based on mergeable_state
+                blocking_message = None
+                if mergeable_state in ['blocked', 'unstable', 'behind']:
+                    if mergeable_state == 'unstable':
+                        blocking_message = "Merging is blocked - Waiting on code owner review or required status checks"
+                    elif mergeable_state == 'blocked':
+                        blocking_message = "Merging is blocked - Required reviews or checks not satisfied"
+                    elif mergeable_state == 'behind':
+                        blocking_message = "This branch is out of date with the base branch"
+
+                pr_info = PRInfo(
+                    number=pr_data['number'],
+                    title=pr_data['title'],
+                    url=pr_data['html_url'],
+                    state=pr_data['state'],
+                    is_merged=pr_data.get('merged', False),
+                    review_decision=pr_data.get('reviewDecision'),
+                    mergeable_state=mergeable_state,
+                    unresolved_conversations=unresolved_count,
+                    ci_status=ci_status,
+                    has_conflicts=has_conflicts,
+                    conflict_message=conflict_message,
+                    blocking_message=blocking_message,
+                    failed_checks=failed_checks,
+                    rerun_url=rerun_url
+                )
+                pr_list.append(pr_info)
+
+            return pr_list
+
+        except Exception as e:
+            import sys
+            print(f"Error fetching PR info for {branch}: {e}", file=sys.stderr)
+            return []
 
 

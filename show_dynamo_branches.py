@@ -26,24 +26,9 @@ import git
 import requests
 
 # Import GitHub utilities from common module
-from common import GitHubAPIClient
+from common import GitHubAPIClient, FailedCheck, PRInfo
 
 
-@dataclass
-class PRInfo:
-    """Pull request information"""
-    number: int
-    title: str
-    url: str
-    state: str
-    is_merged: bool
-    review_decision: Optional[str]
-    mergeable_state: str
-    unresolved_conversations: int
-    ci_status: Optional[str]
-    has_conflicts: bool = False
-    conflict_message: Optional[str] = None
-    blocking_message: Optional[str] = None
 
 
 @dataclass
@@ -297,85 +282,73 @@ class ConflictWarningNode(BranchNode):
         return self.label
 
 
-def get_pr_info(github_client: GitHubAPIClient, owner: str, repo: str, branch: str) -> List[PRInfo]:
-    """Get PR information for a branch.
+@dataclass
+class FailedTestNode(BranchNode):
+    """Failed test node"""
+    failed_check: Optional[FailedCheck] = None
 
-    Args:
-        github_client: GitHubAPIClient instance
-        owner: Repository owner
-        repo: Repository name
-        branch: Branch name
+    def _format_content(self) -> str:
+        if not self.failed_check:
+            return ""
+        required_marker = " [REQUIRED]" if self.failed_check.is_required else ""
+        error_indicator = " [Error details available]" if self.failed_check.error_summary else ""
+        return f"❌ {self.failed_check.name}{required_marker} ({self.failed_check.duration}){error_indicator}"
 
-    Returns:
-        List of PRInfo objects
-    """
-    endpoint = f"/repos/{owner}/{repo}/pulls"
-    params = {'head': f'{owner}:{branch}', 'state': 'all'}
+    def _format_html_content(self) -> str:
+        if not self.failed_check:
+            return ""
+        required_marker = ' <span style="color: #cc0000; font-weight: bold;">[REQUIRED]</span>' if self.failed_check.is_required else ""
 
-    try:
-        prs_data = github_client.get(endpoint, params=params)
-        if not prs_data:
-            return []
+        # Create unique ID for this error details section
+        import hashlib
+        detail_id = hashlib.md5(f"{self.failed_check.name}{self.failed_check.job_url}".encode()).hexdigest()[:8]
 
-        pr_list = []
-        for pr_data in prs_data:
-            # Fetch PR details in parallel using ThreadPoolExecutor
-            with ThreadPoolExecutor(max_workers=3) as executor:
-                # Submit all 3 API calls in parallel
-                future_ci = executor.submit(github_client.get_ci_status, owner, repo, pr_data['head']['sha'])
-                future_conversations = executor.submit(github_client.count_unresolved_conversations, owner, repo, pr_data['number'])
-                future_details = executor.submit(github_client.get_pr_details, owner, repo, pr_data['number'])
+        base_html = f'❌ <a href="{self.failed_check.job_url}" target="_blank">{self.failed_check.name}</a>{required_marker} ({self.failed_check.duration})'
 
-                # Wait for all to complete
-                ci_status = future_ci.result()
-                unresolved_count = future_conversations.result()
-                pr_details = future_details.result()
+        # Extract job ID for raw log link
+        job_id = None
+        if '/job/' in self.failed_check.job_url:
+            job_id = self.failed_check.job_url.split('/job/')[1].split('?')[0]
 
-            mergeable = pr_details.get('mergeable') if pr_details else None
-            mergeable_state = pr_details.get('mergeable_state') if pr_details else pr_data.get('mergeable_state', 'unknown')
-            has_conflicts = (mergeable == False) or (mergeable_state == 'dirty')
+        # Add raw log link
+        if job_id:
+            # GitHub provides raw logs at the job URL
+            base_html += f' <a href="{self.failed_check.job_url}" target="_blank" style="color: #666; font-size: 11px; margin-left: 5px;">[raw log]</a>'
 
-            # Generate conflict message
-            conflict_message = None
-            if has_conflicts:
-                base_branch = pr_data.get('base', {}).get('ref', 'main')
-                conflict_message = f"This branch has conflicts that must be resolved (merge {base_branch} into this branch)"
+        # Add expandable error details if available
+        if self.failed_check.error_summary:
+            # Escape HTML in error summary
+            import html
+            escaped_error = html.escape(self.failed_check.error_summary)
+            # Keep "Show error" on the same line, but put the error div on a new line
+            base_html += f' <span style="cursor: pointer; color: #0066cc; margin-left: 10px;" onclick="document.getElementById(\'error_{detail_id}\').style.display = document.getElementById(\'error_{detail_id}\').style.display === \'none\' ? \'block\' : \'none\'">▶ Show error</span><div id="error_{detail_id}" style="display: none; margin-left: 20px; margin-top: 5px; padding: 10px; background-color: #fff5f5; border-left: 3px solid #cc0000; font-family: monospace; font-size: 11px; white-space: pre-wrap;">{escaped_error}</div>'
 
-            # Generate blocking message based on mergeable_state
-            blocking_message = None
-            if mergeable_state in ['blocked', 'unstable', 'behind']:
-                if mergeable_state == 'unstable':
-                    blocking_message = "Merging is blocked - Waiting on code owner review or required status checks"
-                elif mergeable_state == 'blocked':
-                    blocking_message = "Merging is blocked - Required reviews or checks not satisfied"
-                elif mergeable_state == 'behind':
-                    blocking_message = "This branch is out of date with the base branch"
-
-            pr_info = PRInfo(
-                number=pr_data['number'],
-                title=pr_data['title'],
-                url=pr_data['html_url'],
-                state=pr_data['state'],
-                is_merged=pr_data.get('merged', False),
-                review_decision=pr_data.get('reviewDecision'),
-                mergeable_state=mergeable_state,
-                unresolved_conversations=unresolved_count,
-                ci_status=ci_status,
-                has_conflicts=has_conflicts,
-                conflict_message=conflict_message,
-                blocking_message=blocking_message
-            )
-            pr_list.append(pr_info)
-
-        return pr_list
-
-    except Exception as e:
-        print(f"Error fetching PR info for {branch}: {e}", file=sys.stderr)
-        return []
+        return base_html
 
 
-class BranchScanner:
-    """Scanner for repository branches"""
+@dataclass
+class RerunLinkNode(BranchNode):
+    """Rerun link node"""
+    url: Optional[str] = None
+    run_id: Optional[str] = None
+
+    def _format_content(self) -> str:
+        if not self.url or not self.run_id:
+            return ""
+        return f"🔄 Restart: gh run rerun {self.run_id} --repo ai-dynamo/dynamo --failed"
+
+    def _format_html_content(self) -> str:
+        if not self.url or not self.run_id:
+            return ""
+        return f'🔄 <a href="{self.url}" target="_blank">Restart failed jobs</a> (or: <code>gh run rerun {self.run_id} --repo ai-dynamo/dynamo --failed</code>)'
+
+
+
+
+
+
+class LocalRepoScanner:
+    """Scanner for local repository branches"""
 
     def __init__(self, token: Optional[str] = None):
         self.github_api = GitHubAPIClient(token=token)
@@ -490,8 +463,7 @@ class BranchScanner:
             with ThreadPoolExecutor(max_workers=4) as executor:
                 future_to_branch = {
                     executor.submit(
-                        get_pr_info,
-                        self.github_api,
+                        self.github_api.get_pr_info,
                         'ai-dynamo',
                         'dynamo',
                         branch_name
@@ -538,6 +510,17 @@ class BranchScanner:
                     if pr.blocking_message:
                         blocked_node = BlockedMessageNode(label=pr.blocking_message)
                         pr_node.add_child(blocked_node)
+
+                    # Add failed checks if any
+                    if pr.failed_checks:
+                        for failed_check in pr.failed_checks:
+                            failed_test_node = FailedTestNode(label="", failed_check=failed_check)
+                            pr_node.add_child(failed_test_node)
+
+                        # Add rerun link after all failed checks
+                        if pr.rerun_url and pr.failed_checks[0].run_id:
+                            rerun_node = RerunLinkNode(label="", url=pr.rerun_url, run_id=pr.failed_checks[0].run_id)
+                            pr_node.add_child(rerun_node)
 
                 pr_section.add_child(branch_node)
 
@@ -655,7 +638,7 @@ def main():
     base_dir = base_dir.resolve()
 
     # Scan repositories
-    scanner = BranchScanner(token=args.token)
+    scanner = LocalRepoScanner(token=args.token)
     root = scanner.scan_repositories(base_dir)
 
     # Output
