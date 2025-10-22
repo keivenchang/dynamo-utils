@@ -443,6 +443,11 @@ if [ -n "$BUILD_TYPE" ]; then
             cmd rmdir $WHEEL_OUTPUT_DIR 2>/dev/null || true
         fi
 
+        # Clean up old _core*.so files to ensure fresh build
+        if ls $WORKSPACE_DIR/lib/bindings/python/src/dynamo/_core*.so 1> /dev/null 2>&1; then
+            cmd rm -f $WORKSPACE_DIR/lib/bindings/python/src/dynamo/_core*.so
+        fi
+
         # Install maturin if needed (skip in dry-run mode)
         if [ "$DRY_RUN" = false ] && ! uv pip show maturin >/dev/null 2>&1; then
             cmd uv pip install maturin[patchelf]
