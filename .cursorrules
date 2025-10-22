@@ -78,6 +78,7 @@
 bash -ec 'rustup component add rustfmt clippy && \
               cargo fmt -- --check && \
               cargo clippy --features block-manager --no-deps --all-targets -- -D warnings && \
+              (cd lib/bindings/python && cargo clippy --features block-manager --no-deps --all-targets -- -D warnings) && \
               cargo test --locked --all-targets --features=block-manager && \
               cargo test --locked --features integration -- --nocapture'
 ```
@@ -85,6 +86,7 @@ bash -ec 'rustup component add rustfmt clippy && \
 ## Formatting and Linting
 # - Run `cargo fmt` whenever there are significant changes to Rust (*.rs files)
 # - Also periodically run `cargo clippy --no-deps --all-targets -- -D warnings`
+# - Also periodically run `(cd lib/bindings/python && cargo clippy --no-deps --all-targets -- -D warnings)`
 
 ## Type Inference for Examples
 # When working on any example directories in "lib/runtime/examples/<dir>" or "lib/bindings/python":
@@ -355,8 +357,12 @@ chown -R $USER_ID:$GROUP_ID .
 #   - If the change is straightforward, a single line message is preferred
 
 ## Commit Message Format
-# - When I say "commit", make it terse, 1 if a small commit, or just a couple of lines if necessary.
-# - But when I say "first commit" or "initial commit", follow the more verbose title format below on the very first line of the message:
+# - When I say "commit", make it terse, 1 if a small commit, or at most a couple of lines,if it helps with clarity. Something like:
+#   quick fix of the module in XYZ ...
+#   documentation updates on XYZ ...
+#   minor, changing the usage of XYZ to perform something else like ...
+#   renaming of XYZ to ZYX ...
+# - The one exception is that when I say "first commit" or "initial commit", follow the format below, on the very first line of the message:
 #   feat: add new user authentication system
 #   fix: resolve memory leak in data processing
 #   docs: update API documentation

@@ -1,6 +1,6 @@
 # NVIDIA Dynamo Projects - Instructions
 
-> **Note**: For coding conventions, style guidelines, and development practices, refer to `.cursorrules` in this directory.
+> **Note**: For coding conventions, style guidelines, and development practices, refer to `dynamo-utils/.cursorrules`. Periodically review this file so you don't forget the details in .cursorrules.
 
 ---
 
@@ -9,7 +9,7 @@
 ## Meta Instructions
 
 ### Remember This
-When the user says "remember this", document it in this CLAUDE.md file.
+When the user says "remember this" or "remember how to do this" or something similar, document it in this CLAUDE.md file.
 
 ### Commit Policy
 **NEVER auto-commit changes without explicit user approval.** Always wait for the user to explicitly request a commit before running git commit commands.
@@ -18,11 +18,23 @@ When the user says "remember this", document it in this CLAUDE.md file.
 - No need to ask permission when running any read-only operations, such as `echo`, `cat`, `tail`, `head`, `grep`, `egrep`, `ls`, `uname`, `soak_fe.py` or `curl` commands
 - When executing `docker exec ... bash -c "<command> ..." and the <command> is one of the read-only operations, just execute the command, no need to ask for permission.
 
+### Python Virtual Environment
+**Always use the dynamo-utils venv**: Before any Python operations in dynamo-utils, activate the virtual environment:
+```bash
+source dynamo-utils/.venv/bin/activate
+```
+
+The venv includes:
+- pre-commit (for git hooks, always run this git commit)
+- All Python dependencies for dynamo-utils scripts
+
+**Location**: `nvidia/dynamo-utils/.venv/`
+
 ## Environment Setup
 
 ### All Projects Overview
 
-The `~/nvidia/` directory contains multiple projects:
+The `nvidia/` directory contains multiple projects:
 
 - **dynamo1, dynamo2, dynamo3, dynamo4**: Multiple working branches of the Dynamo repository
 - **dynamo_ci**: Main CI/testing repository for Dynamo
@@ -32,11 +44,11 @@ The `~/nvidia/` directory contains multiple projects:
 
 When running `docker ps`, VS Code/Cursor dev container images follow this naming pattern:
 
-- `vsc-dynamo1-*` → `~/nvidia/dynamo1`
-- `vsc-dynamo2-*` → `~/nvidia/dynamo2`
-- `vsc-dynamo3-*` → `~/nvidia/dynamo3`
-- `vsc-dynamo4-*` → `~/nvidia/dynamo4`
-- `vsc-dynamo_ci-*` → `~/nvidia/dynamo_ci`
+- `vsc-dynamo1-*` → `nvidia/dynamo1`
+- `vsc-dynamo2-*` → `nvidia/dynamo2`
+- `vsc-dynamo3-*` → `nvidia/dynamo3`
+- `vsc-dynamo4-*` → `nvidia/dynamo4`
+- `vsc-dynamo_ci-*` → `nvidia/dynamo_ci`
 
 The `vsc-` prefix indicates VS Code/Cursor dev containers, and the part after it matches the directory name.
 
@@ -46,10 +58,10 @@ The `vsc-` prefix indicates VS Code/Cursor dev containers, and the part after it
 
 The `dynamo-utils` directory on the host is mapped to the container's `_` directory:
 
-- **Host**: `~/nvidia/dynamo-utils/`
+- **Host**: `nvidia/dynamo-utils/`
 - **Container**: `~/dynamo/_/`
 
-Example: A file at `~/nvidia/dynamo-utils/notes/metrics-vllm.log` on the host appears at `~/dynamo/_/notes/metrics-vllm.log` inside the container.
+Example: A file at `nvidia/dynamo-utils/notes/metrics-vllm.log` on the host appears at `~/dynamo/_/notes/metrics-vllm.log` inside the container.
 
 ### Backup File Convention
 
@@ -118,7 +130,7 @@ docker exec <container_name> bash -c "mkdir -p ~/dynamo/_/notes && curl -s local
 ```
 
 **Output**:
-- Metrics saved to: `~/nvidia/dynamo-utils/notes/metrics-<framework>.log` (on host)
+- Metrics saved to: `nvidia/dynamo-utils/notes/metrics-<framework>.log` (on host)
 - Typical size: ~200-600 lines
 
 **Repeat for other frameworks**:
@@ -275,6 +287,8 @@ All frameworks showed consistent Dynamo component behavior:
 
 > **Note**: General pytest guidelines (including `--basetemp=/tmp/pytest_temp`) are in `.cursorrules`.
 
+### Docker Builder Tests
+
 **Quick Test (Single Framework)**:
 ```bash
 python3 dynamo_docker_builder.py --sanity-check-only --framework sglang --force-run --email <email>
@@ -288,6 +302,45 @@ python3 dynamo_docker_builder.py --skip-build-if-image-exists --parallel --force
 **Full Build**:
 ```bash
 python3 dynamo_docker_builder.py --parallel --force-run --email <email>
+```
+
+### Documentation Build Test
+
+Test Sphinx documentation build (same as CI) to verify no warnings/errors:
+
+**Build documentation in Docker** (replicates exact CI environment):
+```bash
+cd /path/to/dynamo/repo
+docker build -t docs-builder -f container/Dockerfile.docs .
+```
+
+This builds documentation using:
+- **Container**: `container/Dockerfile.docs`
+- **Script**: `docs/generate_docs.py`
+- **Steps**: `make clean` → preprocess links → `make html` with `-W` (warnings as errors)
+- **Output**: `docs/build/html/` (inside container)
+
+**Expected result**: `build succeeded` with no warnings
+
+**If build fails**: Check for:
+- Missing images referenced in markdown
+- Documents not included in any toctree (add to `docs/index.rst` or `docs/hidden_toctree.rst`)
+- Broken relative links
+
+**Extract built HTML** (optional, to view locally):
+```bash
+docker create --name docs-container docs-builder
+docker cp docs-container:/workspace/dynamo/docs/build/html ./dynamo-docs/
+docker rm docs-container
+cd dynamo-docs
+python3 -m http.server 8000  # View at http://localhost:8000
+```
+
+**Quick check for warnings without full build**:
+```bash
+# Look for common issues in recent changes
+git diff --name-only HEAD~5 | grep '\.md$' | xargs grep -l 'http.*github.com.*dynamo'  # Check links
+find docs -name '*.md' -newer docs/build/html 2>/dev/null  # Find modified docs
 ```
 
 ## Important Reminders
@@ -305,3 +358,84 @@ python3 dynamo_docker_builder.py --parallel --force-run --email <email>
 For detailed information about Python utilities and scripts in this directory, see:
 - **README.md**: Comprehensive documentation for all Python scripts and tools
 - **.cursorrules**: Coding conventions, style guidelines, and development practices
+
+---
+
+## GitHub API Access
+
+**GitHub credentials location**: `~/.config/gh/hosts.yml`
+
+**Environment variable**: `GITHUB_TOKEN` is set in `~/.bashrc` and automatically loaded on login.
+
+To use GitHub API with curl:
+```bash
+# Using environment variable (preferred)
+curl -H "Authorization: token $GITHUB_TOKEN" https://api.github.com/user
+
+# Or read from config file
+TOKEN=$(grep oauth_token ~/.config/gh/hosts.yml | head -1 | awk '{print $2}')
+curl -H "Authorization: token $TOKEN" https://api.github.com/repos/ai-dynamo/dynamo/...
+```
+
+For Python scripts, use `GitHubAPIClient` from `common.py` which automatically reads credentials from:
+1. Provided token argument
+2. `GITHUB_TOKEN` environment variable (set in ~/.bashrc)
+3. `~/.config/gh/hosts.yml` (GitHub CLI config)
+
+## Re-running Failed GitHub Actions
+
+**Quick method using GitHub CLI** (recommended):
+
+```bash
+# Step 1: View PR checks to get workflow run ID
+gh pr checks <PR_NUMBER> --repo ai-dynamo/dynamo
+
+# Step 2: Re-run failed jobs using the run ID from check URLs
+gh run rerun <RUN_ID> --repo ai-dynamo/dynamo --failed
+
+# Step 3: Verify the re-run started
+gh run view <RUN_ID> --repo ai-dynamo/dynamo --json status,conclusion,url
+```
+
+**Example workflow**:
+```bash
+# For PR #3688
+gh pr checks 3688 --repo ai-dynamo/dynamo
+# Output shows: https://github.com/ai-dynamo/dynamo/actions/runs/18690241847/...
+# Extract run ID: 18690241847
+
+gh run rerun 18690241847 --repo ai-dynamo/dynamo --failed
+# ✅ Successfully triggered re-run
+
+gh run view 18690241847 --repo ai-dynamo/dynamo --json status,conclusion,url
+# Shows: {"conclusion":"","status":"queued",...}
+```
+
+**Alternative: Using Python API**:
+
+```python
+import sys
+sys.path.insert(0, 'nvidia/dynamo-utils')
+from common import GitHubAPIClient
+import requests
+
+client = GitHubAPIClient()
+
+# Re-run failed jobs for a specific workflow run
+run_id = 18672015489  # Get from workflow URL or API
+rerun_url = f"{client.base_url}/repos/ai-dynamo/dynamo/actions/runs/{run_id}/rerun-failed-jobs"
+
+response = requests.post(rerun_url, headers=client.headers)
+if response.status_code == 201:
+    print("✅ Successfully triggered re-run of failed jobs")
+```
+
+**When to use**:
+- Transient infrastructure failures (ARM64 runner issues, network timeouts)
+- Failed checks that passed locally
+- When all code tests pass but build/deploy steps fail
+
+**Finding workflow run ID**:
+- From `gh pr checks <PR_NUMBER>`: Extract from check URLs (e.g., `/runs/18690241847/`)
+- From Actions URL: `https://github.com/ai-dynamo/dynamo/actions/runs/RUN_ID`
+- From PR check status: Use GitHubAPIClient to get commit check-runs, extract run ID from `html_url`
