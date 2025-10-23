@@ -4,22 +4,22 @@ Dynamo utilities package.
 Shared constants and utilities for dynamo Docker management scripts.
 """
 
+import json
 import logging
 import os
 import re
 import shlex
 import shutil
 import subprocess
-import sys
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 try:
-    import docker
+    import docker  # type: ignore[import-untyped]
 except ImportError:
-    docker = None
+    docker = None  # type: ignore[assignment]
 
 try:
     import yaml
@@ -72,7 +72,7 @@ class DynamoImageInfo:
 
     def matches_sha(self, sha: str) -> bool:
         """Check if this image matches the specified SHA."""
-        return self.version and sha in self.version
+        return bool(self.version and sha in self.version)
 
     def is_framework_image(self) -> bool:
         """Check if this has framework information."""
@@ -114,7 +114,7 @@ class DockerImageInfo:
 
     def matches_sha(self, sha: str) -> bool:
         """Check if this image matches the specified SHA."""
-        return self.dynamo_info and self.dynamo_info.matches_sha(sha)
+        return bool(self.dynamo_info and self.dynamo_info.matches_sha(sha))
 
     def is_dynamo_image(self) -> bool:
         """Check if this is a dynamo image."""
@@ -122,7 +122,7 @@ class DockerImageInfo:
 
     def is_dynamo_framework_image(self) -> bool:
         """Check if this is a dynamo framework image."""
-        return self.is_dynamo_image() and self.dynamo_info and self.dynamo_info.is_framework_image()
+        return bool(self.is_dynamo_image() and self.dynamo_info and self.dynamo_info.is_framework_image())
 
     def get_latest_tag(self) -> str:
         """Get the latest tag for this image."""
@@ -262,7 +262,7 @@ class BaseUtils:
                 return True, "", ""
             else:
                 # Return a mock completed process in dry-run mode
-                mock_result = subprocess.CompletedProcess(command, 0)
+                mock_result: subprocess.CompletedProcess[str] = subprocess.CompletedProcess(command, 0)
                 mock_result.stdout = ""
                 mock_result.stderr = ""
                 return mock_result
@@ -457,7 +457,7 @@ class DynamoRepositoryUtils(BaseUtils):
                 self.store_composite_sha(current_sha)
                 return True
         else:
-            self.logger.info(f"No previous composite SHA found - rebuild needed")
+            self.logger.info("No previous composite SHA found - rebuild needed")
             self.store_composite_sha(current_sha)
             return True
 
@@ -486,12 +486,13 @@ class DockerUtils(BaseUtils):
         """Format size in human readable format."""
         if size_bytes == 0:
             return "0 B"
-        
+
+        size_float = float(size_bytes)
         for unit in ['B', 'KB', 'MB', 'GB', 'TB']:
-            if size_bytes < 1024.0:
-                return f"{size_bytes:.1f} {unit}"
-            size_bytes /= 1024.0
-        return f"{size_bytes:.1f} PB"
+            if size_float < 1024.0:
+                return f"{size_float:.1f} {unit}"
+            size_float = size_float / 1024.0
+        return f"{size_float:.1f} PB"
     
     def _parse_dynamo_image(self, image_name: str) -> Optional[DynamoImageInfo]:
         """Parse dynamo image name to extract framework and version info."""
@@ -560,7 +561,7 @@ class DockerUtils(BaseUtils):
             self.logger.error(f"Failed to get image info for {image_name}: {e}")
             return None
     
-    def list_images(self, name_filter: str = None) -> List[DockerImageInfo]:
+    def list_images(self, name_filter: Optional[str] = None) -> List[DockerImageInfo]:
         """List all Docker images with optional name filtering.
 
         DEPRECATION: retag script only. V1 and V2 do not use this.
@@ -587,7 +588,7 @@ class DockerUtils(BaseUtils):
             self.logger.error(f"Failed to list images: {e}")
             return []
     
-    def list_dynamo_images(self, framework: str = None, target: str = None, sha: str = None) -> List[DockerImageInfo]:
+    def list_dynamo_images(self, framework: Optional[str] = None, target: Optional[str] = None, sha: Optional[str] = None) -> List[DockerImageInfo]:
         """List dynamo framework images with optional filtering.
 
         DEPRECATION: retag script only. V1 and V2 do not use this.
@@ -710,7 +711,6 @@ class DockerUtils(BaseUtils):
 
         Helps identify functionally identical commands with different formatting.
         """
-        import re
         
         # Remove extra whitespace and normalize
         normalized = ' '.join(docker_command.split())
@@ -989,6 +989,7 @@ class RunningCheck:
     name: str
     check_url: str
     is_required: bool = False
+    elapsed_time: Optional[str] = None
 
 
 @dataclass
@@ -1284,7 +1285,7 @@ class GitHubAPIClient:
 
             return required_checks
 
-        except Exception as e:
+        except Exception:
             # If we can't get required checks, return empty set
             return set()
 
@@ -1432,7 +1433,6 @@ class GitHubAPIClient:
             for check in data['check_runs']:
                 if check.get('conclusion') == 'failure':
                     check_name = check['name']
-                    check_run_id = check.get('id')
 
                     # Extract run ID from html_url
                     # Example: https://github.com/ai-dynamo/dynamo/actions/runs/18697156351/job/53317461976
@@ -1454,7 +1454,7 @@ class GitHubAPIClient:
                                 duration = f"{duration_sec // 60}m{duration_sec % 60}s"
                             else:
                                 duration = f"{duration_sec}s"
-                        except:
+                        except Exception:
                             duration = "unknown"
 
                     # Check if this is a required check
@@ -1527,10 +1527,33 @@ class GitHubAPIClient:
                     check_url = check.get('detailsUrl', '')
                     is_required = check.get('isRequired', False) or (name in required_checks)
 
+                    # Calculate elapsed time
+                    elapsed_time = None
+                    started_at = check.get('startedAt')
+                    if started_at and started_at != '0001-01-01T00:00:00Z':
+                        try:
+                            from datetime import datetime, timezone
+                            start_time = datetime.fromisoformat(started_at.replace('Z', '+00:00'))
+                            now = datetime.now(timezone.utc)
+                            elapsed = now - start_time
+                            total_seconds = int(elapsed.total_seconds())
+
+                            if total_seconds < 60:
+                                elapsed_time = f'{total_seconds}s'
+                            else:
+                                minutes = total_seconds // 60
+                                seconds = total_seconds % 60
+                                elapsed_time = f'{minutes}m{seconds}s'
+                        except Exception:
+                            elapsed_time = None
+                    elif status == 'QUEUED':
+                        elapsed_time = 'queued'
+
                     running_check = RunningCheck(
                         name=name,
                         check_url=check_url,
-                        is_required=is_required
+                        is_required=is_required,
+                        elapsed_time=elapsed_time
                     )
                     running_checks.append(running_check)
 
@@ -1589,7 +1612,7 @@ class GitHubAPIClient:
 
                 mergeable = pr_details.get('mergeable') if pr_details else None
                 mergeable_state = pr_details.get('mergeable_state') if pr_details else pr_data.get('mergeable_state', 'unknown')
-                has_conflicts = (mergeable == False) or (mergeable_state == 'dirty')
+                has_conflicts = (mergeable is False) or (mergeable_state == 'dirty')
 
                 # Generate conflict message
                 conflict_message = None
@@ -1612,7 +1635,7 @@ class GitHubAPIClient:
                     title=pr_data['title'],
                     url=pr_data['html_url'],
                     state=pr_data['state'],
-                    is_merged=pr_data.get('merged', False),
+                    is_merged=pr_data.get('merged_at') is not None,
                     review_decision=pr_data.get('reviewDecision'),
                     mergeable_state=mergeable_state,
                     unresolved_conversations=unresolved_count,

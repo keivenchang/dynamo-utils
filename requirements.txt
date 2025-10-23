@@ -1,4 +1,19 @@
-# Required dependencies for DynamoDockerBuilder
+# Core dependencies for dynamo-utils scripts
+# Install with: pip install -r requirements.txt
+
+# Docker Builder requirements
 jinja2>=3.0.0
 psutil>=5.8.0
 docker>=6.0.0
+
+# GitHub API and Git operations (for show_dynamo_branches.py)
+requests>=2.32.0
+GitPython>=3.1.0
+
+# YAML parsing (optional, for configuration files)
+PyYAML>=6.0.0
+
+# Development tools
+pre-commit>=4.0.0
+ruff>=0.14.0
+mypy>=1.0.0

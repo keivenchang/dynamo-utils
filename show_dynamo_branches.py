@@ -9,26 +9,18 @@ Supports parallel data gathering for improved performance.
 
 import argparse
 import hashlib
-import json
-import os
-import re
-import subprocess
-import sys
+import html
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
-from urllib.parse import quote
+from typing import List, Optional
 from zoneinfo import ZoneInfo
 
 import git
-import requests
 
 # Import GitHub utilities from common module
-from common import GitHubAPIClient, FailedCheck, RunningCheck, PRInfo
-
-
+from common import FailedCheck, GitHubAPIClient, PRInfo
 
 
 @dataclass
@@ -210,7 +202,12 @@ class PRNode(BranchNode):
 
         # Truncate title at 80 characters
         title = self.pr.title[:80] + '...' if len(self.pr.title) > 80 else self.pr.title
-        return f'{emoji} <a href="{self.pr.url}" target="_blank">PR#{self.pr.number}</a>: {title}'
+
+        # Gray out merged PRs
+        if self.pr.is_merged:
+            return f'<span style="color: #999;">{emoji} <a href="{self.pr.url}" target="_blank" style="color: #999;">PR#{self.pr.number}</a>: {title}</span>'
+        else:
+            return f'{emoji} <a href="{self.pr.url}" target="_blank">PR#{self.pr.number}</a>: {title}'
 
 
 @dataclass
@@ -300,7 +297,6 @@ class FailedTestNode(BranchNode):
         required_marker = ' <span style="color: #cc0000; font-weight: bold;">[REQUIRED]</span>' if self.failed_check.is_required else ""
 
         # Create unique ID for this error details section
-        import hashlib
         detail_id = hashlib.md5(f"{self.failed_check.name}{self.failed_check.job_url}".encode()).hexdigest()[:8]
 
         base_html = f'❌ <a href="{self.failed_check.job_url}" target="_blank">{self.failed_check.name}</a>{required_marker} ({self.failed_check.duration})'
@@ -318,7 +314,6 @@ class FailedTestNode(BranchNode):
         # Add expandable error details if available
         if self.failed_check.error_summary:
             # Escape HTML in error summary
-            import html
             escaped_error = html.escape(self.failed_check.error_summary)
             # Keep "Show error" on the same line, but put the error div on a new line
             base_html += f' <span style="cursor: pointer; color: #0066cc; margin-left: 10px;" onclick="document.getElementById(\'error_{detail_id}\').style.display = document.getElementById(\'error_{detail_id}\').style.display === \'none\' ? \'block\' : \'none\'">▶ Show error</span><div id="error_{detail_id}" style="display: none; margin-left: 20px; margin-top: 5px; padding: 10px; background-color: #fff5f5; border-left: 3px solid #cc0000; font-family: monospace; font-size: 11px; white-space: pre-wrap;">{escaped_error}</div>'
@@ -349,20 +344,23 @@ class RunningCheckNode(BranchNode):
     check_name: str = ""
     is_required: bool = False
     check_url: Optional[str] = None
+    elapsed_time: Optional[str] = None
 
     def _format_content(self) -> str:
         if not self.check_name:
             return ""
         required_marker = " [REQUIRED]" if self.is_required else ""
-        return f"⏳ {self.check_name}{required_marker}"
+        time_info = f" ({self.elapsed_time})" if self.elapsed_time else ""
+        return f"⏳ {self.check_name}{required_marker}{time_info}"
 
     def _format_html_content(self) -> str:
         if not self.check_name:
             return ""
         required_marker = ' <span style="color: #0066cc; font-weight: bold;">[REQUIRED]</span>' if self.is_required else ""
+        time_info = f' <span style="color: #666; font-size: 11px;">({self.elapsed_time})</span>' if self.elapsed_time else ""
         if self.check_url:
-            return f'⏳ <a href="{self.check_url}" target="_blank">{self.check_name}</a>{required_marker}'
-        return f'⏳ {self.check_name}{required_marker}'
+            return f'⏳ <a href="{self.check_url}" target="_blank">{self.check_name}</a>{required_marker}{time_info}'
+        return f'⏳ {self.check_name}{required_marker}{time_info}'
 
 
 
@@ -442,7 +440,7 @@ class LocalRepoScanner:
             pass
 
         # Scan all local branches
-        for branch in repo.branches:
+        for branch in repo.branches:  # type: ignore[attr-defined]
             branch_name = branch.name
 
             # Skip main branches
@@ -535,18 +533,15 @@ class LocalRepoScanner:
 
                     # Add running checks if any (show first, before failed checks)
                     if pr.running_checks:
-                        for running_check in pr.running_checks[:10]:  # Limit to 10
+                        for running_check in pr.running_checks:
                             running_check_node = RunningCheckNode(
                                 label="",
                                 check_name=running_check.name,
                                 is_required=running_check.is_required,
-                                check_url=running_check.check_url
+                                check_url=running_check.check_url,
+                                elapsed_time=running_check.elapsed_time
                             )
                             pr_node.add_child(running_check_node)
-
-                        if len(pr.running_checks) > 10:
-                            more_node = BranchNode(label=f"... +{len(pr.running_checks) - 10} more running checks")
-                            pr_node.add_child(more_node)
 
                     # Add failed checks if any
                     if pr.failed_checks:
