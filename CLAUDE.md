@@ -308,7 +308,7 @@ python3 dynamo_docker_builder.py --parallel --force-run --email <email>
 
 Test Sphinx documentation build (same as CI) to verify no warnings/errors:
 
-**Build documentation in Docker** (replicates exact CI environment):
+**Docs Link / Build documentation in Docker** (replicates exact CI environment):
 ```bash
 cd /path/to/dynamo/repo
 docker build -t docs-builder -f container/Dockerfile.docs .
