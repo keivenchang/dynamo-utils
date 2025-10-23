@@ -268,6 +268,63 @@ def process_file(filename: str) -> None:
 # - Always pass `--basetemp=/tmp/pytest_temp` to avoid cluttering project root with test artifacts
 #   Example: `pytest --basetemp=/tmp/pytest_temp tests/`
 
+## End-to-End (E2E) Backend Testing with Metrics Validation
+# - E2E tests validate backend deployments with comprehensive metrics validation
+# - Tests validate both dynamo_component_* metrics (≥23 unique) and backend-specific metrics
+# - Backend-specific metric thresholds:
+#   - vLLM: ≥52 unique vllm:* metrics (80% of ~65 typical metrics)
+#   - SGLang: ≥20 unique sglang:* metrics (80% of ~25 typical metrics)
+#   - TensorRT-LLM: ≥4 unique trtllm:* metrics (80% of ~5 typical metrics)
+
+## Aggregated vs Disaggregated Mode Requirements
+# - **Aggregated mode**: Single GPU deployment, all components on one device
+#   - Works with single GPU systems
+#   - Requires metrics server: `DYN_SYSTEM_ENABLED=true DYN_SYSTEM_PORT=8081`
+#   - Example: vLLM and SGLang aggregated configs include metrics validation
+# - **Disaggregated mode**: Multi-GPU deployment, prefill/decode separation
+#   - Requires multiple GPUs (typically 2+ GPUs)
+#   - Will fail on single GPU systems with service discovery errors
+#   - Use aggregated mode for single GPU testing and metrics validation
+
+# Individual backend E2E tests (aggregated configs with metrics validation):
+```
+pytest tests/serve/test_vllm.py::test_serve_deployment -k "aggregated" -v --tb=short
+pytest tests/serve/test_sglang.py::test_sglang_deployment -k "aggregated" -v --tb=short
+pytest tests/serve/test_trtllm.py::test_deployment -k "aggregated" -v --tb=short
+```
+
+# All backend E2E tests with metrics validation:
+```
+pytest tests/serve/ -k "aggregated" -v --tb=short
+```
+
+# Filtered output (recommended to avoid clutter):
+```
+pytest tests/serve/ -k "aggregated" -v --tb=short | grep -v "running 0 tests" | grep -v "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out" | grep -v "tower_http::trace::on_failure:"
+```
+
+# All serve tests (requires GPU resources):
+```
+pytest tests/serve/ -v --tb=short
+```
+
+## Metrics Server Configuration for Backend Tests
+# - Backend launch scripts must include metrics server environment variables for E2E tests
+# - **Required environment variables**:
+#   - `DYN_SYSTEM_ENABLED=true` - Enables the metrics server
+#   - `DYN_SYSTEM_PORT=8081` - Sets metrics endpoint port (default: 8081)
+# - **Example launch script pattern**:
+```bash
+# run worker with metrics enabled
+DYN_SYSTEM_ENABLED=true DYN_SYSTEM_PORT=8081 \
+python -m dynamo.backend_name --model <model> [other_args]
+```
+# - **Backend-specific examples**:
+#   - vLLM: `/workspace/components/backends/vllm/launch/agg.sh` (already configured)
+#   - SGLang: `/workspace/tests/serve/launch/sglang_agg.sh` (updated to include metrics)
+#   - TensorRT-LLM: Launch scripts should follow same pattern
+# - **Without metrics server**: Tests will fail with "Connection refused" on port 8081
+
 # =============================================================================
 # JAVASCRIPT/TYPESCRIPT DEVELOPMENT GUIDELINES
 # =============================================================================
