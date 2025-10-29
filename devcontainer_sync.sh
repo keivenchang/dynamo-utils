@@ -202,20 +202,28 @@ for destdir in "$DEST_SRC_DIR_GLOB"*; do
     # Clean up temporary file
     rm -f "${TEMP_OUTPUT_FILE}" 2>/dev/null
 
-    # Handle build directory management for dynamo* directories
+    # Handle build directory migration for dynamo* directories
     if [[ "$DEST_BASE_DIRNAME" == dynamo* ]]; then
-        # Ensure .build/target exists
-        cmd mkdir -p "$destdir/.build/target"
-
-        # If target is a real directory (not symlink), move it and create symlink
-        if [ -d "$destdir/target" ] && [ ! -L "$destdir/target" ]; then
-            cmd rm -rf "$destdir/.build/target"/*
-            if [ "$(ls -A "$destdir/target" 2>/dev/null)" ]; then
-                cmd mv "$destdir/target"/* "$destdir/target"/.* "$destdir/.build/target/"
+        # If .build/target exists, migrate it to target and clean up
+        if [ -e "$destdir/.build/target" ]; then
+            # Remove symlink if target is a symlink
+            if [ -L "$destdir/target" ]; then
+                cmd rm "$destdir/target"
+                dry_run_echo "INFO: Removed target symlink in $DEST_BASE_DIRNAME"
             fi
-            cmd rm -rf "$destdir/target"
-            cmd ln -s ".build/target" "$destdir/target"
-            dry_run_echo "SUCCESS: Moved target to .build/target and created symlink in $DEST_BASE_DIRNAME"
+            
+            # Move .build/target to target if it's not empty
+            if [ -d "$destdir/.build/target" ] && [ "$(ls -A "$destdir/.build/target" 2>/dev/null)" ]; then
+                cmd mv "$destdir/.build/target" "$destdir/target"
+                dry_run_echo "SUCCESS: Moved .build/target to target in $DEST_BASE_DIRNAME"
+            fi
+            
+            # Remove .build directory if it exists and is empty or can be removed
+            if [ -d "$destdir/.build" ]; then
+                cmd rmdir "$destdir/.build" 2>/dev/null && \
+                    dry_run_echo "SUCCESS: Removed empty .build directory in $DEST_BASE_DIRNAME" || \
+                    dry_run_echo "INFO: .build directory not empty, skipping removal in $DEST_BASE_DIRNAME"
+            fi
         fi
     fi
 
