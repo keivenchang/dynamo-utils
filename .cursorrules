@@ -470,6 +470,18 @@ chown -R $USER_ID:$GROUP_ID .
 # - For possible reviewers, look at past commits and look for past committers to the files I modified.
 # - If there is 0 document line changed, then don't print "documents: ..." section.
 # - Never, ever show the literal text `<PR#NUMBER>`. If unsure what that is, ask me for it.
+# - Map github logins to Slack logins:
+#   - nv-tusharma or tusharma -> @Tushar Sharma
+#   - ishandhanani -> @Ishan Dhanani
+#   - anant-s -> @Anant Sharma
+#   - hhzhang16 -> @Hannah Zhang
+#   - grahamk -> @Graham King
+#   - krish -> @Krishnan Prashanth
+#   - yanrpei -> @Rudy Pei 
+#   - biswa.panda -> @Biswa Ranjan Panda
+#   - tedzhouhk -> @Hongkuan Zhou
+#   - tzulingk -> @Tzu-Ling Kan
+#   - neelays -> @Neelay Shah
 ```
 RFR (code: +123/-55 lines, documents: 50 lines changed):
 *feat:* DIS-123 some feature desc here
