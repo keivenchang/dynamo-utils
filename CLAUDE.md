@@ -11,6 +11,14 @@
 ### Remember This
 When the user says "remember this" or "remember how to do this" or something similar, document it in this CLAUDE.md file.
 
+### New Project Protocol
+
+When the user says "new project", always:
+1. Re-read `~/nvidia/dynamo-utils/.cursorrules`
+2. Re-read `~/nvidia/dynamo-utils/CLAUDE.md`
+
+These are the canonical project instructions. Do NOT read .cursorrules or CLAUDE.md from other project directories (dynamo1, dynamo2, dynamo3, dynamo_ci, etc.) unless explicitly instructed.
+
 ### Commit Policy
 **NEVER auto-commit changes without explicit user approval.** Always wait for the user to explicitly request a commit before running git commit commands.
 
@@ -286,6 +294,33 @@ All frameworks showed consistent Dynamo component behavior:
 ## Testing Commands
 
 > **Note**: General pytest guidelines (including `--basetemp=/tmp/pytest_temp`) are in `.cursorrules`.
+
+### Running Pytest with WORKSPACE_DIR
+
+**IMPORTANT**: When using `WORKSPACE_DIR` environment variable for pytest tests, always run pytest from `$WORKSPACE_DIR` instead of `/workspace`:
+
+**Correct** ✅:
+```bash
+docker exec -u root <container> bash -c "export WORKSPACE_DIR=~/dynamo && cd ~/dynamo && pytest -xvs tests/serve/test_vllm.py::test_serve_deployment -k aggregated --basetemp=/tmp/pytest_test"
+```
+
+**Incorrect** ❌:
+```bash
+docker exec -u root <container> bash -c "export WORKSPACE_DIR=~/dynamo && cd /workspace && pytest ..."
+```
+
+**Why this matters**:
+- pytest writes cache files (`.pytest_cache`) to the **current working directory**, not based on environment variables
+- When running from `/workspace`, pytest tries to write to `/workspace/.pytest_cache` (permission denied for non-root)
+- When running from `$WORKSPACE_DIR`, pytest writes to `$WORKSPACE_DIR/.pytest_cache` (works correctly)
+- The test code uses `WORKSPACE_DIR` to find scripts/models, but pytest's cache location depends on `pwd`
+
+**Solution**: Always `cd $WORKSPACE_DIR` before running pytest when using WORKSPACE_DIR environment variable.
+
+**Alternative**: Use `--cache-dir=/tmp/pytest_cache` flag if you must run from a different directory:
+```bash
+pytest --cache-dir=/tmp/pytest_cache --basetemp=/tmp/pytest_test ...
+```
 
 ### Docker Builder Tests
 
