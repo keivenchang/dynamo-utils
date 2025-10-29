@@ -30,7 +30,7 @@
             "settings": {
                 "dev.containers.copyGitConfig": false,
                 "terminal.integrated.defaultProfile.linux": "bash",
-                "terminal.integrated.cwd": "~/dynamo",
+                "terminal.integrated.cwd": "/workspace",
 
                 "python.defaultInterpreterPath": "/opt/dynamo/venv/bin/python",
                 "python.linting.enabled": true,
@@ -39,7 +39,7 @@
                 "rust-analyzer.checkOnSave.command": "clippy",
                 "rust-analyzer.checkOnSave.enable": true,
                 "rust-analyzer.cargo.buildScripts.enable": true,
-                "rust-analyzer.cargo.targetDir": "~/dynamo/.build/target",
+                "rust-analyzer.cargo.targetDir": "/workspace/target",
                 "rust-analyzer.procMacro.enable": true,
                 "rust-analyzer.completion.autoimport.enable": true,
 
@@ -57,15 +57,11 @@
             }
         }
     },
-    "workspaceFolder": "~/dynamo",
-    "workspaceMount": "source=${localWorkspaceFolder},target=~/dynamo,type=bind,consistency=cached",
+    "workspaceFolder": "/workspace",
+    "workspaceMount": "source=${localWorkspaceFolder},target=/workspace,type=bind,consistency=cached",
     "userEnvProbe": "interactiveShell",
-    "postCreateCommand": "/bin/bash ~/dynamo/.devcontainer/post-create.sh", // Runs cargo build and pip installs packages
+    "postCreateCommand": "/bin/bash /workspace/.devcontainer/post-create.sh", // Runs cargo build and pip installs packages
     "containerEnv": {
-        "DYNAMO_HOME": "~/dynamo",
-        "CARGO_HOME": "~/dynamo/.build/.cargo",
-        "RUSTUP_HOME": "~/dynamo/.build/.rustup",
-        "CARGO_TARGET_DIR": "~/dynamo/.build/target",
         "CARGO_PROFILE_DEV_OPT_LEVEL": "0",  // keiven's custom env var
         "CARGO_BUILD_JOBS": "32"  // keiven's custom env var
     },
@@ -85,10 +81,10 @@
         // Keiven's custom mounts
         //"source=${localEnv:HOME}/.ssh,target=/home/ubuntu/.ssh,type=bind,readonly",
         "source=/usr/bin/less,target=/usr/bin/less,type=bind,readonly",
-        "source=${localEnv:HOME}/nvidia/dynamo-utils,target=~/dynamo/_,type=bind",
-        "source=${localEnv:HOME}/nvidia/dynamo-utils/pyrightconfig.json,target=~/dynamo/pyrightconfig.json,type=bind",
-        "source=${localEnv:HOME}/nvidia/dynamo-utils/.cursorignore,target=~/dynamo/.cursorignore,type=bind",
-        "source=${localEnv:HOME}/nvidia/dynamo-utils/.cursorrules,target=~/dynamo/.cursorrules,type=bind",
+        "source=${localEnv:HOME}/nvidia/dynamo-utils,target=/workspace/_,type=bind",
+        "source=${localEnv:HOME}/nvidia/dynamo-utils/pyrightconfig.json,target=/workspace/pyrightconfig.json,type=bind",
+        "source=${localEnv:HOME}/nvidia/dynamo-utils/.cursorignore,target=/workspace/.cursorignore,type=bind",
+        "source=${localEnv:HOME}/nvidia/dynamo-utils/.cursorrules,target=/workspace/.cursorrules,type=bind",
         "source=${localEnv:HOME}/.gnupg,target=/home/ubuntu/.gnupg,type=bind",
         "source=${localEnv:HOME}/.bash_aliases,target=/home/ubuntu/.bash_aliases,type=bind",
         "source=${localEnv:HOME}/.gitconfig,target=/home/ubuntu/.gitconfig,type=bind"
