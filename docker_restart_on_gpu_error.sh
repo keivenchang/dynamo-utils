@@ -81,11 +81,15 @@ should_monitor_container() {
 check_gpu_in_container() {
     local container=$1
 
-    # Check if container has GPU runtime enabled
+    # Check if container has GPU access (either via nvidia runtime or --gpus flag)
     local runtime
     runtime=$(docker inspect "$container" --format='{{.HostConfig.Runtime}}' 2>/dev/null || echo "")
 
-    if [[ "$runtime" != "nvidia" ]]; then
+    local device_requests
+    device_requests=$(docker inspect "$container" --format='{{.HostConfig.DeviceRequests}}' 2>/dev/null || echo "")
+
+    # Skip if container has neither nvidia runtime nor GPU device requests
+    if [[ "$runtime" != "nvidia" ]] && [[ ! "$device_requests" =~ gpu ]]; then
         return 1  # Not a GPU container
     fi
 
