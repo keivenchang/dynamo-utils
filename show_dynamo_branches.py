@@ -254,7 +254,70 @@ class PRStatusNode(BranchNode):
         return ""
 
     def _format_html_content(self) -> str:
-        return self._format_content()
+        base_html = self._format_content()
+
+        # Add expandable "Show checks" button for PRs
+        if self.pr and self.pr.number:
+            import subprocess
+            import html as html_module
+            import uuid
+
+            try:
+                # Run gh pr checks to get detailed check information
+                result = subprocess.run(
+                    ['gh', 'pr', 'checks', str(self.pr.number), '--repo', 'ai-dynamo/dynamo'],
+                    capture_output=True,
+                    text=True,
+                    timeout=10
+                )
+
+                # Display checks output if available (exit code 8 means some checks failed, but output is still useful)
+                if result.stdout.strip():
+                    # Parse tab-separated output into a formatted table
+                    lines = result.stdout.strip().split('\n')
+                    table_html = '<table style="border-collapse: collapse; font-size: 11px; margin-top: 5px;">'
+                    table_html += '<tr style="background-color: #e8eaed;"><th style="text-align: left; padding: 4px 8px; border: 1px solid #d0d0d0;">Check Name</th><th style="text-align: left; padding: 4px 8px; border: 1px solid #d0d0d0;">Status</th><th style="text-align: left; padding: 4px 8px; border: 1px solid #d0d0d0;">Duration</th><th style="text-align: left; padding: 4px 8px; border: 1px solid #d0d0d0;">Details</th></tr>'
+
+                    for line in lines:
+                        if not line.strip():
+                            continue
+                        # Split by tabs (gh pr checks uses tabs)
+                        parts = line.split('\t')
+                        if len(parts) >= 3:
+                            name = html_module.escape(parts[0])
+                            status = html_module.escape(parts[1])
+                            duration = html_module.escape(parts[2]) if len(parts) > 2 else ''
+                            url = parts[3] if len(parts) > 3 else ''
+                            description = html_module.escape(parts[4]) if len(parts) > 4 else ''
+
+                            # Color code the status
+                            status_color = '#059669' if status == 'pass' else '#dc2626' if status == 'fail' else '#6b7280'
+                            status_html = f'<span style="color: {status_color}; font-weight: bold;">{status}</span>'
+
+                            # Make URL clickable if present
+                            if url and url.strip():
+                                url_escaped = html_module.escape(url.strip())
+                                details = f'<a href="{url_escaped}" target="_blank" style="color: #0066cc;">View</a>'
+                                if description:
+                                    details += f' - {description}'
+                            elif description:
+                                details = description
+                            else:
+                                details = ''
+
+                            table_html += f'<tr><td style="padding: 4px 8px; border: 1px solid #d0d0d0;">{name}</td><td style="padding: 4px 8px; border: 1px solid #d0d0d0;">{status_html}</td><td style="padding: 4px 8px; border: 1px solid #d0d0d0;">{duration}</td><td style="padding: 4px 8px; border: 1px solid #d0d0d0;">{details}</td></tr>'
+
+                    table_html += '</table>'
+
+                    # Generate unique ID for this checks div
+                    checks_id = f"checks_{uuid.uuid4().hex[:8]}"
+                    # Add expandable section with formatted table
+                    base_html += f' <span style="cursor: pointer; color: #0066cc; margin-left: 10px;" onclick="document.getElementById(\'{checks_id}\').style.display = document.getElementById(\'{checks_id}\').style.display === \'none\' ? \'block\' : \'none\'">▶ Show checks</span><div id="{checks_id}" style="display: none; margin-left: 20px; margin-top: 5px;">{table_html}</div>'
+            except (subprocess.TimeoutExpired, FileNotFoundError, Exception):
+                # Silently fail if gh command is not available or times out
+                pass
+
+        return base_html
 
 
 @dataclass
@@ -596,6 +659,7 @@ def generate_html(root: BranchNode) -> str:
 <head>
     <meta charset="UTF-8">
     <title>Dynamo Branch Status</title>
+    <link rel="icon" type="image/svg+xml" href="favicon.svg">
     <style>
         body {{
             font-family: 'Courier New', monospace;
