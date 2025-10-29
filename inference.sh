@@ -7,6 +7,10 @@ BACKENDS=components/backends
 : ${DYN_FRONTEND_PORT:=8000}
 : ${DYN_BACKEND_PORT:=8081}
 
+# GPU memory utilization constants
+GPU_MEMORY_UTIL_AGG=0.24      # Aggregated mode: single worker
+GPU_MEMORY_UTIL_DISAGG=0.24   # Disaggregated mode: per worker (decode + prefill)
+
 # Function to check if ports are already bound
 check_port_available() {
     local port="$1"
@@ -289,6 +293,8 @@ OPTIONS:
                          Installed frameworks: $installed_frameworks
                          Auto-selected: $auto_selected
                          Default: auto-detect (or "vllm" if auto-detection fails)
+    --disagg              Run in disaggregated mode (prefill + decode workers)
+                         Default: aggregated mode (single worker)
     --dryrun, --dry-run Show what would be executed without running
                        (dry run mode)
     --frontend             Run the frontend component
@@ -296,7 +302,9 @@ OPTIONS:
                           (if neither specified, both components run by default)
 
 DESCRIPTION:
-    This script builds the workspace and runs Dynamo inference in aggregation mode.
+    This script builds the workspace and runs Dynamo inference.
+    By default, it runs in aggregation mode (single worker).
+    Use --disagg to run in disaggregated mode (separate prefill and decode workers).
     The script will automatically detect which framework is installed and available.
     Use --framework to override auto-detection.
     Use --model to specify which model to use for inference.
@@ -309,6 +317,7 @@ DRY_RUN=false
 FRAMEWORK_SPECIFIED=false
 RUN_FRONTEND=false
 RUN_BACKEND=false
+DISAGG_MODE=false
 QWEN_MODEL="Qwen/Qwen3-0.6B"
 TINYLLAMA_MODEL="TinyLlama/TinyLlama-1.1B-Chat-v1.0"
 # deepseek-ai/DeepSeek-R1-Distill-Llama-8B
@@ -330,6 +339,10 @@ while [[ $# -gt 0 ]]; do
             FRAMEWORK="$2"
             FRAMEWORK_SPECIFIED=true
             shift 2
+            ;;
+        --disagg)
+            DISAGG_MODE=true
+            shift
             ;;
         --dryrun|--dry-run)
             DRY_RUN=true
@@ -383,22 +396,34 @@ if [ "$DRY_RUN" = true ]; then
     echo
 fi
 
+# Function to clean up dynamo processes
+cleanup_dynamo_processes() {
+    if [ "$DRY_RUN" = false ]; then
+        (ps -ef --forest|grep multiprocess|awk '{print $2}'|xargs kill) && true
+        (ps -ef|grep "python3.*\/tmp"|awk '{print $2}'|xargs kill) && true
+        (ps -ef|grep "VLLM::EngineCore"|awk '{print $2}'|xargs kill) && true
+        (ps -ef|grep "python -m dynamo.sglang.main"|awk '{print $2}'|xargs kill) && true
+        (ps -ef|grep "python -m dynamo.frontend"|grep -v grep|awk '{print $2}'|xargs kill) && true
+        pkill -f "python -m dynamo.frontend" 2>/dev/null || true
+        pkill -f "python3 -m dynamo.vllm" 2>/dev/null || true
+        pkill -f "python3 -m dynamo.sglang" 2>/dev/null || true
+        pkill -f "python3 -m dynamo.trtllm" 2>/dev/null || true
+    else
+        dry_run_echo "Would kill multiprocess processes: \$(ps -ef --forest|grep multiprocess|awk '{print \$2}')"
+        dry_run_echo "Would kill python3 temp processes: \$(ps -ef|grep \"python3.*\/tmp\"|awk '{print \$2}')"
+        dry_run_echo "Would kill VLLM processes: \$(ps -ef|grep \"VLLM::EngineCore\"|awk '{print \$2}')"
+        dry_run_echo "Would kill sglang processes: \$(ps -ef|grep \"python -m dynamo.sglang.main\"|awk '{print \$2}')"
+        dry_run_echo "Would kill frontend processes: \$(ps -ef|grep \"python -m dynamo.frontend\"|grep -v grep|awk '{print \$2}')"
+    fi
+}
+
 if [ ! -e /.dockerenv ]; then
     echo "This script must be run inside a Docker container."
     exit 1
 fi
 
-if [ "$DRY_RUN" = false ]; then
-    (ps -ef --forest|grep multiprocess|awk '{print $2}'|xargs kill) && true
-    (ps -ef|grep "python3.*\/tmp"|awk '{print $2}'|xargs kill) && true
-    (ps -ef|grep "VLLM::EngineCore"|awk '{print $2}'|xargs kill) && true
-    (ps -ef|grep "python -m dynamo.sglang.main"|awk '{print $2}'|xargs kill) && true
-else
-    dry_run_echo "Would kill multiprocess processes: \$(ps -ef --forest|grep multiprocess|awk '{print \$2}')"
-    dry_run_echo "Would kill python3 temp processes: \$(ps -ef|grep \"python3.*\/tmp\"|awk '{print \$2}')"
-    dry_run_echo "Would kill VLLM processes: \$(ps -ef|grep \"VLLM::EngineCore\"|awk '{print \$2}')"
-    dry_run_echo "Would kill sglang processes: \$(ps -ef|grep \"python -m dynamo.sglang.main\"|awk '{print \$2}')"
-fi
+# Clean up any existing processes before starting
+cleanup_dynamo_processes
 if [ -d "~/dynamo" ]; then
     WORKSPACE_DIR="~/dynamo"
 elif [ -d "/workspace" ]; then
@@ -441,17 +466,44 @@ if [ "$RUN_BACKEND" = true ]; then
     fi
 fi
 
-# Run aggregation mode by default
-dry_run_echo "Running Dynamo inference in aggregation mode"
+# Display mode
+if [ "$DISAGG_MODE" = true ]; then
+    dry_run_echo "Running Dynamo inference in disaggregated mode (prefill + decode workers)"
+else
+    dry_run_echo "Running Dynamo inference in aggregation mode (single worker)"
+fi
 
-# Only check deploy/agg.yaml if we have a valid framework
+# Only check deploy yaml if we have a valid framework
 if [ "$RUN_BACKEND" = true ] && [ -n "$FRAMEWORK" ]; then
-    dry_run_exec "cd $BACKENDS/$FRAMEWORK && grep 'model' deploy/agg.yaml"
+    if [ "$DISAGG_MODE" = true ]; then
+        dry_run_exec "cd $BACKENDS/$FRAMEWORK && grep 'model' deploy/disagg.yaml 2>/dev/null || echo 'Note: deploy/disagg.yaml not found'"
+    else
+        dry_run_exec "cd $BACKENDS/$FRAMEWORK && grep 'model' deploy/agg.yaml"
+    fi
 fi
 
 # Set up trap to kill all background processes on exit
+cleanup_on_exit() {
+    echo "Cleaning up..."
+    # Kill jobs started by this script
+    kill $(jobs -p) 2>/dev/null || true
+
+    # Kill PIDs we tracked
+    [ -n "$FRONTEND_PID" ] && kill -9 $FRONTEND_PID 2>/dev/null || true
+    [ -n "$BACKEND_PID" ] && kill -9 $BACKEND_PID 2>/dev/null || true
+    [ -n "$PREFILL_PID" ] && kill -9 $PREFILL_PID 2>/dev/null || true
+
+    # Force kill any remaining dynamo processes
+    pkill -9 -f "python.*dynamo\.(frontend|trtllm|vllm|sglang)" 2>/dev/null || true
+
+    # Reuse the cleanup function to be thorough
+    cleanup_dynamo_processes
+
+    echo "Cleanup complete."
+}
+
 if [ "$DRY_RUN" = false ]; then
-    cmd trap 'echo Cleaning up...; kill $(jobs -p) 2>/dev/null || true; exit' INT TERM EXIT
+    trap cleanup_on_exit INT TERM EXIT
 else
     cmd trap 'echo "[DRY RUN] Would clean up and kill background processes on exit"; exit' INT TERM EXIT
 fi
@@ -523,43 +575,266 @@ if [ "$RUN_BACKEND" = true ]; then
 fi
 
 # Set framework-specific arguments
-BATCH_SIZE=16
+BATCH_SIZE=2
 if [ "$FRAMEWORK" = "vllm" ]; then
-    FRAMEWORK_ARGS="--gpu-memory-utilization 0.20 --enforce-eager --no-enable-prefix-caching --max-num-seqs $BATCH_SIZE"
+    FRAMEWORK_ARGS="--gpu-memory-utilization $GPU_MEMORY_UTIL_AGG --enforce-eager --no-enable-prefix-caching --max-num-seqs $BATCH_SIZE"
 elif [ "$FRAMEWORK" = "sglang" ]; then
-    FRAMEWORK_ARGS="--mem-fraction-static 0.20 --max-running-requests $BATCH_SIZE --enable-metrics"
+    FRAMEWORK_ARGS="--mem-fraction-static $GPU_MEMORY_UTIL_AGG --max-running-requests $BATCH_SIZE --enable-metrics"
 elif [ "$FRAMEWORK" = "trtllm" ]; then
-    FRAMEWORK_ARGS="--free-gpu-memory-fraction 0.20 --max-num-tokens 8192 --max-batch-size $BATCH_SIZE --publish-events-and-metrics"
+    FRAMEWORK_ARGS="--free-gpu-memory-fraction $GPU_MEMORY_UTIL_AGG --max-num-tokens 512 --max-batch-size $BATCH_SIZE --publish-events-and-metrics"
 else
     FRAMEWORK_ARGS=""
 fi
 
+# Function to check if a port is available
+check_port() {
+    local port=$1
+    # Try ss first (modern), then netstat (older), then lsof
+    if command -v ss >/dev/null 2>&1; then
+        if ss -ltn | grep -q ":$port "; then
+            return 1  # Port is in use
+        fi
+    elif command -v netstat >/dev/null 2>&1; then
+        if netstat -ltn | grep -q ":$port "; then
+            return 1  # Port is in use
+        fi
+    elif command -v lsof >/dev/null 2>&1; then
+        if lsof -Pi :$port -sTCP:LISTEN -t >/dev/null 2>&1; then
+            return 1  # Port is in use
+        fi
+    else
+        echo "Warning: No port checking tool available (ss, netstat, or lsof)"
+    fi
+    return 0  # Port is available
+}
+
+# Function to check all required ports before starting
+check_all_ports() {
+    local ports_to_check=()
+    local port_descriptions=()
+
+    # Frontend port
+    if [ "$RUN_FRONTEND" = true ]; then
+        ports_to_check+=(8000)
+        port_descriptions+=("frontend")
+    fi
+
+    # Backend ports
+    if [ "$RUN_BACKEND" = true ]; then
+        if [ "$DISAGG_MODE" = true ]; then
+            ports_to_check+=($DECODE_PORT)
+            port_descriptions+=("decode worker")
+            ports_to_check+=($PREFILL_PORT)
+            port_descriptions+=("prefill worker")
+        else
+            ports_to_check+=($DYN_BACKEND_PORT)
+            port_descriptions+=("backend")
+        fi
+    fi
+
+    # Check each port
+    local all_available=true
+    for i in "${!ports_to_check[@]}"; do
+        local port=${ports_to_check[$i]}
+        local desc=${port_descriptions[$i]}
+        if ! check_port $port; then
+            echo "❌ Port $port is already in use (needed for $desc)"
+            all_available=false
+        fi
+    done
+
+    if [ "$all_available" = false ]; then
+        echo ""
+        echo "Please free up the ports above before running this script."
+        echo "You can find processes using ports with: lsof -i :<port>"
+        echo "Kill processes with: kill -9 <pid>"
+        exit 1
+    fi
+}
+
+# Function to get PIDs using a port
+get_port_pids() {
+    local port=$1
+    # Try different methods to find PIDs
+    if command -v ss >/dev/null 2>&1; then
+        ss -ltnp 2>/dev/null | grep ":$port " | sed -n 's/.*pid=\([0-9]*\).*/\1/p' | sort -u
+    elif command -v lsof >/dev/null 2>&1; then
+        lsof -ti:$port 2>/dev/null || true
+    elif command -v fuser >/dev/null 2>&1; then
+        fuser $port/tcp 2>/dev/null | tr -d ' ' || true
+    fi
+}
+
+# Function to kill processes on specific ports with retry
+kill_port_processes() {
+    local ports=("$@")
+    for port in "${ports[@]}"; do
+        local max_retries=5
+        local retry=0
+        while [ $retry -lt $max_retries ]; do
+            local pids=$(get_port_pids $port)
+            if [ -z "$pids" ]; then
+                break
+            fi
+            echo "Killing processes on port $port: $pids (attempt $((retry + 1))/$max_retries)"
+            echo "$pids" | xargs kill -9 2>/dev/null || true
+            sleep 2
+            retry=$((retry + 1))
+        done
+
+        # Final check
+        local remaining=$(get_port_pids $port)
+        if [ -n "$remaining" ]; then
+            echo "Warning: Port $port still has processes after cleanup: $remaining"
+        fi
+    done
+}
+
 # Start background processes based on component selection
 FRONTEND_PID=""
 BACKEND_PID=""
+PREFILL_PID=""
 
-# Start frontend if requested
-if [ "$RUN_FRONTEND" = true ]; then
-    cmd python -m dynamo.frontend &
-    if [ "$DRY_RUN" = false ]; then
-        FRONTEND_PID=$!
-    else
-        dry_run_echo "FRONTEND_PID=\$!"
+# Kill existing processes and check port availability before starting services
+if [ "$DRY_RUN" = false ]; then
+    # Set port variables for disagg mode
+    if [ "$DISAGG_MODE" = true ]; then
+        PREFILL_PORT=$DYN_BACKEND_PORT
+        DECODE_PORT=$((DYN_BACKEND_PORT + 1))
     fi
+
+    # Kill processes on required ports
+    ports_to_kill=()
+    if [ "$RUN_FRONTEND" = true ]; then
+        ports_to_kill+=(8000)
+    fi
+    if [ "$RUN_BACKEND" = true ]; then
+        if [ "$DISAGG_MODE" = true ]; then
+            ports_to_kill+=($PREFILL_PORT $DECODE_PORT)
+        else
+            ports_to_kill+=($DYN_BACKEND_PORT)
+        fi
+    fi
+
+    if [ ${#ports_to_kill[@]} -gt 0 ]; then
+        echo "Cleaning up processes on ports: ${ports_to_kill[*]}"
+        kill_port_processes "${ports_to_kill[@]}"
+    fi
+
+    # Now check if ports are available
+    check_all_ports
 fi
 
 # Framework detection already done earlier
 
-# Start backend if requested
+# Start backend FIRST (so it's ready before frontend accepts requests)
 if [ "$RUN_BACKEND" = true ]; then
     cmd unset HF_TOKEN
     metrics="true"
-    if [ "$DRY_RUN" = false ]; then
-        ( set -x; DYN_LOG=info DYN_SYSTEM_ENABLED=true DYN_SYSTEM_PORT=$DYN_BACKEND_PORT python -m dynamo.$FRAMEWORK --model "$MODEL" $FRAMEWORK_ARGS ) &
-        BACKEND_PID=$!
+
+    if [ "$DISAGG_MODE" = true ]; then
+        # Disaggregated mode: Launch prefill worker (port 8081) and decode worker (port 8082)
+        # Both use GPU_MEMORY_UTIL_DISAGG GPU memory to share the same GPU
+        # NOTE: SGLang disaggregated mode typically requires 2 separate GPUs (one for prefill, one for decode)
+        # Running both on same GPU may cause OOM errors. Consider using aggregated mode for single GPU.
+        PREFILL_PORT=$DYN_BACKEND_PORT
+        DECODE_PORT=$((DYN_BACKEND_PORT + 1))
+
+        # Set framework-specific memory args for disagg mode
+        if [ "$FRAMEWORK" = "vllm" ]; then
+            DISAGG_FRAMEWORK_ARGS="--gpu-memory-utilization $GPU_MEMORY_UTIL_DISAGG --enforce-eager --no-enable-prefix-caching --max-num-seqs $BATCH_SIZE"
+            PREFILL_FLAG="--is-prefill-worker"
+            DECODE_FLAG=""
+        elif [ "$FRAMEWORK" = "sglang" ]; then
+            DISAGG_FRAMEWORK_ARGS="--mem-fraction-static 0.48 --page-size 16 --chunked-prefill-size 4096 --max-prefill-tokens 4096 --enable-memory-saver --delete-ckpt-after-loading --max-running-requests $BATCH_SIZE --enable-metrics --disaggregation-bootstrap-port 12345 --host 0.0.0.0 --disaggregation-transfer-backend nixl"
+            PREFILL_FLAG="--disaggregation-mode prefill"
+            DECODE_FLAG="--disaggregation-mode decode"
+        elif [ "$FRAMEWORK" = "trtllm" ]; then
+            # TensorRT-LLM disaggregated mode uses trtllm-small YAML configs
+            PREFILL_YAML="$WORKSPACE_DIR/recipes/qwen3/trtllm-small/prefill.yaml"
+            DECODE_YAML="$WORKSPACE_DIR/recipes/qwen3/trtllm-small/decode.yaml"
+            DISAGG_FRAMEWORK_ARGS="--publish-events-and-metrics"
+            PREFILL_FLAG="--disaggregation-mode prefill --extra-engine-args $PREFILL_YAML"
+            DECODE_FLAG="--disaggregation-mode decode --extra-engine-args $DECODE_YAML"
+        else
+            DISAGG_FRAMEWORK_ARGS=""
+            PREFILL_FLAG=""
+            DECODE_FLAG=""
+        fi
+
+        # Convert to percentage for display (use awk instead of bc for portability)
+        GPU_MEM_PERCENT=$(awk "BEGIN {printf \"%.0f%%\", $GPU_MEMORY_UTIL_DISAGG * 100}")
+
+        # Launch prefill worker FIRST so it can register before decode worker tries to connect
+        dry_run_echo "Launching prefill worker on port $PREFILL_PORT ($GPU_MEM_PERCENT GPU memory)..."
+        if [ "$DRY_RUN" = false ]; then
+            ( set -x; DYN_LOG=info DYN_SYSTEM_ENABLED=true DYN_SYSTEM_PORT=$PREFILL_PORT python3 -m dynamo.$FRAMEWORK --model "$MODEL" $DISAGG_FRAMEWORK_ARGS $PREFILL_FLAG ) 2>&1 | sed 's/^/[PREFILL] /' &
+            PREFILL_PID=$!
+        else
+            ( set -x; : DYN_LOG=info DYN_SYSTEM_ENABLED=true DYN_SYSTEM_PORT=$PREFILL_PORT python3 -m dynamo.$FRAMEWORK --model "$MODEL" $DISAGG_FRAMEWORK_ARGS $PREFILL_FLAG ) 2>&1 | sed 's/^+ : /+ /'
+            dry_run_echo "PREFILL_PID=\$!"
+        fi
+
+        # Wait for prefill worker to initialize and register with NATS
+        if [ "$DRY_RUN" = false ]; then
+            echo "Waiting for prefill worker to initialize..."
+            sleep 20
+
+            # Poll the prefill worker's metrics endpoint to verify it's ready
+            echo "Checking if prefill worker is ready..."
+            max_attempts=30
+            attempt=0
+            while [ $attempt -lt $max_attempts ]; do
+                if curl -s http://localhost:$PREFILL_PORT/metrics > /dev/null 2>&1; then
+                    echo "Prefill worker is ready!"
+                    break
+                fi
+                attempt=$((attempt + 1))
+                if [ $attempt -lt $max_attempts ]; then
+                    sleep 2
+                fi
+            done
+
+            if [ $attempt -eq $max_attempts ]; then
+                echo "Warning: Prefill worker may not be fully ready after $max_attempts attempts"
+            fi
+        else
+            dry_run_echo "sleep 20"
+            dry_run_echo "# Poll prefill worker metrics endpoint"
+        fi
+
+        # Launch decode worker SECOND (after prefill worker is ready)
+        dry_run_echo "Launching decode worker on port $DECODE_PORT ($GPU_MEM_PERCENT GPU memory)..."
+        if [ "$DRY_RUN" = false ]; then
+            ( set -x; DYN_LOG=info DYN_SYSTEM_ENABLED=true DYN_SYSTEM_PORT=$DECODE_PORT python3 -m dynamo.$FRAMEWORK --model "$MODEL" $DISAGG_FRAMEWORK_ARGS $DECODE_FLAG ) 2>&1 | sed 's/^/[DECODE] /' &
+            BACKEND_PID=$!
+        else
+            ( set -x; : DYN_LOG=info DYN_SYSTEM_ENABLED=true DYN_SYSTEM_PORT=$DECODE_PORT python3 -m dynamo.$FRAMEWORK --model "$MODEL" $DISAGG_FRAMEWORK_ARGS $DECODE_FLAG ) 2>&1 | sed 's/^+ : /+ /'
+            dry_run_echo "BACKEND_PID=\$!"
+        fi
     else
-        ( set -x; : DYN_LOG=info DYN_SYSTEM_ENABLED=true DYN_SYSTEM_PORT=$DYN_BACKEND_PORT python -m dynamo.$FRAMEWORK --model "$MODEL" $FRAMEWORK_ARGS ) 2>&1 | sed 's/^+ : /+ /'
-        dry_run_echo "BACKEND_PID=\$!"
+        # Aggregated mode: Launch single worker
+        if [ "$DRY_RUN" = false ]; then
+            ( set -x; DYN_LOG=info DYN_SYSTEM_ENABLED=true DYN_SYSTEM_PORT=$DYN_BACKEND_PORT python -m dynamo.$FRAMEWORK --model "$MODEL" $FRAMEWORK_ARGS ) &
+            BACKEND_PID=$!
+        else
+            ( set -x; : DYN_LOG=info DYN_SYSTEM_ENABLED=true DYN_SYSTEM_PORT=$DYN_BACKEND_PORT python -m dynamo.$FRAMEWORK --model "$MODEL" $FRAMEWORK_ARGS ) 2>&1 | sed 's/^+ : /+ /'
+            dry_run_echo "BACKEND_PID=\$!"
+        fi
+    fi
+fi
+
+# Start frontend AFTER backend (so backend is ready when frontend starts accepting requests)
+if [ "$RUN_FRONTEND" = true ]; then
+    if [ "$DISAGG_MODE" = true ]; then
+        cmd python -m dynamo.frontend --router-mode kv &
+    else
+        cmd python -m dynamo.frontend &
+    fi
+    if [ "$DRY_RUN" = false ]; then
+        FRONTEND_PID=$!
+    else
+        dry_run_echo "FRONTEND_PID=\$!"
     fi
 fi
 
@@ -572,17 +847,35 @@ if [ "$RUN_FRONTEND" = true ] && [ "$RUN_BACKEND" = false ]; then
         dry_run_echo "wait \$FRONTEND_PID"
     fi
 elif [ "$RUN_BACKEND" = true ] && [ "$RUN_FRONTEND" = false ]; then
-    dry_run_echo "Launched $FRAMEWORK backend process only. Press Ctrl+C to exit."
-    if [ "$DRY_RUN" = false ]; then
-        wait $BACKEND_PID
+    if [ "$DISAGG_MODE" = true ]; then
+        dry_run_echo "Launched $FRAMEWORK backend processes (decode + prefill) only. Press Ctrl+C to exit."
+        if [ "$DRY_RUN" = false ]; then
+            wait $BACKEND_PID $PREFILL_PID
+        else
+            dry_run_echo "wait \$BACKEND_PID \$PREFILL_PID"
+        fi
     else
-        dry_run_echo "wait \$BACKEND_PID"
+        dry_run_echo "Launched $FRAMEWORK backend process only. Press Ctrl+C to exit."
+        if [ "$DRY_RUN" = false ]; then
+            wait $BACKEND_PID
+        else
+            dry_run_echo "wait \$BACKEND_PID"
+        fi
     fi
 else
-    dry_run_echo "Launched frontend and $FRAMEWORK processes. Press Ctrl+C to exit."
-    if [ "$DRY_RUN" = false ]; then
-        wait $FRONTEND_PID $BACKEND_PID
+    if [ "$DISAGG_MODE" = true ]; then
+        dry_run_echo "Launched frontend and $FRAMEWORK processes (decode + prefill). Press Ctrl+C to exit."
+        if [ "$DRY_RUN" = false ]; then
+            wait $FRONTEND_PID $BACKEND_PID $PREFILL_PID
+        else
+            dry_run_echo "wait \$FRONTEND_PID \$BACKEND_PID \$PREFILL_PID"
+        fi
     else
-        dry_run_echo "wait \$FRONTEND_PID \$BACKEND_PID"
+        dry_run_echo "Launched frontend and $FRAMEWORK processes. Press Ctrl+C to exit."
+        if [ "$DRY_RUN" = false ]; then
+            wait $FRONTEND_PID $BACKEND_PID
+        else
+            dry_run_echo "wait \$FRONTEND_PID \$BACKEND_PID"
+        fi
     fi
 fi
