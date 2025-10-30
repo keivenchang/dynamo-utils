@@ -112,15 +112,15 @@ h2 { margin: 0; font-size: 1.2em; font-weight: bold; }
 <div class="chart-row">
 <div class="chart-cell chart-header">Target</div>
 <div class="chart-cell chart-header">Build</div>
-<div class="chart-cell chart-header">Build Time</div>
+<div class="chart-cell chart-header">Compilation</div>
 <div class="chart-cell chart-header">Sanity Check</div>
-<div class="chart-cell chart-header">Sanity Time</div>
 <div class="chart-cell chart-header">Image Size</div>
 </div>
 {%- for target_name in ['base', 'runtime', 'dev', 'local-dev'] %}
 {%- if target_name in targets %}
 {%- set target_data = targets[target_name] %}
 {%- set build_task = target_data.build %}
+{%- set compilation_task = target_data.compilation %}
 {%- set sanity_task = target_data.sanity %}
 
 <div class="chart-row">
@@ -128,41 +128,37 @@ h2 { margin: 0; font-size: 1.2em; font-weight: bold; }
 <div class="chart-cell chart-status">
 {%- if build_task %}
 {%- if build_task.status == 'SUCCESS' %}
-<span class="success">✅ PASS</span>
+<span class="success">✅ PASS</span> <span class="chart-timing">({{ build_task.build_time }})</span>
 {%- elif build_task.status == 'SKIPPED' %}
 ⏭️ SKIP
 {%- else %}
-<span class="failure">❌ FAIL</span>
+<span class="failure">❌ FAIL</span> <span class="chart-timing">({{ build_task.build_time if build_task.build_time else 'n/a' }})</span>
 {%- endif %}
 {%- if build_task.log_file %} <a href="{{ build_task.log_file }}" class="log-link">[log]</a>{%- endif %}
 {%- else %}-{%- endif %}
 </div>
-<div class="chart-cell chart-timing">
-{%- if build_task %}
-{%- if build_task.status == 'SUCCESS' %}{{ build_task.build_time }}
-{%- elif build_task.status == 'SKIPPED' %}skipped
-{%- else %}{{ build_task.build_time if build_task.build_time else 'failed' }}
+<div class="chart-cell chart-status">
+{%- if compilation_task %}
+{%- if compilation_task.status == 'SUCCESS' %}
+<span class="success">✅ PASS</span> <span class="chart-timing">({{ compilation_task.time }})</span>
+{%- elif compilation_task.status == 'SKIPPED' %}
+⏭️ SKIP
+{%- else %}
+<span class="failure">❌ FAIL</span> <span class="chart-timing">({{ compilation_task.time if compilation_task.time else 'n/a' }})</span>
 {%- endif %}
+{%- if compilation_task.log_file %} <a href="{{ compilation_task.log_file }}" class="log-link">[log]</a>{%- endif %}
 {%- else %}-{%- endif %}
 </div>
 <div class="chart-cell chart-status">
 {%- if sanity_task %}
 {%- if sanity_task.status == 'SUCCESS' %}
-<span class="success">✅ PASS</span>
+<span class="success">✅ PASS</span> <span class="chart-timing">({{ sanity_task.sanity_time }})</span>
 {%- elif sanity_task.status == 'SKIPPED' %}
 ⏭️ SKIP
 {%- else %}
-<span class="failure">❌ FAIL</span>
+<span class="failure">❌ FAIL</span> <span class="chart-timing">({{ sanity_task.sanity_time if sanity_task.sanity_time else 'n/a' }})</span>
 {%- endif %}
 {%- if sanity_task.log_file %} <a href="{{ sanity_task.log_file }}" class="log-link">[log]</a>{%- endif %}
-{%- else %}-{%- endif %}
-</div>
-<div class="chart-cell chart-timing">
-{%- if sanity_task %}
-{%- if sanity_task.status == 'SUCCESS' %}{{ sanity_task.sanity_time }}
-{%- elif sanity_task.status == 'SKIPPED' %}skipped
-{%- else %}{{ sanity_task.sanity_time if sanity_task.sanity_time else 'failed' }}
-{%- endif %}
 {%- else %}-{%- endif %}
 </div>
 <div class="chart-cell chart-timing">{{ target_data.image_size if target_data.image_size else '-' }}</div>

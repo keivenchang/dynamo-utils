@@ -266,11 +266,17 @@ def create_task_graph(framework: str, sha: str, repo_path: Path) -> Dict[str, 'B
     )
 
     # Level 3: Dev compilation
-    cargo_cmd = "cargo build --locked --profile dev --features dynamo-llm/block-manager && cd /workspace/lib/bindings/python && maturin develop && uv pip install -e ."
+    # Use fast build flags from compile.sh:
+    # - CARGO_INCREMENTAL=1: Enable incremental compilation
+    # - CARGO_PROFILE_DEV_OPT_LEVEL=0: No optimizations (faster compile)
+    # - CARGO_BUILD_JOBS=$(nproc): Parallel compilation
+    # - CARGO_PROFILE_DEV_CODEGEN_UNITS=256: More parallel code generation
+    cargo_cmd = "CARGO_INCREMENTAL=1 CARGO_PROFILE_DEV_OPT_LEVEL=0 CARGO_BUILD_JOBS=$(nproc) CARGO_PROFILE_DEV_CODEGEN_UNITS=256 cargo build --locked --profile dev --features dynamo-llm/block-manager && cd /workspace/lib/bindings/python && CARGO_INCREMENTAL=1 CARGO_PROFILE_DEV_OPT_LEVEL=0 CARGO_BUILD_JOBS=$(nproc) CARGO_PROFILE_DEV_CODEGEN_UNITS=256 maturin develop --uv --features block-manager && uv pip install -e ."
+    home_dir = str(Path.home())
     tasks[f"{framework_upper}-dev-compilation"] = CommandTask(
         task_id=f"{framework_upper}-dev-compilation",
         description=f"Run workspace compilation in {framework_upper} dev container",
-        command=f"{repo_path}/container/run.sh --image {dev_image_tag} --mount-workspace -- bash -c '{cargo_cmd}'",
+        command=f"{repo_path}/container/run.sh --image {dev_image_tag} --mount-workspace -v {home_dir}/.cargo:/root/.cargo -- bash -c '{cargo_cmd}'",
         input_image=dev_image_tag,
         parents=[f"{framework_upper}-dev"],
         timeout=1800.0,
@@ -280,7 +286,7 @@ def create_task_graph(framework: str, sha: str, repo_path: Path) -> Dict[str, 'B
     tasks[f"{framework_upper}-dev-chown"] = CommandTask(
         task_id=f"{framework_upper}-dev-chown",
         description=f"Fix file ownership after {framework_upper} dev compilation",
-        command=f"sudo chown -R $(id -u):$(id -g) {repo_path}/target {repo_path}/lib/bindings/python",
+        command=f"sudo chown -R $(id -u):$(id -g) {repo_path}/target {repo_path}/lib/bindings/python {home_dir}/.cargo",
         parents=[f"{framework_upper}-dev-compilation"],
         run_even_if_deps_fail=True,
         timeout=60.0,
@@ -290,7 +296,7 @@ def create_task_graph(framework: str, sha: str, repo_path: Path) -> Dict[str, 'B
     tasks[f"{framework_upper}-dev-sanity"] = CommandTask(
         task_id=f"{framework_upper}-dev-sanity",
         description=f"Run sanity_check.py in {framework_upper} dev container",
-        command=f"{repo_path}/container/run.sh --image {dev_image_tag} -- python3 /workspace/deploy/sanity_check.py",
+        command=f"{repo_path}/container/run.sh --image {dev_image_tag} --mount-workspace -v {home_dir}/.cargo:/root/.cargo -- python3 /workspace/deploy/sanity_check.py",
         input_image=dev_image_tag,
         parents=[f"{framework_upper}-dev-chown"],
         timeout=120.0,
@@ -315,7 +321,7 @@ def create_task_graph(framework: str, sha: str, repo_path: Path) -> Dict[str, 'B
     tasks[f"{framework_upper}-local-dev-compilation"] = CommandTask(
         task_id=f"{framework_upper}-local-dev-compilation",
         description=f"Run workspace compilation in {framework_upper} local-dev container",
-        command=f"{repo_path}/container/run.sh --image {local_dev_image_tag} --mount-workspace -- bash -c '{cargo_cmd}'",
+        command=f"{repo_path}/container/run.sh --image {local_dev_image_tag} --mount-workspace -v {home_dir}/.cargo:/home/ubuntu/.cargo -- bash -c '{cargo_cmd}'",
         input_image=local_dev_image_tag,
         parents=[f"{framework_upper}-local-dev", f"{framework_upper}-dev-chown"],
         timeout=1800.0,
@@ -325,7 +331,7 @@ def create_task_graph(framework: str, sha: str, repo_path: Path) -> Dict[str, 'B
     tasks[f"{framework_upper}-local-dev-sanity"] = CommandTask(
         task_id=f"{framework_upper}-local-dev-sanity",
         description=f"Run sanity_check.py in {framework_upper} local-dev container",
-        command=f"{repo_path}/container/run.sh --image {local_dev_image_tag} -- python3 /workspace/deploy/sanity_check.py",
+        command=f"{repo_path}/container/run.sh --image {local_dev_image_tag} --mount-workspace -v {home_dir}/.cargo:/home/ubuntu/.cargo -- python3 /workspace/deploy/sanity_check.py",
         input_image=local_dev_image_tag,
         parents=[f"{framework_upper}-local-dev-compilation"],
         timeout=120.0,
@@ -398,7 +404,7 @@ class BaseTask(ABC):
         """
         pass
 
-    def _run_command(self, command: str, repo_path: Path) -> bool:
+    def _run_command(self, command: str, repo_path: Path) -> int:
         """
         Common method to run a command and log output.
         
@@ -407,7 +413,7 @@ class BaseTask(ABC):
             repo_path: Path to the repository
             
         Returns:
-            True if command succeeded, False otherwise
+            Exit code of the command (0 for success, non-zero for failure)
         """
         try:
             # Open log file in append mode
@@ -441,16 +447,13 @@ class BaseTask(ABC):
                 process.wait()
                 self.exit_code = process.returncode
                 
-                log_fh.write(f"\n{'='*80}\n")
-                log_fh.write(f"Exit code: {self.exit_code}\n")
-                log_fh.write(f"{'='*80}\n")
-                
-                return self.exit_code == 0
+                return self.exit_code
                 
         except Exception as e:
             self.error_message = str(e)
             self.logger.error(f"Command execution failed: {e}")
-            return False
+            self.exit_code = -1
+            return self.exit_code
 
     @abstractmethod
     def execute(self, repo_path: Path, dry_run: bool = False) -> bool:
@@ -604,7 +607,8 @@ class BuildTask(BaseTask):
         # Remove --dry-run from the command
         actual_command = self.command.replace(' --dry-run', '')
         
-        return self._run_command(actual_command, repo_path)
+        exit_code = self._run_command(actual_command, repo_path)
+        return exit_code == 0
 
     def image_exists(self) -> bool:
         """Check if Docker image already exists"""
@@ -623,6 +627,27 @@ class BuildTask(BaseTask):
         except Exception as e:
             self.logger.warning(f"Error checking image existence: {e}")
             return False
+
+    def get_image_size(self) -> Optional[str]:
+        """Get the size of the Docker image in human-readable format"""
+        if not self.output_image:
+            return None
+
+        try:
+            # Use docker images to get size
+            result = subprocess.run(
+                ["docker", "images", self.output_image, "--format", "{{.Size}}"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=10
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                return result.stdout.strip()
+            return None
+        except Exception as e:
+            self.logger.warning(f"Error getting image size: {e}")
+            return None
 
     def get_command(self, repo_path: Path) -> str:
         """Get the build.sh wrapper command (not the underlying docker command)"""
@@ -719,13 +744,13 @@ class CommandTask(BaseTask):
             return True
         
         command = self.get_command(repo_path)
-        success = self._run_command(command, repo_path)
+        exit_code = self._run_command(command, repo_path)
         
         # If ignore_exit_code is set, always return success
         if self.ignore_exit_code:
             return True
         
-        return success
+        return exit_code == 0
 
     def get_command(self, repo_path: Path) -> str:
         """Get the command to execute (from self.command)."""
@@ -869,6 +894,11 @@ def parse_args() -> argparse.Namespace:
         type=str,
         help="Git commit SHA to build (default: current HEAD)",
     )
+    parser.add_argument(
+        "--pull-latest",
+        action="store_true",
+        help="Pull latest code from main branch before building",
+    )
 
     # Framework and target selection
     parser.add_argument(
@@ -916,8 +946,15 @@ def parse_args() -> argparse.Namespace:
     # Output options
     parser.add_argument(
         "--html-path",
-        type=Path,
-        help="Directory to save HTML report (default: repo logs directory)",
+        type=str,
+        default="/nvidia/dynamo_ci/logs",
+        help="Base URL path for HTML reports in emails (default: /nvidia/dynamo_ci/logs)",
+    )
+    parser.add_argument(
+        "--hostname",
+        type=str,
+        default="keivenc-linux",
+        help="Hostname for absolute URLs in email reports (default: keivenc-linux)",
     )
     parser.add_argument(
         "--email",
@@ -962,6 +999,7 @@ def execute_task_sequential(
     log_dir: Optional[Path] = None,
     log_date: Optional[str] = None,
     dry_run: bool = False,
+    skip_if_image_exists: bool = False,
 ) -> bool:
     """
     Execute a single task and its dependencies recursively (sequential mode).
@@ -976,6 +1014,7 @@ def execute_task_sequential(
         log_dir: Directory for log files (None in dry-run)
         log_date: Date string for log files (None in dry-run)
         dry_run: If True, only print commands without executing
+        skip_if_image_exists: If True, skip build tasks if Docker image already exists
         
     Returns:
         True if task succeeded, False if failed
@@ -992,7 +1031,7 @@ def execute_task_sequential(
     for parent_id in task.parents:
         if not execute_task_sequential(
             all_tasks, executed_tasks, failed_tasks, parent_id,
-            repo_path, sha, log_dir, log_date, dry_run
+            repo_path, sha, log_dir, log_date, dry_run, skip_if_image_exists
         ):
             # Parent failed
             if not task.run_even_if_deps_fail:
@@ -1034,7 +1073,7 @@ def execute_task_sequential(
             if child_id not in executed_tasks:
                 execute_task_sequential(
                     all_tasks, executed_tasks, failed_tasks, child_id,
-                    repo_path, sha, log_dir, log_date, dry_run
+                    repo_path, sha, log_dir, log_date, dry_run, skip_if_image_exists
                 )
         
         return True
@@ -1047,6 +1086,23 @@ def execute_task_sequential(
     log_task_name = task_id.lower().replace("-base", "-dynamo-base")
     log_file = log_dir / f"{log_date}.{sha}.{log_task_name}.log"
     task.log_file = log_file
+
+    # Check if we should skip this build task if image already exists
+    if skip_if_image_exists and isinstance(task, BuildTask):
+        if task.image_exists():
+            logger.info(f"⊘ Skipping {task_id}: Docker image already exists ({task.output_image})")
+            task.status = TaskStatus.SKIPPED
+            executed_tasks.add(task_id)
+            
+            # Process children
+            for child_id in task.children:
+                if child_id not in executed_tasks:
+                    execute_task_sequential(
+                        all_tasks, executed_tasks, failed_tasks, child_id,
+                        repo_path, sha, log_dir, log_date, dry_run, skip_if_image_exists
+                    )
+            
+            return True
 
     # Execute this task
     logger.info(f"Executing: {task_id} ({task.description})")
@@ -1070,10 +1126,21 @@ def execute_task_sequential(
         success = task.execute(repo_path, dry_run=False)
 
         task.end_time = time.time()
+        duration = task.end_time - task.start_time
+
+        # Append execution summary to log file
+        with open(log_file, 'a') as log_fh:
+            log_fh.write(f"\n")
+            log_fh.write(f"{'='*80}\n")
+            log_fh.write(f"Task: {task_id}\n")
+            log_fh.write(f"Duration: {duration:.2f}s\n")
+            log_fh.write(f"Exit code: {task.exit_code if hasattr(task, 'exit_code') else (0 if success else 1)}\n")
+            log_fh.write(f"Status: {'SUCCESS' if success else 'FAILED'}\n")
+            log_fh.write(f"{'='*80}\n")
 
         if success:
             task.status = TaskStatus.SUCCESS
-            logger.info(f"✓ Completed: {task_id} ({task.end_time - task.start_time:.2f}s)")
+            logger.info(f"✓ Completed: {task_id} ({duration:.2f}s)")
             # Create .PASS marker file
             pass_marker = log_file.with_suffix('.PASS')
             pass_marker.touch()
@@ -1100,7 +1167,7 @@ def execute_task_sequential(
             if child_id not in executed_tasks:
                 execute_task_sequential(
                     all_tasks, executed_tasks, failed_tasks, child_id,
-                    repo_path, sha, log_dir, log_date, dry_run
+                    repo_path, sha, log_dir, log_date, dry_run, skip_if_image_exists
                 )
     
     return task.status == TaskStatus.SUCCESS
@@ -1114,6 +1181,7 @@ def execute_task_parallel(
     log_dir: Optional[Path] = None,
     log_date: Optional[str] = None,
     dry_run: bool = False,
+    skip_if_image_exists: bool = False,
     max_workers: int = 4,
 ) -> Tuple[Set[str], Set[str]]:
     """
@@ -1130,6 +1198,7 @@ def execute_task_parallel(
         log_dir: Directory for log files (None in dry-run)
         log_date: Date string for log files (None in dry-run)
         dry_run: If True, only print commands without executing
+        skip_if_image_exists: If True, skip build tasks if Docker image already exists
         max_workers: Maximum number of parallel threads
         
     Returns:
@@ -1194,6 +1263,16 @@ def execute_task_parallel(
         log_file = log_dir / f"{log_date}.{sha}.{log_task_name}.log"
         task.log_file = log_file
         
+        # Check if we should skip this build task if image already exists
+        if skip_if_image_exists and isinstance(task, BuildTask):
+            if task.image_exists():
+                with lock:
+                    logger.info(f"⊘ Skipping {task_id}: Docker image already exists ({task.output_image})")
+                task.status = TaskStatus.SKIPPED
+                with lock:
+                    executed_tasks.add(task_id)
+                return True
+        
         with lock:
             logger.info(f"Executing: {task_id} ({task.description})")
             logger.info(f"  Command: {task.get_command(repo_path)}")
@@ -1213,11 +1292,36 @@ def execute_task_parallel(
             
             success = task.execute(repo_path, dry_run=False)
             task.end_time = time.time()
+            duration = task.end_time - task.start_time
+            
+            # Append execution summary to log file
+            with open(log_file, 'a') as log_fh:
+                log_fh.write(f"\n")
+                log_fh.write(f"{'='*80}\n")
+                log_fh.write(f"Task: {task_id}\n")
+                log_fh.write(f"Duration: {duration:.2f}s\n")
+                log_fh.write(f"Exit code: {task.exit_code if hasattr(task, 'exit_code') else (0 if success else 1)}\n")
+                log_fh.write(f"Status: {'SUCCESS' if success else 'FAILED'}\n")
+                log_fh.write(f"{'='*80}\n")
             
             with lock:
                 if success:
                     task.status = TaskStatus.SUCCESS
-                    logger.info(f"✓ Completed: {task_id} ({task.end_time - task.start_time:.2f}s)")
+                    
+                    # Show running tasks and their elapsed time
+                    running_tasks = [
+                        (tid, t) for tid, t in all_tasks.items()
+                        if t.status == TaskStatus.RUNNING and t.start_time
+                    ]
+                    if running_tasks:
+                        running_info = []
+                        for tid, t in running_tasks:
+                            elapsed = time.time() - t.start_time
+                            running_info.append(f"{tid} ({elapsed:.0f}s)")
+                        logger.info(f"✓ Completed: {task_id} ({duration:.2f}s) | Running: {', '.join(running_info)}")
+                    else:
+                        logger.info(f"✓ Completed: {task_id} ({duration:.2f}s)")
+                    
                     pass_marker = log_file.with_suffix('.PASS')
                     pass_marker.touch()
                 else:
@@ -1282,6 +1386,9 @@ def generate_html_report(
     sha: str,
     log_dir: Path,
     date_str: str,
+    use_absolute_urls: bool = False,
+    hostname: str = "keivenc-linux",
+    html_path: str = "/nvidia/dynamo_ci/logs",
 ) -> str:
     """
     Generate HTML report using Jinja2 template.
@@ -1292,6 +1399,9 @@ def generate_html_report(
         sha: Git commit SHA (9 chars)
         log_dir: Directory containing log files
         date_str: Date string (YYYY-MM-DD)
+        use_absolute_urls: If True, use http://hostname/... URLs for email
+        hostname: Hostname for absolute URLs
+        html_path: Base path for absolute URLs
         
     Returns:
         HTML string
@@ -1352,6 +1462,25 @@ def generate_html_report(
     else:
         commit_info = {'sha_short': sha[:7], 'sha_full': sha}
     
+    # Helper function to generate log URL
+    def get_log_url(task: 'BaseTask') -> Optional[str]:
+        """Generate URL/path for task log file"""
+        if not task.log_file:
+            return None
+        try:
+            if use_absolute_urls:
+                # Email: absolute URL with http://
+                # Get path relative to logs root (e.g., "2025-10-29/file.log")
+                rel_path = task.log_file.relative_to(log_dir.parent)
+                # Construct full URL: http://hostname/path/to/logs/date/file.log
+                return f"http://{hostname}{html_path}/{rel_path}"
+            else:
+                # File: relative path (just filename)
+                return task.log_file.name
+        except Exception as e:
+            logging.getLogger("html").warning(f"Error generating log URL: {e}")
+            return None
+    
     # Organize tasks by framework
     frameworks_data: Dict[str, Dict[str, Any]] = {}
     
@@ -1377,8 +1506,11 @@ def generate_html_report(
             frameworks_data[framework][target]['build'] = {
                 'status': task.status.name,
                 'build_time': f"{task.end_time - task.start_time:.1f}s" if task.start_time and task.end_time else None,
-                'log_file': task.log_file.name if task.log_file else None,
+                'log_file': get_log_url(task) if task.status != TaskStatus.SKIPPED else None,
             }
+            # Get image size for build tasks
+            if isinstance(task, BuildTask):
+                frameworks_data[framework][target]['image_size'] = task.get_image_size()
         elif isinstance(task, CommandTask):
             # CommandTask: could be compilation, chown, or sanity
             if 'compilation' in rest:
@@ -1388,7 +1520,7 @@ def generate_html_report(
                 frameworks_data[framework][target]['compilation'] = {
                     'status': task.status.name,
                     'time': f"{task.end_time - task.start_time:.1f}s" if task.start_time and task.end_time else None,
-                    'log_file': task.log_file.name if task.log_file else None,
+                    'log_file': get_log_url(task),
                 }
             elif 'sanity' in rest:
                 target = rest.replace('-sanity', '')  # runtime, dev, local-dev
@@ -1397,7 +1529,7 @@ def generate_html_report(
                 frameworks_data[framework][target]['sanity'] = {
                     'status': task.status.name,
                     'sanity_time': f"{task.end_time - task.start_time:.1f}s" if task.start_time and task.end_time else None,
-                    'log_file': task.log_file.name if task.log_file else None,
+                    'log_file': get_log_url(task),
                 }
     
     # Load Jinja2 template
@@ -1424,6 +1556,85 @@ def generate_html_report(
     )
     
     return html
+
+
+def send_email_notification(
+    email: str,
+    html_content: str,
+    sha: str,
+    failed_tasks: List[str],
+) -> bool:
+    """
+    Send HTML email notification via SMTP using curl.
+    
+    Args:
+        email: Recipient email address
+        html_content: HTML content to send
+        sha: Git commit SHA (short, 7 chars)
+        failed_tasks: List of failed task IDs
+        
+    Returns:
+        True if email sent successfully, False otherwise
+    """
+    logger = logging.getLogger("email")
+    
+    try:
+        # Determine overall status
+        overall_status = "SUCCESS" if not failed_tasks else "FAILURE"
+        
+        # Create subject line
+        status_prefix = "SUCC" if overall_status == "SUCCESS" else "FAIL"
+        
+        # Include failed task names in subject if any
+        if failed_tasks:
+            failure_summary = ", ".join(failed_tasks[:3])  # Limit to first 3
+            if len(failed_tasks) > 3:
+                failure_summary += f" (+{len(failed_tasks) - 3} more)"
+            subject = f"{status_prefix}: DynamoDockerBuilder - {sha} ({failure_summary})"
+        else:
+            subject = f"{status_prefix}: DynamoDockerBuilder - {sha}"
+        
+        # Create email file with proper CRLF formatting
+        email_file = Path(f"/tmp/dynamo_email_{os.getpid()}.txt")
+        
+        # Write email content directly
+        email_content = (
+            f'Subject: {subject}\r\n'
+            f'From: DynamoDockerBuilder <dynamo-docker-builder@nvidia.com>\r\n'
+            f'To: {email}\r\n'
+            f'MIME-Version: 1.0\r\n'
+            f'Content-Type: text/html; charset=UTF-8\r\n'
+            f'\r\n'
+            f'{html_content}\r\n'
+        )
+        
+        with open(email_file, 'w', encoding='utf-8') as f:
+            f.write(email_content)
+        
+        # Send email using curl
+        result = subprocess.run([
+            'curl', '--url', 'smtp://smtp.nvidia.com:25',
+            '--mail-from', 'dynamo-docker-builder@nvidia.com',
+            '--mail-rcpt', email,
+            '--upload-file', str(email_file)
+        ], capture_output=True, text=True, timeout=30)
+        
+        # Clean up
+        email_file.unlink(missing_ok=True)
+        
+        if result.returncode == 0:
+            logger.info(f"📧 Email notification sent to {email}")
+            logger.info(f"   Subject: {subject}")
+            if failed_tasks:
+                logger.info(f"   Failed tasks: {', '.join(failed_tasks)}")
+            return True
+        else:
+            logger.error(f"⚠️  Failed to send email: {result.stderr}")
+            return False
+            
+    except Exception as e:
+        logger.error(f"⚠️  Error sending email: {e}")
+        return False
 
 
 def print_dependency_tree(frameworks: List[str], sha: str, repo_path: Path, verbose: bool = False) -> None:
@@ -1545,6 +1756,26 @@ def main() -> int:
         logger.error(f"Repository path does not exist: {repo_path}")
         return 1
 
+    # Pull latest code if requested
+    if args.pull_latest:
+        logger.info("Pulling latest code from main branch...")
+        try:
+            # Initialize GitUtils to check repo status
+            git_utils_temp = GitUtils(repo_path)
+            
+            # Check if there are uncommitted changes
+            if git_utils_temp.is_dirty() or git_utils_temp.repo.untracked_files:
+                logger.warning("Repository has uncommitted changes. Stashing them before pull...")
+                git_utils_temp.repo.git.stash('save', '--include-untracked', 'Auto-stash before pull')
+            
+            # Pull latest from main using GitPython
+            origin = git_utils_temp.repo.remotes.origin
+            origin.pull('main')
+            logger.info("✓ Successfully pulled latest code from main")
+        except Exception as e:
+            logger.error(f"Failed to pull latest code: {e}")
+            return 1
+
     # Get commit SHA
     try:
         git_utils = GitUtils(repo_path)
@@ -1583,23 +1814,64 @@ def main() -> int:
         log_dir.mkdir(parents=True, exist_ok=True)
         logger.info(f"Log directory: {log_dir}")
         
-        # Clean up all existing log files and marker files for this SHA
-        # Pattern: YYYY-MM-DD.{sha}.*
-        cleanup_pattern = str(log_dir / f"{log_date}.{sha}.*")
-        cleaned_files = glob.glob(cleanup_pattern)
-        if cleaned_files:
-            logger.info(f"Cleaning up {len(cleaned_files)} existing log/marker files for SHA {sha}")
-            for file_path in cleaned_files:
-                try:
-                    Path(file_path).unlink()
-                except Exception as e:
-                    logger.warning(f"Failed to remove {file_path}: {e}")
+        # Clean up existing log files and marker files for this SHA and frameworks
+        # Pattern: YYYY-MM-DD.{sha}.{framework}-*
+        cleaned_count = 0
+        for framework in frameworks:
+            cleanup_pattern = str(log_dir / f"{log_date}.{sha}.{framework}-*")
+            framework_files = glob.glob(cleanup_pattern)
+            if framework_files:
+                for file_path in framework_files:
+                    try:
+                        Path(file_path).unlink()
+                        cleaned_count += 1
+                    except Exception as e:
+                        logger.warning(f"Failed to remove {file_path}: {e}")
+        
+        # Also clean up HTML report files for this SHA
+        html_report_pattern = str(log_dir / f"{log_date}.{sha}.report.html")
+        html_files = glob.glob(html_report_pattern)
+        for file_path in html_files:
+            try:
+                Path(file_path).unlink()
+                cleaned_count += 1
+            except Exception as e:
+                logger.warning(f"Failed to remove {file_path}: {e}")
+        
+        if cleaned_count > 0:
+            logger.info(f"Cleaned up {cleaned_count} existing log/marker files for SHA {sha}")
 
     # Create task graph for each framework
     all_tasks = {}
     for framework in frameworks:
         framework_tasks = create_task_graph(framework, sha, repo_path)
         all_tasks.update(framework_tasks)
+
+    # Filter tasks based on --sanity-check-only
+    if args.sanity_check_only:
+        logger.info("Sanity-check-only mode: skipping builds and compilation")
+        
+        # Mark build and compilation tasks as SKIPPED, keep sanity checks
+        sanity_tasks = {}
+        for task_id, task in all_tasks.items():
+            if 'sanity' in task_id:
+                # Keep sanity check tasks
+                sanity_tasks[task_id] = task
+                # Clear dependencies since we're not building
+                task.parents = []
+                task.children = []
+            elif 'compilation' in task_id or 'chown' in task_id:
+                # Mark compilation and chown tasks as skipped (for HTML report)
+                task.status = TaskStatus.SKIPPED
+                sanity_tasks[task_id] = task
+            elif isinstance(task, BuildTask):
+                # Mark build tasks as skipped
+                task.status = TaskStatus.SKIPPED
+                # Add to sanity_tasks so they show in HTML report with image size
+                sanity_tasks[task_id] = task
+        
+        all_tasks = sanity_tasks
+        logger.info(f"Filtered to {len([t for t in all_tasks.values() if 'sanity' in t.task_id])} sanity check tasks")
 
     # Execute tasks in dependency order
     mode = "parallel" if args.parallel else "sequential"
@@ -1629,6 +1901,7 @@ def main() -> int:
             log_dir=log_dir if not args.dry_run else None,
             log_date=log_date if not args.dry_run else None,
             dry_run=args.dry_run,
+            skip_if_image_exists=args.skip_build_if_image_exists,
             max_workers=4,  # TODO: make this configurable
         )
     else:
@@ -1646,6 +1919,7 @@ def main() -> int:
                 log_dir=log_dir if not args.dry_run else None,
                 log_date=log_date if not args.dry_run else None,
                 dry_run=args.dry_run,
+                skip_if_image_exists=args.skip_build_if_image_exists,
             )
 
     # Calculate total execution time
@@ -1679,24 +1953,72 @@ def main() -> int:
         logger.info(f"  ✓ Success: {success_count}")
         logger.info(f"  ✗ Failed: {failed_count}")
         logger.info(f"  ⊘ Skipped: {skipped_count}")
-        logger.info(f"  Logs: {log_dir}")
+        
+        # Show detailed task breakdown
+        logger.info(f"\n  Task Details:")
+        for task_id, task in all_tasks.items():
+            if task.status == TaskStatus.SUCCESS and task.start_time and task.end_time:
+                duration = task.end_time - task.start_time
+                logger.info(f"    ✓ {task_id}: {duration:.1f}s")
+            elif task.status == TaskStatus.FAILED:
+                if task.start_time and task.end_time:
+                    duration = task.end_time - task.start_time
+                    logger.info(f"    ✗ {task_id}: {duration:.1f}s")
+                else:
+                    logger.info(f"    ✗ {task_id}: failed")
+            elif task.status == TaskStatus.SKIPPED:
+                logger.info(f"    ⊘ {task_id}: skipped")
+        
+        logger.info(f"\n  Logs: {log_dir}")
         logger.info(f"  Total time: {duration_str} ({total_duration:.2f}s)")
         logger.info(f"  Exit status: {exit_status}")
         logger.info(f"  Completed: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         
         # Generate HTML report if requested
-        if args.html:
+        if args.html or args.email:
             try:
-                html_content = generate_html_report(
+                # Generate report with relative paths for file
+                html_content_file = generate_html_report(
                     all_tasks=all_tasks,
                     repo_path=repo_path,
                     sha=sha,
                     log_dir=log_dir,
                     date_str=log_date,
+                    use_absolute_urls=False,
                 )
-                html_file = log_dir / f"{log_date}.{sha}.report.html"
-                html_file.write_text(html_content)
-                logger.info(f"  HTML Report: {html_file}")
+                
+                if args.html:
+                    html_file = log_dir / f"{log_date}.{sha}.report.html"
+                    html_file.write_text(html_content_file)
+                    logger.info(f"  HTML Report: {html_file}")
+                
+                # Generate report with absolute URLs for email
+                if args.email:
+                    html_content_email = generate_html_report(
+                        all_tasks=all_tasks,
+                        repo_path=repo_path,
+                        sha=sha,
+                        log_dir=log_dir,
+                        date_str=log_date,
+                        use_absolute_urls=True,
+                        hostname=args.hostname,
+                        html_path=args.html_path,
+                    )
+                    
+                    # Collect failed task names
+                    failed_task_names = [
+                        task_id for task_id, task in all_tasks.items()
+                        if task.status == TaskStatus.FAILED
+                    ]
+                    
+                    # Send email
+                    send_email_notification(
+                        email=args.email,
+                        html_content=html_content_email,
+                        sha=sha[:7],
+                        failed_tasks=failed_task_names,
+                    )
+                    
             except Exception as e:
                 logger.error(f"Failed to generate HTML report: {e}")
 
