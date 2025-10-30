@@ -1,0 +1,175 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<title>DynamoDockerBuilder - {{ sha_display }} - {{ overall_status }}</title>
+<style>
+body { font-family: Arial, sans-serif; margin: 10px; line-height: 1.3; }
+.header { background-color: {{ header_color }}; color: white; padding: 15px 20px; border-radius: 4px; margin-bottom: 10px; text-align: center; }
+.summary { background-color: #f8f9fa; padding: 4px 6px; border-radius: 2px; margin: 3px 0; }
+.summary-boxes { width: 100%; margin: 15px 0; }
+.summary-boxes table { width: 100%; border-collapse: separate; border-spacing: 10px; }
+.summary-box { padding: 12px; border-radius: 6px; text-align: center; width: 25%; }
+.summary-box.total { background: #e8f4f8; border-left: 4px solid #3498db; }
+.summary-box.success { background: #e8f8f5; border-left: 4px solid #27ae60; }
+.summary-box.failed { background: #fde8e8; border-left: 4px solid #e74c3c; }
+.summary-box.skipped { background: #f9f9f9; border-left: 4px solid #95a5a6; }
+.summary-box .number { font-size: 28px; font-weight: bold; margin: 5px 0; display: block; }
+.summary-box .label { font-size: 13px; color: #7f8c8d; text-transform: uppercase; font-weight: 600; display: block; }
+.framework { margin: 10px 0; padding: 8px; border: 1px solid #dee2e6; border-radius: 4px; background-color: #ffffff; }
+.framework-header { background-color: #007bff; color: white; padding: 8px 12px; margin: -8px -8px 8px -8px; border-radius: 4px 4px 0 0; font-weight: bold; }
+.results-chart { display: table; width: 100%; border-collapse: collapse; margin: 8px 0; }
+.chart-row { display: table-row; }
+.chart-cell { display: table-cell; padding: 6px 12px; border: 1px solid #dee2e6; vertical-align: middle; }
+.chart-header { background-color: #f8f9fa; font-weight: bold; text-align: center; }
+.chart-target { font-weight: bold; background-color: #f1f3f4; }
+.chart-status { text-align: center; }
+.chart-timing { text-align: right; font-family: monospace; font-size: 0.9em; }
+.success { color: #28a745; font-weight: bold; }
+.failure { color: #dc3545; font-weight: bold; }
+.git-info { background-color: #e9ecef; padding: 4px 6px; border-radius: 2px; font-family: monospace; font-size: 0.9em; }
+a { color: #007bff; text-decoration: none; }
+a:hover { text-decoration: underline; }
+a.log-link { font-size: 0.85em; margin-left: 4px; }
+p { margin: 1px 0; }
+h2 { margin: 0; font-size: 1.2em; font-weight: bold; }
+</style>
+</head>
+<body>
+<div class="header">
+<h2>DynamoDockerBuilder - <a href="https://github.com/ai-dynamo/dynamo/commit/{{ sha_link }}" style="color: white; text-decoration: underline;">{{ sha_display }}</a> - {{ overall_status }}</h2>
+</div>
+
+<div class="summary-boxes">
+<table>
+<tr>
+<td class="summary-box total">
+<div class="number">{{ total_tasks }}</div>
+<div class="label">Total Tasks</div>
+</td>
+<td class="summary-box success">
+<div class="number">{{ succeeded }}</div>
+<div class="label">Succeeded</div>
+</td>
+<td class="summary-box failed">
+<div class="number">{{ failed }}</div>
+<div class="label">Failed</div>
+</td>
+<td class="summary-box skipped">
+<div class="number">{{ skipped }}</div>
+<div class="label">Skipped</div>
+</td>
+</tr>
+</table>
+</div>
+
+<div class="summary">
+<p><strong>Build Date:</strong> {{ build_date }} </p>
+</div>
+
+<div class="git-info">
+<p><strong>Commit SHA:</strong> <a href="https://github.com/ai-dynamo/dynamo/commit/{{ sha_link }}">{{ sha_display }}</a></p>
+{%- if commit.pr_link %}
+<p><strong>Pull Request:</strong> <a href="{{ commit.pr_link }}">#{{ commit.pr_number }}</a></p>
+{%- endif %}
+{%- if commit.date %}
+<p><strong>Commit Date:</strong> {{ commit.date }} fixed</p>
+<p><strong>Author:</strong> {{ commit.author }}</p>
+<div style="background-color: #f8f9fa; padding: 6px; border-radius: 3px; margin: 3px 0;">
+<strong>Commit Message:</strong>
+<pre style="margin: 3px 0; white-space: pre-wrap; font-family: monospace; font-size: 0.9em;">{{ commit.message }}</pre>
+</div>
+{%- endif %}
+{%- if commit.insertions is defined %}
+
+<p><strong>Changes Summary:</strong> +{{ commit.insertions }}/-{{ commit.deletions }} lines</p>
+{%- endif %}
+{%- if commit.files_changed %}
+
+<p><strong>Files Changed with Line Counts:</strong></p>
+<div style="background-color: #f8f9fa; padding: 6px; border-radius: 3px; font-family: monospace; font-size: 0.9em; margin: 3px 0;">
+{%- for file_path, file_stats in commit.files_changed|dictsort %}
+{%- set insertions = file_stats.get('insertions', 0) %}
+{%- set deletions = file_stats.get('deletions', 0) %}
+{%- if insertions and deletions %}
+• {{ file_path }} +{{ insertions }}/-{{ deletions }}<br>
+{%- elif insertions %}
+• {{ file_path }} +{{ insertions }}<br>
+{%- elif deletions %}
+• {{ file_path }} -{{ deletions }}<br>
+{%- endif %}
+{%- endfor %}
+</div>
+{%- endif %}
+</div>
+
+{%- for framework_name in frameworks|sort %}
+{%- set targets = frameworks[framework_name] %}
+
+<div class="framework">
+<div class="framework-header">{{ framework_name }}</div>
+<div class="results-chart">
+<div class="chart-row">
+<div class="chart-cell chart-header">Target</div>
+<div class="chart-cell chart-header">Build</div>
+<div class="chart-cell chart-header">Build Time</div>
+<div class="chart-cell chart-header">Sanity Check</div>
+<div class="chart-cell chart-header">Sanity Time</div>
+<div class="chart-cell chart-header">Image Size</div>
+</div>
+{%- for target_name in ['base', 'runtime', 'dev', 'local-dev'] %}
+{%- if target_name in targets %}
+{%- set target_data = targets[target_name] %}
+{%- set build_task = target_data.build %}
+{%- set sanity_task = target_data.sanity %}
+
+<div class="chart-row">
+<div class="chart-cell chart-target">{{ target_name }}</div>
+<div class="chart-cell chart-status">
+{%- if build_task %}
+{%- if build_task.status == 'SUCCESS' %}
+<span class="success">✅ PASS</span>
+{%- elif build_task.status == 'SKIPPED' %}
+⏭️ SKIP
+{%- else %}
+<span class="failure">❌ FAIL</span>
+{%- endif %}
+{%- if build_task.log_file %} <a href="{{ build_task.log_file }}" class="log-link">[log]</a>{%- endif %}
+{%- else %}-{%- endif %}
+</div>
+<div class="chart-cell chart-timing">
+{%- if build_task %}
+{%- if build_task.status == 'SUCCESS' %}{{ build_task.build_time }}
+{%- elif build_task.status == 'SKIPPED' %}skipped
+{%- else %}{{ build_task.build_time if build_task.build_time else 'failed' }}
+{%- endif %}
+{%- else %}-{%- endif %}
+</div>
+<div class="chart-cell chart-status">
+{%- if sanity_task %}
+{%- if sanity_task.status == 'SUCCESS' %}
+<span class="success">✅ PASS</span>
+{%- elif sanity_task.status == 'SKIPPED' %}
+⏭️ SKIP
+{%- else %}
+<span class="failure">❌ FAIL</span>
+{%- endif %}
+{%- if sanity_task.log_file %} <a href="{{ sanity_task.log_file }}" class="log-link">[log]</a>{%- endif %}
+{%- else %}-{%- endif %}
+</div>
+<div class="chart-cell chart-timing">
+{%- if sanity_task %}
+{%- if sanity_task.status == 'SUCCESS' %}{{ sanity_task.sanity_time }}
+{%- elif sanity_task.status == 'SKIPPED' %}skipped
+{%- else %}{{ sanity_task.sanity_time if sanity_task.sanity_time else 'failed' }}
+{%- endif %}
+{%- else %}-{%- endif %}
+</div>
+<div class="chart-cell chart-timing">{{ target_data.image_size if target_data.image_size else '-' }}</div>
+</div>
+{%- endif %}
+{%- endfor %}
+</div></div>
+{%- endfor %}
+</body></html>
+

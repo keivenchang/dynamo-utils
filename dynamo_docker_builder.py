@@ -1,43 +1,72 @@
 #!/usr/bin/env python3
 """
-SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-SPDX-License-Identifier: Apache-2.0
+DynamoDockerBuilder V2 - Clean OOP Architecture
 
-DynamoDockerBuilder V2 - Simplified Parallel Docker Build System
+A Docker image build orchestration system for the Dynamo inference framework.
+Supports building images for multiple frameworks (VLLM, SGLANG, TRTLLM) with
+dependency management, parallel execution, and HTML reporting.
 
-A cleaner, more elegant implementation focusing on:
-- Native parallel execution with asyncio
-- Simpler code structure with functional patterns
-- Type-safe dataclasses
-- Same behavior as V1 but with cleaner code
+Architecture:
+    - BaseTask: Abstract base class for all task types
+    - BuildTask: Handles Docker image building
+    - CompilationTask: Handles workspace compilation inside containers
+    - ChownTask: Fixes file ownership after compilation
+    - SanityCheckTask: Runs validation scripts in containers
 """
 
 import argparse
-import asyncio
+import glob
 import logging
 import os
-import shutil
+import re
+import subprocess
 import sys
+import threading
+import time
+from abc import ABC, abstractmethod
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
-from typing import Dict, List, Optional, Set
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
-from common import FRAMEWORKS_UPPER, BaseUtils, DockerUtils, DynamoRepositoryUtils, get_terminal_width
-import subprocess
-import docker
+# Third-party imports (optional, with error handling)
+try:
+    import git
+except ImportError:
+    git = None  # type: ignore
+
+try:
+    from jinja2 import Environment, FileSystemLoader, select_autoescape
+except ImportError:
+    Environment = None  # type: ignore
+    FileSystemLoader = None  # type: ignore
+    select_autoescape = None  # type: ignore
+
+# Import utilities from common.py
+from common import (
+    normalize_framework,
+    get_framework_display_name,
+    DynamoImageInfo,
+    DockerImageInfo,
+    get_terminal_width,
+    DynamoRepositoryUtils,
+    DockerUtils,
+    GitUtils,
+)
 
 
-class TaskType(Enum):
-    """Task types in the build pipeline"""
-    BUILD = "build"
-    COMPILATION = "compilation"
-    SANITY_CHECK = "sanity_check"
+# ==============================================================================
+# CONSTANTS
+# ==============================================================================
+
+FRAMEWORKS_UPPER = ["VLLM", "SGLANG", "TRTLLM"]
+FRAMEWORKS_LOWER = ["vllm", "sglang", "trtllm"]
 
 
 class TaskStatus(Enum):
-    """Task execution status"""
+    """Status of a task in the pipeline"""
     PENDING = "pending"
     RUNNING = "running"
     SUCCESS = "success"
@@ -45,1641 +74,1633 @@ class TaskStatus(Enum):
     SKIPPED = "skipped"
 
 
-@dataclass
-class Task:
-    """Represents a single task in the build pipeline"""
-    task_id: str
-    task_type: TaskType
-    framework: Optional[str]
-    target: Optional[str]
-    description: str
-    command: str
+# ==============================================================================
+# TASK GRAPH DEFINITION
+# ==============================================================================
 
-    # Dependencies
-    depends_on: List[str] = field(default_factory=list)
+# ==============================================================================
+# DOCKER COMMAND FILTER FUNCTIONS
+# ==============================================================================
+
+def select_command(index: int) -> Callable[[List[str]], Optional[str]]:
+    """
+    Create a function that selects a specific command by index.
+    
+    Args:
+        index: 0-based index (0 for first, 1 for second, etc.)
+        
+    Returns:
+        Function that selects the command at the given index
+    """
+    def selector(commands: List[str]) -> Optional[str]:
+        if len(commands) <= index:
+            # Not enough commands - return what we have
+            return '\n'.join(commands) if commands else None
+        return commands[index]
+    return selector
+
+
+def filter_out_latest_tag(select_func: Callable[[List[str]], Optional[str]]) -> Callable[[List[str]], Optional[str]]:
+    """
+    Wrap a selection function to also filter out 'latest' tags.
+    
+    Returns a function that does: filter_out_latest(select_func(commands))
+    """
+    def wrapper(commands: List[str]) -> Optional[str]:
+        command = select_func(commands)
+        if command is None:
+            return None
+        # Remove --tag arguments that contain 'latest'
+        command = re.sub(r'--tag\s+[^\s]*latest[^\s]*', '', command)
+        # Clean up whitespace
+        command = re.sub(r'\s+', ' ', command).strip()
+        return command
+    return wrapper
+
+
+def rename_output_tag(new_tag: str, select_func: Callable[[List[str]], Optional[str]]) -> Callable[[List[str]], Optional[str]]:
+    """
+    Wrap a selection function to also rename output tags (--tag).
+    
+    Returns a function that does: rename_output_tag_to(new_tag, select_func(commands))
+    """
+    def wrapper(commands: List[str]) -> Optional[str]:
+        command = select_func(commands)
+        if command is None:
+            return None
+        # Remove all existing --tag arguments
+        command = re.sub(r'--tag\s+[^\s-][^\s]*', '', command)
+        # Clean up whitespace
+        command = re.sub(r'\s+', ' ', command).strip()
+
+        # Add our new tag before the final path argument
+        parts = command.rsplit(maxsplit=1)
+        if len(parts) == 2:
+            return f"{parts[0]} --tag {new_tag} {parts[1]}"
+        else:
+            return f"{command} --tag {new_tag}"
+    return wrapper
+
+
+def rename_input_tag(new_tag: str, select_func: Callable[[List[str]], Optional[str]]) -> Callable[[List[str]], Optional[str]]:
+    """
+    Wrap a selection function to also rename input base image (--build-arg DYNAMO_BASE_IMAGE=).
+    
+    Returns a function that does: rename_input_tag_to(new_tag, select_func(commands))
+    """
+    def wrapper(commands: List[str]) -> Optional[str]:
+        command = select_func(commands)
+        if command is None:
+            return None
+        # Replace DYNAMO_BASE_IMAGE value
+        command = re.sub(
+            r'--build-arg\s+DYNAMO_BASE_IMAGE=[^\s]+',
+            f'--build-arg DYNAMO_BASE_IMAGE={new_tag}',
+            command
+        )
+        return command
+    return wrapper
+
+
+# Factory function to create task instances for a specific framework
+def create_task_graph(framework: str, sha: str, repo_path: Path) -> Dict[str, 'BaseTask']:
+    """
+    Create task instances for a specific framework.
+
+    Args:
+        framework: Framework name (vllm, sglang, trtllm)
+        sha: Git commit SHA (short form, 9 chars)
+        repo_path: Path to the Dynamo repository
+
+    Returns:
+        Dictionary mapping task IDs to task instances
+        
+    Image Dependency Chain:
+        The docker_command_filter uses function composition to transform build commands:
+        
+        1. Base image (produces: dynamo-base:v0.1.0.dev.f1552864b-vllm):
+           rename_output_tag(base_image_tag, 
+               filter_out_latest_tag(select_command(0)))
+           
+        2. Runtime image (consumes: base, produces: dynamo:v0.1.0.dev.f1552864b-vllm-runtime):
+           rename_output_tag(runtime_image_tag,
+               rename_input_tag(base_image_tag,
+                   filter_out_latest_tag(select_command(1))))
+           
+        3. Dev image (consumes: base, produces: dynamo:v0.1.0.dev.f1552864b-vllm-dev):
+           rename_output_tag(dev_image_tag,
+               rename_input_tag(base_image_tag,
+                   filter_out_latest_tag(select_command(1))))
+           
+        4. Local-dev image (consumes: dev, produces: dynamo:v0.1.0.dev.f1552864b-vllm-local-dev):
+           rename_output_tag(local_dev_image_tag,
+               rename_input_tag(dev_image_tag,
+                   filter_out_latest_tag(select_command(1))))
+        
+        Each function in the chain wraps the next:
+        - select_command(index): Selects docker command from build.sh output
+        - filter_out_latest_tag(): Removes --tag arguments containing 'latest'
+        - rename_input_tag(tag): Sets --build-arg DYNAMO_BASE_IMAGE=<tag>
+        - rename_output_tag(tag): Sets --tag <tag>
+        
+        Result: Input and output images match parent/child dependencies perfectly.
+    """
+    framework_upper = framework.upper()
+    framework_lower = framework.lower()
+
+    # Task ID format: FRAMEWORK-target
+    # Example: VLLM-base, VLLM-dev-compilation
+
+    tasks: Dict[str, BaseTask] = {}
+
+    # Level 0: Base image build
+    base_image_tag = f"dynamo-base:v0.1.0.dev.{sha}-{framework_lower}"
+    tasks[f"{framework_upper}-base"] = BuildTask(
+        task_id=f"{framework_upper}-base",
+        description=f"Build {framework_upper} base image",
+        command=f"{repo_path}/container/build.sh --framework {framework_lower} --target dynamo_base --dry-run",
+        output_image=base_image_tag,
+        docker_command_filter=rename_output_tag(base_image_tag, filter_out_latest_tag(select_command(0))),
+        timeout=600.0,
+    )
+
+    # Level 1: Runtime image build
+    runtime_image_tag = f"dynamo:v0.1.0.dev.{sha}-{framework_lower}-runtime"
+    tasks[f"{framework_upper}-runtime"] = BuildTask(
+        task_id=f"{framework_upper}-runtime",
+        description=f"Build {framework_upper} runtime image",
+        command=f"{repo_path}/container/build.sh --framework {framework_lower} --target runtime --dry-run",
+        input_image=base_image_tag,
+        output_image=runtime_image_tag,
+        docker_command_filter=rename_output_tag(runtime_image_tag, 
+            rename_input_tag(base_image_tag, 
+                filter_out_latest_tag(select_command(1)))),
+        parents=[f"{framework_upper}-base"],
+        timeout=600.0,
+    )
+
+    # Level 2: Runtime sanity check
+    tasks[f"{framework_upper}-runtime-sanity"] = CommandTask(
+        task_id=f"{framework_upper}-runtime-sanity",
+        description=f"Run sanity_check.py in {framework_upper} runtime container",
+        command=f"{repo_path}/container/run.sh --image {runtime_image_tag} -- python3 /workspace/deploy/sanity_check.py",
+        input_image=runtime_image_tag,
+        parents=[f"{framework_upper}-runtime"],
+        timeout=120.0,
+        ignore_exit_code=True,  # Runtime may fail some checks, we only care about Dynamo paths
+    )
+
+    # Level 2: Dev image build
+    dev_image_tag = f"dynamo:v0.1.0.dev.{sha}-{framework_lower}-dev"
+    tasks[f"{framework_upper}-dev"] = BuildTask(
+        task_id=f"{framework_upper}-dev",
+        description=f"Build {framework_upper} dev image",
+        command=f"{repo_path}/container/build.sh --framework {framework_lower} --target dev --dry-run",
+        input_image=base_image_tag,
+        output_image=dev_image_tag,
+        docker_command_filter=rename_output_tag(dev_image_tag,
+            rename_input_tag(base_image_tag,
+                filter_out_latest_tag(select_command(1)))),
+        parents=[f"{framework_upper}-base"],  # Parent is base, not runtime
+        timeout=600.0,
+    )
+
+    # Level 3: Dev compilation
+    cargo_cmd = "cargo build --locked --profile dev --features dynamo-llm/block-manager && cd /workspace/lib/bindings/python && maturin develop && uv pip install -e ."
+    tasks[f"{framework_upper}-dev-compilation"] = CommandTask(
+        task_id=f"{framework_upper}-dev-compilation",
+        description=f"Run workspace compilation in {framework_upper} dev container",
+        command=f"{repo_path}/container/run.sh --image {dev_image_tag} --mount-workspace -- bash -c '{cargo_cmd}'",
+        input_image=dev_image_tag,
+        parents=[f"{framework_upper}-dev"],
+        timeout=1800.0,
+    )
+
+    # Level 4: Dev chown (always runs, even if compilation fails)
+    tasks[f"{framework_upper}-dev-chown"] = CommandTask(
+        task_id=f"{framework_upper}-dev-chown",
+        description=f"Fix file ownership after {framework_upper} dev compilation",
+        command=f"sudo chown -R $(id -u):$(id -g) {repo_path}/target {repo_path}/lib/bindings/python",
+        parents=[f"{framework_upper}-dev-compilation"],
+        run_even_if_deps_fail=True,
+        timeout=60.0,
+    )
+
+    # Level 5: Dev sanity check
+    tasks[f"{framework_upper}-dev-sanity"] = CommandTask(
+        task_id=f"{framework_upper}-dev-sanity",
+        description=f"Run sanity_check.py in {framework_upper} dev container",
+        command=f"{repo_path}/container/run.sh --image {dev_image_tag} -- python3 /workspace/deploy/sanity_check.py",
+        input_image=dev_image_tag,
+        parents=[f"{framework_upper}-dev-chown"],
+        timeout=120.0,
+    )
+
+    # Level 3: Local-dev image build
+    local_dev_image_tag = f"dynamo:v0.1.0.dev.{sha}-{framework_lower}-local-dev"
+    tasks[f"{framework_upper}-local-dev"] = BuildTask(
+        task_id=f"{framework_upper}-local-dev",
+        description=f"Build {framework_upper} local-dev image",
+        command=f"{repo_path}/container/build.sh --framework {framework_lower} --target local-dev --dry-run",
+        input_image=dev_image_tag,
+        output_image=local_dev_image_tag,
+        docker_command_filter=rename_output_tag(local_dev_image_tag,
+            rename_input_tag(dev_image_tag,
+                filter_out_latest_tag(select_command(1)))),
+        parents=[f"{framework_upper}-dev"],
+        timeout=600.0,
+    )
+
+    # Level 5: Local-dev compilation
+    tasks[f"{framework_upper}-local-dev-compilation"] = CommandTask(
+        task_id=f"{framework_upper}-local-dev-compilation",
+        description=f"Run workspace compilation in {framework_upper} local-dev container",
+        command=f"{repo_path}/container/run.sh --image {local_dev_image_tag} --mount-workspace -- bash -c '{cargo_cmd}'",
+        input_image=local_dev_image_tag,
+        parents=[f"{framework_upper}-local-dev", f"{framework_upper}-dev-chown"],
+        timeout=1800.0,
+    )
+
+    # Level 6: Local-dev sanity check
+    tasks[f"{framework_upper}-local-dev-sanity"] = CommandTask(
+        task_id=f"{framework_upper}-local-dev-sanity",
+        description=f"Run sanity_check.py in {framework_upper} local-dev container",
+        command=f"{repo_path}/container/run.sh --image {local_dev_image_tag} -- python3 /workspace/deploy/sanity_check.py",
+        input_image=local_dev_image_tag,
+        parents=[f"{framework_upper}-local-dev-compilation"],
+        timeout=120.0,
+    )
+
+    return tasks
+
+
+# ==============================================================================
+# BASE TASK CLASS
+# ==============================================================================
+
+@dataclass
+class BaseTask(ABC):
+    """
+    Abstract base class for all task types.
+
+    All tasks share common attributes and behaviors:
+    - Unique identification (task_id, framework, target)
+    - Dependency management (parents, children)
+    - Execution state (status, start_time, end_time)
+    - Logging (log_file)
+    - Configuration (timeout, run_on_dep_failure)
+    """
+
+    # Identity
+    task_id: str
+    description: str
+
+    # Command and execution
+    command: str = ""
+    timeout: float = 600.0  # Default 10 minutes
+
+    # Docker image tracking
+    input_image: Optional[str] = None   # Base/input Docker image (for builds or container runs)
+    output_image: Optional[str] = None  # Output Docker image (for builds)
+
+    # Dependency management
+    parents: List[str] = field(default_factory=list)
     children: List[str] = field(default_factory=list)
+    run_even_if_deps_fail: bool = False  # Run even if dependencies fail
 
     # Execution state
     status: TaskStatus = TaskStatus.PENDING
-    duration: float = 0.0
-    error_message: Optional[str] = None
+    start_time: Optional[float] = None
+    end_time: Optional[float] = None
     log_file: Optional[Path] = None
 
-    # Build-specific (for BUILD tasks)
-    image_tag: Optional[str] = None
-    base_image: Optional[str] = None
-    image_size: Optional[str] = None  # Human-readable image size (e.g., "18.2 GB")
+    # Results
+    exit_code: Optional[int] = None
+    error_message: Optional[str] = None
 
-    # Execute-specific (for COMPILATION/SANITY_CHECK tasks)
-    timeout: float = 3600.0
+    def __post_init__(self):
+        """Initialize task-specific attributes"""
+        self.logger = logging.getLogger(f"{self.__class__.__name__}.{self.task_id}")
 
-    def can_run(self, task_tree: Dict[str, 'Task']) -> bool:
-        """Check if all dependencies are completed successfully"""
+    @abstractmethod
+    def prepare(self, repo_path: Path, sha: str) -> None:
+        """
+        Prepare task for execution.
+
+        This method should:
+        - Generate the command to execute
+        - Set up any required paths or environment
+        - Validate prerequisites
+
+        Args:
+            repo_path: Path to the repository
+            sha: Git commit SHA
+        """
+        pass
+
+    def _run_command(self, command: str, repo_path: Path) -> bool:
+        """
+        Common method to run a command and log output.
+        
+        Args:
+            command: Command to execute
+            repo_path: Path to the repository
+            
+        Returns:
+            True if command succeeded, False otherwise
+        """
+        try:
+            # Open log file in append mode
+            if self.log_file is None:
+                raise ValueError("log_file is not set")
+            with open(self.log_file, 'a') as log_fh:
+                log_fh.write(f"\n{'='*80}\n")
+                log_fh.write(f"Executing: {command}\n")
+                log_fh.write(f"{'='*80}\n\n")
+                log_fh.flush()
+                
+                # Run the command
+                process = subprocess.Popen(
+                    command,
+                    shell=True,
+                    cwd=repo_path,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    bufsize=1
+                )
+                
+                # Stream output to log file
+                if process.stdout is None:
+                    raise ValueError("process.stdout is None")
+                for line in process.stdout:
+                    log_fh.write(line)
+                    log_fh.flush()
+                
+                # Wait for process to complete
+                process.wait()
+                self.exit_code = process.returncode
+                
+                log_fh.write(f"\n{'='*80}\n")
+                log_fh.write(f"Exit code: {self.exit_code}\n")
+                log_fh.write(f"{'='*80}\n")
+                
+                return self.exit_code == 0
+                
+        except Exception as e:
+            self.error_message = str(e)
+            self.logger.error(f"Command execution failed: {e}")
+            return False
+
+    @abstractmethod
+    def execute(self, repo_path: Path, dry_run: bool = False) -> bool:
+        """
+        Execute the task.
+
+        Args:
+            repo_path: Path to the repository
+            dry_run: If True, don't actually run commands
+
+        Returns:
+            True if execution succeeded, False otherwise
+        """
+        pass
+
+    def can_run(self, all_tasks: Dict[str, 'BaseTask']) -> bool:
+        """
+        Check if this task can run based on dependency status.
+
+        Args:
+            all_tasks: Dictionary of all tasks in the pipeline
+
+        Returns:
+            True if all dependencies are satisfied
+        """
         if self.status != TaskStatus.PENDING:
             return False
 
-        for dep_id in self.depends_on:
-            dep_task = task_tree.get(dep_id)
-            if not dep_task or dep_task.status not in (TaskStatus.SUCCESS, TaskStatus.SKIPPED):
+        for dep_id in self.parents:
+            if dep_id not in all_tasks:
+                self.logger.warning(f"Dependency {dep_id} not found")
+                return False
+
+            dep_task = all_tasks[dep_id]
+
+            # If dependency is still pending or running, we can't run yet
+            if dep_task.status in [TaskStatus.PENDING, TaskStatus.RUNNING]:
+                return False
+
+            # If dependency failed and we don't run on failure, we can't run
+            if dep_task.status == TaskStatus.FAILED and not self.run_even_if_deps_fail:
                 return False
 
         return True
 
+    def should_skip(self, all_tasks: Dict[str, 'BaseTask']) -> bool:
+        """
+        Check if this task should be skipped due to dependency failures.
+
+        Args:
+            all_tasks: Dictionary of all tasks in the pipeline
+
+        Returns:
+            True if task should be skipped
+        """
+        if self.run_even_if_deps_fail:
+            return False
+
+        for dep_id in self.parents:
+            if dep_id in all_tasks:
+                dep_task = all_tasks[dep_id]
+                if dep_task.status == TaskStatus.FAILED:
+                    return True
+
+        return False
+
+    def duration(self) -> Optional[float]:
+        """Get task duration in seconds"""
+        if self.start_time and self.end_time:
+            return self.end_time - self.start_time
+        return None
+
+    def mark_skipped(self, reason: str = ""):
+        """Mark task as skipped"""
+        self.status = TaskStatus.SKIPPED
+        if reason:
+            self.error_message = reason
+        self.logger.info(f"Skipped: {reason}")
+
+    @abstractmethod
+    def get_command(self, repo_path: Path) -> str:
+        """
+        Get the Unix command that would be executed for this task.
+
+        Args:
+            repo_path: Path to the repository
+
+        Returns:
+            The full Unix command string
+        """
+        pass
+
+    def get_docker_command(self, repo_path: Path) -> Optional[str]:
+        """
+        Get the underlying docker command (optional, for tasks that use docker).
+
+        Args:
+            repo_path: Path to the repository
+
+        Returns:
+            The docker command string, or None if not applicable
+        """
+        return None
+
+
+# ==============================================================================
+# BUILD TASK
+# ==============================================================================
+
+@dataclass
+class BuildTask(BaseTask):
+    """
+    Task for building Docker images.
+
+    Additional attributes:
+        docker_command_filter: Optional function to filter/select and transform docker commands
+                              Takes List[str] of commands, returns Optional[str] (selected and transformed command)
+                              Can chain: selection -> filter_out_latest_tag -> rename_tag
+        original_build_command: Full output from build.sh --dry-run (all docker commands)
+        actual_build_command: The extracted and transformed docker command to execute
+    """
+
+    docker_command_filter: Optional[Callable[[List[str]], Optional[str]]] = None
+    original_build_command: Optional[str] = field(default=None, init=False, repr=False)
+    actual_build_command: Optional[str] = field(default=None, init=False, repr=False)
+
+    def __post_init__(self):
+        super().__post_init__()
+
+    def prepare(self, repo_path: Path, sha: str) -> None:
+        """
+        Prepare build command.
+
+        Generates the docker build command with appropriate arguments.
+        """
+        # TODO: Implement command generation
+        # Will use build.sh script from the repo
+        pass
+
+    def execute(self, repo_path: Path, dry_run: bool = False) -> bool:
+        """
+        Execute Docker build.
+
+        Runs docker build command and captures output to log file.
+        """
+        if dry_run:
+            self.logger.info("Dry-run mode: skipping actual execution")
+            return True
+        
+        # Get the actual docker build command (without --dry-run)
+        # Remove --dry-run from the command
+        actual_command = self.command.replace(' --dry-run', '')
+        
+        return self._run_command(actual_command, repo_path)
+
+    def image_exists(self) -> bool:
+        """Check if Docker image already exists"""
+        if not self.output_image:
+            return False
+
+        try:
+            # Use docker inspect to check if image exists
+            result = subprocess.run(
+                ["docker", "inspect", self.output_image],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True
+            )
+            return result.returncode == 0
+        except Exception as e:
+            self.logger.warning(f"Error checking image existence: {e}")
+            return False
+
+    def get_command(self, repo_path: Path) -> str:
+        """Get the build.sh wrapper command (not the underlying docker command)"""
+        # Return the build.sh command stored in self.command
+        # e.g., "/path/to/build.sh --framework vllm --target runtime --dry-run"
+        return self.command
+
+    def get_docker_command(self, repo_path: Path) -> Optional[str]:
+        """Get the underlying docker build command by running build.sh --dry-run
+
+        Uses the explicit command stored in self.command (e.g., "build.sh --framework vllm --target dev --dry-run")
+
+        This populates:
+        - original_build_command: All docker commands from build.sh --dry-run
+        - Returns: The selected and transformed docker command
+
+        Returns:
+            The docker command after applying docker_command_filter (which can chain selection + transformations)
+        """
+        if not self.command:
+            return None
+
+        try:
+            result = subprocess.run(
+                self.command,
+                shell=True,
+                cwd=repo_path,
+                capture_output=True,
+                text=True,
+                timeout=30  # Increased timeout for slower systems
+            )
+            # build.sh --dry-run prints docker build commands
+            output = result.stdout.strip()
+            docker_commands = []
+            for line in output.split('\n'):
+                line = line.strip()
+                # Look for lines with "docker build" (may be prefixed with "echo")
+                if 'docker build' in line:
+                    # Remove "echo" prefix if present
+                    if line.startswith('echo '):
+                        line = line[5:]
+                    docker_commands.append(line)
+
+            # Store original commands
+            self.original_build_command = '\n'.join(docker_commands) if docker_commands else None
+
+            # Apply filter function if provided (handles selection + transformation)
+            if self.docker_command_filter:
+                selected_command = self.docker_command_filter(docker_commands)
+            else:
+                # Default: return all commands joined with newlines
+                selected_command = '\n'.join(docker_commands) if docker_commands else None
+
+            return selected_command
+
+        except subprocess.TimeoutExpired:
+            # Timeout - build.sh --dry-run took too long
+            return None
+        except Exception:
+            # Silently fail - don't break tree visualization
+            return None
+
+
+# ==============================================================================
+# COMMAND TASK (Generic task for executing commands)
+# ==============================================================================
+
+@dataclass
+class CommandTask(BaseTask):
+    """
+    Generic task for executing commands (replaces CompilationTask, ChownTask, SanityCheckTask).
+    
+    This is a simplified task that just runs a command and logs output.
+    Can be used for compilation, chown, sanity checks, or any other command execution.
+
+    Additional attributes:
+        ignore_exit_code: If True, task succeeds even if command exits with non-zero
+    """
+
+    ignore_exit_code: bool = False
+
+    def __post_init__(self):
+        super().__post_init__()
+        # Task type is already set by the factory function
+
+    def prepare(self, repo_path: Path, sha: str) -> None:
+        """Prepare command for execution."""
+        pass
+
+    def execute(self, repo_path: Path, dry_run: bool = False) -> bool:
+        """Execute the command."""
+        if dry_run:
+            self.logger.info("Dry-run mode: skipping actual execution")
+            return True
+        
+        command = self.get_command(repo_path)
+        success = self._run_command(command, repo_path)
+        
+        # If ignore_exit_code is set, always return success
+        if self.ignore_exit_code:
+            return True
+        
+        return success
+
+    def get_command(self, repo_path: Path) -> str:
+        """Get the command to execute (from self.command)."""
+        return self.command
+
+
+# ==============================================================================
+# PIPELINE BUILDER
+# ==============================================================================
 
 class BuildPipeline:
-    """Manages the complete build pipeline with dependency resolution"""
+    """
+    Manages the complete build pipeline with dependency resolution.
+
+    Responsibilities:
+    - Store all tasks
+    - Resolve dependencies
+    - Determine execution order
+    - Track overall pipeline status
+    """
 
     def __init__(self):
-        self.tasks: Dict[str, Task] = {}
+        self.tasks: Dict[str, BaseTask] = {}
         self.logger = logging.getLogger(self.__class__.__name__)
 
-    def add_task(self, task: Task) -> None:
+    def add_task(self, task: BaseTask) -> None:
         """Add a task to the pipeline"""
         self.tasks[task.task_id] = task
+
+    def _build_children_relationships(self) -> None:
+        """Build children relationships after all tasks are added"""
+        for task in self.tasks.values():
+            for parent_id in task.parents:
+                if parent_id in self.tasks:
+                    if task.task_id not in self.tasks[parent_id].children:
+                        self.tasks[parent_id].children.append(task.task_id)
 
     def add_dependency(self, child_id: str, parent_id: str) -> None:
         """Establish parent-child dependency"""
         if child_id in self.tasks and parent_id in self.tasks:
-            self.tasks[child_id].depends_on.append(parent_id)
-            self.tasks[parent_id].children.append(child_id)
+            if parent_id not in self.tasks[child_id].parents:
+                self.tasks[child_id].parents.append(parent_id)
+            if child_id not in self.tasks[parent_id].children:
+                self.tasks[parent_id].children.append(child_id)
 
-    def get_ready_tasks(self) -> List[Task]:
+    def get_ready_tasks(self) -> List[BaseTask]:
         """Get all tasks ready to run (dependencies satisfied)"""
         return [task for task in self.tasks.values() if task.can_run(self.tasks)]
 
-    def get_levels(self) -> List[List[Task]]:
+    def get_levels(self) -> List[List[BaseTask]]:
         """
         Group tasks by execution level (for parallel execution).
-        Tasks in same level can run in parallel.
+
+        Level 0: Tasks with no dependencies
+        Level 1: Tasks depending only on level 0
+        Level N: Tasks depending on level N-1 or earlier
+
+        Returns:
+            List of task lists, one per level
         """
-        levels: List[List[Task]] = []
-        processed: Set[str] = set()  # Track which tasks we've already added to levels
+        levels: List[List[BaseTask]] = []
+        remaining = set(self.tasks.keys())
 
-        # Mark skipped tasks as processed
-        for task in self.tasks.values():
-            if task.status == TaskStatus.SKIPPED:
-                processed.add(task.task_id)
+        while remaining:
+            # Find tasks whose dependencies are all satisfied
+            level_tasks = []
+            for task_id in list(remaining):
+                task = self.tasks[task_id]
+                if all(dep_id not in remaining for dep_id in task.parents):
+                    level_tasks.append(task)
+                    remaining.remove(task_id)
 
-        while len(processed) < len(self.tasks):
-            # Find tasks ready to run that haven't been processed yet
-            ready = [
-                task for task in self.tasks.values()
-                if task.task_id not in processed and
-                task.status == TaskStatus.PENDING and
-                all(dep in processed for dep in task.depends_on)
-            ]
-
-            if not ready:
-                # Check if there are unprocessed pending tasks (circular dependency)
-                unprocessed = [t for t in self.tasks.values()
-                              if t.task_id not in processed and t.status == TaskStatus.PENDING]
-                if unprocessed:
-                    self.logger.error(f"Circular dependency detected: {[t.task_id for t in unprocessed]}")
+            if not level_tasks:
+                # Circular dependency or missing dependency
+                self.logger.error(f"Cannot resolve dependencies for: {remaining}")
                 break
 
-            levels.append(ready)
-            # Mark these tasks as processed so they don't appear in future levels
-            processed.update(task.task_id for task in ready)
+            levels.append(level_tasks)
 
         return levels
 
     def visualize_tree(self) -> str:
-        """Generate tree visualization with box-drawing characters"""
-        lines = []
-        lines.append("\n" + "=" * 80)
-        lines.append("DEPENDENCY TREE")
-        lines.append("=" * 80)
-        lines.append("\nRoot tasks (can run in parallel):")
-        lines.append("")
+        """
+        Generate ASCII tree visualization of the pipeline.
 
-        # Find root tasks (no dependencies)
-        roots = [t for t in self.tasks.values() if not t.depends_on]
+        Returns:
+            String containing the tree visualization
+        """
+        levels = self.get_levels()
+        output = []
+        output.append("=" * 80)
+        output.append("DEPENDENCY TREE")
+        output.append("=" * 80)
 
-        def print_task(task: Task, prefix: str = "", is_last_sibling: bool = True, is_root: bool = False):
-            # Determine tree connector
-            if is_root:
-                connector = ""
-            elif is_last_sibling:
-                connector = "└─ "
-            else:
-                connector = "├─ "
+        for level_num, level_tasks in enumerate(levels):
+            output.append(f"\nLevel {level_num}:")
+            for task in level_tasks:
+                status_symbol = {
+                    TaskStatus.PENDING: "⏳",
+                    TaskStatus.RUNNING: "🔄",
+                    TaskStatus.SUCCESS: "✅",
+                    TaskStatus.FAILED: "❌",
+                    TaskStatus.SKIPPED: "⏭️",
+                }[task.status]
 
-            # Build task info line (compact, single line)
-            info_parts = [task.task_id]
-            info_parts.append(f"({task.task_type.value}")
-            if task.framework:
-                info_parts.append(f"{task.framework}")
-            if task.target:
-                info_parts.append(f"{task.target})")
-            else:
-                info_parts[-1] += ")"
+                output.append(f"  {status_symbol} {task.task_id} ({task.__class__.__name__})")
 
-            # Print compact task line
-            lines.append(f"{prefix}{connector}{' '.join(info_parts)}")
+                if task.parents:
+                    output.append(f"      └─ depends on: {', '.join(task.parents)}")
 
-            # Print children with proper tree lines
-            if task.children:
-                for idx, child_id in enumerate(task.children):
-                    child_task = self.tasks[child_id]
-                    is_last_child = idx == len(task.children) - 1
+        return "\n".join(output)
 
-                    # Calculate child prefix - very compact
-                    if is_root:
-                        child_prefix = ""
-                    elif is_last_sibling:
-                        child_prefix = prefix + "   "
-                    else:
-                        child_prefix = prefix + "│  "
-
-                    print_task(child_task, child_prefix, is_last_child, is_root=False)
-
-        for idx, task in enumerate(roots):
-            is_last = idx == len(roots) - 1
-            print_task(task, "", is_last, is_root=True)
-
-        return "\n".join(lines)
+    def get_status_summary(self) -> Dict[str, int]:
+        """Get count of tasks in each status"""
+        summary = {status.value: 0 for status in TaskStatus}
+        for task in self.tasks.values():
+            summary[task.status.value] += 1
+        return summary
 
 
-class TaskExecutor:
-    """Executes tasks with async parallel support"""
+# ==============================================================================
+# MAIN ENTRY POINT
+# ==============================================================================
 
-    def __init__(self, dry_run: bool = False, verbose: bool = False, log_dir: Optional[Path] = None, repo_sha: Optional[str] = None, repo_path: Optional[Path] = None):
-        self.dry_run = dry_run
-        self.verbose = verbose
-        self.log_dir = log_dir
-        self.repo_sha = repo_sha
-        self.repo_path = repo_path
-        self.logger = logging.getLogger(self.__class__.__name__)
+def parse_args() -> argparse.Namespace:
+    """Parse command-line arguments"""
+    parser = argparse.ArgumentParser(
+        description="DynamoDockerBuilder V2 - Build orchestration for Dynamo Docker images",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
 
-    async def execute_task(self, task: Task, worker_num: int = None) -> bool:
-        """Execute a single task"""
-        task.status = TaskStatus.RUNNING
-        start_time = asyncio.get_event_loop().time()
+    # Repository configuration
+    parser.add_argument(
+        "--repo-path",
+        type=Path,
+        required=True,
+        help="Path to the Dynamo repository",
+    )
+    parser.add_argument(
+        "--repo-sha",
+        type=str,
+        help="Git commit SHA to build (default: current HEAD)",
+    )
 
-        # Succinct one-line output with timestamp
-        from datetime import datetime
-        timestamp = datetime.now().strftime("%H:%M:%S")
-        worker_prefix = f"#{worker_num} " if worker_num is not None else ""
+    # Framework and target selection
+    parser.add_argument(
+        "-f", "--framework",
+        action="append",
+        help="Framework(s) to build (vllm, sglang, trtllm). Can specify multiple times. Default: all",
+    )
+    parser.add_argument(
+        "--target",
+        default="base,runtime,dev,local-dev",
+        help="Comma-separated list of build targets (default: all)",
+    )
 
-        # Calculate log file path early for display
-        log_file_path_str = None
-        log_file = None
-        if self.log_dir and not self.dry_run:
-            date_str = datetime.now().strftime('%Y-%m-%d')
-            sha_prefix = self.repo_sha[:7] if self.repo_sha else "unknown"
-            log_suffix = f"{sha_prefix}.{task.task_id.lower()}"
-            log_file = self.log_dir / f"{date_str}.{log_suffix}.log"
-            log_file_path_str = str(log_file)
-            # Store log file in task for later reference
-            task.log_file = log_file
+    # Execution options
+    parser.add_argument(
+        "--parallel",
+        action="store_true",
+        help="Execute tasks in parallel when possible",
+    )
+    parser.add_argument(
+        "--dry-run", "--dryrun",
+        action="store_true",
+        dest="dry_run",
+        help="Show what would be executed without running commands",
+    )
+    parser.add_argument(
+        "--force-run",
+        action="store_true",
+        help="Force run even if composite SHA hasn't changed (bypasses lock check)",
+    )
 
-        # Print execution message with log path
-        exec_msg = f"[{timestamp}] {worker_prefix}Executing: {task.task_id} ({task.task_type.value})"
-        if log_file_path_str:
-            exec_msg += f" → {log_file_path_str}"
-        self.logger.info(exec_msg)
+    # Build options
+    parser.add_argument(
+        "--skip-build-if-image-exists",
+        "--skip",
+        action="store_true",
+        help="Skip building if Docker image already exists",
+    )
+    parser.add_argument(
+        "--sanity-check-only",
+        action="store_true",
+        help="Only run sanity checks, skip builds",
+    )
 
-        # Show complete command in verbose mode
-        if self.verbose:
-            cmd_display = task.command
-            # Pretty print multi-line commands
-            if len(cmd_display) > 100:
-                self.logger.info(f"  Command:")
-                # Split on common delimiters for readability
-                if ' -- ' in cmd_display:
-                    parts = cmd_display.split(' -- ')
-                    for i, part in enumerate(parts):
-                        if i == 0:
-                            self.logger.info(f"    {part} -- \\")
-                        else:
-                            self.logger.info(f"      {part}")
+    # Output options
+    parser.add_argument(
+        "--html-path",
+        type=Path,
+        help="Directory to save HTML report (default: repo logs directory)",
+    )
+    parser.add_argument(
+        "--email",
+        help="Email address to send report to",
+    )
+    parser.add_argument(
+        "-v", "--verbose",
+        action="store_true",
+        help="Enable verbose logging",
+    )
+    parser.add_argument(
+        "--tree",
+        action="store_true",
+        help="Show dependency tree visualization",
+    )
+    parser.add_argument(
+        "--html",
+        action="store_true",
+        help="Generate HTML report after execution",
+    )
+
+    return parser.parse_args()
+
+
+def setup_logging(verbose: bool = False) -> None:
+    """Configure logging"""
+    level = logging.DEBUG if verbose else logging.INFO
+    logging.basicConfig(
+        level=level,
+        format="[%(asctime)s] %(levelname)s: %(message)s",
+        datefmt="%H:%M:%S",
+    )
+
+
+def execute_task_sequential(
+    all_tasks: Dict[str, 'BaseTask'],
+    executed_tasks: Set[str],
+    failed_tasks: Set[str],
+    task_id: str,
+    repo_path: Path,
+    sha: str,
+    log_dir: Optional[Path] = None,
+    log_date: Optional[str] = None,
+    dry_run: bool = False,
+) -> bool:
+    """
+    Execute a single task and its dependencies recursively (sequential mode).
+    
+    Args:
+        all_tasks: Dictionary of all tasks
+        executed_tasks: Set of already executed task IDs (modified in place)
+        failed_tasks: Set of failed task IDs (modified in place)
+        task_id: ID of task to execute
+        repo_path: Path to repository
+        sha: Git commit SHA
+        log_dir: Directory for log files (None in dry-run)
+        log_date: Date string for log files (None in dry-run)
+        dry_run: If True, only print commands without executing
+        
+    Returns:
+        True if task succeeded, False if failed
+    """
+    logger = logging.getLogger("executor")
+    
+    # Skip if already executed
+    if task_id in executed_tasks:
+        return task_id not in failed_tasks
+
+    task = all_tasks[task_id]
+
+    # Execute dependencies first
+    for parent_id in task.parents:
+        if not execute_task_sequential(
+            all_tasks, executed_tasks, failed_tasks, parent_id,
+            repo_path, sha, log_dir, log_date, dry_run
+        ):
+            # Parent failed
+            if not task.run_even_if_deps_fail:
+                if dry_run:
+                    logger.info(f"Would skip {task_id} due to failed dependency {parent_id}")
                 else:
-                    self.logger.info(f"    {cmd_display}")
-            else:
-                self.logger.info(f"  Command: {cmd_display}")
-
-        if self.dry_run:
-            cmd_display = task.command[:200] + "..." if len(task.command) > 200 else task.command
-            self.logger.info(f"  Would execute: {cmd_display}")
-            task.status = TaskStatus.SUCCESS
-            task.duration = 0.0
-            timestamp = datetime.now().strftime("%H:%M:%S")
-            worker_prefix = f"#{worker_num} " if worker_num is not None else ""
-            self.logger.info(f"[{timestamp}] {worker_prefix}✅ {task.task_id}: Success (0.0s)")
-            return True
-
-        try:
-            # Use log file already set in task (set earlier in this function)
-            if log_file:
-                log_file.parent.mkdir(parents=True, exist_ok=True)
-
-            # Determine working directory - use repo_path for compilation/sanity tasks
-            cwd = self.repo_path if task.task_type in (TaskType.COMPILATION, TaskType.SANITY_CHECK) else None
-
-            if self.dry_run:
-                # Dry-run: capture output
-                process = await asyncio.create_subprocess_shell(
-                    task.command,
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.STDOUT,
-                    cwd=cwd,
-                )
-                stdout, _ = await asyncio.wait_for(
-                    process.communicate(),
-                    timeout=task.timeout
-                )
-            elif log_file:
-                # Real run with log file: write to log file only (not console)
-                with open(log_file, 'w') as f:
-                    process = await asyncio.create_subprocess_shell(
-                        task.command,
-                        stdout=asyncio.subprocess.PIPE,
-                        stderr=asyncio.subprocess.STDOUT,
-                        cwd=cwd,
-                    )
-
-                    # Stream output to log file only
-                    while True:
-                        line = await process.stdout.readline()
-                        if not line:
-                            break
-                        decoded_line = line.decode('utf-8')
-                        f.write(decoded_line)
-
-                    await asyncio.wait_for(process.wait(), timeout=task.timeout)
-            else:
-                # Real run without log file: stream to console only
-                process = await asyncio.create_subprocess_shell(
-                    task.command,
-                    stdout=None,
-                    stderr=None,
-                    cwd=cwd,
-                )
-                await asyncio.wait_for(process.wait(), timeout=task.timeout)
-
-            task.duration = asyncio.get_event_loop().time() - start_time
-
-            if process.returncode == 0:
-                task.status = TaskStatus.SUCCESS
-                timestamp = datetime.now().strftime("%H:%M:%S")
-                worker_prefix = f"#{worker_num} " if worker_num is not None else ""
-                self.logger.info(f"[{timestamp}] {worker_prefix}✅ {task.task_id}: Success ({task.duration:.1f}s)")
-                # Create success marker file
-                if log_file:
-                    success_marker = log_file.with_suffix('.SUCC')
-                    success_marker.touch()
-                return True
-            else:
-                task.status = TaskStatus.FAILED
-                if self.dry_run:
-                    task.error_message = stdout.decode('utf-8')[-1000:]
-                timestamp = datetime.now().strftime("%H:%M:%S")
-                worker_prefix = f"#{worker_num} " if worker_num is not None else ""
-                self.logger.error(f"[{timestamp}] {worker_prefix}❌ {task.task_id}: Failed ({task.duration:.1f}s)")
-                # Create failure marker file
-                if log_file:
-                    fail_marker = log_file.with_suffix('.FAIL')
-                    fail_marker.touch()
+                    logger.info(f"Skipping {task_id} due to failed dependency {parent_id}")
+                task.status = TaskStatus.SKIPPED
+                executed_tasks.add(task_id)
+                failed_tasks.add(task_id)
                 return False
 
-        except asyncio.TimeoutError:
-            process.kill()
-            task.status = TaskStatus.FAILED
-            task.error_message = f"Timeout after {task.timeout}s"
-            self.logger.error(f"  ❌ {task.task_id}: Timeout")
-            return False
+    executed_tasks.add(task_id)
 
+    # DRY-RUN: Just print what would be executed
+    if dry_run:
+        logger.info(f"[{task_id}] {task.description}")
+        
+        # For BuildTask, show both build.sh command AND docker build command
+        if isinstance(task, BuildTask):
+            logger.info(f"  1. {task.command}")
+            docker_cmd = task.get_docker_command(repo_path)
+            if docker_cmd:
+                docker_lines = docker_cmd.split('\n')
+                for i, line in enumerate(docker_lines):
+                    if i == 0:
+                        logger.info(f"  2. {line}")
+                    else:
+                        logger.info(f"     {line}")
+        else:
+            logger.info(f"→ {task.get_command(repo_path)}")
+        logger.info("")
+        
+        # Mark as success for dry-run traversal
+        task.status = TaskStatus.SUCCESS
+        
+        # Process children
+        for child_id in task.children:
+            if child_id not in executed_tasks:
+                execute_task_sequential(
+                    all_tasks, executed_tasks, failed_tasks, child_id,
+                    repo_path, sha, log_dir, log_date, dry_run
+                )
+        
+        return True
+
+    # ACTUAL EXECUTION
+    # Setup log file: YYYY-MM-DD.{sha}.{task-name}.log
+    # Convert task_id (e.g., "VLLM-base") to log name (e.g., "vllm-dynamo-base")
+    if log_dir is None or log_date is None:
+        raise ValueError("log_dir and log_date must be set for actual execution")
+    log_task_name = task_id.lower().replace("-base", "-dynamo-base")
+    log_file = log_dir / f"{log_date}.{sha}.{log_task_name}.log"
+    task.log_file = log_file
+
+    # Execute this task
+    logger.info(f"Executing: {task_id} ({task.description})")
+    logger.info(f"  Command: {task.get_command(repo_path)}")
+    logger.info(f"  Log: {log_file}")
+
+    task.status = TaskStatus.RUNNING
+    task.start_time = time.time()
+
+    try:
+        # Open log file for writing header
+        with open(log_file, 'w') as log_fh:
+            log_fh.write(f"Task: {task_id}\n")
+            log_fh.write(f"Description: {task.description}\n")
+            log_fh.write(f"Command: {task.get_command(repo_path)}\n")
+            log_fh.write(f"Started: {datetime.now().isoformat()}\n")
+            log_fh.write("=" * 80 + "\n\n")
+            log_fh.flush()
+
+        # Execute the task (will append to log file)
+        success = task.execute(repo_path, dry_run=False)
+
+        task.end_time = time.time()
+
+        if success:
+            task.status = TaskStatus.SUCCESS
+            logger.info(f"✓ Completed: {task_id} ({task.end_time - task.start_time:.2f}s)")
+            # Create .PASS marker file
+            pass_marker = log_file.with_suffix('.PASS')
+            pass_marker.touch()
+        else:
+            task.status = TaskStatus.FAILED
+            logger.error(f"✗ Failed: {task_id}")
+            failed_tasks.add(task_id)
+            # Create .FAIL marker file
+            fail_marker = log_file.with_suffix('.FAIL')
+            fail_marker.touch()
+    except Exception as e:
+        task.end_time = time.time()
+        task.status = TaskStatus.FAILED
+        task.error_message = str(e)
+        logger.error(f"✗ Failed: {task_id} - {e}")
+        failed_tasks.add(task_id)
+        # Create .FAIL marker file
+        fail_marker = log_file.with_suffix('.FAIL')
+        fail_marker.touch()
+    
+    # After successfully executing this task, execute all children
+    if task.status == TaskStatus.SUCCESS:
+        for child_id in task.children:
+            if child_id not in executed_tasks:
+                execute_task_sequential(
+                    all_tasks, executed_tasks, failed_tasks, child_id,
+                    repo_path, sha, log_dir, log_date, dry_run
+                )
+    
+    return task.status == TaskStatus.SUCCESS
+
+
+def execute_task_parallel(
+    all_tasks: Dict[str, 'BaseTask'],
+    root_tasks: List[str],
+    repo_path: Path,
+    sha: str,
+    log_dir: Optional[Path] = None,
+    log_date: Optional[str] = None,
+    dry_run: bool = False,
+    max_workers: int = 4,
+) -> Tuple[Set[str], Set[str]]:
+    """
+    Execute tasks in parallel respecting dependencies.
+    
+    Uses a thread pool to execute tasks that have all dependencies satisfied.
+    Tasks are executed as soon as their dependencies complete.
+    
+    Args:
+        all_tasks: Dictionary of all tasks
+        root_tasks: List of root task IDs (no dependencies)
+        repo_path: Path to repository
+        sha: Git commit SHA
+        log_dir: Directory for log files (None in dry-run)
+        log_date: Date string for log files (None in dry-run)
+        dry_run: If True, only print commands without executing
+        max_workers: Maximum number of parallel threads
+        
+    Returns:
+        Tuple of (executed_tasks, failed_tasks) sets
+    """
+    logger = logging.getLogger("executor")
+    
+    executed_tasks = set()
+    failed_tasks = set()
+    lock = threading.Lock()
+    
+    def can_execute(task_id: str) -> bool:
+        """Check if all dependencies are satisfied"""
+        task = all_tasks[task_id]
+        for parent_id in task.parents:
+            if parent_id not in executed_tasks:
+                return False
+            if parent_id in failed_tasks and not task.run_even_if_deps_fail:
+                return False
+        return True
+    
+    def execute_single_task(task_id: str) -> bool:
+        """Execute a single task (thread-safe)"""
+        task = all_tasks[task_id]
+        
+        # Check if we should skip due to failed dependency
+        with lock:
+            for parent_id in task.parents:
+                if parent_id in failed_tasks and not task.run_even_if_deps_fail:
+                    if dry_run:
+                        logger.info(f"Would skip {task_id} due to failed dependency {parent_id}")
+                    else:
+                        logger.info(f"Skipping {task_id} due to failed dependency {parent_id}")
+                    task.status = TaskStatus.SKIPPED
+                    executed_tasks.add(task_id)
+                    failed_tasks.add(task_id)
+                    return False
+        
+        # DRY-RUN: Just print
+        if dry_run:
+            with lock:
+                logger.info(f"[{task_id}] {task.description}")
+                if isinstance(task, BuildTask):
+                    logger.info(f"  1. {task.command}")
+                    docker_cmd = task.get_docker_command(repo_path)
+                    if docker_cmd:
+                        for i, line in enumerate(docker_cmd.split('\n')):
+                            logger.info(f"  2. {line}" if i == 0 else f"     {line}")
+                else:
+                    logger.info(f"→ {task.get_command(repo_path)}")
+                logger.info("")
+            
+            task.status = TaskStatus.SUCCESS
+            with lock:
+                executed_tasks.add(task_id)
+            return True
+        
+        # ACTUAL EXECUTION
+        if log_dir is None or log_date is None:
+            raise ValueError("log_dir and log_date must be set for actual execution")
+        log_task_name = task_id.lower().replace("-base", "-dynamo-base")
+        log_file = log_dir / f"{log_date}.{sha}.{log_task_name}.log"
+        task.log_file = log_file
+        
+        with lock:
+            logger.info(f"Executing: {task_id} ({task.description})")
+            logger.info(f"  Command: {task.get_command(repo_path)}")
+            logger.info(f"  Log: {log_file}")
+        
+        task.status = TaskStatus.RUNNING
+        task.start_time = time.time()
+        
+        try:
+            with open(log_file, 'w') as log_fh:
+                log_fh.write(f"Task: {task_id}\n")
+                log_fh.write(f"Description: {task.description}\n")
+                log_fh.write(f"Command: {task.get_command(repo_path)}\n")
+                log_fh.write(f"Started: {datetime.now().isoformat()}\n")
+                log_fh.write("=" * 80 + "\n\n")
+                log_fh.flush()
+            
+            success = task.execute(repo_path, dry_run=False)
+            task.end_time = time.time()
+            
+            with lock:
+                if success:
+                    task.status = TaskStatus.SUCCESS
+                    logger.info(f"✓ Completed: {task_id} ({task.end_time - task.start_time:.2f}s)")
+                    pass_marker = log_file.with_suffix('.PASS')
+                    pass_marker.touch()
+                else:
+                    task.status = TaskStatus.FAILED
+                    logger.error(f"✗ Failed: {task_id}")
+                    failed_tasks.add(task_id)
+                    fail_marker = log_file.with_suffix('.FAIL')
+                    fail_marker.touch()
         except Exception as e:
+            task.end_time = time.time()
             task.status = TaskStatus.FAILED
             task.error_message = str(e)
-            self.logger.error(f"  ❌ {task.task_id}: Error - {e}")
-            return False
-
-    async def execute_pipeline(self, pipeline: BuildPipeline, parallel: bool = False) -> tuple:
-        """Execute pipeline with optional parallel execution"""
-        successful = 0
-        failed = 0
-
-        self.logger.info("\n" + "=" * 80)
-        self.logger.info("EXECUTING TASKS")
-        self.logger.info("=" * 80)
-
-        if parallel:
-            # Greedy/immediate scheduling: start tasks as soon as dependencies complete
-            return await self._execute_pipeline_greedy(pipeline)
-        else:
-            # Serial execution: use level-based approach
-            levels = pipeline.get_levels()
-            for level_idx, level in enumerate(levels):
-                for task in level:
-                    result = await self.execute_task(task)
-                    if result:
-                        successful += 1
-                    else:
-                        failed += 1
-
-                # Stop on failure
-                if failed > 0:
-                    # Mark remaining as skipped
-                    for remaining_level in levels[level_idx + 1:]:
-                        for task in remaining_level:
-                            task.status = TaskStatus.SKIPPED
-                    break
-
-            return successful, failed
-
-    async def _execute_pipeline_greedy(self, pipeline: BuildPipeline) -> tuple:
-        """Execute pipeline with greedy scheduling - start tasks immediately when ready"""
-        successful = 0
-        failed = 0
-        completed_tasks = set()  # Track completed task IDs (including skipped)
-        running_tasks = {}  # Map task_id -> asyncio.Task
-        task_workers = {}  # Map task_id -> worker_num
-        worker_counter = 0  # For assigning worker numbers
-
-        # Get all tasks
-        all_tasks = list(pipeline.tasks.values())
-        pending_tasks = {task.task_id for task in all_tasks if task.status == TaskStatus.PENDING}
-
-        # Mark skipped tasks as completed (for dependency resolution)
-        for task in all_tasks:
-            if task.status == TaskStatus.SKIPPED:
-                completed_tasks.add(task.task_id)
-
-        async def run_task_wrapper(task: Task, worker_num: int):
-            """Wrapper to execute task and return result"""
-            result = await self.execute_task(task, worker_num=worker_num)
-            return task.task_id, result, worker_num
-
-        while pending_tasks or running_tasks:
-            # Find tasks that are ready to run (all dependencies completed)
-            ready_tasks = [
-                task for task in all_tasks
-                if task.task_id in pending_tasks and
-                all(dep in completed_tasks for dep in task.depends_on)
-            ]
-
-            # Start all ready tasks
-            for task in ready_tasks:
-                worker_counter += 1
-                pending_tasks.remove(task.task_id)
-                task_workers[task.task_id] = worker_counter
-                running_tasks[task.task_id] = asyncio.create_task(
-                    run_task_wrapper(task, worker_counter)
-                )
-
-            # Wait for at least one task to complete (or all if none are ready to start)
-            if running_tasks:
-                done, pending = await asyncio.wait(
-                    running_tasks.values(),
-                    return_when=asyncio.FIRST_COMPLETED
-                )
-
-                # Process completed tasks
-                for completed_future in done:
-                    task_id, result, worker_num = await completed_future
-                    del running_tasks[task_id]
-                    del task_workers[task_id]
-                    completed_tasks.add(task_id)
-
-                    if result:
-                        successful += 1
-                        # Show which workers are still running (if any)
-                        if running_tasks:
-                            still_running = sorted(task_workers.values())
-                            workers_str = ', '.join(f"#{w}" for w in still_running)
-                            self.logger.info(f"  ⏳ Still running: {workers_str}")
-                    else:
-                        failed += 1
-                        # On failure, mark all remaining tasks as skipped
-                        for task in all_tasks:
-                            if task.task_id in pending_tasks or task.task_id in running_tasks:
-                                task.status = TaskStatus.SKIPPED
-                        # Cancel running tasks
-                        for running_task in running_tasks.values():
-                            running_task.cancel()
-                        return successful, failed
-            else:
-                # No tasks running and none ready - check for circular dependencies
+            with lock:
+                logger.error(f"✗ Failed: {task_id} - {e}")
+                failed_tasks.add(task_id)
+                fail_marker = log_file.with_suffix('.FAIL')
+                fail_marker.touch()
+        
+        with lock:
+            executed_tasks.add(task_id)
+        
+        return task.status == TaskStatus.SUCCESS
+    
+    # Execute tasks in waves based on dependencies
+    pending_tasks = set(all_tasks.keys())
+    
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        while pending_tasks:
+            # Find tasks ready to execute
+            ready_tasks = [t for t in pending_tasks if can_execute(t)]
+            
+            if not ready_tasks:
+                # No ready tasks but pending tasks remain - check for deadlock
                 if pending_tasks:
-                    self.logger.error(f"Circular dependency detected: {pending_tasks}")
+                    logger.error(f"Deadlock detected! Remaining tasks: {pending_tasks}")
+                    for task_id in pending_tasks:
+                        with lock:
+                            failed_tasks.add(task_id)
+                            executed_tasks.add(task_id)
                 break
-
-        return successful, failed
-
-
-class PipelineBuilder:
-    """Builds task pipeline matching V1 logic exactly"""
-
-    def __init__(self, repo_path: Path, frameworks: List[str], targets: List[str],
-                 dry_run: bool = False, verbose: bool = False):
-        self.repo_path = repo_path
-        self.frameworks = frameworks
-        self.targets = targets
-        self.dry_run = dry_run
-        self.verbose = verbose
-        self.logger = logging.getLogger(self.__class__.__name__)
-        self.docker_utils = DockerUtils(dry_run, verbose)
-        self.seen_commands: Dict[str, str] = {}  # command -> task_id
-
-    def _get_build_commands(self, framework: str, target: Optional[str]) -> List[str]:
-        """Get docker build commands from build.sh --dry-run and filter out latest tags"""
-        script_path = self.repo_path / "container" / "build.sh"
-
-        try:
-            cmd = [str(script_path), "--framework", framework.lower(), "--dry-run"]
-            if target:
-                cmd.extend(["--target", target])
-
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                cwd=self.repo_path / "container",
-                timeout=30
-            )
-
-            if result.returncode != 0:
-                return []
-
-            # Extract and filter docker commands to remove latest tags
-            commands = []
-            import re
-            for line in result.stdout.splitlines():
-                line = line.strip()
-                if line.startswith("docker build"):
-                    # Remove --tag arguments containing ":latest" using regex
-                    line = re.sub(r'--tag\s+\S*:latest\S*(?:\s|$)', '', line)
-                    commands.append(line)
-
-            return commands
-
-        except Exception as e:
-            self.logger.error(f"Failed to get build commands: {e}")
-            return []
-
-    def build_pipeline(self) -> BuildPipeline:
-        """Build pipeline matching V1's exact logic"""
-        pipeline = BuildPipeline()
-
-        self.logger.info("Building dependency tree...")
-        self.logger.info("")
-
-        # Step 1: Create build tasks (matching V1 logic)
-        for framework in self.frameworks:
-            self.logger.info(f"Creating tasks for {framework}...")
-
-            for target in self.targets:
-                # Get commands (V1 uses None for "dev")
-                target_arg = None if target == "dev" else target
-                commands = self._get_build_commands(framework, target_arg)
-
-                for docker_cmd in commands:
-                    # Skip duplicates
-                    if docker_cmd in self.seen_commands:
-                        self.logger.debug(f"  Skipping duplicate command")
-                        continue
-
-                    # Extract metadata
-                    base_image = self.docker_utils.extract_base_image_from_command(docker_cmd)
-                    image_tag = self.docker_utils.extract_image_tag_from_command(docker_cmd)
-
-                    if not image_tag:
-                        continue
-
-                    # Determine task_id based on image_tag (matching V1 logic)
-                    if "dynamo-base" in image_tag:
-                        task_id = f"{framework}-dynamo-base"
-                        task_target = "base"
-                    elif "runtime" in image_tag:
-                        task_id = f"{framework}-runtime"
-                        task_target = "runtime"
-                    elif "local-dev" in image_tag:
-                        task_id = f"{framework}-local-dev"
-                        task_target = "local-dev"
-                    else:
-                        task_id = f"{framework}-dev"
-                        task_target = "dev"
-
-                    task = Task(
-                        task_id=task_id,
-                        task_type=TaskType.BUILD,
-                        framework=framework,
-                        target=task_target,
-                        description=f"Build {framework} {task_target} image",
-                        command=docker_cmd,
-                        image_tag=image_tag,
-                        base_image=base_image
-                    )
-
-                    pipeline.add_task(task)
-                    self.seen_commands[docker_cmd] = task_id
-                    self.logger.info(f"  Created task: {task_id}")
-
-        # Step 1.5: Override dev base_image to depend on runtime (for linear chain: base→runtime→dev→local-dev)
-        self.logger.info("")
-        self.logger.info("Overriding dev base_image to depend on runtime...")
-        for framework in self.frameworks:
-            dev_id = f"{framework}-dev"
-            runtime_id = f"{framework}-runtime"
-
-            if dev_id in pipeline.tasks and runtime_id in pipeline.tasks:
-                dev_task = pipeline.tasks[dev_id]
-                runtime_task = pipeline.tasks[runtime_id]
-
-                # Override dev's base_image to point to runtime's image_tag
-                old_base = dev_task.base_image
-                dev_task.base_image = runtime_task.image_tag
-                self.logger.info(f"  {dev_id}: Changed base_image from {old_base} to {runtime_task.image_tag}")
-
-        # Step 2: Establish dependencies based on base_image
-        self.logger.info("")
-        self.logger.info("Establishing dependencies...")
-
-        for task_id, task in pipeline.tasks.items():
-            if task.task_type != TaskType.BUILD or not task.base_image:
-                continue
-
-            # Find parent task that produces this base_image
-            for other_id, other_task in pipeline.tasks.items():
-                if other_id == task_id:
-                    continue
-                if other_task.task_type == TaskType.BUILD and task.base_image == other_task.image_tag:
-                    # Prefer same framework
-                    if task.framework == other_task.framework:
-                        pipeline.add_dependency(task_id, other_id)
-                        self.logger.info(f"  {task_id} depends on {other_id}")
-                        break
-
-        # Step 3: Create compilation tasks
-        self.logger.info("")
-        self.logger.info("Creating compilation tasks...")
-
-        for framework in self.frameworks:
-            runtime_id = f"{framework}-runtime"
-            if runtime_id not in pipeline.tasks:
-                continue
-
-            runtime_task = pipeline.tasks[runtime_id]
-            image_tag = runtime_task.image_tag
-
-            compilation_id = f"{framework}-compilation"
-            # Runtime runs as root in container, so we need to chown affected directories on host after compilation
-            # Chown both target/ (Rust artifacts) and lib/bindings/python/ (Python bindings)
-            compilation_command = (
-                f"./container/run.sh --image {image_tag} --mount-workspace -- bash -c '"
-                f"cargo build --locked --profile dev --features dynamo-llm/block-manager && "
-                f"cd /workspace/lib/bindings/python && maturin develop && uv pip install -e .' ; "
-                f"sudo chown -R $(id -u):$(id -g) {self.repo_path}/target {self.repo_path}/lib/bindings/python"
-            )
-
-            compilation_task = Task(
-                task_id=compilation_id,
-                task_type=TaskType.COMPILATION,
-                framework=framework,
-                target="runtime",
-                description=f"Run workspace compilation in {framework} runtime container",
-                command=compilation_command,
-                timeout=1800.0
-            )
-
-            pipeline.add_task(compilation_task)
-            pipeline.add_dependency(compilation_id, runtime_id)
-            self.logger.info(f"  Created task: {compilation_id} (depends on {runtime_id})")
-
-        # Step 4: Create sanity check tasks
-        self.logger.info("")
-        self.logger.info("Creating sanity check tasks...")
-
-        for framework in self.frameworks:
-            compilation_id = f"{framework}-compilation"
-            if compilation_id not in pipeline.tasks:
-                continue
-
-            for target in ['runtime', 'dev', 'local-dev']:
-                task_id = f"{framework}-{target}"
-                if task_id not in pipeline.tasks:
-                    continue
-
-                build_task = pipeline.tasks[task_id]
-                image_tag = build_task.image_tag
-
-                sanity_id = f"{framework}-{target}-sanity"
-                sanity_task = Task(
-                    task_id=sanity_id,
-                    task_type=TaskType.SANITY_CHECK,
-                    framework=framework,
-                    target=target,
-                    description=f"Run sanity_check.py in {framework} {target} container (after compilation and build)",
-                    command=f"./container/run.sh --image {image_tag} --mount-workspace --entrypoint deploy/sanity_check.py",
-                    timeout=120.0
-                )
-
-                pipeline.add_task(sanity_task)
-                # Sanity check depends on BOTH compilation AND the target build completing
-                pipeline.add_dependency(sanity_id, compilation_id)
-                pipeline.add_dependency(sanity_id, task_id)
-                self.logger.info(f"  Created task: {sanity_id} (depends on {compilation_id} and {task_id})")
-
-        self.logger.info("")
-        self.logger.info(f"Dependency tree built: {len(pipeline.tasks)} tasks total")
-
-        # Resolve image tag conflicts (matching V1 logic)
-        self._resolve_image_tag_conflicts(pipeline)
-
-        return pipeline
-
-    def _resolve_image_tag_conflicts(self, pipeline: BuildPipeline) -> None:
-        """
-        Detect and resolve image tag conflicts when multiple tasks produce the same tag.
-        Matching V1's logic.
-        """
-        self.logger.info("")
-        self.logger.info("Checking for image tag conflicts...")
-
-        # Step 1: Build mapping of image_tag -> [task_ids that produce it]
-        image_tag_to_tasks: Dict[str, List[str]] = {}
-        for task_id, task in pipeline.tasks.items():
-            if task.task_type != TaskType.BUILD or not task.image_tag:
-                continue
-
-            if task.image_tag not in image_tag_to_tasks:
-                image_tag_to_tasks[task.image_tag] = []
-            image_tag_to_tasks[task.image_tag].append(task_id)
-
-        # Step 2: Find conflicts (tags produced by multiple tasks)
-        conflicts: Set[str] = set()
-        for image_tag, task_ids in image_tag_to_tasks.items():
-            if len(task_ids) > 1:
-                conflicts.add(image_tag)
-                self.logger.info(f"  Conflict detected: {image_tag}")
-                for task_id in task_ids:
-                    self.logger.info(f"    - {task_id}")
-
-        if not conflicts:
-            self.logger.info("  No image tag conflicts found")
-            return
-
-        # Step 3: Rename conflicting tags by appending framework suffix
-        task_to_new_tag: Dict[str, str] = {}  # task_id -> new_tag
-
-        for task_id, task in pipeline.tasks.items():
-            if task.task_type != TaskType.BUILD:
-                continue
-
-            if not task.image_tag or task.image_tag not in conflicts:
-                continue
-
-            # Check if tag already has framework suffix
-            if task.framework and task.image_tag.endswith(f"-{task.framework.lower()}"):
-                continue
-
-            # Create new tag with framework suffix
-            old_tag = task.image_tag
-            if task.framework:
-                new_tag = f"{old_tag}-{task.framework.lower()}"
-            else:
-                # Fallback: use part of task_id
-                new_tag = f"{old_tag}-{task_id.split('-')[0].lower()}"
-
-            task_to_new_tag[task_id] = new_tag
-
-            # Update the task's image_tag
-            task.image_tag = new_tag
-
-            # Update the docker command to use the new tag
-            if task.command:
-                import re
-                task.command = re.sub(
-                    rf'--tag\s+{re.escape(old_tag)}(?=\s|$)',
-                    f'--tag {new_tag}',
-                    task.command
-                )
-
-            self.logger.info(f"  Renamed: {task_id}")
-            self.logger.info(f"    Old: {old_tag}")
-            self.logger.info(f"    New: {new_tag}")
-
-        # Step 4: Update base_image references in dependent tasks
-        for task_id, task in pipeline.tasks.items():
-            if task.task_type != TaskType.BUILD:
-                continue
-
-            if not task.base_image or task.base_image not in conflicts:
-                continue
-
-            # Find which parent task this depends on
-            for parent_task_id in task.depends_on:
-                parent_task = pipeline.tasks.get(parent_task_id)
-                if not parent_task or parent_task.task_type != TaskType.BUILD:
-                    continue
-
-                # Check if parent was renamed
-                if parent_task_id in task_to_new_tag:
-                    old_base = task.base_image
-                    new_base = task_to_new_tag[parent_task_id]
-                    task.base_image = new_base
-                    self.logger.info(f"  Updated base_image: {task_id}")
-                    self.logger.info(f"    {old_base} -> {new_base}")
-
-                    # Also update docker command if it references the old tag
-                    if task.command and old_base in task.command:
-                        task.command = task.command.replace(old_base, new_base)
-                    break
-
-        # Step 5: Update image references in COMPILATION and SANITY_CHECK tasks
-        for task_id, task in pipeline.tasks.items():
-            if task.task_type not in (TaskType.COMPILATION, TaskType.SANITY_CHECK):
-                continue
-
-            if not task.command:
-                continue
-
-            # Find parent build task and update command if its tag was renamed
-            for parent_task_id in task.depends_on:
-                parent_task = pipeline.tasks.get(parent_task_id)
-                if not parent_task:
-                    continue
-
-                # Check if parent was renamed
-                if parent_task_id in task_to_new_tag:
-                    old_tag = None
-                    # Find the old tag by checking what the parent's original tag was
-                    for conflict_tag in conflicts:
-                        if task_to_new_tag[parent_task_id].startswith(conflict_tag):
-                            old_tag = conflict_tag
-                            break
-
-                    if old_tag:
-                        new_tag = task_to_new_tag[parent_task_id]
-                        if old_tag in task.command:
-                            task.command = task.command.replace(old_tag, new_tag)
-                            self.logger.info(f"  Updated image reference in {task_id}")
-                            self.logger.info(f"    {old_tag} -> {new_tag}")
-
-
-class ReportGenerator:
-    """Generate HTML reports from build pipeline results"""
-
-    @staticmethod
-    def generate_html_report(
-        pipeline: BuildPipeline,
-        repo_path: Path,
-        repo_sha: str,
-        log_dir: Path,
-        date_str: str,
-        hostname: str = "keivenc-linux",
-        html_path: str = "/nvidia/dynamo_ci/logs",
-        use_absolute_urls: bool = False
-    ) -> str:
-        """Generate elegant HTML report matching V1 format with clickable log links
-
-        Args:
-            use_absolute_urls: If True, use http://hostname/... URLs. If False, use relative paths.
-        """
-        import git
-
-        # Helper function to generate log URL from task
-        def get_log_url(task: Task) -> Optional[str]:
-            """Generate URL/path for task log file"""
-            if not task.log_file:
-                return None
-            try:
-                if use_absolute_urls:
-                    # Email: absolute URL with http://
-                    # Get relative path from logs directory (includes date subdirectory)
-                    rel_path = task.log_file.relative_to(log_dir.parent)
-                    return f"http://{hostname}{html_path}/{rel_path}"
-                else:
-                    # File: relative path from HTML report location
-                    # HTML is in same directory as log files, so just use filename
-                    return str(task.log_file.name)
-            except ValueError:
-                return None
-
-        # Get git information
-        repo = git.Repo(repo_path)
-        commit = repo.commit(repo_sha)
-        sha_short = repo_sha[:7]
-
-        # Extract PR number from commit message (format: "title (#1234)")
-        import re
-        pr_number = None
-        pr_link = None
-        first_line = commit.message.split('\n')[0] if commit.message else ""
-        pr_match = re.search(r'\(#(\d+)\)', first_line)
-        if pr_match:
-            pr_number = pr_match.group(1)
-            pr_link = f"https://github.com/ai-dynamo/dynamo/pull/{pr_number}"
-
-        # Get file changes (stats for this commit)
-        try:
-            stats = commit.stats
-            files_changed = stats.files
-            total_insertions = stats.total['insertions']
-            total_deletions = stats.total['deletions']
-        except Exception:
-            files_changed = {}
-            total_insertions = 0
-            total_deletions = 0
-
-        # Count task statistics
-        total_tasks = len(pipeline.tasks)
-        succeeded = sum(1 for t in pipeline.tasks.values() if t.status == TaskStatus.SUCCESS)
-        failed = sum(1 for t in pipeline.tasks.values() if t.status == TaskStatus.FAILED)
-        skipped = sum(1 for t in pipeline.tasks.values() if t.status == TaskStatus.SKIPPED)
-
-        # Determine overall status
-        overall_status = "✅ ALL TESTS PASSED" if failed == 0 else "❌ TESTS FAILED"
-        header_color = "#28a745" if failed == 0 else "#dc3545"
-
-        # Organize tasks by framework
-        frameworks = {}
-        compilation_tasks = []
-
-        for task_id, task in pipeline.tasks.items():
-            if task.task_type == TaskType.COMPILATION:
-                compilation_tasks.append(task)
-            elif task.framework and task.target:
-                if task.framework not in frameworks:
-                    frameworks[task.framework] = {}
-                if task.target not in frameworks[task.framework]:
-                    frameworks[task.framework][task.target] = {
-                        'build': None, 'sanity': None
-                    }
-                if task.task_type == TaskType.BUILD:
-                    frameworks[task.framework][task.target]['build'] = task
-                elif task.task_type == TaskType.SANITY_CHECK:
-                    frameworks[task.framework][task.target]['sanity'] = task
-
-        # Build HTML
-        html = f"""<!DOCTYPE html>
-<html>
-<head>
-<meta charset="UTF-8">
-<title>DynamoDockerBuilder - {sha_short} - {overall_status}</title>
-<style>
-body {{ font-family: Arial, sans-serif; margin: 10px; line-height: 1.3; }}
-.header {{ background-color: {header_color}; color: white; padding: 15px 20px; border-radius: 4px; margin-bottom: 10px; text-align: center; }}
-.summary {{ background-color: #f8f9fa; padding: 4px 6px; border-radius: 2px; margin: 3px 0; }}
-.summary-boxes {{ width: 100%; margin: 15px 0; }}
-.summary-boxes table {{ width: 100%; border-collapse: separate; border-spacing: 10px; }}
-.summary-box {{ padding: 12px; border-radius: 6px; text-align: center; width: 25%; }}
-.summary-box.total {{ background: #e8f4f8; border-left: 4px solid #3498db; }}
-.summary-box.success {{ background: #e8f8f5; border-left: 4px solid #27ae60; }}
-.summary-box.failed {{ background: #fde8e8; border-left: 4px solid #e74c3c; }}
-.summary-box.skipped {{ background: #f9f9f9; border-left: 4px solid #95a5a6; }}
-.summary-box .number {{ font-size: 28px; font-weight: bold; margin: 5px 0; display: block; }}
-.summary-box .label {{ font-size: 13px; color: #7f8c8d; text-transform: uppercase; font-weight: 600; display: block; }}
-.framework {{ margin: 10px 0; padding: 8px; border: 1px solid #dee2e6; border-radius: 4px; background-color: #ffffff; }}
-.framework-header {{ background-color: #007bff; color: white; padding: 8px 12px; margin: -8px -8px 8px -8px; border-radius: 4px 4px 0 0; font-weight: bold; }}
-.results-chart {{ display: table; width: 100%; border-collapse: collapse; margin: 8px 0; }}
-.chart-row {{ display: table-row; }}
-.chart-cell {{ display: table-cell; padding: 6px 12px; border: 1px solid #dee2e6; vertical-align: middle; }}
-.chart-header {{ background-color: #f8f9fa; font-weight: bold; text-align: center; }}
-.chart-target {{ font-weight: bold; background-color: #f1f3f4; }}
-.chart-status {{ text-align: center; }}
-.chart-timing {{ text-align: right; font-family: monospace; font-size: 0.9em; }}
-.success {{ color: #28a745; font-weight: bold; }}
-.failure {{ color: #dc3545; font-weight: bold; }}
-.git-info {{ background-color: #e9ecef; padding: 4px 6px; border-radius: 2px; font-family: monospace; font-size: 0.9em; }}
-a {{ color: #007bff; text-decoration: none; }}
-a:hover {{ text-decoration: underline; }}
-a.log-link {{ font-size: 0.85em; margin-left: 4px; }}
-p {{ margin: 1px 0; }}
-h2 {{ margin: 0; font-size: 1.2em; font-weight: bold; }}
-</style>
-</head>
-<body>
-<div class="header">
-<h2>DynamoDockerBuilder - <a href="https://github.com/ai-dynamo/dynamo/commit/{repo_sha}" style="color: white; text-decoration: underline;">{sha_short}</a> - {overall_status}</h2>
-</div>
-
-<div class="summary-boxes">
-<table>
-<tr>
-<td class="summary-box total">
-<div class="number">{total_tasks}</div>
-<div class="label">Total Tasks</div>
-</td>
-<td class="summary-box success">
-<div class="number">{succeeded}</div>
-<div class="label">Succeeded</div>
-</td>
-<td class="summary-box failed">
-<div class="number">{failed}</div>
-<div class="label">Failed</div>
-</td>
-<td class="summary-box skipped">
-<div class="number">{skipped}</div>
-<div class="label">Skipped</div>
-</td>
-</tr>
-</table>
-</div>
-
-<div class="summary">
-<p><strong>Build Date:</strong> {datetime.now().strftime('%Y-%m-%d %H:%M:%S %Z')}</p>
-</div>
-
-<div class="git-info">
-<p><strong>Commit SHA:</strong> <a href="https://github.com/ai-dynamo/dynamo/commit/{repo_sha}">{sha_short}</a></p>"""
-
-        # Add PR link if found
-        if pr_link:
-            html += f"""<p><strong>Pull Request:</strong> <a href="{pr_link}">#{pr_number}</a></p>"""
-
-        html += f"""<p><strong>Commit Date:</strong> {commit.committed_datetime.strftime('%Y-%m-%d %H:%M:%S %Z')}</p>
-<p><strong>Author:</strong> {commit.author.name} &lt;{commit.author.email}&gt;</p>
-<div style="background-color: #f8f9fa; padding: 6px; border-radius: 3px; margin: 3px 0;">
-<strong>Commit Message:</strong>
-<pre style="margin: 3px 0; white-space: pre-wrap; font-family: monospace; font-size: 0.9em;">{commit.message.strip()}</pre>
-</div>
-
-<p><strong>Changes Summary:</strong> +{total_insertions}/-{total_deletions} lines</p>
-"""
-
-        # Add files changed section if there are any changes
-        if files_changed:
-            html += """
-<p><strong>Files Changed with Line Counts:</strong></p>
-<div style="background-color: #f8f9fa; padding: 6px; border-radius: 3px; font-family: monospace; font-size: 0.9em; margin: 3px 0;">
-"""
-            for file_path, file_stats in sorted(files_changed.items()):
-                insertions = file_stats.get('insertions', 0)
-                deletions = file_stats.get('deletions', 0)
-                if insertions and deletions:
-                    html += f"\n• {file_path} +{insertions}/-{deletions}<br>"
-                elif insertions:
-                    html += f"\n• {file_path} +{insertions}<br>"
-                elif deletions:
-                    html += f"\n• {file_path} -{deletions}<br>"
-                else:
-                    html += f"\n• {file_path}<br>"
-            html += "\n</div>\n"
-
-        html += "</div>\n"
-        html += """
-"""
-
-        # Compilation section
-        if compilation_tasks:
-            html += """
-<div class="framework">
-<div class="framework-header">Compilation</div>
-<div class="results-chart">
-<div class="chart-row">
-<div class="chart-cell chart-header">Framework</div>
-<div class="chart-cell chart-header">Status</div>
-<div class="chart-cell chart-header">Time</div>
-</div>
-"""
-            for task in compilation_tasks:
-                status_class = "success" if task.status == TaskStatus.SUCCESS else "failure"
-                status_text = "✅ PASS" if task.status == TaskStatus.SUCCESS else "❌ FAIL"
-                time_text = f"{task.duration:.1f}s" if task.duration else "-"
-                # Add log link if available
-                log_url = get_log_url(task)
-                if log_url:
-                    status_text += f' <a href="{log_url}" class="log-link">[log]</a>'
-                html += f"""
-<div class="chart-row">
-<div class="chart-cell chart-target">{task.framework}</div>
-<div class="chart-cell chart-status {status_class}">{status_text}</div>
-<div class="chart-cell chart-timing">{time_text}</div>
-</div>
-"""
-            html += "</div></div>\n"
-
-        # Framework sections
-        for framework_name in sorted(frameworks.keys()):
-            targets = frameworks[framework_name]
-            html += f"""
-<div class="framework">
-<div class="framework-header">{framework_name}</div>
-<div class="results-chart">
-<div class="chart-row">
-<div class="chart-cell chart-header">Target</div>
-<div class="chart-cell chart-header">Build</div>
-<div class="chart-cell chart-header">Build Time</div>
-<div class="chart-cell chart-header">Sanity Check</div>
-<div class="chart-cell chart-header">Sanity Time</div>
-<div class="chart-cell chart-header">Image Size</div>
-</div>
-"""
-            for target_name in sorted(targets.keys()):
-                target_data = targets[target_name]
-                build_task = target_data['build']
-                sanity_task = target_data['sanity']
-
-                # Get image size from either build or sanity task
-                image_size = "-"
-                if build_task and build_task.image_size:
-                    image_size = build_task.image_size
-                elif sanity_task and sanity_task.image_size:
-                    image_size = sanity_task.image_size
-
-                # Build status
-                if build_task:
-                    if build_task.status == TaskStatus.SUCCESS:
-                        build_status = '<span class="success">✅ PASS</span>'
-                        build_time = f"{build_task.duration:.1f}s"
-                    elif build_task.status == TaskStatus.SKIPPED:
-                        build_status = "⏭️ SKIP"
-                        build_time = "skipped"
-                    else:
-                        build_status = '<span class="failure">❌ FAIL</span>'
-                        build_time = f"{build_task.duration:.1f}s" if build_task.duration else "failed"
-                    # Add log link if available
-                    log_url = get_log_url(build_task)
-                    if log_url:
-                        build_status += f' <a href="{log_url}" class="log-link">[log]</a>'
-                else:
-                    build_status = "-"
-                    build_time = "-"
-
-                # Sanity status
-                if sanity_task:
-                    if sanity_task.status == TaskStatus.SUCCESS:
-                        sanity_status = '<span class="success">✅ PASS</span>'
-                        sanity_time = f"{sanity_task.duration:.1f}s"
-                    elif sanity_task.status == TaskStatus.SKIPPED:
-                        sanity_status = "⏭️ SKIP"
-                        sanity_time = "skipped"
-                    else:
-                        sanity_status = '<span class="failure">❌ FAIL</span>'
-                        sanity_time = f"{sanity_task.duration:.1f}s" if sanity_task.duration else "failed"
-                    # Add log link if available
-                    log_url = get_log_url(sanity_task)
-                    if log_url:
-                        sanity_status += f' <a href="{log_url}" class="log-link">[log]</a>'
-                else:
-                    sanity_status = "-"
-                    sanity_time = "-"
-
-                html += f"""
-<div class="chart-row">
-<div class="chart-cell chart-target">{target_name}</div>
-<div class="chart-cell chart-status">{build_status}</div>
-<div class="chart-cell chart-timing">{build_time}</div>
-<div class="chart-cell chart-status">{sanity_status}</div>
-<div class="chart-cell chart-timing">{sanity_time}</div>
-<div class="chart-cell chart-timing">{image_size}</div>
-</div>
-"""
-            html += "</div></div>\n"
-
-        html += "</body></html>"
-        return html
-
-
-class DynamoDockerBuilderV2:
-    """Main V2 orchestrator - simpler than V1 but same behavior"""
-
-    def __init__(self):
-        self.logger = logging.getLogger(self.__class__.__name__)
-        self.repo_path = Path("../dynamo_ci").resolve()
-        self.docker_client = None
-        self.lock_file = Path(__file__).parent / f".{Path(__file__).name}.lock"
-        # Initialize repository utils (will be set properly in run())
-        self.repo_utils = None
-
-    def check_if_running(self, force_run: bool = False) -> None:
-        """Check if another instance is already running"""
-        import os
-        import atexit
-        import psutil
-
-        script_name = Path(__file__).name
-        current_pid = os.getpid()
-
-        # Skip lock check if force_run is specified
-        if force_run:
-            self.logger.warning("FORCE-RUN MODE: Bypassing process lock check")
-            self.lock_file.write_text(str(current_pid))
-            self.logger.info(f"Created process lock file: {self.lock_file} (PID: {current_pid})")
-            atexit.register(lambda: self.lock_file.unlink(missing_ok=True))
-            return
-
-        # Check if lock file exists
-        if self.lock_file.exists():
-            try:
-                existing_pid = int(self.lock_file.read_text().strip())
-
-                # Check if the process is still running
-                if psutil.pid_exists(existing_pid):
-                    try:
-                        proc = psutil.Process(existing_pid)
-                        if script_name in " ".join(proc.cmdline()):
-                            self.logger.error(f"Another instance of {script_name} is already running (PID: {existing_pid})")
-                            self.logger.error(f"If you're sure no other instance is running, remove the lock file:")
-                            self.logger.error(f"  rm '{self.lock_file}'")
-                            self.logger.error(f"Or use --force-run to bypass the check")
-                            sys.exit(1)
-                    except (psutil.NoSuchProcess, psutil.AccessDenied):
-                        # Process exists but not accessible, remove stale lock
-                        self.logger.warning(f"Removing stale lock file (PID {existing_pid})")
-                        self.lock_file.unlink()
-                else:
-                    # Process doesn't exist, remove stale lock file
-                    self.logger.warning(f"Removing stale lock file (PID {existing_pid} no longer exists)")
-                    self.lock_file.unlink()
-            except (ValueError, FileNotFoundError):
-                # Invalid lock file content, remove it
-                self.logger.warning("Removing invalid lock file")
-                self.lock_file.unlink(missing_ok=True)
-
-        # Create lock file with current PID
-        self.lock_file.write_text(str(current_pid))
-        self.logger.info(f"Created process lock file: {self.lock_file} (PID: {current_pid})")
-
-        # Set up cleanup on exit
-        atexit.register(lambda: self.lock_file.unlink(missing_ok=True))
-
-    def _mark_existing_images_skipped(self, pipeline: BuildPipeline) -> None:
-        """Mark build tasks as skipped if their images already exist"""
-        if not self.docker_client:
-            self.docker_client = docker.from_env()
-
-        skipped_count = 0
-        for task_id, task in pipeline.tasks.items():
-            # Only check build tasks
-            if task.task_type != TaskType.BUILD:
-                continue
-
-            # Check if image exists
-            if task.image_tag:
+            
+            # Submit ready tasks
+            futures = {executor.submit(execute_single_task, t): t for t in ready_tasks}
+            pending_tasks -= set(ready_tasks)
+            
+            # Wait for at least one to complete
+            for future in as_completed(futures):
+                task_id = futures[future]
                 try:
-                    self.docker_client.images.get(task.image_tag)
-                    # Image exists - mark as skipped
-                    task.status = TaskStatus.SKIPPED
-                    skipped_count += 1
-                    self.logger.info(f"  Skipping {task_id}: image {task.image_tag} already exists")
-                except docker.errors.ImageNotFound:
-                    # Image doesn't exist - will need to build
-                    pass
+                    future.result()
                 except Exception as e:
-                    self.logger.warning(f"  Error checking image {task.image_tag}: {e}")
-
-        if skipped_count > 0:
-            self.logger.info(f"Skipped {skipped_count} existing images")
-            self.logger.info("")
-
-    def _apply_sanity_check_only_mode(self, pipeline: BuildPipeline) -> None:
-        """Mark build tasks as skipped when in sanity-check-only mode (but keep compilation)"""
-        if not self.docker_client:
-            self.docker_client = docker.from_env()
-
-        self.logger.info("")
-        self.logger.info("=" * 80)
-        self.logger.info("SANITY-CHECK-ONLY MODE")
-        self.logger.info("=" * 80)
-        self.logger.info("Skipping build tasks (compilation and sanity checks will run)...")
-        self.logger.info("")
-
-        # Track required images for sanity checks and map images to tasks
-        required_images: Set[str] = set()
-        image_to_tasks: Dict[str, List[Task]] = {}  # Map image name to tasks that use it
-        sanity_tasks = []
-        compilation_tasks = []
-
-        # Find all sanity check tasks and skip ONLY build tasks
-        for task_id, task in pipeline.tasks.items():
-            if task.task_type == TaskType.SANITY_CHECK:
-                sanity_tasks.append(task)
-                # Extract image name from command
-                import re
-                match = re.search(r'--image\s+(\S+)', task.command)
-                if match:
-                    image_name = match.group(1)
-                    required_images.add(image_name)
-                    if image_name not in image_to_tasks:
-                        image_to_tasks[image_name] = []
-                    image_to_tasks[image_name].append(task)
-            elif task.task_type == TaskType.COMPILATION:
-                compilation_tasks.append(task)
-                # Extract image name from compilation command
-                import re
-                match = re.search(r'--image\s+(\S+)', task.command)
-                if match:
-                    image_name = match.group(1)
-                    required_images.add(image_name)
-                    if image_name not in image_to_tasks:
-                        image_to_tasks[image_name] = []
-                    image_to_tasks[image_name].append(task)
-            elif task.task_type == TaskType.BUILD:
-                task.status = TaskStatus.SKIPPED
-                self.logger.info(f"  Skipping: {task_id} (build)")
-
-        # Verify required images exist and store sizes
-        self.logger.info("")
-        self.logger.info("Verifying required images exist...")
-        missing_images = []
-
-        for image_name in sorted(required_images):
-            try:
-                img = self.docker_client.images.get(image_name)
-                size_bytes = img.attrs.get('Size', 0)
-                size_gb = size_bytes / (1024**3)
-                size_str = f"{size_gb:.1f} GB"
-                self.logger.info(f"  ✅ Found: {image_name} ({size_str})")
-
-                # Store size in all tasks that use this image
-                if image_name in image_to_tasks:
-                    for task in image_to_tasks[image_name]:
-                        task.image_size = size_str
-            except docker.errors.ImageNotFound:
-                missing_images.append(image_name)
-                self.logger.error(f"  ❌ Missing: {image_name}")
-            except Exception as e:
-                missing_images.append(image_name)
-                self.logger.error(f"  ❌ Error checking {image_name}: {e}")
-
-        if missing_images:
-            self.logger.error("")
-            self.logger.error("=" * 80)
-            self.logger.error("ERROR: Missing required Docker images")
-            self.logger.error("=" * 80)
-            self.logger.error("The following images are required but not found:")
-            for img in missing_images:
-                self.logger.error(f"  - {img}")
-            self.logger.error("")
-            self.logger.error("Please build the images first by running without --sanity-check-only")
-            sys.exit(1)
-
-        self.logger.info("")
-        self.logger.info(f"Sanity check mode: {len(compilation_tasks)} compilation + {len(sanity_tasks)} sanity checks will run")
-        self.logger.info("")
+                    logger.error(f"Exception in task {task_id}: {e}")
+                    with lock:
+                        failed_tasks.add(task_id)
+    
+    return executed_tasks, failed_tasks
 
 
-
-    def _send_html_email_via_smtp(
-        self,
-        email: str,
-        html_content: str,
-        subject_prefix: str,
-        git_sha: str,
-        failed_tasks: List[str]
-    ) -> None:
-        """Send HTML email notification via SMTP using curl"""
+def generate_html_report(
+    all_tasks: Dict[str, 'BaseTask'],
+    repo_path: Path,
+    sha: str,
+    log_dir: Path,
+    date_str: str,
+) -> str:
+    """
+    Generate HTML report using Jinja2 template.
+    
+    Args:
+        all_tasks: Dictionary of all tasks that were executed
+        repo_path: Path to the repository
+        sha: Git commit SHA (9 chars)
+        log_dir: Directory containing log files
+        date_str: Date string (YYYY-MM-DD)
+        
+    Returns:
+        HTML string
+    """
+    # Check if jinja2 is available (imported at top of file)
+    if Environment is None:
+        logging.getLogger("html").error("Jinja2 not installed. Install with: pip install jinja2")
+        return "<html><body><h1>Error: Jinja2 not installed</h1></body></html>"
+    
+    # Check if git is available (imported at top of file)
+    if git is None:
+        logging.getLogger("html").warning("GitPython not installed, skipping git information")
+    
+    # Count task statistics
+    total_tasks = len(all_tasks)
+    succeeded = sum(1 for t in all_tasks.values() if t.status == TaskStatus.SUCCESS)
+    failed = sum(1 for t in all_tasks.values() if t.status == TaskStatus.FAILED)
+    skipped = sum(1 for t in all_tasks.values() if t.status == TaskStatus.SKIPPED)
+    
+    # Determine overall status
+    overall_status = "✅ ALL TESTS PASSED" if failed == 0 else "❌ TESTS FAILED"
+    header_color = "#28a745" if failed == 0 else "#dc3545"
+    
+    # Get git information
+    commit_info: Dict[str, Any] = {}
+    if git:
         try:
-            # Determine overall status
-            overall_status = "SUCCESS" if not failed_tasks else "FAILURE"
-
-            # Create subject line
-            status_prefix = "SUCC" if overall_status == "SUCCESS" else "FAIL"
-
-            # Include failed task names in subject if any
-            if failed_tasks:
-                failure_summary = ", ".join(failed_tasks)
-                subject = f"{status_prefix}: {subject_prefix} - {git_sha} ({failure_summary})"
-            else:
-                subject = f"{status_prefix}: {subject_prefix} - {git_sha}"
-
-            # Create email file with proper CRLF formatting
-            email_file = Path(f"/tmp/dynamo_email_{os.getpid()}.txt")
-
-            # Write email content directly
-            email_content = f'Subject: {subject}\r\nFrom: {subject_prefix} <dynamo-docker-builder@nvidia.com>\r\nTo: {email}\r\nMIME-Version: 1.0\r\nContent-Type: text/html; charset=UTF-8\r\n\r\n{html_content}\r\n'
-
-            with open(email_file, 'w', encoding='utf-8') as f:
-                f.write(email_content)
-
-            # Send email using curl
-            result = subprocess.run([
-                'curl', '--url', 'smtp://smtp.nvidia.com:25',
-                '--mail-from', 'dynamo-docker-builder@nvidia.com',
-                '--mail-rcpt', email,
-                '--upload-file', str(email_file)
-            ], capture_output=True, text=True)
-
-            # Clean up
-            email_file.unlink(missing_ok=True)
-
-            if result.returncode == 0:
-                self.logger.info(f"\n📧 Email notification sent to {email}")
-                self.logger.info(f"   Subject: {subject}")
-                if failed_tasks:
-                    self.logger.info(f"   Failed tasks: {', '.join(failed_tasks)}")
-            else:
-                self.logger.error(f"\n⚠️  Failed to send email: {result.stderr}")
-
-        except Exception as e:
-            self.logger.error(f"\n⚠️  Error sending email notification: {e}")
-
-    def _populate_image_sizes(self, pipeline: BuildPipeline) -> None:
-        """Populate image sizes for all BUILD tasks by querying Docker.
-
-        This is called after task execution to populate image sizes for both:
-        - Successfully built images
-        - Skipped images (when using --skip-build-if-image-exists)
-
-        Args:
-            pipeline: The build pipeline with tasks to populate
-        """
-        import docker
-
-        try:
-            docker_client = docker.from_env()
-        except Exception as e:
-            self.logger.warning(f"Could not connect to Docker to get image sizes: {e}")
-            return
-
-        # Collect all BUILD tasks that have an image_tag
-        build_tasks = [
-            task for task in pipeline.tasks.values()
-            if task.task_type == TaskType.BUILD and task.image_tag
-        ]
-
-        if not build_tasks:
-            return
-
-        self.logger.info("")
-        self.logger.info("Populating image sizes...")
-
-        for task in build_tasks:
+            repo = git.Repo(repo_path)
+            commit = repo.commit(sha)
+            commit_info = {
+                'sha_short': sha[:7],
+                'sha_full': sha,
+                'author': f"{commit.author.name} <{commit.author.email}>",
+                'date': commit.committed_datetime.strftime('%Y-%m-%d %H:%M:%S %Z'),
+                'message': commit.message.strip(),
+            }
+            
+            # Extract PR number
+            commit_message = str(commit.message) if commit.message else ""
+            first_line = commit_message.split('\n')[0]
+            pr_match = re.search(r'\(#(\d+)\)', first_line)
+            if pr_match:
+                commit_info['pr_number'] = pr_match.group(1)
+                commit_info['pr_link'] = f"https://github.com/ai-dynamo/dynamo/pull/{pr_match.group(1)}"
+            
+            # Get file changes
             try:
-                img = docker_client.images.get(task.image_tag)
-                size_bytes = img.attrs.get('Size', 0)
-                size_gb = size_bytes / (1024**3)
-                task.image_size = f"{size_gb:.1f} GB"
-                self.logger.info(f"  ✅ {task.image_tag}: {task.image_size}")
-            except docker.errors.ImageNotFound:
-                # Image doesn't exist - this is expected for failed/skipped builds
+                stats = commit.stats
+                commit_info['insertions'] = int(stats.total.get('insertions', 0))
+                commit_info['deletions'] = int(stats.total.get('deletions', 0))
+                commit_info['files_changed'] = dict(stats.files)
+            except Exception:
                 pass
-            except Exception as e:
-                self.logger.warning(f"  ⚠️  Could not get size for {task.image_tag}: {e}")
-
-    def run(self, args: argparse.Namespace) -> int:
-        """Main entry point"""
-        dry_run = args.dry_run
-        verbose = args.verbose
-        parallel = args.parallel
-        skip_build_if_image_exists = args.skip_build_if_image_exists if hasattr(args, 'skip_build_if_image_exists') else False
-        sanity_check_only = args.sanity_check_only if hasattr(args, 'sanity_check_only') else False
-        repo_sha = args.repo_sha if hasattr(args, 'repo_sha') else None
-        force_run = args.force_run if hasattr(args, 'force_run') else False
-
-        if args.repo_path:
-            self.repo_path = Path(args.repo_path).resolve()
-
-        # Initialize repository utils
-        self.repo_utils = DynamoRepositoryUtils(self.repo_path, dry_run=dry_run, verbose=verbose)
-
-        # Validate mutually exclusive flags
-        if args.repo_sha and args.no_checkout:
-            print("❌ Error: --repo-sha and --no-checkout are mutually exclusive")
-            return 1
-
-        # Get or checkout specific SHA (BEFORE composite SHA check)
-        import git
-        try:
-            repo = git.Repo(self.repo_path)
-            if args.no_checkout:
-                # Use current HEAD without checkout
-                repo_sha = repo.head.commit.hexsha
-                print(f"NO-CHECKOUT MODE: Using current HEAD {repo_sha[:9]}")
-            elif repo_sha:
-                current_sha = repo.head.commit.hexsha[:9]
-                if current_sha != repo_sha[:9]:
-                    print(f"Checking out SHA: {repo_sha}")
-                    repo.git.checkout(repo_sha)
-                    print(f"✅ Checked out {repo_sha}")
-                    repo_sha = repo.head.commit.hexsha
-            else:
-                # Checkout main and pull latest
-                print("Checking out main branch and pulling latest...")
-                repo.git.checkout('main')
-                repo.remotes.origin.pull()
-                repo_sha = repo.head.commit.hexsha
-                print(f"✅ Using latest main: {repo_sha[:9]}")
+                
         except Exception as e:
-            print(f"❌ Failed to get/checkout SHA: {e}")
-            return 1
+            logging.getLogger("html").warning(f"Could not get git info: {e}")
+            commit_info = {'sha_short': sha[:7], 'sha_full': sha}
+    else:
+        commit_info = {'sha_short': sha[:7], 'sha_full': sha}
+    
+    # Organize tasks by framework
+    frameworks_data: Dict[str, Dict[str, Any]] = {}
+    
+    for task_id, task in all_tasks.items():
+        # Parse task_id to extract framework and target
+        # Format: VLLM-base, VLLM-runtime, VLLM-dev-compilation, etc.
+        parts = task_id.split('-', 1)
+        if len(parts) < 2:
+            continue
+            
+        framework = parts[0]
+        rest = parts[1]
+        
+        if framework not in frameworks_data:
+            frameworks_data[framework] = {}
+        
+        # Determine target and task type
+        if isinstance(task, BuildTask):
+            # BuildTask: VLLM-base, VLLM-runtime, VLLM-dev, VLLM-local-dev
+            target = rest  # base, runtime, dev, local-dev
+            if target not in frameworks_data[framework]:
+                frameworks_data[framework][target] = {'build': None, 'compilation': None, 'sanity': None, 'image_size': None}
+            frameworks_data[framework][target]['build'] = {
+                'status': task.status.name,
+                'build_time': f"{task.end_time - task.start_time:.1f}s" if task.start_time and task.end_time else None,
+                'log_file': task.log_file.name if task.log_file else None,
+            }
+        elif isinstance(task, CommandTask):
+            # CommandTask: could be compilation, chown, or sanity
+            if 'compilation' in rest:
+                target = rest.replace('-compilation', '')  # dev, local-dev
+                if target not in frameworks_data[framework]:
+                    frameworks_data[framework][target] = {'build': None, 'compilation': None, 'sanity': None, 'image_size': None}
+                frameworks_data[framework][target]['compilation'] = {
+                    'status': task.status.name,
+                    'time': f"{task.end_time - task.start_time:.1f}s" if task.start_time and task.end_time else None,
+                    'log_file': task.log_file.name if task.log_file else None,
+                }
+            elif 'sanity' in rest:
+                target = rest.replace('-sanity', '')  # runtime, dev, local-dev
+                if target not in frameworks_data[framework]:
+                    frameworks_data[framework][target] = {'build': None, 'compilation': None, 'sanity': None, 'image_size': None}
+                frameworks_data[framework][target]['sanity'] = {
+                    'status': task.status.name,
+                    'sanity_time': f"{task.end_time - task.start_time:.1f}s" if task.start_time and task.end_time else None,
+                    'log_file': task.log_file.name if task.log_file else None,
+                }
+    
+    # Load Jinja2 template
+    template_dir = Path(__file__).parent
+    env = Environment(
+        loader=FileSystemLoader(template_dir),
+        autoescape=select_autoescape(['html', 'xml'])
+    )
+    template = env.get_template('dynamo_docker_builder.html.j2')
+    
+    # Render HTML
+    html = template.render(
+        sha_display=commit_info.get('sha_short', sha[:7]),
+        sha_link=commit_info.get('sha_full', sha),
+        overall_status=overall_status,
+        header_color=header_color,
+        total_tasks=total_tasks,
+        succeeded=succeeded,
+        failed=failed,
+        skipped=skipped,
+        build_date=datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+        commit=commit_info,
+        frameworks=frameworks_data,
+    )
+    
+    return html
 
-        # Check if another instance is running (skip in sanity-check-only mode)
-        if not sanity_check_only:
-            self.check_if_running(force_run=force_run)
 
-            # Check if rebuild is needed based on composite SHA (AFTER pulling latest)
-            if not self.repo_utils.check_if_rebuild_needed(force_run=force_run):
-                return 0  # Exit early - no rebuild needed
+def print_dependency_tree(frameworks: List[str], sha: str, repo_path: Path, verbose: bool = False) -> None:
+    """
+    Print dependency tree visualization for given frameworks.
+    
+    Args:
+        frameworks: List of framework names (normalized, lowercase)
+        sha: Git commit SHA (9 chars)
+        repo_path: Path to the repository
+        verbose: If True, show commands in tree
+    """
+    print("\n" + "=" * 80)
+    print("DEPENDENCY TREE VISUALIZATION")
+    print("=" * 80)
+    print(f"\nRepository: {repo_path}")
+    print(f"Commit SHA: {sha}")
+    print(f"Frameworks: {', '.join(f.upper() for f in frameworks)}")
+    print()
 
-        # Determine frameworks - support both --framework vllm --framework sglang and --framework vllm,sglang
-        if args.framework:
-            # Flatten and split comma-separated values
-            frameworks = []
-            for f in args.framework:
-                frameworks.extend([fw.strip().upper() for fw in f.split(',')])
-        else:
-            frameworks = list(FRAMEWORKS_UPPER)
+    for framework in frameworks:
+        # Create task graph for this framework
+        tasks = create_task_graph(framework, sha, repo_path)
 
-        # Determine targets
-        targets = [t.strip() for t in args.target.split(',')]
+        # Create pipeline and add tasks
+        pipeline = BuildPipeline()
+        for task in tasks.values():
+            pipeline.add_task(task)
 
-        # Print header
-        print("=" * 80)
-        print(f"DynamoDockerBuilder V2 - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-        print("Simplified Parallel Build System")
-        print("=" * 80)
+        # Build children relationships after all tasks are added
+        pipeline._build_children_relationships()
 
-        if dry_run:
-            print("DRY-RUN MODE: Commands will be shown but not executed")
-        if sanity_check_only:
-            print("SANITY-CHECK-ONLY MODE: Will only run sanity checks, skipping builds and compilation")
-        if repo_sha:
-            print(f"REPO-SHA MODE: Building for SHA {repo_sha}")
-        if skip_build_if_image_exists:
-            print("SKIP-BUILD-IF-IMAGE-EXISTS MODE: Will skip building images that already exist")
-        if parallel:
-            print("PARALLEL MODE: Tasks will execute in parallel when dependencies allow")
-        else:
-            print("SERIAL MODE: Tasks will execute sequentially (use --parallel for parallel execution)")
-
-        print(f"Dynamo CI Directory: {self.repo_path}")
-        print("")
-
-        # Build pipeline
-        builder = PipelineBuilder(self.repo_path, frameworks, targets, dry_run, verbose)
-        pipeline = builder.build_pipeline()
-
-        # Apply sanity-check-only mode if specified
-        if sanity_check_only:
-            self._apply_sanity_check_only_mode(pipeline)
-        # Otherwise, mark existing images as skipped if --skip-build-if-image-exists
-        elif skip_build_if_image_exists:
-            self._mark_existing_images_skipped(pipeline)
-
-        # Visualize
-        print(pipeline.visualize_tree())
-
-        # Summary
+        # Show framework header
+        framework_display = get_framework_display_name(framework)
         print("\n" + "=" * 80)
-        print("SUMMARY")
+        print(f"{framework_display} PIPELINE")
         print("=" * 80)
-        print(f"Total tasks: {len(pipeline.tasks)}")
-        print("")
-        print("By type:")
-        for task_type in TaskType:
-            count = sum(1 for t in pipeline.tasks.values() if t.task_type == task_type)
-            if count > 0:
-                print(f"  {task_type.value}: {count}")
-        print("")
-        print("By status:")
-        for status in TaskStatus:
-            count = sum(1 for t in pipeline.tasks.values() if t.status == status)
-            if count > 0:
-                print(f"  {status.value}: {count}")
-        print("=" * 80)
+        print()
 
-        # Setup log directory (matching V1 behavior: logs/<date>/)
-        log_dir = None
-        if not dry_run:
-            date_str = datetime.now().strftime('%Y-%m-%d')
-            log_dir = self.repo_path / "logs" / date_str
-            log_dir.mkdir(parents=True, exist_ok=True)
-            print(f"\nLog directory: {log_dir}")
+        # Helper function to print tree recursively
+        def print_tree(task_id: str, prefix: str = "", is_last: bool = True, visited: Optional[set] = None) -> None:
+            if visited is None:
+                visited = set()
 
-            # Clean up existing log files ONLY for tasks that will actually run
-            sha_prefix = repo_sha[:7] if repo_sha else "unknown"
-            removed_files = []
-            for task_id, task in pipeline.tasks.items():
-                # Only clean up logs for tasks that will run (not skipped)
-                if task.status != TaskStatus.SKIPPED:
-                    task_id_lower = task_id.lower()
-                    log_patterns = [
-                        f"{date_str}.{sha_prefix}.{task_id_lower}.log",
-                        f"{date_str}.{sha_prefix}.{task_id_lower}.SUCC",
-                        f"{date_str}.{sha_prefix}.{task_id_lower}.FAIL"
-                    ]
-                    for pattern in log_patterns:
-                        file_path = log_dir / pattern
-                        if file_path.exists() and file_path.is_file():
-                            file_path.unlink()
-                            removed_files.append(file_path.name)
+            if task_id in visited:
+                return
+            visited.add(task_id)
 
-            if removed_files:
-                print(f"Removed {len(removed_files)} existing log file(s) for tasks that will run")
-            print("")
+            task = pipeline.tasks[task_id]
 
-        # Execute
-        executor = TaskExecutor(dry_run, verbose, log_dir=log_dir, repo_sha=repo_sha, repo_path=self.repo_path)
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        successful, failed = loop.run_until_complete(executor.execute_pipeline(pipeline, parallel))
-        loop.close()
+            # Determine the connector for this task
+            connector = "└─ " if is_last else "├─ "
 
-        # Populate image sizes for all BUILD tasks (for both built and skipped images)
-        if not dry_run:
-            self._populate_image_sizes(pipeline)
+            # Print this task
+            suffix = ""
+            if task.run_even_if_deps_fail:
+                suffix += " [runs even if dependencies fail]"
+            if len(task.parents) > 1:
+                parents_str = ", ".join(task.parents)
+                suffix += f" [parents: {parents_str}]"
+            print(f"{prefix}{connector}{task.task_id} ({task.__class__.__name__}){suffix}")
 
-        # Final summary
-        print("\n" + "=" * 80)
-        print("FINAL RESULTS")
-        print("=" * 80)
-        print(f"Successful: {successful}")
-        print(f"Failed: {failed}")
-        print(f"Skipped: {sum(1 for t in pipeline.tasks.values() if t.status == TaskStatus.SKIPPED)}")
+            # Print commands if verbose mode is enabled
+            if verbose:
+                continuation = "   " if is_last else "│  "
 
-        # Generate HTML report with relative paths for file
-        html_report_file = None
-        html_report_email = None
-        if not dry_run and log_dir:
-            try:
-                # Generate report with relative paths for the HTML file
-                html_report_file = ReportGenerator.generate_html_report(
-                    pipeline=pipeline,
-                    repo_path=self.repo_path,
-                    repo_sha=repo_sha,
-                    log_dir=log_dir,
-                    date_str=date_str,
-                    hostname=getattr(args, 'hostname', 'keivenc-linux'),
-                    html_path=getattr(args, 'html_path', '/nvidia/dynamo_ci/logs'),
-                    use_absolute_urls=False  # Use relative paths for file
-                )
-                report_file = log_dir / f"{date_str}.{repo_sha[:7]}.report.html"
-                report_file.write_text(html_report_file)
-                print(f"\n📊 HTML report generated: {report_file}")
+                # Get both commands to determine numbering
+                command = task.get_command(repo_path)
+                docker_cmd = task.get_docker_command(repo_path)
 
-                # If email is requested, generate a second version with absolute URLs
-                if hasattr(args, 'email') and args.email:
-                    html_report_email = ReportGenerator.generate_html_report(
-                        pipeline=pipeline,
-                        repo_path=self.repo_path,
-                        repo_sha=repo_sha,
-                        log_dir=log_dir,
-                        date_str=date_str,
-                        hostname=getattr(args, 'hostname', 'keivenc-linux'),
-                        html_path=getattr(args, 'html_path', '/dynamo_ci/logs'),
-                        use_absolute_urls=True  # Use absolute URLs for email
-                    )
-            except Exception as e:
-                print(f"\n⚠️  Failed to generate HTML report: {e}")
+                # Only show "1." if there's also a "2." (docker command exists)
+                if docker_cmd:
+                    # Two-level command structure
+                    print(f"{prefix}{continuation}1. {command}")
 
-        # Send email notification if requested
-        if hasattr(args, 'email') and args.email and html_report_email:
-            # Collect failed task names
-            failed_task_names = [
-                task_id for task_id, task in pipeline.tasks.items()
-                if task.status == TaskStatus.FAILED
-            ]
+                    # 2. Print the underlying docker command
+                    # Docker command may be multiline (multiple docker build commands)
+                    docker_lines = docker_cmd.split('\n')
+                    for i, line in enumerate(docker_lines):
+                        if i == 0:
+                            print(f"{prefix}{continuation}2. {line}")
+                        else:
+                            # Additional lines with same continuation prefix
+                            print(f"{prefix}{continuation}   {line}")
+                else:
+                    # Single command - no numbering needed
+                    print(f"{prefix}{continuation}{command}")
 
-            # Send email with HTML report (using absolute URLs)
-            self._send_html_email_via_smtp(
-                email=args.email,
-                html_content=html_report_email,
-                subject_prefix="DynamoDockerBuilder V2",
-                git_sha=repo_sha[:7] if repo_sha else "unknown",
-                failed_tasks=failed_task_names
+            # Print children (tasks that depend on this one)
+            children = task.children
+            for i, child_id in enumerate(children):
+                is_last_child = (i == len(children) - 1)
+                # Determine the prefix for the child
+                extension = "   " if is_last else "│  "
+                print_tree(child_id, prefix + extension, is_last_child, visited)
+
+        # Find root tasks (tasks with no dependencies)
+        root_tasks = [task_id for task_id, task in pipeline.tasks.items() if not task.parents]
+
+        # Print tree starting from each root
+        for root_id in root_tasks:
+            print_tree(root_id)
+            print()  # Blank line between root trees
+
+    print()  # Blank line after tree
+    sys.stdout.flush()  # Ensure tree prints before any logger output
+
+
+def main() -> int:
+    """Main entry point"""
+    args = parse_args()
+    setup_logging(args.verbose)
+
+    logger = logging.getLogger("main")
+
+    # Get repository info
+    repo_path = args.repo_path.resolve()
+    if not repo_path.exists():
+        logger.error(f"Repository path does not exist: {repo_path}")
+        return 1
+
+    # Get commit SHA
+    try:
+        git_utils = GitUtils(repo_path)
+        if args.repo_sha:
+            sha = args.repo_sha
+        else:
+            full_sha = git_utils.get_current_commit()
+            sha = full_sha[:9]  # Use 9 chars to match build.sh format
+    except Exception as e:
+        logger.error(f"Failed to get commit SHA: {e}")
+        return 1
+
+    # Determine which frameworks to build
+    if args.framework:
+        frameworks = [normalize_framework(f) for f in args.framework]
+    else:
+        frameworks = FRAMEWORKS_LOWER
+
+    # Handle --tree flag: show dependency tree
+    if args.tree:
+        print_dependency_tree(frameworks, sha, repo_path, verbose=args.verbose)
+
+    # Execution mode header
+    if args.dry_run:
+        logger.info("DRY-RUN MODE: Showing commands that would be executed")
+    else:
+        logger.info("DynamoDockerBuilder V2 - Starting")
+
+    # Track overall execution time
+    execution_start_time = time.time()
+
+    # Setup log directory: logs/YYYY-MM-DD/ (skip in dry-run)
+    if not args.dry_run:
+        log_date = datetime.now().strftime("%Y-%m-%d")
+        log_dir = repo_path / "logs" / log_date
+        log_dir.mkdir(parents=True, exist_ok=True)
+        logger.info(f"Log directory: {log_dir}")
+        
+        # Clean up all existing log files and marker files for this SHA
+        # Pattern: YYYY-MM-DD.{sha}.*
+        cleanup_pattern = str(log_dir / f"{log_date}.{sha}.*")
+        cleaned_files = glob.glob(cleanup_pattern)
+        if cleaned_files:
+            logger.info(f"Cleaning up {len(cleaned_files)} existing log/marker files for SHA {sha}")
+            for file_path in cleaned_files:
+                try:
+                    Path(file_path).unlink()
+                except Exception as e:
+                    logger.warning(f"Failed to remove {file_path}: {e}")
+
+    # Create task graph for each framework
+    all_tasks = {}
+    for framework in frameworks:
+        framework_tasks = create_task_graph(framework, sha, repo_path)
+        all_tasks.update(framework_tasks)
+
+    # Execute tasks in dependency order
+    mode = "parallel" if args.parallel else "sequential"
+    if args.dry_run:
+        logger.info(f"Would execute {len(all_tasks)} tasks {mode}ly")
+        logger.info("")
+    else:
+        logger.info(f"Executing {len(all_tasks)} tasks {mode}ly")
+
+    # Find root tasks (tasks with no dependencies)
+    root_tasks = [task_id for task_id, task in all_tasks.items() if not task.parents]
+
+    # Build children relationships first
+    for task_id, task in all_tasks.items():
+        for parent_id in task.parents:
+            if parent_id in all_tasks and task_id not in all_tasks[parent_id].children:
+                all_tasks[parent_id].children.append(task_id)
+
+    # Execute based on mode
+    if args.parallel:
+        # Parallel execution
+        executed_tasks, failed_tasks = execute_task_parallel(
+            all_tasks=all_tasks,
+            root_tasks=root_tasks,
+            repo_path=repo_path,
+            sha=sha,
+            log_dir=log_dir if not args.dry_run else None,
+            log_date=log_date if not args.dry_run else None,
+            dry_run=args.dry_run,
+            max_workers=4,  # TODO: make this configurable
+        )
+    else:
+        # Sequential execution
+        executed_tasks = set()
+        failed_tasks = set()
+        for root_id in root_tasks:
+            execute_task_sequential(
+                all_tasks=all_tasks,
+                executed_tasks=executed_tasks,
+                failed_tasks=failed_tasks,
+                task_id=root_id,
+                repo_path=repo_path,
+                sha=sha,
+                log_dir=log_dir if not args.dry_run else None,
+                log_date=log_date if not args.dry_run else None,
+                dry_run=args.dry_run,
             )
 
-        return 0 if failed == 0 else 1
+    # Calculate total execution time
+    execution_end_time = time.time()
+    total_duration = execution_end_time - execution_start_time
+    
+    # Format duration nicely
+    hours, remainder = divmod(int(total_duration), 3600)
+    minutes, seconds = divmod(remainder, 60)
+    if hours > 0:
+        duration_str = f"{hours}h {minutes}m {seconds}s"
+    elif minutes > 0:
+        duration_str = f"{minutes}m {seconds}s"
+    else:
+        duration_str = f"{seconds}s"
 
+    # Report summary
+    if args.dry_run:
+        logger.info(f"\nDry-run Summary:")
+        logger.info(f"  Total tasks: {len(all_tasks)}")
+        logger.info(f"  Time: {duration_str} ({total_duration:.2f}s)")
+        return 0
+    else:
+        success_count = len([t for t in all_tasks.values() if t.status == TaskStatus.SUCCESS])
+        failed_count = len([t for t in all_tasks.values() if t.status == TaskStatus.FAILED])
+        skipped_count = len([t for t in all_tasks.values() if t.status == TaskStatus.SKIPPED])
+        
+        exit_status = 0 if failed_count == 0 else 1
 
-def main():
-    """Entry point"""
-    parser = argparse.ArgumentParser(
-        description="DynamoDockerBuilder V2 - Simplified Build System"
-    )
-    parser.add_argument("-f", "--framework", action="append",
-                        help="Framework to build (can specify multiple)")
-    parser.add_argument("--target", default="runtime,dev,local-dev",
-                        help="Comma-separated targets: base, runtime, dev, local-dev (default: runtime,dev,local-dev)")
-    parser.add_argument("--repo-path", type=Path,
-                        help="Path to dynamo repository (default: ../dynamo_ci)")
-    parser.add_argument("--repo-sha", type=str,
-                        help="Git SHA to checkout (default: current HEAD)")
-    parser.add_argument("--no-checkout", action="store_true",
-                        help="Use current HEAD without checking out (mutually exclusive with --repo-sha)")
-    parser.add_argument("--dry-run", action="store_true",
-                        help="Show commands without executing")
-    parser.add_argument("--skip-build-if-image-exists", action="store_true",
-                        help="Skip building images that already exist locally")
-    parser.add_argument("--sanity-check-only", action="store_true",
-                        help="Only run sanity checks, skip all builds and compilation")
-    parser.add_argument("--parallel", action="store_true",
-                        help="Execute tasks in parallel when possible")
-    parser.add_argument("-v", "--verbose", action="store_true",
-                        help="Verbose output")
-    parser.add_argument("--force-run", action="store_true",
-                        help="Force run even if another instance is running (bypasses lock check)")
-    parser.add_argument("--email", type=str,
-                        help="Email address for notifications (sends email if specified)")
-    parser.add_argument("--hostname", type=str, default="keivenc-linux",
-                        help="Hostname for log file URLs (default: keivenc-linux)")
-    parser.add_argument("--html-path", type=str, default="/nvidia/dynamo_ci/logs",
-                        help="Web-accessible path prefix for log files (default: /nvidia/dynamo_ci/logs)")
+        logger.info(f"\nExecution Summary:")
+        logger.info(f"  ✓ Success: {success_count}")
+        logger.info(f"  ✗ Failed: {failed_count}")
+        logger.info(f"  ⊘ Skipped: {skipped_count}")
+        logger.info(f"  Logs: {log_dir}")
+        logger.info(f"  Total time: {duration_str} ({total_duration:.2f}s)")
+        logger.info(f"  Exit status: {exit_status}")
+        logger.info(f"  Completed: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        
+        # Generate HTML report if requested
+        if args.html:
+            try:
+                html_content = generate_html_report(
+                    all_tasks=all_tasks,
+                    repo_path=repo_path,
+                    sha=sha,
+                    log_dir=log_dir,
+                    date_str=log_date,
+                )
+                html_file = log_dir / f"{log_date}.{sha}.report.html"
+                html_file.write_text(html_content)
+                logger.info(f"  HTML Report: {html_file}")
+            except Exception as e:
+                logger.error(f"Failed to generate HTML report: {e}")
 
-    args = parser.parse_args()
-
-    # Setup logging
-    logging.basicConfig(
-        level=logging.DEBUG if args.verbose else logging.INFO,
-        format='%(message)s'
-    )
-
-    builder = DynamoDockerBuilderV2()
-    return builder.run(args)
+        return exit_status
 
 
 if __name__ == "__main__":
