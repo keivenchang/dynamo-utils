@@ -727,6 +727,11 @@ def main():
         action='store_true',
         help='Output in HTML format'
     )
+    parser.add_argument(
+        '--output',
+        type=Path,
+        help='Output file path (default: stdout)'
+    )
     args = parser.parse_args()
 
     base_dir = args.base_dir
@@ -739,7 +744,12 @@ def main():
 
     # Output
     if args.html:
-        print(generate_html(root))
+        html_output = generate_html(root)
+        if args.output:
+            args.output.parent.mkdir(parents=True, exist_ok=True)
+            args.output.write_text(html_output)
+        else:
+            print(html_output)
     else:
         for child in root.children:
             child.print_tree()
