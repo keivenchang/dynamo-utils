@@ -207,6 +207,27 @@ def rename_input_tag(new_tag: str, select_func: Callable[[List[str]], Optional[s
     return wrapper
 
 
+def rename_dev_base_tag(new_tag: str, select_func: Callable[[List[str]], Optional[str]]) -> Callable[[List[str]], Optional[str]]:
+    """
+    Wrap a selection function to also rename dev base image (--build-arg DEV_BASE=).
+    Used specifically for local-dev builds.
+    
+    Returns a function that does: rename_dev_base_tag_to(new_tag, select_func(commands))
+    """
+    def wrapper(commands: List[str]) -> Optional[str]:
+        command = select_func(commands)
+        if command is None:
+            return None
+        # Replace DEV_BASE value
+        command = re.sub(
+            r'--build-arg\s+DEV_BASE=[^\s]+',
+            f'--build-arg DEV_BASE={new_tag}',
+            command
+        )
+        return command
+    return wrapper
+
+
 # Factory function to create task instances for a specific framework
 def create_task_graph(framework: str, sha: str, repo_path: Path) -> Dict[str, 'BaseTask']:
     """
@@ -250,15 +271,15 @@ def create_task_graph(framework: str, sha: str, repo_path: Path) -> Dict[str, 'B
         
         Result: Input and output images match parent/child dependencies perfectly.
     """
-    # Task ID format: framework-target (all lowercase)
-    # Example: vllm-base, vllm-dev-compilation
+    # Task ID format: framework-target-type (all lowercase)
+    # Example: vllm-base-build, vllm-dev-compilation, vllm-runtime-sanity
 
     tasks: Dict[str, BaseTask] = {}
 
     # Level 0: Base image build
     base_image_tag = f"dynamo-base:v0.1.0.dev.{sha}-{framework}"
-    tasks[f"{framework}-base"] = BuildTask(
-        task_id=f"{framework}-base",
+    tasks[f"{framework}-base-build"] = BuildTask(
+        task_id=f"{framework}-base-build",
         description=f"Build {framework.upper()} base image",
         command=f"{repo_path}/container/build.sh --dry-run --framework {framework} --target runtime",
         output_image=base_image_tag,
@@ -268,8 +289,8 @@ def create_task_graph(framework: str, sha: str, repo_path: Path) -> Dict[str, 'B
 
     # Level 1: Runtime image build
     runtime_image_tag = f"dynamo:v0.1.0.dev.{sha}-{framework}-runtime"
-    tasks[f"{framework}-runtime"] = BuildTask(
-        task_id=f"{framework}-runtime",
+    tasks[f"{framework}-runtime-build"] = BuildTask(
+        task_id=f"{framework}-runtime-build",
         description=f"Build {framework.upper()} runtime image",
         command=f"{repo_path}/container/build.sh --dry-run --framework {framework} --target runtime",
         input_image=base_image_tag,
@@ -277,7 +298,7 @@ def create_task_graph(framework: str, sha: str, repo_path: Path) -> Dict[str, 'B
         docker_command_filter=rename_output_tag(runtime_image_tag, 
             rename_input_tag(base_image_tag, 
                 filter_out_latest_tag(select_command(1)))),
-        parents=[f"{framework}-base"],
+        parents=[f"{framework}-base-build"],
         timeout=1200.0,  # 20 minutes for builds
     )
 
@@ -287,15 +308,15 @@ def create_task_graph(framework: str, sha: str, repo_path: Path) -> Dict[str, 'B
         description=f"Run sanity_check.py in {framework.upper()} runtime container",
         command=f"{repo_path}/container/run.sh --image {runtime_image_tag} -- python3 /workspace/deploy/sanity_check.py",
         input_image=runtime_image_tag,
-        parents=[f"{framework}-runtime"],
+        parents=[f"{framework}-runtime-build"],
         timeout=45.0,  # 45 seconds for sanity checks
         ignore_exit_code=True,  # Runtime may fail some checks, we only care about Dynamo paths
     )
 
     # Level 2: Dev image build (runs after runtime for better parallelization)
     dev_image_tag = f"dynamo:v0.1.0.dev.{sha}-{framework}-dev"
-    tasks[f"{framework}-dev"] = BuildTask(
-        task_id=f"{framework}-dev",
+    tasks[f"{framework}-dev-build"] = BuildTask(
+        task_id=f"{framework}-dev-build",
         description=f"Build {framework.upper()} dev image",
         command=f"{repo_path}/container/build.sh --dry-run --framework {framework} --target dev",
         input_image=base_image_tag,
@@ -303,7 +324,7 @@ def create_task_graph(framework: str, sha: str, repo_path: Path) -> Dict[str, 'B
         docker_command_filter=rename_output_tag(dev_image_tag,
             rename_input_tag(base_image_tag,
                 filter_out_latest_tag(select_command(1)))),
-        parents=[f"{framework}-runtime"],  # Wait for runtime to complete first
+        parents=[f"{framework}-runtime-build"],  # Wait for runtime to complete first
         timeout=1200.0,  # 20 minutes for builds
     )
 
@@ -313,14 +334,14 @@ def create_task_graph(framework: str, sha: str, repo_path: Path) -> Dict[str, 'B
     # - CARGO_PROFILE_DEV_OPT_LEVEL=0: No optimizations (faster compile)
     # - CARGO_BUILD_JOBS=$(nproc): Parallel compilation
     # - CARGO_PROFILE_DEV_CODEGEN_UNITS=256: More parallel code generation
-    cargo_cmd = "CARGO_INCREMENTAL=1 CARGO_PROFILE_DEV_OPT_LEVEL=0 CARGO_BUILD_JOBS=$(nproc) CARGO_PROFILE_DEV_CODEGEN_UNITS=256 cargo build --locked --profile dev --features dynamo-llm/block-manager && cd /workspace/lib/bindings/python && CARGO_INCREMENTAL=1 CARGO_PROFILE_DEV_OPT_LEVEL=0 CARGO_BUILD_JOBS=$(nproc) CARGO_PROFILE_DEV_CODEGEN_UNITS=256 maturin develop --uv --features block-manager && uv pip install -e ."
+    cargo_cmd = "CARGO_INCREMENTAL=1 CARGO_PROFILE_DEV_OPT_LEVEL=0 CARGO_BUILD_JOBS=$(nproc) CARGO_PROFILE_DEV_CODEGEN_UNITS=256 cargo build --locked --profile dev --features dynamo-llm/block-manager && cd /workspace/lib/bindings/python && CARGO_INCREMENTAL=1 CARGO_PROFILE_DEV_OPT_LEVEL=0 CARGO_BUILD_JOBS=$(nproc) CARGO_PROFILE_DEV_CODEGEN_UNITS=256 maturin develop --uv && uv pip install -e ."
     home_dir = str(Path.home())
     tasks[f"{framework}-dev-compilation"] = CommandTask(
         task_id=f"{framework}-dev-compilation",
         description=f"Run workspace compilation in {framework.upper()} dev container",
         command=f"{repo_path}/container/run.sh --image {dev_image_tag} --mount-workspace -v {home_dir}/.cargo:/root/.cargo -- bash -c '{cargo_cmd}'",
         input_image=dev_image_tag,
-        parents=[f"{framework}-dev"],
+        parents=[f"{framework}-dev-build"],
         timeout=600.0,  # 10 minutes for compilation
     )
 
@@ -346,16 +367,16 @@ def create_task_graph(framework: str, sha: str, repo_path: Path) -> Dict[str, 'B
 
     # Level 3: Local-dev image build
     local_dev_image_tag = f"dynamo:v0.1.0.dev.{sha}-{framework}-local-dev"
-    tasks[f"{framework}-local-dev"] = BuildTask(
-        task_id=f"{framework}-local-dev",
+    tasks[f"{framework}-local-dev-build"] = BuildTask(
+        task_id=f"{framework}-local-dev-build",
         description=f"Build {framework.upper()} local-dev image",
         command=f"{repo_path}/container/build.sh --dry-run --framework {framework} --target local-dev",
         input_image=dev_image_tag,
         output_image=local_dev_image_tag,
         docker_command_filter=rename_output_tag(local_dev_image_tag,
-            rename_input_tag(dev_image_tag,
-                filter_out_latest_tag(select_command(1)))),
-        parents=[f"{framework}-dev"],
+            rename_dev_base_tag(dev_image_tag,
+                filter_out_latest_tag(select_command(2)))),
+        parents=[f"{framework}-dev-build"],
         timeout=1200.0,  # 20 minutes for builds
     )
 
@@ -365,7 +386,7 @@ def create_task_graph(framework: str, sha: str, repo_path: Path) -> Dict[str, 'B
         description=f"Run workspace compilation in {framework.upper()} local-dev container",
         command=f"{repo_path}/container/run.sh --image {local_dev_image_tag} --mount-workspace -v {home_dir}/.cargo:/home/ubuntu/.cargo -- bash -c '{cargo_cmd}'",
         input_image=local_dev_image_tag,
-        parents=[f"{framework}-local-dev", f"{framework}-dev-chown"],
+        parents=[f"{framework}-local-dev-build", f"{framework}-dev-chown"],
         timeout=600.0,  # 10 minutes for compilation
     )
 
@@ -1165,12 +1186,7 @@ def parse_args() -> argparse.Namespace:
         "--skip-action-if-already-passed",
         "--skip",
         action="store_true",
-        help="Skip any task (build, compilation, sanity check) if it has already passed (checks for .PASS marker)",
-    )
-    parser.add_argument(
-        "--skip-build-if-image-exists",
-        action="store_true",
-        help="Skip build tasks if the output Docker image already exists on the system",
+        help="Skip any task if it has already passed (checks for .PASS marker) or if build output image already exists",
     )
     parser.add_argument(
         "--no-compile",
@@ -1337,7 +1353,6 @@ def execute_task_sequential(
     log_date: Optional[str] = None,
     dry_run: bool = False,
     skip_action_if_already_passed: bool = False,
-    skip_build_if_image_exists: bool = False,
     no_compile: bool = False,
 ) -> bool:
     """
@@ -1353,8 +1368,7 @@ def execute_task_sequential(
         log_dir: Directory for log files (None in dry-run)
         log_date: Date string for log files (None in dry-run)
         dry_run: If True, only print commands without executing
-        skip_action_if_already_passed: If True, skip any task if .PASS marker exists
-        skip_build_if_image_exists: If True, skip build tasks if Docker image already exists
+        skip_action_if_already_passed: If True, skip any task if .PASS marker exists or if build image exists
         no_compile: If True, skip all compilation tasks
         
     Returns:
@@ -1373,7 +1387,7 @@ def execute_task_sequential(
         if not execute_task_sequential(
             all_tasks, executed_tasks, failed_tasks, parent_id,
             repo_path, sha, log_dir, log_date, dry_run, skip_action_if_already_passed,
-            skip_build_if_image_exists, no_compile
+            no_compile
         ):
             # Parent failed
             if not task.run_even_if_deps_fail:
@@ -1399,7 +1413,7 @@ def execute_task_sequential(
                 execute_task_sequential(
                     all_tasks, executed_tasks, failed_tasks, child_id,
                     repo_path, sha, log_dir, log_date, dry_run, skip_action_if_already_passed,
-                    skip_build_if_image_exists, no_compile
+                    no_compile
                 )
         
         return True
@@ -1432,7 +1446,7 @@ def execute_task_sequential(
                 execute_task_sequential(
                     all_tasks, executed_tasks, failed_tasks, child_id,
                     repo_path, sha, log_dir, log_date, dry_run, skip_action_if_already_passed,
-                    skip_build_if_image_exists, no_compile
+                    no_compile
                 )
         
         return True
@@ -1459,11 +1473,16 @@ def execute_task_sequential(
         
         return False
 
-    # Check if we should skip build tasks if image already exists (--skip-build-if-image-exists)
-    if skip_build_if_image_exists and isinstance(task, BuildTask):
-        if task.image_exists():
-            logger.info(f"⊘ Skipping {task_id}: Docker image already exists ({task.output_image})")
-            task.mark_status_as(TaskStatus.SKIPPED, f"Docker image already exists: {task.output_image}")
+    # Check if we should skip any task if it has already passed or if build image exists
+    if skip_action_if_already_passed:
+        # For build tasks, also check if Docker image exists
+        skip_task = task.passed_previously() or (isinstance(task, BuildTask) and task.image_exists())
+        
+        if skip_task:
+            reason = "Docker image already exists" if isinstance(task, BuildTask) and task.image_exists() else "Already passed previously"
+            logger.info(f"⊘ Skipping {task_id}: {reason}")
+            task.mark_status_as(TaskStatus.SKIPPED, reason)
+            executed_tasks.add(task_id)
             
             # Process children
             for child_id in task.children:
@@ -1471,28 +1490,10 @@ def execute_task_sequential(
                     execute_task_sequential(
                         all_tasks, executed_tasks, failed_tasks, child_id,
                         repo_path, sha, log_dir, log_date, dry_run, skip_action_if_already_passed,
-                        skip_build_if_image_exists, no_compile
+                        no_compile
                     )
             
             return True
-        # else: image doesn't exist, continue with build
-    
-    # Check if we should skip any task if it has already passed
-    if skip_action_if_already_passed and task.passed_previously():
-        logger.info(f"⊘ Skipping {task_id}: Already passed")
-        task.mark_status_as(TaskStatus.SKIPPED, "Already passed previously")
-        executed_tasks.add(task_id)
-        
-        # Process children
-        for child_id in task.children:
-            if child_id not in executed_tasks:
-                execute_task_sequential(
-                    all_tasks, executed_tasks, failed_tasks, child_id,
-                    repo_path, sha, log_dir, log_date, dry_run, skip_action_if_already_passed,
-                    skip_build_if_image_exists, no_compile
-                )
-        
-        return True
 
     # Execute this task
     logger.info(f"Executing: {task_id} ({task.description})")
@@ -1591,7 +1592,7 @@ def execute_task_sequential(
                 execute_task_sequential(
                     all_tasks, executed_tasks, failed_tasks, child_id,
                     repo_path, sha, log_dir, log_date, dry_run, skip_action_if_already_passed,
-                    skip_build_if_image_exists, no_compile
+                    no_compile
                 )
     
     return task.status == TaskStatus.SUCCESS
@@ -1605,7 +1606,7 @@ def execute_task_parallel(
     log_dir: Optional[Path] = None,
     log_date: Optional[str] = None,
     dry_run: bool = False,
-    skip_if_image_exists: bool = False,
+    skip_if_passed: bool = False,
     no_compile: bool = False,
     max_workers: int = 4,
 ) -> Tuple[Set[str], Set[str]]:
@@ -1623,7 +1624,7 @@ def execute_task_parallel(
         log_dir: Directory for log files (None in dry-run)
         log_date: Date string for log files (None in dry-run)
         dry_run: If True, only print commands without executing
-        skip_if_image_exists: If True, skip build tasks if Docker image already exists
+        skip_if_passed: If True, skip any task if .PASS marker exists or if build image exists
         no_compile: If True, skip all compilation tasks
         max_workers: Maximum number of parallel threads
         
@@ -1715,12 +1716,16 @@ def execute_task_parallel(
             
             return False
         
-        # Check if we should skip this build task if image already exists
-        if skip_if_image_exists and isinstance(task, BuildTask):
-            if task.image_exists():
+        # Check if we should skip any task if it has already passed or if build image exists
+        if skip_if_passed:
+            # For build tasks, also check if Docker image exists
+            skip_task = task.passed_previously() or (isinstance(task, BuildTask) and task.image_exists())
+            
+            if skip_task:
+                reason = "Docker image already exists" if isinstance(task, BuildTask) and task.image_exists() else "Already passed previously"
                 with lock:
-                    logger.info(f"⊘ Skipping {task_id}: Docker image already exists ({task.output_image})")
-                task.mark_status_as(TaskStatus.SKIPPED, f"Docker image already exists: {task.output_image}")
+                    logger.info(f"⊘ Skipping {task_id}: {reason}")
+                task.mark_status_as(TaskStatus.SKIPPED, reason)
                 with lock:
                     executed_tasks.add(task_id)
                 return True
@@ -1923,7 +1928,8 @@ def initialize_frameworks_data_cache(
             frameworks_data[framework][target] = FrameworkTargetData()
             
             # Get BuildTask for this target to extract image info
-            task_id_for_build = f"{framework}-{target}"
+            # BuildTask IDs now have -build suffix: framework-target-build
+            task_id_for_build = f"{framework}-{target}-build"
             
             # Try to get from all_tasks (frameworks currently being run)
             if task_id_for_build in all_tasks and isinstance(all_tasks[task_id_for_build], BuildTask):
@@ -1944,8 +1950,8 @@ def initialize_frameworks_data_cache(
                     if image_size:
                         frameworks_data[framework][target].image_size = image_size
             
-            # Load previous build log (if exists)
-            log_file = BaseTask.get_log_file_path(log_dir, date_str, sha, f"{framework}-{target}")
+            # Load previous build log (if exists) - log files still use framework-target pattern
+            log_file = BaseTask.get_log_file_path(log_dir, date_str, sha, f"{framework}-{target}-build")
             if log_file.exists():
                 log_results = parse_log_file_results(log_file)
                 if log_results:
@@ -2036,7 +2042,9 @@ def update_frameworks_data_cache(task: 'BaseTask', use_absolute_urls: bool = Fal
     
     # Determine target and task type, then update cache
     if isinstance(task, BuildTask):
-        target = rest
+        # BuildTask IDs are like: framework-target-build
+        # Strip -build suffix to get target
+        target = rest.replace('-build', '') if rest.endswith('-build') else rest
         _frameworks_data_cache[framework][target].build = create_task_data_from_task(task)
         _frameworks_data_cache[framework][target].image_size = task.get_image_size()
         _frameworks_data_cache[framework][target].input_image = task.input_image
@@ -2465,10 +2473,16 @@ def main() -> int:
             # Check if there are uncommitted changes
             if git_utils_temp.is_dirty() or git_utils_temp.repo.untracked_files:
                 logger.warning("Repository has uncommitted changes. Stashing them before pull...")
-                git_utils_temp.repo.git.stash('save', '--include-untracked', 'Auto-stash before pull')
+                # Exclude .last_build_composite_sha from stash since it's not part of source code
+                git_utils_temp.repo.git.stash('push', '--include-untracked', '--', 
+                                                ':(exclude).last_build_composite_sha', 
+                                                '-m', 'Auto-stash before pull')
             
-            # Pull latest from main using GitPython
+            # Checkout main branch and pull latest
+            logger.info("Checking out main branch...")
+            git_utils_temp.repo.git.checkout('main')
             origin = git_utils_temp.repo.remotes.origin
+            logger.info("Pulling latest from origin/main...")
             origin.pull('main')
             logger.info("✓ Successfully pulled latest code from main")
         except Exception as e:
@@ -2521,6 +2535,13 @@ def main() -> int:
         logger.info("DRY-RUN MODE: Showing commands that would be executed")
     else:
         logger.info("DynamoDockerBuilder V2 - Starting")
+        
+        # Check if rebuild is needed based on composite SHA (container files)
+        # Only check in non-dry-run mode to avoid writing .last_build_composite_sha
+        dynamo_repo_utils = DynamoRepositoryUtils(repo_path)
+        if not dynamo_repo_utils.check_if_rebuild_needed(force_run=args.force_run):
+            logger.info("✅ No rebuild needed - exiting")
+            return 0
 
     # Track overall execution time
     execution_start_time = time.time()
@@ -2617,7 +2638,7 @@ def main() -> int:
             log_dir=log_dir if not args.dry_run else None,
             log_date=log_date if not args.dry_run else None,
             dry_run=args.dry_run,
-            skip_if_image_exists=args.skip_build_if_image_exists,
+            skip_if_passed=args.skip_action_if_already_passed,
             no_compile=args.no_compile,
             max_workers=4,  # TODO: make this configurable
         )
@@ -2637,7 +2658,6 @@ def main() -> int:
                 log_date=log_date if not args.dry_run else None,
                 dry_run=args.dry_run,
                 skip_action_if_already_passed=args.skip_action_if_already_passed,
-                skip_build_if_image_exists=args.skip_build_if_image_exists,
                 no_compile=args.no_compile,
             )
 
