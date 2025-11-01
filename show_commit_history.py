@@ -45,7 +45,7 @@ class CommitHistoryGenerator:
         self.repo_path = Path(repo_path)
         self.verbose = verbose
         self.logger = self._setup_logger()
-        self.cache_file = Path("~/nvidia/dynamo_ci/.commit_history_cache.json")
+        self.cache_file = self.repo_path / ".commit_history_cache.json"
 
     def _setup_logger(self) -> logging.Logger:
         """Setup logging configuration"""
@@ -61,12 +61,13 @@ class CommitHistoryGenerator:
 
         return logger
 
-    def show_commit_history(self, max_commits: int = 50, html_output: bool = False) -> int:
+    def show_commit_history(self, max_commits: int = 50, html_output: bool = False, output_path: Path = None) -> int:
         """Show recent commit history with composite SHAs
 
         Args:
             max_commits: Maximum number of commits to show
             html_output: Generate HTML output instead of terminal output
+            output_path: Path for HTML output file (optional, auto-detected if not provided)
 
         Returns:
             Exit code (0 for success, 1 for failure)
@@ -169,7 +170,14 @@ class CommitHistoryGenerator:
             # Generate HTML if requested
             if html_output:
                 html_content = self._generate_commit_history_html(commit_data)
-                output_path = Path("~/nvidia/dynamo_ci/logs/commit-history.html")
+                # Determine output path
+                if output_path is None:
+                    # Auto-detect: Write to logs directory within the repo (or current directory if logs doesn't exist)
+                    logs_dir = self.repo_path / "logs"
+                    if logs_dir.exists():
+                        output_path = logs_dir / "commit-history.html"
+                    else:
+                        output_path = Path("commit-history.html")
                 output_path.parent.mkdir(parents=True, exist_ok=True)
                 output_path.write_text(html_content)
                 print(f"\nHTML report generated: {output_path}")
@@ -552,8 +560,8 @@ Examples:
     parser.add_argument(
         '--repo-path',
         type=Path,
-        default=Path('~/nvidia/dynamo_ci'),
-        help='Path to the Dynamo repository (default: ~/nvidia/dynamo_ci)'
+        default=Path.cwd(),
+        help='Path to the Dynamo repository (default: current directory)'
     )
 
     parser.add_argument(
@@ -575,6 +583,12 @@ Examples:
         help='Generate HTML output instead of terminal output'
     )
 
+    parser.add_argument(
+        '--output',
+        type=Path,
+        help='Output path for HTML file (default: auto-detect from repo)'
+    )
+
     args = parser.parse_args()
 
     # Validate repository path
@@ -594,7 +608,8 @@ Examples:
 
     return generator.show_commit_history(
         max_commits=args.max_commits,
-        html_output=args.html
+        html_output=args.html,
+        output_path=args.output
     )
 
 
