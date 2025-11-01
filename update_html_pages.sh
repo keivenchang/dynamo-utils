@@ -3,16 +3,30 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # Wrapper script to update HTML pages (branch status and commit history)
+# This script is designed to be run by cron and requires absolute paths
+#
+# Environment Variables (optional):
+#   NVIDIA_HOME       - Base directory for logs and output files (default: parent of script dir)
+#
+# Cron Example:
+#   */30 * * * * /path/to/update_html_pages.sh
+#
+# Or with custom path:
+#   */30 * * * * NVIDIA_HOME=/var/www/html /path/to/update_html_pages.sh
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-OUTPUT_FILE="$HOME/nvidia/index.html"
-TEMP_FILE="$HOME/nvidia/.index.html.tmp"
-LOG_FILE="$HOME/nvidia/dynamo-utils/update_html_pages.log"
-COMMIT_HISTORY_FILE="$HOME/nvidia/dynamo_ci/logs/commit-history.html"
-COMMIT_HISTORY_TEMP="$HOME/nvidia/dynamo_ci/logs/.commit-history.html.tmp"
-LOGS_DIR="$HOME/nvidia/dynamo_ci/logs"
 
-cd "$HOME/nvidia" || exit 1
+# Base directory - can be overridden by environment variable
+# Default: parent directory of script location
+NVIDIA_HOME="${NVIDIA_HOME:-$(dirname "$SCRIPT_DIR")}"
+
+LOGS_DIR="$NVIDIA_HOME/logs"
+LOG_FILE="$LOGS_DIR/cron.log"
+BRANCHES_OUTPUT_FILE="$NVIDIA_HOME/index.html"
+BRANCHES_TEMP_FILE="$NVIDIA_HOME/.index.html.tmp"
+
+# Create logs directory if it doesn't exist
+mkdir -p "$LOGS_DIR"
 
 # Cleanup old log directories - keep only last 10 non-empty dated directories
 cleanup_old_logs() {
@@ -52,22 +66,40 @@ cleanup_old_logs() {
 cleanup_old_logs "$LOGS_DIR"
 
 # Update branch status HTML
-if python3 "$SCRIPT_DIR/show_dynamo_branches.py" --html > "$TEMP_FILE" 2>> "$LOG_FILE"; then
+cd "$NVIDIA_HOME" || exit 1
+if python3 "$SCRIPT_DIR/show_dynamo_branches.py" --html --output "$BRANCHES_TEMP_FILE" 2>> "$LOG_FILE"; then
     # Atomic move - only replace if generation succeeded
-    mv "$TEMP_FILE" "$OUTPUT_FILE"
-    echo "$(date '+%Y-%m-%d %H:%M:%S') - Updated $OUTPUT_FILE" >> "$LOG_FILE"
+    mv "$BRANCHES_TEMP_FILE" "$BRANCHES_OUTPUT_FILE"
+    echo "$(date '+%Y-%m-%d %H:%M:%S') - Updated $BRANCHES_OUTPUT_FILE" >> "$LOG_FILE"
 else
     # Script failed - remove temp file and log error
-    rm -f "$TEMP_FILE"
-    echo "$(date '+%Y-%m-%d %H:%M:%S') - ERROR: Failed to update $OUTPUT_FILE" >> "$LOG_FILE"
+    rm -f "$BRANCHES_TEMP_FILE"
+    echo "$(date '+%Y-%m-%d %H:%M:%S') - ERROR: Failed to update $BRANCHES_OUTPUT_FILE" >> "$LOG_FILE"
     exit 1
 fi
 
 # Generate commit history HTML
-# Note: show_commit_history.py writes HTML directly to commit-history.html file
-cd "$HOME/nvidia/dynamo_ci" || exit 1
-if python3 "$SCRIPT_DIR/show_commit_history.py" --html --max-commits 50 2>> "$LOG_FILE"; then
-    echo "$(date '+%Y-%m-%d %H:%M:%S') - Updated commit-history.html" >> "$LOG_FILE"
+DYNAMO_REPO="$NVIDIA_HOME/dynamo_latest"
+COMMIT_HISTORY_HTML="$DYNAMO_REPO/index.html"
+
+if [ ! -d "$DYNAMO_REPO/.git" ]; then
+    echo "$(date '+%Y-%m-%d %H:%M:%S') - ERROR: Not a git repository: $DYNAMO_REPO" >> "$LOG_FILE"
+    exit 1
+fi
+
+cd "$DYNAMO_REPO" || exit 1
+
+# Checkout main and pull latest
+echo "$(date '+%Y-%m-%d %H:%M:%S') - Updating $DYNAMO_REPO to latest main" >> "$LOG_FILE"
+if git checkout main >> "$LOG_FILE" 2>&1 && git pull origin main >> "$LOG_FILE" 2>&1; then
+    echo "$(date '+%Y-%m-%d %H:%M:%S') - Successfully updated to latest main" >> "$LOG_FILE"
+else
+    echo "$(date '+%Y-%m-%d %H:%M:%S') - WARNING: Failed to update git repository" >> "$LOG_FILE"
+    # Continue anyway - use whatever is currently checked out
+fi
+
+if python3 "$SCRIPT_DIR/show_commit_history.py" --repo-path . --html --max-commits 50 --output "$COMMIT_HISTORY_HTML" 2>> "$LOG_FILE"; then
+    echo "$(date '+%Y-%m-%d %H:%M:%S') - Updated $COMMIT_HISTORY_HTML" >> "$LOG_FILE"
 else
     echo "$(date '+%Y-%m-%d %H:%M:%S') - ERROR: Failed to update commit-history.html" >> "$LOG_FILE"
     exit 1
