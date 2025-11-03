@@ -87,6 +87,7 @@
         "source=${localEnv:HOME}/nvidia/dynamo-utils/.cursorrules,target=/workspace/.cursorrules,type=bind",
         "source=${localEnv:HOME}/.gnupg,target=/home/ubuntu/.gnupg,type=bind",
         "source=${localEnv:HOME}/.bash_aliases,target=/home/ubuntu/.bash_aliases,type=bind",
-        "source=${localEnv:HOME}/.gitconfig,target=/home/ubuntu/.gitconfig,type=bind"
+        "source=${localEnv:HOME}/.gitconfig,target=/home/ubuntu/.gitconfig,type=bind",
+        "source=${localEnv:HOME}/.cargo,target=/home/ubuntu/.cargo,type=bind"
     ]
 }
