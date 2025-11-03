@@ -7,7 +7,7 @@ BACKENDS=components/backends
 : ${DYN_FRONTEND_PORT:=8000}
 : ${DYN_BACKEND_PORT:=8081}
 
-# GPU memory utilization constants
+# GPU memory utilization defaults (can be overridden with --gpu-mem-fraction)
 GPU_MEMORY_UTIL_AGG=0.24      # Aggregated mode: single worker
 GPU_MEMORY_UTIL_DISAGG=0.24   # Disaggregated mode: per worker (decode + prefill)
 
@@ -295,6 +295,9 @@ OPTIONS:
                          Default: auto-detect (or "vllm" if auto-detection fails)
     --disagg              Run in disaggregated mode (prefill + decode workers)
                          Default: aggregated mode (single worker)
+    --gpu-mem-fraction FRACTION
+                         GPU memory fraction to use (0.0 to 1.0)
+                         Default: 0.24 (24% of GPU memory)
     --dryrun, --dry-run Show what would be executed without running
                        (dry run mode)
     --frontend             Run the frontend component
@@ -318,6 +321,7 @@ FRAMEWORK_SPECIFIED=false
 RUN_FRONTEND=false
 RUN_BACKEND=false
 DISAGG_MODE=false
+GPU_MEM_FRACTION_OVERRIDE=""  # Will override defaults if set
 QWEN_MODEL="Qwen/Qwen3-0.6B"
 TINYLLAMA_MODEL="TinyLlama/TinyLlama-1.1B-Chat-v1.0"
 # deepseek-ai/DeepSeek-R1-Distill-Llama-8B
@@ -343,6 +347,10 @@ while [[ $# -gt 0 ]]; do
         --disagg)
             DISAGG_MODE=true
             shift
+            ;;
+        --gpu-mem-fraction)
+            GPU_MEM_FRACTION_OVERRIDE="$2"
+            shift 2
             ;;
         --dryrun|--dry-run)
             DRY_RUN=true
@@ -574,6 +582,13 @@ if [ "$RUN_BACKEND" = true ]; then
     fi
 fi
 
+# Apply GPU memory fraction override if specified
+if [ -n "$GPU_MEM_FRACTION_OVERRIDE" ]; then
+    GPU_MEMORY_UTIL_AGG="$GPU_MEM_FRACTION_OVERRIDE"
+    GPU_MEMORY_UTIL_DISAGG="$GPU_MEM_FRACTION_OVERRIDE"
+    echo "Using GPU memory fraction: $GPU_MEM_FRACTION_OVERRIDE"
+fi
+
 # Set framework-specific arguments
 BATCH_SIZE=2
 if [ "$FRAMEWORK" = "vllm" ]; then
@@ -746,7 +761,7 @@ if [ "$RUN_BACKEND" = true ]; then
             PREFILL_FLAG="--is-prefill-worker"
             DECODE_FLAG=""
         elif [ "$FRAMEWORK" = "sglang" ]; then
-            DISAGG_FRAMEWORK_ARGS="--mem-fraction-static 0.48 --page-size 16 --chunked-prefill-size 4096 --max-prefill-tokens 4096 --enable-memory-saver --delete-ckpt-after-loading --max-running-requests $BATCH_SIZE --enable-metrics --disaggregation-bootstrap-port 12345 --host 0.0.0.0 --disaggregation-transfer-backend nixl"
+            DISAGG_FRAMEWORK_ARGS="--mem-fraction-static $GPU_MEMORY_UTIL_DISAGG --page-size 16 --chunked-prefill-size 4096 --max-prefill-tokens 4096 --enable-memory-saver --delete-ckpt-after-loading --max-running-requests $BATCH_SIZE --enable-metrics --disaggregation-bootstrap-port 12345 --host 0.0.0.0 --disaggregation-transfer-backend nixl"
             PREFILL_FLAG="--disaggregation-mode prefill"
             DECODE_FLAG="--disaggregation-mode decode"
         elif [ "$FRAMEWORK" = "trtllm" ]; then
