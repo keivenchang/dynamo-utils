@@ -13,6 +13,7 @@ import argparse
 import git
 import json
 import logging
+import os
 import re
 import subprocess
 import sys
@@ -61,13 +62,14 @@ class CommitHistoryGenerator:
 
         return logger
 
-    def show_commit_history(self, max_commits: int = 50, html_output: bool = False, output_path: Path = None) -> int:
+    def show_commit_history(self, max_commits: int = 50, html_output: bool = False, output_path: Path = None, logs_dir: Path = None) -> int:
         """Show recent commit history with composite SHAs
 
         Args:
             max_commits: Maximum number of commits to show
             html_output: Generate HTML output instead of terminal output
             output_path: Path for HTML output file (optional, auto-detected if not provided)
+            logs_dir: Path to logs directory for build reports (optional, defaults to repo_path/logs)
 
         Returns:
             Exit code (0 for success, 1 for failure)
@@ -105,10 +107,10 @@ class CommitHistoryGenerator:
                 fixed_width = sha_width + composite_width + date_width + author_width + separator_width
                 message_width = max(30, term_width - fixed_width)
 
-                print(f"\nCommit History with Composite SHAs")
+                print(f"\nCommit History with Composite Docker SHAs")
                 print(f"Repository: {self.repo_path}")
                 print(f"Showing {len(commits)} most recent commits:\n")
-                print(f"{'Commit SHA':<{sha_width}} {'Composite SHA':<{composite_width}} {'Date':<{date_width}} {'Author':<{author_width}} Message")
+                print(f"{'Commit SHA':<{sha_width}} {'Composite Docker SHA':<{composite_width}} {'Date':<{date_width}} {'Author':<{author_width}} Message")
                 print("-" * term_width)
 
             try:
@@ -144,6 +146,18 @@ class CommitHistoryGenerator:
                             composite_sha = "ERROR"
 
                     if html_output:
+                        # Get commit stats (files changed, insertions, deletions)
+                        stats = commit.stats.total
+                        files_changed = stats['files']
+                        insertions = stats['insertions']
+                        deletions = stats['deletions']
+
+                        # Get full commit message
+                        full_message = commit.message.strip()
+
+                        # Get list of changed files
+                        changed_files = list(commit.stats.files.keys())
+
                         # Collect data for HTML generation
                         commit_data.append({
                             'sha_short': sha_short,
@@ -151,7 +165,12 @@ class CommitHistoryGenerator:
                             'composite_sha': composite_sha,
                             'date': date_str,
                             'author': author_name,
-                            'message': message_first_line
+                            'message': message_first_line,
+                            'full_message': full_message,
+                            'files_changed': files_changed,
+                            'insertions': insertions,
+                            'deletions': deletions,
+                            'changed_files': changed_files
                         })
                         if self.verbose:
                             print(f"Processed commit {i+1}/{len(commits)}: {sha_short}")
@@ -169,7 +188,10 @@ class CommitHistoryGenerator:
 
             # Generate HTML if requested
             if html_output:
-                html_content = self._generate_commit_history_html(commit_data)
+                # Set default logs_dir if not provided
+                if logs_dir is None:
+                    logs_dir = self.repo_path / "logs"
+                html_content = self._generate_commit_history_html(commit_data, logs_dir)
                 # Determine output path
                 if output_path is None:
                     # Auto-detect: Write to logs directory within the repo (or current directory if logs doesn't exist)
@@ -206,11 +228,12 @@ class CommitHistoryGenerator:
             self.logger.error(f"Failed to get commit history: {e}")
             return 1
 
-    def _generate_commit_history_html(self, commit_data: List[dict]) -> str:
+    def _generate_commit_history_html(self, commit_data: List[dict], logs_dir: Path) -> str:
         """Generate HTML report for commit history with Docker image detection
 
         Args:
             commit_data: List of commit dictionaries with sha_short, sha_full, composite_sha, date, author, message
+            logs_dir: Path to logs directory for build reports
 
         Returns:
             HTML content as string
@@ -321,8 +344,9 @@ summary:hover {
     margin: 4px 0;
 }
 .date {
+    font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
     color: #57606a;
-    font-size: 14px;
+    font-size: 12px;
 }
 .author {
     color: #24292f;
@@ -350,8 +374,10 @@ function toggleDockerImages(event, linkElement) {
         // Toggle visibility
         if (dockerRow.style.display === 'none') {
             dockerRow.style.display = 'table-row';
+            linkElement.textContent = '▼';  // Point down when expanded
         } else {
             dockerRow.style.display = 'none';
+            linkElement.textContent = '▶';  // Point right when collapsed
         }
     }
 }
@@ -380,7 +406,7 @@ function toggleDockerImages(event, linkElement) {
 <thead>
 <tr>
 <th style="width: 120px;">Commit SHA</th>
-<th style="width: 140px;">Composite SHA</th>
+<th style="width: 140px;">Composite Docker SHA</th>
 <th style="width: 180px;">Date/Time (PDT)</th>
 <th style="width: 150px;">Author</th>
 <th>Message</th>
@@ -389,6 +415,22 @@ function toggleDockerImages(event, linkElement) {
 <tbody>
 """
 
+        # Track composite SHA changes for color alternation
+        # Use colorblind-friendly multi-color scheme
+        # Colors chosen from Paul Tol's colorblind-safe palette
+        bg_color_scheme = [
+            '#bbccee',  # Light blue
+            '#cceeff',  # Pale cyan
+            '#ccddaa',  # Light green-yellow
+            '#eeeebb',  # Light yellow
+            '#ffcccc',  # Light pink
+            '#dddddd',  # Light gray
+            '#ffe5b4',  # Light peach
+            '#e7d4f7',  # Light lavender
+        ]
+        current_color_index = 0
+        previous_composite_sha = None
+
         for commit in commit_data:
             sha_short = commit['sha_short']
             sha_full = commit['sha_full']
@@ -396,6 +438,15 @@ function toggleDockerImages(event, linkElement) {
             date_str = commit['date']
             author = commit['author']
             message = commit['message']
+
+            # Check if composite SHA changed from previous commit
+            if previous_composite_sha is not None and composite_sha != previous_composite_sha:
+                # Cycle to next color when composite SHA changes
+                current_color_index = (current_color_index + 1) % len(bg_color_scheme)
+
+            # Get current background color for this composite SHA
+            composite_bg_color = bg_color_scheme[current_color_index]
+            previous_composite_sha = composite_sha
 
             # Create GitHub commit link
             commit_link = f"https://github.com/ai-dynamo/dynamo/commit/{sha_full}"
@@ -415,11 +466,35 @@ function toggleDockerImages(event, linkElement) {
             # Check if Docker images exist for this commit
             has_docker_images = sha_short in docker_images and docker_images[sha_short]
 
-            # Make composite SHA clickable if Docker images exist
+            # Build composite SHA cell with logs link (if exists) and Docker images toggle
             if has_docker_images:
-                composite_sha_html = f'<a href="#" class="composite-sha-link" onclick="toggleDockerImages(event, this); return false;">{composite_sha}</a>'
+                # Search for build log across all date directories (not just commit date)
+                # Logs are organized by build date, not commit date
+                log_path = None
+                log_filename = f"*.{sha_short}.report.html"
+
+                # Search in logs_dir for the report file
+                import glob
+                search_pattern = str(logs_dir / "*" / log_filename)
+                matching_logs = glob.glob(search_pattern)
+
+                if matching_logs:
+                    # Use the most recent log if multiple exist
+                    log_path = Path(sorted(matching_logs)[-1])
+
+                # Make composite SHA link to logs if they exist, otherwise plain text
+                if log_path and log_path.exists():
+                    # Convert logs_dir to relative path from ~/nvidia/ for URL
+                    log_url_path = str(log_path).replace('~/', '')
+                    log_url = f"http://keivenc-linux/{log_url_path}"
+                    composite_sha_html = f'<span style="background-color: {composite_bg_color}; padding: 2px 6px; border-radius: 3px;"><a href="{log_url}" target="_blank" style="color: #0969da; text-decoration: none;" title="View build logs">{composite_sha}</a></span>'
+                else:
+                    composite_sha_html = f'<span style="background-color: {composite_bg_color}; padding: 2px 6px; border-radius: 3px;">{composite_sha}</span>'
+
+                # Add triangle icon to toggle Docker images
+                composite_sha_html += f' <a href="#" class="composite-sha-link" onclick="toggleDockerImages(event, this); return false;" style="text-decoration: none; margin-left: 4px;" title="Show Docker images">▶</a>'
             else:
-                composite_sha_html = composite_sha
+                composite_sha_html = f'<span style="background-color: {composite_bg_color}; padding: 2px 6px; border-radius: 3px;">{composite_sha}</span>'
 
             html += f"""
 <tr>
@@ -436,10 +511,44 @@ function toggleDockerImages(event, linkElement) {
             # Add Docker images row if any exist for this SHA
             if has_docker_images:
                 images = docker_images[sha_short]
+
+                # Get commit details
+                full_msg = commit['full_message']
+                files_changed = commit['files_changed']
+                insertions = commit['insertions']
+                deletions = commit['deletions']
+                changed_files = commit['changed_files']
+
+                # Escape HTML in full message
+                full_msg_html = full_msg.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;').replace('\n', '<br>')
+
                 html += f"""
 <tr class="docker-images-row" style="display: none;">
 <td colspan="5" style="padding: 0; background-color: #f6f8fa;">
-<div style="padding: 4px 8px; border-top: 1px solid #d0d7de;">
+<div style="padding: 8px 12px; border-top: 1px solid #d0d7de;">
+<!-- Commit Details Section -->
+<div style="margin-bottom: 12px; padding: 8px; background-color: white; border: 1px solid #d0d7de; border-radius: 4px;">
+<div style="font-weight: 600; margin-bottom: 6px; font-size: 13px;">Commit Message:</div>
+<div style="font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace; font-size: 12px; color: #24292f; white-space: pre-wrap; margin-bottom: 8px;">{full_msg_html}</div>
+<div style="font-size: 12px; color: #57606a; margin-top: 6px;">
+<span style="color: #1a7f37; font-weight: 500;">+{insertions}</span>
+<span style="color: #cf222e; font-weight: 500;">-{deletions}</span>
+<span style="margin-left: 8px;">{files_changed} file(s) changed</span>
+</div>
+<details style="margin-top: 8px;">
+<summary style="cursor: pointer; color: #0969da; font-size: 12px;">Show changed files ({len(changed_files)})</summary>
+<div style="margin-top: 4px; font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace; font-size: 11px;">
+"""
+                for file in changed_files:
+                    html += f'<div style="padding: 2px 0;">{file}</div>\n'
+
+                html += """
+</div>
+</details>
+</div>
+
+<!-- Docker Images Section -->
+<div style="font-weight: 600; margin-bottom: 4px; font-size: 13px;">Docker Images:</div>
 <table style="width: 100%; border: none; background-color: white; border-collapse: collapse;">
 <thead>
 <tr>
@@ -589,6 +698,12 @@ Examples:
         help='Output path for HTML file (default: auto-detect from repo)'
     )
 
+    parser.add_argument(
+        '--logs-dir',
+        type=Path,
+        help='Path to logs directory for build reports (default: repo-path/logs)'
+    )
+
     args = parser.parse_args()
 
     # Validate repository path
@@ -609,7 +724,8 @@ Examples:
     return generator.show_commit_history(
         max_commits=args.max_commits,
         html_output=args.html,
-        output_path=args.output
+        output_path=args.output,
+        logs_dir=args.logs_dir
     )
 
 

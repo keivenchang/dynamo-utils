@@ -613,8 +613,10 @@ class LocalRepoScanner:
                             pr_node.add_child(failed_test_node)
 
                         # Add rerun link after all failed checks
-                        if pr.rerun_url and pr.failed_checks[0].run_id:
-                            rerun_node = RerunLinkNode(label="", url=pr.rerun_url, run_id=pr.failed_checks[0].run_id)
+                        # Find the first GitHub Actions run_id for the rerun command
+                        github_run_id = next((check.run_id for check in pr.failed_checks if check.run_id), None)
+                        if pr.rerun_url and github_run_id:
+                            rerun_node = RerunLinkNode(label="", url=pr.rerun_url, run_id=github_run_id)
                             pr_node.add_child(rerun_node)
 
                 pr_section.add_child(branch_node)

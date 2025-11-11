@@ -64,7 +64,6 @@ DEBUG=false               # Flag for --debug mode
 BUILD_RUST=true          # Flag for --rust-only/--rust (default: true)
 BUILD_PYTHON=true        # Flag for --py-only/--py (default: true)
 DRY_RUN=false            # Flag for --dryrun/--dry-run mode
-ENABLE_BLOCK_MANAGER=true  # Flag for --block-manager feature (default: true)
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -88,10 +87,6 @@ while [[ $# -gt 0 ]]; do
             if [ -z "$BUILD_TYPE" ]; then
                 BUILD_TYPE="development"
             fi
-            shift
-            ;;
-        --no-block-manager)
-            ENABLE_BLOCK_MANAGER=false
             shift
             ;;
         --cargo-clean|--rust-clean)
@@ -131,10 +126,6 @@ BUILD COMPONENTS (mutually exclusive):
   --py-only, --py         Build only Python components (wheel/maturin/uv)
                           Default: Build both Rust and Python components
 
-FEATURE FLAGS:
-  --no-block-manager      Disable block-manager feature (dynamo-llm/block-manager)
-                          Default: Enabled
-
 OTHER OPTIONS:
   --clean                 Clean both Rust build artifacts and Python packages (can be used standalone or with build)
   --cargo-clean           Clean Rust build artifacts (can be used standalone or with build)
@@ -149,8 +140,7 @@ EXAMPLES:
     • ./compile.sh --python-clean       # Only remove Python packages
 
   Combined operations:
-    • ./compile.sh                      # Build in development mode (with block-manager)
-    • ./compile.sh --no-block-manager   # Build without block-manager feature
+    • ./compile.sh                      # Build in development mode
     • ./compile.sh --release --cargo-clean  # Clean then build optimized wheels
     • ./compile.sh --rust-only          # Build only Rust components in development mode
     • ./compile.sh --py-only            # Build only Python components in development mode
@@ -368,7 +358,7 @@ if [ -n "$BUILD_TYPE" ]; then
         exit 1
     fi
 
-    dry_run_echo "Build: $BUILD_TYPE mode (Rust=$BUILD_RUST, Python=$BUILD_PYTHON, Block-Manager=$ENABLE_BLOCK_MANAGER)"
+    dry_run_echo "Build: $BUILD_TYPE mode (Rust=$BUILD_RUST, Python=$BUILD_PYTHON)"
 
     # ==============================================================================
     # WORKSPACE SETUP
@@ -430,16 +420,10 @@ if [ -n "$BUILD_TYPE" ]; then
     # Build the Rust components that will become the Python extension
 
     if [ "$BUILD_RUST" = true ]; then
-        # Build feature flags
-        CARGO_FEATURES=""
-        if [ "$ENABLE_BLOCK_MANAGER" = true ]; then
-            CARGO_FEATURES="--features dynamo-llm/block-manager"
-        fi
-
         if [ "$BUILD_TYPE" = "development" ]; then
-            cmd bash -c "CARGO_PROFILE_DEV_OPT_LEVEL=0 CARGO_BUILD_JOBS=$CARGO_BUILD_JOBS CARGO_PROFILE_DEV_CODEGEN_UNITS=256 cargo build --locked $CARGO_FEATURES --workspace"
+            cmd bash -c "CARGO_PROFILE_DEV_OPT_LEVEL=0 CARGO_BUILD_JOBS=$CARGO_BUILD_JOBS CARGO_PROFILE_DEV_CODEGEN_UNITS=256 cargo build --locked --features dynamo-llm/block-manager --workspace"
         else
-            cmd cargo build --release --locked $CARGO_FEATURES --workspace
+            cmd cargo build --release --locked --features dynamo-llm/block-manager --workspace
         fi
     else
         dry_run_echo "Skipping Rust build (--py-only mode)"
@@ -471,19 +455,13 @@ if [ -n "$BUILD_TYPE" ]; then
 
         dry_run_echo "Building ai-dynamo-runtime package..."
 
-        # Build maturin feature flags
-        MATURIN_FEATURES=""
-        if [ "$ENABLE_BLOCK_MANAGER" = true ]; then
-            MATURIN_FEATURES="--features block-manager"
-        fi
-
         if [ "$BUILD_TYPE" = "development" ]; then
-            cmd bash -c "cd $WORKSPACE_DIR/lib/bindings/python && CARGO_PROFILE_DEV_OPT_LEVEL=0 CARGO_BUILD_JOBS=$CARGO_BUILD_JOBS CARGO_PROFILE_DEV_CODEGEN_UNITS=256 maturin develop --uv $MATURIN_FEATURES"
+            cmd bash -c "cd $WORKSPACE_DIR/lib/bindings/python && CARGO_PROFILE_DEV_OPT_LEVEL=0 CARGO_BUILD_JOBS=$CARGO_BUILD_JOBS CARGO_PROFILE_DEV_CODEGEN_UNITS=256 maturin develop --uv"
 
             dry_run_echo "Installing components package in editable mode..."
             cmd bash -c "cd $WORKSPACE_DIR/ && uv pip install -e ."
         else
-            cmd bash -c "cd $WORKSPACE_DIR/lib/bindings/python && maturin build --release $MATURIN_FEATURES --out $WHEEL_OUTPUT_DIR"
+            cmd bash -c "cd $WORKSPACE_DIR/lib/bindings/python && maturin build --release --out $WHEEL_OUTPUT_DIR"
 
             if [ "$DRY_RUN" = false ]; then
                 if ls $WHEEL_OUTPUT_DIR/*.whl 1> /dev/null 2>&1; then

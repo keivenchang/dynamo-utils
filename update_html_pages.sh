@@ -98,7 +98,7 @@ else
     # Continue anyway - use whatever is currently checked out
 fi
 
-if python3 "$SCRIPT_DIR/show_commit_history.py" --repo-path . --html --max-commits 50 --output "$COMMIT_HISTORY_HTML" 2>> "$LOG_FILE"; then
+if python3 "$SCRIPT_DIR/show_commit_history.py" --repo-path . --html --max-commits 200 --output "$COMMIT_HISTORY_HTML" 2>> "$LOG_FILE"; then
     echo "$(date '+%Y-%m-%d %H:%M:%S') - Updated $COMMIT_HISTORY_HTML" >> "$LOG_FILE"
 else
     echo "$(date '+%Y-%m-%d %H:%M:%S') - ERROR: Failed to update commit-history.html" >> "$LOG_FILE"

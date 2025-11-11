@@ -2,7 +2,7 @@
 
 set -euo pipefail
 
-BACKENDS=components/backends
+BACKENDS=examples/backends
 # Use existing environment variables if set, otherwise use defaults
 : ${DYN_FRONTEND_PORT:=8000}
 : ${DYN_BACKEND_PORT:=8081}
@@ -765,9 +765,9 @@ if [ "$RUN_BACKEND" = true ]; then
             PREFILL_FLAG="--disaggregation-mode prefill"
             DECODE_FLAG="--disaggregation-mode decode"
         elif [ "$FRAMEWORK" = "trtllm" ]; then
-            # TensorRT-LLM disaggregated mode uses trtllm-small YAML configs
-            PREFILL_YAML="$WORKSPACE_DIR/recipes/qwen3/trtllm-small/prefill.yaml"
-            DECODE_YAML="$WORKSPACE_DIR/recipes/qwen3/trtllm-small/decode.yaml"
+            # TensorRT-LLM disaggregated mode uses test YAML configs
+            PREFILL_YAML="$WORKSPACE_DIR/tests/serve/configs/trtllm/prefill.yaml"
+            DECODE_YAML="$WORKSPACE_DIR/tests/serve/configs/trtllm/decode.yaml"
             DISAGG_FRAMEWORK_ARGS="--publish-events-and-metrics"
             PREFILL_FLAG="--disaggregation-mode prefill --extra-engine-args $PREFILL_YAML"
             DECODE_FLAG="--disaggregation-mode decode --extra-engine-args $DECODE_YAML"
@@ -783,10 +783,10 @@ if [ "$RUN_BACKEND" = true ]; then
         # Launch prefill worker FIRST so it can register before decode worker tries to connect
         dry_run_echo "Launching prefill worker on port $PREFILL_PORT ($GPU_MEM_PERCENT GPU memory)..."
         if [ "$DRY_RUN" = false ]; then
-            ( set -x; DYN_LOG=info DYN_SYSTEM_ENABLED=true DYN_SYSTEM_PORT=$PREFILL_PORT python3 -m dynamo.$FRAMEWORK --model "$MODEL" $DISAGG_FRAMEWORK_ARGS $PREFILL_FLAG ) 2>&1 | sed 's/^/[PREFILL] /' &
+            ( set -x; DYN_LOG=info DYN_SYSTEM_PORT=$PREFILL_PORT python3 -m dynamo.$FRAMEWORK --model "$MODEL" $DISAGG_FRAMEWORK_ARGS $PREFILL_FLAG ) 2>&1 | sed 's/^/[PREFILL] /' &
             PREFILL_PID=$!
         else
-            ( set -x; : DYN_LOG=info DYN_SYSTEM_ENABLED=true DYN_SYSTEM_PORT=$PREFILL_PORT python3 -m dynamo.$FRAMEWORK --model "$MODEL" $DISAGG_FRAMEWORK_ARGS $PREFILL_FLAG ) 2>&1 | sed 's/^+ : /+ /'
+            ( set -x; : DYN_LOG=info DYN_SYSTEM_PORT=$PREFILL_PORT python3 -m dynamo.$FRAMEWORK --model "$MODEL" $DISAGG_FRAMEWORK_ARGS $PREFILL_FLAG ) 2>&1 | sed 's/^+ : /+ /'
             dry_run_echo "PREFILL_PID=\$!"
         fi
 
@@ -821,19 +821,19 @@ if [ "$RUN_BACKEND" = true ]; then
         # Launch decode worker SECOND (after prefill worker is ready)
         dry_run_echo "Launching decode worker on port $DECODE_PORT ($GPU_MEM_PERCENT GPU memory)..."
         if [ "$DRY_RUN" = false ]; then
-            ( set -x; DYN_LOG=info DYN_SYSTEM_ENABLED=true DYN_SYSTEM_PORT=$DECODE_PORT python3 -m dynamo.$FRAMEWORK --model "$MODEL" $DISAGG_FRAMEWORK_ARGS $DECODE_FLAG ) 2>&1 | sed 's/^/[DECODE] /' &
+            ( set -x; DYN_LOG=info DYN_SYSTEM_PORT=$DECODE_PORT python3 -m dynamo.$FRAMEWORK --model "$MODEL" $DISAGG_FRAMEWORK_ARGS $DECODE_FLAG ) 2>&1 | sed 's/^/[DECODE] /' &
             BACKEND_PID=$!
         else
-            ( set -x; : DYN_LOG=info DYN_SYSTEM_ENABLED=true DYN_SYSTEM_PORT=$DECODE_PORT python3 -m dynamo.$FRAMEWORK --model "$MODEL" $DISAGG_FRAMEWORK_ARGS $DECODE_FLAG ) 2>&1 | sed 's/^+ : /+ /'
+            ( set -x; : DYN_LOG=info DYN_SYSTEM_PORT=$DECODE_PORT python3 -m dynamo.$FRAMEWORK --model "$MODEL" $DISAGG_FRAMEWORK_ARGS $DECODE_FLAG ) 2>&1 | sed 's/^+ : /+ /'
             dry_run_echo "BACKEND_PID=\$!"
         fi
     else
         # Aggregated mode: Launch single worker
         if [ "$DRY_RUN" = false ]; then
-            ( set -x; DYN_LOG=info DYN_SYSTEM_ENABLED=true DYN_SYSTEM_PORT=$DYN_BACKEND_PORT python -m dynamo.$FRAMEWORK --model "$MODEL" $FRAMEWORK_ARGS ) &
+            ( set -x; DYN_LOG=info DYN_SYSTEM_PORT=$DYN_BACKEND_PORT python -m dynamo.$FRAMEWORK --model "$MODEL" $FRAMEWORK_ARGS ) &
             BACKEND_PID=$!
         else
-            ( set -x; : DYN_LOG=info DYN_SYSTEM_ENABLED=true DYN_SYSTEM_PORT=$DYN_BACKEND_PORT python -m dynamo.$FRAMEWORK --model "$MODEL" $FRAMEWORK_ARGS ) 2>&1 | sed 's/^+ : /+ /'
+            ( set -x; : DYN_LOG=info DYN_SYSTEM_PORT=$DYN_BACKEND_PORT python -m dynamo.$FRAMEWORK --model "$MODEL" $FRAMEWORK_ARGS ) 2>&1 | sed 's/^+ : /+ /'
             dry_run_echo "BACKEND_PID=\$!"
         fi
     fi
@@ -842,9 +842,9 @@ fi
 # Start frontend AFTER backend (so backend is ready when frontend starts accepting requests)
 if [ "$RUN_FRONTEND" = true ]; then
     if [ "$DISAGG_MODE" = true ]; then
-        cmd python -m dynamo.frontend --router-mode kv &
+        cmd env -u DYN_SYSTEM_PORT python -m dynamo.frontend --http-port $DYN_FRONTEND_PORT --router-mode kv &
     else
-        cmd python -m dynamo.frontend &
+        cmd env -u DYN_SYSTEM_PORT python -m dynamo.frontend --http-port $DYN_FRONTEND_PORT &
     fi
     if [ "$DRY_RUN" = false ]; then
         FRONTEND_PID=$!

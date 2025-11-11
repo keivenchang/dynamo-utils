@@ -15,6 +15,7 @@ Architecture:
 """
 
 import argparse
+import atexit
 import glob
 import logging
 import os
@@ -2445,6 +2446,43 @@ def print_dependency_tree(frameworks: List[str], sha: str, repo_path: Path, verb
     sys.stdout.flush()  # Ensure tree prints before any logger output
 
 
+def check_running_build_processes() -> list[str]:
+    """
+    Check for actually running docker build processes using ps.
+
+    This is more reliable than checking .RUNNING marker files, which can become
+    stale if a build crashes or is killed without cleanup.
+
+    Returns:
+        List of running build process descriptions (empty if none found)
+    """
+    try:
+        # Check for running docker build processes
+        result = subprocess.run(
+            ['ps', 'aux'],
+            capture_output=True,
+            text=True,
+            timeout=5
+        )
+
+        running_builds = []
+        for line in result.stdout.splitlines():
+            # Look for docker build commands and dynamo_docker_builder.py processes
+            if 'docker build' in line or ('python' in line and 'dynamo_docker_builder.py' in line and '--parallel' not in line):
+                # Exclude the current process (this check) and grep itself
+                if 'ps aux' not in line and 'grep' not in line:
+                    # Extract just the relevant part of the command
+                    parts = line.split()
+                    if len(parts) >= 11:
+                        cmd = ' '.join(parts[10:])[:80]  # First 80 chars of command
+                        running_builds.append(cmd)
+
+        return running_builds
+    except Exception as e:
+        # If ps check fails, return empty list to allow build to proceed
+        return []
+
+
 def main() -> int:
     """Main entry point"""
     args = parse_args()
@@ -2458,6 +2496,46 @@ def main() -> int:
         logger.error(f"Repository path does not exist: {repo_path}")
         return 1
 
+    # Check for lock file to prevent concurrent runs
+    lock_file = repo_path / ".dynamo_builder.lock"
+    if lock_file.exists():
+        try:
+            with open(lock_file, 'r') as f:
+                lock_info = f.read().strip().split('\n')
+                lock_pid = int(lock_info[0])
+                lock_time = lock_info[1] if len(lock_info) > 1 else "unknown"
+
+            # Check if the process is still running
+            try:
+                os.kill(lock_pid, 0)  # Signal 0 checks if process exists
+                logger.warning(f"Another instance (PID {lock_pid}) is already running since {lock_time}")
+                logger.info("Exiting to avoid concurrent builds")
+                return 0  # Exit gracefully, not an error
+            except OSError:
+                # Process doesn't exist, stale lock file
+                logger.warning(f"Found stale lock file from PID {lock_pid}, removing it")
+                lock_file.unlink()
+        except (ValueError, IndexError, IOError) as e:
+            logger.warning(f"Invalid lock file, removing it: {e}")
+            lock_file.unlink()
+
+    # Create lock file with current PID and timestamp
+    try:
+        with open(lock_file, 'w') as f:
+            f.write(f"{os.getpid()}\n{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+    except IOError as e:
+        logger.error(f"Failed to create lock file: {e}")
+        return 1
+
+    # Ensure lock file is removed on exit
+    def cleanup_lock():
+        if lock_file.exists():
+            try:
+                lock_file.unlink()
+            except:
+                pass
+    atexit.register(cleanup_lock)
+
     # Validate conflicting flags
     if args.pull_latest and args.repo_sha:
         logger.error("Cannot use --pull-latest and --repo-sha together. They conflict in intent.")
@@ -2465,29 +2543,53 @@ def main() -> int:
 
     # Pull latest code if requested
     if args.pull_latest:
-        logger.info("Pulling latest code from main branch...")
-        try:
-            # Initialize GitUtils to check repo status
-            git_utils_temp = GitUtils(repo_path)
-            
-            # Check if there are uncommitted changes
-            if git_utils_temp.is_dirty() or git_utils_temp.repo.untracked_files:
-                logger.warning("Repository has uncommitted changes. Stashing them before pull...")
-                # Exclude .last_build_composite_sha from stash since it's not part of source code
-                git_utils_temp.repo.git.stash('push', '--include-untracked', '--', 
-                                                ':(exclude).last_build_composite_sha', 
-                                                '-m', 'Auto-stash before pull')
-            
-            # Checkout main branch and pull latest
-            logger.info("Checking out main branch...")
-            git_utils_temp.repo.git.checkout('main')
-            origin = git_utils_temp.repo.remotes.origin
-            logger.info("Pulling latest from origin/main...")
-            origin.pull('main')
-            logger.info("✓ Successfully pulled latest code from main")
-        except Exception as e:
-            logger.error(f"Failed to pull latest code: {e}")
-            return 1
+        # Check if another build process is actually running using ps
+        running_processes = check_running_build_processes()
+        if running_processes:
+            logger.warning(f"Skipping pull - found {len(running_processes)} running build process(es):")
+            for proc in running_processes[:5]:  # Show first 5
+                logger.warning(f"  {proc}")
+            if len(running_processes) > 5:
+                logger.warning(f"  ... and {len(running_processes) - 5} more")
+            logger.info("Will retry pull on next run when builds complete")
+            # Don't return error - just skip the pull and continue
+            args.pull_latest = False  # Disable pull for this run
+
+        if args.pull_latest:  # Only proceed if not disabled above
+            logger.info("Pulling latest code from main branch...")
+            try:
+                # Initialize GitUtils to check repo status
+                git_utils_temp = GitUtils(repo_path)
+
+                # Reset all Cargo.lock files before pull (they can be regenerated)
+                cargo_lock_files = list(repo_path.glob('**/Cargo.lock'))
+                if cargo_lock_files:
+                    logger.info(f"Resetting {len(cargo_lock_files)} Cargo.lock file(s)...")
+                    for cargo_lock in cargo_lock_files:
+                        try:
+                            git_utils_temp.repo.git.restore(str(cargo_lock.relative_to(repo_path)))
+                            logger.debug(f"  Reset {cargo_lock.relative_to(repo_path)}")
+                        except Exception as e:
+                            logger.warning(f"  Could not reset {cargo_lock.relative_to(repo_path)}: {e}")
+
+                # Check if there are uncommitted changes
+                if git_utils_temp.is_dirty() or git_utils_temp.repo.untracked_files:
+                    logger.warning("Repository has uncommitted changes. Stashing them before pull...")
+                    # Exclude .last_build_composite_sha from stash since it's not part of source code
+                    git_utils_temp.repo.git.stash('push', '--include-untracked', '--',
+                                                    ':(exclude).last_build_composite_sha',
+                                                    '-m', 'Auto-stash before pull')
+
+                # Checkout main branch and pull latest
+                logger.info("Checking out main branch...")
+                git_utils_temp.repo.git.checkout('main')
+                origin = git_utils_temp.repo.remotes.origin
+                logger.info("Pulling latest from origin/main...")
+                origin.pull('main')
+                logger.info("✓ Successfully pulled latest code from main")
+            except Exception as e:
+                logger.error(f"Failed to pull latest code: {e}")
+                return 1
 
     # Get commit SHA and checkout if needed
     try:

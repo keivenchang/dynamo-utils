@@ -381,7 +381,7 @@ class DynamoRepositoryUtils(BaseUtils):
                     with open(temp_path, 'rb') as f:
                         sha_full = hashlib.sha256(f.read()).hexdigest()
                         result = sha_full if full_hash else sha_full[:12]
-                        self.logger.debug(f"Composite SHA: {result}")
+                        self.logger.debug(f"Composite Docker SHA: {result}")
                         return result
                 finally:
                     temp_path.unlink(missing_ok=True)
@@ -409,7 +409,7 @@ class DynamoRepositoryUtils(BaseUtils):
         Store current composite SHA to file.
 
         Args:
-            sha: Composite SHA to store
+            sha: Composite Docker SHA to store
         """
         sha_file = self.repo_path / ".last_build_composite_sha"
         sha_file.write_text(sha)
@@ -429,7 +429,7 @@ class DynamoRepositoryUtils(BaseUtils):
             True if rebuild is needed, False otherwise
         """
         self.logger.info("\nChecking if rebuild is needed based on file changes...")
-        self.logger.info(f"Composite SHA file: {self.repo_path}/.last_build_composite_sha")
+        self.logger.info(f"Composite Docker SHA file: {self.repo_path}/.last_build_composite_sha")
 
         # Generate current composite SHA (full hash, not truncated)
         current_sha = self.generate_composite_sha(full_hash=True)
@@ -443,14 +443,14 @@ class DynamoRepositoryUtils(BaseUtils):
         if stored_sha:
             if current_sha == stored_sha:
                 if force_run:
-                    self.logger.info(f"Composite SHA unchanged ({current_sha[:12]}) but --force-run specified - proceeding")
+                    self.logger.info(f"Composite Docker SHA unchanged ({current_sha[:12]}) but --force-run specified - proceeding")
                     return True
                 else:
-                    self.logger.info(f"Composite SHA unchanged ({current_sha[:12]}) - skipping rebuild")
+                    self.logger.info(f"Composite Docker SHA unchanged ({current_sha[:12]}) - skipping rebuild")
                     self.logger.info("Use --force-run to force rebuild")
                     return False  # No rebuild needed
             else:
-                self.logger.info("Composite SHA changed:")
+                self.logger.info("Composite Docker SHA changed:")
                 self.logger.info(f"  Previous: {stored_sha[:12]}")
                 self.logger.info(f"  Current:  {current_sha[:12]}")
                 self.logger.info("Rebuild needed")
@@ -1289,6 +1289,73 @@ class GitHubAPIClient:
             # If we can't get required checks, return empty set
             return set()
 
+    def _extract_pytest_summary(self, all_lines: list) -> Optional[str]:
+        """Extract pytest short test summary from log lines.
+
+        Args:
+            all_lines: List of log lines
+
+        Returns:
+            Formatted summary with failed test names, or None if not a pytest failure
+        """
+        try:
+            # Find the "short test summary info" section
+            summary_start_idx = None
+            summary_end_idx = None
+
+            for i, line in enumerate(all_lines):
+                if '=== short test summary info ===' in line or '==== short test summary info ====' in line:
+                    summary_start_idx = i
+                elif summary_start_idx is not None and '===' in line and 'failed' in line.lower() and 'passed' in line.lower():
+                    # Found end line like "===== 4 failed, 329 passed, 3 skipped, 284 deselected in 422.68s (0:07:02) ====="
+                    summary_end_idx = i
+                    break
+
+            if summary_start_idx is None:
+                return None
+
+            # Extract failed test lines
+            failed_tests = []
+            for i in range(summary_start_idx + 1, summary_end_idx if summary_end_idx else len(all_lines)):
+                line = all_lines[i]
+                # Look for lines that start with "FAILED" after timestamp/prefix
+                if 'FAILED' in line:
+                    # Extract the test name
+                    # Format: "FAILED lib/bindings/python/tests/test_metrics_registry.py::test_counter_introspection"
+                    parts = line.split('FAILED')
+                    if len(parts) >= 2:
+                        test_name = parts[1].strip()
+                        # Remove any trailing info like " - AssertionError: ..."
+                        if ' - ' in test_name:
+                            test_name = test_name.split(' - ')[0].strip()
+                        failed_tests.append(test_name)
+
+            if not failed_tests:
+                return None
+
+            # Format the output
+            result = "Failed unit tests:\n\n"
+            for test in failed_tests:
+                result += f"  • {test}\n"
+
+            # Add summary line if available
+            if summary_end_idx:
+                summary_line = all_lines[summary_end_idx]
+                # Extract just the summary part (after the timestamp and ====)
+                # Format: "2025-11-04T20:25:55.7767823Z ==== 5 failed, 4 passed, 320 deselected, 111 warnings in 1637.48s (0:27:17) ===="
+                if '====' in summary_line:
+                    # Split by ==== and get the middle part
+                    parts = summary_line.split('====')
+                    if len(parts) >= 2:
+                        summary_text = parts[1].strip()
+                        if summary_text:
+                            result += f"\nSummary: {summary_text}"
+
+            return result
+
+        except Exception:
+            return None
+
     def get_job_error_summary(self, run_id: str, job_url: str, owner: str, repo: str) -> Optional[str]:
         """Get error summary by fetching job logs via gh CLI (with disk + memory caching).
 
@@ -1339,6 +1406,13 @@ class GitHubAPIClient:
 
             # Get all log lines
             all_lines = result.stdout.strip().split('\n')
+
+            # First, try to extract pytest short test summary (most useful for test failures)
+            pytest_summary = self._extract_pytest_summary(all_lines)
+            if pytest_summary:
+                self._job_log_cache[job_id] = pytest_summary
+                self._save_to_disk_cache(job_id, pytest_summary)
+                return pytest_summary
 
             # Filter for error-related lines with surrounding context
             error_keywords = ['error', 'fail', 'Error', 'ERROR', 'FAIL', 'fatal', 'FATAL', 'broken']
@@ -1408,21 +1482,98 @@ class GitHubAPIClient:
         except Exception as e:
             return f"Error fetching logs: {str(e)}\n\nView full logs at:\n{job_url}"
 
-    def get_failed_checks(self, owner: str, repo: str, sha: str, required_checks: set) -> Tuple[List[FailedCheck], Optional[str]]:
-        """Get failed CI checks for a commit.
+    def get_failed_checks(self, owner: str, repo: str, sha: str, required_checks: set, pr_number: Optional[int] = None) -> Tuple[List[FailedCheck], Optional[str]]:
+        """Get failed CI checks for a commit using gh CLI.
 
         Args:
             owner: Repository owner
             repo: Repository name
-            sha: Commit SHA
+            sha: Commit SHA (unused, kept for compatibility)
             required_checks: Set of required check names
+            pr_number: PR number (optional, if available use gh pr checks)
 
         Returns:
             Tuple of (List of FailedCheck objects, rerun_url)
         """
-        endpoint = f"/repos/{owner}/{repo}/commits/{sha}/check-runs"
-
         try:
+            import subprocess
+
+            # Use gh pr checks if PR number is available (more reliable)
+            if pr_number:
+                result = subprocess.run(
+                    ['gh', 'pr', 'checks', str(pr_number), '--repo', f'{owner}/{repo}'],
+                    capture_output=True,
+                    text=True,
+                    timeout=10
+                )
+
+                # gh pr checks returns non-zero when there are failed checks
+                # We only care if the command itself failed (no output)
+                # So just check if we got output
+
+                if not result.stdout.strip():
+                    return [], None
+
+                failed_checks = []
+                rerun_run_id = None  # Track run_id for rerun command
+
+                # Parse tab-separated output
+                for line in result.stdout.strip().split('\n'):
+                    if not line.strip():
+                        continue
+
+                    parts = line.split('\t')
+                    if len(parts) < 2:
+                        continue
+
+                    check_name = parts[0]
+                    status = parts[1]
+
+                    # Only process failed checks
+                    if status != 'fail':
+                        continue
+
+                    duration = parts[2] if len(parts) > 2 else ''
+                    html_url = parts[3] if len(parts) > 3 else ''
+
+                    # Extract run ID from html_url
+                    check_run_id = ''
+                    if '/runs/' in html_url:
+                        check_run_id = html_url.split('/runs/')[1].split('/')[0]
+                        # Save the first valid run_id we find for the rerun command
+                        if not rerun_run_id and check_run_id:
+                            rerun_run_id = check_run_id
+
+                    # Check if this is a required check
+                    is_required = check_name in required_checks
+
+                    # Get error summary from job logs
+                    error_summary = None
+                    if check_run_id and html_url:
+                        error_summary = self.get_job_error_summary(check_run_id, html_url, owner, repo)
+
+                    failed_check = FailedCheck(
+                        name=check_name,
+                        job_url=html_url,
+                        run_id=check_run_id,
+                        duration=duration,
+                        is_required=is_required,
+                        error_summary=error_summary
+                    )
+                    failed_checks.append(failed_check)
+
+                # Sort: required checks first, then by name
+                failed_checks.sort(key=lambda x: (not x.is_required, x.name))
+
+                # Generate rerun URL if we have a run_id
+                rerun_url = None
+                if rerun_run_id:
+                    rerun_url = f"https://github.com/{owner}/{repo}/actions/runs/{rerun_run_id}"
+
+                return failed_checks, rerun_url
+
+            # Fallback to GitHub API if no PR number
+            endpoint = f"/repos/{owner}/{repo}/commits/{sha}/check-runs"
             data = self.get(endpoint)
             if not data or 'check_runs' not in data:
                 return [], None
@@ -1435,7 +1586,6 @@ class GitHubAPIClient:
                     check_name = check['name']
 
                     # Extract run ID from html_url
-                    # Example: https://github.com/ai-dynamo/dynamo/actions/runs/18697156351/job/53317461976
                     html_url = check.get('html_url', '')
                     if '/runs/' in html_url:
                         run_id = html_url.split('/runs/')[1].split('/')[0]
@@ -1487,7 +1637,7 @@ class GitHubAPIClient:
 
         except Exception as e:
             import sys
-            print(f"Error fetching failed checks for {sha}: {e}", file=sys.stderr)
+            print(f"Error fetching failed checks: {e}", file=sys.stderr)
             return [], None
 
     def get_running_checks(self, pr_number: int, owner: str, repo: str, required_checks: set) -> List[RunningCheck]:
@@ -1600,7 +1750,7 @@ class GitHubAPIClient:
                     required_checks = future_required.result()
 
                     # Now get failed checks and running checks with required info
-                    future_failed_checks = executor.submit(self.get_failed_checks, owner, repo, pr_data['head']['sha'], required_checks)
+                    future_failed_checks = executor.submit(self.get_failed_checks, owner, repo, pr_data['head']['sha'], required_checks, pr_data['number'])
                     future_running_checks = executor.submit(self.get_running_checks, pr_data['number'], owner, repo, required_checks)
 
                     # Wait for all to complete
