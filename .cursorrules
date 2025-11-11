@@ -2,6 +2,16 @@
 # https://github.com/keivenchang/dynamo-utils/blob/main/.cursorrules
 
 # =============================================================================
+# 0. ENVIRONMENT SETUP
+# =============================================================================
+
+## Virtualenv Activation (Host Machine Only)
+# - At the start of each context, check if on host machine (not in Docker)
+# - If on host: source ~/bin/$(uname).$(uname -m)/venv.3.*/bin/activate
+# - This ensures pre-commit and other Python tools are available
+# - Detection: Check if running in container by looking for /.dockerenv or checking hostname
+
+# =============================================================================
 # 1. PROJECT OVERVIEW
 # =============================================================================
 
@@ -28,6 +38,10 @@
 # - Don't be overly agreeable or sycophantic
 # - Suggest alternatives when current approach has issues
 # - Ask clarifying questions when requirements are unclear
+# - CRITICAL: When debugging or fixing code, FIRST check what exists in main branch
+#   - Remove any extra tests/code that weren't in main or explicitly requested
+#   - Don't waste time debugging things that shouldn't exist
+#   - Only work on what was explicitly asked for
 
 # =============================================================================
 # 3. UNIVERSAL CODE STYLE
@@ -88,6 +102,11 @@ bash -ec 'rustup component add rustfmt clippy && \
 # - Run cargo fmt whenever there are significant Rust changes
 # - Periodically run: cargo clippy --no-deps --all-targets -- -D warnings
 # - Also run: (cd lib/bindings/python && cargo clippy --no-deps --all-targets -- -D warnings)
+# - Go operator changes: Before commit, run linter (golangci-lint includes gofmt):
+```
+cd deploy/cloud/operator
+docker build --target linter --progress=plain .
+```
 
 ## Type Inference for Examples
 # Add to top-level Cargo.toml [workspace] members (REMOVE BEFORE COMMIT):
@@ -247,7 +266,7 @@ def process_file(filename: str) -> None:
 
 ## Aggregated vs Disaggregated Mode
 # - Aggregated: Single GPU, all components on one device
-#   - Requires: DYN_SYSTEM_ENABLED=true DYN_SYSTEM_PORT=8081
+#   - Requires: DYN_SYSTEM_PORT=8081
 # - Disaggregated: Multi-GPU, prefill/decode separation
 #   - Requires 2+ GPUs
 #   - Use aggregated mode for single GPU testing
@@ -272,10 +291,10 @@ pytest tests/serve/ -v --tb=short
 ## Metrics Server Configuration
 # Backend launch scripts must include:
 ```
-DYN_SYSTEM_ENABLED=true DYN_SYSTEM_PORT=8081 \
+DYN_SYSTEM_PORT=8081 \
 python -m dynamo.backend_name --model <model> [other_args]
 ```
-# Without these: tests fail with "Connection refused" on port 8081
+# Without this: tests fail with "Connection refused" on port 8081
 
 # =============================================================================
 # 6. JAVASCRIPT/TYPESCRIPT
@@ -324,7 +343,11 @@ chown -R $USER_ID:$GROUP_ID .
 # - Use tilde (~) instead of full paths: ~/path not /home/ubuntu/path
 
 ## Pre-commit
-# - Run pre-commit before commit
+# ALWAYS run pre-commit checks before committing:
+# - For single file: pre-commit run --files <file_path>
+# - For all changed files: pre-commit run --all-files
+# - Pre-commit runs automatically on git commit, but run manually to catch issues early
+# - Fix any issues reported before committing
 
 # =============================================================================
 # 8. BUILD AND DEVELOPMENT WORKFLOW
@@ -347,6 +370,7 @@ chown -R $USER_ID:$GROUP_ID .
 # 3. Run cargo fmt on directories
 
 ## Commit Process
+# - NEVER launch vim or any editor (always provide -m flag with message)
 # - Never commit top-level Cargo.toml or Cargo.lock (unless explicitly told)
 # - Never use --no-verify
 # - Always use --signoff: git commit --signoff ...
@@ -356,15 +380,23 @@ chown -R $USER_ID:$GROUP_ID .
 # - Prompt to git add modified files
 # - Diff changes and generate descriptive message
 # - Single line message for straightforward changes
+# - For merge commits: use git commit -m "Merge ..." or git commit --no-edit
 
 ## Commit Message Format
-# Subsequent commits (default): terse, 1 line or at most a couple lines
-# - Quick fix of the module in XYZ ...
-# - Documentation updates on XYZ ...
-# - Minor changing the usage of XYZ ...
-# - Renaming of XYZ to ZYX ...
+# Determine commit type by checking git history:
+# - If NO commits exist on current branch (check with: git log --oneline origin/main..HEAD)
+#   → Use FIRST/INITIAL commit format (verbose with prefix)
+# - If commits already exist on current branch
+#   → Use SUBSEQUENT commit format (terse, 1-2 lines)
 
-# First/initial commits (when explicitly stated): verbose format
+# SUBSEQUENT commits (when branch already has commits): terse, 1 line or at most a couple lines
+# - Quick fix of the module in XYZ
+# - Documentation updates on XYZ
+# - Minor changing the usage of XYZ
+# - Renaming of XYZ to ZYX
+# - Remove leftover merge conflict marker
+
+# FIRST/INITIAL commits (when branch has no commits yet): verbose format with description prefix (e.g. feat:, fix:, test:, ...)
 # - feat: add new user authentication system
 # - fix: resolve memory leak in data processing
 # - docs: update API documentation
@@ -456,7 +488,7 @@ RFR (code: +123/-55 lines, documents: 50 lines changed):
 # - Set appropriate user permissions
 # - Use .dockerignore
 # - Pin dependency versions
-# - DO NOT use bullshit BS jargon in Docker comments/docs: intuitive, comprehensive, optimal, 
+# - DO NOT use bullshit BS jargon in Docker comments/docs: intuitive, comprehensive, optimal,
 #   seamless, next-generation, holistic, cutting-edge
 
 ## Example Dockerfile
@@ -557,6 +589,18 @@ pip install sphinx sphinx-rtd-theme myst-parser
 # - Missing toctree entries cause failures
 # - All .md files must be referenced in a toctree
 # - Check for: "WARNING: document isn't included in any toctree"
+# - Invalid JSON in code blocks marked as ```json will cause lexer errors
+#   - Either fix JSON syntax (remove ellipsis ..., comments, etc.)
+#   - Or change to ```text if non-valid JSON content is intentional
+
+## Checking Documentation Build
+# Test locally before pushing (replicates CI environment):
+```
+cd /path/to/dynamo/repo
+docker build -t docs-builder -f container/Dockerfile.docs .
+```
+# Expected: "build succeeded" with no warnings
+# If fails: Check for missing images, broken links, invalid JSON in code blocks
 
 ## Exclusions
 # Files in docs/exclusions.txt are skipped during hyperlink conversion

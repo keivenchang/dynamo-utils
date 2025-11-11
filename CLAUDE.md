@@ -339,11 +339,35 @@ python3 dynamo_docker_builder.py --skip-build-if-image-exists --parallel --force
 python3 dynamo_docker_builder.py --parallel --force-run --email <email>
 ```
 
+### Go Operator Linting
+
+Before committing Go operator changes, run the linter to verify formatting and code quality (same as CI).
+
+**Command to run**:
+```bash
+cd /path/to/dynamo/deploy/cloud/operator
+docker build --target linter --progress=plain .
+```
+
+This runs golangci-lint which includes:
+- gofmt (Go formatting)
+- Multiple code quality checks
+- Same checks that run in CI
+
+**Expected result**: Build completes successfully with no linting errors
+
+**When to run**: Before committing any changes to `deploy/cloud/operator/*.go` files
+
 ### Documentation Build Test
 
-Test Sphinx documentation build (same as CI) to verify no warnings/errors:
+Test Sphinx documentation build (same as CI) to verify no warnings/errors.
 
-**Docs Link / Build documentation in Docker** (replicates exact CI environment):
+**IMPORTANT**: Since Docker commands cannot be run inside Cursor, you must:
+1. Tell the user to run the docker build command in their external terminal
+2. Wait for the user to report back the results
+3. If build fails, analyze the error and fix the documentation files
+
+**Tell user to run** (in external terminal):
 ```bash
 cd /path/to/dynamo/repo
 docker build -t docs-builder -f container/Dockerfile.docs .
@@ -357,12 +381,27 @@ This builds documentation using:
 
 **Expected result**: `build succeeded` with no warnings
 
-**If build fails**: Check for:
-- Missing images referenced in markdown
-- Documents not included in any toctree (add to `docs/index.rst` or `docs/hidden_toctree.rst`)
-- Broken relative links
+**Common build failures**:
 
-**Extract built HTML** (optional, to view locally):
+1. **Invalid JSON in code blocks**:
+   - Error: `WARNING: Lexing literal_block as "json" resulted in an error`
+   - Cause: Code block marked as ` ```json` contains invalid JSON (ellipsis `...`, comments, etc.)
+   - Fix: Either remove invalid syntax OR change to ` ```text`
+   - Example: `docs/observability/logging.md:215` had `...` on line 217
+
+2. **Missing toctree entries**:
+   - Error: `WARNING: document isn't included in any toctree`
+   - Fix: Add to `docs/index.rst` or `docs/hidden_toctree.rst`
+
+3. **Missing images**:
+   - Error: `WARNING: image file not found`
+   - Fix: Check image path is correct
+
+4. **Broken relative links**:
+   - Error: Various link warnings
+   - Fix: Verify link paths
+
+**Extract built HTML** (optional, tell user to run):
 ```bash
 docker create --name docs-container docs-builder
 docker cp docs-container:/workspace/dynamo/docs/build/html ./dynamo-docs/
