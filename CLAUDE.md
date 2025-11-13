@@ -66,10 +66,10 @@ The `vsc-` prefix indicates VS Code/Cursor dev containers, and the part after it
 
 The `dynamo-utils` directory on the host is mapped to the container's `_` directory:
 
-- **Host**: `nvidia/dynamo-utils/`
+- **Host**: `~/nvidia/dynamo-utils/`
 - **Container**: `~/dynamo/_/`
 
-Example: A file at `nvidia/dynamo-utils/notes/metrics-vllm.log` on the host appears at `~/dynamo/_/notes/metrics-vllm.log` inside the container.
+Example: A file at `~/nvidia/dynamo-utils/notes/metrics-vllm.log` on the host appears at `~/dynamo/_/notes/metrics-vllm.log` inside the container.
 
 ### Backup File Convention
 
@@ -306,7 +306,7 @@ docker exec -u root <container> bash -c "export WORKSPACE_DIR=~/dynamo && cd ~/d
 
 **Incorrect** ❌:
 ```bash
-docker exec -u root <container> bash -c "export WORKSPACE_DIR=~/dynamo && cd /workspace && pytest ..."
+docker exec -u root <container> bash -c "export WORKSPACE_DIR=/home/<user>/dynamo && cd /workspace && pytest ..."
 ```
 
 **Why this matters**:
@@ -326,17 +326,17 @@ pytest --cache-dir=/tmp/pytest_cache --basetemp=/tmp/pytest_test ...
 
 **Quick Test (Single Framework)**:
 ```bash
-python3 dynamo_docker_builder.py --sanity-check-only --framework sglang --force-run --email <email>
+python3 dynamo_docker_builder.py --sanity-check-only --framework sglang --force-run
 ```
 
 **Parallel Build with Skip**:
 ```bash
-python3 dynamo_docker_builder.py --skip-build-if-image-exists --parallel --force-run --email <email>
+python3 dynamo_docker_builder.py --skip-build-if-image-exists --parallel --force-run
 ```
 
 **Full Build**:
 ```bash
-python3 dynamo_docker_builder.py --parallel --force-run --email <email>
+python3 dynamo_docker_builder.py --parallel --force-run
 ```
 
 ### Go Operator Linting
