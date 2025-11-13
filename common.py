@@ -1004,6 +1004,8 @@ class PRInfo:
     mergeable_state: str
     unresolved_conversations: int
     ci_status: Optional[str]
+    base_ref: Optional[str] = None
+    created_at: Optional[str] = None
     has_conflicts: bool = False
     conflict_message: Optional[str] = None
     blocking_message: Optional[str] = None
@@ -1764,10 +1766,12 @@ class GitHubAPIClient:
                 mergeable_state = pr_details.get('mergeable_state') if pr_details else pr_data.get('mergeable_state', 'unknown')
                 has_conflicts = (mergeable is False) or (mergeable_state == 'dirty')
 
+                # Extract base branch for all PRs
+                base_branch = pr_data.get('base', {}).get('ref', 'main')
+
                 # Generate conflict message
                 conflict_message = None
                 if has_conflicts:
-                    base_branch = pr_data.get('base', {}).get('ref', 'main')
                     conflict_message = f"This branch has conflicts that must be resolved (merge {base_branch} into this branch)"
 
                 # Generate blocking message based on mergeable_state
@@ -1790,6 +1794,8 @@ class GitHubAPIClient:
                     mergeable_state=mergeable_state,
                     unresolved_conversations=unresolved_count,
                     ci_status=ci_status,
+                    base_ref=base_branch,
+                    created_at=pr_data.get('created_at'),
                     has_conflicts=has_conflicts,
                     conflict_message=conflict_message,
                     blocking_message=blocking_message,

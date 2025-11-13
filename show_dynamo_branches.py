@@ -187,8 +187,23 @@ class PRNode(BranchNode):
 
         # Truncate title at 80 characters
         title = self.pr.title[:80] + '...' if len(self.pr.title) > 80 else self.pr.title
-        # Return just the PR info, URL will be shown separately
-        return f"{emoji} PR#{self.pr.number}: {title}"
+
+        # Add base branch and created date
+        metadata = []
+        if self.pr.base_ref:
+            metadata.append(f"→ {self.pr.base_ref}")
+        if self.pr.created_at:
+            # Parse and format date (ISO format: 2025-11-12T17:15:32Z)
+            try:
+                from datetime import datetime
+                dt = datetime.fromisoformat(self.pr.created_at.replace('Z', '+00:00'))
+                date_str = dt.strftime('%Y-%m-%d %H:%M')
+                metadata.append(f"created {date_str}")
+            except:
+                pass
+
+        metadata_str = f" ({', '.join(metadata)})" if metadata else ""
+        return f"{emoji} PR#{self.pr.number}: {title}{metadata_str}"
 
     def _format_html_content(self) -> str:
         if not self.pr:
@@ -203,11 +218,27 @@ class PRNode(BranchNode):
         # Truncate title at 80 characters
         title = self.pr.title[:80] + '...' if len(self.pr.title) > 80 else self.pr.title
 
+        # Add base branch and created date
+        metadata = []
+        if self.pr.base_ref:
+            metadata.append(f'<span style="color: #0969da; font-weight: 500;">→ {self.pr.base_ref}</span>')
+        if self.pr.created_at:
+            # Parse and format date (ISO format: 2025-11-12T17:15:32Z)
+            try:
+                from datetime import datetime
+                dt = datetime.fromisoformat(self.pr.created_at.replace('Z', '+00:00'))
+                date_str = dt.strftime('%Y-%m-%d %H:%M')
+                metadata.append(f'<span style="color: #666;">created {date_str}</span>')
+            except:
+                pass
+
+        metadata_str = f" ({', '.join(metadata)})" if metadata else ""
+
         # Gray out merged PRs
         if self.pr.is_merged:
-            return f'<span style="color: #999;">{emoji} <a href="{self.pr.url}" target="_blank" style="color: #999;">PR#{self.pr.number}</a>: {title}</span>'
+            return f'<span style="color: #999;">{emoji} <a href="{self.pr.url}" target="_blank" style="color: #999;">PR#{self.pr.number}</a>: {title}{metadata_str}</span>'
         else:
-            return f'{emoji} <a href="{self.pr.url}" target="_blank">PR#{self.pr.number}</a>: {title}'
+            return f'{emoji} <a href="{self.pr.url}" target="_blank">PR#{self.pr.number}</a>: {title}{metadata_str}'
 
 
 @dataclass
@@ -350,19 +381,23 @@ class FailedTestNode(BranchNode):
     def _format_content(self) -> str:
         if not self.failed_check:
             return ""
+        # Use red X for required failures, plain black X for non-required
+        icon = "❌" if self.failed_check.is_required else "✗"
         required_marker = " [REQUIRED]" if self.failed_check.is_required else ""
         error_indicator = " [Error details available]" if self.failed_check.error_summary else ""
-        return f"❌ {self.failed_check.name}{required_marker} ({self.failed_check.duration}){error_indicator}"
+        return f"{icon} {self.failed_check.name}{required_marker} ({self.failed_check.duration}){error_indicator}"
 
     def _format_html_content(self) -> str:
         if not self.failed_check:
             return ""
+        # Use red X for required failures, plain black X for non-required
+        icon = "❌" if self.failed_check.is_required else '<span style="color: #000;">✗</span>'
         required_marker = ' <span style="color: #cc0000; font-weight: bold;">[REQUIRED]</span>' if self.failed_check.is_required else ""
 
         # Create unique ID for this error details section
         detail_id = hashlib.md5(f"{self.failed_check.name}{self.failed_check.job_url}".encode()).hexdigest()[:8]
 
-        base_html = f'❌ <a href="{self.failed_check.job_url}" target="_blank">{self.failed_check.name}</a>{required_marker} ({self.failed_check.duration})'
+        base_html = f'{icon} <a href="{self.failed_check.job_url}" target="_blank">{self.failed_check.name}</a>{required_marker} ({self.failed_check.duration})'
 
         # Extract job ID for raw log link
         job_id = None
@@ -510,12 +545,22 @@ class LocalRepoScanner:
             if branch_name in ['main', 'master']:
                 continue
 
-            # Check if branch has remote tracking
+            # Check if branch has remote tracking or matching remote branch
             try:
                 tracking_branch = branch.tracking_branch()
                 has_remote = tracking_branch is not None
             except Exception:
                 has_remote = False
+
+            # Also check if a remote branch exists with the same name (even if not tracking)
+            if not has_remote:
+                try:
+                    remote_branches = [ref.name for ref in repo.remote().refs]  # type: ignore[attr-defined]
+                    # Check for origin/branch_name
+                    if f'origin/{branch_name}' in remote_branches:
+                        has_remote = True
+                except Exception:
+                    pass
 
             # Get commit SHA
             try:
