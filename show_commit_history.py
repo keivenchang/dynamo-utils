@@ -11,6 +11,7 @@ Can output to terminal or HTML format.
 
 import argparse
 import git
+import glob
 import json
 import logging
 import os
@@ -190,7 +191,12 @@ class CommitHistoryGenerator:
             if html_output:
                 # Set default logs_dir if not provided
                 if logs_dir is None:
-                    logs_dir = self.repo_path / "logs"
+                    # For dynamo_latest, default to ../dynamo_ci/logs for build logs
+                    repo_abs_path = self.repo_path.resolve()
+                    if repo_abs_path.name == "dynamo_latest":
+                        logs_dir = repo_abs_path.parent / "dynamo_ci" / "logs"
+                    else:
+                        logs_dir = self.repo_path / "logs"
                 html_content = self._generate_commit_history_html(commit_data, logs_dir)
                 # Determine output path
                 if output_path is None:
@@ -246,6 +252,7 @@ class CommitHistoryGenerator:
 <head>
 <meta charset="UTF-8">
 <title>Dynamo Commit History</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📋</text></svg>">
 <style>
 body {
     font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif;
@@ -474,7 +481,6 @@ function toggleDockerImages(event, linkElement) {
                 log_filename = f"*.{sha_short}.report.html"
 
                 # Search in logs_dir for the report file
-                import glob
                 search_pattern = str(logs_dir / "*" / log_filename)
                 matching_logs = glob.glob(search_pattern)
 
@@ -484,9 +490,16 @@ function toggleDockerImages(event, linkElement) {
 
                 # Make composite SHA link to logs if they exist, otherwise plain text
                 if log_path and log_path.exists():
-                    # Convert logs_dir to relative path from ~/nvidia/ for URL
-                    log_url_path = str(log_path).replace('~/', '')
-                    log_url = f"http://keivenc-linux/{log_url_path}"
+                    # Create relative path from dynamo_latest to dynamo_ci/logs
+                    # dynamo_latest/index.html -> ../dynamo_ci/logs/DATE/DATE.SHA.report.html
+                    try:
+                        # Try to create relative path from nvidia directory
+                        nvidia_dir = Path.home() / 'nvidia'
+                        relative_parts = log_path.relative_to(nvidia_dir)
+                        log_url = f"../{relative_parts}"
+                    except ValueError:
+                        # Fallback to absolute path if not under nvidia dir
+                        log_url = str(log_path)
                     composite_sha_html = f'<span style="background-color: {composite_bg_color}; padding: 2px 6px; border-radius: 3px;"><a href="{log_url}" target="_blank" style="color: #0969da; text-decoration: none;" title="View build logs">{composite_sha}</a></span>'
                 else:
                     composite_sha_html = f'<span style="background-color: {composite_bg_color}; padding: 2px 6px; border-radius: 3px;">{composite_sha}</span>'

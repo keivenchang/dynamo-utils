@@ -98,6 +98,7 @@ else
     # Continue anyway - use whatever is currently checked out
 fi
 
+# Note: --logs-dir defaults to ../dynamo_ci/logs for dynamo_latest repo
 if python3 "$SCRIPT_DIR/show_commit_history.py" --repo-path . --html --max-commits 200 --output "$COMMIT_HISTORY_HTML" 2>> "$LOG_FILE"; then
     echo "$(date '+%Y-%m-%d %H:%M:%S') - Updated $COMMIT_HISTORY_HTML" >> "$LOG_FILE"
 else
