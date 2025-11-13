@@ -229,8 +229,58 @@ def rename_dev_base_tag(new_tag: str, select_func: Callable[[List[str]], Optiona
     return wrapper
 
 
+def extract_version_from_build_sh(framework: str, repo_path: Path) -> str:
+    """
+    Extract the VERSION from build.sh by running it with --dry-run.
+    
+    The build.sh script dynamically determines VERSION based on git tags and commits:
+    - If on a tagged commit: v{tag}
+    - Otherwise: v{latest_tag}.dev.{commit_id}
+    
+    This function runs build.sh --dry-run and parses the --tag argument to extract
+    the actual version being used.
+    
+    Args:
+        framework: Framework name (vllm, sglang, trtllm)
+        repo_path: Path to the Dynamo repository
+        
+    Returns:
+        The version string (e.g., "v0.1.0.dev.f1552864b" or "v0.2.0")
+        
+    Raises:
+        RuntimeError: If unable to extract version from build.sh output
+    """
+    try:
+        # Run build.sh --dry-run to get docker commands
+        result = subprocess.run(
+            f"{repo_path}/container/build.sh --dry-run --framework {framework} --target runtime",
+            shell=True,
+            cwd=repo_path,
+            capture_output=True,
+            text=True,
+            timeout=30
+        )
+        
+        output = result.stdout.strip()
+        
+        # Look for --tag arguments in the output
+        # Expected format: --tag dynamo:v{VERSION}-{framework}-{target}
+        # or: --tag dynamo-base:v{VERSION}-{framework}
+        tag_match = re.search(r'--tag\s+(?:dynamo|dynamo-base):(v[^-\s]+)', output)
+        if tag_match:
+            return tag_match.group(1)
+        
+        # Fallback: if we can't find version, raise error
+        raise RuntimeError(f"Could not extract version from build.sh output. Output: {output[:200]}")
+        
+    except subprocess.TimeoutExpired:
+        raise RuntimeError("build.sh --dry-run timed out while extracting version")
+    except Exception as e:
+        raise RuntimeError(f"Failed to extract version from build.sh: {e}")
+
+
 # Factory function to create task instances for a specific framework
-def create_task_graph(framework: str, sha: str, repo_path: Path) -> Dict[str, 'BaseTask']:
+def create_task_graph(framework: str, sha: str, repo_path: Path, version: Optional[str] = None) -> Dict[str, 'BaseTask']:
     """
     Create task instances for a specific framework.
 
@@ -238,6 +288,8 @@ def create_task_graph(framework: str, sha: str, repo_path: Path) -> Dict[str, 'B
         framework: Framework name (vllm, sglang, trtllm)
         sha: Git commit SHA (short form, 9 chars)
         repo_path: Path to the Dynamo repository
+        version: Version string from build.sh (e.g., "v0.1.0.dev.f1552864b"). 
+                 If None, will be extracted from build.sh output.
 
     Returns:
         Dictionary mapping task IDs to task instances
@@ -245,21 +297,21 @@ def create_task_graph(framework: str, sha: str, repo_path: Path) -> Dict[str, 'B
     Image Dependency Chain:
         The docker_command_filter uses function composition to transform build commands:
         
-        1. Base image (produces: dynamo-base:v0.1.0.dev.f1552864b-vllm):
+        1. Base image (produces: dynamo-base:{version}-{framework}):
            rename_output_tag(base_image_tag, 
                filter_out_latest_tag(select_command(0)))
            
-        2. Runtime image (consumes: base, produces: dynamo:v0.1.0.dev.f1552864b-vllm-runtime):
+        2. Runtime image (consumes: base, produces: dynamo:{version}-{framework}-runtime):
            rename_output_tag(runtime_image_tag,
                rename_input_tag(base_image_tag,
                    filter_out_latest_tag(select_command(1))))
            
-        3. Dev image (consumes: base, produces: dynamo:v0.1.0.dev.f1552864b-vllm-dev):
+        3. Dev image (consumes: base, produces: dynamo:{version}-{framework}-dev):
            rename_output_tag(dev_image_tag,
                rename_input_tag(base_image_tag,
                    filter_out_latest_tag(select_command(1))))
            
-        4. Local-dev image (consumes: dev, produces: dynamo:v0.1.0.dev.f1552864b-vllm-local-dev):
+        4. Local-dev image (consumes: dev, produces: dynamo:{version}-{framework}-local-dev):
            rename_output_tag(local_dev_image_tag,
                rename_input_tag(dev_image_tag,
                    filter_out_latest_tag(select_command(1))))
@@ -275,10 +327,14 @@ def create_task_graph(framework: str, sha: str, repo_path: Path) -> Dict[str, 'B
     # Task ID format: framework-target-type (all lowercase)
     # Example: vllm-base-build, vllm-dev-compilation, vllm-runtime-sanity
 
+    # Extract version from build.sh if not provided
+    if version is None:
+        version = extract_version_from_build_sh(framework, repo_path)
+
     tasks: Dict[str, BaseTask] = {}
 
     # Level 0: Base image build
-    base_image_tag = f"dynamo-base:v0.1.0.dev.{sha}-{framework}"
+    base_image_tag = f"dynamo-base:{version}-{framework}"
     tasks[f"{framework}-base-build"] = BuildTask(
         task_id=f"{framework}-base-build",
         description=f"Build {framework.upper()} base image",
@@ -289,7 +345,7 @@ def create_task_graph(framework: str, sha: str, repo_path: Path) -> Dict[str, 'B
     )
 
     # Level 1: Runtime image build
-    runtime_image_tag = f"dynamo:v0.1.0.dev.{sha}-{framework}-runtime"
+    runtime_image_tag = f"dynamo:{version}-{framework}-runtime"
     tasks[f"{framework}-runtime-build"] = BuildTask(
         task_id=f"{framework}-runtime-build",
         description=f"Build {framework.upper()} runtime image",
@@ -315,7 +371,7 @@ def create_task_graph(framework: str, sha: str, repo_path: Path) -> Dict[str, 'B
     )
 
     # Level 2: Dev image build (runs after runtime for better parallelization)
-    dev_image_tag = f"dynamo:v0.1.0.dev.{sha}-{framework}-dev"
+    dev_image_tag = f"dynamo:{version}-{framework}-dev"
     tasks[f"{framework}-dev-build"] = BuildTask(
         task_id=f"{framework}-dev-build",
         description=f"Build {framework.upper()} dev image",
@@ -367,7 +423,7 @@ def create_task_graph(framework: str, sha: str, repo_path: Path) -> Dict[str, 'B
     )
 
     # Level 3: Local-dev image build
-    local_dev_image_tag = f"dynamo:v0.1.0.dev.{sha}-{framework}-local-dev"
+    local_dev_image_tag = f"dynamo:{version}-{framework}-local-dev"
     tasks[f"{framework}-local-dev-build"] = BuildTask(
         task_id=f"{framework}-local-dev-build",
         description=f"Build {framework.upper()} local-dev image",
@@ -2561,16 +2617,16 @@ def main() -> int:
                 # Initialize GitUtils to check repo status
                 git_utils_temp = GitUtils(repo_path)
 
-                # Reset all Cargo.lock files before pull (they can be regenerated)
-                cargo_lock_files = list(repo_path.glob('**/Cargo.lock'))
-                if cargo_lock_files:
-                    logger.info(f"Resetting {len(cargo_lock_files)} Cargo.lock file(s)...")
-                    for cargo_lock in cargo_lock_files:
+                # Reset all *.lock files before pull (they can be regenerated)
+                lock_files = list(repo_path.glob('**/*.lock'))
+                if lock_files:
+                    logger.info(f"Resetting {len(lock_files)} *.lock file(s)...")
+                    for lock_file in lock_files:
                         try:
-                            git_utils_temp.repo.git.restore(str(cargo_lock.relative_to(repo_path)))
-                            logger.debug(f"  Reset {cargo_lock.relative_to(repo_path)}")
+                            git_utils_temp.repo.git.restore(str(lock_file.relative_to(repo_path)))
+                            logger.debug(f"  Reset {lock_file.relative_to(repo_path)}")
                         except Exception as e:
-                            logger.warning(f"  Could not reset {cargo_lock.relative_to(repo_path)}: {e}")
+                            logger.warning(f"  Could not reset {lock_file.relative_to(repo_path)}: {e}")
 
                 # Check if there are uncommitted changes
                 if git_utils_temp.is_dirty() or git_utils_temp.repo.untracked_files:
@@ -2600,8 +2656,19 @@ def main() -> int:
             # Check if we need to checkout the specified SHA
             current_sha = repo.head.commit.hexsha[:9]
             target_sha = args.repo_sha[:9]
-            
+
             if current_sha != target_sha:
+                # Reset all *.lock files before checkout (they can be regenerated)
+                lock_files = list(repo_path.glob('**/*.lock'))
+                if lock_files:
+                    logger.info(f"Resetting {len(lock_files)} *.lock file(s) before checkout...")
+                    for lock_file in lock_files:
+                        try:
+                            repo.git.restore(str(lock_file.relative_to(repo_path)))
+                            logger.debug(f"  Reset {lock_file.relative_to(repo_path)}")
+                        except Exception as e:
+                            logger.warning(f"  Could not reset {lock_file.relative_to(repo_path)}: {e}")
+
                 logger.info(f"Checking out SHA: {args.repo_sha}")
                 repo.git.checkout(args.repo_sha)
                 logger.info(f"✅ Checked out {args.repo_sha}")
@@ -2663,9 +2730,17 @@ def main() -> int:
         # Cleanup will happen per-task before execution
 
     # Create task graph for each framework
+    # Extract version once per framework to avoid repeated build.sh calls
     all_tasks = {}
     for framework in frameworks:
-        framework_tasks = create_task_graph(framework, sha, repo_path)
+        logger.info(f"Extracting version from build.sh for {framework.upper()}...")
+        try:
+            version = extract_version_from_build_sh(framework, repo_path)
+            logger.info(f"  Version: {version}")
+        except Exception as e:
+            logger.error(f"Failed to extract version for {framework}: {e}")
+            return 1
+        framework_tasks = create_task_graph(framework, sha, repo_path, version=version)
         all_tasks.update(framework_tasks)
     
     # Set log_file paths for all tasks (needed for HTML generation to find existing logs)
@@ -2782,6 +2857,12 @@ def main() -> int:
         logger.info(f"\nDry-run Summary:")
         logger.info(f"  Total tasks: {len(all_tasks)}")
         logger.info(f"  Time: {duration_str} ({total_duration:.2f}s)")
+        
+        # In dry-run mode, still generate HTML report and send email if requested
+        # (but don't execute actual tasks)
+        if args.email:
+            logger.info(f"  Note: Email notifications are not sent in dry-run mode")
+        
         return 0
     else:
         success_count = len([t for t in all_tasks.values() if t.status == TaskStatus.SUCCESS])
@@ -2832,9 +2913,14 @@ def main() -> int:
             html_file = log_dir / f"{log_date}.{sha}.report.html"
             html_file.write_text(html_content_file)
             logger.info(f"  HTML Report: {html_file}")
-            
-            # Generate report with absolute URLs for email (if requested)
-            if args.email:
+        except Exception as e:
+            logger.error(f"Failed to generate HTML report: {e}")
+            # Continue to try sending email even if HTML report generation failed
+        
+        # Send email notification (separate try-except to avoid hiding email errors)
+        if args.email:
+            try:
+                # Generate report with absolute URLs for email
                 html_content_email = generate_html_report(
                     all_tasks=all_tasks,
                     repo_path=repo_path,
@@ -2853,15 +2939,19 @@ def main() -> int:
                 ]
                 
                 # Send email
-                send_email_notification(
+                email_sent = send_email_notification(
                     email=args.email,
                     html_content=html_content_email,
                     sha=sha[:7],
                     failed_tasks=failed_task_names,
                 )
-                    
-        except Exception as e:
-            logger.error(f"Failed to generate HTML report: {e}")
+                
+                if not email_sent:
+                    logger.warning(f"⚠️  Email notification was not sent successfully")
+            except Exception as e:
+                logger.error(f"Failed to send email notification: {e}")
+                import traceback
+                logger.debug(traceback.format_exc())
 
         return exit_status
 

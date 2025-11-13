@@ -32,6 +32,8 @@ dynamo-utils/
 ├── dynamo_docker_builder.py      # Automated Docker build/test pipeline
 ├── common.py                     # Shared utilities module
 ├── show_dynamo_branches.py       # Branch status checker
+├── show_commit_history.py        # Commit history with composite SHAs
+├── git_stats.py                  # Git repository statistics analyzer
 ├── update_html_pages.sh          # HTML page update cron script
 ├── soak_fe.py                    # Frontend soak testing script
 ├── retag_latest_dynamo_images.py # Docker image retagging utility
@@ -71,17 +73,17 @@ Convenient script to test models via the chat completions API with retry logic a
 
 ```bash
 # Basic test
-./curl.sh --port 8080 --prompt "Hello!"
+./curl.sh --port 8000 --prompt "Hello!"
 
 # Streaming with retry
-./curl.sh --stream --retry --prompt "Tell me a story"
+./curl.sh --port 8000 --stream --retry --prompt "Tell me a story"
 
 # Loop testing with metrics
-./curl.sh --loop --metrics --random
+./curl.sh --port 8000 --loop --metrics --random
 ```
 
 **Options:**
-- `--port`: API server port (default: 8080)
+- `--port`: API server port (default: 8000)
 - `--prompt`: User prompt
 - `--stream`: Enable streaming responses
 - `--retry`: Retry until success
@@ -103,7 +105,7 @@ Launches Dynamo inference services (frontend and backend).
 ```
 
 **Environment variables:**
-- `DYN_FRONTEND_PORT`: Frontend port (default: 8080)
+- `DYN_FRONTEND_PORT`: Frontend port (default: 8000)
 - `DYN_BACKEND_PORT`: Backend port (default: 8081)
 
 ### Configuration Management
@@ -137,18 +139,20 @@ Automated Docker build and test pipeline system that builds and tests multiple i
 
 **Quick Test (Single Framework)**:
 ```bash
-python3 dynamo_docker_builder.py --sanity-check-only --framework sglang --force-run --email <email>
+python3 dynamo_docker_builder.py --repo-path ~/nvidia/dynamo_ci --sanity-check-only --framework sglang --force-run
 ```
 
 **Parallel Build with Skip**:
 ```bash
-python3 dynamo_docker_builder.py --skip-build-if-image-exists --parallel --force-run --email <email>
+python3 dynamo_docker_builder.py --repo-path ~/nvidia/dynamo_ci --skip-action-if-already-passed --parallel --force-run
 ```
 
 **Full Build**:
 ```bash
-python3 dynamo_docker_builder.py --parallel --force-run --email <email>
+python3 dynamo_docker_builder.py --repo-path ~/nvidia/dynamo_ci --parallel --force-run
 ```
+
+**Note**: `--repo-path` is required and specifies the path to the Dynamo repository.
 
 #### HTML Report Generation
 - Generate two versions when email is requested:
@@ -166,25 +170,36 @@ python3 dynamo_docker_builder.py --parallel --force-run --email <email>
 - Always use date subdirectories
 - Use `log_dir.parent` to get root logs directory
 
+#### Version Extraction
+- Automatically extracts version from `build.sh` output (not hardcoded)
+- Version format depends on git repository state:
+  - If on a tagged commit: `v{tag}` (e.g., `v0.6.1`)
+  - Otherwise: `v{latest_tag}.dev.{commit_id}` (e.g., `v0.6.1.dev.d9b674b86`)
+- Version is extracted once per framework before creating task graphs
+- All image tags use the dynamically extracted version (base, runtime, dev, local-dev)
+
 #### Process Management
 - Use lock files to prevent concurrent runs
-- Lock file: `.dynamo_docker_builder.py.lock`
+- Lock file: `.dynamo_builder.lock` (in repository root)
 - Store PID in lock file
 - Check if process is still running before acquiring lock
 - Clean up stale locks automatically
 
 #### Email Notifications
-- Use SMTP (localhost:25) for emails
-- Email subject format: `[DynamoDockerBuilder] {status} - {sha_short}`
+- Uses SMTP server: `smtp.nvidia.com:25`
+- Email subject format: `{SUCC|FAIL}: DynamoDockerBuilder - {sha_short} [{failed_tasks}]`
 - HTML email body with clickable links (absolute URLs)
-- Plain text fallback for email clients
+- Includes failed task names in subject if any failures occurred
+- **Note**: Email notifications are NOT sent in dry-run mode (only shows a note that email would be sent)
+- Separate error handling for email failures (errors are logged separately from HTML report generation)
+- Email sending continues even if HTML report generation fails
 
 #### Commit History Feature
 
-**Overview**: The `--show-commit-history` flag displays recent commits with their composite SHAs. Supports both terminal and HTML output modes with integrated caching for performance.
+**Overview**: The `show_commit_history.py` script displays recent commits with their composite SHAs. Supports both terminal and HTML output modes with integrated caching for performance.
 
 **Caching System**:
-- Cache file: `~/nvidia/dynamo_ci/.commit_history_cache.json`
+- Cache file: `.commit_history_cache.json` (in repository root)
 - Format: JSON mapping of commit SHA (full) → composite SHA
 - Purpose: Avoid expensive git checkout + composite SHA recalculation
 - Performance: Cached lookups are nearly instant vs ~1-2 seconds per commit calculation
@@ -193,17 +208,17 @@ python3 dynamo_docker_builder.py --parallel --force-run --email <email>
 
 Terminal output with caching:
 ```bash
-python3 dynamo_docker_builder.py --show-commit-history --max-commits 50 --repo-path ~/nvidia/dynamo_ci
+python3 show_commit_history.py --repo-path ~/nvidia/dynamo_ci --max-commits 50
 ```
 
-HTML output with caching (generates `~/nvidia/dynamo_ci/logs/commit-history.html`):
+HTML output with caching:
 ```bash
-python3 dynamo_docker_builder.py --show-commit-history --html --max-commits 50 --repo-path ~/nvidia/dynamo_ci
+python3 show_commit_history.py --repo-path ~/nvidia/dynamo_ci --html --max-commits 50 --output ~/nvidia/dynamo_ci/logs/commit-history.html
 ```
 
 Verbose mode (shows cache hits/misses):
 ```bash
-python3 dynamo_docker_builder.py --show-commit-history --html --max-commits 50 --repo-path ~/nvidia/dynamo_ci --verbose
+python3 show_commit_history.py --repo-path ~/nvidia/dynamo_ci --html --max-commits 50 --output ~/nvidia/dynamo_ci/logs/commit-history.html --verbose
 ```
 
 **HTML Output Features**:
@@ -241,34 +256,35 @@ python3 dynamo_docker_builder.py --show-commit-history --html --max-commits 50 -
 
 ### update_html_pages.sh
 
-Automated cron script that runs every 5 minutes during daytime (9am-9pm) to update multiple HTML pages.
+Automated cron script that runs every 30 minutes to update multiple HTML pages.
 
 **Schedule**:
 ```cron
-*/5 9-20 * * * $HOME/nvidia/dynamo-utils/update_html_pages.sh
+*/30 * * * * $HOME/nvidia/dynamo-utils/update_html_pages.sh
 ```
 
 **Tasks Performed**:
 1. **Cleanup old logs** (runs first)
-   - Keeps only the last 10 non-empty dated directories in `~/nvidia/dynamo_ci/logs/`
+   - Keeps only the last 10 non-empty dated directories in `$LOGS_DIR` (defaults to `$NVIDIA_HOME/logs`)
    - Deletes older directories to save disk space
    - Logs all cleanup actions with directory counts
 
-2. Updates branch status HTML (`$HOME/nvidia/index.html`)
-   - Calls `show_dynamo_branches.py --html`
+2. Updates branch status HTML (`$NVIDIA_HOME/index.html` where `NVIDIA_HOME` defaults to parent of script directory)
+   - Calls `show_dynamo_branches.py --html --output $BRANCHES_TEMP_FILE`
    - Shows status of all dynamo branches
+   - Uses atomic file replacement (temp file → final file)
 
-3. Updates commit history HTML (`~/nvidia/dynamo_ci/logs/commit-history.html`)
-   - Calls `dynamo_docker_builder.py --show-commit-history --html --max-commits 50`
+3. Updates commit history HTML (`$DYNAMO_REPO/index.html` where `DYNAMO_REPO` defaults to `$NVIDIA_HOME/dynamo_latest`)
+   - Calls `show_commit_history.py --repo-path . --html --max-commits 200 --output $COMMIT_HISTORY_HTML`
    - Leverages caching for fast updates (only calculates new commits)
-   - Shows last 50 commits with composite SHAs and Docker images
+   - Shows last 200 commits with composite SHAs and Docker images
 
-**Log file**: `~/nvidia/dynamo-utils/update_html_pages.log`
+**Log file**: `$LOGS_DIR/cron.log` (where `LOGS_DIR` defaults to `$NVIDIA_HOME/logs`)
 
 **Performance Optimization**:
-- First run: ~50-100 seconds (calculates all 50 commits)
+- First run: ~50-100 seconds (calculates all 200 commits)
 - Subsequent runs: ~5-10 seconds (only processes new commits, rest from cache)
-- Cache file size: ~5-10KB for 50 commits
+- Cache file size: ~20-40KB for 200 commits
 - No cache invalidation needed: Composite SHAs are deterministic based on file content
 
 ---
@@ -303,6 +319,74 @@ Branch status checker that displays information about dynamo* repository branche
 
 ---
 
+### git_stats.py
+
+Git repository statistics analyzer that provides detailed contributor metrics and rankings.
+
+**Features**:
+- Analyzes git commit history for any time range
+- Tracks unique contributors with commit counts
+- Calculates lines added/deleted/changed per contributor
+- Provides average statistics per person
+- Dual ranking views: by commits and by lines changed
+- Supports flexible time ranges (days, since/until dates, all-time)
+
+**Usage Examples**:
+
+```bash
+# Statistics for last 30 days
+python3 git_stats.py --days 30
+
+# Statistics for last 7 days
+python3 git_stats.py --days 7
+
+# Statistics since a specific date
+python3 git_stats.py --since "2025-01-01"
+
+# Statistics for a date range
+python3 git_stats.py --since "2025-01-01" --until "2025-01-31"
+
+# All time statistics
+python3 git_stats.py
+```
+
+**Output Includes**:
+1. Number of unique contributors
+2. Total commits and line changes
+3. Average commits per person
+4. Average lines added/deleted/changed per person
+5. Contributor rankings by commits (with full details)
+6. Contributor rankings by lines changed
+
+**Sample Output**:
+```
+================================================================================
+Git Repository Statistics - Last 30 days
+================================================================================
+
+Number of unique contributors: 59
+Total commits: 340
+Total lines added: 148,764
+Total lines deleted: 61,093
+Total lines changed: 209,857
+
+Average commits per person: 5.8
+Average lines added per person: 2521.4
+Average lines deleted per person: 1035.5
+Average lines changed per person: 3556.9
+
+================================================================================
+Contributor Rankings (by commits)
+================================================================================
+
+Rank   Name                           Email                               Commits  Added      Deleted    Changed   
+--------------------------------------------------------------------------------------------------------------
+1      John Doe                       john@example.com                    31       4,455      3,512      7,967
+...
+```
+
+---
+
 ## Environment Setup
 
 The typical workflow for setting up a development environment:
@@ -325,7 +409,7 @@ The typical workflow for setting up a development environment:
 If you encounter port conflicts when running `inference.sh`:
 ```bash
 # Check what's using the port
-lsof -i :8080
+lsof -i :8000
 # Kill the process or use different ports
 DYN_FRONTEND_PORT=8090 DYN_BACKEND_PORT=8091 ./inference.sh
 ```
