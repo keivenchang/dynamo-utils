@@ -358,6 +358,17 @@ This runs golangci-lint which includes:
 
 **When to run**: Before committing any changes to `deploy/cloud/operator/*.go` files
 
+### Complete Pre-Merge CI Checks
+
+**See `~/nvidia/dynamo-utils/.cursorrules`** for the complete list of pre-merge CI checks including:
+- Rust Format Check (cargo fmt)
+- Rust Clippy Checks (unused imports, warnings)
+- Rust Tests (unit, doc, integration)
+- Pre-commit Hooks (ruff, mypy, YAML/JSON validation)
+- Copyright Headers
+- Cargo Deny (license checks)
+- Quick Pre-Commit Checklist
+
 ### Documentation Build Test
 
 Test Sphinx documentation build (same as CI) to verify no warnings/errors.

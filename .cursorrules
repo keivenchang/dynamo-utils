@@ -615,7 +615,90 @@ docker build -t docs-builder -f container/Dockerfile.docs .
 # - Document common issues and solutions
 
 # =============================================================================
-# 19. CODE REVIEW GUIDELINES
+# 19. COMPLETE PRE-MERGE CI CHECKS
+# =============================================================================
+# Run all the checks that CI runs before merging. These commands replicate the
+# CI environment locally.
+
+## 1. Rust Format Check
+# Check code formatting (must pass before commit):
+#
+# cargo fmt -- --check
+#
+# Check all directories that CI checks:
+# (cd . && cargo fmt -- --check)
+# (cd lib/bindings/python && cargo fmt -- --check)
+# (cd lib/runtime/examples && cargo fmt -- --check)
+# (cd launch/dynamo-run && cargo fmt -- --check)
+#
+# Fix formatting:
+# cargo fmt
+
+## 2. Rust Clippy Checks
+# Find unused imports, warnings, and other issues:
+#
+# cargo clippy --no-deps --all-targets -- -D warnings
+#
+# Check all directories that CI checks:
+# (cd . && cargo clippy --no-deps --all-targets -- -D warnings)
+# (cd lib/bindings/python && cargo clippy --no-deps --all-targets -- -D warnings)
+# (cd lib/runtime/examples && cargo clippy --no-deps --all-targets -- -D warnings)
+# (cd launch/dynamo-run && cargo clippy --no-deps --all-targets -- -D warnings)
+#
+# Find specific issues:
+# cargo clippy --no-deps --all-targets -- -D warnings 2>&1 | grep -B 5 -A 10 "unused import"
+# cargo clippy --no-deps --all-targets -- -D warnings 2>&1 | grep -E "^(error|warning)"
+
+## 3. Rust Tests
+# Run all tests (unit, doc, integration):
+#
+# Compile tests first (separate build from execution):
+# cargo test --locked --no-run
+#
+# Run doc tests (CI runs doc generation first):
+# cargo doc --no-deps && cargo test --locked --doc
+#
+# Run unit tests (--all-targets doesn't run doc tests):
+# cargo test --locked --all-targets
+#
+# NOTE: CI runs tests in these directories: ., lib/bindings/python, lib/runtime/examples, launch/dynamo-run
+
+## 4. Pre-commit Hooks
+# Run all pre-commit hooks (Python linting, formatting, etc.):
+#
+# pre-commit run --all-files
+# pre-commit run --files path/to/file.py
+# pre-commit run ruff --all-files
+# pre-commit run mypy --all-files
+#
+# Common hooks: ruff (Python linter), mypy (type checking), trailing-whitespace,
+# end-of-file-fixer, check-yaml, check-json
+
+## 5. Copyright Headers
+# Check copyright headers (requires PowerShell):
+#
+# pwsh .github/workflows/copyright-check.ps1
+#
+# Or manually check:
+# grep -L "SPDX-FileCopyrightText" $(find . -name "*.rs" -o -name "*.py" -o -name "*.go")
+
+## 6. Cargo Deny (License Checks)
+# Check licenses and security advisories:
+#
+# cargo-deny --version || cargo install cargo-deny@0.16.4
+# cargo-deny --no-default-features check --hide-inclusion-graph licenses bans --config deny.toml
+
+## Quick Pre-Commit Checklist
+# Before committing Rust changes, run:
+# 1. cargo fmt
+# 2. cargo clippy --no-deps --all-targets -- -D warnings
+# 3. cargo test --locked --all-targets
+# 4. pre-commit run --all-files  (if Python changes)
+#
+# Expected result: All checks pass with no errors
+
+# =============================================================================
+# 20. CODE REVIEW GUIDELINES
 # =============================================================================
 # - Review for security vulnerabilities
 # - Check for performance issues
