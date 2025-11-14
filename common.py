@@ -1813,3 +1813,246 @@ class GitHubAPIClient:
             return []
 
 
+class GitLabAPIClient:
+    """GitLab API client with automatic token detection and error handling.
+    
+    Features:
+    - Automatic token detection (--token arg > GITLAB_TOKEN env > ~/.config/gitlab-token)
+    - Request/response handling with proper error messages
+    - Container registry queries
+    
+    Example:
+        client = GitLabAPIClient()
+        tags = client.get_registry_tags(project_id="169905", registry_id="85325")
+    """
+    
+    @staticmethod
+    def get_gitlab_token_from_file() -> Optional[str]:
+        """Get GitLab token from ~/.config/gitlab-token file.
+        
+        Returns:
+            GitLab token string, or None if not found
+        """
+        try:
+            token_file = Path.home() / '.config' / 'gitlab-token'
+            if token_file.exists():
+                return token_file.read_text().strip()
+        except Exception:
+            pass
+        return None
+    
+    def __init__(self, token: Optional[str] = None, base_url: str = "https://gitlab-master.nvidia.com"):
+        """Initialize GitLab API client.
+        
+        Args:
+            token: GitLab personal access token. If not provided, will try:
+                   1. GITLAB_TOKEN environment variable
+                   2. ~/.config/gitlab-token file
+            base_url: GitLab instance URL (default: https://gitlab-master.nvidia.com)
+        """
+        # Token priority: 1) provided token, 2) environment variable, 3) config file
+        self.token = token or os.environ.get('GITLAB_TOKEN') or self.get_gitlab_token_from_file()
+        self.base_url = base_url.rstrip('/')
+        self.headers = {}
+        
+        if self.token:
+            self.headers['PRIVATE-TOKEN'] = self.token
+    
+    def has_token(self) -> bool:
+        """Check if a GitLab token is configured."""
+        return self.token is not None
+    
+    def get(self, endpoint: str, params: Optional[Dict[str, Any]] = None, timeout: int = 10) -> Optional[Any]:
+        """Make GET request to GitLab API.
+        
+        Args:
+            endpoint: API endpoint (e.g., "/api/v4/projects/169905")
+            params: Query parameters
+            timeout: Request timeout in seconds
+            
+        Returns:
+            JSON response (dict or list), or None if request failed
+        """
+        if not HAS_REQUESTS:
+            # Fallback to urllib for basic GET requests
+            import urllib.request
+            import urllib.parse
+            
+            url = f"{self.base_url}{endpoint}" if endpoint.startswith('/') else f"{self.base_url}/{endpoint}"
+            
+            if params:
+                url += '?' + urllib.parse.urlencode(params)
+            
+            try:
+                req = urllib.request.Request(url, headers=self.headers)
+                with urllib.request.urlopen(req, timeout=timeout) as response:
+                    return json.loads(response.read().decode())
+            except Exception:
+                return None
+        
+        # Use requests if available
+        url = f"{self.base_url}{endpoint}" if endpoint.startswith('/') else f"{self.base_url}/{endpoint}"
+        
+        try:
+            response = requests.get(url, headers=self.headers, params=params, timeout=timeout)
+            
+            if response.status_code == 401:
+                raise Exception("GitLab API returned 401 Unauthorized. Check your token.")
+            elif response.status_code == 403:
+                raise Exception("GitLab API returned 403 Forbidden. Token may lack permissions.")
+            elif response.status_code == 404:
+                raise Exception(f"GitLab API returned 404 Not Found for {endpoint}")
+            
+            response.raise_for_status()
+            return response.json()
+            
+        except requests.exceptions.RequestException as e:
+            raise Exception(f"GitLab API request failed for {endpoint}: {e}")
+    
+    def get_registry_tags(self, project_id: str, registry_id: str, 
+                         per_page: int = 200, max_pages: int = 1) -> List[Dict[str, Any]]:
+        """Get container registry tags for a project.
+        
+        Args:
+            project_id: GitLab project ID (e.g., "169905")
+            registry_id: Container registry ID (e.g., "85325")
+            per_page: Number of tags per page (max 100 for GitLab)
+            max_pages: Maximum number of pages to fetch
+            
+        Returns:
+            List of tag dictionaries with 'name', 'location', etc.
+        """
+        if not self.has_token():
+            return []
+        
+        all_tags = []
+        
+        for page in range(1, max_pages + 1):
+            endpoint = f"/api/v4/projects/{project_id}/registry/repositories/{registry_id}/tags"
+            params = {
+                'per_page': min(per_page, 100),  # GitLab API max is 100
+                'page': page,
+                'order_by': 'updated_at',
+                'sort': 'desc'
+            }
+            
+            try:
+                tags = self.get(endpoint, params=params)
+                if not tags:
+                    break
+                    
+                all_tags.extend(tags)
+                
+                # If we got fewer tags than requested, we've reached the end
+                if len(tags) < params['per_page']:
+                    break
+                    
+            except Exception as e:
+                if page == 1:
+                    # Re-raise error on first page
+                    raise
+                # For subsequent pages, just stop
+                break
+        
+        return all_tags
+    
+    def get_tag_details(self, project_id: str, registry_id: str, tag_name: str) -> Optional[Dict[str, Any]]:
+        """Get detailed information for a specific tag.
+        
+        Args:
+            project_id: GitLab project ID
+            registry_id: Container registry ID
+            tag_name: Tag name to get details for
+            
+        Returns:
+            Tag details including total_size and created_at, or None if failed
+        """
+        if not self.has_token():
+            return None
+        
+        try:
+            # URL encode the tag name for the API
+            import urllib.parse
+            encoded_tag = urllib.parse.quote(tag_name, safe='')
+            endpoint = f"/api/v4/projects/{project_id}/registry/repositories/{registry_id}/tags/{encoded_tag}"
+            return self.get(endpoint)
+        except Exception:
+            return None
+    
+    def get_registry_images_for_shas(self, project_id: str, registry_id: str, 
+                                     sha_list: List[str]) -> Dict[str, List[Dict[str, Any]]]:
+        """Get container registry images for a list of commit SHAs.
+        
+        Args:
+            project_id: GitLab project ID
+            registry_id: Container registry ID  
+            sha_list: List of full commit SHAs (40 characters)
+            
+        Returns:
+            Dictionary mapping SHA to list of image info dicts with:
+                - tag: Full image tag
+                - framework: Framework name (vllm/sglang/trtllm)
+                - arch: Architecture (amd64/arm64)
+                - pipeline_id: GitLab CI pipeline ID
+                - location: Full image location URL
+                - total_size: Image size in bytes
+                - created_at: ISO 8601 timestamp
+        """
+        sha_to_images: Dict[str, List[Dict[str, Any]]] = {sha: [] for sha in sha_list}
+        
+        if not self.has_token():
+            return sha_to_images
+        
+        try:
+            # Fetch tags from registry (fetch enough to cover recent commits)
+            tags = self.get_registry_tags(project_id, registry_id, per_page=100, max_pages=2)
+            
+            # Map tags to SHAs and fetch detailed info for each matching tag
+            for tag_info in tags:
+                tag_name = tag_info['name']
+                
+                # Tags format: {full-sha}-{pipeline-id}-{framework}-{arch}
+                # Example: 02763376c536985cdd6a4f6402594f0cab328f21-38443994-vllm-amd64
+                for sha_full in sha_list:
+                    if sha_full in tag_name:
+                        # Parse tag to extract framework and arch
+                        # Format: SHA-PIPELINE-FRAMEWORK-ARCH
+                        parts = tag_name.split('-')
+                        if len(parts) >= 3:
+                            # Last part is arch, second to last is framework
+                            arch = parts[-1]
+                            framework = parts[-2]
+                            pipeline_id = parts[-3] if len(parts) >= 4 else "unknown"
+                            
+                            # Fetch detailed tag info (includes size and created_at)
+                            tag_details = self.get_tag_details(project_id, registry_id, tag_name)
+                            
+                            if tag_details:
+                                sha_to_images[sha_full].append({
+                                    'tag': tag_name,
+                                    'framework': framework,
+                                    'arch': arch,
+                                    'pipeline_id': pipeline_id,
+                                    'location': tag_details.get('location', tag_info.get('location', '')),
+                                    'total_size': tag_details.get('total_size', 0),
+                                    'created_at': tag_details.get('created_at', ''),
+                                })
+                            else:
+                                # Fallback to basic info if details fetch fails
+                                sha_to_images[sha_full].append({
+                                    'tag': tag_name,
+                                    'framework': framework,
+                                    'arch': arch,
+                                    'pipeline_id': pipeline_id,
+                                    'location': tag_info.get('location', ''),
+                                    'total_size': 0,
+                                    'created_at': '',
+                                })
+                            
+        except Exception:
+            # Silently fail - registry lookup is optional
+            pass
+        
+        return sha_to_images
+
+

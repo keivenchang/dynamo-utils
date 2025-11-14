@@ -1,0 +1,376 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<title>Dynamo Commit History</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📋</text></svg>">
+<style>
+body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif;
+    margin: 10px;
+    line-height: 1.3;
+    background-color: #f6f8fa;
+    font-size: 13px;
+}
+.header {
+    background-color: #24292f;
+    color: white;
+    padding: 10px 15px;
+    border-radius: 4px;
+    margin-bottom: 10px;
+}
+.header h1 {
+    margin: 0;
+    font-size: 18px;
+}
+.container {
+    background-color: white;
+    border: 1px solid #d0d7de;
+    border-radius: 4px;
+    overflow: hidden;
+}
+table {
+    width: 100%;
+    border-collapse: collapse;
+}
+th {
+    background-color: #f6f8fa;
+    padding: 6px 8px;
+    text-align: left;
+    font-weight: 600;
+    border-bottom: 1px solid #d0d7de;
+    position: sticky;
+    top: 0;
+    font-size: 12px;
+}
+td {
+    padding: 6px 8px;
+    border-bottom: 1px solid #d0d7de;
+    vertical-align: top;
+}
+tr:hover {
+    background-color: #f6f8fa;
+}
+.sha {
+    font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
+    font-size: 12px;
+}
+.sha a {
+    color: #0969da;
+    text-decoration: none;
+}
+.sha a:hover {
+    text-decoration: underline;
+}
+.message {
+    color: #24292f;
+}
+.pr-link {
+    color: #0969da;
+    text-decoration: none;
+    font-weight: 500;
+}
+.pr-link:hover {
+    text-decoration: underline;
+}
+.docker-images {
+    margin-top: 8px;
+}
+details {
+    margin-top: 4px;
+}
+summary {
+    cursor: pointer;
+    color: #0969da;
+    font-size: 13px;
+    font-weight: 500;
+}
+summary:hover {
+    text-decoration: underline;
+}
+.image-list {
+    margin: 8px 0;
+    padding-left: 20px;
+}
+.image-tag {
+    font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
+    font-size: 12px;
+    background-color: #f6f8fa;
+    padding: 2px 6px;
+    border-radius: 3px;
+    display: block;
+    margin: 4px 0;
+}
+.date {
+    font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
+    color: #57606a;
+    font-size: 12px;
+}
+.author {
+    color: #24292f;
+    font-size: 14px;
+}
+.composite-sha-link {
+    color: #0969da;
+    text-decoration: none;
+    cursor: pointer;
+    border-bottom: 1px dotted #0969da;
+}
+.composite-sha-link:hover {
+    text-decoration: underline;
+}
+</style>
+<script>
+function toggleDockerImages(event, linkElement) {
+    event.preventDefault();
+    // Find the current row
+    var currentRow = linkElement.closest('tr');
+    // Find the next row (which should be the docker-images-row)
+    var dockerRow = currentRow.nextElementSibling;
+
+    if (dockerRow && dockerRow.classList.contains('docker-images-row')) {
+        // Toggle visibility
+        if (dockerRow.style.display === 'none') {
+            dockerRow.style.display = 'table-row';
+            linkElement.textContent = '▼';  // Point down when expanded
+        } else {
+            dockerRow.style.display = 'none';
+            linkElement.textContent = '▶';  // Point right when collapsed
+        }
+    }
+}
+
+function copyToClipboard(text, button) {
+    // Fallback for non-HTTPS contexts (file:// protocol)
+    var textArea = document.createElement('textarea');
+    textArea.value = text;
+    textArea.style.position = 'fixed';
+    textArea.style.left = '-999999px';
+    textArea.style.top = '-999999px';
+    document.body.appendChild(textArea);
+    textArea.focus();
+    textArea.select();
+    
+    try {
+        var successful = document.execCommand('copy');
+        document.body.removeChild(textArea);
+        
+        if (successful) {
+            var originalText = button.textContent;
+            button.textContent = '✓ Copied!';
+            button.style.backgroundColor = '#1a7f37';
+            setTimeout(function() {
+                button.textContent = originalText;
+                button.style.backgroundColor = '#2da44e';
+            }, 2000);
+        } else {
+            alert('Failed to copy text');
+        }
+    } catch (err) {
+        document.body.removeChild(textArea);
+        alert('Failed to copy: ' + err);
+    }
+}
+
+function copyFromClipboardAttr(button) {
+    var text = button.getAttribute('data-clipboard-text');
+    
+    if (!text) {
+        alert('No text found in data-clipboard-text attribute');
+        return;
+    }
+    
+    // Fallback for non-HTTPS contexts (file:// protocol)
+    var textArea = document.createElement('textarea');
+    textArea.value = text;
+    textArea.style.position = 'fixed';
+    textArea.style.left = '-999999px';
+    textArea.style.top = '-999999px';
+    document.body.appendChild(textArea);
+    textArea.focus();
+    textArea.select();
+    
+    try {
+        var successful = document.execCommand('copy');
+        document.body.removeChild(textArea);
+        
+        if (successful) {
+            var originalText = button.textContent;
+            button.textContent = '✓ Copied!';
+            button.style.backgroundColor = '#1a7f37';
+            setTimeout(function() {
+                button.textContent = originalText;
+                button.style.backgroundColor = '#2da44e';
+            }, 2000);
+        } else {
+            alert('Failed to copy text');
+        }
+    } catch (err) {
+        document.body.removeChild(textArea);
+        alert('Failed to copy: ' + err);
+    }
+}
+</script>
+</head>
+<body>
+
+<div class="header">
+<h1>Dynamo Commit History</h1>
+<p style="margin: 5px 0 0 0; opacity: 0.9;">Recent commits with composite SHAs and Docker images</p>
+<p style="margin: 5px 0 0 0; opacity: 0.7; font-size: 12px;">Page generated: {{ generated_time }}</p>
+</div>
+
+<div class="container">
+<table>
+<thead>
+<tr>
+<th style="width: 120px;">Commit SHA</th>
+<th style="width: 140px;">Composite Docker SHA</th>
+<th style="width: 180px;">Date/Time (PDT)</th>
+<th style="width: 150px;">Author</th>
+<th>Message</th>
+</tr>
+</thead>
+<tbody>
+
+{% for commit in commits %}
+{%- set sha_short = commit.sha_short -%}
+{%- set sha_full = commit.sha_full -%}
+{%- set composite_sha = commit.composite_sha -%}
+{%- set date_str = commit.date -%}
+{%- set author = commit.author -%}
+{%- set message = commit.message -%}
+{%- set commit_link = "https://github.com/ai-dynamo/dynamo/commit/" ~ sha_full -%}
+{%- set has_docker_images = sha_short in docker_images and docker_images[sha_short] -%}
+{%- set composite_bg_color = commit.composite_bg_color -%}
+
+<tr>
+<td class="sha"><a href="{{ commit_link }}" target="_blank">{{ sha_short }}</a></td>
+<td class="sha">
+{%- if has_docker_images -%}
+{%- set log_path = log_paths.get(sha_short) -%}
+{%- if log_path -%}
+<span style="background-color: {{ composite_bg_color }}; padding: 2px 6px; border-radius: 3px;"><a href="{{ log_path }}" target="_blank" style="color: #0969da; text-decoration: none;" title="View build logs">{{ composite_sha }}</a></span>
+{%- else -%}
+<span style="background-color: {{ composite_bg_color }}; padding: 2px 6px; border-radius: 3px;">{{ composite_sha }}</span>
+{%- endif -%}
+ <a href="#" class="composite-sha-link" onclick="toggleDockerImages(event, this); return false;" style="text-decoration: none; margin-left: 4px;" title="Show Docker images">▶</a>
+{%- else -%}
+<span style="background-color: {{ composite_bg_color }}; padding: 2px 6px; border-radius: 3px;">{{ composite_sha }}</span>
+{%- endif -%}
+</td>
+<td class="date">{{ date_str }}</td>
+<td class="author">{{ author }}</td>
+<td>
+<div class="message">{{ message | safe }}</div>
+</td>
+</tr>
+
+{# Docker images row if any exist for this SHA #}
+{% if has_docker_images %}
+{%- set images = docker_images[sha_short] -%}
+{%- set full_msg = commit.full_message -%}
+{%- set files_changed = commit.files_changed -%}
+{%- set insertions = commit.insertions -%}
+{%- set deletions = commit.deletions -%}
+{%- set changed_files = commit.changed_files -%}
+{%- set gitlab_imgs = gitlab_images.get(sha_full, []) -%}
+
+<tr class="docker-images-row" style="display: none;">
+<td colspan="5" style="padding: 0; background-color: #f6f8fa;">
+<div style="padding: 8px 12px; border-top: 1px solid #d0d7de;">
+<!-- Commit Details Section -->
+<div style="margin-bottom: 12px; padding: 8px; background-color: white; border: 1px solid #d0d7de; border-radius: 4px;">
+<div style="font-weight: 600; margin-bottom: 6px; font-size: 13px;">Commit Message:</div>
+<div style="font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace; font-size: 12px; color: #24292f; white-space: pre-wrap; margin-bottom: 8px;">{{ full_msg | e }}</div>
+<div style="font-size: 12px; color: #57606a; margin-top: 6px;">
+<span style="color: #1a7f37; font-weight: 500;">+{{ insertions }}</span>
+<span style="color: #cf222e; font-weight: 500;">-{{ deletions }}</span>
+<span style="margin-left: 8px;">{{ files_changed }} file(s) changed</span>
+</div>
+<details style="margin-top: 8px;">
+<summary style="cursor: pointer; color: #0969da; font-size: 12px;">Show changed files ({{ changed_files|length }})</summary>
+<div style="margin-top: 4px; font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace; font-size: 11px;">
+{% for file in changed_files %}
+<div style="padding: 2px 0;">{{ file }}</div>
+{% endfor %}
+</div>
+</details>
+</div>
+
+<!-- Docker Images Section -->
+<div style="margin-bottom: 12px; padding: 8px; background-color: white; border: 1px solid #d0d7de; border-radius: 4px;">
+<div style="font-weight: 600; margin-bottom: 4px; font-size: 13px;">Local Docker Images:</div>
+<table style="width: 100%; border: none; background-color: white; border-collapse: collapse;">
+<thead>
+<tr>
+<th style="width: 50%; padding: 3px 6px; border: none;">Image Name:Tag</th>
+<th style="width: 15%; padding: 3px 6px; border: none;">Image ID</th>
+<th style="width: 10%; padding: 3px 6px; border: none;">Size</th>
+<th style="width: 25%; padding: 3px 6px; border: none;">Created (PDT)</th>
+</tr>
+</thead>
+<tbody>
+{% for image in images | sort(attribute='tag') %}
+<tr>
+<td style="font-family: monospace; font-size: 11px; padding: 2px 6px; border: none;">{{ image.tag }}</td>
+<td style="font-family: monospace; font-size: 11px; padding: 2px 6px; border: none;">{{ image.id }}</td>
+<td style="font-size: 11px; padding: 2px 6px; border: none;">{{ image.size }}</td>
+<td style="font-size: 11px; padding: 2px 6px; border: none;">{{ image.created }}</td>
+</tr>
+{% endfor %}
+</tbody>
+</table>
+</div>
+
+{# GitLab Container Registry Section #}
+{% if gitlab_imgs %}
+<div style="margin-bottom: 12px; padding: 8px; background-color: white; border: 1px solid #d0d7de; border-radius: 4px;">
+<div style="font-weight: 600; margin-bottom: 4px; font-size: 13px;">GitLab Container Registry (Runtime Images):</div>
+<table style="width: 100%; border: none; background-color: white; border-collapse: collapse;">
+<thead>
+<tr>
+<th style="width: 50%; padding: 3px 6px; border: none;">Image Name:Tag</th>
+<th style="width: 15%; padding: 3px 6px; border: none;">Image ID</th>
+<th style="width: 10%; padding: 3px 6px; border: none;">Size</th>
+<th style="width: 25%; padding: 3px 6px; border: none;">Created (PDT)</th>
+</tr>
+</thead>
+<tbody>
+{% for img in gitlab_imgs %}
+{%- set arch_icon = "🖥️" if img.arch == "amd64" else "🦾" -%}
+{%- set display_tag_with_icon = arch_icon ~ " " ~ img.tag -%}
+{%- set image_id = img.pipeline_id[:12] if img.pipeline_id|length >= 12 else img.pipeline_id -%}
+{%- set local_tag = "dynamo:latest-" ~ img.framework ~ "-runtime" -%}
+{%- set pull_cmd = "docker pull " ~ img.location -%}
+{%- set retag_cmd = "docker tag " ~ img.location ~ " " ~ local_tag -%}
+{%- set full_cmd = pull_cmd ~ " && " ~ retag_cmd -%}
+<tr>
+<td style="font-family: monospace; font-size: 11px; padding: 2px 6px; border: none; max-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="{{ img.tag }}
+Pipeline: {{ img.pipeline_id }}
+Framework: {{ img.framework }}
+Copy button to get pull & tag commands"><button data-clipboard-text="docker pull {{ img.location }} && docker tag {{ img.location }} dynamo:latest-{{ img.framework }}-runtime" onclick="copyFromClipboardAttr(this)" style="padding: 4px 6px; margin-right: 6px; font-size: 11px; background-color: transparent; color: #57606a; border: 1px solid #d0d7de; border-radius: 6px; cursor: pointer; display: inline-flex; align-items: center; vertical-align: middle;" title="Copy pull and retag commands" onmouseover="this.style.backgroundColor='#f3f4f6'; this.style.borderColor='#8c959f';" onmouseout="this.style.backgroundColor='transparent'; this.style.borderColor='#d0d7de';"><svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" style="display: inline-block;"><path d="M0 6.75C0 5.784.784 5 1.75 5h1.5a.75.75 0 0 1 0 1.5h-1.5a.25.25 0 0 0-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 0 0 .25-.25v-1.5a.75.75 0 0 1 1.5 0v1.5A1.75 1.75 0 0 1 9.25 16h-7.5A1.75 1.75 0 0 1 0 14.25Z"></path><path d="M5 1.75C5 .784 5.784 0 6.75 0h7.5C15.216 0 16 .784 16 1.75v7.5A1.75 1.75 0 0 1 14.25 11h-7.5A1.75 1.75 0 0 1 5 9.25Zm1.75-.25a.25.25 0 0 0-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 0 0 .25-.25v-7.5a.25.25 0 0 0-.25-.25Z"></path></svg></button>{{ display_tag_with_icon }}</td>
+<td style="font-family: monospace; font-size: 11px; padding: 2px 6px; border: none;"><a href="https://gitlab-master.nvidia.com/dl/ai-dynamo/dynamo/-/pipelines/{{ img.pipeline_id }}" target="_blank" style="color: #0969da;" title="View pipeline {{ img.pipeline_id }}">{{ image_id }}</a></td>
+<td style="font-size: 11px; padding: 2px 6px; border: none;">{{ img.size_display }}</td>
+<td style="font-size: 11px; padding: 2px 6px; border: none;">{{ img.created_display }}</td>
+</tr>
+{% endfor %}
+</tbody>
+</table>
+</div>
+{% endif %}
+
+</div>
+</td>
+</tr>
+{% endif %}
+
+{% endfor %}
+
+</tbody>
+</table>
+</div>
+
+</body>
+</html>
+

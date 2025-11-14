@@ -23,7 +23,14 @@ from pathlib import Path
 from typing import List, Dict
 
 # Import utilities from common module
-from common import DynamoRepositoryUtils, get_terminal_width
+from common import DynamoRepositoryUtils, GitLabAPIClient, get_terminal_width
+
+# Import Jinja2 for HTML template rendering
+try:
+    from jinja2 import Environment, FileSystemLoader, select_autoescape
+    HAS_JINJA2 = True
+except ImportError:
+    HAS_JINJA2 = False
 
 # Try to import pytz, but make it optional
 try:
@@ -244,188 +251,69 @@ class CommitHistoryGenerator:
         Returns:
             HTML content as string
         """
+        if not HAS_JINJA2:
+            raise ImportError("jinja2 is required for HTML generation. Install with: pip install jinja2")
+        
         # Get Docker images containing SHAs
         docker_images = self._get_docker_images_by_sha([c['sha_short'] for c in commit_data])
-
-        html = """<!DOCTYPE html>
-<html>
-<head>
-<meta charset="UTF-8">
-<title>Dynamo Commit History</title>
-<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📋</text></svg>">
-<style>
-body {
-    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif;
-    margin: 10px;
-    line-height: 1.3;
-    background-color: #f6f8fa;
-    font-size: 13px;
-}
-.header {
-    background-color: #24292f;
-    color: white;
-    padding: 10px 15px;
-    border-radius: 4px;
-    margin-bottom: 10px;
-}
-.header h1 {
-    margin: 0;
-    font-size: 18px;
-}
-.container {
-    background-color: white;
-    border: 1px solid #d0d7de;
-    border-radius: 4px;
-    overflow: hidden;
-}
-table {
-    width: 100%;
-    border-collapse: collapse;
-}
-th {
-    background-color: #f6f8fa;
-    padding: 6px 8px;
-    text-align: left;
-    font-weight: 600;
-    border-bottom: 1px solid #d0d7de;
-    position: sticky;
-    top: 0;
-    font-size: 12px;
-}
-td {
-    padding: 6px 8px;
-    border-bottom: 1px solid #d0d7de;
-    vertical-align: top;
-}
-tr:hover {
-    background-color: #f6f8fa;
-}
-.sha {
-    font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
-    font-size: 12px;
-}
-.sha a {
-    color: #0969da;
-    text-decoration: none;
-}
-.sha a:hover {
-    text-decoration: underline;
-}
-.message {
-    color: #24292f;
-}
-.pr-link {
-    color: #0969da;
-    text-decoration: none;
-    font-weight: 500;
-}
-.pr-link:hover {
-    text-decoration: underline;
-}
-.docker-images {
-    margin-top: 8px;
-}
-details {
-    margin-top: 4px;
-}
-summary {
-    cursor: pointer;
-    color: #0969da;
-    font-size: 13px;
-    font-weight: 500;
-}
-summary:hover {
-    text-decoration: underline;
-}
-.image-list {
-    margin: 8px 0;
-    padding-left: 20px;
-}
-.image-tag {
-    font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
-    font-size: 12px;
-    background-color: #f6f8fa;
-    padding: 2px 6px;
-    border-radius: 3px;
-    display: block;
-    margin: 4px 0;
-}
-.date {
-    font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
-    color: #57606a;
-    font-size: 12px;
-}
-.author {
-    color: #24292f;
-    font-size: 14px;
-}
-.composite-sha-link {
-    color: #0969da;
-    text-decoration: none;
-    cursor: pointer;
-    border-bottom: 1px dotted #0969da;
-}
-.composite-sha-link:hover {
-    text-decoration: underline;
-}
-</style>
-<script>
-function toggleDockerImages(event, linkElement) {
-    event.preventDefault();
-    // Find the current row
-    var currentRow = linkElement.closest('tr');
-    // Find the next row (which should be the docker-images-row)
-    var dockerRow = currentRow.nextElementSibling;
-
-    if (dockerRow && dockerRow.classList.contains('docker-images-row')) {
-        // Toggle visibility
-        if (dockerRow.style.display === 'none') {
-            dockerRow.style.display = 'table-row';
-            linkElement.textContent = '▼';  // Point down when expanded
-        } else {
-            dockerRow.style.display = 'none';
-            linkElement.textContent = '▶';  // Point right when collapsed
-        }
-    }
-}
-</script>
-</head>
-<body>
-"""
-        # Add generation timestamp in PDT at the top
-        if HAS_PYTZ:
-            pdt = pytz.timezone('America/Los_Angeles')
-            generated_time = datetime.now(pdt).strftime('%Y-%m-%d %H:%M:%S %Z')
-        else:
-            generated_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-
-        html += f"""
-<div class="header">
-<h1>Dynamo Commit History</h1>
-<p style="margin: 5px 0 0 0; opacity: 0.9;">Recent commits with composite SHAs and Docker images</p>
-<p style="margin: 5px 0 0 0; opacity: 0.7; font-size: 12px;">Page generated: {generated_time}</p>
-</div>
-"""
-
-        html += """
-<div class="container">
-<table>
-<thead>
-<tr>
-<th style="width: 120px;">Commit SHA</th>
-<th style="width: 140px;">Composite Docker SHA</th>
-<th style="width: 180px;">Date/Time (PDT)</th>
-<th style="width: 150px;">Author</th>
-<th>Message</th>
-</tr>
-</thead>
-<tbody>
-"""
-
-        # Track composite SHA changes for color alternation
-        # Use colorblind-friendly multi-color scheme
-        # Colors chosen from Paul Tol's colorblind-safe palette
-        bg_color_scheme = [
+        
+        # Get GitLab container registry images for commits (with caching)
+        gitlab_images_raw = self._get_cached_gitlab_images([c['sha_full'] for c in commit_data])
+        
+        # Process GitLab images: deduplicate and format
+        gitlab_images = {}
+        for sha_full, registry_imgs in gitlab_images_raw.items():
+            if not registry_imgs:
+                continue
+                
+            # Deduplicate: keep only the most recent image per framework/arch combination
+            deduped_imgs = {}
+            for img in registry_imgs:
+                key = (img['framework'], img['arch'])
+                if key not in deduped_imgs or img['pipeline_id'] > deduped_imgs[key]['pipeline_id']:
+                    deduped_imgs[key] = img
+            
+            # Format the images for display
+            formatted_imgs = []
+            for (framework, arch), img in sorted(deduped_imgs.items()):
+                total_size = img.get('total_size', 0)
+                created_at = img.get('created_at', '')
+                
+                # Format size (bytes to human-readable)
+                if total_size > 0:
+                    if total_size >= 1_000_000_000:  # GB
+                        size_display = f"{total_size / 1_000_000_000:.2f}GB"
+                    elif total_size >= 1_000_000:  # MB
+                        size_display = f"{total_size / 1_000_000:.1f}MB"
+                    else:
+                        size_display = f"{total_size / 1_000:.1f}KB"
+                else:
+                    size_display = "N/A"
+                
+                # Format created timestamp (ISO 8601 to readable, convert to PDT)
+                created_display = "N/A"
+                if created_at:
+                    try:
+                        # Parse UTC timestamp
+                        dt = datetime.fromisoformat(created_at.replace('Z', '+00:00'))
+                        # Convert to PDT if pytz is available
+                        if HAS_PYTZ:
+                            pdt = pytz.timezone('America/Los_Angeles')
+                            dt = dt.astimezone(pdt)
+                        created_display = dt.strftime('%Y-%m-%d %H:%M')
+                    except:
+                        created_display = created_at[:16] if len(created_at) >= 16 else created_at
+                
+                formatted_imgs.append({
+                    **img,
+                    'size_display': size_display,
+                    'created_display': created_display
+                })
+            
+            gitlab_images[sha_full] = formatted_imgs
+        
+        # Process commit messages for PR links and assign colors
+        bg_colors = [
             '#bbccee',  # Light blue
             '#cceeff',  # Pale cyan
             '#ccddaa',  # Light green-yellow
@@ -435,170 +323,135 @@ function toggleDockerImages(event, linkElement) {
             '#ffe5b4',  # Light peach
             '#e7d4f7',  # Light lavender
         ]
+        
         current_color_index = 0
         previous_composite_sha = None
-
+        
         for commit in commit_data:
-            sha_short = commit['sha_short']
-            sha_full = commit['sha_full']
-            composite_sha = commit['composite_sha']
-            date_str = commit['date']
-            author = commit['author']
+            # Handle PR links
             message = commit['message']
-
-            # Check if composite SHA changed from previous commit
-            if previous_composite_sha is not None and composite_sha != previous_composite_sha:
-                # Cycle to next color when composite SHA changes
-                current_color_index = (current_color_index + 1) % len(bg_color_scheme)
-
-            # Get current background color for this composite SHA
-            composite_bg_color = bg_color_scheme[current_color_index]
-            previous_composite_sha = composite_sha
-
-            # Create GitHub commit link
-            commit_link = f"https://github.com/ai-dynamo/dynamo/commit/{sha_full}"
-
-            # Extract PR number and create PR link
             pr_match = re.search(r'\(#(\d+)\)', message)
             if pr_match:
                 pr_number = pr_match.group(1)
                 pr_link = f"https://github.com/ai-dynamo/dynamo/pull/{pr_number}"
-                # Replace (#1234) with clickable link
                 message = re.sub(
                     r'\(#(\d+)\)',
                     f'(<a href="{pr_link}" class="pr-link" target="_blank">#{pr_number}</a>)',
                     message
                 )
-
-            # Check if Docker images exist for this commit
-            has_docker_images = sha_short in docker_images and docker_images[sha_short]
-
-            # Build composite SHA cell with logs link (if exists) and Docker images toggle
-            if has_docker_images:
-                # Search for build log across all date directories (not just commit date)
-                # Logs are organized by build date, not commit date
-                log_path = None
+                commit['message'] = message
+            
+            # Assign color based on composite SHA changes
+            composite_sha = commit['composite_sha']
+            if previous_composite_sha is not None and composite_sha != previous_composite_sha:
+                # Composite SHA changed, move to next color
+                current_color_index = (current_color_index + 1) % len(bg_colors)
+            
+            commit['composite_bg_color'] = bg_colors[current_color_index]
+            previous_composite_sha = composite_sha
+        
+        # Build log paths dictionary
+        log_paths = {}
+        for commit in commit_data:
+            sha_short = commit['sha_short']
+            if sha_short in docker_images and docker_images[sha_short]:
+                # Search for build log
                 log_filename = f"*.{sha_short}.report.html"
-
-                # Search in logs_dir for the report file
                 search_pattern = str(logs_dir / "*" / log_filename)
                 matching_logs = glob.glob(search_pattern)
-
+                
                 if matching_logs:
-                    # Use the most recent log if multiple exist
                     log_path = Path(sorted(matching_logs)[-1])
-
-                # Make composite SHA link to logs if they exist, otherwise plain text
-                if log_path and log_path.exists():
-                    # Create relative path from dynamo_latest to dynamo_ci/logs
-                    # dynamo_latest/index.html -> ../dynamo_ci/logs/DATE/DATE.SHA.report.html
                     try:
-                        # Try to create relative path from nvidia directory
                         nvidia_dir = Path.home() / 'nvidia'
                         relative_parts = log_path.relative_to(nvidia_dir)
-                        log_url = f"../{relative_parts}"
+                        log_paths[sha_short] = f"../{relative_parts}"
                     except ValueError:
-                        # Fallback to absolute path if not under nvidia dir
-                        log_url = str(log_path)
-                    composite_sha_html = f'<span style="background-color: {composite_bg_color}; padding: 2px 6px; border-radius: 3px;"><a href="{log_url}" target="_blank" style="color: #0969da; text-decoration: none;" title="View build logs">{composite_sha}</a></span>'
-                else:
-                    composite_sha_html = f'<span style="background-color: {composite_bg_color}; padding: 2px 6px; border-radius: 3px;">{composite_sha}</span>'
+                        log_paths[sha_short] = str(log_path)
+        
+        # Generate timestamp
+        if HAS_PYTZ:
+            pdt = pytz.timezone('America/Los_Angeles')
+            generated_time = datetime.now(pdt).strftime('%Y-%m-%d %H:%M:%S %Z')
+        else:
+            generated_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        
+        # Render template
+        template_dir = Path(__file__).parent
+        env = Environment(
+            loader=FileSystemLoader(template_dir),
+            autoescape=select_autoescape(['html', 'xml'])
+        )
+        template = env.get_template('show_commit_history.j2')
+        
+        return template.render(
+            commits=commit_data,
+            docker_images=docker_images,
+            gitlab_images=gitlab_images,
+            log_paths=log_paths,
+            generated_time=generated_time
+        )
 
-                # Add triangle icon to toggle Docker images
-                composite_sha_html += f' <a href="#" class="composite-sha-link" onclick="toggleDockerImages(event, this); return false;" style="text-decoration: none; margin-left: 4px;" title="Show Docker images">▶</a>'
+    def _get_cached_gitlab_images(self, sha_full_list: List[str]) -> dict:
+        """Get GitLab registry images with caching.
+        
+        Args:
+            sha_full_list: List of full commit SHAs (40 characters)
+            
+        Returns:
+            Dictionary mapping SHA to list of registry image info
+        """
+        # Load cache
+        cache = {}
+        gitlab_cache_file = self.repo_path / ".gitlab_registry_cache.json"
+        if gitlab_cache_file.exists():
+            try:
+                cache = json.loads(gitlab_cache_file.read_text())
+                if self.verbose:
+                    self.logger.info(f"Loaded GitLab cache with {len(cache)} entries")
+            except Exception as e:
+                self.logger.warning(f"Failed to load GitLab cache: {e}")
+        
+        # Check which SHAs need to be fetched
+        shas_to_fetch = []
+        result = {}
+        
+        for sha in sha_full_list:
+            if sha in cache:
+                result[sha] = cache[sha]
+                if self.verbose:
+                    self.logger.info(f"Cache hit for GitLab registry: {sha[:9]}")
             else:
-                composite_sha_html = f'<span style="background-color: {composite_bg_color}; padding: 2px 6px; border-radius: 3px;">{composite_sha}</span>'
-
-            html += f"""
-<tr>
-<td class="sha"><a href="{commit_link}" target="_blank">{sha_short}</a></td>
-<td class="sha">{composite_sha_html}</td>
-<td class="date">{date_str}</td>
-<td class="author">{author}</td>
-<td>
-<div class="message">{message}</div>
-</td>
-</tr>
-"""
-
-            # Add Docker images row if any exist for this SHA
-            if has_docker_images:
-                images = docker_images[sha_short]
-
-                # Get commit details
-                full_msg = commit['full_message']
-                files_changed = commit['files_changed']
-                insertions = commit['insertions']
-                deletions = commit['deletions']
-                changed_files = commit['changed_files']
-
-                # Escape HTML in full message
-                full_msg_html = full_msg.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;').replace('\n', '<br>')
-
-                html += f"""
-<tr class="docker-images-row" style="display: none;">
-<td colspan="5" style="padding: 0; background-color: #f6f8fa;">
-<div style="padding: 8px 12px; border-top: 1px solid #d0d7de;">
-<!-- Commit Details Section -->
-<div style="margin-bottom: 12px; padding: 8px; background-color: white; border: 1px solid #d0d7de; border-radius: 4px;">
-<div style="font-weight: 600; margin-bottom: 6px; font-size: 13px;">Commit Message:</div>
-<div style="font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace; font-size: 12px; color: #24292f; white-space: pre-wrap; margin-bottom: 8px;">{full_msg_html}</div>
-<div style="font-size: 12px; color: #57606a; margin-top: 6px;">
-<span style="color: #1a7f37; font-weight: 500;">+{insertions}</span>
-<span style="color: #cf222e; font-weight: 500;">-{deletions}</span>
-<span style="margin-left: 8px;">{files_changed} file(s) changed</span>
-</div>
-<details style="margin-top: 8px;">
-<summary style="cursor: pointer; color: #0969da; font-size: 12px;">Show changed files ({len(changed_files)})</summary>
-<div style="margin-top: 4px; font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace; font-size: 11px;">
-"""
-                for file in changed_files:
-                    html += f'<div style="padding: 2px 0;">{file}</div>\n'
-
-                html += """
-</div>
-</details>
-</div>
-
-<!-- Docker Images Section -->
-<div style="font-weight: 600; margin-bottom: 4px; font-size: 13px;">Docker Images:</div>
-<table style="width: 100%; border: none; background-color: white; border-collapse: collapse;">
-<thead>
-<tr>
-<th style="width: 50%; padding: 3px 6px; border: none;">Image Name:Tag</th>
-<th style="width: 15%; padding: 3px 6px; border: none;">Image ID</th>
-<th style="width: 10%; padding: 3px 6px; border: none;">Size</th>
-<th style="width: 25%; padding: 3px 6px; border: none;">Created (PDT)</th>
-</tr>
-</thead>
-<tbody>
-"""
-                for image in sorted(images, key=lambda x: x['tag']):
-                    html += f"""
-<tr>
-<td style="font-family: monospace; font-size: 11px; padding: 2px 6px; border: none;">{image['tag']}</td>
-<td style="font-family: monospace; font-size: 11px; padding: 2px 6px; border: none;">{image['id']}</td>
-<td style="font-size: 11px; padding: 2px 6px; border: none;">{image['size']}</td>
-<td style="font-size: 11px; padding: 2px 6px; border: none;">{image['created']}</td>
-</tr>
-"""
-                html += """
-</tbody>
-</table>
-</div>
-</td>
-</tr>
-"""
-
-        html += """
-</tbody>
-</table>
-</div>
-</body>
-</html>
-"""
-
-        return html
+                shas_to_fetch.append(sha)
+                result[sha] = []
+        
+        # Fetch missing SHAs from GitLab
+        if shas_to_fetch:
+            if self.verbose:
+                self.logger.info(f"Fetching {len(shas_to_fetch)} SHAs from GitLab registry")
+            
+            gitlab_client = GitLabAPIClient()
+            fresh_data = gitlab_client.get_registry_images_for_shas(
+                project_id="169905",  # dl/ai-dynamo/dynamo
+                registry_id="85325",  # Main dynamo registry
+                sha_list=shas_to_fetch
+            )
+            
+            # Update result and cache
+            for sha, images in fresh_data.items():
+                result[sha] = images
+                cache[sha] = images
+            
+            # Save updated cache
+            try:
+                gitlab_cache_file.parent.mkdir(parents=True, exist_ok=True)
+                gitlab_cache_file.write_text(json.dumps(cache, indent=2))
+                if self.verbose:
+                    self.logger.info(f"Saved GitLab cache with {len(cache)} entries")
+            except Exception as e:
+                self.logger.warning(f"Failed to save GitLab cache: {e}")
+        
+        return result
 
     def _get_docker_images_by_sha(self, sha_list: List[str]) -> dict:
         """Get Docker images containing each SHA in their tag
