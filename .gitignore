@@ -1,3 +1,7 @@
 __pycache__
 *.bak
 no-commit/
+.venv/
+.commit_history_cache.json
+.gitlab_registry_cache.json
+update_html_pages.log
