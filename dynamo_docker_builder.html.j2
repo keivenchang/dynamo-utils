@@ -143,7 +143,7 @@ h2 { margin: 0; font-size: 1.2em; font-weight: bold; }
 {%- elif build_task.status == 'QUEUED' %}
 <span style="color: #95a5a6;">⏳ to be run</span>{%- if build_task.time %} <span class="chart-timing">(prev: {{ build_task.time }})</span>{%- endif %}
 {%- elif build_task.status == 'SKIPPED' %}
-⏭️ SKIP{%- if build_task.time and build_task.prev_status %} (prev: {%- if build_task.prev_status == 'SUCCESS' %}<span class="success">PASS</span>{%- else %}<span class="failure">FAIL</span>{%- endif %} ({{ build_task.time }})){%- endif %}
+{%- if build_task.time and build_task.prev_status %}prev: {%- if build_task.prev_status == 'SUCCESS' %}<span class="success">PASS</span>{%- else %}<span class="failure">FAIL</span>{%- endif %} ({{ build_task.time }}){%- endif %}
 {%- else %}
 <span class="failure">❌ FAIL</span> <span class="chart-timing">({{ build_task.time if build_task.time else 'n/a' }})</span>
 {%- endif %}
@@ -159,7 +159,7 @@ h2 { margin: 0; font-size: 1.2em; font-weight: bold; }
 {%- elif compilation_task.status == 'QUEUED' %}
 <span style="color: #95a5a6;">⏳ to be run</span>{%- if compilation_task.time %} <span class="chart-timing">(prev: {{ compilation_task.time }})</span>{%- endif %}
 {%- elif compilation_task.status == 'SKIPPED' %}
-⏭️ SKIP{%- if compilation_task.time and compilation_task.prev_status %} (prev: {%- if compilation_task.prev_status == 'SUCCESS' %}<span class="success">PASS</span>{%- else %}<span class="failure">FAIL</span>{%- endif %} ({{ compilation_task.time }})){%- endif %}
+{%- if compilation_task.time and compilation_task.prev_status %}prev: {%- if compilation_task.prev_status == 'SUCCESS' %}<span class="success">PASS</span>{%- else %}<span class="failure">FAIL</span>{%- endif %} ({{ compilation_task.time }}){%- endif %}
 {%- else %}
 <span class="failure">❌ FAIL</span> <span class="chart-timing">({{ compilation_task.time if compilation_task.time else 'n/a' }})</span>
 {%- endif %}
@@ -175,7 +175,7 @@ h2 { margin: 0; font-size: 1.2em; font-weight: bold; }
 {%- elif sanity_task.status == 'QUEUED' %}
 <span style="color: #95a5a6;">⏳ to be run</span>{%- if sanity_task.time %} <span class="chart-timing">(prev: {{ sanity_task.time }})</span>{%- endif %}
 {%- elif sanity_task.status == 'SKIPPED' %}
-⏭️ SKIP{%- if sanity_task.time and sanity_task.prev_status %} (prev: {%- if sanity_task.prev_status == 'SUCCESS' %}<span class="success">PASS</span>{%- else %}<span class="failure">FAIL</span>{%- endif %} ({{ sanity_task.time }})){%- endif %}
+{%- if sanity_task.time and sanity_task.prev_status %}prev: {%- if sanity_task.prev_status == 'SUCCESS' %}<span class="success">PASS</span>{%- else %}<span class="failure">FAIL</span>{%- endif %} ({{ sanity_task.time }}){%- endif %}
 {%- else %}
 <span class="failure">❌ FAIL</span> <span class="chart-timing">({{ sanity_task.time if sanity_task.time else 'n/a' }})</span>
 {%- endif %}

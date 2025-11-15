@@ -363,7 +363,7 @@ def create_task_graph(framework: str, sha: str, repo_path: Path, version: Option
     tasks[f"{framework}-runtime-sanity"] = CommandTask(
         task_id=f"{framework}-runtime-sanity",
         description=f"Run sanity_check.py in {framework.upper()} runtime container",
-        command=f"{repo_path}/container/run.sh --image {runtime_image_tag} -- python3 /workspace/deploy/sanity_check.py",
+        command=f"{repo_path}/container/run.sh --image {runtime_image_tag} -- python3 /workspace/deploy/sanity_check.py --runtime-check",
         input_image=runtime_image_tag,
         parents=[f"{framework}-runtime-build"],
         timeout=45.0,  # 45 seconds for sanity checks
@@ -391,7 +391,7 @@ def create_task_graph(framework: str, sha: str, repo_path: Path, version: Option
     # - CARGO_PROFILE_DEV_OPT_LEVEL=0: No optimizations (faster compile)
     # - CARGO_BUILD_JOBS=$(nproc): Parallel compilation
     # - CARGO_PROFILE_DEV_CODEGEN_UNITS=256: More parallel code generation
-    cargo_cmd = "CARGO_INCREMENTAL=1 CARGO_PROFILE_DEV_OPT_LEVEL=0 CARGO_BUILD_JOBS=$(nproc) CARGO_PROFILE_DEV_CODEGEN_UNITS=256 cargo build --locked --profile dev --features dynamo-llm/block-manager && cd /workspace/lib/bindings/python && CARGO_INCREMENTAL=1 CARGO_PROFILE_DEV_OPT_LEVEL=0 CARGO_BUILD_JOBS=$(nproc) CARGO_PROFILE_DEV_CODEGEN_UNITS=256 maturin develop --uv && uv pip install -e ."
+    cargo_cmd = "CARGO_INCREMENTAL=1 CARGO_PROFILE_DEV_OPT_LEVEL=0 CARGO_BUILD_JOBS=$(nproc) CARGO_PROFILE_DEV_CODEGEN_UNITS=256 cargo build --profile dev --features dynamo-llm/block-manager && cd /workspace/lib/bindings/python && CARGO_INCREMENTAL=1 CARGO_PROFILE_DEV_OPT_LEVEL=0 CARGO_BUILD_JOBS=$(nproc) CARGO_PROFILE_DEV_CODEGEN_UNITS=256 maturin develop --uv && uv pip install -e ."
     home_dir = str(Path.home())
     tasks[f"{framework}-dev-compilation"] = CommandTask(
         task_id=f"{framework}-dev-compilation",
@@ -1945,6 +1945,50 @@ def execute_task_parallel(
 
 
 
+def find_previous_log_file(
+    repo_path: Path,
+    current_date_str: str,
+    sha: str,
+    task_id: str,
+    max_days_back: int = 7,
+) -> Optional[Tuple[Path, Path]]:
+    """
+    Find a previous log file for a given task, searching backwards from current date.
+
+    Args:
+        repo_path: Repository root path
+        current_date_str: Current date string (YYYY-MM-DD)
+        sha: Git commit SHA
+        task_id: Task identifier
+        max_days_back: Maximum number of days to search back
+
+    Returns:
+        Tuple of (log_file_path, log_dir) if found, None otherwise
+    """
+    from datetime import datetime, timedelta
+
+    logs_base = repo_path / "logs"
+    if not logs_base.exists():
+        return None
+
+    current_date = datetime.strptime(current_date_str, "%Y-%m-%d")
+
+    # Search backwards from current date
+    for days_ago in range(max_days_back + 1):
+        search_date = current_date - timedelta(days=days_ago)
+        search_date_str = search_date.strftime("%Y-%m-%d")
+        search_log_dir = logs_base / search_date_str
+
+        if not search_log_dir.exists():
+            continue
+
+        log_file = BaseTask.get_log_file_path(search_log_dir, search_date_str, sha, task_id)
+        if log_file.exists():
+            return (log_file, search_log_dir)
+
+    return None
+
+
 def initialize_frameworks_data_cache(
     all_tasks: Dict[str, 'BaseTask'],
     log_dir: Path,
@@ -1956,6 +2000,7 @@ def initialize_frameworks_data_cache(
     """
     Initialize the frameworks data cache once with image info and previous logs.
     This is called once at the start, before any tasks run.
+    Searches for previous logs in current date and up to 7 days back.
     """
     
     hostname = DEFAULT_HOSTNAME
@@ -2007,41 +2052,62 @@ def initialize_frameworks_data_cache(
                     if image_size:
                         frameworks_data[framework][target].image_size = image_size
             
-            # Load previous build log (if exists) - log files still use framework-target pattern
-            log_file = BaseTask.get_log_file_path(log_dir, date_str, sha, f"{framework}-{target}-build")
-            if log_file.exists():
+            # Load previous build log (if exists) - search current and previous dates
+            prev_log_result = find_previous_log_file(repo_path, date_str, sha, f"{framework}-{target}-build")
+            if prev_log_result:
+                log_file, found_log_dir = prev_log_result
                 log_results = parse_log_file_results(log_file)
                 if log_results:
+                    # If log is from a different date, use relative path
+                    if found_log_dir.name != date_str:
+                        log_link = f"../{found_log_dir.name}/{log_file.name}"
+                    else:
+                        log_link = log_file.name
+
                     frameworks_data[framework][target].build = TaskData(
                         status='SKIPPED',
                         time=f"{log_results.duration:.1f}s" if log_results.duration else None,
-                        log_file=log_file.name if not use_absolute_urls else f"http://{hostname}{html_path}/{log_dir.name}/{log_file.name}",
+                        log_file=log_link if not use_absolute_urls else f"http://{hostname}{html_path}/{found_log_dir.name}/{log_file.name}",
                         prev_status=log_results.status.name,
                     )
             
-            # Load previous compilation log (if exists)
+            # Load previous compilation log (if exists) - search current and previous dates
             if target in ['dev', 'local-dev']:
-                log_file_comp = BaseTask.get_log_file_path(log_dir, date_str, sha, f"{framework}-{target}-compilation")
-                if log_file_comp.exists():
+                prev_log_result = find_previous_log_file(repo_path, date_str, sha, f"{framework}-{target}-compilation")
+                if prev_log_result:
+                    log_file_comp, found_log_dir = prev_log_result
                     log_results = parse_log_file_results(log_file_comp)
                     if log_results:
+                        # If log is from a different date, use relative path
+                        if found_log_dir.name != date_str:
+                            log_link = f"../{found_log_dir.name}/{log_file_comp.name}"
+                        else:
+                            log_link = log_file_comp.name
+
                         frameworks_data[framework][target].compilation = TaskData(
                             status='SKIPPED',
                             time=f"{log_results.duration:.1f}s" if log_results.duration else None,
-                            log_file=log_file_comp.name if not use_absolute_urls else f"http://{hostname}{html_path}/{log_dir.name}/{log_file_comp.name}",
+                            log_file=log_link if not use_absolute_urls else f"http://{hostname}{html_path}/{found_log_dir.name}/{log_file_comp.name}",
                             prev_status=log_results.status.name,
                         )
             
-            # Load previous sanity log (if exists)
+            # Load previous sanity log (if exists) - search current and previous dates
             if target in ['runtime', 'dev', 'local-dev']:
-                log_file_sanity = BaseTask.get_log_file_path(log_dir, date_str, sha, f"{framework}-{target}-sanity")
-                if log_file_sanity.exists():
+                prev_log_result = find_previous_log_file(repo_path, date_str, sha, f"{framework}-{target}-sanity")
+                if prev_log_result:
+                    log_file_sanity, found_log_dir = prev_log_result
                     log_results = parse_log_file_results(log_file_sanity)
                     if log_results:
+                        # If log is from a different date, use relative path
+                        if found_log_dir.name != date_str:
+                            log_link = f"../{found_log_dir.name}/{log_file_sanity.name}"
+                        else:
+                            log_link = log_file_sanity.name
+
                         frameworks_data[framework][target].sanity = TaskData(
                             status='SKIPPED',
                             time=f"{log_results.duration:.1f}s" if log_results.duration else None,
-                            log_file=log_file_sanity.name if not use_absolute_urls else f"http://{hostname}{html_path}/{log_dir.name}/{log_file_sanity.name}",
+                            log_file=log_link if not use_absolute_urls else f"http://{hostname}{html_path}/{found_log_dir.name}/{log_file_sanity.name}",
                             prev_status=log_results.status.name,
                         )
     
@@ -2617,24 +2683,26 @@ def main() -> int:
                 # Initialize GitUtils to check repo status
                 git_utils_temp = GitUtils(repo_path)
 
-                # Reset all *.lock files before pull (they can be regenerated)
-                lock_files = list(repo_path.glob('**/*.lock'))
-                if lock_files:
-                    logger.info(f"Resetting {len(lock_files)} *.lock file(s)...")
-                    for lock_file in lock_files:
-                        try:
-                            git_utils_temp.repo.git.restore(str(lock_file.relative_to(repo_path)))
-                            logger.debug(f"  Reset {lock_file.relative_to(repo_path)}")
-                        except Exception as e:
-                            logger.warning(f"  Could not reset {lock_file.relative_to(repo_path)}: {e}")
+                # Hard reset to clean up any uncommitted changes
+                logger.info("Doing hard reset to clean repository state...")
+                git_utils_temp.repo.git.reset('--hard', 'HEAD')
 
-                # Check if there are uncommitted changes
-                if git_utils_temp.is_dirty() or git_utils_temp.repo.untracked_files:
-                    logger.warning("Repository has uncommitted changes. Stashing them before pull...")
-                    # Exclude .last_build_composite_sha from stash since it's not part of source code
-                    git_utils_temp.repo.git.stash('push', '--include-untracked', '--',
-                                                    ':(exclude).last_build_composite_sha',
-                                                    '-m', 'Auto-stash before pull')
+                # Clean untracked files (except .last_build_composite_sha which we want to keep)
+                untracked = git_utils_temp.repo.untracked_files
+                if untracked:
+                    logger.info(f"Removing {len(untracked)} untracked file(s)...")
+                    for file in untracked:
+                        if file != '.last_build_composite_sha':
+                            file_path = repo_path / file
+                            try:
+                                if file_path.is_file():
+                                    file_path.unlink()
+                                elif file_path.is_dir():
+                                    import shutil
+                                    shutil.rmtree(file_path)
+                                logger.debug(f"  Removed {file}")
+                            except Exception as e:
+                                logger.warning(f"  Could not remove {file}: {e}")
 
                 # Checkout main branch and pull latest
                 logger.info("Checking out main branch...")

@@ -420,6 +420,11 @@ if [ -n "$BUILD_TYPE" ]; then
     # Build the Rust components that will become the Python extension
 
     if [ "$BUILD_RUST" = true ]; then
+        # Sync Cargo.lock first to ensure it's up-to-date with Cargo.toml
+        dry_run_echo "Syncing Cargo.lock with dependencies..."
+        cmd cargo update
+
+        # Build with --locked to ensure exact dependency versions
         if [ "$BUILD_TYPE" = "development" ]; then
             cmd bash -c "CARGO_PROFILE_DEV_OPT_LEVEL=0 CARGO_BUILD_JOBS=$CARGO_BUILD_JOBS CARGO_PROFILE_DEV_CODEGEN_UNITS=256 cargo build --locked --features dynamo-llm/block-manager --workspace"
         else

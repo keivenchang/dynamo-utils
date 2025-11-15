@@ -241,11 +241,18 @@ function copyFromClipboardAttr(button) {
 {%- set author = commit.author -%}
 {%- set message = commit.message -%}
 {%- set commit_link = "https://github.com/ai-dynamo/dynamo/commit/" ~ sha_full -%}
+{%- set gitlab_commit_link = "https://gitlab-master.nvidia.com/dl/ai-dynamo/dynamo/-/commit/" ~ sha_full -%}
 {%- set has_docker_images = sha_short in docker_images and docker_images[sha_short] -%}
+{%- set has_gitlab = sha_full in gitlab_images and gitlab_images[sha_full] -%}
 {%- set composite_bg_color = commit.composite_bg_color -%}
 
 <tr>
-<td class="sha"><a href="{{ commit_link }}" target="_blank">{{ sha_short }}</a></td>
+<td class="sha">
+<a href="{{ commit_link }}" target="_blank">{{ sha_short }}</a>
+{%- if has_gitlab -%}
+<a href="{{ gitlab_commit_link }}" target="_blank" style="margin-left: 4px; color: #fc6d26; text-decoration: none; font-weight: 600;" title="View commit in GitLab">🦊</a>
+{%- endif -%}
+</td>
 <td class="sha">
 {%- if has_docker_images -%}
 {%- set log_path = log_paths.get(sha_short) -%}
