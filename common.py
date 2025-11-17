@@ -1979,15 +1979,92 @@ class GitLabAPIClient:
         except Exception:
             return None
     
-    def get_registry_images_for_shas(self, project_id: str, registry_id: str, 
-                                     sha_list: List[str]) -> Dict[str, List[Dict[str, Any]]]:
-        """Get container registry images for a list of commit SHAs.
-        
+    def get_cached_registry_tags(self, project_id: str, registry_id: str,
+                                 cache_file: str = '.gitlab_tags_cache.json',
+                                 max_age_hours: int = 24) -> List[Dict[str, Any]]:
+        """Get registry tags with incremental page caching - stops when seeing duplicate pages.
+
         Args:
             project_id: GitLab project ID
-            registry_id: Container registry ID  
+            registry_id: Container registry ID
+            cache_file: Path to cache file (default: .gitlab_tags_cache.json)
+            max_age_hours: Maximum cache age in hours before refresh (default: 24)
+
+        Returns:
+            List of tag info dictionaries
+        """
+        import json
+        from pathlib import Path
+        from datetime import datetime, timedelta
+
+        cache_path = Path(cache_file)
+        tags = []
+        cache_valid = False
+
+        # Try to load from cache
+        if cache_path.exists():
+            try:
+                cache_data = json.loads(cache_path.read_text())
+                cache_time = datetime.fromisoformat(cache_data.get('timestamp', ''))
+                cache_age = datetime.now() - cache_time
+
+                if cache_age < timedelta(hours=max_age_hours):
+                    tags = cache_data.get('tags', [])
+                    cache_valid = True
+            except Exception:
+                pass
+
+        # Fetch fresh data if cache is invalid
+        if not cache_valid:
+            # Incremental fetch: page by page, stop when we see tags we already have
+            tags = []
+            seen_tag_names = set()
+            page = 1
+            max_pages = 50  # Safety limit
+            per_page = 100
+
+            while page <= max_pages:
+                page_tags = self.get_registry_tags(project_id, registry_id, per_page=per_page, page=page)
+
+                if not page_tags:
+                    # No more pages
+                    break
+
+                # Check if we've seen all tags on this page before
+                page_tag_names = {t['name'] for t in page_tags}
+                if page_tag_names.issubset(seen_tag_names):
+                    # All tags on this page were already seen - we've reached the end
+                    break
+
+                # Add new tags
+                new_tags = [t for t in page_tags if t['name'] not in seen_tag_names]
+                tags.extend(new_tags)
+                seen_tag_names.update(t['name'] for t in new_tags)
+
+                page += 1
+
+            # Save to cache
+            try:
+                cache_data = {
+                    'timestamp': datetime.now().isoformat(),
+                    'tags': tags,
+                    'pages_fetched': page - 1
+                }
+                cache_path.write_text(json.dumps(cache_data, indent=2))
+            except Exception:
+                pass  # Silently fail on cache write errors
+
+        return tags
+
+    def get_registry_images_for_shas(self, project_id: str, registry_id: str,
+                                     sha_list: List[str]) -> Dict[str, List[Dict[str, Any]]]:
+        """Get container registry images for a list of commit SHAs.
+
+        Args:
+            project_id: GitLab project ID
+            registry_id: Container registry ID
             sha_list: List of full commit SHAs (40 characters)
-            
+
         Returns:
             Dictionary mapping SHA to list of image info dicts with:
                 - tag: Full image tag
@@ -1999,13 +2076,13 @@ class GitLabAPIClient:
                 - created_at: ISO 8601 timestamp
         """
         sha_to_images: Dict[str, List[Dict[str, Any]]] = {sha: [] for sha in sha_list}
-        
+
         if not self.has_token():
             return sha_to_images
-        
+
         try:
-            # Fetch tags from registry (fetch enough to cover recent commits)
-            tags = self.get_registry_tags(project_id, registry_id, per_page=100, max_pages=2)
+            # Get tags from cache (refreshes if older than 24 hours)
+            tags = self.get_cached_registry_tags(project_id, registry_id)
             
             # Map tags to SHAs and fetch detailed info for each matching tag
             for tag_info in tags:
@@ -2036,6 +2113,7 @@ class GitLabAPIClient:
                                     'location': tag_details.get('location', tag_info.get('location', '')),
                                     'total_size': tag_details.get('total_size', 0),
                                     'created_at': tag_details.get('created_at', ''),
+                                    'registry_id': registry_id,
                                 })
                             else:
                                 # Fallback to basic info if details fetch fails
@@ -2047,6 +2125,7 @@ class GitLabAPIClient:
                                     'location': tag_info.get('location', ''),
                                     'total_size': 0,
                                     'created_at': '',
+                                    'registry_id': registry_id,
                                 })
                             
         except Exception:

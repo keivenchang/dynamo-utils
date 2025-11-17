@@ -1,3 +1,6 @@
+triton/
+notes/
+ping/
 __pycache__
 *.bak
 no-commit/

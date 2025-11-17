@@ -256,9 +256,12 @@ class CommitHistoryGenerator:
         
         # Get Docker images containing SHAs
         docker_images = self._get_docker_images_by_sha([c['sha_short'] for c in commit_data])
-        
+
         # Get GitLab container registry images for commits (with caching)
         gitlab_images_raw = self._get_cached_gitlab_images([c['sha_full'] for c in commit_data])
+
+        # Get GitLab CI pipeline statuses
+        gitlab_pipelines = self._get_gitlab_pipeline_statuses([c['sha_full'] for c in commit_data])
         
         # Process GitLab images: deduplicate and format
         gitlab_images = {}
@@ -274,8 +277,15 @@ class CommitHistoryGenerator:
                     deduped_imgs[key] = img
             
             # Format the images for display
+            # Sort by arch first (all x86 together, then all ARM), then by framework
             formatted_imgs = []
-            for (framework, arch), img in sorted(deduped_imgs.items()):
+            def sort_key(item):
+                framework, arch = item[0]
+                # amd64 comes before arm64: 0 for amd64, 1 for arm64
+                arch_order = 0 if arch == 'amd64' else 1
+                return (arch_order, framework)
+
+            for (framework, arch), img in sorted(deduped_imgs.items(), key=sort_key):
                 total_size = img.get('total_size', 0)
                 created_at = img.get('created_at', '')
                 
@@ -388,6 +398,7 @@ class CommitHistoryGenerator:
             commits=commit_data,
             docker_images=docker_images,
             gitlab_images=gitlab_images,
+            gitlab_pipelines=gitlab_pipelines,
             log_paths=log_paths,
             generated_time=generated_time
         )
@@ -451,6 +462,80 @@ class CommitHistoryGenerator:
             except Exception as e:
                 self.logger.warning(f"Failed to save GitLab cache: {e}")
         
+        return result
+
+    def _get_gitlab_pipeline_statuses(self, sha_full_list: List[str]) -> dict:
+        """Get GitLab CI pipeline status for commits.
+
+        Args:
+            sha_full_list: List of full commit SHAs (40 characters)
+
+        Returns:
+            Dictionary mapping SHA to pipeline status dict with 'status', 'id', 'web_url'
+        """
+        # Load cache
+        cache = {}
+        pipeline_cache_file = self.repo_path / ".gitlab_pipeline_cache.json"
+        if pipeline_cache_file.exists():
+            try:
+                cache = json.loads(pipeline_cache_file.read_text())
+                if self.verbose:
+                    self.logger.info(f"Loaded pipeline cache with {len(cache)} entries")
+            except Exception as e:
+                self.logger.warning(f"Failed to load pipeline cache: {e}")
+
+        # Check which SHAs need to be fetched
+        shas_to_fetch = []
+        result = {}
+
+        for sha in sha_full_list:
+            if sha in cache:
+                result[sha] = cache[sha]
+                if self.verbose:
+                    self.logger.info(f"Cache hit for pipeline: {sha[:9]}")
+            else:
+                shas_to_fetch.append(sha)
+                result[sha] = None
+
+        # Fetch missing SHAs from GitLab
+        if shas_to_fetch:
+            if self.verbose:
+                self.logger.info(f"Fetching pipeline status for {len(shas_to_fetch)} SHAs")
+
+            gitlab_client = GitLabAPIClient()
+            for sha in shas_to_fetch:
+                try:
+                    # Get pipelines for this commit
+                    endpoint = f"/api/v4/projects/169905/pipelines?sha={sha}&per_page=1"
+                    pipelines = gitlab_client.get(endpoint)
+
+                    if pipelines and len(pipelines) > 0:
+                        pipeline = pipelines[0]  # Most recent pipeline
+                        status_info = {
+                            'status': pipeline.get('status', 'unknown'),
+                            'id': pipeline.get('id'),
+                            'web_url': pipeline.get('web_url', ''),
+                        }
+                        result[sha] = status_info
+                        cache[sha] = status_info
+                    else:
+                        result[sha] = None
+                        cache[sha] = None
+                except Exception as e:
+                    if self.verbose:
+                        self.logger.warning(f"Failed to get pipeline for {sha[:9]}: {e}")
+                    result[sha] = None
+                    cache[sha] = None
+
+            # Save updated cache
+            try:
+                pipeline_cache_file.parent.mkdir(parents=True, exist_ok=True)
+                pipeline_cache_file.write_text(json.dumps(cache, indent=2))
+                if self.verbose:
+                    self.logger.info(f"Saved pipeline cache with {len(cache)} entries")
+            except Exception as e:
+                self.logger.warning(f"Failed to save pipeline cache: {e}")
+
         return result
 
     def _get_docker_images_by_sha(self, sha_list: List[str]) -> dict:

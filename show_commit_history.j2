@@ -245,16 +245,21 @@ function copyFromClipboardAttr(button) {
 {%- set has_docker_images = sha_short in docker_images and docker_images[sha_short] -%}
 {%- set has_gitlab = sha_full in gitlab_images and gitlab_images[sha_full] -%}
 {%- set composite_bg_color = commit.composite_bg_color -%}
+{%- set pipeline = gitlab_pipelines.get(sha_full) -%}
 
 <tr>
 <td class="sha">
 <a href="{{ commit_link }}" target="_blank">{{ sha_short }}</a>
 {%- if has_gitlab -%}
 <a href="{{ gitlab_commit_link }}" target="_blank" style="margin-left: 4px; color: #fc6d26; text-decoration: none; font-weight: 600;" title="View commit in GitLab">🦊</a>
+{%- elif pipeline and pipeline.status == 'failed' -%}
+<a href="{{ pipeline.web_url }}" target="_blank" style="margin-left: 4px; color: #d73a49; text-decoration: none; font-weight: 600; font-size: 11px;" title="CI Failed - Click to view pipeline">❌ CI</a>
+{%- elif pipeline and pipeline.status in ['running', 'pending'] -%}
+<a href="{{ pipeline.web_url }}" target="_blank" style="margin-left: 4px; color: #dbab09; text-decoration: none; font-weight: 600; font-size: 11px;" title="CI Running - Click to view pipeline">🔄 CI</a>
 {%- endif -%}
 </td>
 <td class="sha">
-{%- if has_docker_images -%}
+{%- if has_docker_images or has_gitlab -%}
 {%- set log_path = log_paths.get(sha_short) -%}
 {%- if log_path -%}
 <span style="background-color: {{ composite_bg_color }}; padding: 2px 6px; border-radius: 3px;"><a href="{{ log_path }}" target="_blank" style="color: #0969da; text-decoration: none;" title="View build logs">{{ composite_sha }}</a></span>
@@ -274,8 +279,8 @@ function copyFromClipboardAttr(button) {
 </tr>
 
 {# Docker images row if any exist for this SHA #}
-{% if has_docker_images %}
-{%- set images = docker_images[sha_short] -%}
+{% if has_docker_images or has_gitlab %}
+{%- set images = docker_images.get(sha_short, []) -%}
 {%- set full_msg = commit.full_message -%}
 {%- set files_changed = commit.files_changed -%}
 {%- set insertions = commit.insertions -%}
@@ -306,6 +311,7 @@ function copyFromClipboardAttr(button) {
 </div>
 
 <!-- Docker Images Section -->
+{% if images %}
 <div style="margin-bottom: 12px; padding: 8px; background-color: white; border: 1px solid #d0d7de; border-radius: 4px;">
 <div style="font-weight: 600; margin-bottom: 4px; font-size: 13px;">Local Docker Images:</div>
 <table style="width: 100%; border: none; background-color: white; border-collapse: collapse;">
@@ -329,11 +335,12 @@ function copyFromClipboardAttr(button) {
 </tbody>
 </table>
 </div>
+{% endif %}
 
 {# GitLab Container Registry Section #}
 {% if gitlab_imgs %}
 <div style="margin-bottom: 12px; padding: 8px; background-color: white; border: 1px solid #d0d7de; border-radius: 4px;">
-<div style="font-weight: 600; margin-bottom: 4px; font-size: 13px;">GitLab Container Registry (Runtime Images):</div>
+<div style="font-weight: 600; margin-bottom: 4px; font-size: 13px;">GitLab Container Registry (Runtime Images): <a href="https://gitlab-master.nvidia.com/dl/ai-dynamo/dynamo/container_registry/{{ gitlab_imgs[0].registry_id }}" target="_blank" style="color: #fc6d26; text-decoration: none; font-weight: 600; font-size: 12px;" title="View all images in GitLab Container Registry">🦊 View Registry</a></div>
 <table style="width: 100%; border: none; background-color: white; border-collapse: collapse;">
 <thead>
 <tr>
@@ -345,8 +352,8 @@ function copyFromClipboardAttr(button) {
 </thead>
 <tbody>
 {% for img in gitlab_imgs %}
-{%- set arch_icon = "🖥️" if img.arch == "amd64" else "🦾" -%}
-{%- set display_tag_with_icon = arch_icon ~ " " ~ img.tag -%}
+{%- set arch_label = "[x86]" if img.arch == "amd64" else "[ARM]" -%}
+{%- set display_tag = arch_label ~ " " ~ img.tag -%}
 {%- set image_id = img.pipeline_id[:12] if img.pipeline_id|length >= 12 else img.pipeline_id -%}
 {%- set local_tag = "dynamo:latest-" ~ img.framework ~ "-runtime" -%}
 {%- set pull_cmd = "docker pull " ~ img.location -%}
@@ -356,7 +363,7 @@ function copyFromClipboardAttr(button) {
 <td style="font-family: monospace; font-size: 11px; padding: 2px 6px; border: none; max-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="{{ img.tag }}
 Pipeline: {{ img.pipeline_id }}
 Framework: {{ img.framework }}
-Copy button to get pull & tag commands"><button data-clipboard-text="docker pull {{ img.location }} && docker tag {{ img.location }} dynamo:latest-{{ img.framework }}-runtime" onclick="copyFromClipboardAttr(this)" style="padding: 4px 6px; margin-right: 6px; font-size: 11px; background-color: transparent; color: #57606a; border: 1px solid #d0d7de; border-radius: 6px; cursor: pointer; display: inline-flex; align-items: center; vertical-align: middle;" title="Copy pull and retag commands" onmouseover="this.style.backgroundColor='#f3f4f6'; this.style.borderColor='#8c959f';" onmouseout="this.style.backgroundColor='transparent'; this.style.borderColor='#d0d7de';"><svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" style="display: inline-block;"><path d="M0 6.75C0 5.784.784 5 1.75 5h1.5a.75.75 0 0 1 0 1.5h-1.5a.25.25 0 0 0-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 0 0 .25-.25v-1.5a.75.75 0 0 1 1.5 0v1.5A1.75 1.75 0 0 1 9.25 16h-7.5A1.75 1.75 0 0 1 0 14.25Z"></path><path d="M5 1.75C5 .784 5.784 0 6.75 0h7.5C15.216 0 16 .784 16 1.75v7.5A1.75 1.75 0 0 1 14.25 11h-7.5A1.75 1.75 0 0 1 5 9.25Zm1.75-.25a.25.25 0 0 0-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 0 0 .25-.25v-7.5a.25.25 0 0 0-.25-.25Z"></path></svg></button>{{ display_tag_with_icon }}</td>
+Copy button to get pull & tag commands"><button data-clipboard-text="docker pull {{ img.location }} && docker tag {{ img.location }} dynamo:latest-{{ img.framework }}-runtime" onclick="copyFromClipboardAttr(this)" style="padding: 4px 6px; margin-right: 6px; font-size: 11px; background-color: transparent; color: #57606a; border: 1px solid #d0d7de; border-radius: 6px; cursor: pointer; display: inline-flex; align-items: center; vertical-align: middle;" title="Copy pull and retag commands" onmouseover="this.style.backgroundColor='#f3f4f6'; this.style.borderColor='#8c959f';" onmouseout="this.style.backgroundColor='transparent'; this.style.borderColor='#d0d7de';"><svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" style="display: inline-block;"><path d="M0 6.75C0 5.784.784 5 1.75 5h1.5a.75.75 0 0 1 0 1.5h-1.5a.25.25 0 0 0-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 0 0 .25-.25v-1.5a.75.75 0 0 1 1.5 0v1.5A1.75 1.75 0 0 1 9.25 16h-7.5A1.75 1.75 0 0 1 0 14.25Z"></path><path d="M5 1.75C5 .784 5.784 0 6.75 0h7.5C15.216 0 16 .784 16 1.75v7.5A1.75 1.75 0 0 1 14.25 11h-7.5A1.75 1.75 0 0 1 5 9.25Zm1.75-.25a.25.25 0 0 0-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 0 0 .25-.25v-7.5a.25.25 0 0 0-.25-.25Z"></path></svg></button>{{ display_tag }}</td>
 <td style="font-family: monospace; font-size: 11px; padding: 2px 6px; border: none;"><a href="https://gitlab-master.nvidia.com/dl/ai-dynamo/dynamo/-/pipelines/{{ img.pipeline_id }}" target="_blank" style="color: #0969da;" title="View pipeline {{ img.pipeline_id }}">{{ image_id }}</a></td>
 <td style="font-size: 11px; padding: 2px 6px; border: none;">{{ img.size_display }}</td>
 <td style="font-size: 11px; padding: 2px 6px; border: none;">{{ img.created_display }}</td>
