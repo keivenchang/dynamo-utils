@@ -2020,11 +2020,24 @@ class GitLabAPIClient:
             tags = []
             seen_tag_names = set()
             page = 1
-            max_pages = 50  # Safety limit
+            safety_limit = 50  # Safety limit on pages
             per_page = 100
 
-            while page <= max_pages:
-                page_tags = self.get_registry_tags(project_id, registry_id, per_page=per_page, page=page)
+            while page <= safety_limit:
+                # Fetch one page at a time using direct API call
+                endpoint = f"/api/v4/projects/{project_id}/registry/repositories/{registry_id}/tags"
+                params = {
+                    'per_page': per_page,
+                    'page': page,
+                    'order_by': 'updated_at',
+                    'sort': 'desc'
+                }
+
+                try:
+                    page_tags = self.get(endpoint, params=params)
+                except Exception:
+                    # API error, stop fetching
+                    break
 
                 if not page_tags:
                     # No more pages
@@ -2040,6 +2053,10 @@ class GitLabAPIClient:
                 new_tags = [t for t in page_tags if t['name'] not in seen_tag_names]
                 tags.extend(new_tags)
                 seen_tag_names.update(t['name'] for t in new_tags)
+
+                # If we got fewer tags than requested, we've reached the end
+                if len(page_tags) < per_page:
+                    break
 
                 page += 1
 
