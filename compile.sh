@@ -426,9 +426,9 @@ if [ -n "$BUILD_TYPE" ]; then
 
         # Build with --locked to ensure exact dependency versions
         if [ "$BUILD_TYPE" = "development" ]; then
-            cmd bash -c "CARGO_PROFILE_DEV_OPT_LEVEL=0 CARGO_BUILD_JOBS=$CARGO_BUILD_JOBS CARGO_PROFILE_DEV_CODEGEN_UNITS=256 cargo build --locked --features dynamo-llm/block-manager --workspace"
+            cmd bash -c "DYNAMO_USE_PREBUILT_KERNELS=1 CARGO_PROFILE_DEV_OPT_LEVEL=0 CARGO_BUILD_JOBS=$CARGO_BUILD_JOBS CARGO_PROFILE_DEV_CODEGEN_UNITS=256 cargo build --locked --features dynamo-llm/block-manager --workspace"
         else
-            cmd cargo build --release --locked --features dynamo-llm/block-manager --workspace
+            cmd bash -c "DYNAMO_USE_PREBUILT_KERNELS=1 cargo build --release --locked --features dynamo-llm/block-manager --workspace"
         fi
     else
         dry_run_echo "Skipping Rust build (--py-only mode)"
@@ -461,12 +461,12 @@ if [ -n "$BUILD_TYPE" ]; then
         dry_run_echo "Building ai-dynamo-runtime package..."
 
         if [ "$BUILD_TYPE" = "development" ]; then
-            cmd bash -c "cd $WORKSPACE_DIR/lib/bindings/python && CARGO_PROFILE_DEV_OPT_LEVEL=0 CARGO_BUILD_JOBS=$CARGO_BUILD_JOBS CARGO_PROFILE_DEV_CODEGEN_UNITS=256 maturin develop --uv"
+            cmd bash -c "cd $WORKSPACE_DIR/lib/bindings/python && DYNAMO_USE_PREBUILT_KERNELS=1 CARGO_PROFILE_DEV_OPT_LEVEL=0 CARGO_BUILD_JOBS=$CARGO_BUILD_JOBS CARGO_PROFILE_DEV_CODEGEN_UNITS=256 maturin develop --uv"
 
             dry_run_echo "Installing components package in editable mode..."
             cmd bash -c "cd $WORKSPACE_DIR/ && uv pip install -e ."
         else
-            cmd bash -c "cd $WORKSPACE_DIR/lib/bindings/python && maturin build --release --out $WHEEL_OUTPUT_DIR"
+            cmd bash -c "cd $WORKSPACE_DIR/lib/bindings/python && DYNAMO_USE_PREBUILT_KERNELS=1 maturin build --release --out $WHEEL_OUTPUT_DIR"
 
             if [ "$DRY_RUN" = false ]; then
                 if ls $WHEEL_OUTPUT_DIR/*.whl 1> /dev/null 2>&1; then
