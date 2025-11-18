@@ -77,7 +77,7 @@ When creating backup files, use the naming format: `<filename>.<YYYY-MM-DD>.bak`
 
 Example:
 ```bash
-cp dynamo_docker_builder.py dynamo_docker_builder.py.2025-10-18.bak
+cp docker/build_images.py docker/build_images.py.2025-10-18.bak
 ```
 
 This convention:
@@ -326,17 +326,17 @@ pytest --cache-dir=/tmp/pytest_cache --basetemp=/tmp/pytest_test ...
 
 **Quick Test (Single Framework)**:
 ```bash
-python3 dynamo_docker_builder.py --sanity-check-only --framework sglang --force-run
+python3 docker/build_images.py --sanity-check-only --framework sglang --force-run
 ```
 
 **Parallel Build with Skip**:
 ```bash
-python3 dynamo_docker_builder.py --skip-build-if-image-exists --parallel --force-run
+python3 docker/build_images.py --skip-build-if-image-exists --parallel --force-run
 ```
 
 **Full Build**:
 ```bash
-python3 dynamo_docker_builder.py --parallel --force-run
+python3 docker/build_images.py --parallel --force-run
 ```
 
 ### Go Operator Linting
