@@ -4,7 +4,7 @@
         "SPDX-FileCopyrightText: Copyright (c) {{ current_year }} NVIDIA CORPORATION & AFFILIATES. All rights reserved.",
         "SPDX-License-Identifier: Apache-2.0"
     ],
-    "name": "[{{ dirname }}-{{ username }}] {{ framework.upper() }}",
+    "name": "{{ username}} {{ dirname }} {{ framework.upper() }}",
     "remoteUser": "dynamo", // Matches our container user
     "image": "dynamo:latest-{{ framework }}-local-dev", // Use the latest {{ framework.upper() }} dev image
     "overrideCommand": true, // Override the default command to keep container running
@@ -59,7 +59,8 @@
     "postCreateCommand": "/bin/bash /workspace/.devcontainer/post-create.sh", // Runs cargo build and pip installs packages
     "containerEnv": {
         "CARGO_PROFILE_DEV_OPT_LEVEL": "0",
-        "CARGO_BUILD_JOBS": "32"
+        "CARGO_BUILD_JOBS": "32",
+        "DYNAMO_USE_PREBUILT_KERNELS": "1"
     },
     "remoteEnv": {
         // Optional convenience tokens passed from host. SSH agent is forwarded via your IDE setting, not here by default.
