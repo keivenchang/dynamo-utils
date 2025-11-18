@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-DynamoDockerBuilder V2 - Clean OOP Architecture
+Build Images - Docker Image Build Orchestration System
 
 A Docker image build orchestration system for the Dynamo inference framework.
 Supports building images for multiple frameworks (VLLM, SGLANG, TRTLLM) with
@@ -31,6 +31,9 @@ from datetime import datetime
 from enum import Enum
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
+
+# Add parent directory to path to import common.py
+sys.path.insert(0, str(Path(__file__).parent.parent))
 
 # Third-party imports (optional, with error handling)
 try:
@@ -2287,7 +2290,7 @@ def generate_html_report(
         loader=FileSystemLoader(template_dir),
         autoescape=select_autoescape(['html', 'xml'])
     )
-    template = env.get_template('dynamo_docker_builder.html.j2')
+    template = env.get_template('build_images_report.html.j2')
     
     # Render HTML
     # Example data structure passed to Jinja2 template:
@@ -2589,8 +2592,8 @@ def check_running_build_processes() -> list[str]:
 
         running_builds = []
         for line in result.stdout.splitlines():
-            # Look for docker build commands and dynamo_docker_builder.py processes
-            if 'docker build' in line or ('python' in line and 'dynamo_docker_builder.py' in line and '--parallel' not in line):
+            # Look for docker build commands and build_images.py processes
+            if 'docker build' in line or ('python' in line and 'build_images.py' in line and '--parallel' not in line):
                 # Exclude the current process (this check) and grep itself
                 if 'ps aux' not in line and 'grep' not in line:
                     # Extract just the relevant part of the command

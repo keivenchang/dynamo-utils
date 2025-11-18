@@ -14,7 +14,11 @@ import os
 import re
 import sys
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Dict, List, Optional, Tuple
+
+# Add parent directory to path to import common.py
+sys.path.insert(0, str(Path(__file__).parent.parent))
 
 try:
     import docker

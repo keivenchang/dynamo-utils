@@ -20,7 +20,7 @@ while [[ $# -gt 0 ]]; do
             ;;
         --help|-h)
             cat << 'EOF'
-Usage: docker_restart_on_gpu_error.sh [OPTIONS]
+Usage: restart_gpu_containers.sh [OPTIONS]
 
 Monitor GPU-enabled Docker containers and restart if GPU errors detected.
 
@@ -29,8 +29,8 @@ Options:
     --help, -h             Show this help message
 
 Examples:
-    ./docker_restart_on_gpu_error.sh                # Normal mode - restart containers with GPU errors
-    ./docker_restart_on_gpu_error.sh --dry-run     # Dry-run mode - only check and report, don't restart
+    ./restart_gpu_containers.sh                # Normal mode - restart containers with GPU errors
+    ./restart_gpu_containers.sh --dry-run     # Dry-run mode - only check and report, don't restart
 
 EOF
             exit 0
