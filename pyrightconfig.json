@@ -50,7 +50,6 @@
     ],
     "venvPath": "/opt/dynamo",
     "venv": "venv",
-    //"stubPath": "typings",
     "typeCheckingMode": "basic",
     "useLibraryCodeForTypes": true,
     "autoImportCompletions": true,
