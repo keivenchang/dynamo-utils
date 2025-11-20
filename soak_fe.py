@@ -88,26 +88,33 @@ class LoadTestStats:
 
         # Print to stdout in real-time if --output is specified
         if self.config and self.config.output_responses and response_content:
-            content = (
-                response_content.strip()
-                .replace("\n", " ")
-                .replace("\r", " ")
-                .replace("\\n", " ")
-                .replace("\\r", " ")
-            )
-            # Only trim for multiple workers to avoid cluttered output
-            if self.config.workers > 1 and len(content) > 70:
-                original_cleaned = (
+            # Try to parse as JSON and pretty print, otherwise print as-is
+            try:
+                response_json = json.loads(response_content)
+                print(f"[{worker_id}-{request_id}] RESPONSE JSON:")
+                print(json.dumps(response_json, indent=2))
+            except json.JSONDecodeError:
+                # Not JSON, print as regular text
+                content = (
                     response_content.strip()
                     .replace("\n", " ")
                     .replace("\r", " ")
                     .replace("\\n", " ")
                     .replace("\\r", " ")
                 )
-                content = (
-                    content[:70] + f"... ({len(original_cleaned) - 70} more chars)"
-                )
-            print(f"[{worker_id}-{request_id}] RESPONSE: {content}")
+                # Only trim for multiple workers to avoid cluttered output
+                if self.config.workers > 1 and len(content) > 70:
+                    original_cleaned = (
+                        response_content.strip()
+                        .replace("\n", " ")
+                        .replace("\r", " ")
+                        .replace("\\n", " ")
+                        .replace("\\r", " ")
+                    )
+                    content = (
+                        content[:70] + f"... ({len(original_cleaned) - 70} more chars)"
+                    )
+                print(f"[{worker_id}-{request_id}] RESPONSE: {content}")
 
         if success:
             self.successful_requests += 1
@@ -527,24 +534,21 @@ class LoadTestWorker:
                     duration = time.time() - start_time
 
                     if response.status == 200:
-                        content = ""
-                        if self.config.output_responses and self.config.workers == 1:
-                            # Stream tokens in real-time for single worker
-                            content = await self._stream_response_realtime(
-                                response, request_id
-                            )
-                        elif self.config.output_responses:
-                            # Parse streaming response normally for multiple workers
-                            response_text = await response.text()
-                            content = StreamingParser.parse_streaming_response(
-                                response_text
-                            )
-                        else:
-                            # Always capture content for word/char counting, but don't display
-                            response_text = await response.text()
-                            content = StreamingParser.parse_streaming_response(
-                                response_text
-                            )
+                        # For streaming, collect all SSE events and return as JSON array
+                        response_text = await response.text()
+
+                        # Parse SSE events into JSON array
+                        events = []
+                        for line in response_text.strip().split("\n"):
+                            if line.startswith("data: "):
+                                try:
+                                    data = json.loads(line[6:])  # Remove 'data: ' prefix
+                                    events.append(data)
+                                except json.JSONDecodeError:
+                                    continue
+
+                        # Return the array of events as JSON string
+                        content = json.dumps({"streaming_events": events})
 
                         return True, duration, response.status, content
                     else:
@@ -590,23 +594,14 @@ class LoadTestWorker:
                     duration = time.time() - start_time
 
                     if response.status == 200:
-                        content = ""
-                        # Always capture content for word/char counting
+                        # Return the entire JSON response as a string
                         try:
                             data = await response.json()
-                            choices = data.get("choices", [])
-                            if choices:
-                                if self.config.version == "v1_completion":
-                                    # v1/completions format - uses 'content'
-                                    content = choices[0].get("text", "")
-                                else:
-                                    # v1_chat_completion format - try both content and reasoning_content
-                                    message = choices[0].get("message", {})
-                                    content = message.get("content", "") or message.get(
-                                        "reasoning_content", ""
-                                    )
-                        except (json.JSONDecodeError, KeyError, IndexError):
-                            content = ""
+                            content = json.dumps(data)  # Convert JSON to string for storage
+                        except json.JSONDecodeError as e:
+                            if self.config.verbose:
+                                print(f"[{self.worker_id}-{request_id}] Error parsing JSON response: {e}")
+                            content = await response.text()  # Fallback to raw text if not JSON
 
                         return True, duration, response.status, content
                     else:
@@ -777,17 +772,34 @@ class LoadTester:
                             1 for task in self.tasks if not task.done()
                         )
 
-                        # Calculate words and characters per second
+                        # Calculate words and characters per second from JSON responses
                         total_words = 0
                         total_chars = 0
                         for result in self.stats.results:
                             if result.get("response_content"):
-                                content = result["response_content"]
-                                # Simple word count (split by spaces)
-                                words = len(content.split())
-                                chars = len(content)
-                                total_words += words
-                                total_chars += chars
+                                try:
+                                    # Try to parse JSON and extract text content
+                                    data = json.loads(result["response_content"])
+                                    content = ""
+                                    choices = data.get("choices", [])
+                                    if choices:
+                                        # Try different field names for different models
+                                        content = (choices[0].get("text", "") or
+                                                 choices[0].get("message", {}).get("content", "") or
+                                                 choices[0].get("message", {}).get("reasoning_content", "") or
+                                                 choices[0].get("delta", {}).get("content", ""))
+                                    if content:
+                                        words = len(content.split())
+                                        chars = len(content)
+                                        total_words += words
+                                        total_chars += chars
+                                except (json.JSONDecodeError, KeyError, IndexError):
+                                    # If not JSON or can't extract, count the raw response
+                                    content = result["response_content"]
+                                    words = len(content.split())
+                                    chars = len(content)
+                                    total_words += words
+                                    total_chars += chars
 
                         words_per_second = (
                             total_words / current_time if current_time > 0 else 0
@@ -949,11 +961,29 @@ class LoadTester:
         total_chars = 0
         for result in self.stats.results:
             if result.get("response_content"):
-                content = result["response_content"]
-                words = len(content.split())
-                chars = len(content)
-                total_words += words
-                total_chars += chars
+                try:
+                    # Try to parse JSON and extract text content
+                    data = json.loads(result["response_content"])
+                    content = ""
+                    choices = data.get("choices", [])
+                    if choices:
+                        # Try different field names for different models
+                        content = (choices[0].get("text", "") or
+                                 choices[0].get("message", {}).get("content", "") or
+                                 choices[0].get("message", {}).get("reasoning_content", "") or
+                                 choices[0].get("delta", {}).get("content", ""))
+                    if content:
+                        words = len(content.split())
+                        chars = len(content)
+                        total_words += words
+                        total_chars += chars
+                except (json.JSONDecodeError, KeyError, IndexError):
+                    # If not JSON or can't extract, count the raw response
+                    content = result["response_content"]
+                    words = len(content.split())
+                    chars = len(content)
+                    total_words += words
+                    total_chars += chars
 
         words_per_second = total_words / actual_duration if actual_duration > 0 else 0
         chars_per_second = total_chars / actual_duration if actual_duration > 0 else 0
