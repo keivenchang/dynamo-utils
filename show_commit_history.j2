@@ -54,6 +54,7 @@ tr:hover {
 .sha {
     font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
     font-size: 12px;
+    white-space: nowrap;
 }
 .sha a {
     color: #0969da;
@@ -217,8 +218,53 @@ function copyFromClipboardAttr(button) {
 <div class="header">
 <h1>Dynamo Commit History</h1>
 <p style="margin: 5px 0 0 0; opacity: 0.9;">Recent commits with composite SHAs and Docker images</p>
-<p style="margin: 5px 0 0 0; opacity: 0.7; font-size: 12px;">Page generated: {{ generated_time }}</p>
+<p style="margin: 5px 0 0 0; opacity: 0.7; font-size: 12px;">Page generated: {{ generated_time }} <span id="page-age" style="color: #ffa657;"></span></p>
 </div>
+
+<script>
+// Calculate and display page age
+(function() {
+    // Parse the generated time string more reliably
+    const timeStr = '{{ generated_time }}';
+    // Replace PST/PDT with timezone offset
+    const timeStrFixed = timeStr.replace(' PST', '-08:00').replace(' PDT', '-07:00');
+    const generatedTime = new Date(timeStrFixed);
+
+    function updatePageAge() {
+        const now = new Date();
+        const ageMs = now - generatedTime;
+
+        // Check if date parsed correctly
+        if (isNaN(generatedTime.getTime())) {
+            document.getElementById('page-age').textContent = '(invalid date)';
+            return;
+        }
+
+        // Calculate time components
+        const seconds = Math.floor(ageMs / 1000);
+        const minutes = Math.floor(seconds / 60);
+        const hours = Math.floor(minutes / 60);
+        const days = Math.floor(hours / 24);
+
+        let ageText = '';
+        if (days > 0) {
+            ageText = `(${days} day${days > 1 ? 's' : ''} ${hours % 24} hour${(hours % 24) !== 1 ? 's' : ''} old)`;
+        } else if (hours > 0) {
+            ageText = `(${hours} hour${hours > 1 ? 's' : ''} ${minutes % 60} min old)`;
+        } else if (minutes > 0) {
+            ageText = `(${minutes} minute${minutes > 1 ? 's' : ''} old)`;
+        } else {
+            ageText = `(${seconds} second${seconds !== 1 ? 's' : ''} old)`;
+        }
+
+        document.getElementById('page-age').textContent = ageText;
+    }
+
+    // Update immediately and then every 3 seconds
+    updatePageAge();
+    setInterval(updatePageAge, 3000);
+})();
+</script>
 
 <div class="container">
 <table>
@@ -250,11 +296,14 @@ function copyFromClipboardAttr(button) {
 <tr>
 <td class="sha">
 <a href="{{ commit_link }}" target="_blank">{{ sha_short }}</a>
-{%- if has_gitlab -%}
 <a href="{{ gitlab_commit_link }}" target="_blank" style="margin-left: 4px; color: #fc6d26; text-decoration: none; font-weight: 600;" title="View commit in GitLab">🦊</a>
-{%- elif pipeline and pipeline.status == 'failed' -%}
+{%- if has_gitlab and pipeline and pipeline.status == 'failed' -%}
 <a href="{{ pipeline.web_url }}" target="_blank" style="margin-left: 4px; color: #d73a49; text-decoration: none; font-weight: 600; font-size: 11px;" title="CI Failed - Click to view pipeline">❌ CI</a>
-{%- elif pipeline and pipeline.status in ['running', 'pending'] -%}
+{%- elif has_gitlab and pipeline and pipeline.status in ['running', 'pending'] -%}
+<a href="{{ pipeline.web_url }}" target="_blank" style="margin-left: 4px; color: #dbab09; text-decoration: none; font-weight: 600; font-size: 11px;" title="CI Running - Click to view pipeline">🔄 CI</a>
+{%- elif not has_gitlab and pipeline and pipeline.status == 'failed' -%}
+<a href="{{ pipeline.web_url }}" target="_blank" style="margin-left: 4px; color: #d73a49; text-decoration: none; font-weight: 600; font-size: 11px;" title="CI Failed - Click to view pipeline">❌ CI</a>
+{%- elif not has_gitlab and pipeline and pipeline.status in ['running', 'pending'] -%}
 <a href="{{ pipeline.web_url }}" target="_blank" style="margin-left: 4px; color: #dbab09; text-decoration: none; font-weight: 600; font-size: 11px;" title="CI Running - Click to view pipeline">🔄 CI</a>
 {%- endif -%}
 </td>
@@ -310,33 +359,6 @@ function copyFromClipboardAttr(button) {
 </details>
 </div>
 
-<!-- Docker Images Section -->
-{% if images %}
-<div style="margin-bottom: 12px; padding: 8px; background-color: white; border: 1px solid #d0d7de; border-radius: 4px;">
-<div style="font-weight: 600; margin-bottom: 4px; font-size: 13px;">Local Docker Images:</div>
-<table style="width: 100%; border: none; background-color: white; border-collapse: collapse;">
-<thead>
-<tr>
-<th style="width: 50%; padding: 3px 6px; border: none;">Image Name:Tag</th>
-<th style="width: 15%; padding: 3px 6px; border: none;">Image ID</th>
-<th style="width: 10%; padding: 3px 6px; border: none;">Size</th>
-<th style="width: 25%; padding: 3px 6px; border: none;">Created (PDT)</th>
-</tr>
-</thead>
-<tbody>
-{% for image in images | sort(attribute='tag') %}
-<tr>
-<td style="font-family: monospace; font-size: 11px; padding: 2px 6px; border: none;">{{ image.tag }}</td>
-<td style="font-family: monospace; font-size: 11px; padding: 2px 6px; border: none;">{{ image.id }}</td>
-<td style="font-size: 11px; padding: 2px 6px; border: none;">{{ image.size }}</td>
-<td style="font-size: 11px; padding: 2px 6px; border: none;">{{ image.created }}</td>
-</tr>
-{% endfor %}
-</tbody>
-</table>
-</div>
-{% endif %}
-
 {# GitLab Container Registry Section #}
 {% if gitlab_imgs %}
 <div style="margin-bottom: 12px; padding: 8px; background-color: white; border: 1px solid #d0d7de; border-radius: 4px;">
@@ -345,7 +367,7 @@ function copyFromClipboardAttr(button) {
 <thead>
 <tr>
 <th style="width: 50%; padding: 3px 6px; border: none;">Image Name:Tag</th>
-<th style="width: 15%; padding: 3px 6px; border: none;">Image ID</th>
+<th style="width: 15%; padding: 3px 6px; border: none;">Build ID</th>
 <th style="width: 10%; padding: 3px 6px; border: none;">Size</th>
 <th style="width: 25%; padding: 3px 6px; border: none;">Created (PDT)</th>
 </tr>
@@ -367,6 +389,33 @@ Copy button to get pull & tag commands"><button data-clipboard-text="docker pull
 <td style="font-family: monospace; font-size: 11px; padding: 2px 6px; border: none;"><a href="https://gitlab-master.nvidia.com/dl/ai-dynamo/dynamo/-/pipelines/{{ img.pipeline_id }}" target="_blank" style="color: #0969da;" title="View pipeline {{ img.pipeline_id }}">{{ image_id }}</a></td>
 <td style="font-size: 11px; padding: 2px 6px; border: none;">{{ img.size_display }}</td>
 <td style="font-size: 11px; padding: 2px 6px; border: none;">{{ img.created_display }}</td>
+</tr>
+{% endfor %}
+</tbody>
+</table>
+</div>
+{% endif %}
+
+<!-- Docker Images Section -->
+{% if images %}
+<div style="margin-bottom: 12px; padding: 8px; background-color: white; border: 1px solid #d0d7de; border-radius: 4px;">
+<div style="font-weight: 600; margin-bottom: 4px; font-size: 13px;">Local Docker Images:</div>
+<table style="width: 100%; border: none; background-color: white; border-collapse: collapse;">
+<thead>
+<tr>
+<th style="width: 50%; padding: 3px 6px; border: none;">Image Name:Tag</th>
+<th style="width: 15%; padding: 3px 6px; border: none;">Image ID</th>
+<th style="width: 10%; padding: 3px 6px; border: none;">Size</th>
+<th style="width: 25%; padding: 3px 6px; border: none;">Created (PDT)</th>
+</tr>
+</thead>
+<tbody>
+{% for image in images | sort(attribute='tag') %}
+<tr>
+<td style="font-family: monospace; font-size: 11px; padding: 2px 6px; border: none;">{{ image.tag }}</td>
+<td style="font-family: monospace; font-size: 11px; padding: 2px 6px; border: none;">{{ image.id }}</td>
+<td style="font-size: 11px; padding: 2px 6px; border: none;">{{ image.size }}</td>
+<td style="font-size: 11px; padding: 2px 6px; border: none;">{{ image.created }}</td>
 </tr>
 {% endfor %}
 </tbody>

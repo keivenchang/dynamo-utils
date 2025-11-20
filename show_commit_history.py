@@ -43,16 +43,18 @@ except ImportError:
 class CommitHistoryGenerator:
     """Generate commit history with composite SHAs and Docker images"""
 
-    def __init__(self, repo_path: Path, verbose: bool = False):
+    def __init__(self, repo_path: Path, verbose: bool = False, skip_gitlab_fetch: bool = False):
         """
         Initialize the commit history generator
 
         Args:
             repo_path: Path to the Dynamo repository
             verbose: Enable verbose output
+            skip_gitlab_fetch: Skip fetching GitLab registry data, use cached data only
         """
         self.repo_path = Path(repo_path)
         self.verbose = verbose
+        self.skip_gitlab_fetch = skip_gitlab_fetch
         self.logger = self._setup_logger()
         self.cache_file = self.repo_path / ".commit_history_cache.json"
 
@@ -436,23 +438,23 @@ class CommitHistoryGenerator:
                 shas_to_fetch.append(sha)
                 result[sha] = []
         
-        # Fetch missing SHAs from GitLab
-        if shas_to_fetch:
+        # Fetch missing SHAs from GitLab (unless skip flag is set)
+        if shas_to_fetch and not self.skip_gitlab_fetch:
             if self.verbose:
                 self.logger.info(f"Fetching {len(shas_to_fetch)} SHAs from GitLab registry")
-            
+
             gitlab_client = GitLabAPIClient()
             fresh_data = gitlab_client.get_registry_images_for_shas(
                 project_id="169905",  # dl/ai-dynamo/dynamo
                 registry_id="85325",  # Main dynamo registry
                 sha_list=shas_to_fetch
             )
-            
+
             # Update result and cache
             for sha, images in fresh_data.items():
                 result[sha] = images
                 cache[sha] = images
-            
+
             # Save updated cache
             try:
                 gitlab_cache_file.parent.mkdir(parents=True, exist_ok=True)
@@ -461,6 +463,9 @@ class CommitHistoryGenerator:
                     self.logger.info(f"Saved GitLab cache with {len(cache)} entries")
             except Exception as e:
                 self.logger.warning(f"Failed to save GitLab cache: {e}")
+        elif shas_to_fetch and self.skip_gitlab_fetch:
+            if self.verbose:
+                self.logger.info(f"Skipping fetch for {len(shas_to_fetch)} SHAs (--skip-gitlab-fetch enabled)")
         
         return result
 
@@ -650,6 +655,12 @@ Examples:
     )
 
     parser.add_argument(
+        '--skip-gitlab-fetch',
+        action='store_true',
+        help='Skip fetching GitLab registry data, use cached data only (much faster)'
+    )
+
+    parser.add_argument(
         '--logs-dir',
         type=Path,
         help='Path to logs directory for build reports (default: repo-path/logs)'
@@ -669,7 +680,8 @@ Examples:
     # Create generator and run
     generator = CommitHistoryGenerator(
         repo_path=args.repo_path,
-        verbose=args.verbose
+        verbose=args.verbose,
+        skip_gitlab_fetch=args.skip_gitlab_fetch
     )
 
     return generator.show_commit_history(
