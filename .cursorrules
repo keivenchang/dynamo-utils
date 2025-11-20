@@ -155,7 +155,7 @@ DO NOT use these BS words in docs/comments:
 ### 2.3.1 Command Chaining
 - Chain multiple commands in one go whenever possible using && or ;
 - Use parentheses for grouping: (a && b); (c || d)
-- Examples: 
+- Examples:
   - cd dir && command
   - cmd1; cmd2; cmd3
   - (cd dir1 && cargo fmt); (cd dir2 && cargo fmt)
@@ -164,8 +164,9 @@ DO NOT use these BS words in docs/comments:
 ### 2.3.2 Long-Running Programs
 - For long-running programs (vllm, sglang, trtllm), use tee to log output to a file and background it
 - Do NOT filter output - errors must be visible in the log file
-- Format: program args 2>&1 | tee /tmp/program.HHMM.log &
-- Example: vllm serve 2>&1 | tee /tmp/vllm.1616.log & (for 4:16 PM)
+- Format: program args 2>&1 | tee /tmp/program.N.log &
+- Example: vllm serve 2>&1 | tee /tmp/vllm.1.log &
+- Use sequential numbering: .1, .2, .3, etc for multiple runs
 - This allows monitoring while keeping the terminal responsive
 
 ## 2.4 Environment Awareness and Setup
@@ -233,6 +234,35 @@ _/inference.sh --framework vllm --model qwen      # Specific framework
 _/inference.sh --disagg --framework trtllm        # Disaggregated mode (multi-GPU)
 _/inference.sh --dryrun                           # Show what would be executed
 ```
+
+#### Safe Process Killing Pattern
+CRITICAL: Use these patterns to kill Dynamo processes without killing the Docker container:
+
+**SAFE patterns (use these):**
+```bash
+# Using pgrep and xargs (recommended)
+pgrep -f "python3?.*-m dynamo\.(vllm|frontend|sglang|trtllm)" | xargs -r kill
+
+# More specific patterns
+pgrep -f "python3.*-m dynamo\." | xargs -r kill
+pgrep -f "python.*-m dynamo\." | xargs -r kill
+
+# Alternative using ps
+ps aux | grep -E "python3?.*-m dynamo\." | grep -v grep | awk '{print $2}' | xargs -r kill
+```
+
+**DANGEROUS patterns (DO NOT use - kills container):**
+```bash
+pkill -f "python.*dynamo"  # Too broad, kills container
+pkill python               # Kills all Python including container init
+pkill -f python3           # Can kill container processes
+```
+
+Why the safe pattern works:
+- Specifically matches `-m dynamo.` module invocations
+- Uses pgrep to find PIDs first, then pipes to kill for control
+- The `-r` flag in xargs prevents errors if no processes found
+- Won't match the Docker container's main Python process
 
 ### 3.2.3 Test the Deployment
 ```bash
