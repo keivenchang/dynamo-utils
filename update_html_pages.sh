@@ -6,13 +6,14 @@
 # This script is designed to be run by cron and requires absolute paths
 #
 # Environment Variables (optional):
-#   NVIDIA_HOME       - Base directory for logs and output files (default: parent of script dir)
+#   NVIDIA_HOME         - Base directory for logs and output files (default: parent of script dir)
+#   SKIP_GITLAB_FETCH   - If set, skip fetching from GitLab API, use cached data only (faster)
 #
 # Cron Example:
-#   */30 * * * * /path/to/update_html_pages.sh
-#
-# Or with custom path:
-#   */30 * * * * NVIDIA_HOME=/var/www/html /path/to/update_html_pages.sh
+#   # Full fetch once per hour
+#   0 * * * * NVIDIA_HOME=$HOME/nvidia /path/to/update_html_pages.sh
+#   # Use cache every 3 minutes (except minute 0)
+#   3-59/3 * * * * NVIDIA_HOME=$HOME/nvidia SKIP_GITLAB_FETCH=1 /path/to/update_html_pages.sh
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
@@ -99,7 +100,10 @@ else
 fi
 
 # Note: --logs-dir defaults to ../dynamo_ci/logs for dynamo_latest repo
-if python3 "$SCRIPT_DIR/show_commit_history.py" --repo-path . --html --max-commits 200 --output "$COMMIT_HISTORY_HTML" 2>> "$LOG_FILE"; then
+# Set flag based on environment variable
+SKIP_FLAG="${SKIP_GITLAB_FETCH:+--skip-gitlab-fetch}"
+
+if python3 "$SCRIPT_DIR/show_commit_history.py" --repo-path . --html --max-commits 200 --output "$COMMIT_HISTORY_HTML" $SKIP_FLAG 2>> "$LOG_FILE"; then
     echo "$(date '+%Y-%m-%d %H:%M:%S') - Updated $COMMIT_HISTORY_HTML" >> "$LOG_FILE"
 else
     echo "$(date '+%Y-%m-%d %H:%M:%S') - ERROR: Failed to update commit-history.html" >> "$LOG_FILE"

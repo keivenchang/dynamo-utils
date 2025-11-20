@@ -2016,11 +2016,16 @@ class GitLabAPIClient:
 
         # Fetch fresh data if cache is invalid
         if not cache_valid:
+            # NOTE: GitLab Container Registry API does NOT support search/filter parameters
+            # for listing tags. The API only returns tags in alphabetical order by name.
+            # We must fetch ALL pages and cache them locally to enable searching by commit SHA.
+            # Web UI search works via client-side filtering after fetching all tags.
+
             # Incremental fetch: page by page, stop when we see tags we already have
             tags = []
             seen_tag_names = set()
             page = 1
-            safety_limit = 50  # Safety limit on pages
+            safety_limit = 50  # Safety limit on pages (5000 tags total at 100 per page)
             per_page = 100
 
             while page <= safety_limit:
