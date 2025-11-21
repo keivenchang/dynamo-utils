@@ -43,33 +43,58 @@ except ImportError:
 class CommitHistoryGenerator:
     """Generate commit history with composite SHAs and Docker images"""
 
-    def __init__(self, repo_path: Path, verbose: bool = False, skip_gitlab_fetch: bool = False):
+    def __init__(self, repo_path: Path, verbose: bool = False, debug: bool = False, skip_gitlab_fetch: bool = False):
         """
         Initialize the commit history generator
 
         Args:
             repo_path: Path to the Dynamo repository
-            verbose: Enable verbose output
+            verbose: Enable verbose output (INFO level)
+            debug: Enable debug output (DEBUG level)
             skip_gitlab_fetch: Skip fetching GitLab registry data, use cached data only
         """
         self.repo_path = Path(repo_path)
         self.verbose = verbose
+        self.debug = debug
         self.skip_gitlab_fetch = skip_gitlab_fetch
         self.logger = self._setup_logger()
         self.cache_file = self.repo_path / ".commit_history_cache.json"
+        self.gitlab_client = GitLabAPIClient()  # Single instance for all GitLab operations
 
     def _setup_logger(self) -> logging.Logger:
         """Setup logging configuration"""
         logger = logging.getLogger('CommitHistoryGenerator')
-        logger.setLevel(logging.DEBUG if self.verbose else logging.INFO)
+        if self.debug:
+            logger.setLevel(logging.DEBUG)
+        elif self.verbose:
+            logger.setLevel(logging.INFO)
+        else:
+            logger.setLevel(logging.WARNING)
 
         if not logger.handlers:
             handler = logging.StreamHandler()
-            handler.setLevel(logging.DEBUG if self.verbose else logging.INFO)
+            if self.debug:
+                handler.setLevel(logging.DEBUG)
+            elif self.verbose:
+                handler.setLevel(logging.INFO)
+            else:
+                handler.setLevel(logging.WARNING)
             formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
             handler.setFormatter(formatter)
             logger.addHandler(handler)
-
+        
+        # Also configure the common module logger
+        import common
+        common_logger = logging.getLogger('common')
+        if self.debug:
+            common_logger.setLevel(logging.DEBUG)
+        elif self.verbose:
+            common_logger.setLevel(logging.INFO)
+        else:
+            common_logger.setLevel(logging.WARNING)
+        if not common_logger.handlers:
+            common_logger.addHandler(handler)
+        
         return logger
 
     def show_commit_history(self, max_commits: int = 50, html_output: bool = False, output_path: Path = None, logs_dir: Path = None) -> int:
@@ -92,8 +117,7 @@ class CommitHistoryGenerator:
         if self.cache_file.exists():
             try:
                 cache = json.loads(self.cache_file.read_text())
-                if self.verbose:
-                    print(f"Loaded cache with {len(cache)} entries")
+                self.logger.debug(f"Loaded cache with {len(cache)} entries")
             except Exception as e:
                 self.logger.warning(f"Failed to load cache: {e}")
 
@@ -140,8 +164,7 @@ class CommitHistoryGenerator:
                     # Check cache first
                     if sha_full in cache:
                         composite_sha = cache[sha_full]
-                        if self.verbose:
-                            print(f"Cache hit for {sha_short}: {composite_sha}")
+                        self.logger.debug(f"Cache hit for {sha_short}: {composite_sha} (composite SHA)")
                     else:
                         # Checkout commit and calculate composite SHA
                         try:
@@ -150,8 +173,7 @@ class CommitHistoryGenerator:
                             # Update cache
                             cache[sha_full] = composite_sha
                             cache_updated = True
-                            if self.verbose:
-                                print(f"Calculated and cached {sha_short}: {composite_sha}")
+                            self.logger.debug(f"Calculated and cached {sha_short}: {composite_sha}")
                         except Exception as e:
                             composite_sha = "ERROR"
 
@@ -174,6 +196,7 @@ class CommitHistoryGenerator:
                             'sha_full': sha_full,
                             'composite_sha': composite_sha,
                             'date': date_str,
+                            'committed_datetime': commit.committed_datetime,  # Store datetime object for time-based filtering
                             'author': author_name,
                             'message': message_first_line,
                             'full_message': full_message,
@@ -182,8 +205,7 @@ class CommitHistoryGenerator:
                             'deletions': deletions,
                             'changed_files': changed_files
                         })
-                        if self.verbose:
-                            print(f"Processed commit {i+1}/{len(commits)}: {sha_short}")
+                        self.logger.debug(f"Processed commit {i+1}/{len(commits)}: {sha_short}")
                     else:
                         # Terminal: overwrite line with actual composite SHA
                         author_str = author_name[:author_width-1]
@@ -225,8 +247,7 @@ class CommitHistoryGenerator:
                 try:
                     self.cache_file.parent.mkdir(parents=True, exist_ok=True)
                     self.cache_file.write_text(json.dumps(cache, indent=2))
-                    if self.verbose:
-                        print(f"Cache saved with {len(cache)} entries")
+                    self.logger.debug(f"Cache saved with {len(cache)} entries")
                 except Exception as e:
                     self.logger.warning(f"Failed to save cache: {e}")
 
@@ -256,11 +277,11 @@ class CommitHistoryGenerator:
         if not HAS_JINJA2:
             raise ImportError("jinja2 is required for HTML generation. Install with: pip install jinja2")
         
-        # Get Docker images containing SHAs
-        docker_images = self._get_docker_images_by_sha([c['sha_short'] for c in commit_data])
+        # Get local Docker images containing SHAs
+        docker_images = self._get_local_docker_images_by_sha([c['sha_short'] for c in commit_data])
 
         # Get GitLab container registry images for commits (with caching)
-        gitlab_images_raw = self._get_cached_gitlab_images([c['sha_full'] for c in commit_data])
+        gitlab_images_raw = self._get_cached_gitlab_images_from_sha(commit_data)
 
         # Get GitLab CI pipeline statuses
         gitlab_pipelines = self._get_gitlab_pipeline_statuses([c['sha_full'] for c in commit_data])
@@ -405,72 +426,42 @@ class CommitHistoryGenerator:
             generated_time=generated_time
         )
 
-    def _get_cached_gitlab_images(self, sha_full_list: List[str]) -> dict:
-        """Get GitLab registry images with caching.
+    def _get_cached_gitlab_images_from_sha(self, commit_data: List[dict]) -> dict:
+        """Get Docker images mapped by commit SHA using cache.
+        
+        Simplified logic:
+        - If skip_gitlab_fetch=True: Only use cache
+        - If skip_gitlab_fetch=False: Fetch tags for recent commits (within 8 hours) using binary search
         
         Args:
-            sha_full_list: List of full commit SHAs (40 characters)
+            commit_data: List of commit dictionaries with sha_full and committed_datetime
             
         Returns:
             Dictionary mapping SHA to list of registry image info
         """
-        # Load cache
-        cache = {}
-        gitlab_cache_file = self.repo_path / ".gitlab_registry_cache.json"
-        if gitlab_cache_file.exists():
-            try:
-                cache = json.loads(gitlab_cache_file.read_text())
-                if self.verbose:
-                    self.logger.info(f"Loaded GitLab cache with {len(cache)} entries")
-            except Exception as e:
-                self.logger.warning(f"Failed to load GitLab cache: {e}")
+        cache_file = str(self.repo_path / ".gitlab_commit_sha_cache.json")
         
-        # Check which SHAs need to be fetched
-        shas_to_fetch = []
-        result = {}
+        sha_full_list = [c['sha_full'] for c in commit_data]
+        sha_to_datetime = {c['sha_full']: c['committed_datetime'] for c in commit_data}
         
-        for sha in sha_full_list:
-            if sha in cache:
-                result[sha] = cache[sha]
-                if self.verbose:
-                    self.logger.info(f"Cache hit for GitLab registry: {sha[:9]}")
-            else:
-                shas_to_fetch.append(sha)
-                result[sha] = []
+        self.logger.debug(f"Getting Docker images for {len(sha_full_list)} SHAs")
         
-        # Fetch missing SHAs from GitLab (unless skip flag is set)
-        if shas_to_fetch and not self.skip_gitlab_fetch:
-            if self.verbose:
-                self.logger.info(f"Fetching {len(shas_to_fetch)} SHAs from GitLab registry")
-
-            gitlab_client = GitLabAPIClient()
-            fresh_data = gitlab_client.get_registry_images_for_shas(
-                project_id="169905",  # dl/ai-dynamo/dynamo
-                registry_id="85325",  # Main dynamo registry
-                sha_list=shas_to_fetch
-            )
-
-            # Update result and cache
-            for sha, images in fresh_data.items():
-                result[sha] = images
-                cache[sha] = images
-
-            # Save updated cache
-            try:
-                gitlab_cache_file.parent.mkdir(parents=True, exist_ok=True)
-                gitlab_cache_file.write_text(json.dumps(cache, indent=2))
-                if self.verbose:
-                    self.logger.info(f"Saved GitLab cache with {len(cache)} entries")
-            except Exception as e:
-                self.logger.warning(f"Failed to save GitLab cache: {e}")
-        elif shas_to_fetch and self.skip_gitlab_fetch:
-            if self.verbose:
-                self.logger.info(f"Skipping fetch for {len(shas_to_fetch)} SHAs (--skip-gitlab-fetch enabled)")
+        result = self.gitlab_client.get_cached_registry_images_for_shas(
+            project_id="169905",  # dl/ai-dynamo/dynamo
+            registry_id="85325",  # Main dynamo registry
+            sha_list=sha_full_list,
+            sha_to_datetime=sha_to_datetime,
+            cache_file=cache_file,
+            skip_fetch=self.skip_gitlab_fetch
+        )
+        
+        cached_count = sum(1 for v in result.values() if v)
+        self.logger.debug(f"Found Docker images for {cached_count}/{len(sha_full_list)} SHAs")
         
         return result
 
     def _get_gitlab_pipeline_statuses(self, sha_full_list: List[str]) -> dict:
-        """Get GitLab CI pipeline status for commits.
+        """Get GitLab CI pipeline status for commits using the centralized cache.
 
         Args:
             sha_full_list: List of full commit SHAs (40 characters)
@@ -478,72 +469,18 @@ class CommitHistoryGenerator:
         Returns:
             Dictionary mapping SHA to pipeline status dict with 'status', 'id', 'web_url'
         """
-        # Load cache
-        cache = {}
-        pipeline_cache_file = self.repo_path / ".gitlab_pipeline_cache.json"
-        if pipeline_cache_file.exists():
-            try:
-                cache = json.loads(pipeline_cache_file.read_text())
-                if self.verbose:
-                    self.logger.info(f"Loaded pipeline cache with {len(cache)} entries")
-            except Exception as e:
-                self.logger.warning(f"Failed to load pipeline cache: {e}")
-
-        # Check which SHAs need to be fetched
-        shas_to_fetch = []
-        result = {}
-
-        for sha in sha_full_list:
-            if sha in cache:
-                result[sha] = cache[sha]
-                if self.verbose:
-                    self.logger.info(f"Cache hit for pipeline: {sha[:9]}")
-            else:
-                shas_to_fetch.append(sha)
-                result[sha] = None
-
-        # Fetch missing SHAs from GitLab
-        if shas_to_fetch:
-            if self.verbose:
-                self.logger.info(f"Fetching pipeline status for {len(shas_to_fetch)} SHAs")
-
-            gitlab_client = GitLabAPIClient()
-            for sha in shas_to_fetch:
-                try:
-                    # Get pipelines for this commit
-                    endpoint = f"/api/v4/projects/169905/pipelines?sha={sha}&per_page=1"
-                    pipelines = gitlab_client.get(endpoint)
-
-                    if pipelines and len(pipelines) > 0:
-                        pipeline = pipelines[0]  # Most recent pipeline
-                        status_info = {
-                            'status': pipeline.get('status', 'unknown'),
-                            'id': pipeline.get('id'),
-                            'web_url': pipeline.get('web_url', ''),
-                        }
-                        result[sha] = status_info
-                        cache[sha] = status_info
-                    else:
-                        result[sha] = None
-                        cache[sha] = None
-                except Exception as e:
-                    if self.verbose:
-                        self.logger.warning(f"Failed to get pipeline for {sha[:9]}: {e}")
-                    result[sha] = None
-                    cache[sha] = None
-
-            # Save updated cache
-            try:
-                pipeline_cache_file.parent.mkdir(parents=True, exist_ok=True)
-                pipeline_cache_file.write_text(json.dumps(cache, indent=2))
-                if self.verbose:
-                    self.logger.info(f"Saved pipeline cache with {len(cache)} entries")
-            except Exception as e:
-                self.logger.warning(f"Failed to save pipeline cache: {e}")
-
+        cache_file = str(self.repo_path / ".gitlab_pipeline_status_cache.json")
+        
+        self.logger.debug(f"Getting pipeline status for {len(sha_full_list)} commits")
+        
+        result = self.gitlab_client.get_cached_pipeline_status(sha_full_list, cache_file=cache_file, skip_fetch=self.skip_gitlab_fetch)
+        
+        cached_count = sum(1 for v in result.values() if v is not None)
+        self.logger.debug(f"Found pipeline status for {cached_count}/{len(sha_full_list)} commits")
+        
         return result
 
-    def _get_docker_images_by_sha(self, sha_list: List[str]) -> dict:
+    def _get_local_docker_images_by_sha(self, sha_list: List[str]) -> dict:
         """Get Docker images containing each SHA in their tag
 
         Args:
@@ -551,6 +488,25 @@ class CommitHistoryGenerator:
 
         Returns:
             Dictionary mapping SHA to list of image details (dicts with tag, id, size, created)
+            
+            Example return value:
+            {
+                "21a03b316": [
+                    {
+                        "tag": "gitlab-master.nvidia.com:5005/dl/ai-dynamo/dynamo:21a03b316-38895507-vllm-amd64",
+                        "id": "1234abcd5678",
+                        "size": "13.4GB",
+                        "created": "2025-11-20 22:15:32"
+                    },
+                    {
+                        "tag": "gitlab-master.nvidia.com:5005/dl/ai-dynamo/dynamo:21a03b316-38895507-vllm-arm64",
+                        "id": "9876fedc5432",
+                        "size": "8.0GB",
+                        "created": "2025-11-20 22:16:35"
+                    }
+                ],
+                "5fe0476e6": []
+            }
         """
         sha_to_images = {sha: [] for sha in sha_list}
 
@@ -637,9 +593,15 @@ Examples:
     )
 
     parser.add_argument(
-        '--verbose',
+        '--verbose', '-v',
         action='store_true',
-        help='Enable verbose output'
+        help='Enable verbose output (INFO level logging)'
+    )
+    
+    parser.add_argument(
+        '--debug',
+        action='store_true',
+        help='Enable debug output (DEBUG level logging, shows all API calls)'
     )
 
     parser.add_argument(
@@ -681,6 +643,7 @@ Examples:
     generator = CommitHistoryGenerator(
         repo_path=args.repo_path,
         verbose=args.verbose,
+        debug=args.debug,
         skip_gitlab_fetch=args.skip_gitlab_fetch
     )
 

@@ -11,10 +11,14 @@ import re
 import shlex
 import shutil
 import subprocess
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+
+# Global logger for the module
+_logger = logging.getLogger(__name__)
 
 try:
     import docker  # type: ignore[import-untyped]
@@ -568,6 +572,26 @@ class DockerUtils(BaseUtils):
 
         Returns:
             List of DockerImageInfo objects sorted by creation date (newest first)
+            
+            Example return value:
+            [
+                DockerImageInfo(
+                    repository="gitlab-master.nvidia.com:5005/dl/ai-dynamo/dynamo",
+                    tag="21a03b316-38895507-vllm-amd64",
+                    image_id="sha256:1234abcd",
+                    created_at="2025-11-20T22:15:32",
+                    size_mb=13411.0,
+                    digest="sha256:c048ae310fcf16471200d512056fdc835b28bdfad7d3df97a46f5ad870541e13"
+                ),
+                DockerImageInfo(
+                    repository="gitlab-master.nvidia.com:5005/dl/ai-dynamo/dynamo",
+                    tag="5fe0476e6-38888909-sglang-arm64",
+                    image_id="sha256:5678efgh",
+                    created_at="2025-11-19T10:00:00",
+                    size_mb=7997.4,
+                    digest="sha256:abcd1234..."
+                )
+            ]
         """
         self.logger.debug("Equivalent: docker images --format table")
         
@@ -898,6 +922,13 @@ class GitUtils(BaseUtils):
 
         Returns:
             List of GitPython commit objects
+            
+            Example return value (commit objects have these attributes):
+            [
+                <git.Commit "21a03b316dc1e5031183965e5798b0d9fe2e64b3">,  # commit.hexsha
+                <git.Commit "5fe0476e605d2564234f00e8123461e1594a9ce7">,  # commit.message
+                <git.Commit "826eea05c9b3c7a68f04fb70dd44d7783d224df5">   # commit.author.name, commit.committed_datetime
+            ]
         """
         try:
             commits = list(self.repo.iter_commits(branch, max_count=max_count))
@@ -915,6 +946,20 @@ class GitUtils(BaseUtils):
 
         Returns:
             Dictionary with commit information
+            
+            Example return value:
+            {
+                "sha_full": "21a03b316dc1e5031183965e5798b0d9fe2e64b3",
+                "sha_short": "21a03b316",
+                "author_name": "John Doe",
+                "author_email": "john@nvidia.com",
+                "committer_name": "John Doe",
+                "committer_email": "john@nvidia.com",
+                "date": datetime.datetime(2025, 11, 20, 17, 5, 58),
+                "message": "Fix Docker image fetching for recent commits\\n\\nDetailed description...",
+                "message_first_line": "Fix Docker image fetching for recent commits",
+                "parents": ["5fe0476e605d2564234f00e8123461e1594a9ce7"]
+            }
         """
         from datetime import datetime
 
@@ -944,6 +989,14 @@ class GitUtils(BaseUtils):
 
         Returns:
             List of untracked file paths
+            
+            Example return value:
+            [
+                "test_output.txt",
+                ".env.local",
+                "debug.log",
+                "temp/cache_data.json"
+            ]
         """
         return self.repo.untracked_files
 
@@ -952,6 +1005,14 @@ class GitUtils(BaseUtils):
 
         Returns:
             List of tag names
+            
+            Example return value:
+            [
+                "v1.0.0",
+                "v1.0.1",
+                "v1.1.0",
+                "release-2025-11-20"
+            ]
         """
         return [tag.name for tag in self.repo.tags]
 
@@ -963,6 +1024,12 @@ class GitUtils(BaseUtils):
 
         Returns:
             List of branch names
+            
+            Example return value (local):
+            ["main", "feature/docker-caching", "bugfix/timezone-issue"]
+            
+            Example return value (remote):
+            ["origin/main", "origin/develop", "origin/feature/docker-caching"]
         """
         if remote:
             return [ref.name for ref in self.repo.remote().refs]
@@ -1089,6 +1156,36 @@ class GitHubAPIClient:
 
         Returns:
             JSON response as dict, or None if request failed
+            
+            Example return value for pull request endpoint:
+            {
+                "number": 1234,
+                "title": "Add Docker image caching improvements",
+                "state": "open",
+                "head": {
+                    "sha": "21a03b316dc1e5031183965e5798b0d9fe2e64b3",
+                    "ref": "feature/docker-caching"
+                },
+                "base": {"ref": "main"},
+                "mergeable": true,
+                "mergeable_state": "clean",
+                "user": {"login": "johndoe"},
+                "created_at": "2025-11-20T10:00:00Z"
+            }
+            
+            Example return value for check runs endpoint:
+            {
+                "total_count": 5,
+                "check_runs": [
+                    {
+                        "id": 12345678,
+                        "name": "build-test-amd64",
+                        "status": "completed",
+                        "conclusion": "success",
+                        "html_url": "https://github.com/owner/repo/actions/runs/12345678"
+                    }
+                ]
+            }
         """
         url = f"{self.base_url}{endpoint}" if endpoint.startswith('/') else f"{self.base_url}/{endpoint}"
 
@@ -1188,6 +1285,20 @@ class GitHubAPIClient:
 
         Returns:
             PR details as dict, or None if request failed
+            
+            Example return value:
+            {
+                "number": 1234,
+                "title": "Add Docker image caching improvements",
+                "state": "open",
+                "head": {"sha": "21a03b316dc1e5031183965e5798b0d9fe2e64b3"},
+                "base": {"ref": "main"},
+                "mergeable": true,
+                "mergeable_state": "clean",
+                "user": {"login": "johndoe"},
+                "created_at": "2025-11-20T10:00:00Z",
+                "updated_at": "2025-11-20T17:05:58Z"
+            }
         """
         endpoint = f"/repos/{owner}/{repo}/pulls/{pr_number}"
         try:
@@ -1496,6 +1607,27 @@ class GitHubAPIClient:
 
         Returns:
             Tuple of (List of FailedCheck objects, rerun_url)
+            
+            Example return value:
+            (
+                [
+                    FailedCheck(
+                        name="build-test-arm64",
+                        conclusion="failure",
+                        job_id="12345678",
+                        job_url="https://github.com/owner/repo/actions/runs/12345678",
+                        rerun_url="https://github.com/owner/repo/actions/runs/12345678/rerun"
+                    ),
+                    FailedCheck(
+                        name="lint",
+                        conclusion="failure",
+                        job_id="87654321",
+                        job_url="https://github.com/owner/repo/actions/runs/87654321",
+                        rerun_url=None
+                    )
+                ],
+                "https://github.com/owner/repo/actions/runs/99999999/rerun-all-jobs"
+            )
         """
         try:
             import subprocess
@@ -1729,6 +1861,28 @@ class GitHubAPIClient:
 
         Returns:
             List of PRInfo objects
+            
+            Example return value:
+            [
+                PRInfo(
+                    number=1234,
+                    title="Add Docker image caching improvements",
+                    url="https://github.com/owner/repo/pull/1234",
+                    state="open",
+                    mergeable_state="clean",
+                    sha="21a03b316dc1e5031183965e5798b0d9fe2e64b3",
+                    checks_status="success"
+                ),
+                PRInfo(
+                    number=1233,
+                    title="Fix timezone handling in cache",
+                    url="https://github.com/owner/repo/pull/1233",
+                    state="closed",
+                    mergeable_state=None,
+                    sha="5fe0476e605d2564234f00e8123461e1594a9ce7",
+                    checks_status="failure"
+                )
+            ]
         """
         endpoint = f"/repos/{owner}/{repo}/pulls"
         params = {'head': f'{owner}:{branch}', 'state': 'all'}
@@ -1823,8 +1977,9 @@ class GitLabAPIClient:
     
     Example:
         client = GitLabAPIClient()
-        tags = client.get_registry_tags(project_id="169905", registry_id="85325")
+        # Use get_cached_registry_images_for_shas for fetching Docker images
     """
+    
     
     @staticmethod
     def get_gitlab_token_from_file() -> Optional[str]:
@@ -1872,6 +2027,33 @@ class GitLabAPIClient:
             
         Returns:
             JSON response (dict or list), or None if request failed
+            
+            Example return value for registry tags endpoint:
+            [
+                {
+                    "name": "21a03b316dc1e5031183965e5798b0d9fe2e64b3-38895507-vllm-amd64",
+                    "path": "dl/ai-dynamo/dynamo:21a03b316dc1e5031183965e5798b0d9fe2e64b3-38895507-vllm-amd64",
+                    "location": "gitlab-master.nvidia.com:5005/dl/ai-dynamo/dynamo:21a03b316...",
+                    "created_at": "2025-11-20T22:15:32.829+00:00"
+                },
+                {
+                    "name": "5fe0476e605d2564234f00e8123461e1594a9ce7-38888909-sglang-arm64",
+                    "path": "dl/ai-dynamo/dynamo:5fe0476e605d2564234f00e8123461e1594a9ce7-38888909-sglang-arm64",
+                    "location": "gitlab-master.nvidia.com:5005/dl/ai-dynamo/dynamo:5fe0476e6...",
+                    "created_at": "2025-11-19T10:00:00.000+00:00"
+                }
+            ]
+            
+            Example return value for pipelines endpoint:
+            [
+                {
+                    "id": 38895507,
+                    "status": "success",
+                    "web_url": "https://gitlab-master.nvidia.com/dl/ai-dynamo/dynamo/-/pipelines/38895507",
+                    "ref": "main",
+                    "sha": "21a03b316dc1e5031183965e5798b0d9fe2e64b3"
+                }
+            ]
         """
         if not HAS_REQUESTS:
             # Fallback to urllib for basic GET requests
@@ -1909,251 +2091,388 @@ class GitLabAPIClient:
         except requests.exceptions.RequestException as e:
             raise Exception(f"GitLab API request failed for {endpoint}: {e}")
     
-    def get_registry_tags(self, project_id: str, registry_id: str, 
-                         per_page: int = 200, max_pages: int = 1) -> List[Dict[str, Any]]:
-        """Get container registry tags for a project.
+    def get_cached_registry_images_for_shas(self, project_id: str, registry_id: str,
+                                           sha_list: List[str],
+                                           sha_to_datetime: Optional[Dict[str, datetime]] = None,
+                                           cache_file: str = '.gitlab_commit_sha_cache.json',
+                                           skip_fetch: bool = False) -> Dict[str, List[Dict[str, Any]]]:
+        """Get container registry images for commit SHAs with caching.
+        
+        Optimized caching logic:
+        - If skip_fetch=True: Only return cached data, no API calls
+        - If skip_fetch=False: Use binary search to find tags for recent commits (within 8 hours)
+          - Only fetches pages needed for recent SHAs
+          - Tracks visited pages to avoid redundant API calls
+          - Only updates cache for recent SHAs found
         
         Args:
-            project_id: GitLab project ID (e.g., "169905")
-            registry_id: Container registry ID (e.g., "85325")
-            per_page: Number of tags per page (max 100 for GitLab)
-            max_pages: Maximum number of pages to fetch
+            project_id: GitLab project ID
+            registry_id: Container registry ID  
+            sha_list: List of full commit SHAs (40 characters)
+            sha_to_datetime: Optional dict mapping SHA to committed_datetime for time-based filtering
+            cache_file: Path to cache file (default: .gitlab_commit_sha_cache.json)
+            skip_fetch: If True, only return cached data without fetching from GitLab
             
         Returns:
-            List of tag dictionaries with 'name', 'location', etc.
+            Dictionary mapping SHA to list of image info dicts
+            
+        Cache file format (.gitlab_commit_sha_cache.json):
+            {
+                "21a03b316dc1e5031183965e5798b0d9fe2e64b3": [
+                    {
+                        "tag": "21a03b316dc1e5031183965e5798b0d9fe2e64b3-38895507-vllm-amd64",
+                        "framework": "vllm",
+                        "arch": "amd64",
+                        "pipeline_id": "38895507",
+                        "location": "gitlab-master.nvidia.com:5005/dl/ai-dynamo/dynamo:21a03b316...",
+                        "total_size": 15000000000,
+                        "created_at": "2024-11-20T13:00:00Z"
+                    }
+                ],
+                "5fe0476e605d2564234f00e8123461e1594a9ce7": []
+            }
         """
-        if not self.has_token():
-            return []
+        from pathlib import Path
+        import json
+        from datetime import datetime, timedelta
         
-        all_tags = []
+        # Load cache
+        cache = {}
+        cache_path = Path(cache_file)
+        if cache_path.exists():
+            try:
+                cache = json.loads(cache_path.read_text())
+            except Exception:
+                pass
         
-        for page in range(1, max_pages + 1):
+        # Initialize result for requested SHAs
+        result = {}
+        
+        if skip_fetch:
+            # Only return cached data - NO API calls
+            for sha in sha_list:
+                result[sha] = cache.get(sha, [])
+            
+            # Warn if no images found in cache
+            if not any(result.values()):
+                _logger.warning("⚠️  No Docker images found in cache. Consider running without --skip-gitlab-fetch to fetch fresh data.")
+            
+            return result
+        else:
+            # Identify recent SHAs (within 8 hours)
+            from datetime import timezone
+            now_utc = datetime.now(timezone.utc)
+            eight_hours_ago_utc = now_utc - timedelta(hours=8)
+            
+            recent_shas = set()
+            if sha_to_datetime:
+                from datetime import timezone
+                for sha in sha_list:
+                    commit_time = sha_to_datetime.get(sha)
+                    if commit_time:
+                        # Normalize to UTC for comparison
+                        if commit_time.tzinfo is None:
+                            # Naive datetime, assume UTC
+                            commit_time_utc = commit_time.replace(tzinfo=timezone.utc)
+                        else:
+                            commit_time_utc = commit_time.astimezone(timezone.utc)
+                        
+                        if commit_time_utc >= eight_hours_ago_utc:
+                            recent_shas.add(sha)
+            
+            _logger.debug(f"Found {len(recent_shas)} SHAs within 8 hours (out of {len(sha_list)} total)")
+            
+            if not recent_shas:
+                # No recent SHAs, just return cached data
+                for sha in sha_list:
+                    result[sha] = cache.get(sha, [])
+                return result
+            
+            # Fetch ALL pages first, then filter by SHA
+            per_page = 100
+            import threading
+            from concurrent.futures import ThreadPoolExecutor, as_completed
+            
+            if not self.has_token():
+                # No token, show big warning
+                print("\n" + "="*80)
+                print("⚠️  WARNING: No GitLab token found!")
+                print("="*80)
+                print("Cannot fetch Docker registry images without a GitLab token.")
+                print("\nTo set up a token:")
+                print("1. Create a personal access token at:")
+                print("   https://gitlab-master.nvidia.com/-/profile/personal_access_tokens")
+                print("2. Set it using one of these methods:")
+                print("   - Export GITLAB_TOKEN environment variable")
+                print("   - Save to ~/.config/gitlab-token file")
+                print("="*80 + "\n")
+                return {sha: [] for sha in sha_list}
+            
+            # Fetch page 1 first to get total pages from headers
             endpoint = f"/api/v4/projects/{project_id}/registry/repositories/{registry_id}/tags"
             params = {
-                'per_page': min(per_page, 100),  # GitLab API max is 100
-                'page': page,
+                'per_page': per_page,
+                'page': 1,
                 'order_by': 'updated_at',
                 'sort': 'desc'
             }
             
             try:
-                tags = self.get(endpoint, params=params)
-                if not tags:
-                    break
-                    
-                all_tags.extend(tags)
+                # Make direct request to get headers
+                if HAS_REQUESTS:
+                    url = f"{self.base_url}{endpoint}"
+                    response = requests.get(url, headers=self.headers, params=params, timeout=10)
+                    response.raise_for_status()
+                    first_page_tags = response.json()
+                    total_pages = int(response.headers.get('X-Total-Pages', '1'))
+                else:
+                    # Fallback: use get method and assume 1 page
+                    first_page_tags = self.get(endpoint, params=params)
+                    total_pages = 1
                 
-                # If we got fewer tags than requested, we've reached the end
-                if len(tags) < params['per_page']:
-                    break
-                    
+                if first_page_tags is None:
+                    first_page_tags = []
+                
+                _logger.debug(f"Total pages available: {total_pages}")
+                
             except Exception as e:
-                if page == 1:
-                    # Re-raise error on first page
-                    raise
-                # For subsequent pages, just stop
-                break
-        
-        return all_tags
-    
-    def get_tag_details(self, project_id: str, registry_id: str, tag_name: str) -> Optional[Dict[str, Any]]:
-        """Get detailed information for a specific tag.
-        
-        Args:
-            project_id: GitLab project ID
-            registry_id: Container registry ID
-            tag_name: Tag name to get details for
+                _logger.warning(f"Failed to fetch page 1 to determine total pages: {e}")
+                print("\n" + "="*80)
+                print("⚠️  ERROR: Failed to fetch Docker registry tags from GitLab!")
+                print("="*80)
+                print(f"Error: {e}")
+                print("="*80 + "\n")
+                return {sha: [] for sha in sha_list}
             
-        Returns:
-            Tag details including total_size and created_at, or None if failed
-        """
-        if not self.has_token():
-            return None
-        
-        try:
-            # URL encode the tag name for the API
-            import urllib.parse
-            encoded_tag = urllib.parse.quote(tag_name, safe='')
-            endpoint = f"/api/v4/projects/{project_id}/registry/repositories/{registry_id}/tags/{encoded_tag}"
-            return self.get(endpoint)
-        except Exception:
-            return None
-    
-    def get_cached_registry_tags(self, project_id: str, registry_id: str,
-                                 cache_file: str = '.gitlab_tags_cache.json',
-                                 max_age_hours: int = 24) -> List[Dict[str, Any]]:
-        """Get registry tags with incremental page caching - stops when seeing duplicate pages.
-
-        Args:
-            project_id: GitLab project ID
-            registry_id: Container registry ID
-            cache_file: Path to cache file (default: .gitlab_tags_cache.json)
-            max_age_hours: Maximum cache age in hours before refresh (default: 24)
-
-        Returns:
-            List of tag info dictionaries
-        """
-        import json
-        from pathlib import Path
-        from datetime import datetime, timedelta
-
-        cache_path = Path(cache_file)
-        tags = []
-        cache_valid = False
-
-        # Try to load from cache
-        if cache_path.exists():
-            try:
-                cache_data = json.loads(cache_path.read_text())
-                cache_time = datetime.fromisoformat(cache_data.get('timestamp', ''))
-                cache_age = datetime.now() - cache_time
-
-                if cache_age < timedelta(hours=max_age_hours):
-                    tags = cache_data.get('tags', [])
-                    cache_valid = True
-            except Exception:
-                pass
-
-        # Fetch fresh data if cache is invalid
-        if not cache_valid:
-            # NOTE: GitLab Container Registry API does NOT support search/filter parameters
-            # for listing tags. The API only returns tags in alphabetical order by name.
-            # We must fetch ALL pages and cache them locally to enable searching by commit SHA.
-            # Web UI search works via client-side filtering after fetching all tags.
-
-            # Incremental fetch: page by page, stop when we see tags we already have
-            tags = []
-            seen_tag_names = set()
-            page = 1
-            safety_limit = 50  # Safety limit on pages (5000 tags total at 100 per page)
-            per_page = 100
-
-            while page <= safety_limit:
-                # Fetch one page at a time using direct API call
+            # Collect all tags from all pages
+            all_tags = list(first_page_tags)  # Start with page 1 tags
+            lock = threading.Lock()
+            
+            def fetch_page(page_num: int) -> List[Dict[str, Any]]:
+                """Fetch a single page of tags."""
                 endpoint = f"/api/v4/projects/{project_id}/registry/repositories/{registry_id}/tags"
                 params = {
                     'per_page': per_page,
-                    'page': page,
+                    'page': page_num,
                     'order_by': 'updated_at',
                     'sort': 'desc'
                 }
-
-                try:
-                    page_tags = self.get(endpoint, params=params)
-                except Exception:
-                    # API error, stop fetching
-                    break
-
-                if not page_tags:
-                    # No more pages
-                    break
-
-                # Check if we've seen all tags on this page before
-                page_tag_names = {t['name'] for t in page_tags}
-                if page_tag_names.issubset(seen_tag_names):
-                    # All tags on this page were already seen - we've reached the end
-                    break
-
-                # Add new tags
-                new_tags = [t for t in page_tags if t['name'] not in seen_tag_names]
-                tags.extend(new_tags)
-                seen_tag_names.update(t['name'] for t in new_tags)
-
-                # If we got fewer tags than requested, we've reached the end
-                if len(page_tags) < per_page:
-                    break
-
-                page += 1
-
-            # Save to cache
-            try:
-                cache_data = {
-                    'timestamp': datetime.now().isoformat(),
-                    'tags': tags,
-                    'pages_fetched': page - 1
-                }
-                cache_path.write_text(json.dumps(cache_data, indent=2))
-            except Exception:
-                pass  # Silently fail on cache write errors
-
-        return tags
-
-    def get_registry_images_for_shas(self, project_id: str, registry_id: str,
-                                     sha_list: List[str]) -> Dict[str, List[Dict[str, Any]]]:
-        """Get container registry images for a list of commit SHAs.
-
-        Args:
-            project_id: GitLab project ID
-            registry_id: Container registry ID
-            sha_list: List of full commit SHAs (40 characters)
-
-        Returns:
-            Dictionary mapping SHA to list of image info dicts with:
-                - tag: Full image tag
-                - framework: Framework name (vllm/sglang/trtllm)
-                - arch: Architecture (amd64/arm64)
-                - pipeline_id: GitLab CI pipeline ID
-                - location: Full image location URL
-                - total_size: Image size in bytes
-                - created_at: ISO 8601 timestamp
-        """
-        sha_to_images: Dict[str, List[Dict[str, Any]]] = {sha: [] for sha in sha_list}
-
-        if not self.has_token():
-            return sha_to_images
-
-        try:
-            # Get tags from cache (refreshes if older than 24 hours)
-            tags = self.get_cached_registry_tags(project_id, registry_id)
-            
-            # Map tags to SHAs and fetch detailed info for each matching tag
-            for tag_info in tags:
-                tag_name = tag_info['name']
                 
-                # Tags format: {full-sha}-{pipeline-id}-{framework}-{arch}
-                # Example: 02763376c536985cdd6a4f6402594f0cab328f21-38443994-vllm-amd64
-                for sha_full in sha_list:
-                    if sha_full in tag_name:
-                        # Parse tag to extract framework and arch
-                        # Format: SHA-PIPELINE-FRAMEWORK-ARCH
+                try:
+                    tags = self.get(endpoint, params=params)
+                    if tags is None:
+                        return []
+                    return tags
+                except Exception as e:
+                    _logger.debug(f"Failed to fetch page {page_num}: {e}")
+                    return []
+            
+            # Fetch all remaining pages in parallel (8 threads)
+            _logger.debug(f"Fetching all {total_pages} pages in parallel (8 threads)...")
+            pages_fetched = 1  # Already fetched page 1
+            
+            if total_pages > 1:
+                with ThreadPoolExecutor(max_workers=8) as executor:
+                    # Submit all page fetch tasks (starting from page 2)
+                    future_to_page = {executor.submit(fetch_page, page_num): page_num 
+                                     for page_num in range(2, total_pages + 1)}
+                    
+                    # Collect results as they complete
+                    for future in as_completed(future_to_page):
+                        page_num = future_to_page[future]
+                        tags = future.result()
+                        pages_fetched += 1
+                        
+                        if tags:
+                            with lock:
+                                all_tags.extend(tags)
+                        
+                        if pages_fetched % 10 == 0:
+                            _logger.debug(f"Fetched {pages_fetched}/{total_pages} pages...")
+                        
+                        # If we got fewer tags than per_page, we've reached the end
+                        if len(tags) < per_page:
+                            # Cancel remaining futures
+                            for f in future_to_page:
+                                if not f.done():
+                                    f.cancel()
+                            break
+            
+            _logger.debug(f"Fetched all {pages_fetched} pages, total tags: {len(all_tags)}")
+            
+            # Now filter tags by SHA
+            sha_to_images = {}
+            recent_shas_set = set(recent_shas)
+            
+            for tag_info in all_tags:
+                tag_name = tag_info.get('name', '')
+                # Check if this tag matches any of our recent SHAs
+                for sha in recent_shas_set:
+                    if tag_name.startswith(sha + '-'):
+                        if sha not in sha_to_images:
+                            sha_to_images[sha] = []
+                        
                         parts = tag_name.split('-')
-                        if len(parts) >= 3:
-                            # Last part is arch, second to last is framework
-                            arch = parts[-1]
-                            framework = parts[-2]
-                            pipeline_id = parts[-3] if len(parts) >= 4 else "unknown"
-                            
-                            # Fetch detailed tag info (includes size and created_at)
-                            tag_details = self.get_tag_details(project_id, registry_id, tag_name)
-                            
-                            if tag_details:
-                                sha_to_images[sha_full].append({
-                                    'tag': tag_name,
-                                    'framework': framework,
-                                    'arch': arch,
-                                    'pipeline_id': pipeline_id,
-                                    'location': tag_details.get('location', tag_info.get('location', '')),
-                                    'total_size': tag_details.get('total_size', 0),
-                                    'created_at': tag_details.get('created_at', ''),
-                                    'registry_id': registry_id,
-                                })
-                            else:
-                                # Fallback to basic info if details fetch fails
-                                sha_to_images[sha_full].append({
-                                    'tag': tag_name,
-                                    'framework': framework,
-                                    'arch': arch,
-                                    'pipeline_id': pipeline_id,
-                                    'location': tag_info.get('location', ''),
-                                    'total_size': 0,
-                                    'created_at': '',
-                                    'registry_id': registry_id,
-                                })
-                            
-        except Exception:
-            # Silently fail - registry lookup is optional
-            pass
+                        if len(parts) >= 4:
+                            sha_to_images[sha].append({
+                                'tag': tag_name,
+                                'framework': parts[2],
+                                'arch': parts[3],
+                                'pipeline_id': parts[1],
+                                'location': tag_info.get('location', ''),
+                                'total_size': tag_info.get('total_size', 0),
+                                'created_at': tag_info.get('created_at', '')
+                            })
+            
+            found_count = len([sha for sha in recent_shas if sha in sha_to_images and sha_to_images[sha]])
+            _logger.debug(f"Found tags for {found_count}/{len(recent_shas)} recent SHAs")
+            
+            # Update cache only for recent SHAs we found
+            for sha, images in sha_to_images.items():
+                cache[sha] = images
+            
+            # Build result for all requested SHAs (use cache for non-recent ones)
+            for sha in sha_list:
+                result[sha] = cache.get(sha, [])
+            
+            # Warn if no images found for recent SHAs
+            if recent_shas and not any(result[sha] for sha in recent_shas):
+                _logger.warning(f"⚠️  No Docker images found for any of the {len(recent_shas)} recent SHAs (within 8 hours)")
+                _logger.warning("This might mean the commits haven't been built yet or the builds failed.")
+            
+            # Save updated cache with timestamp
+            try:
+                cache_with_metadata = {
+                    '_metadata': {
+                        'timestamp': datetime.now().isoformat(),
+                        'total_shas': len(cache),
+                        'recent_shas_updated': len(sha_to_images)
+                    }
+                }
+                cache_with_metadata.update(cache)
+                cache_path.parent.mkdir(parents=True, exist_ok=True)
+                cache_path.write_text(json.dumps(cache_with_metadata, indent=2))
+                _logger.debug(f"Updated cache with {len(sha_to_images)} recent SHAs")
+            except Exception as e:
+                _logger.warning(f"Failed to save cache: {e}")
         
-        return sha_to_images
+        return result
+    
+    def get_cached_pipeline_status(self, sha_list: List[str],
+                                  cache_file: str = '.gitlab_pipeline_status_cache.json',
+                                  skip_fetch: bool = False) -> Dict[str, Optional[Dict[str, Any]]]:
+        """Get GitLab CI pipeline status for commits with intelligent caching.
+        
+        Caching strategy:
+        - If skip_fetch=True: Only return cached data, no API calls
+        - If skip_fetch=False:
+          - "success" status: Cached permanently (won't change)
+          - "failed", "running", "pending", etc.: Always refetched (might be re-run)
+          - None/missing: Always fetched
+        
+        Args:
+            sha_list: List of full commit SHAs (40 characters)
+            cache_file: Path to cache file (default: .gitlab_pipeline_status_cache.json)
+            skip_fetch: If True, only return cached data without fetching from GitLab
+            
+        Returns:
+            Dictionary mapping SHA to pipeline status dict (or None if no pipeline found)
+            
+            Example return value:
+            {
+                "21a03b316dc1e5031183965e5798b0d9fe2e64b3": {
+                    "status": "success",
+                    "id": 38895507,
+                    "web_url": "https://gitlab-master.nvidia.com/dl/ai-dynamo/dynamo/-/pipelines/38895507"
+                },
+                "5fe0476e605d2564234f00e8123461e1594a9ce7": None
+            }
+            
+        Cache file format (.gitlab_pipeline_status_cache.json) - internally used:
+        {
+            "21a03b316dc1e5031183965e5798b0d9fe2e64b3": {
+                "status": "success",
+                "id": 38895507,
+                "web_url": "https://gitlab-master.nvidia.com/dl/ai-dynamo/dynamo/-/pipelines/38895507"
+            },
+            "5fe0476e605d2564234f00e8123461e1594a9ce7": {
+                "status": "failed",
+                "id": 38888909,
+                "web_url": "https://gitlab-master.nvidia.com/dl/ai-dynamo/dynamo/-/pipelines/38888909"
+            }
+        }
+        """
+        import json
+        from pathlib import Path
+        
+        # Load cache
+        cache = {}
+        pipeline_cache_path = Path(cache_file)
+        if pipeline_cache_path.exists():
+            try:
+                cache = json.loads(pipeline_cache_path.read_text())
+            except Exception:
+                pass
+        
+        # If skip_fetch=True, only return cached data - NO API calls
+        if skip_fetch:
+            result = {}
+            for sha in sha_list:
+                result[sha] = cache.get(sha)
+            return result
+        
+        # Check which SHAs need to be fetched
+        # Only cache "success" status permanently; refetch others as they might change
+        shas_to_fetch = []
+        result = {}
+        
+        for sha in sha_list:
+            if sha in cache:
+                cached_info = cache[sha]
+                # If pipeline succeeded, use cached value
+                # If pipeline failed/running/pending, refetch as it might have been re-run
+                if cached_info and cached_info.get('status') == 'success':
+                    result[sha] = cached_info
+                else:
+                    # Non-success status or None - refetch to check for updates
+                    shas_to_fetch.append(sha)
+                    result[sha] = cached_info  # Use cached value temporarily
+            else:
+                shas_to_fetch.append(sha)
+                result[sha] = None
+        
+        # Fetch missing SHAs and non-success statuses from GitLab
+        if shas_to_fetch and self.has_token():
+            for sha in shas_to_fetch:
+                try:
+                    # Get pipelines for this commit
+                    endpoint = f"/api/v4/projects/169905/pipelines"
+                    params = {'sha': sha, 'per_page': 1}
+                    pipelines = self.get(endpoint, params=params)
+                    
+                    if pipelines and len(pipelines) > 0:
+                        pipeline = pipelines[0]  # Most recent pipeline
+                        status_info = {
+                            'status': pipeline.get('status', 'unknown'),
+                            'id': pipeline.get('id'),
+                            'web_url': pipeline.get('web_url', ''),
+                        }
+                        result[sha] = status_info
+                        cache[sha] = status_info
+                    else:
+                        result[sha] = None
+                        cache[sha] = None
+                except Exception:
+                    result[sha] = None
+                    cache[sha] = None
+            
+            # Save updated cache
+            try:
+                pipeline_cache_path.parent.mkdir(parents=True, exist_ok=True)
+                pipeline_cache_path.write_text(json.dumps(cache, indent=2))
+            except Exception:
+                pass
+        
+        return result
 
 
