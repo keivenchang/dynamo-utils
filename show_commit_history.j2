@@ -157,12 +157,10 @@ function copyToClipboard(text, button) {
         document.body.removeChild(textArea);
         
         if (successful) {
-            var originalText = button.textContent;
-            button.textContent = '✓ Copied!';
-            button.style.backgroundColor = '#1a7f37';
+            var originalHTML = button.innerHTML;
+            button.innerHTML = '<svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" style="display: inline-block;"><path d="M0 6.75C0 5.784.784 5 1.75 5h1.5a.75.75 0 0 1 0 1.5h-1.5a.25.25 0 0 0-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 0 0 .25-.25v-1.5a.75.75 0 0 1 1.5 0v1.5A1.75 1.75 0 0 1 9.25 16h-7.5A1.75 1.75 0 0 1 0 14.25Z"></path><path d="M5 1.75C5 .784 5.784 0 6.75 0h7.5C15.216 0 16 .784 16 1.75v7.5A1.75 1.75 0 0 1 14.25 11h-7.5A1.75 1.75 0 0 1 5 9.25Zm1.75-.25a.25.25 0 0 0-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 0 0 .25-.25v-7.5a.25.25 0 0 0-.25-.25Z"></path></svg><span style="margin-left: 6px;">Copied!</span>';
             setTimeout(function() {
-                button.textContent = originalText;
-                button.style.backgroundColor = '#2da44e';
+                button.innerHTML = originalHTML;
             }, 2000);
         } else {
             alert('Failed to copy text');
@@ -196,12 +194,10 @@ function copyFromClipboardAttr(button) {
         document.body.removeChild(textArea);
         
         if (successful) {
-            var originalText = button.textContent;
-            button.textContent = '✓ Copied!';
-            button.style.backgroundColor = '#1a7f37';
+            var originalHTML = button.innerHTML;
+            button.innerHTML = '<svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" style="display: inline-block;"><path d="M0 6.75C0 5.784.784 5 1.75 5h1.5a.75.75 0 0 1 0 1.5h-1.5a.25.25 0 0 0-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 0 0 .25-.25v-1.5a.75.75 0 0 1 1.5 0v1.5A1.75 1.75 0 0 1 9.25 16h-7.5A1.75 1.75 0 0 1 0 14.25Z"></path><path d="M5 1.75C5 .784 5.784 0 6.75 0h7.5C15.216 0 16 .784 16 1.75v7.5A1.75 1.75 0 0 1 14.25 11h-7.5A1.75 1.75 0 0 1 5 9.25Zm1.75-.25a.25.25 0 0 0-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 0 0 .25-.25v-7.5a.25.25 0 0 0-.25-.25Z"></path></svg><span style="margin-left: 6px;">Copied!</span>';
             setTimeout(function() {
-                button.textContent = originalText;
-                button.style.backgroundColor = '#2da44e';
+                button.innerHTML = originalHTML;
             }, 2000);
         } else {
             alert('Failed to copy text');
@@ -366,26 +362,51 @@ function copyFromClipboardAttr(button) {
 <table style="width: 100%; border: none; background-color: white; border-collapse: collapse;">
 <thead>
 <tr>
-<th style="width: 50%; padding: 3px 6px; border: none;">Image Name:Tag</th>
-<th style="width: 15%; padding: 3px 6px; border: none;">Build ID</th>
-<th style="width: 10%; padding: 3px 6px; border: none;">Size</th>
-<th style="width: 25%; padding: 3px 6px; border: none;">Created (PDT)</th>
+<th style="width: 35%; padding: 3px 6px; border: none;">Image Name:Tag</th>
+<th style="width: 10%; padding: 3px 6px; border: none;">pull runtime</th>
+{% if gitlab_imgs|selectattr('arch', 'equalto', 'amd64')|selectattr('framework', 'in', ['trtllm', 'vllm'])|list|length > 0 %}<th style="width: 10%; padding: 3px 6px; border: none;">make local-dev</th>{% endif %}
+<th style="width: 10%; padding: 3px 6px; border: none;">Build ID</th>
+<th style="width: 8%; padding: 3px 6px; border: none;">Size</th>
+<th style="width: 27%; padding: 3px 6px; border: none;">Created (PDT)</th>
 </tr>
 </thead>
+{# Macro to generate docker pull, wget Dockerfile, and build command (multi-line format with early stop on error)
+   Example output:
+   (BASE_IMAGE=gitlab-master.nvidia.com:5005/dl/ai-dynamo/dynamo:2f18b23ee7163df21f20e872b83ada4226fbf851-38897884-vllm-amd64 && \
+   docker pull ${BASE_IMAGE} && \
+   wget http://keivenc-linux/nvidia/dynamo-utils/docker/Dockerfile.runtime_localdev_venv -O /tmp/Dockerfile.runtime_localdev_venv && \
+   docker build -f /tmp/Dockerfile.runtime_localdev_venv --build-arg BASE_IMAGE=${BASE_IMAGE} --build-arg USER_UID=$(id -u) --build-arg USER_GID=$(id -g) -t dynamo:2f18b23e-vllm-local-dev /tmp && \
+   echo 'Build SUCCESS! Run with: container/run.sh --image dynamo:2f18b23e-vllm-local-dev --mount-workspace -it ...')
+   Note: sha_short is accessed from outer scope (commit loop)
+   Note: sglang uses Dockerfile.runtime_localdev_system, vllm/trtllm use Dockerfile.runtime_localdev_venv
+#}
+{% macro docker_pull_tag_cmd(img, sha_short) -%}
+{%- set local_tag = "dynamo:" ~ sha_short ~ "-" ~ img.framework ~ "-local-dev" -%}
+{%- if img.framework|upper == "SGLANG" -%}
+{%- set dockerfile_name = "Dockerfile.runtime_localdev_system" -%}
+{%- else -%}
+{%- set dockerfile_name = "Dockerfile.runtime_localdev_venv" -%}
+{%- endif -%}
+{%- set dockerfile_url = "http://keivenc-linux/nvidia/dynamo-utils/docker/" ~ dockerfile_name -%}
+{%- set dockerfile_path = "/tmp/" ~ dockerfile_name -%}
+(BASE_IMAGE={{ img.location }} && \
+docker pull ${BASE_IMAGE} && \
+wget {{ dockerfile_url }} -O {{ dockerfile_path }} && \
+docker build -f {{ dockerfile_path }} --build-arg BASE_IMAGE=${BASE_IMAGE} --build-arg USER_UID=$(id -u) --build-arg USER_GID=$(id -g) -t {{ local_tag }} /tmp && \
+echo 'Build SUCCESS! Run with: container/run.sh --image {{ local_tag }} --mount-workspace -it ...')
+{%- endmacro %}
+
 <tbody>
 {% for img in gitlab_imgs %}
 {%- set arch_label = "[x86]" if img.arch == "amd64" else "[ARM]" -%}
 {%- set display_tag = arch_label ~ " " ~ img.tag -%}
 {%- set image_id = img.pipeline_id[:12] if img.pipeline_id|length >= 12 else img.pipeline_id -%}
-{%- set local_tag = "dynamo:latest-" ~ img.framework ~ "-runtime" -%}
-{%- set pull_cmd = "docker pull " ~ img.location -%}
-{%- set retag_cmd = "docker tag " ~ img.location ~ " " ~ local_tag -%}
-{%- set full_cmd = pull_cmd ~ " && " ~ retag_cmd -%}
 <tr>
 <td style="font-family: monospace; font-size: 11px; padding: 2px 6px; border: none; max-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="{{ img.tag }}
 Pipeline: {{ img.pipeline_id }}
-Framework: {{ img.framework }}
-Copy button to get pull & tag commands"><button data-clipboard-text="docker pull {{ img.location }} && docker tag {{ img.location }} dynamo:latest-{{ img.framework }}-runtime" onclick="copyFromClipboardAttr(this)" style="padding: 4px 6px; margin-right: 6px; font-size: 11px; background-color: transparent; color: #57606a; border: 1px solid #d0d7de; border-radius: 6px; cursor: pointer; display: inline-flex; align-items: center; vertical-align: middle;" title="Copy pull and retag commands" onmouseover="this.style.backgroundColor='#f3f4f6'; this.style.borderColor='#8c959f';" onmouseout="this.style.backgroundColor='transparent'; this.style.borderColor='#d0d7de';"><svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" style="display: inline-block;"><path d="M0 6.75C0 5.784.784 5 1.75 5h1.5a.75.75 0 0 1 0 1.5h-1.5a.25.25 0 0 0-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 0 0 .25-.25v-1.5a.75.75 0 0 1 1.5 0v1.5A1.75 1.75 0 0 1 9.25 16h-7.5A1.75 1.75 0 0 1 0 14.25Z"></path><path d="M5 1.75C5 .784 5.784 0 6.75 0h7.5C15.216 0 16 .784 16 1.75v7.5A1.75 1.75 0 0 1 14.25 11h-7.5A1.75 1.75 0 0 1 5 9.25Zm1.75-.25a.25.25 0 0 0-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 0 0 .25-.25v-7.5a.25.25 0 0 0-.25-.25Z"></path></svg></button>{{ display_tag }}</td>
+Framework: {{ img.framework }}">{{ display_tag }}</td>
+<td style="font-size: 11px; padding: 2px 6px; border: none; white-space: nowrap;"><button data-clipboard-text="docker pull {{ img.location }}" onclick="copyFromClipboardAttr(this)" style="padding: 4px 6px; font-size: 11px; background-color: transparent; color: #57606a; border: 1px solid #d0d7de; border-radius: 6px; cursor: pointer; display: inline-flex; align-items: center; vertical-align: middle;" title="Click to copy docker pull command for runtime image" onmouseover="this.style.backgroundColor='#f3f4f6'; this.style.borderColor='#8c959f';" onmouseout="this.style.backgroundColor='transparent'; this.style.borderColor='#d0d7de';"><svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" style="display: inline-block;"><path d="M0 6.75C0 5.784.784 5 1.75 5h1.5a.75.75 0 0 1 0 1.5h-1.5a.25.25 0 0 0-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 0 0 .25-.25v-1.5a.75.75 0 0 1 1.5 0v1.5A1.75 1.75 0 0 1 9.25 16h-7.5A1.75 1.75 0 0 1 0 14.25Z"></path><path d="M5 1.75C5 .784 5.784 0 6.75 0h7.5C15.216 0 16 .784 16 1.75v7.5A1.75 1.75 0 0 1 14.25 11h-7.5A1.75 1.75 0 0 1 5 9.25Zm1.75-.25a.25.25 0 0 0-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 0 0 .25-.25v-7.5a.25.25 0 0 0-.25-.25Z"></path></svg></button><span style="margin-left: 6px;">copy command</span></td>
+{% if gitlab_imgs|selectattr('arch', 'equalto', 'amd64')|selectattr('framework', 'in', ['trtllm', 'vllm'])|list|length > 0 %}<td style="font-size: 11px; padding: 2px 6px; border: none; white-space: nowrap;">{% if img.arch == "amd64" and (img.framework|upper == "TRTLLM" or img.framework|upper == "VLLM") %}<button data-clipboard-text="{{ docker_pull_tag_cmd(img, sha_short) }}" onclick="copyFromClipboardAttr(this)" style="padding: 4px 6px; font-size: 11px; background-color: transparent; color: #57606a; border: 1px solid #d0d7de; border-radius: 6px; cursor: pointer; display: inline-flex; align-items: center; vertical-align: middle;" title="Click to copy command for creating local-dev image: Pulls the runtime image, downloads Dockerfile, builds a local-dev container with your UID/GID, and shows how to run it" onmouseover="this.style.backgroundColor='#f3f4f6'; this.style.borderColor='#8c959f';" onmouseout="this.style.backgroundColor='transparent'; this.style.borderColor='#d0d7de';"><svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" style="display: inline-block;"><path d="M0 6.75C0 5.784.784 5 1.75 5h1.5a.75.75 0 0 1 0 1.5h-1.5a.25.25 0 0 0-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 0 0 .25-.25v-1.5a.75.75 0 0 1 1.5 0v1.5A1.75 1.75 0 0 1 9.25 16h-7.5A1.75 1.75 0 0 1 0 14.25Z"></path><path d="M5 1.75C5 .784 5.784 0 6.75 0h7.5C15.216 0 16 .784 16 1.75v7.5A1.75 1.75 0 0 1 14.25 11h-7.5A1.75 1.75 0 0 1 5 9.25Zm1.75-.25a.25.25 0 0 0-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 0 0 .25-.25v-7.5a.25.25 0 0 0-.25-.25Z"></path></svg></button><span style="margin-left: 6px;">copy command</span>{% endif %}</td>{% endif %}
 <td style="font-family: monospace; font-size: 11px; padding: 2px 6px; border: none;"><a href="https://gitlab-master.nvidia.com/dl/ai-dynamo/dynamo/-/pipelines/{{ img.pipeline_id }}" target="_blank" style="color: #0969da;" title="View pipeline {{ img.pipeline_id }}">{{ image_id }}</a></td>
 <td style="font-size: 11px; padding: 2px 6px; border: none;">{{ img.size_display }}</td>
 <td style="font-size: 11px; padding: 2px 6px; border: none;">{{ img.created_display }}</td>
