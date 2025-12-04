@@ -202,28 +202,28 @@ def get_terminal_width(padding: int = 2, default: int = 118) -> int:
 
 class BaseUtils:
     """Base class for all utility classes with common logger and cmd functionality"""
-    
+
     def __init__(self, dry_run: bool = False, verbose: bool = False):
         self.dry_run = dry_run
         self.verbose = verbose
-        
+
         # Set up logger with class name
         self.logger = logging.getLogger(self.__class__.__name__)
         self.logger.setLevel(logging.DEBUG if verbose else logging.INFO)
-        
+
         # Remove any existing handlers
         self.logger.handlers.clear()
-        
+
         # Create console handler
         console_handler = logging.StreamHandler()
         console_handler.setLevel(logging.DEBUG if verbose else logging.INFO)
-        
+
         # Create custom formatter that handles DRYRUN prefix and shows class/method
         class DryRunFormatter(logging.Formatter):
             def __init__(self, dry_run_instance) -> None:
                 super().__init__()
                 self.dry_run_instance = dry_run_instance
-            
+
             def format(self, record: logging.LogRecord) -> str:
                 if self.dry_run_instance.verbose:
                     # Verbose mode: show location info
@@ -236,30 +236,30 @@ class BaseUtils:
                 else:
                     # Simple mode: just the message
                     return record.getMessage()
-        
+
         formatter = DryRunFormatter(self)
         console_handler.setFormatter(formatter)
-        
+
         # Add handler to logger
         self.logger.addHandler(console_handler)
-        
+
         # Prevent propagation to root logger
         self.logger.propagate = False
-    
+
     def cmd(self, command: List[str], return_tuple: bool = False, **kwargs: Any) -> Any:
         """Execute command with dry-run support.
-        
+
         Args:
             command: Command to execute as list of strings
             return_tuple: If True, return (success, stdout, stderr). If False, return CompletedProcess
             **kwargs: Additional arguments passed to subprocess.run()
-            
+
         Returns:
             CompletedProcess object (default) or (success, stdout, stderr) tuple if return_tuple=True
         """
         cmd_str = " ".join(shlex.quote(str(arg)) for arg in command)
         self.logger.debug(f"+ {cmd_str}")
-        
+
         if self.dry_run:
             if return_tuple:
                 self.logger.info(f"DRY RUN: Would execute: {' '.join(command)}")
@@ -270,29 +270,29 @@ class BaseUtils:
                 mock_result.stdout = ""
                 mock_result.stderr = ""
                 return mock_result
-        
+
         # Set default kwargs for tuple interface
         if return_tuple:
             kwargs.setdefault('capture_output', True)
             kwargs.setdefault('text', True)
             kwargs.setdefault('check', False)
-        
+
         try:
             result = subprocess.run(command, **kwargs)
-            
+
             if return_tuple:
                 success = result.returncode == 0
                 return success, result.stdout or "", result.stderr or ""
             else:
                 return result
-                
+
         except Exception as e:
             if return_tuple:
                 return False, "", str(e)
             else:
                 # Re-raise for CompletedProcess interface
                 raise
-    
+
 
 
 class DynamoRepositoryUtils(BaseUtils):
@@ -485,7 +485,7 @@ class DockerUtils(BaseUtils):
         except Exception as e:
             self.logger.error(f"Failed to initialize Docker client: {e}")
             raise
-    
+
     def _format_size(self, size_bytes: int) -> str:
         """Format size in human readable format."""
         if size_bytes == 0:
@@ -497,19 +497,19 @@ class DockerUtils(BaseUtils):
                 return f"{size_float:.1f} {unit}"
             size_float = size_float / 1024.0
         return f"{size_float:.1f} PB"
-    
+
     def _parse_dynamo_image(self, image_name: str) -> Optional[DynamoImageInfo]:
         """Parse dynamo image name to extract framework and version info."""
         # Pattern for dynamo images: (dynamo|dynamo-base):v{version}-{framework}-{target}
-        # Examples: 
+        # Examples:
         #   dynamo:v0.1.0.dev.ea07d51fc-sglang-local-dev
         #   dynamo-base:v0.1.0.dev.ea07d51fc-vllm-dev
         pattern = r'^(?:dynamo|dynamo-base):v(.+?)-([^-]+)(?:-(.+))?$'
         match = re.match(pattern, image_name)
-        
+
         if not match:
             return None
-        
+
         version_part, framework, target = match.groups()
 
         # Validate framework
@@ -523,32 +523,32 @@ class DockerUtils(BaseUtils):
             target=target or "",
             latest_tag=None  # Will be computed later if needed
         )
-    
+
     def get_image_info(self, image_name: str) -> Optional[DockerImageInfo]:
         """Get comprehensive information about a Docker image.
 
         DEPRECATION: V1 + retag script only. V2 uses docker.from_env() directly.
         """
         self.logger.debug(f"Equivalent: docker inspect {image_name}")
-        
+
         try:
             image = self.client.images.get(image_name)
-            
+
             # Parse repository and tag
             if ':' in image_name:
                 repository, tag = image_name.split(':', 1)
             else:
                 repository = image_name
                 tag = 'latest'
-            
+
             # Get basic image info
             size_bytes = image.attrs.get('Size', 0)
             created_at = image.attrs.get('Created', '')
             labels = image.attrs.get('Config', {}).get('Labels') or {}
-            
+
             # Parse dynamo-specific info
             dynamo_info = self._parse_dynamo_image(image_name)
-            
+
             return DockerImageInfo(
                 name=image_name,
                 repository=repository,
@@ -560,11 +560,11 @@ class DockerUtils(BaseUtils):
                 labels=labels,
                 dynamo_info=dynamo_info
             )
-            
+
         except Exception as e:
             self.logger.error(f"Failed to get image info for {image_name}: {e}")
             return None
-    
+
     def list_images(self, name_filter: Optional[str] = None) -> List[DockerImageInfo]:
         """List all Docker images with optional name filtering.
 
@@ -572,7 +572,7 @@ class DockerUtils(BaseUtils):
 
         Returns:
             List of DockerImageInfo objects sorted by creation date (newest first)
-            
+
             Example return value:
             [
                 DockerImageInfo(
@@ -594,7 +594,7 @@ class DockerUtils(BaseUtils):
             ]
         """
         self.logger.debug("Equivalent: docker images --format table")
-        
+
         try:
             images = []
             for image in self.client.images.list():
@@ -603,15 +603,15 @@ class DockerUtils(BaseUtils):
                         image_info = self.get_image_info(tag)
                         if image_info:
                             images.append(image_info)
-            
+
             # Sort by creation date (newest first)
             images.sort(key=lambda x: x.created_at, reverse=True)
             return images
-            
+
         except Exception as e:
             self.logger.error(f"Failed to list images: {e}")
             return []
-    
+
     def list_dynamo_images(self, framework: Optional[str] = None, target: Optional[str] = None, sha: Optional[str] = None) -> List[DockerImageInfo]:
         """List dynamo framework images with optional filtering.
 
@@ -622,58 +622,58 @@ class DockerUtils(BaseUtils):
         for prefix in ["dynamo:", "dynamo-base:"]:
             images = self.list_images(name_filter=prefix)
             dynamo_images.extend([img for img in images if img.is_dynamo_image()])
-        
+
         # Apply filters
         if framework:
             framework = normalize_framework(framework)
             dynamo_images = [img for img in dynamo_images
                            if img.dynamo_info and img.dynamo_info.framework == framework]
-        
+
         if target:
-            dynamo_images = [img for img in dynamo_images 
+            dynamo_images = [img for img in dynamo_images
                            if img.dynamo_info and img.dynamo_info.target == target]
-        
+
         if sha:
             dynamo_images = [img for img in dynamo_images if img.matches_sha(sha)]
-        
+
         return dynamo_images
-    
+
     def tag_image(self, source_tag: str, target_tag: str) -> bool:
         """Tag a Docker image.
 
         DEPRECATION: retag script only. V1 and V2 do not use this.
         """
         self.logger.debug(f"Equivalent: docker tag {source_tag} {target_tag}")
-        
+
         if self.dry_run:
             self.logger.info(f"DRY RUN: Would execute: docker tag {source_tag} {target_tag}")
             return True
-        
+
         try:
             source_image = self.client.images.get(source_tag)
-            
+
             # Parse target tag
             if ':' in target_tag:
                 repository, tag = target_tag.split(':', 1)
             else:
                 repository = target_tag
                 tag = 'latest'
-            
+
             source_image.tag(repository, tag)
             self.logger.info(f"✓ Tagged: {source_tag} -> {target_tag}")
             return True
-            
+
         except Exception as e:
             self.logger.error(f"✗ Failed to tag {source_tag} -> {target_tag}: {e}")
             return False
-    
+
     def retag_to_latest(self, images: List[DockerImageInfo]) -> Dict[str, int]:
         """Retag multiple images to their latest tags.
 
         DEPRECATION: retag script only. V1 and V2 do not use this.
         """
         results = {'success': 0, 'failed': 0}
-        
+
         for image in images:
             if image.is_dynamo_framework_image():
                 latest_tag = image.get_latest_tag()
@@ -681,9 +681,9 @@ class DockerUtils(BaseUtils):
                     results['success'] += 1
                 else:
                     results['failed'] += 1
-        
+
         return results
-    
+
     def filter_unused_build_args(self, docker_command: str) -> str:
         """Remove unused --build-arg flags from Docker build commands for base images.
 
@@ -693,22 +693,22 @@ class DockerUtils(BaseUtils):
         args helps Docker recognize when builds are truly identical.
         """
         import re
-        
+
         if not re.search(r'--tag\s+dynamo-base:', docker_command):
             # Only filter base image builds
             return docker_command
-            
+
         # List of build args that are typically unused by base images
         unused_args = {
             'PYTORCH_VERSION', 'CUDA_VERSION', 'PYTHON_VERSION',
             'FRAMEWORK_VERSION', 'TARGET_ARCH', 'BUILD_TYPE'
         }
-        
+
         # Split command into parts
         parts = docker_command.split()
         filtered_parts = []
         filtered_args = []
-        
+
         i = 0
         while i < len(parts):
             if parts[i] == '--build-arg' and i + 1 < len(parts):
@@ -722,12 +722,12 @@ class DockerUtils(BaseUtils):
             else:
                 filtered_parts.append(parts[i])
                 i += 1
-        
+
         if filtered_args and self.verbose:
             self.logger.info(f"Filtered {len(filtered_args)} unused base image build args: {', '.join(sorted(filtered_args))}")
-        
+
         return ' '.join(filtered_parts)
-    
+
     def normalize_command(self, docker_command: str) -> str:
         """Normalize Docker command by removing whitespace and sorting build args.
 
@@ -735,15 +735,15 @@ class DockerUtils(BaseUtils):
 
         Helps identify functionally identical commands with different formatting.
         """
-        
+
         # Remove extra whitespace and normalize
         normalized = ' '.join(docker_command.split())
-        
+
         # Sort build args to make commands with same args but different order equivalent
         # Find all --build-arg KEY=VALUE pairs
         build_args = []
         other_parts = []
-        
+
         parts = normalized.split()
         i = 0
         while i < len(parts):
@@ -753,10 +753,10 @@ class DockerUtils(BaseUtils):
             else:
                 other_parts.append(parts[i])
                 i += 1
-        
+
         # Sort build args for consistent ordering
         build_args.sort()
-        
+
         # Reconstruct command with sorted build args
         if build_args:
             # Insert sorted build args after 'docker build' but before other args
@@ -765,42 +765,42 @@ class DockerUtils(BaseUtils):
                 if part == 'build':
                     docker_build_idx = idx
                     break
-            
+
             if docker_build_idx >= 0:
                 result_parts = other_parts[:docker_build_idx + 1] + build_args + other_parts[docker_build_idx + 1:]
             else:
                 result_parts = other_parts + build_args
         else:
             result_parts = other_parts
-        
+
         return ' '.join(result_parts)
-    
+
     def extract_base_image_from_command(self, docker_cmd: str) -> str:
         """Extract the base/FROM image from docker build command arguments"""
         import re
-        
+
         # Look for --build-arg DYNAMO_BASE_IMAGE=... (framework-specific builds)
         match = re.search(r'--build-arg\s+DYNAMO_BASE_IMAGE=([^\s]+)', docker_cmd)
         if match:
             return match.group(1)
-        
+
         # Look for --build-arg BASE_IMAGE=... and BASE_IMAGE_TAG=... (base builds)
         base_image_match = re.search(r'--build-arg\s+BASE_IMAGE=([^\s]+)', docker_cmd)
         base_tag_match = re.search(r'--build-arg\s+BASE_IMAGE_TAG=([^\s]+)', docker_cmd)
-        
+
         if base_image_match and base_tag_match:
             return f"{base_image_match.group(1)}:{base_tag_match.group(1)}"
         elif base_image_match:
             return base_image_match.group(1)
-        
+
         # Look for --build-arg DEV_BASE=... (local-dev builds)
         dev_base_match = re.search(r'--build-arg\s+DEV_BASE=([^\s]+)', docker_cmd)
         if dev_base_match:
             return dev_base_match.group(1)
-        
+
         # Return empty string if no base image found
         return ""
-    
+
     def extract_image_tag_from_command(self, docker_cmd: str) -> str:
         """
         Extract the output tag from docker build command --tag argument.
@@ -808,10 +808,10 @@ class DockerUtils(BaseUtils):
         Raises error if multiple tags are found (should not happen after get_build_commands validation).
         """
         import re
-        
+
         # Find all --tag arguments in the command
         tags = re.findall(r'--tag\s+([^\s]+)', docker_cmd)
-        
+
         if len(tags) == 0:
             return ""
         elif len(tags) == 1:
@@ -922,7 +922,7 @@ class GitUtils(BaseUtils):
 
         Returns:
             List of GitPython commit objects
-            
+
             Example return value (commit objects have these attributes):
             [
                 <git.Commit "21a03b316dc1e5031183965e5798b0d9fe2e64b3">,  # commit.hexsha
@@ -946,7 +946,7 @@ class GitUtils(BaseUtils):
 
         Returns:
             Dictionary with commit information
-            
+
             Example return value:
             {
                 "sha_full": "21a03b316dc1e5031183965e5798b0d9fe2e64b3",
@@ -989,7 +989,7 @@ class GitUtils(BaseUtils):
 
         Returns:
             List of untracked file paths
-            
+
             Example return value:
             [
                 "test_output.txt",
@@ -1005,7 +1005,7 @@ class GitUtils(BaseUtils):
 
         Returns:
             List of tag names
-            
+
             Example return value:
             [
                 "v1.0.0",
@@ -1024,10 +1024,10 @@ class GitUtils(BaseUtils):
 
         Returns:
             List of branch names
-            
+
             Example return value (local):
             ["main", "feature/docker-caching", "bugfix/timezone-issue"]
-            
+
             Example return value (remote):
             ["origin/main", "origin/develop", "origin/feature/docker-caching"]
         """
@@ -1156,7 +1156,7 @@ class GitHubAPIClient:
 
         Returns:
             JSON response as dict, or None if request failed
-            
+
             Example return value for pull request endpoint:
             {
                 "number": 1234,
@@ -1172,7 +1172,7 @@ class GitHubAPIClient:
                 "user": {"login": "johndoe"},
                 "created_at": "2025-11-20T10:00:00Z"
             }
-            
+
             Example return value for check runs endpoint:
             {
                 "total_count": 5,
@@ -1285,7 +1285,7 @@ class GitHubAPIClient:
 
         Returns:
             PR details as dict, or None if request failed
-            
+
             Example return value:
             {
                 "number": 1234,
@@ -1607,7 +1607,7 @@ class GitHubAPIClient:
 
         Returns:
             Tuple of (List of FailedCheck objects, rerun_url)
-            
+
             Example return value:
             (
                 [
@@ -1861,7 +1861,7 @@ class GitHubAPIClient:
 
         Returns:
             List of PRInfo objects
-            
+
             Example return value:
             [
                 PRInfo(
@@ -1969,22 +1969,22 @@ class GitHubAPIClient:
 
 class GitLabAPIClient:
     """GitLab API client with automatic token detection and error handling.
-    
+
     Features:
     - Automatic token detection (--token arg > GITLAB_TOKEN env > ~/.config/gitlab-token)
     - Request/response handling with proper error messages
     - Container registry queries
-    
+
     Example:
         client = GitLabAPIClient()
         # Use get_cached_registry_images_for_shas for fetching Docker images
     """
-    
-    
+
+
     @staticmethod
     def get_gitlab_token_from_file() -> Optional[str]:
         """Get GitLab token from ~/.config/gitlab-token file.
-        
+
         Returns:
             GitLab token string, or None if not found
         """
@@ -1995,10 +1995,10 @@ class GitLabAPIClient:
         except Exception:
             pass
         return None
-    
+
     def __init__(self, token: Optional[str] = None, base_url: str = "https://gitlab-master.nvidia.com"):
         """Initialize GitLab API client.
-        
+
         Args:
             token: GitLab personal access token. If not provided, will try:
                    1. GITLAB_TOKEN environment variable
@@ -2009,25 +2009,25 @@ class GitLabAPIClient:
         self.token = token or os.environ.get('GITLAB_TOKEN') or self.get_gitlab_token_from_file()
         self.base_url = base_url.rstrip('/')
         self.headers = {}
-        
+
         if self.token:
             self.headers['PRIVATE-TOKEN'] = self.token
-    
+
     def has_token(self) -> bool:
         """Check if a GitLab token is configured."""
         return self.token is not None
-    
+
     def get(self, endpoint: str, params: Optional[Dict[str, Any]] = None, timeout: int = 10) -> Optional[Any]:
         """Make GET request to GitLab API.
-        
+
         Args:
             endpoint: API endpoint (e.g., "/api/v4/projects/169905")
             params: Query parameters
             timeout: Request timeout in seconds
-            
+
         Returns:
             JSON response (dict or list), or None if request failed
-            
+
             Example return value for registry tags endpoint:
             [
                 {
@@ -2043,7 +2043,7 @@ class GitLabAPIClient:
                     "created_at": "2025-11-19T10:00:00.000+00:00"
                 }
             ]
-            
+
             Example return value for pipelines endpoint:
             [
                 {
@@ -2059,63 +2059,63 @@ class GitLabAPIClient:
             # Fallback to urllib for basic GET requests
             import urllib.request
             import urllib.parse
-            
+
             url = f"{self.base_url}{endpoint}" if endpoint.startswith('/') else f"{self.base_url}/{endpoint}"
-            
+
             if params:
                 url += '?' + urllib.parse.urlencode(params)
-            
+
             try:
                 req = urllib.request.Request(url, headers=self.headers)
                 with urllib.request.urlopen(req, timeout=timeout) as response:
                     return json.loads(response.read().decode())
             except Exception:
                 return None
-        
+
         # Use requests if available
         url = f"{self.base_url}{endpoint}" if endpoint.startswith('/') else f"{self.base_url}/{endpoint}"
-        
+
         try:
             response = requests.get(url, headers=self.headers, params=params, timeout=timeout)
-            
+
             if response.status_code == 401:
                 raise Exception("GitLab API returned 401 Unauthorized. Check your token.")
             elif response.status_code == 403:
                 raise Exception("GitLab API returned 403 Forbidden. Token may lack permissions.")
             elif response.status_code == 404:
                 raise Exception(f"GitLab API returned 404 Not Found for {endpoint}")
-            
+
             response.raise_for_status()
             return response.json()
-            
+
         except requests.exceptions.RequestException as e:
             raise Exception(f"GitLab API request failed for {endpoint}: {e}")
-    
+
     def get_cached_registry_images_for_shas(self, project_id: str, registry_id: str,
                                            sha_list: List[str],
                                            sha_to_datetime: Optional[Dict[str, datetime]] = None,
                                            cache_file: str = '.gitlab_commit_sha_cache.json',
                                            skip_fetch: bool = False) -> Dict[str, List[Dict[str, Any]]]:
         """Get container registry images for commit SHAs with caching.
-        
+
         Optimized caching logic:
         - If skip_fetch=True: Only return cached data, no API calls
         - If skip_fetch=False: Use binary search to find tags for recent commits (within 8 hours)
           - Only fetches pages needed for recent SHAs
           - Tracks visited pages to avoid redundant API calls
           - Only updates cache for recent SHAs found
-        
+
         Args:
             project_id: GitLab project ID
-            registry_id: Container registry ID  
+            registry_id: Container registry ID
             sha_list: List of full commit SHAs (40 characters)
             sha_to_datetime: Optional dict mapping SHA to committed_datetime for time-based filtering
             cache_file: Path to cache file (default: .gitlab_commit_sha_cache.json)
             skip_fetch: If True, only return cached data without fetching from GitLab
-            
+
         Returns:
             Dictionary mapping SHA to list of image info dicts
-            
+
         Cache file format (.gitlab_commit_sha_cache.json):
             {
                 "21a03b316dc1e5031183965e5798b0d9fe2e64b3": [
@@ -2135,7 +2135,7 @@ class GitLabAPIClient:
         from pathlib import Path
         import json
         from datetime import datetime, timedelta
-        
+
         # Load cache
         cache = {}
         cache_path = Path(cache_file)
@@ -2144,26 +2144,26 @@ class GitLabAPIClient:
                 cache = json.loads(cache_path.read_text())
             except Exception:
                 pass
-        
+
         # Initialize result for requested SHAs
         result = {}
-        
+
         if skip_fetch:
             # Only return cached data - NO API calls
             for sha in sha_list:
                 result[sha] = cache.get(sha, [])
-            
+
             # Warn if no images found in cache
             if not any(result.values()):
                 _logger.warning("⚠️  No Docker images found in cache. Consider running without --skip-gitlab-fetch to fetch fresh data.")
-            
+
             return result
         else:
             # Identify recent SHAs (within 8 hours)
             from datetime import timezone
             now_utc = datetime.now(timezone.utc)
             eight_hours_ago_utc = now_utc - timedelta(hours=8)
-            
+
             recent_shas = set()
             if sha_to_datetime:
                 from datetime import timezone
@@ -2176,23 +2176,23 @@ class GitLabAPIClient:
                             commit_time_utc = commit_time.replace(tzinfo=timezone.utc)
                         else:
                             commit_time_utc = commit_time.astimezone(timezone.utc)
-                        
+
                         if commit_time_utc >= eight_hours_ago_utc:
                             recent_shas.add(sha)
-            
+
             _logger.debug(f"Found {len(recent_shas)} SHAs within 8 hours (out of {len(sha_list)} total)")
-            
+
             if not recent_shas:
                 # No recent SHAs, just return cached data
                 for sha in sha_list:
                     result[sha] = cache.get(sha, [])
                 return result
-            
+
             # Fetch ALL pages first, then filter by SHA
             per_page = 100
             import threading
             from concurrent.futures import ThreadPoolExecutor, as_completed
-            
+
             if not self.has_token():
                 # No token, show big warning
                 print("\n" + "="*80)
@@ -2207,7 +2207,7 @@ class GitLabAPIClient:
                 print("   - Save to ~/.config/gitlab-token file")
                 print("="*80 + "\n")
                 return {sha: [] for sha in sha_list}
-            
+
             # Fetch page 1 first to get total pages from headers
             endpoint = f"/api/v4/projects/{project_id}/registry/repositories/{registry_id}/tags"
             params = {
@@ -2216,7 +2216,7 @@ class GitLabAPIClient:
                 'order_by': 'updated_at',
                 'sort': 'desc'
             }
-            
+
             try:
                 # Make direct request to get headers
                 if HAS_REQUESTS:
@@ -2229,12 +2229,12 @@ class GitLabAPIClient:
                     # Fallback: use get method and assume 1 page
                     first_page_tags = self.get(endpoint, params=params)
                     total_pages = 1
-                
+
                 if first_page_tags is None:
                     first_page_tags = []
-                
+
                 _logger.debug(f"Total pages available: {total_pages}")
-                
+
             except Exception as e:
                 _logger.warning(f"Failed to fetch page 1 to determine total pages: {e}")
                 print("\n" + "="*80)
@@ -2243,11 +2243,11 @@ class GitLabAPIClient:
                 print(f"Error: {e}")
                 print("="*80 + "\n")
                 return {sha: [] for sha in sha_list}
-            
+
             # Collect all tags from all pages
             all_tags = list(first_page_tags)  # Start with page 1 tags
             lock = threading.Lock()
-            
+
             def fetch_page(page_num: int) -> List[Dict[str, Any]]:
                 """Fetch a single page of tags."""
                 endpoint = f"/api/v4/projects/{project_id}/registry/repositories/{registry_id}/tags"
@@ -2257,7 +2257,7 @@ class GitLabAPIClient:
                     'order_by': 'updated_at',
                     'sort': 'desc'
                 }
-                
+
                 try:
                     tags = self.get(endpoint, params=params)
                     if tags is None:
@@ -2266,30 +2266,30 @@ class GitLabAPIClient:
                 except Exception as e:
                     _logger.debug(f"Failed to fetch page {page_num}: {e}")
                     return []
-            
+
             # Fetch all remaining pages in parallel (8 threads)
             _logger.debug(f"Fetching all {total_pages} pages in parallel (8 threads)...")
             pages_fetched = 1  # Already fetched page 1
-            
+
             if total_pages > 1:
                 with ThreadPoolExecutor(max_workers=8) as executor:
                     # Submit all page fetch tasks (starting from page 2)
-                    future_to_page = {executor.submit(fetch_page, page_num): page_num 
+                    future_to_page = {executor.submit(fetch_page, page_num): page_num
                                      for page_num in range(2, total_pages + 1)}
-                    
+
                     # Collect results as they complete
                     for future in as_completed(future_to_page):
                         page_num = future_to_page[future]
                         tags = future.result()
                         pages_fetched += 1
-                        
+
                         if tags:
                             with lock:
                                 all_tags.extend(tags)
-                        
+
                         if pages_fetched % 10 == 0:
                             _logger.debug(f"Fetched {pages_fetched}/{total_pages} pages...")
-                        
+
                         # If we got fewer tags than per_page, we've reached the end
                         if len(tags) < per_page:
                             # Cancel remaining futures
@@ -2297,13 +2297,13 @@ class GitLabAPIClient:
                                 if not f.done():
                                     f.cancel()
                             break
-            
+
             _logger.debug(f"Fetched all {pages_fetched} pages, total tags: {len(all_tags)}")
-            
+
             # Now filter tags by SHA
             sha_to_images = {}
             recent_shas_set = set(recent_shas)
-            
+
             for tag_info in all_tags:
                 tag_name = tag_info.get('name', '')
                 # Check if this tag matches any of our recent SHAs
@@ -2311,7 +2311,7 @@ class GitLabAPIClient:
                     if tag_name.startswith(sha + '-'):
                         if sha not in sha_to_images:
                             sha_to_images[sha] = []
-                        
+
                         parts = tag_name.split('-')
                         if len(parts) >= 4:
                             sha_to_images[sha].append({
@@ -2323,23 +2323,23 @@ class GitLabAPIClient:
                                 'total_size': tag_info.get('total_size', 0),
                                 'created_at': tag_info.get('created_at', '')
                             })
-            
+
             found_count = len([sha for sha in recent_shas if sha in sha_to_images and sha_to_images[sha]])
             _logger.debug(f"Found tags for {found_count}/{len(recent_shas)} recent SHAs")
-            
+
             # Update cache only for recent SHAs we found
             for sha, images in sha_to_images.items():
                 cache[sha] = images
-            
+
             # Build result for all requested SHAs (use cache for non-recent ones)
             for sha in sha_list:
                 result[sha] = cache.get(sha, [])
-            
+
             # Warn if no images found for recent SHAs
             if recent_shas and not any(result[sha] for sha in recent_shas):
                 _logger.warning(f"⚠️  No Docker images found for any of the {len(recent_shas)} recent SHAs (within 8 hours)")
                 _logger.warning("This might mean the commits haven't been built yet or the builds failed.")
-            
+
             # Save updated cache with timestamp
             try:
                 cache_with_metadata = {
@@ -2355,29 +2355,29 @@ class GitLabAPIClient:
                 _logger.debug(f"Updated cache with {len(sha_to_images)} recent SHAs")
             except Exception as e:
                 _logger.warning(f"Failed to save cache: {e}")
-        
+
         return result
-    
+
     def get_cached_pipeline_status(self, sha_list: List[str],
                                   cache_file: str = '.gitlab_pipeline_status_cache.json',
                                   skip_fetch: bool = False) -> Dict[str, Optional[Dict[str, Any]]]:
         """Get GitLab CI pipeline status for commits with intelligent caching.
-        
+
         Caching strategy:
         - If skip_fetch=True: Only return cached data, no API calls
         - If skip_fetch=False:
           - "success" status: Cached permanently (won't change)
           - "failed", "running", "pending", etc.: Always refetched (might be re-run)
           - None/missing: Always fetched
-        
+
         Args:
             sha_list: List of full commit SHAs (40 characters)
             cache_file: Path to cache file (default: .gitlab_pipeline_status_cache.json)
             skip_fetch: If True, only return cached data without fetching from GitLab
-            
+
         Returns:
             Dictionary mapping SHA to pipeline status dict (or None if no pipeline found)
-            
+
             Example return value:
             {
                 "21a03b316dc1e5031183965e5798b0d9fe2e64b3": {
@@ -2387,7 +2387,7 @@ class GitLabAPIClient:
                 },
                 "5fe0476e605d2564234f00e8123461e1594a9ce7": None
             }
-            
+
         Cache file format (.gitlab_pipeline_status_cache.json) - internally used:
         {
             "21a03b316dc1e5031183965e5798b0d9fe2e64b3": {
@@ -2404,7 +2404,7 @@ class GitLabAPIClient:
         """
         import json
         from pathlib import Path
-        
+
         # Load cache
         cache = {}
         pipeline_cache_path = Path(cache_file)
@@ -2413,19 +2413,19 @@ class GitLabAPIClient:
                 cache = json.loads(pipeline_cache_path.read_text())
             except Exception:
                 pass
-        
+
         # If skip_fetch=True, only return cached data - NO API calls
         if skip_fetch:
             result = {}
             for sha in sha_list:
                 result[sha] = cache.get(sha)
             return result
-        
+
         # Check which SHAs need to be fetched
         # Only cache "success" status permanently; refetch others as they might change
         shas_to_fetch = []
         result = {}
-        
+
         for sha in sha_list:
             if sha in cache:
                 cached_info = cache[sha]
@@ -2440,7 +2440,7 @@ class GitLabAPIClient:
             else:
                 shas_to_fetch.append(sha)
                 result[sha] = None
-        
+
         # Fetch missing SHAs and non-success statuses from GitLab
         if shas_to_fetch and self.has_token():
             for sha in shas_to_fetch:
@@ -2449,7 +2449,7 @@ class GitLabAPIClient:
                     endpoint = f"/api/v4/projects/169905/pipelines"
                     params = {'sha': sha, 'per_page': 1}
                     pipelines = self.get(endpoint, params=params)
-                    
+
                     if pipelines and len(pipelines) > 0:
                         pipeline = pipelines[0]  # Most recent pipeline
                         status_info = {
@@ -2465,14 +2465,14 @@ class GitLabAPIClient:
                 except Exception:
                     result[sha] = None
                     cache[sha] = None
-            
+
             # Save updated cache
             try:
                 pipeline_cache_path.parent.mkdir(parents=True, exist_ok=True)
                 pipeline_cache_path.write_text(json.dumps(cache, indent=2))
             except Exception:
                 pass
-        
+
         return result
 
 

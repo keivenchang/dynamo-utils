@@ -383,16 +383,30 @@ class CommitHistoryGenerator:
             commit['composite_bg_color'] = bg_colors[current_color_index]
             previous_composite_sha = composite_sha
         
-        # Build log paths dictionary
+        # Build log paths dictionary and status indicators
         log_paths = {}
+        composite_to_status = {}  # Maps composite_sha to status (with priority: failed > building > success)
+        composite_to_commits = {}  # Maps composite_sha to list of commit SHAs
+
+        # Status priority for conflict resolution (higher number = higher priority)
+        status_priority = {'success': 1, 'building': 2, 'failed': 3}
+
+        # Pass 1: Collect all statuses and map composite SHA to commits
         for commit in commit_data:
             sha_short = commit['sha_short']
+            composite_sha = commit['composite_sha']
+
+            # Track which commits have this composite SHA
+            if composite_sha not in composite_to_commits:
+                composite_to_commits[composite_sha] = []
+            composite_to_commits[composite_sha].append(sha_short)
+
             if sha_short in docker_images and docker_images[sha_short]:
                 # Search for build log
                 log_filename = f"*.{sha_short}.report.html"
                 search_pattern = str(logs_dir / "*" / log_filename)
                 matching_logs = glob.glob(search_pattern)
-                
+
                 if matching_logs:
                     log_path = Path(sorted(matching_logs)[-1])
                     try:
@@ -401,6 +415,51 @@ class CommitHistoryGenerator:
                         log_paths[sha_short] = f"../{relative_parts}"
                     except ValueError:
                         log_paths[sha_short] = str(log_path)
+
+                    # Determine build status by checking for FAIL files
+                    log_dir = log_path.parent
+                    fail_pattern = str(log_dir / f"*.{sha_short}.*.FAIL")
+                    pass_pattern = str(log_dir / f"*.{sha_short}.*.PASS")
+
+                    fail_files = glob.glob(fail_pattern)
+                    pass_files = glob.glob(pass_pattern)
+
+                    if fail_files:
+                        status = 'failed'
+                    elif pass_files:
+                        status = 'success'
+                    else:
+                        status = 'building'
+
+                    # Update composite SHA status with priority (failed > building > success)
+                    if composite_sha not in composite_to_status:
+                        composite_to_status[composite_sha] = status
+                    else:
+                        # If new status has higher priority, replace it
+                        if status_priority[status] > status_priority[composite_to_status[composite_sha]]:
+                            composite_to_status[composite_sha] = status
+                else:
+                    # No report yet, assume building
+                    if composite_sha not in composite_to_status:
+                        composite_to_status[composite_sha] = 'building'
+                    elif composite_to_status[composite_sha] == 'success':
+                        # Building has higher priority than success
+                        composite_to_status[composite_sha] = 'building'
+
+        # Pass 2: Assign status to all commits based on composite SHA
+        # Commits with logs get regular status, commits without logs get inherited status
+        build_status = {}
+        for commit in commit_data:
+            sha_short = commit['sha_short']
+            composite_sha = commit['composite_sha']
+
+            if composite_sha in composite_to_status:
+                # Check if this commit has logs (not inherited)
+                has_logs = sha_short in log_paths
+                build_status[sha_short] = {
+                    'status': composite_to_status[composite_sha],
+                    'inherited': not has_logs
+                }
         
         # Generate timestamp
         if HAS_PYTZ:
@@ -415,7 +474,7 @@ class CommitHistoryGenerator:
             loader=FileSystemLoader(template_dir),
             autoescape=select_autoescape(['html', 'xml'])
         )
-        template = env.get_template('show_commit_history.j2')
+        template = env.get_template('show_commit_history.dev.j2')
         
         return template.render(
             commits=commit_data,
@@ -423,6 +482,7 @@ class CommitHistoryGenerator:
             gitlab_images=gitlab_images,
             gitlab_pipelines=gitlab_pipelines,
             log_paths=log_paths,
+            build_status=build_status,
             generated_time=generated_time
         )
 

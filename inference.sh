@@ -298,6 +298,11 @@ OPTIONS:
     --gpu-mem-fraction FRACTION
                          GPU memory fraction to use (0.0 to 1.0)
                          Default: 0.24 (24% of GPU memory)
+    --lmcache             Enable LMCache KV cache offloading (vLLM only, enabled by default)
+    --no-lmcache          Disable LMCache KV cache offloading (vLLM only)
+                         Note: LMCache only supported on x86 architecture
+                         Aggregated mode: Uses LMCacheConnectorV1
+                         Disaggregated mode: Prefill worker uses LMCache + NIXL multi-connector
     --dryrun, --dry-run Show what would be executed without running
                        (dry run mode)
     --frontend             Run the frontend component
@@ -321,6 +326,7 @@ FRAMEWORK_SPECIFIED=false
 RUN_FRONTEND=false
 RUN_BACKEND=false
 DISAGG_MODE=false
+ENABLE_LMCACHE=true  # Enabled by default for vLLM (can be disabled with --no-lmcache)
 GPU_MEM_FRACTION_OVERRIDE=""  # Will override defaults if set
 QWEN_MODEL="Qwen/Qwen3-0.6B"
 TINYLLAMA_MODEL="TinyLlama/TinyLlama-1.1B-Chat-v1.0"
@@ -346,6 +352,14 @@ while [[ $# -gt 0 ]]; do
             ;;
         --disagg)
             DISAGG_MODE=true
+            shift
+            ;;
+        --lmcache)
+            ENABLE_LMCACHE=true
+            shift
+            ;;
+        --no-lmcache)
+            ENABLE_LMCACHE=false
             shift
             ;;
         --gpu-mem-fraction)
@@ -407,11 +421,11 @@ fi
 # Function to clean up dynamo processes
 cleanup_dynamo_processes() {
     if [ "$DRY_RUN" = false ]; then
-        (ps -ef --forest|grep multiprocess|awk '{print $2}'|xargs kill) && true
-        (ps -ef|grep "python3.*\/tmp"|awk '{print $2}'|xargs kill) && true
-        (ps -ef|grep "VLLM::EngineCore"|awk '{print $2}'|xargs kill) && true
-        (ps -ef|grep "python -m dynamo.sglang.main"|awk '{print $2}'|xargs kill) && true
-        (ps -ef|grep "python -m dynamo.frontend"|grep -v grep|awk '{print $2}'|xargs kill) && true
+        (ps -ef --forest|grep multiprocess|awk '{print $2}'|xargs -r kill) 2>/dev/null || true
+        (ps -ef|grep "python3.*\/tmp"|awk '{print $2}'|xargs -r kill) 2>/dev/null || true
+        (ps -ef|grep "VLLM::EngineCore"|awk '{print $2}'|xargs -r kill) 2>/dev/null || true
+        (ps -ef|grep "python -m dynamo.sglang.main"|awk '{print $2}'|xargs -r kill) 2>/dev/null || true
+        (ps -ef|grep "python -m dynamo.frontend"|grep -v grep|awk '{print $2}'|xargs -r kill) 2>/dev/null || true
         pkill -f "python -m dynamo.frontend" 2>/dev/null || true
         pkill -f "python3 -m dynamo.vllm" 2>/dev/null || true
         pkill -f "python3 -m dynamo.sglang" 2>/dev/null || true
@@ -593,6 +607,10 @@ fi
 BATCH_SIZE=2
 if [ "$FRAMEWORK" = "vllm" ]; then
     FRAMEWORK_ARGS="--gpu-memory-utilization $GPU_MEMORY_UTIL_AGG --enforce-eager --no-enable-prefix-caching --max-num-seqs $BATCH_SIZE"
+    # Add LMCache connector if enabled
+    if [ "$ENABLE_LMCACHE" = true ]; then
+        FRAMEWORK_ARGS="$FRAMEWORK_ARGS --connector lmcache"
+    fi
 elif [ "$FRAMEWORK" = "sglang" ]; then
     FRAMEWORK_ARGS="--mem-fraction-static $GPU_MEMORY_UTIL_AGG --max-running-requests $BATCH_SIZE --enable-metrics"
 elif [ "$FRAMEWORK" = "trtllm" ]; then
@@ -760,6 +778,11 @@ if [ "$RUN_BACKEND" = true ]; then
             DISAGG_FRAMEWORK_ARGS="--gpu-memory-utilization $GPU_MEMORY_UTIL_DISAGG --enforce-eager --no-enable-prefix-caching --max-num-seqs $BATCH_SIZE"
             PREFILL_FLAG="--is-prefill-worker"
             DECODE_FLAG=""
+
+            # Add LMCache support for prefill worker only (uses multi-connector with NIXL)
+            if [ "$ENABLE_LMCACHE" = true ]; then
+                PREFILL_FLAG="$PREFILL_FLAG --connector lmcache nixl"
+            fi
         elif [ "$FRAMEWORK" = "sglang" ]; then
             DISAGG_FRAMEWORK_ARGS="--mem-fraction-static $GPU_MEMORY_UTIL_DISAGG --page-size 16 --chunked-prefill-size 4096 --max-prefill-tokens 4096 --enable-memory-saver --delete-ckpt-after-loading --max-running-requests $BATCH_SIZE --enable-metrics --disaggregation-bootstrap-port 12345 --host 0.0.0.0 --disaggregation-transfer-backend nixl"
             PREFILL_FLAG="--disaggregation-mode prefill"

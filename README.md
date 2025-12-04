@@ -382,7 +382,7 @@ Average lines changed per person: 3556.9
 Contributor Rankings (by commits)
 ================================================================================
 
-Rank   Name                           Email                               Commits  Added      Deleted    Changed   
+Rank   Name                           Email                               Commits  Added      Deleted    Changed
 --------------------------------------------------------------------------------------------------------------
 1      John Doe                       john@example.com                    31       4,455      3,512      7,967
 ...

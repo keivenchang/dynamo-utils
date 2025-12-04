@@ -421,8 +421,9 @@ if [ -n "$BUILD_TYPE" ]; then
 
     if [ "$BUILD_RUST" = true ]; then
         # Sync Cargo.lock first to ensure it's up-to-date with Cargo.toml
-        dry_run_echo "Syncing Cargo.lock with dependencies..."
-        cmd cargo update
+        # NOTE: cargo update disabled by default to avoid breaking dependency updates
+        # dry_run_echo "Syncing Cargo.lock with dependencies..."
+        # cmd cargo update
 
         # Build with --locked to ensure exact dependency versions
         if [ "$BUILD_TYPE" = "development" ]; then

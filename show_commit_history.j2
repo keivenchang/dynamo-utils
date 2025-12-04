@@ -120,6 +120,45 @@ summary:hover {
 .composite-sha-link:hover {
     text-decoration: underline;
 }
+.status-indicator {
+    display: inline-block;
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    margin-right: 6px;
+    vertical-align: middle;
+}
+.status-success {
+    background-color: #2da44e;
+    box-shadow: 0 0 0 2px rgba(45, 164, 78, 0.2);
+}
+.status-failed {
+    background-color: #d73a49;
+    box-shadow: 0 0 0 2px rgba(215, 58, 73, 0.2);
+}
+.status-building {
+    background-color: #dbab09;
+    box-shadow: 0 0 0 2px rgba(219, 171, 9, 0.2);
+}
+.status-success-inherited {
+    background-color: #a8d5ba;
+    box-shadow: 0 0 0 2px rgba(45, 164, 78, 0.1);
+    opacity: 0.7;
+}
+.status-failed-inherited {
+    background-color: #f5a3ab;
+    box-shadow: 0 0 0 2px rgba(215, 58, 73, 0.1);
+    opacity: 0.7;
+}
+.status-building-inherited {
+    background-color: #f0d97d;
+    box-shadow: 0 0 0 2px rgba(219, 171, 9, 0.1);
+    opacity: 0.7;
+}
+.status-unknown {
+    background-color: transparent;
+    border: 2px solid #8c959f;
+}
 </style>
 <script>
 function toggleDockerImages(event, linkElement) {
@@ -151,11 +190,11 @@ function copyToClipboard(text, button) {
     document.body.appendChild(textArea);
     textArea.focus();
     textArea.select();
-    
+
     try {
         var successful = document.execCommand('copy');
         document.body.removeChild(textArea);
-        
+
         if (successful) {
             var originalHTML = button.innerHTML;
             button.innerHTML = '<svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" style="display: inline-block;"><path d="M0 6.75C0 5.784.784 5 1.75 5h1.5a.75.75 0 0 1 0 1.5h-1.5a.25.25 0 0 0-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 0 0 .25-.25v-1.5a.75.75 0 0 1 1.5 0v1.5A1.75 1.75 0 0 1 9.25 16h-7.5A1.75 1.75 0 0 1 0 14.25Z"></path><path d="M5 1.75C5 .784 5.784 0 6.75 0h7.5C15.216 0 16 .784 16 1.75v7.5A1.75 1.75 0 0 1 14.25 11h-7.5A1.75 1.75 0 0 1 5 9.25Zm1.75-.25a.25.25 0 0 0-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 0 0 .25-.25v-7.5a.25.25 0 0 0-.25-.25Z"></path></svg><span style="margin-left: 6px;">Copied!</span>';
@@ -173,12 +212,12 @@ function copyToClipboard(text, button) {
 
 function copyFromClipboardAttr(button) {
     var text = button.getAttribute('data-clipboard-text');
-    
+
     if (!text) {
         alert('No text found in data-clipboard-text attribute');
         return;
     }
-    
+
     // Fallback for non-HTTPS contexts (file:// protocol)
     var textArea = document.createElement('textarea');
     textArea.value = text;
@@ -188,11 +227,11 @@ function copyFromClipboardAttr(button) {
     document.body.appendChild(textArea);
     textArea.focus();
     textArea.select();
-    
+
     try {
         var successful = document.execCommand('copy');
         document.body.removeChild(textArea);
-        
+
         if (successful) {
             var originalHTML = button.innerHTML;
             button.innerHTML = '<svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" style="display: inline-block;"><path d="M0 6.75C0 5.784.784 5 1.75 5h1.5a.75.75 0 0 1 0 1.5h-1.5a.25.25 0 0 0-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 0 0 .25-.25v-1.5a.75.75 0 0 1 1.5 0v1.5A1.75 1.75 0 0 1 9.25 16h-7.5A1.75 1.75 0 0 1 0 14.25Z"></path><path d="M5 1.75C5 .784 5.784 0 6.75 0h7.5C15.216 0 16 .784 16 1.75v7.5A1.75 1.75 0 0 1 14.25 11h-7.5A1.75 1.75 0 0 1 5 9.25Zm1.75-.25a.25.25 0 0 0-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 0 0 .25-.25v-7.5a.25.25 0 0 0-.25-.25Z"></path></svg><span style="margin-left: 6px;">Copied!</span>';
@@ -292,7 +331,9 @@ function copyFromClipboardAttr(button) {
 <tr>
 <td class="sha">
 <a href="{{ commit_link }}" target="_blank">{{ sha_short }}</a>
+{%- if has_gitlab or pipeline -%}
 <a href="{{ gitlab_commit_link }}" target="_blank" style="margin-left: 4px; color: #fc6d26; text-decoration: none; font-weight: 600;" title="View commit in GitLab">🦊</a>
+{%- endif -%}
 {%- if has_gitlab and pipeline and pipeline.status == 'failed' -%}
 <a href="{{ pipeline.web_url }}" target="_blank" style="margin-left: 4px; color: #d73a49; text-decoration: none; font-weight: 600; font-size: 11px;" title="CI Failed - Click to view pipeline">❌ CI</a>
 {%- elif has_gitlab and pipeline and pipeline.status in ['running', 'pending'] -%}
@@ -304,8 +345,21 @@ function copyFromClipboardAttr(button) {
 {%- endif -%}
 </td>
 <td class="sha">
-{%- if has_docker_images or has_gitlab -%}
 {%- set log_path = log_paths.get(sha_short) -%}
+{%- set status_info = build_status.get(sha_short, {}) -%}
+{%- set status = status_info.get('status', 'unknown') -%}
+{%- set inherited = status_info.get('inherited', False) -%}
+{# Status indicator ball - show for any commit with a status (including inherited) #}
+{%- if status == 'success' -%}
+<span class="status-indicator status-success{%- if inherited -%}-inherited{%- endif -%}" title="{%- if inherited -%}Inherited: {%- endif -%}All tests passed"></span>
+{%- elif status == 'failed' -%}
+<span class="status-indicator status-failed{%- if inherited -%}-inherited{%- endif -%}" title="{%- if inherited -%}Inherited: {%- endif -%}Some tests failed"></span>
+{%- elif status == 'building' -%}
+<span class="status-indicator status-building{%- if inherited -%}-inherited{%- endif -%}" title="{%- if inherited -%}Inherited: {%- endif -%}Build in progress"></span>
+{%- elif status == 'unknown' -%}
+<span class="status-indicator status-unknown" title="No build status available"></span>
+{%- endif -%}
+{%- if has_docker_images or has_gitlab -%}
 {%- if log_path -%}
 <span style="background-color: {{ composite_bg_color }}; padding: 2px 6px; border-radius: 3px;"><a href="{{ log_path }}" target="_blank" style="color: #0969da; text-decoration: none;" title="View build logs">{{ composite_sha }}</a></span>
 {%- else -%}
@@ -364,7 +418,7 @@ function copyFromClipboardAttr(button) {
 <tr>
 <th style="width: 35%; padding: 3px 6px; border: none;">Image Name:Tag</th>
 <th style="width: 10%; padding: 3px 6px; border: none;">pull runtime</th>
-{% if gitlab_imgs|selectattr('arch', 'equalto', 'amd64')|selectattr('framework', 'in', ['trtllm', 'vllm'])|list|length > 0 %}<th style="width: 10%; padding: 3px 6px; border: none;">make local-dev</th>{% endif %}
+{% if gitlab_imgs|selectattr('arch', 'equalto', 'amd64')|selectattr('framework', 'in', ['trtllm', 'vllm'])|list|length > 0 %}<th style="width: 10%; padding: 3px 6px; border: none;">make localdev</th>{% endif %}
 <th style="width: 10%; padding: 3px 6px; border: none;">Build ID</th>
 <th style="width: 8%; padding: 3px 6px; border: none;">Size</th>
 <th style="width: 27%; padding: 3px 6px; border: none;">Created (PDT)</th>
