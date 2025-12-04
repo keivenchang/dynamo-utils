@@ -428,7 +428,7 @@ function copyFromClipboardAttr(button) {
    Example output:
    (BASE_IMAGE=gitlab-master.nvidia.com:5005/dl/ai-dynamo/dynamo:2f18b23ee7163df21f20e872b83ada4226fbf851-38897884-vllm-amd64 && \
    docker pull ${BASE_IMAGE} && \
-   wget http://keivenc-linux/nvidia/dynamo-utils/docker/Dockerfile.runtime_localdev_venv -O /tmp/Dockerfile.runtime_localdev_venv && \
+   wget http://keivenc-linux/nvidia/dynamo-utils/container/Dockerfile.runtime_localdev_venv -O /tmp/Dockerfile.runtime_localdev_venv && \
    docker build -f /tmp/Dockerfile.runtime_localdev_venv --build-arg BASE_IMAGE=${BASE_IMAGE} --build-arg USER_UID=$(id -u) --build-arg USER_GID=$(id -g) -t dynamo:2f18b23e-vllm-local-dev /tmp && \
    echo 'Build SUCCESS! Run with: container/run.sh --image dynamo:2f18b23e-vllm-local-dev --mount-workspace -it ...')
    Note: sha_short is accessed from outer scope (commit loop)
@@ -441,7 +441,7 @@ function copyFromClipboardAttr(button) {
 {%- else -%}
 {%- set dockerfile_name = "Dockerfile.runtime_localdev_venv" -%}
 {%- endif -%}
-{%- set dockerfile_url = "http://keivenc-linux/nvidia/dynamo-utils/docker/" ~ dockerfile_name -%}
+{%- set dockerfile_url = "http://keivenc-linux/nvidia/dynamo-utils/container/" ~ dockerfile_name -%}
 {%- set dockerfile_path = "/tmp/" ~ dockerfile_name -%}
 (BASE_IMAGE={{ img.location }} && \
 docker pull ${BASE_IMAGE} && \

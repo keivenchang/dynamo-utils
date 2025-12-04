@@ -36,7 +36,7 @@ dynamo-utils/
 ├── update_html_pages.sh          # HTML page update cron script
 ├── soak_fe.py                    # Frontend soak testing script
 ├── gpu_reset.sh                  # GPU reset utility
-└── docker/                       # Docker-related scripts
+└── container/                    # Docker-related scripts
     ├── build_images.py               # Automated Docker build/test pipeline
     ├── build_images_report.html.j2   # HTML report template
     ├── retag_images.py               # Docker image retagging utility
@@ -134,7 +134,7 @@ Automatically syncs development configuration files across multiple Dynamo proje
 
 ## Python Utilities
 
-### docker/build_images.py
+### container/build_images.py
 
 Automated Docker build and test pipeline system that builds and tests multiple inference frameworks (VLLM, SGLANG, TRTLLM) across different target environments (base, dev, local-dev), generates HTML reports, and sends email notifications.
 
@@ -142,17 +142,17 @@ Automated Docker build and test pipeline system that builds and tests multiple i
 
 **Quick Test (Single Framework)**:
 ```bash
-python3 docker/build_images.py --repo-path ~/nvidia/dynamo_ci --sanity-check-only --framework sglang --force-run
+python3 container/build_images.py --repo-path ~/nvidia/dynamo_ci --sanity-check-only --framework sglang --force-run
 ```
 
 **Parallel Build with Skip**:
 ```bash
-python3 docker/build_images.py --repo-path ~/nvidia/dynamo_ci --skip-action-if-already-passed --parallel --force-run
+python3 container/build_images.py --repo-path ~/nvidia/dynamo_ci --skip-action-if-already-passed --parallel --force-run
 ```
 
 **Full Build**:
 ```bash
-python3 docker/build_images.py --repo-path ~/nvidia/dynamo_ci --parallel --force-run
+python3 container/build_images.py --repo-path ~/nvidia/dynamo_ci --parallel --force-run
 ```
 
 **Note**: `--repo-path` is required and specifies the path to the Dynamo repository.
@@ -242,7 +242,7 @@ python3 show_commit_history.py --repo-path ~/nvidia/dynamo_ci --html --max-commi
 **Overview**: Docker image sizes are automatically populated in HTML reports for all BUILD tasks, regardless of whether images were just built or were skipped (using `--skip-build-if-image-exists`).
 
 **Implementation**:
-- Location: `docker/build_images.py:1810-1851` and line 2003-2004
+- Location: `container/build_images.py:1810-1851` and line 2003-2004
 - Method: `_populate_image_sizes(pipeline: BuildPipeline)`
 - Called after task execution completes (but before HTML report generation)
 - Only runs when NOT in dry-run mode
