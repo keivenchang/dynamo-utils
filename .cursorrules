@@ -319,6 +319,10 @@ All serve tests (requires GPU):
 pytest tests/serve/ -v --tb=short
 ```
 
+**Important**: This development environment has only 1 GPU available. Disaggregated multi-GPU tests
+will fail with `NVMLError_InvalidArgument` or similar GPU detection errors. Only run aggregated tests
+or tests that use a single GPU. Skip disaggregated tests that require 2+ GPUs.
+
 ### 3.5.3 Metrics Server Configuration
 Backend launch scripts must include:
 ```
@@ -574,13 +578,23 @@ ALWAYS run pre-commit checks before committing:
 ## 6.1 Review Before Git Operations
 Periodically review this .cursorrules before git operations
 
-## 6.2 Merge Conflicts
+## 6.2 Git Interactive Editors
+- Git commands like `git rebase --continue`, `git commit --amend`, and `git rebase -i` launch interactive text editors (vim/nano)
+- Cursor does NOT have interactive editor
+- Therefore ALWAYS use `GIT_EDITOR=true` prefix to bypass interactive editors:
+  - `GIT_EDITOR=true git rebase --continue` - accepts default commit message
+  - `GIT_EDITOR=true git commit --amend -m "message"` - amends with new message
+  - For commits, use `-m "message"` flag instead of letting editor open
+- If editor opens accidentally, the command will hang waiting for user input
+- Example: `git rebase --continue` will open vim → use `GIT_EDITOR=true git rebase --continue` instead
+
+## 6.3 Merge Conflicts
 After resolving:
 1. git add <resolved_files>
-3. If in rebase: let user run git rebase --continue (don't open terminal)
-4. Run cargo fmt on directories
+2. If in rebase: use `GIT_EDITOR=true git rebase --continue` (never let vim open)
+3. Run cargo fmt on directories
 
-## 6.3 Commit Process
+## 6.4 Commit Process
 - NEVER launch vim or any editor (always provide -m flag with message)
 - Never commit top-level Cargo.toml or Cargo.lock (unless explicitly told)
 - Never use --no-verify
@@ -593,7 +607,7 @@ After resolving:
 - Single line message for straightforward changes
 - For merge commits: use git commit -m "Merge ..." or git commit --no-edit
 
-## 6.4 Commit Message Format
+## 6.5 Commit Message Format
 Determine commit type by checking git history:
 - If NO commits exist on current branch (check with: git log --oneline origin/main..HEAD)
   → Use FIRST/INITIAL commit format (verbose with prefix)
@@ -620,7 +634,7 @@ FIRST/INITIAL commits (when branch has no commits yet): verbose format with desc
 - style: apply code formatting and style fixes
 - build: update build scripts for new environment
 
-## 6.5 Git Integration (for parsing commit messages)
+## 6.6 Git Integration (for parsing commit messages)
 - Format: `title (#PR_NUMBER)`
 - Extract PR: r'\(#(\d+)\)'
 - GitHub repo: https://github.com/ai-dynamo/dynamo
