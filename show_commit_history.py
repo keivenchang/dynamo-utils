@@ -474,7 +474,7 @@ class CommitHistoryGenerator:
             loader=FileSystemLoader(template_dir),
             autoescape=select_autoescape(['html', 'xml'])
         )
-        template = env.get_template('show_commit_history.dev.j2')
+        template = env.get_template('show_commit_history.j2')
         
         return template.render(
             commits=commit_data,

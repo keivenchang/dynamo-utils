@@ -1,3 +1,4 @@
+.gitlab*.json
 index.html
 triton/
 notes/
