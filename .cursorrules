@@ -15,9 +15,12 @@ TABLE OF CONTENTS
   2.3 UNIX Command Execution and Workflow
     2.3.1 Command Chaining
     2.3.2 Long-Running Programs
+    2.3.3 Piping and Filtering
   2.4 Environment Awareness and Setup
     2.4.1 Virtualenv Activation (Host Machine Only)
     2.4.2 Docker Environment
+      2.4.2.1 Setting umask for Group-Writable Permissions in Dockerfiles
+      2.4.2.2 Example Dockerfile
 
 3. PROJECT OVERVIEW
   3.1 Project Structure
@@ -29,8 +32,7 @@ TABLE OF CONTENTS
   3.4 External Dependencies (Docker only)
   3.5 Deployment Modes
     3.5.1 Aggregated vs Disaggregated
-    3.5.2 Backend E2E Tests
-    3.5.3 Metrics Server Configuration
+    3.5.2 Metrics Server Configuration
 
 4. UNIVERSAL CODE STYLE
   4.1 Emojis
@@ -61,9 +63,8 @@ TABLE OF CONTENTS
   5.1 General Rules
   5.2 File Operations
   5.3 Permissions
-  5.4 Piping and Filtering
-  5.5 Path Display
-  5.6 Pre-commit
+  5.4 Path Display
+  5.5 Pre-commit
 
 6. GIT WORKFLOW
   6.1 Review Before Git Operations
@@ -72,10 +73,11 @@ TABLE OF CONTENTS
   6.4 Commit Message Format
   6.5 Git Integration (for parsing commit messages)
 
-7. COMMUNICATION TEMPLATES
+7. COMMUNICATION TEMPLATES AND CODE REVIEW
   7.1 Slack RFR Template
     7.1.1 GitHub to Slack Login Mappings
   7.2 GitHub PR Description Template
+  7.3 Code Review Guidelines
 
 8. DOCUMENTATION BUILD AND CI CHECKS
   8.1 Sphinx Documentation
@@ -96,9 +98,6 @@ TABLE OF CONTENTS
     8.2.5 Copyright Headers
     8.2.6 Cargo Deny (License Checks)
     8.2.7 Quick Pre-Commit Checklist
-
-9. CODE REVIEW GUIDELINES
-
 
 =============================================================================
 1. AI PERSONALITY AND DOCUMENTATION GUIDELINES
@@ -163,11 +162,22 @@ DO NOT use these BS words in docs/comments:
 
 ### 2.3.2 Long-Running Programs
 - For long-running programs (vllm, sglang, trtllm), use tee to log output to a file and background it
-- Do NOT filter output - errors must be visible in the log file
+- Do NOT filter output using grep - everything must be visible in the log file
 - Format: program args 2>&1 | tee /tmp/program.N.log &
 - Example: vllm serve 2>&1 | tee /tmp/vllm.1.log &
 - Use sequential numbering: .1, .2, .3, etc for multiple runs
 - This allows monitoring while keeping the terminal responsive
+
+### 2.3.3 Piping and Filtering
+BEST PRACTICE: When running commands that produce output you want to analyze, pipe to a temp file instead of using grep filters.
+- This lets you run the command once and analyze the full output multiple times
+- Example: docker ps -a > /tmp/containers.txt (instead of docker ps -a | grep something)
+- You can then grep/analyze /tmp/containers.txt without re-running the command
+
+Filter out unimportant cargo test output with grep -v:
+- "running 0 tests"
+- "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out"
+- "tower_http::trace::on_failure:"
 
 ## 2.4 Environment Awareness and Setup
 
@@ -184,7 +194,39 @@ DO NOT use these BS words in docs/comments:
 - Pin dependency versions
 - DO NOT use BS jargon: intuitive, comprehensive, optimal, seamless, next-generation, holistic, cutting-edge
 
-#### 2.2.1 Example Dockerfile
+#### 2.4.2.1 Setting umask for Group-Writable Permissions in Dockerfiles
+
+To create group-writable files/directories (775/664) in Dockerfiles:
+
+**Global umask for RUN commands:**
+```dockerfile
+USER myuser
+# Set umask globally for all subsequent RUN commands
+RUN mkdir -p /etc/profile.d && echo 'umask 002' > /etc/profile.d/00-umask.sh
+SHELL ["/bin/bash", "-l", "-o", "pipefail", "-c"]
+
+# Now all RUN commands automatically use umask 002
+RUN mkdir /test  # Creates drwxrwxr-x (775)
+RUN touch /file  # Creates -rw-rw-r-- (664)
+```
+
+**CRITICAL: COPY does NOT respect umask!**
+- The `COPY` instruction bypasses shell umask and always creates destination directories with 755
+- The `--chmod` flag on COPY only affects contents, NOT the destination directory itself
+- You MUST use explicit `chmod g+w` after COPY to fix the destination directory
+
+Pattern for COPY with group-writable permissions:
+```dockerfile
+COPY --chmod=775 --chown=user:0 /source /dest
+RUN chmod g+w /dest  # Required! COPY ignores umask and creates /dest as 755
+```
+
+Summary:
+- ✅ umask works for: RUN mkdir, RUN touch, pip install output files, etc.
+- ❌ umask does NOT work for: COPY destination directories
+- Solution: Use both umask (for RUN) and explicit chmod (after COPY)
+
+#### 2.4.2.2 Example Dockerfile
 ```
 FROM rust:1.70 as builder
 WORKDIR /app
@@ -302,28 +344,7 @@ curl -X POST http://localhost:8000/v1/chat/completions \
   - Requires 2+ GPUs
   - Use aggregated mode for single GPU testing
 
-### 3.5.2 Backend E2E Tests
-```
-Individual backend tests (aggregated with metrics):
-pytest tests/serve/test_vllm.py::test_serve_deployment -k "aggregated" -v --tb=short
-pytest tests/serve/test_sglang.py::test_sglang_deployment -k "aggregated" -v --tb=short
-pytest tests/serve/test_trtllm.py::test_deployment -k "aggregated" -v --tb=short
-
-All backends (aggregated):
-pytest tests/serve/ -k "aggregated" -v --tb=short
-
-Filtered output (recommended):
-pytest tests/serve/ -k "aggregated" -v --tb=short | grep -v "running 0 tests" | grep -v "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out" | grep -v "tower_http::trace::on_failure:"
-
-All serve tests (requires GPU):
-pytest tests/serve/ -v --tb=short
-```
-
-**Important**: This development environment has only 1 GPU available. Disaggregated multi-GPU tests
-will fail with `NVMLError_InvalidArgument` or similar GPU detection errors. Only run aggregated tests
-or tests that use a single GPU. Skip disaggregated tests that require 2+ GPUs.
-
-### 3.5.3 Metrics Server Configuration
+### 3.5.2 Metrics Server Configuration
 Backend launch scripts must include:
 ```
 DYN_SYSTEM_PORT=8081 \
@@ -555,16 +576,10 @@ GROUP_ID=$(stat -c "%g" .)
 chown -R $USER_ID:$GROUP_ID .
 ```
 
-## 5.4 Piping and Filtering
-Filter out unimportant cargo test output with grep -v:
-- "running 0 tests"
-- "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out"
-- "tower_http::trace::on_failure:"
-
-## 5.5 Path Display
+## 5.4 Path Display
 - Use tilde (~) instead of full paths: ~/path not /home/ubuntu/path
 
-## 5.6 Pre-commit
+## 5.5 Pre-commit
 ALWAYS run pre-commit checks before committing:
 - For single file: pre-commit run --files <file_path>
 - For all changed files: pre-commit run --all-files
@@ -641,7 +656,7 @@ FIRST/INITIAL commits (when branch has no commits yet): verbose format with desc
 - Use full SHA for URLs, short SHA (7-9 chars) for display
 
 =============================================================================
-7. COMMUNICATION TEMPLATES
+7. COMMUNICATION TEMPLATES AND CODE REVIEW
 =============================================================================
 
 ## 7.1 Slack RFR Template
@@ -696,6 +711,28 @@ Output in plain text surrounded by triple backticks (no formatting):
 
 /coderabbit profile chill
 ```
+
+## 7.3 Code Review Guidelines
+- Review for security vulnerabilities
+- Check for performance issues
+- Ensure proper error handling
+- Verify test coverage
+- Look for code duplication
+- Check adherence to conventions
+
+- When providing review feedback, prefer short, direct, conversational paragraphs.
+- Output in plain text surrounded by triple backticks (no formatting).
+- For structural changes (like big code refactors, Dockerfiles, shared build scripts, or cross-file patterns), call out both:
+  - what the author did well and why it works (or what it enables), and
+  - disadvantages, if any (e.g. complexity, readability, maintainability)
+- For shared/duplicated sections that must stay in sync across files (e.g., `dynamo_base`, `wheel_builder`, `dynamo_runtime` in `Dockerfile.{vllm,trtllm,sglang}`), explicitly suggest:
+  - adding comments near those sections noting they must stay synchronized, and
+  - considering templating instead of code-duplication to avoid code drift and maintenance nightmare
+- It's preferred to phrase colloquial feedback like this:
+  - "Hey Dillon, thank you for restructuring the framework Dockerfiles to use that same dynamo_base, dynamo_runtime, and wheel_builder flow so that various pieces are built once and then reused/cached later."
+  - "You may want to put a big comment in shared targets (e.g. dynamo_base, wheel_builder, dynamo_runtime, etc), saying that they need to be in-sync between all the Dockerfile.{vllm,trtllm,sglang} files. Otherwise, somebody is going to get lazy, modify only one file, and mess something up. Definitely look into templating."
+  - "The tradeoff to optimization is that the stage graph is now pretty hard to follow. I find it really hard to follow this code now, unless I ask AI to give me a dependency/flow chart like the one below. Maybe we could add the dependency/flow chart next to the code, for better understanding. The AI can sync it up pretty easily."
+  - "Looking forward to get this in, it will be good to have ..."
 
 =============================================================================
 8. DOCUMENTATION BUILD AND CI CHECKS
@@ -814,6 +851,13 @@ cargo test --locked --all-targets
 
 NOTE: CI runs tests in these directories: ., lib/bindings/python, lib/runtime/examples, launch/dynamo-run
 
+Backend E2E serve tests (aggregated, single-GPU):
+
+pytest tests/serve/ -k "aggregated and not disagg" -v --tb=short
+
+Note: Avoid using -k "aggregated" alone because it also matches "disaggregated".
+Always use the combined filter "aggregated and not disagg" so only aggregated tests run.
+
 ### 8.2.4 Pre-commit Hooks
 Run all pre-commit hooks (Python linting, formatting, etc.):
 
@@ -848,12 +892,3 @@ Before committing Rust changes, run:
 
 Expected result: All checks pass with no errors
 
-=============================================================================
-9. CODE REVIEW GUIDELINES
-=============================================================================
-- Review for security vulnerabilities
-- Check for performance issues
-- Ensure proper error handling
-- Verify test coverage
-- Look for code duplication
-- Check adherence to conventions
