@@ -155,7 +155,7 @@ sleep 3
 if [ "$KILL_ALL" = true ]; then
     remaining=$(pgrep -f "dynamo\.(frontend|vllm|sglang|trtllm)|vllm|sglang|mpi4py|etcd|nats-server" 2>/dev/null || true)
 else
-    remaining=$(pgrep -f "dynamo\.(frontend|vllm|sglang|trtllm)|vllm|sglang|mpi4py" 2>/dev/null || true)
+remaining=$(pgrep -f "dynamo\.(frontend|vllm|sglang|trtllm)|vllm|sglang|mpi4py" 2>/dev/null || true)
 fi
 
 if [ -n "$remaining" ]; then

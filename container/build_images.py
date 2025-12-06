@@ -232,24 +232,95 @@ def rename_dev_base_tag(new_tag: str, select_func: Callable[[List[str]], Optiona
     return wrapper
 
 
-def extract_version_from_build_sh(framework: str, repo_path: Path) -> str:
+def extract_base_image_tag_from_build_sh(framework: str, repo_path: Path) -> str:
     """
-    Extract the VERSION from build.sh by running it with --dry-run.
-    
-    The build.sh script dynamically determines VERSION based on git tags and commits:
-    - If on a tagged commit: v{tag}
-    - Otherwise: v{latest_tag}.dev.{commit_id}
-    
-    This function runs build.sh --dry-run and parses the --tag argument to extract
-    the actual version being used.
-    
+    Extract the base image tag that build.sh created/would create by running --dry-run.
+
+    This function extracts the EXACT tag that build.sh uses for the base image,
+    rather than constructing it from version strings. If the exact tag doesn't exist
+    as a Docker image, it checks for a version without the .postN suffix (e.g.,
+    v0.7.0.dev.XXX instead of v0.7.0.post1.dev.XXX) to handle images built with
+    older versioning schemes.
+
     Args:
         framework: Framework name (vllm, sglang, trtllm)
         repo_path: Path to the Dynamo repository
-        
+
+    Returns:
+        The complete base image tag (e.g., "dynamo-base:v0.7.0.dev.046229f2f-vllm")
+
+    Raises:
+        RuntimeError: If unable to extract base image tag from build.sh output
+    """
+    try:
+        # Run build.sh --dry-run to get docker commands for base image build
+        result = subprocess.run(
+            f"{repo_path}/container/build.sh --dry-run --framework {framework} --target base",
+            shell=True,
+            cwd=repo_path,
+            capture_output=True,
+            text=True,
+            timeout=30
+        )
+
+        output = result.stdout.strip()
+
+        # Look for the base image tag in the output
+        # Expected format: --tag dynamo-base:v{VERSION}-{framework}
+        # Example: --tag dynamo-base:v0.7.0.post1.dev.046229f2f-vllm
+        tag_match = re.search(r'--tag\s+(dynamo-base:[^\s]+)', output)
+        if not tag_match:
+            raise RuntimeError(f"Could not extract base image tag from build.sh output. Output: {output[:200]}")
+
+        primary_tag = tag_match.group(1)
+
+        # Check if the primary tag exists as a Docker image using docker inspect
+        def image_exists(tag: str) -> bool:
+            check_result = subprocess.run(
+                f"docker inspect {tag} > /dev/null 2>&1",
+                shell=True,
+                capture_output=False
+            )
+            return check_result.returncode == 0
+
+        if image_exists(primary_tag):
+            return primary_tag
+
+        # If not found, try without .postN suffix (for backward compatibility)
+        # Example: v0.7.0.post1.dev.046229f2f -> v0.7.0.dev.046229f2f
+        fallback_tag = primary_tag.replace('.post1.', '.').replace('.post2.', '.').replace('.post3.', '.')
+
+        if fallback_tag != primary_tag and image_exists(fallback_tag):
+            logger.info(f"  Primary tag not found, using fallback: {fallback_tag}")
+            return fallback_tag
+
+        # Neither primary nor fallback found - return primary tag so build will create it
+        return primary_tag
+
+    except subprocess.TimeoutExpired:
+        raise RuntimeError("build.sh --dry-run timed out while extracting base image tag")
+    except Exception as e:
+        raise RuntimeError(f"Failed to extract base image tag from build.sh: {e}")
+
+
+def extract_version_from_build_sh(framework: str, repo_path: Path) -> str:
+    """
+    Extract the VERSION from build.sh by running it with --dry-run.
+
+    The build.sh script dynamically determines VERSION based on git tags and commits:
+    - If on a tagged commit: v{tag}
+    - Otherwise: v{latest_tag}.dev.{commit_id}
+
+    This function runs build.sh --dry-run and parses the --tag argument to extract
+    the actual version being used.
+
+    Args:
+        framework: Framework name (vllm, sglang, trtllm)
+        repo_path: Path to the Dynamo repository
+
     Returns:
         The version string (e.g., "v0.1.0.dev.f1552864b" or "v0.2.0")
-        
+
     Raises:
         RuntimeError: If unable to extract version from build.sh output
     """
@@ -263,19 +334,19 @@ def extract_version_from_build_sh(framework: str, repo_path: Path) -> str:
             text=True,
             timeout=30
         )
-        
+
         output = result.stdout.strip()
-        
+
         # Look for --tag arguments in the output
         # Expected format: --tag dynamo:v{VERSION}-{framework}-{target}
         # or: --tag dynamo-base:v{VERSION}-{framework}
         tag_match = re.search(r'--tag\s+(?:dynamo|dynamo-base):(v[^-\s]+)', output)
         if tag_match:
             return tag_match.group(1)
-        
+
         # Fallback: if we can't find version, raise error
         raise RuntimeError(f"Could not extract version from build.sh output. Output: {output[:200]}")
-        
+
     except subprocess.TimeoutExpired:
         raise RuntimeError("build.sh --dry-run timed out while extracting version")
     except Exception as e:
@@ -299,32 +370,30 @@ def create_task_graph(framework: str, sha: str, repo_path: Path, version: Option
         
     Image Dependency Chain:
         The docker_command_filter uses function composition to transform build commands:
-        
+
         1. Base image (produces: dynamo-base:{version}-{framework}):
-           rename_output_tag(base_image_tag, 
-               filter_out_latest_tag(select_command(0)))
-           
+           rename_output_tag(base_image_tag, select_command(0))
+
         2. Runtime image (consumes: base, produces: dynamo:{version}-{framework}-runtime):
            rename_output_tag(runtime_image_tag,
-               rename_input_tag(base_image_tag,
-                   filter_out_latest_tag(select_command(1))))
-           
+               rename_input_tag(base_image_tag, select_command(1)))
+
         3. Dev image (consumes: base, produces: dynamo:{version}-{framework}-dev):
            rename_output_tag(dev_image_tag,
-               rename_input_tag(base_image_tag,
-                   filter_out_latest_tag(select_command(1))))
-           
+               rename_input_tag(base_image_tag, select_command(1)))
+
         4. Local-dev image (consumes: dev, produces: dynamo:{version}-{framework}-local-dev):
            rename_output_tag(local_dev_image_tag,
-               rename_input_tag(dev_image_tag,
-                   filter_out_latest_tag(select_command(1))))
-        
+               rename_input_tag(dev_image_tag, select_command(2)))
+
         Each function in the chain wraps the next:
         - select_command(index): Selects docker command from build.sh output
-        - filter_out_latest_tag(): Removes --tag arguments containing 'latest'
         - rename_input_tag(tag): Sets --build-arg DYNAMO_BASE_IMAGE=<tag>
         - rename_output_tag(tag): Sets --tag <tag>
-        
+
+        Note: We use build.sh --no-tag-latest to prevent automatic 'latest' tag creation,
+        rather than filtering it out with regex post-processing.
+
         Result: Input and output images match parent/child dependencies perfectly.
     """
     # Task ID format: framework-target-type (all lowercase)
@@ -337,13 +406,14 @@ def create_task_graph(framework: str, sha: str, repo_path: Path, version: Option
     tasks: Dict[str, BaseTask] = {}
 
     # Level 0: Base image build
-    base_image_tag = f"dynamo-base:{version}-{framework}"
+    # Extract the exact base image tag from build.sh to match existing images
+    base_image_tag = extract_base_image_tag_from_build_sh(framework, repo_path)
     tasks[f"{framework}-base-build"] = BuildTask(
         task_id=f"{framework}-base-build",
         description=f"Build {framework.upper()} base image",
-        command=f"{repo_path}/container/build.sh --dry-run --framework {framework} --target runtime",
+        command=f"{repo_path}/container/build.sh --dry-run --no-tag-latest --framework {framework} --target runtime",
         output_image=base_image_tag,
-        docker_command_filter=rename_output_tag(base_image_tag, filter_out_latest_tag(select_command(0))),
+        docker_command_filter=rename_output_tag(base_image_tag, select_command(0)),
         timeout=1200.0,  # 20 minutes for builds
     )
 
@@ -352,12 +422,12 @@ def create_task_graph(framework: str, sha: str, repo_path: Path, version: Option
     tasks[f"{framework}-runtime-build"] = BuildTask(
         task_id=f"{framework}-runtime-build",
         description=f"Build {framework.upper()} runtime image",
-        command=f"{repo_path}/container/build.sh --dry-run --framework {framework} --target runtime",
+        command=f"{repo_path}/container/build.sh --dry-run --no-tag-latest --framework {framework} --target runtime",
         input_image=base_image_tag,
         output_image=runtime_image_tag,
-        docker_command_filter=rename_output_tag(runtime_image_tag, 
-            rename_input_tag(base_image_tag, 
-                filter_out_latest_tag(select_command(1)))),
+        docker_command_filter=rename_output_tag(runtime_image_tag,
+            rename_input_tag(base_image_tag,
+                select_command(1))),
         parents=[f"{framework}-base-build"],
         timeout=1200.0,  # 20 minutes for builds
     )
@@ -378,12 +448,12 @@ def create_task_graph(framework: str, sha: str, repo_path: Path, version: Option
     tasks[f"{framework}-dev-build"] = BuildTask(
         task_id=f"{framework}-dev-build",
         description=f"Build {framework.upper()} dev image",
-        command=f"{repo_path}/container/build.sh --dry-run --framework {framework} --target dev",
+        command=f"{repo_path}/container/build.sh --dry-run --no-tag-latest --framework {framework} --target dev",
         input_image=base_image_tag,
         output_image=dev_image_tag,
         docker_command_filter=rename_output_tag(dev_image_tag,
             rename_input_tag(base_image_tag,
-                filter_out_latest_tag(select_command(1)))),
+                select_command(1))),
         parents=[f"{framework}-runtime-build"],  # Wait for runtime to complete first
         timeout=1200.0,  # 20 minutes for builds
     )
@@ -430,12 +500,12 @@ def create_task_graph(framework: str, sha: str, repo_path: Path, version: Option
     tasks[f"{framework}-local-dev-build"] = BuildTask(
         task_id=f"{framework}-local-dev-build",
         description=f"Build {framework.upper()} local-dev image",
-        command=f"{repo_path}/container/build.sh --dry-run --framework {framework} --target local-dev",
+        command=f"{repo_path}/container/build.sh --dry-run --no-tag-latest --framework {framework} --target local-dev",
         input_image=dev_image_tag,
         output_image=local_dev_image_tag,
         docker_command_filter=rename_output_tag(local_dev_image_tag,
             rename_dev_base_tag(dev_image_tag,
-                filter_out_latest_tag(select_command(2)))),
+                select_command(2))),
         parents=[f"{framework}-dev-build"],
         timeout=1200.0,  # 20 minutes for builds
     )
@@ -866,7 +936,7 @@ class BuildTask(BaseTask):
     Additional attributes:
         docker_command_filter: Optional function to filter/select and transform docker commands
                               Takes List[str] of commands, returns Optional[str] (selected and transformed command)
-                              Can chain: selection -> filter_out_latest_tag -> rename_tag
+                              Can chain: selection -> rename_input_tag -> rename_output_tag
         original_build_command: Full output from build.sh --dry-run (all docker commands)
         actual_build_command: The extracted and transformed docker command to execute
     """
