@@ -56,7 +56,7 @@ build_all_targets() {
     fi
 
     # Finally build local-dev (which depends on dev)
-    local local_dev_build_cmd="./build.sh --framework \"$framework\" --target local-dev --no-tag-latest"
+    local local_dev_build_cmd="container/build.sh --framework \"$framework\" --target local-dev --no-tag-latest"
     if [ "$no_cache" = true ]; then
         local_dev_build_cmd+=" --no-cache"
     fi
@@ -167,10 +167,10 @@ verify_runtime() {
 
     print_msg "\n=== Running runtime image verification for $framework ==="
     print_msg "Log file: $sanity_log"
-    
-    
+
+
     # Runtime - run sanity check with --runtime-check --thorough-check flags
-    if ./run.sh --image "$image" -- python /workspace/deploy/sanity_check.py --runtime-check --thorough-check > "$sanity_log" 2>&1; then
+    if container/run.sh --image "$image" -- python /workspace/deploy/sanity_check.py --runtime-check --thorough-check > "$sanity_log" 2>&1; then
         print_msg "✓ Runtime image verification passed"
         return 0
     else
