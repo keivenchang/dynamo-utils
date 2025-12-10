@@ -103,7 +103,7 @@ class TaskData:
 
 @dataclass
 class FrameworkTargetData:
-    """Data structure for a framework target (base, runtime, dev, local-dev) in HTML report"""
+    """Data structure for a framework target (runtime, dev, local-dev) in HTML report"""
     build: Optional[TaskData] = None
     compilation: Optional[TaskData] = None
     sanity: Optional[TaskData] = None
@@ -131,176 +131,9 @@ class FrameworkTargetData:
 # DOCKER COMMAND FILTER FUNCTIONS
 # ==============================================================================
 
-def select_command(index: int) -> Callable[[List[str]], Optional[str]]:
-    """
-    Create a function that selects a specific command by index.
-    
-    Args:
-        index: 0-based index (0 for first, 1 for second, etc.)
-        
-    Returns:
-        Function that selects the command at the given index
-    """
-    def selector(commands: List[str]) -> Optional[str]:
-        if len(commands) <= index:
-            # Not enough commands - return what we have
-            return '\n'.join(commands) if commands else None
-        return commands[index]
-    return selector
+# NOTE: Docker command filter functions removed in simplification (2025-12-10)
+# build.sh is now executed directly instead of parsing --dry-run output
 
-
-def filter_out_latest_tag(select_func: Callable[[List[str]], Optional[str]]) -> Callable[[List[str]], Optional[str]]:
-    """
-    Wrap a selection function to also filter out 'latest' tags.
-    
-    Returns a function that does: filter_out_latest(select_func(commands))
-    """
-    def wrapper(commands: List[str]) -> Optional[str]:
-        command = select_func(commands)
-        if command is None:
-            return None
-        # Remove --tag arguments that contain 'latest'
-        command = re.sub(r'--tag\s+[^\s]*latest[^\s]*', '', command)
-        # Clean up whitespace
-        command = re.sub(r'\s+', ' ', command).strip()
-        return command
-    return wrapper
-
-
-def rename_output_tag(new_tag: str, select_func: Callable[[List[str]], Optional[str]]) -> Callable[[List[str]], Optional[str]]:
-    """
-    Wrap a selection function to also rename output tags (--tag).
-    
-    Returns a function that does: rename_output_tag_to(new_tag, select_func(commands))
-    """
-    def wrapper(commands: List[str]) -> Optional[str]:
-        command = select_func(commands)
-        if command is None:
-            return None
-        # Remove all existing --tag arguments
-        command = re.sub(r'--tag\s+[^\s-][^\s]*', '', command)
-        # Clean up whitespace
-        command = re.sub(r'\s+', ' ', command).strip()
-
-        # Add our new tag before the final path argument
-        parts = command.rsplit(maxsplit=1)
-        if len(parts) == 2:
-            return f"{parts[0]} --tag {new_tag} {parts[1]}"
-        else:
-            return f"{command} --tag {new_tag}"
-    return wrapper
-
-
-def rename_input_tag(new_tag: str, select_func: Callable[[List[str]], Optional[str]]) -> Callable[[List[str]], Optional[str]]:
-    """
-    Wrap a selection function to also rename input base image (--build-arg DYNAMO_BASE_IMAGE=).
-    
-    Returns a function that does: rename_input_tag_to(new_tag, select_func(commands))
-    """
-    def wrapper(commands: List[str]) -> Optional[str]:
-        command = select_func(commands)
-        if command is None:
-            return None
-        # Replace DYNAMO_BASE_IMAGE value
-        command = re.sub(
-            r'--build-arg\s+DYNAMO_BASE_IMAGE=[^\s]+',
-            f'--build-arg DYNAMO_BASE_IMAGE={new_tag}',
-            command
-        )
-        return command
-    return wrapper
-
-
-def rename_dev_base_tag(new_tag: str, select_func: Callable[[List[str]], Optional[str]]) -> Callable[[List[str]], Optional[str]]:
-    """
-    Wrap a selection function to also rename dev base image (--build-arg DEV_BASE=).
-    Used specifically for local-dev builds.
-    
-    Returns a function that does: rename_dev_base_tag_to(new_tag, select_func(commands))
-    """
-    def wrapper(commands: List[str]) -> Optional[str]:
-        command = select_func(commands)
-        if command is None:
-            return None
-        # Replace DEV_BASE value
-        command = re.sub(
-            r'--build-arg\s+DEV_BASE=[^\s]+',
-            f'--build-arg DEV_BASE={new_tag}',
-            command
-        )
-        return command
-    return wrapper
-
-
-def extract_base_image_tag_from_build_sh(framework: str, repo_path: Path) -> str:
-    """
-    Extract the base image tag that build.sh created/would create by running --dry-run.
-
-    This function extracts the EXACT tag that build.sh uses for the base image,
-    rather than constructing it from version strings. If the exact tag doesn't exist
-    as a Docker image, it checks for a version without the .postN suffix (e.g.,
-    v0.7.0.dev.XXX instead of v0.7.0.post1.dev.XXX) to handle images built with
-    older versioning schemes.
-
-    Args:
-        framework: Framework name (vllm, sglang, trtllm)
-        repo_path: Path to the Dynamo repository
-
-    Returns:
-        The complete base image tag (e.g., "dynamo-base:v0.7.0.dev.046229f2f-vllm")
-
-    Raises:
-        RuntimeError: If unable to extract base image tag from build.sh output
-    """
-    try:
-        # Run build.sh --dry-run to get docker commands for base image build
-        result = subprocess.run(
-            f"{repo_path}/container/build.sh --dry-run --framework {framework} --target base",
-            shell=True,
-            cwd=repo_path,
-            capture_output=True,
-            text=True,
-            timeout=30
-        )
-
-        output = result.stdout.strip()
-
-        # Look for the base image tag in the output
-        # Expected format: --tag dynamo-base:v{VERSION}-{framework}
-        # Example: --tag dynamo-base:v0.7.0.post1.dev.046229f2f-vllm
-        tag_match = re.search(r'--tag\s+(dynamo-base:[^\s]+)', output)
-        if not tag_match:
-            raise RuntimeError(f"Could not extract base image tag from build.sh output. Output: {output[:200]}")
-
-        primary_tag = tag_match.group(1)
-
-        # Check if the primary tag exists as a Docker image using docker inspect
-        def image_exists(tag: str) -> bool:
-            check_result = subprocess.run(
-                f"docker inspect {tag} > /dev/null 2>&1",
-                shell=True,
-                capture_output=False
-            )
-            return check_result.returncode == 0
-
-        if image_exists(primary_tag):
-            return primary_tag
-
-        # If not found, try without .postN suffix (for backward compatibility)
-        # Example: v0.7.0.post1.dev.046229f2f -> v0.7.0.dev.046229f2f
-        fallback_tag = primary_tag.replace('.post1.', '.').replace('.post2.', '.').replace('.post3.', '.')
-
-        if fallback_tag != primary_tag and image_exists(fallback_tag):
-            logger.info(f"  Primary tag not found, using fallback: {fallback_tag}")
-            return fallback_tag
-
-        # Neither primary nor fallback found - return primary tag so build will create it
-        return primary_tag
-
-    except subprocess.TimeoutExpired:
-        raise RuntimeError("build.sh --dry-run timed out while extracting base image tag")
-    except Exception as e:
-        raise RuntimeError(f"Failed to extract base image tag from build.sh: {e}")
 
 
 def extract_version_from_build_sh(framework: str, repo_path: Path) -> str:
@@ -367,37 +200,25 @@ def create_task_graph(framework: str, sha: str, repo_path: Path, version: Option
 
     Returns:
         Dictionary mapping task IDs to task instances
-        
+
     Image Dependency Chain:
-        The docker_command_filter uses function composition to transform build commands:
+        build.sh is executed directly for each target. Dependencies are enforced
+        through the task graph parent relationships.
 
-        1. Base image (produces: dynamo-base:{version}-{framework}):
-           rename_output_tag(base_image_tag, select_command(0))
+        1. Runtime image: build.sh --target runtime
+           → Produces: dynamo:{version}-{framework}-runtime
 
-        2. Runtime image (consumes: base, produces: dynamo:{version}-{framework}-runtime):
-           rename_output_tag(runtime_image_tag,
-               rename_input_tag(base_image_tag, select_command(1)))
+        2. Dev image: build.sh --target dev (waits for runtime)
+           → Produces: dynamo:{version}-{framework}-dev
 
-        3. Dev image (consumes: base, produces: dynamo:{version}-{framework}-dev):
-           rename_output_tag(dev_image_tag,
-               rename_input_tag(base_image_tag, select_command(1)))
+        3. Local-dev image: build.sh --target local-dev (waits for dev)
+           → Uses --build-arg DEV_BASE to reference dev image
+           → Produces: dynamo:{version}-{framework}-local-dev
 
-        4. Local-dev image (consumes: dev, produces: dynamo:{version}-{framework}-local-dev):
-           rename_output_tag(local_dev_image_tag,
-               rename_input_tag(dev_image_tag, select_command(2)))
-
-        Each function in the chain wraps the next:
-        - select_command(index): Selects docker command from build.sh output
-        - rename_input_tag(tag): Sets --build-arg DYNAMO_BASE_IMAGE=<tag>
-        - rename_output_tag(tag): Sets --tag <tag>
-
-        Note: We use build.sh --no-tag-latest to prevent automatic 'latest' tag creation,
-        rather than filtering it out with regex post-processing.
-
-        Result: Input and output images match parent/child dependencies perfectly.
+        Note: We use --no-tag-latest to prevent automatic 'latest' tag creation.
     """
     # Task ID format: framework-target-type (all lowercase)
-    # Example: vllm-base-build, vllm-dev-compilation, vllm-runtime-sanity
+    # Example: vllm-runtime-build, vllm-dev-compilation, vllm-runtime-sanity
 
     # Extract version from build.sh if not provided
     if version is None:
@@ -405,30 +226,13 @@ def create_task_graph(framework: str, sha: str, repo_path: Path, version: Option
 
     tasks: Dict[str, BaseTask] = {}
 
-    # Level 0: Base image build
-    # Extract the exact base image tag from build.sh to match existing images
-    base_image_tag = extract_base_image_tag_from_build_sh(framework, repo_path)
-    tasks[f"{framework}-base-build"] = BuildTask(
-        task_id=f"{framework}-base-build",
-        description=f"Build {framework.upper()} base image",
-        command=f"{repo_path}/container/build.sh --dry-run --no-tag-latest --framework {framework} --target runtime",
-        output_image=base_image_tag,
-        docker_command_filter=rename_output_tag(base_image_tag, select_command(0)),
-        timeout=1200.0,  # 20 minutes for builds
-    )
-
-    # Level 1: Runtime image build
+    # Level 0: Runtime image build (builds directly from CUDA base image)
     runtime_image_tag = f"dynamo:{version}-{framework}-runtime"
     tasks[f"{framework}-runtime-build"] = BuildTask(
         task_id=f"{framework}-runtime-build",
         description=f"Build {framework.upper()} runtime image",
-        command=f"{repo_path}/container/build.sh --dry-run --no-tag-latest --framework {framework} --target runtime",
-        input_image=base_image_tag,
+        command=f"{repo_path}/container/build.sh --no-tag-latest --framework {framework} --target runtime",
         output_image=runtime_image_tag,
-        docker_command_filter=rename_output_tag(runtime_image_tag,
-            rename_input_tag(base_image_tag,
-                select_command(1))),
-        parents=[f"{framework}-base-build"],
         timeout=1200.0,  # 20 minutes for builds
     )
 
@@ -443,18 +247,14 @@ def create_task_graph(framework: str, sha: str, repo_path: Path, version: Option
         ignore_exit_code=True,  # Runtime may fail some checks, we only care about Dynamo paths
     )
 
-    # Level 2: Dev image build (runs after runtime for better parallelization)
+    # Level 1: Dev image build (waits for runtime to complete)
     dev_image_tag = f"dynamo:{version}-{framework}-dev"
     tasks[f"{framework}-dev-build"] = BuildTask(
         task_id=f"{framework}-dev-build",
         description=f"Build {framework.upper()} dev image",
-        command=f"{repo_path}/container/build.sh --dry-run --no-tag-latest --framework {framework} --target dev",
-        input_image=base_image_tag,
+        command=f"{repo_path}/container/build.sh --no-tag-latest --framework {framework} --target dev",
         output_image=dev_image_tag,
-        docker_command_filter=rename_output_tag(dev_image_tag,
-            rename_input_tag(base_image_tag,
-                select_command(1))),
-        parents=[f"{framework}-runtime-build"],  # Wait for runtime to complete first
+        parents=[f"{framework}-runtime-build"],
         timeout=1200.0,  # 20 minutes for builds
     )
 
@@ -500,12 +300,9 @@ def create_task_graph(framework: str, sha: str, repo_path: Path, version: Option
     tasks[f"{framework}-local-dev-build"] = BuildTask(
         task_id=f"{framework}-local-dev-build",
         description=f"Build {framework.upper()} local-dev image",
-        command=f"{repo_path}/container/build.sh --dry-run --no-tag-latest --framework {framework} --target local-dev",
+        command=f"{repo_path}/container/build.sh --no-tag-latest --framework {framework} --target local-dev",
         input_image=dev_image_tag,
         output_image=local_dev_image_tag,
-        docker_command_filter=rename_output_tag(local_dev_image_tag,
-            rename_dev_base_tag(dev_image_tag,
-                select_command(2))),
         parents=[f"{framework}-dev-build"],
         timeout=1200.0,  # 20 minutes for builds
     )
@@ -933,17 +730,8 @@ class BuildTask(BaseTask):
     """
     Task for building Docker images.
 
-    Additional attributes:
-        docker_command_filter: Optional function to filter/select and transform docker commands
-                              Takes List[str] of commands, returns Optional[str] (selected and transformed command)
-                              Can chain: selection -> rename_input_tag -> rename_output_tag
-        original_build_command: Full output from build.sh --dry-run (all docker commands)
-        actual_build_command: The extracted and transformed docker command to execute
+    Executes build.sh directly (no longer parses --dry-run output).
     """
-
-    docker_command_filter: Optional[Callable[[List[str]], Optional[str]]] = None
-    original_build_command: Optional[str] = field(default=None, init=False, repr=False)
-    actual_build_command: Optional[str] = field(default=None, init=False, repr=False)
 
     def __post_init__(self):
         super().__post_init__()
@@ -962,19 +750,15 @@ class BuildTask(BaseTask):
         """
         Execute Docker build.
 
-        Runs the extracted and filtered docker build command directly.
+        Runs build.sh directly (no longer extracts/filters commands).
         """
         if dry_run:
             self.logger.info("Dry-run mode: skipping actual execution")
             return True
-        
-        # Get the actual docker build command (extracted and filtered)
-        docker_cmd = self.extract_docker_command_from_build_dryrun(repo_path)
-        if not docker_cmd:
-            self.logger.error("Failed to extract docker build command")
-            return False
-        
-        exit_code = self._run_command(docker_cmd, repo_path)
+
+        # Run build.sh directly
+        command = self.get_command(repo_path)
+        exit_code = self._run_command(command, repo_path)
         return exit_code == 0
 
     def image_exists(self) -> bool:
@@ -1003,88 +787,25 @@ class BuildTask(BaseTask):
         return get_docker_image_size(self.output_image)
 
     def get_command(self, repo_path: Path) -> str:
-        """Get the build.sh wrapper command (not the underlying docker command)"""
+        """Get the build.sh command to execute"""
         # Return the build.sh command stored in self.command
-        # e.g., "/path/to/build.sh --framework vllm --target runtime --dry-run"
+        # e.g., "/path/to/build.sh --framework vllm --target runtime --no-tag-latest"
         return self.command
     
     def format_log_header(self, repo_path: Path) -> str:
         """
-        Format the log file header for BuildTask with Proposed/Original/Actual commands.
-        
+        Format the log file header for BuildTask.
+
         Returns:
             Formatted header string
         """
         from datetime import datetime
         header = f"Task:              {self.task_id}\n"
         header += f"Description:       {self.description}\n"
-        header += f"Proposed Command:  {sanitize_token(self.get_command(repo_path))}\n"
-        
-        # Add Original and Actual commands if available
-        if self.original_build_command:
-            header += f"Original Command:  {sanitize_token(self.original_build_command)}\n"
-        docker_cmd = self.extract_docker_command_from_build_dryrun(repo_path)
-        if docker_cmd:
-            header += f"Actual Command:    {sanitize_token(docker_cmd)}\n"
-        
+        header += f"Command:           {sanitize_token(self.get_command(repo_path))}\n"
         header += f"Started:           {datetime.now().isoformat()}\n"
         header += "=" * 80 + "\n\n"
         return header
-
-    def extract_docker_command_from_build_dryrun(self, repo_path: Path) -> Optional[str]:
-        """Extract the underlying docker build command by running build.sh --dry-run
-
-        Uses the explicit command stored in self.command (e.g., "build.sh --framework vllm --target dev --dry-run")
-
-        This populates:
-        - original_build_command: All docker commands from build.sh --dry-run
-        - Returns: The selected and transformed docker command
-
-        Returns:
-            The docker command after applying docker_command_filter (which can chain selection + transformations)
-        """
-        if not self.command:
-            return None
-
-        try:
-            result = subprocess.run(
-                self.command,
-                shell=True,
-                cwd=repo_path,
-                capture_output=True,
-                text=True,
-                timeout=30  # Increased timeout for slower systems
-            )
-            # build.sh --dry-run prints docker build commands
-            output = result.stdout.strip()
-            docker_commands = []
-            for line in output.split('\n'):
-                line = line.strip()
-                # Look for lines with "docker build" (may be prefixed with "echo")
-                if 'docker build' in line:
-                    # Remove "echo" prefix if present
-                    if line.startswith('echo '):
-                        line = line[5:]
-                    docker_commands.append(line)
-
-            # Store original commands
-            self.original_build_command = '\n'.join(docker_commands) if docker_commands else None
-
-            # Apply filter function if provided (handles selection + transformation)
-            if self.docker_command_filter:
-                selected_command = self.docker_command_filter(docker_commands)
-            else:
-                # Default: return all commands joined with newlines
-                selected_command = '\n'.join(docker_commands) if docker_commands else None
-
-            return selected_command
-
-        except subprocess.TimeoutExpired:
-            # Timeout - build.sh --dry-run took too long
-            return None
-        except Exception:
-            # Silently fail - don't break tree visualization
-            return None
 
 
 # ==============================================================================
@@ -1627,18 +1348,7 @@ def execute_task_sequential(
 
     # Execute this task
     logger.info(f"Executing: {task_id} ({task.description})")
-    
-    # For BuildTask, show Proposed/Original/Actual. For others, show Command
-    if isinstance(task, BuildTask):
-        logger.info(f"  Proposed Command:  {sanitize_token(task.get_command(repo_path))}")
-        docker_cmd = task.extract_docker_command_from_build_dryrun(repo_path)
-        if task.original_build_command:
-            logger.info(f"  Original Command:  {sanitize_token(task.original_build_command)}")
-        if docker_cmd:
-            logger.info(f"  Actual Command:    {sanitize_token(docker_cmd)}")
-    else:
-        logger.info(f"  Command:           {sanitize_token(task.get_command(repo_path))}")
-    
+    logger.info(f"  Command:           {sanitize_token(task.get_command(repo_path))}")
     logger.info(f"  Log:               {task.log_file}")
 
     # Clean up existing files for THIS specific task only (now that we know it will run)
@@ -1862,18 +1572,7 @@ def execute_task_parallel(
         
         with lock:
             logger.info(f"Executing: {task_id} ({task.description})")
-            
-            # For BuildTask, show Proposed/Original/Actual. For others, show Command
-            if isinstance(task, BuildTask):
-                logger.info(f"  Proposed Command:  {sanitize_token(task.get_command(repo_path))}")
-                docker_cmd = task.extract_docker_command_from_build_dryrun(repo_path)
-                if task.original_build_command:
-                    logger.info(f"  Original Command:  {sanitize_token(task.original_build_command)}")
-                if docker_cmd:
-                    logger.info(f"  Actual Command:    {sanitize_token(docker_cmd)}")
-            else:
-                logger.info(f"  Command:           {sanitize_token(task.get_command(repo_path))}")
-            
+            logger.info(f"  Command:           {sanitize_token(task.get_command(repo_path))}")
             logger.info(f"  Log:               {task.log_file}")
         
         # Clean up existing files for THIS specific task only (now that we know it will run)
@@ -2079,7 +1778,7 @@ def initialize_frameworks_data_cache(
     hostname = DEFAULT_HOSTNAME
     html_path = DEFAULT_HTML_PATH
     frameworks_data: Dict[str, Dict[str, Any]] = {}
-    targets = ['base', 'runtime', 'dev', 'local-dev']
+    targets = ['runtime', 'dev', 'local-dev']
     
     # Determine which frameworks are actually being run (present in all_tasks)
     frameworks_in_all_tasks = set()
@@ -2294,10 +1993,19 @@ def generate_html_report(
     succeeded = sum(1 for t in all_tasks.values() if t.status == TaskStatus.SUCCESS)
     failed = sum(1 for t in all_tasks.values() if t.status == TaskStatus.FAILED)
     skipped = sum(1 for t in all_tasks.values() if t.status == TaskStatus.SKIPPED)
-    
-    # Determine overall status
-    overall_status = "✅ ALL TESTS PASSED" if failed == 0 else "❌ TESTS FAILED"
-    header_color = "#28a745" if failed == 0 else "#dc3545"
+    running = sum(1 for t in all_tasks.values() if t.status == TaskStatus.RUNNING)
+    queued = sum(1 for t in all_tasks.values() if t.status == TaskStatus.QUEUED)
+
+    # Determine overall status (priority: failed > running/queued > success)
+    if failed > 0:
+        overall_status = "❌ TESTS FAILED"
+        header_color = "#dc3545"  # Red
+    elif running > 0 or queued > 0:
+        overall_status = "🔄 BUILD IN PROGRESS"
+        header_color = "#ffc107"  # Yellow
+    else:
+        overall_status = "✅ ALL TESTS PASSED"
+        header_color = "#28a745"  # Green
     
     # Get git information
     commit_info: Dict[str, Any] = {}
@@ -2351,7 +2059,7 @@ def generate_html_report(
     frameworks_dict = {}
     for framework in FRAMEWORKS:
         frameworks_dict[framework] = {}
-        for target in ['base', 'runtime', 'dev', 'local-dev']:
+        for target in ['runtime', 'dev', 'local-dev']:
             frameworks_dict[framework][target] = frameworks_data[framework][target].to_dict()
     
     # Load Jinja2 template
@@ -2389,14 +2097,6 @@ def generate_html_report(
     #   },
     #   'frameworks': {
     #       'vllm': {
-    #           'base': {
-    #               'build': {'status': 'SUCCESS', 'time': '74.9s', 'log_file': '2025-10-31.f2a3c63.vllm-base.log'},
-    #               'compilation': None,
-    #               'sanity': None,
-    #               'image_size': '8.5GB',
-    #               'input_image': 'nvidia/cuda:12.4.1-devel-ubuntu22.04',
-    #               'output_image': 'dynamo-base:f2a3c638d',
-    #           },
     #           'runtime': {
     #               'build': {'status': 'SUCCESS', 'time': '45.2s', 'log_file': '...'},
     #               'compilation': None,
