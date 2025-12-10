@@ -389,7 +389,7 @@ class CommitHistoryGenerator:
         composite_to_commits = {}  # Maps composite_sha to list of commit SHAs
 
         # Status priority for conflict resolution (higher number = higher priority)
-        status_priority = {'success': 1, 'building': 2, 'failed': 3}
+        status_priority = {'unknown': 0, 'success': 1, 'building': 2, 'failed': 3}
 
         # Pass 1: Collect all statuses and map composite SHA to commits
         for commit in commit_data:
@@ -416,20 +416,25 @@ class CommitHistoryGenerator:
                     except ValueError:
                         log_paths[sha_short] = str(log_path)
 
-                    # Determine build status by checking for FAIL files
+                    # Determine build status by checking for RUNNING, FAIL, and PASS files
                     log_dir = log_path.parent
+                    running_pattern = str(log_dir / f"*.{sha_short}.*.RUNNING")
                     fail_pattern = str(log_dir / f"*.{sha_short}.*.FAIL")
                     pass_pattern = str(log_dir / f"*.{sha_short}.*.PASS")
 
+                    running_files = glob.glob(running_pattern)
                     fail_files = glob.glob(fail_pattern)
                     pass_files = glob.glob(pass_pattern)
 
-                    if fail_files:
+                    # Priority: RUNNING > FAIL > PASS
+                    if running_files:
+                        status = 'building'
+                    elif fail_files:
                         status = 'failed'
                     elif pass_files:
                         status = 'success'
                     else:
-                        status = 'building'
+                        status = 'unknown'
 
                     # Update composite SHA status with priority (failed > building > success)
                     if composite_sha not in composite_to_status:
@@ -439,12 +444,10 @@ class CommitHistoryGenerator:
                         if status_priority[status] > status_priority[composite_to_status[composite_sha]]:
                             composite_to_status[composite_sha] = status
                 else:
-                    # No report yet, assume building
+                    # No report yet, status unknown
                     if composite_sha not in composite_to_status:
-                        composite_to_status[composite_sha] = 'building'
-                    elif composite_to_status[composite_sha] == 'success':
-                        # Building has higher priority than success
-                        composite_to_status[composite_sha] = 'building'
+                        composite_to_status[composite_sha] = 'unknown'
+                    # Don't override existing status if we have no information
 
         # Pass 2: Assign status to all commits based on composite SHA
         # Commits with logs get regular status, commits without logs get inherited status
