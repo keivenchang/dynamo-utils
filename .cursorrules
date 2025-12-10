@@ -663,7 +663,7 @@ FIRST/INITIAL commits (when branch has no commits yet): verbose format with desc
 Output format (fill <PR#NUMBER>, verify line counts, map GitHub to Slack logins). If <PR#NUMBER> is unknown, ask.
 ```
 RFR (code: +123/-55 lines, documents: 50 lines changed):
-*feat:* DIS-123 some feature desc here
+*feat:* DIS-3456 some feature desc here
 *PR:* http://github.com/ai-dynamo/dynamo/pull/<PR#NUMBER>
 *Reviewers:* <top reviewers based on past commits>, @Ryan McCormick, @Tanmay Verma
 ```
@@ -707,7 +707,7 @@ Output in plain text surrounded by triple backticks (no formatting):
 
 #### Related Issues: (use Closes / Fixes / Resolves / Relates to)
 
-<!-- Linear ticket (DIS-123, DYN-789) extracted from commits, or leave blank -->
+<!-- Linear ticket (DIS-1123, DYN-1789, OPS-4321) extracted from commits, or leave blank -->
 
 /coderabbit profile chill
 ```
