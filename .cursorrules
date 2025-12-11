@@ -169,10 +169,35 @@ DO NOT use these BS words in docs/comments:
 - This allows monitoring while keeping the terminal responsive
 
 ### 2.3.3 Piping and Filtering
-BEST PRACTICE: When running commands that produce output you want to analyze, pipe to a temp file instead of using grep filters.
-- This lets you run the command once and analyze the full output multiple times
-- Example: docker ps -a > /tmp/containers.txt (instead of docker ps -a | grep something)
-- You can then grep/analyze /tmp/containers.txt without re-running the command
+**CRITICAL BEST PRACTICE: ALWAYS redirect ENTIRE output to temp file and background it - NEVER use grep/head/tail/any processing on command output directly.**
+
+**Correct pattern (ALWAYS use this):**
+```bash
+command > /tmp/output.txt 2>&1 &
+# or for interactive monitoring:
+command 2>&1 | tee /tmp/output.txt &
+```
+
+**ABSOLUTE RULES:**
+- ✅ **DO:** Redirect the ENTIRE, UNPROCESSED output to a temp file
+- ✅ **DO:** Background long-running commands with `&`
+- ✅ **DO:** Capture both stdout and stderr with `2>&1`
+- ❌ **NEVER:** Use `| grep` on command output directly
+- ❌ **NEVER:** Use `| head` on command output directly  
+- ❌ **NEVER:** Use `| tail` on command output directly
+- ❌ **NEVER:** Apply ANY filtering or processing in the pipeline
+- ❌ **NEVER:** Lose information by filtering before saving
+
+**Why:**
+- Run the command ONCE and analyze the full output multiple times
+- Preserves ALL information - no data loss
+- Allows multiple different analyses on the saved file
+- You can grep/head/tail the temp file without re-running the command
+
+**Examples:**
+- `docker ps -a > /tmp/containers.txt` ✅ (NOT `docker ps -a | grep something` ❌)
+- `cargo test > /tmp/test.txt 2>&1 &` ✅ (NOT `cargo test | grep PASS` ❌)
+- `kubectl get pods > /tmp/pods.txt` ✅ (NOT `kubectl get pods | head -20` ❌)
 
 Filter out unimportant cargo test output with grep -v:
 - "running 0 tests"
