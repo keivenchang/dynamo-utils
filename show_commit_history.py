@@ -384,7 +384,7 @@ class CommitHistoryGenerator:
             previous_composite_sha = composite_sha
         
         # Build log paths dictionary and status indicators
-        log_paths = {}
+        log_paths = {}  # Maps sha_short to list of (date, path) tuples
         composite_to_status = {}  # Maps composite_sha to status (with priority: failed > building > success)
         composite_to_commits = {}  # Maps composite_sha to list of commit SHAs
 
@@ -401,53 +401,79 @@ class CommitHistoryGenerator:
                 composite_to_commits[composite_sha] = []
             composite_to_commits[composite_sha].append(sha_short)
 
-            if sha_short in docker_images and docker_images[sha_short]:
-                # Search for build log
-                log_filename = f"*.{sha_short}.report.html"
-                search_pattern = str(logs_dir / "*" / log_filename)
-                matching_logs = glob.glob(search_pattern)
+            # Search for ALL build logs (independent of Docker image existence)
+            log_filename = f"*.{sha_short}.report.html"
+            search_pattern = str(logs_dir / "*" / log_filename)
+            matching_logs = glob.glob(search_pattern)
 
-                if matching_logs:
-                    log_path = Path(sorted(matching_logs)[-1])
+            if matching_logs:
+                # Store all build attempts with dates
+                log_paths[sha_short] = []
+                for log_file in sorted(matching_logs):
+                    log_path = Path(log_file)
+                    # Extract date from filename (format: YYYY-MM-DD.sha.report.html)
+                    date_str = log_path.name.split('.')[0]
                     try:
                         nvidia_dir = Path.home() / 'nvidia'
                         relative_parts = log_path.relative_to(nvidia_dir)
-                        log_paths[sha_short] = f"../{relative_parts}"
+                        log_paths[sha_short].append((date_str, f"../{relative_parts}"))
                     except ValueError:
-                        log_paths[sha_short] = str(log_path)
+                        log_paths[sha_short].append((date_str, str(log_path)))
 
-                    # Determine build status by checking for RUNNING, FAIL, and PASS files
-                    log_dir = log_path.parent
-                    running_pattern = str(log_dir / f"*.{sha_short}.*.RUNNING")
-                    fail_pattern = str(log_dir / f"*.{sha_short}.*.FAIL")
-                    pass_pattern = str(log_dir / f"*.{sha_short}.*.PASS")
+                # Use the most recent log for status determination
+                log_path = Path(sorted(matching_logs)[-1])
 
-                    running_files = glob.glob(running_pattern)
-                    fail_files = glob.glob(fail_pattern)
-                    pass_files = glob.glob(pass_pattern)
+                # Determine build status by traversing build history chronologically
+                # Traverse from oldest to newest, updating status as we go
+                log_dir = log_path.parent
+                all_status_files = []
 
-                    # Priority: RUNNING > FAIL > PASS
-                    if running_files:
-                        status = 'building'
-                    elif fail_files:
-                        status = 'failed'
-                    elif pass_files:
-                        status = 'success'
-                    else:
-                        status = 'unknown'
+                # Collect all status files for this SHA (from all dates)
+                for status_suffix in ['RUNNING', 'FAIL', 'PASS']:
+                    pattern = str(log_dir / f"*.{sha_short}.*.{status_suffix}")
+                    all_status_files.extend(glob.glob(pattern))
 
-                    # Update composite SHA status with priority (failed > building > success)
-                    if composite_sha not in composite_to_status:
-                        composite_to_status[composite_sha] = status
-                    else:
-                        # If new status has higher priority, replace it
-                        if status_priority[status] > status_priority[composite_to_status[composite_sha]]:
-                            composite_to_status[composite_sha] = status
+                status = 'unknown'  # Default status
+                if all_status_files:
+                    # Extract dates from filenames (format: YYYY-MM-DD.sha.task.STATUS)
+                    # Group files by date for chronological traversal
+                    from collections import defaultdict
+                    files_by_date = defaultdict(list)
+                    for f in all_status_files:
+                        filename = Path(f).name
+                        date_part = filename.split('.')[0]  # Extract YYYY-MM-DD
+                        files_by_date[date_part].append(f)
+
+                    # Traverse dates chronologically (oldest to newest)
+                    for date in sorted(files_by_date.keys()):
+                        date_files = files_by_date[date]
+
+                        # Check status for this date's build run
+                        running_files = [f for f in date_files if f.endswith('.RUNNING')]
+                        fail_files = [f for f in date_files if f.endswith('.FAIL')]
+                        pass_files = [f for f in date_files if f.endswith('.PASS')]
+
+                        # Update status based on this build run (priority: FAIL > RUNNING > PASS)
+                        if fail_files:
+                            status = 'failed'
+                        elif running_files:
+                            status = 'building'
+                        elif pass_files:
+                            status = 'success'
+                        # If this date has no files, keep previous status
+
+                # Update composite SHA status with priority (failed > building > success)
+                if composite_sha not in composite_to_status:
+                    composite_to_status[composite_sha] = status
                 else:
-                    # No report yet, status unknown
-                    if composite_sha not in composite_to_status:
-                        composite_to_status[composite_sha] = 'unknown'
-                    # Don't override existing status if we have no information
+                    # If new status has higher priority, replace it
+                    if status_priority[status] > status_priority[composite_to_status[composite_sha]]:
+                        composite_to_status[composite_sha] = status
+            else:
+                # No report yet, status unknown
+                if composite_sha not in composite_to_status:
+                    composite_to_status[composite_sha] = 'unknown'
+                # Don't override existing status if we have no information
 
         # Pass 2: Assign status to all commits based on composite SHA
         # Commits with logs get regular status, commits without logs get inherited status

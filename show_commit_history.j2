@@ -2,8 +2,9 @@
 <html>
 <head>
 <meta charset="UTF-8">
+<meta http-equiv="refresh" content="900">
 <title>Dynamo Commit History</title>
-<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📋</text></svg>">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect x='15' y='55' width='70' height='20' rx='3' fill='%232196f3'/><rect x='20' y='40' width='60' height='20' rx='3' fill='%234caf50'/><rect x='25' y='25' width='50' height='20' rx='3' fill='%23ff9800'/></svg>">
 <style>
 body {
     font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif;
@@ -180,6 +181,39 @@ function toggleDockerImages(event, linkElement) {
     }
 }
 
+function toggleBuildHistory(event, shaShort) {
+    event.preventDefault();
+    event.stopPropagation();
+
+    var historyDiv = document.getElementById('build-history-' + shaShort);
+
+    // Close all other build history dropdowns
+    var allHistories = document.querySelectorAll('[id^="build-history-"]');
+    allHistories.forEach(function(div) {
+        if (div.id !== 'build-history-' + shaShort) {
+            div.style.display = 'none';
+        }
+    });
+
+    // Toggle this one
+    if (historyDiv.style.display === 'none' || historyDiv.style.display === '') {
+        historyDiv.style.display = 'block';
+    } else {
+        historyDiv.style.display = 'none';
+    }
+}
+
+// Close build history dropdown when clicking outside
+document.addEventListener('click', function(event) {
+    if (!event.target.closest('[onclick^="toggleBuildHistory"]') &&
+        !event.target.closest('[id^="build-history-"]')) {
+        var allHistories = document.querySelectorAll('[id^="build-history-"]');
+        allHistories.forEach(function(div) {
+            div.style.display = 'none';
+        });
+    }
+});
+
 function copyToClipboard(text, button) {
     // Fallback for non-HTTPS contexts (file:// protocol)
     var textArea = document.createElement('textarea');
@@ -345,7 +379,7 @@ function copyFromClipboardAttr(button) {
 {%- endif -%}
 </td>
 <td class="sha">
-{%- set log_path = log_paths.get(sha_short) -%}
+{%- set log_paths_list = log_paths.get(sha_short, []) -%}
 {%- set status_info = build_status.get(sha_short, {}) -%}
 {%- set status = status_info.get('status', 'unknown') -%}
 {%- set inherited = status_info.get('inherited', False) -%}
@@ -359,15 +393,28 @@ function copyFromClipboardAttr(button) {
 {%- elif status == 'unknown' -%}
 <span class="status-indicator status-unknown" title="No build status available"></span>
 {%- endif -%}
-{%- if has_docker_images or has_gitlab -%}
-{%- if log_path -%}
-<span style="background-color: {{ composite_bg_color }}; padding: 2px 6px; border-radius: 3px;"><a href="{{ log_path }}" target="_blank" style="color: #0969da; text-decoration: none;" title="View build logs">{{ composite_sha }}</a></span>
-{%- else -%}
-<span style="background-color: {{ composite_bg_color }}; padding: 2px 6px; border-radius: 3px;">{{ composite_sha }}</span>
+{%- if log_paths_list -%}
+{# Most recent build (last in list) #}
+{%- set latest_date, latest_path = log_paths_list[-1] -%}
+<span style="background-color: {{ composite_bg_color }}; padding: 2px 6px; border-radius: 3px;"><a href="{{ latest_path }}" target="_blank" style="color: #0969da; text-decoration: none;" title="View build logs ({{ latest_date }})">{{ composite_sha }}</a></span>
+{# Show history icon if multiple builds exist #}
+{%- if log_paths_list|length > 1 -%}
+<a href="#" onclick="toggleBuildHistory(event, '{{ sha_short }}'); return false;" style="text-decoration: none; margin-left: 2px; font-size: 11px; color: #656d76;" title="Show build history ({{ log_paths_list|length }} builds)">📋</a>
+<div id="build-history-{{ sha_short }}" style="display: none; position: absolute; background: #fff; border: 1px solid #d0d7de; border-radius: 6px; padding: 8px; margin-top: 4px; z-index: 1000; box-shadow: 0 8px 24px rgba(140, 149, 159, 0.2);">
+<div style="font-weight: 600; font-size: 12px; margin-bottom: 6px; color: #24292f;">Build History</div>
+{%- for date, path in log_paths_list|reverse -%}
+<div style="padding: 4px 0;"><a href="{{ path }}" target="_blank" style="color: #0969da; text-decoration: none; font-size: 12px;">{{ date }}</a>{%- if loop.first -%} <span style="color: #656d76; font-size: 11px;">(latest)</span>{%- endif -%}</div>
+{%- endfor -%}
+</div>
 {%- endif -%}
+{%- if has_docker_images or has_gitlab -%}
  <a href="#" class="composite-sha-link" onclick="toggleDockerImages(event, this); return false;" style="text-decoration: none; margin-left: 4px;" title="Show Docker images">▶</a>
+{%- endif -%}
 {%- else -%}
 <span style="background-color: {{ composite_bg_color }}; padding: 2px 6px; border-radius: 3px;">{{ composite_sha }}</span>
+{%- if has_docker_images or has_gitlab -%}
+ <a href="#" class="composite-sha-link" onclick="toggleDockerImages(event, this); return false;" style="text-decoration: none; margin-left: 4px;" title="Show Docker images">▶</a>
+{%- endif -%}
 {%- endif -%}
 </td>
 <td class="date">{{ date_str }}</td>
