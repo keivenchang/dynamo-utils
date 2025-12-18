@@ -178,7 +178,7 @@ DO NOT use these BS words in docs/comments:
 - This allows monitoring while keeping the terminal responsive
 
 ### 2.3.3 Piping and Filtering
-**CRITICAL BEST PRACTICE: ALWAYS redirect ENTIRE output to temp file and background it - NEVER use grep/head/tail/any processing on command output directly.**
+**CRITICAL BEST PRACTICE: For long-running or expensive commands, ALWAYS capture the full, unprocessed output first (to a temp file) and only filter that saved file afterward.**
 
 **Correct pattern (ALWAYS use this):**
 ```bash
@@ -188,14 +188,11 @@ command 2>&1 | tee /tmp/output.txt &
 ```
 
 **ABSOLUTE RULES:**
-- ✅ **DO:** Redirect the ENTIRE, UNPROCESSED output to a temp file
+- ✅ **DO:** Redirect the ENTIRE, UNPROCESSED output to a temp file (or `tee` it)
 - ✅ **DO:** Background long-running commands with `&`
 - ✅ **DO:** Capture both stdout and stderr with `2>&1`
-- ❌ **NEVER:** Use `| grep` on command output directly
-- ❌ **NEVER:** Use `| head` on command output directly  
-- ❌ **NEVER:** Use `| tail` on command output directly
-- ❌ **NEVER:** Apply ANY filtering or processing in the pipeline
-- ❌ **NEVER:** Lose information by filtering before saving
+- ❌ **NEVER:** Pipe the output of long-running/expensive commands into `grep`, `head`, `tail`, or similar filters
+- ❌ **NEVER:** Lose information by filtering before saving the full output
 
 **Why:**
 - Run the command ONCE and analyze the full output multiple times
@@ -208,7 +205,8 @@ command 2>&1 | tee /tmp/output.txt &
 - `cargo test > /tmp/test.txt 2>&1 &` ✅ (NOT `cargo test | grep PASS` ❌)
 - `kubectl get pods > /tmp/pods.txt` ✅ (NOT `kubectl get pods | head -20` ❌)
 
-Filter out unimportant cargo test output with grep -v:
+When reviewing saved logs, filter out unimportant cargo test output (on the saved file, not the live command output):
+- Example: `grep -v -E "running 0 tests|test result: ok\\. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out|tower_http::trace::on_failure:" /tmp/test.txt`
 - "running 0 tests"
 - "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out"
 - "tower_http::trace::on_failure:"
@@ -408,7 +406,7 @@ Without this: tests fail with "Connection refused" on port 8081
 
 ## 4.4 Rust Development
 
-### 4.5.1 Code Style
+### 4.4.1 Code Style
 - snake_case for variables/functions
 - PascalCase for types/traits
 - Use explicit types when it improves readability
@@ -420,7 +418,7 @@ Without this: tests fail with "Connection refused" on port 8081
   - Exception: `if !x then A` (without else) is fine
 - Use debug_assert* over assert*
 
-### 4.5.2 File Organization
+### 4.4.2 File Organization
 - lib.rs: Library entry point
 - mod.rs: Module definitions
 - Separate files per module
@@ -431,7 +429,7 @@ Without this: tests fail with "Connection refused" on port 8081
 - Development build: cargo build --locked --features dynamo-llm/block-manager --workspace
 - Clean builds: cargo clean
 - Before commit: cargo fmt (run on all affected directories)
-- See section 13.1 (Pre-Merge CI Checks) for comprehensive build/test/lint commands
+- See section 8.2 (Pre-Merge CI Checks) for comprehensive build/test/lint commands
 
 ### 4.4.4 Type Inference for Examples
 Add to top-level Cargo.toml [workspace] members (REMOVE BEFORE COMMIT):
@@ -464,7 +462,7 @@ integration = []  # Empty feature for rust-analyzer compatibility
 5. Restart rust-analyzer (Cmd/Ctrl+Shift+P → "Rust Analyzer: Restart Server")
 6. IMPORTANT: Restore all changes before committing
 
-### 4.5.4 Testing
+### 4.4.6 Testing
 - Write unit tests in same file (unless told otherwise)
 - Use #[cfg(test)] for test-only code
 - Mock external dependencies when mocks are available
@@ -475,7 +473,7 @@ integration = []  # Empty feature for rust-analyzer compatibility
 - For DistributedRuntime/Runtime/drt tests: use unique names (ns515, comp515, ep515)
   - See lib/runtime/src/metrics.rs for examples
 
-### 4.5.3 Error Handling
+### 4.4.7 Error Handling
 - Use Result<T, E> for fallible operations
 - Use Option<T> for nullable values
 - Prefer ? operator over match for error propagation
@@ -652,36 +650,61 @@ After resolving:
 - Never add untracked files (unless explicitly told)
 - List untracked files separately from modified files
 - Prompt to git add modified files
-- Diff changes and generate descriptive message
-- Single line message for straightforward changes
+- **BEFORE writing commit message:** Check `git log --oneline origin/main..HEAD`
+  - Empty output = FIRST commit = Use verbose format with prefix
+  - Shows commits = SUBSEQUENT commit = Use terse format without prefix
+- Diff changes and generate appropriate message based on commit position
 - For merge commits: use git commit -m "Merge ..." or git commit --no-edit
 
 ## 6.5 Commit Message Format
-Determine commit type by checking git history:
-- If NO commits exist on current branch (check with: git log --oneline origin/main..HEAD)
-  → Use FIRST/INITIAL commit format (verbose with prefix)
-- If commits already exist on current branch
-  → Use SUBSEQUENT commit format (terse, 1-2 lines)
 
-SUBSEQUENT commits (when branch already has commits): terse, 1 line or at most a couple lines
-- Quick fix of the module in XYZ
-- Documentation updates on XYZ
-- Minor changing the usage of XYZ
-- Renaming of XYZ to ZYX
-- Remove leftover merge conflict marker
+**CRITICAL: Determine commit type BEFORE writing the message**
+1. Check if branch has existing commits: `git log --oneline origin/main..HEAD`
+2. If output is EMPTY → This is the FIRST commit → Use INITIAL format
+3. If output shows commits → This is a SUBSEQUENT commit → Use SUBSEQUENT format
 
-FIRST/INITIAL commits (when branch has no commits yet): verbose format with description prefix (e.g. feat:, fix:, test:, ...)
+### FIRST/INITIAL COMMIT (when branch has NO commits yet)
+**Format:** Verbose with category prefix (feat:, fix:, docs:, etc.)
+**Length:** Full descriptive sentence
+**Examples:**
 - feat: add new user authentication system
 - fix: resolve memory leak in data processing
 - docs: update API documentation
 - test: add unit tests for user module
 - ci: configure continuous integration pipeline
-- refactor: restructure code for better readability
+- refactor: reuse code for better maintenance and readability
 - perf: optimize data processing for speed
 - chore: update dependencies and clean up
 - revert: undo previous commit due to issues
 - style: apply code formatting and style fixes
 - build: update build scripts for new environment
+
+### SUBSEQUENT COMMITS (when branch ALREADY has commits)
+**Format:** Terse, no prefix, straight to the point
+**Length:** 1 line preferred, 2 lines maximum
+**Examples:**
+- Quick fix of the module in XYZ
+- Documentation updates on XYZ
+- Minor changing the usage of XYZ
+- Renaming of XYZ to ZYX
+- Remove leftover merge conflict marker
+- Fix linting errors
+- Address review comments
+- Update test assertions
+
+**DO NOT DO (subsequent commits):**
+- ❌ Use category prefixes (save these for the FIRST commit):
+  - feat: ...
+  - fix: ...
+  - refactor: ...
+- ❌ Use WIP / placeholder messages:
+  - WIP
+  - tmp
+  - stuff
+- ❌ Write a multi-paragraph commit message (put details in the PR description instead)
+- ❌ Restate the entire PR purpose (the FIRST commit already does that)
+
+**Why this matters:** The first commit establishes the PR's primary purpose and shows up in git history. Subsequent commits are implementation details that get squashed during merge.
 
 ## 6.6 Git Integration (for parsing commit messages)
 - Format: `title (#PR_NUMBER)`
@@ -868,8 +891,9 @@ Check all directories that CI checks:
 (cd launch/dynamo-run && cargo clippy --no-deps --all-targets -- -D warnings)
 
 Find specific issues:
-cargo clippy --no-deps --all-targets -- -D warnings 2>&1 | grep -B 5 -A 10 "unused import"
-cargo clippy --no-deps --all-targets -- -D warnings 2>&1 | grep -E "^(error|warning)"
+cargo clippy --no-deps --all-targets -- -D warnings > /tmp/clippy.txt 2>&1
+grep -B 5 -A 10 "unused import" /tmp/clippy.txt
+grep -E "^(error|warning)" /tmp/clippy.txt
 
 ### 8.2.3 Rust Tests
 Run all tests (unit, doc, integration):
