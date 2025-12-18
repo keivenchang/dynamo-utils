@@ -430,6 +430,7 @@ find docs -name '*.md' -newer docs/build/html 2>/dev/null  # Find modified docs
 
 ## Important Reminders
 
+- **NEVER delete `nvidia/dynamo_latest/index.html`** - This is the production HTML page for commit history
 - Never commit sensitive information (credentials, tokens, etc.)
 - Always test changes locally before pushing
 - Use meaningful commit messages
