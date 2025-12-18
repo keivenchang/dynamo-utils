@@ -33,6 +33,7 @@ body {
 table {
     width: 100%;
     border-collapse: collapse;
+    table-layout: auto;
 }
 th {
     background-color: #f6f8fa;
@@ -43,11 +44,23 @@ th {
     position: sticky;
     top: 0;
     font-size: 12px;
+    white-space: nowrap;
 }
 td {
     padding: 6px 8px;
     border-bottom: 1px solid #d0d7de;
     vertical-align: top;
+}
+/* Make message column single line and flexible */
+td:last-child {
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 0;
+}
+/* Prevent wrapping in other columns */
+.sha, .date, .author {
+    white-space: nowrap;
 }
 tr:hover {
     background-color: #f6f8fa;
@@ -286,8 +299,52 @@ function copyFromClipboardAttr(button) {
 
 <div class="header">
 <h1>Dynamo Commit History</h1>
-<p style="margin: 5px 0 0 0; opacity: 0.9;">Recent commits with composite SHAs and Docker images</p>
+<p style="margin: 5px 0 0 0; opacity: 0.9;">Recent commits with Composite Docker SHAs (CDS) and Docker images</p>
 <p style="margin: 5px 0 0 0; opacity: 0.7; font-size: 12px;">Page generated: {{ generated_time }} <span id="page-age" style="color: #ffa657;"></span></p>
+</div>
+
+<!-- Key/Help Section -->
+<div style="margin: 20px 0; padding: 12px; background-color: #f6f8fa; border: 1px solid #d0d7de; border-radius: 6px;">
+<details>
+<summary style="cursor: pointer; font-weight: 600; font-size: 14px; color: #24292f; user-select: none;">
+Legend & Help
+</summary>
+<div style="margin-top: 12px; font-size: 13px; line-height: 1.6;">
+<div style="margin-bottom: 12px;">
+<div style="font-weight: 600; margin-bottom: 6px; color: #24292f;">Status Indicators:</div>
+<ul style="margin: 4px 0; padding-left: 20px;">
+<li><span class="status-indicator status-success" style="display: inline-block; vertical-align: middle;"></span> <strong>Green</strong> - All builds/compile/sanity passed</li>
+<li><span class="status-indicator status-failed" style="display: inline-block; vertical-align: middle;"></span> <strong>Red</strong> - Some builds/compile/sanity failed</li>
+<li><span class="status-indicator status-building" style="display: inline-block; vertical-align: middle;"></span> <strong>Yellow</strong> - Build in progress</li>
+<li><span class="status-indicator status-unknown" style="display: inline-block; vertical-align: middle;"></span> <strong>Gray</strong> - No build status available</li>
+<li><span class="status-indicator status-success-inherited" style="display: inline-block; vertical-align: middle;"></span> <strong>Hollow</strong> - Inherited status (no direct build for this commit)</li>
+</ul>
+</div>
+<div style="margin-bottom: 12px;">
+<div style="font-weight: 600; margin-bottom: 6px; color: #24292f;">Icons & Links:</div>
+<ul style="margin: 4px 0; padding-left: 20px;">
+<li><strong>🐳</strong> - Search GitLab Docker registry for this commit SHA</li>
+<li><strong>🦊</strong> - View commit in GitLab (with CI pipeline info)</li>
+<li><strong>▶</strong> - Expand to see Docker images and commit details</li>
+<li><strong>📋</strong> - View build history (multiple builds)</li>
+<li><strong>CDS:xxxxxx</strong> - Composite Docker SHA (click to view build logs)</li>
+</ul>
+</div>
+<div style="margin-bottom: 12px;">
+<div style="font-weight: 600; margin-bottom: 6px; color: #24292f;">CI Status Format:</div>
+<ul style="margin: 4px 0; padding-left: 20px;">
+<li><span style="color: #2da44e;">16✓</span> - 16 jobs succeeded</li>
+<li><span style="color: #d73a49;">3✗</span> - 3 jobs failed</li>
+<li><span style="color: #dbab09;">2⏳</span> - 2 jobs running</li>
+<li><span style="color: #8c959f;">1⏸</span> - 1 job pending</li>
+</ul>
+</div>
+<div>
+<div style="font-weight: 600; margin-bottom: 6px; color: #24292f;">Composite Docker SHA (CDS):</div>
+<p style="margin: 4px 0; color: #57606a;">Commits with the same CDS share identical <code>container/</code> directory contents. These commits can use the same Docker images.</p>
+</div>
+</div>
+</details>
 </div>
 
 <script>
@@ -339,11 +396,12 @@ function copyFromClipboardAttr(button) {
 <table>
 <thead>
 <tr>
-<th style="width: 120px;">Commit SHA</th>
-<th style="width: 140px;">Composite Docker SHA</th>
-<th style="width: 180px;">Date/Time (PDT)</th>
-<th style="width: 150px;">Author</th>
-<th>Message</th>
+<th>Commit SHA</th>
+<th>Composite 🐳 SHA</th>
+<th>CI Status</th>
+<th>Date/Time (PDT)</th>
+<th>Author</th>
+<th style="width: 100%;">Message</th>
 </tr>
 </thead>
 <tbody>
@@ -365,18 +423,6 @@ function copyFromClipboardAttr(button) {
 <tr>
 <td class="sha">
 <a href="{{ commit_link }}" target="_blank">{{ sha_short }}</a>
-{%- if has_gitlab or pipeline -%}
-<a href="{{ gitlab_commit_link }}" target="_blank" style="margin-left: 4px; color: #fc6d26; text-decoration: none; font-weight: 600;" title="View commit in GitLab">🦊</a>
-{%- endif -%}
-{%- if has_gitlab and pipeline and pipeline.status == 'failed' -%}
-<a href="{{ pipeline.web_url }}" target="_blank" style="margin-left: 4px; color: #d73a49; text-decoration: none; font-weight: 600; font-size: 11px;" title="CI Failed - Click to view pipeline">❌ CI</a>
-{%- elif has_gitlab and pipeline and pipeline.status in ['running', 'pending'] -%}
-<a href="{{ pipeline.web_url }}" target="_blank" style="margin-left: 4px; color: #dbab09; text-decoration: none; font-weight: 600; font-size: 11px;" title="CI Running - Click to view pipeline">🔄 CI</a>
-{%- elif not has_gitlab and pipeline and pipeline.status == 'failed' -%}
-<a href="{{ pipeline.web_url }}" target="_blank" style="margin-left: 4px; color: #d73a49; text-decoration: none; font-weight: 600; font-size: 11px;" title="CI Failed - Click to view pipeline">❌ CI</a>
-{%- elif not has_gitlab and pipeline and pipeline.status in ['running', 'pending'] -%}
-<a href="{{ pipeline.web_url }}" target="_blank" style="margin-left: 4px; color: #dbab09; text-decoration: none; font-weight: 600; font-size: 11px;" title="CI Running - Click to view pipeline">🔄 CI</a>
-{%- endif -%}
 </td>
 <td class="sha">
 {%- set log_paths_list = log_paths.get(sha_short, []) -%}
@@ -396,24 +442,23 @@ function copyFromClipboardAttr(button) {
 {%- if log_paths_list -%}
 {# Most recent build (last in list) #}
 {%- set latest_date, latest_path = log_paths_list[-1] -%}
-<span style="background-color: {{ composite_bg_color }}; padding: 2px 6px; border-radius: 3px;"><a href="{{ latest_path }}" target="_blank" style="color: #0969da; text-decoration: none;" title="View build logs ({{ latest_date }})">{{ composite_sha }}</a></span>
-{# Show history icon if multiple builds exist #}
-{%- if log_paths_list|length > 1 -%}
-<a href="#" onclick="toggleBuildHistory(event, '{{ sha_short }}'); return false;" style="text-decoration: none; margin-left: 2px; font-size: 11px; color: #656d76;" title="Show build history ({{ log_paths_list|length }} builds)">📋</a>
-<div id="build-history-{{ sha_short }}" style="display: none; position: absolute; background: #fff; border: 1px solid #d0d7de; border-radius: 6px; padding: 8px; margin-top: 4px; z-index: 1000; box-shadow: 0 8px 24px rgba(140, 149, 159, 0.2);">
-<div style="font-weight: 600; font-size: 12px; margin-bottom: 6px; color: #24292f;">Build History</div>
-{%- for date, path in log_paths_list|reverse -%}
-<div style="padding: 4px 0;"><a href="{{ path }}" target="_blank" style="color: #0969da; text-decoration: none; font-size: 12px;">{{ date }}</a>{%- if loop.first -%} <span style="color: #656d76; font-size: 11px;">(latest)</span>{%- endif -%}</div>
-{%- endfor -%}
-</div>
-{%- endif -%}
-{%- if has_docker_images or has_gitlab -%}
- <a href="#" class="composite-sha-link" onclick="toggleDockerImages(event, this); return false;" style="text-decoration: none; margin-left: 4px;" title="Show Docker images">▶</a>
-{%- endif -%}
+<span style="background-color: {{ composite_bg_color }}; padding: 2px 6px; border-radius: 3px;"><a href="{{ latest_path }}" target="_blank" style="color: #0969da; text-decoration: none;" title="View build logs ({{ latest_date }})">CDS:{{ composite_sha[:6] }}</a></span>{# Show history icon if multiple builds exist #}{%- if log_paths_list|length > 1 -%}<a href="#" onclick="toggleBuildHistory(event, '{{ sha_short }}'); return false;" style="text-decoration: none; margin-left: 2px; font-size: 11px; color: #656d76;" title="Show build history ({{ log_paths_list|length }} builds)">📋</a><div id="build-history-{{ sha_short }}" style="display: none; position: absolute; background: #fff; border: 1px solid #d0d7de; border-radius: 6px; padding: 8px; margin-top: 4px; z-index: 1000; box-shadow: 0 8px 24px rgba(140, 149, 159, 0.2);"><div style="font-weight: 600; font-size: 12px; margin-bottom: 6px; color: #24292f;">Build History</div>{%- for date, path in log_paths_list|reverse -%}<div style="padding: 4px 0;"><a href="{{ path }}" target="_blank" style="color: #0969da; text-decoration: none; font-size: 12px;">{{ date }}</a>{%- if loop.first -%} <span style="color: #656d76; font-size: 11px;">(latest)</span>{%- endif -%}</div>{%- endfor -%}</div>{%- endif -%}{%- if has_docker_images or has_gitlab -%}<a href="#" class="composite-sha-link" onclick="toggleDockerImages(event, this); return false;" style="text-decoration: none; margin-left: 4px;" title="Show Docker images">▶</a>{%- endif -%}
 {%- else -%}
-<span style="background-color: {{ composite_bg_color }}; padding: 2px 6px; border-radius: 3px;">{{ composite_sha }}</span>
-{%- if has_docker_images or has_gitlab -%}
- <a href="#" class="composite-sha-link" onclick="toggleDockerImages(event, this); return false;" style="text-decoration: none; margin-left: 4px;" title="Show Docker images">▶</a>
+<span style="background-color: {{ composite_bg_color }}; padding: 2px 6px; border-radius: 3px;">CDS:{{ composite_sha[:6] }}</span>{%- if has_docker_images or has_gitlab -%}<a href="#" class="composite-sha-link" onclick="toggleDockerImages(event, this); return false;" style="text-decoration: none; margin-left: 4px;" title="Show Docker images">▶</a>{%- endif -%}
+{%- endif -%}
+</td>
+<td class="sha">
+<a href="https://gitlab-master.nvidia.com/dl/ai-dynamo/dynamo/container_registry/85325?orderBy=PUBLISHED_AT&sort=desc&search%5B%5D={{ sha_full }}" target="_blank" style="color: #2496ed; text-decoration: none; font-weight: 600;" title="Search GitLab Docker registry for this SHA">🐳</a>
+{%- if pipeline -%}
+<a href="https://gitlab-master.nvidia.com/dl/ai-dynamo/dynamo/-/commit/{{ sha_full }}" target="_blank" style="margin-left: 4px; color: #fc6d26; text-decoration: none; font-weight: 600;" title="View commit in GitLab">🦊</a>
+{%- set job_counts = pipeline_job_counts.get(pipeline.id) -%}
+{%- if job_counts -%}
+<a href="{{ pipeline.web_url }}" target="_blank" style="margin-left: 4px; text-decoration: none; font-weight: 600; font-size: 11px;" title="Click to view pipeline">
+{%- if job_counts.success > 0 -%}<span style="color: #2da44e;">{{ job_counts.success }}✓</span>{%- endif -%}
+{%- if job_counts.failed > 0 -%}{%- if job_counts.success > 0 %} {% endif -%}<span style="color: #d73a49;">{{ job_counts.failed }}✗</span>{%- endif -%}
+{%- if job_counts.running > 0 -%}{%- if job_counts.success > 0 or job_counts.failed > 0 %} {% endif -%}<span style="color: #dbab09;">{{ job_counts.running }}⏳</span>{%- endif -%}
+{%- if job_counts.pending > 0 -%}{%- if job_counts.success > 0 or job_counts.failed > 0 or job_counts.running > 0 %} {% endif -%}<span style="color: #8c959f;">{{ job_counts.pending }}⏸</span>{%- endif -%}
+</a>
 {%- endif -%}
 {%- endif -%}
 </td>
@@ -435,7 +480,7 @@ function copyFromClipboardAttr(button) {
 {%- set gitlab_imgs = gitlab_images.get(sha_full, []) -%}
 
 <tr class="docker-images-row" style="display: none;">
-<td colspan="5" style="padding: 0; background-color: #f6f8fa;">
+<td colspan="6" style="padding: 0; background-color: #f6f8fa;">
 <div style="padding: 8px 12px; border-top: 1px solid #d0d7de;">
 <!-- Commit Details Section -->
 <div style="margin-bottom: 12px; padding: 8px; background-color: white; border: 1px solid #d0d7de; border-radius: 4px;">
@@ -465,7 +510,8 @@ function copyFromClipboardAttr(button) {
 <tr>
 <th style="width: 35%; padding: 3px 6px; border: none;">Image Name:Tag</th>
 <th style="width: 10%; padding: 3px 6px; border: none;">pull runtime</th>
-{% if gitlab_imgs|selectattr('arch', 'equalto', 'amd64')|selectattr('framework', 'in', ['trtllm', 'vllm'])|list|length > 0 %}<th style="width: 10%; padding: 3px 6px; border: none;">make localdev</th>{% endif %}
+{# TODO: Add back "make localdev" column later #}
+{# {% if gitlab_imgs|selectattr('arch', 'equalto', 'amd64')|selectattr('framework', 'in', ['trtllm', 'vllm'])|list|length > 0 %}<th style="width: 10%; padding: 3px 6px; border: none;">make localdev</th>{% endif %} #}
 <th style="width: 10%; padding: 3px 6px; border: none;">Build ID</th>
 <th style="width: 8%; padding: 3px 6px; border: none;">Size</th>
 <th style="width: 27%; padding: 3px 6px; border: none;">Created (PDT)</th>
@@ -507,7 +553,8 @@ echo 'Build SUCCESS! Run with: container/run.sh --image {{ local_tag }} --mount-
 Pipeline: {{ img.pipeline_id }}
 Framework: {{ img.framework }}">{{ display_tag }}</td>
 <td style="font-size: 11px; padding: 2px 6px; border: none; white-space: nowrap;"><button data-clipboard-text="docker pull {{ img.location }}" onclick="copyFromClipboardAttr(this)" style="padding: 4px 6px; font-size: 11px; background-color: transparent; color: #57606a; border: 1px solid #d0d7de; border-radius: 6px; cursor: pointer; display: inline-flex; align-items: center; vertical-align: middle;" title="Click to copy docker pull command for runtime image" onmouseover="this.style.backgroundColor='#f3f4f6'; this.style.borderColor='#8c959f';" onmouseout="this.style.backgroundColor='transparent'; this.style.borderColor='#d0d7de';"><svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" style="display: inline-block;"><path d="M0 6.75C0 5.784.784 5 1.75 5h1.5a.75.75 0 0 1 0 1.5h-1.5a.25.25 0 0 0-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 0 0 .25-.25v-1.5a.75.75 0 0 1 1.5 0v1.5A1.75 1.75 0 0 1 9.25 16h-7.5A1.75 1.75 0 0 1 0 14.25Z"></path><path d="M5 1.75C5 .784 5.784 0 6.75 0h7.5C15.216 0 16 .784 16 1.75v7.5A1.75 1.75 0 0 1 14.25 11h-7.5A1.75 1.75 0 0 1 5 9.25Zm1.75-.25a.25.25 0 0 0-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 0 0 .25-.25v-7.5a.25.25 0 0 0-.25-.25Z"></path></svg></button><span style="margin-left: 6px;">copy command</span></td>
-{% if gitlab_imgs|selectattr('arch', 'equalto', 'amd64')|selectattr('framework', 'in', ['trtllm', 'vllm'])|list|length > 0 %}<td style="font-size: 11px; padding: 2px 6px; border: none; white-space: nowrap;">{% if img.arch == "amd64" and (img.framework|upper == "TRTLLM" or img.framework|upper == "VLLM") %}<button data-clipboard-text="{{ docker_pull_tag_cmd(img, sha_short) }}" onclick="copyFromClipboardAttr(this)" style="padding: 4px 6px; font-size: 11px; background-color: transparent; color: #57606a; border: 1px solid #d0d7de; border-radius: 6px; cursor: pointer; display: inline-flex; align-items: center; vertical-align: middle;" title="Click to copy command for creating local-dev image: Pulls the runtime image, downloads Dockerfile, builds a local-dev container with your UID/GID, and shows how to run it" onmouseover="this.style.backgroundColor='#f3f4f6'; this.style.borderColor='#8c959f';" onmouseout="this.style.backgroundColor='transparent'; this.style.borderColor='#d0d7de';"><svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" style="display: inline-block;"><path d="M0 6.75C0 5.784.784 5 1.75 5h1.5a.75.75 0 0 1 0 1.5h-1.5a.25.25 0 0 0-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 0 0 .25-.25v-1.5a.75.75 0 0 1 1.5 0v1.5A1.75 1.75 0 0 1 9.25 16h-7.5A1.75 1.75 0 0 1 0 14.25Z"></path><path d="M5 1.75C5 .784 5.784 0 6.75 0h7.5C15.216 0 16 .784 16 1.75v7.5A1.75 1.75 0 0 1 14.25 11h-7.5A1.75 1.75 0 0 1 5 9.25Zm1.75-.25a.25.25 0 0 0-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 0 0 .25-.25v-7.5a.25.25 0 0 0-.25-.25Z"></path></svg></button><span style="margin-left: 6px;">copy command</span>{% endif %}</td>{% endif %}
+{# TODO: Add back "make localdev" column later #}
+{# {% if gitlab_imgs|selectattr('arch', 'equalto', 'amd64')|selectattr('framework', 'in', ['trtllm', 'vllm'])|list|length > 0 %}<td style="font-size: 11px; padding: 2px 6px; border: none; white-space: nowrap;">{% if img.arch == "amd64" and (img.framework|upper == "TRTLLM" or img.framework|upper == "VLLM") %}<button data-clipboard-text="{{ docker_pull_tag_cmd(img, sha_short) }}" onclick="copyFromClipboardAttr(this)" style="padding: 4px 6px; font-size: 11px; background-color: transparent; color: #57606a; border: 1px solid #d0d7de; border-radius: 6px; cursor: pointer; display: inline-flex; align-items: center; vertical-align: middle;" title="Click to copy command for creating local-dev image: Pulls the runtime image, downloads Dockerfile, builds a local-dev container with your UID/GID, and shows how to run it" onmouseover="this.style.backgroundColor='#f3f4f6'; this.style.borderColor='#8c959f';" onmouseout="this.style.backgroundColor='transparent'; this.style.borderColor='#d0d7de';"><svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" style="display: inline-block;"><path d="M0 6.75C0 5.784.784 5 1.75 5h1.5a.75.75 0 0 1 0 1.5h-1.5a.25.25 0 0 0-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 0 0 .25-.25v-1.5a.75.75 0 0 1 1.5 0v1.5A1.75 1.75 0 0 1 9.25 16h-7.5A1.75 1.75 0 0 1 0 14.25Z"></path><path d="M5 1.75C5 .784 5.784 0 6.75 0h7.5C15.216 0 16 .784 16 1.75v7.5A1.75 1.75 0 0 1 14.25 11h-7.5A1.75 1.75 0 0 1 5 9.25Zm1.75-.25a.25.25 0 0 0-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 0 0 .25-.25v-7.5a.25.25 0 0 0-.25-.25Z"></path></svg></button><span style="margin-left: 6px;">copy command</span>{% endif %}</td>{% endif %} #}
 <td style="font-family: monospace; font-size: 11px; padding: 2px 6px; border: none;"><a href="https://gitlab-master.nvidia.com/dl/ai-dynamo/dynamo/-/pipelines/{{ img.pipeline_id }}" target="_blank" style="color: #0969da;" title="View pipeline {{ img.pipeline_id }}">{{ image_id }}</a></td>
 <td style="font-size: 11px; padding: 2px 6px; border: none;">{{ img.size_display }}</td>
 <td style="font-size: 11px; padding: 2px 6px; border: none;">{{ img.created_display }}</td>
