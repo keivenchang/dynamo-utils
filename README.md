@@ -31,7 +31,7 @@ dynamo-utils/
 ├── devcontainer.json             # VS Code Dev Container configuration
 ├── common.py                     # Shared utilities module
 ├── show_dynamo_branches.py       # Branch status checker
-├── show_commit_history.py        # Commit history with composite SHAs
+├── show_commit_history.py        # Commit history with Composite Docker SHAs (CDS)
 ├── git_stats.py                  # Git repository statistics analyzer
 ├── update_html_pages.sh          # HTML page update cron script
 ├── soak_fe.py                    # Frontend soak testing script
@@ -199,12 +199,12 @@ python3 container/build_images.py --repo-path ~/nvidia/dynamo_ci --parallel --fo
 
 #### Commit History Feature
 
-**Overview**: The `show_commit_history.py` script displays recent commits with their composite SHAs. Supports both terminal and HTML output modes with integrated caching for performance.
+**Overview**: The `show_commit_history.py` script displays recent commits with their Composite Docker SHAs (CDS). Supports both terminal and HTML output modes with integrated caching for performance.
 
 **Caching System**:
 - Cache file: `.commit_history_cache.json` (in repository root)
-- Format: JSON mapping of commit SHA (full) → composite SHA
-- Purpose: Avoid expensive git checkout + composite SHA recalculation
+- Format: JSON mapping of commit SHA (full) → Composite Docker SHA (CDS)
+- Purpose: Avoid expensive git checkout + Composite Docker SHA (CDS) recalculation
 - Performance: Cached lookups are nearly instant vs ~1-2 seconds per commit calculation
 
 **Usage Examples**:
@@ -280,7 +280,7 @@ Automated cron script that runs every 30 minutes to update multiple HTML pages.
 3. Updates commit history HTML (`$DYNAMO_REPO/index.html` where `DYNAMO_REPO` defaults to `$NVIDIA_HOME/dynamo_latest`)
    - Calls `show_commit_history.py --repo-path . --html --max-commits 200 --output $COMMIT_HISTORY_HTML`
    - Leverages caching for fast updates (only calculates new commits)
-   - Shows last 200 commits with composite SHAs and Docker images
+   - Shows last 200 commits with Composite Docker SHAs (CDS) and Docker images
 
 **Log file**: `$LOGS_DIR/cron.log` (where `LOGS_DIR` defaults to `$NVIDIA_HOME/logs`)
 
@@ -288,7 +288,7 @@ Automated cron script that runs every 30 minutes to update multiple HTML pages.
 - First run: ~50-100 seconds (calculates all 200 commits)
 - Subsequent runs: ~5-10 seconds (only processes new commits, rest from cache)
 - Cache file size: ~20-40KB for 200 commits
-- No cache invalidation needed: Composite SHAs are deterministic based on file content
+- No cache invalidation needed: Composite Docker SHAs (CDS) are deterministic based on file content
 
 ---
 
