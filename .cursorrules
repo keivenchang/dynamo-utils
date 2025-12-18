@@ -139,6 +139,9 @@ DO NOT use these BS words in docs/comments:
 - In dynamo* repositories (dynamo1, dynamo2, dynamo3, etc.): ALWAYS use --signoff for commits
 - In /workspace directory: ALWAYS use --signoff for commits
 - NEVER skip --signoff in dynamo* or /workspace directories
+- **CONFLICT RESOLUTION**: After resolving merge conflicts in a file, you MUST run `git add <file>` to mark it as resolved
+  - This applies during rebase, merge, cherry-pick operations
+  - Forgetting to `git add` after conflict resolution will cause the operation to fail
 
 ## 2.1 Security
 - Never commit API keys or secrets
