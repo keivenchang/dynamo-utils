@@ -5,7 +5,7 @@ SPDX-License-Identifier: Apache-2.0
 
 Dynamo Commit History Generator - Standalone Tool
 
-Generates commit history with composite SHAs and Docker image detection.
+Generates commit history with Composite Docker SHAs (CDS) and Docker image detection.
 Can output to terminal or HTML format.
 """
 
@@ -41,7 +41,7 @@ except ImportError:
 
 
 class CommitHistoryGenerator:
-    """Generate commit history with composite SHAs and Docker images"""
+    """Generate commit history with Composite Docker SHAs (CDS) and Docker images"""
 
     def __init__(self, repo_path: Path, verbose: bool = False, debug: bool = False, skip_gitlab_fetch: bool = False):
         """
@@ -98,7 +98,7 @@ class CommitHistoryGenerator:
         return logger
 
     def show_commit_history(self, max_commits: int = 50, html_output: bool = False, output_path: Path = None, logs_dir: Path = None) -> int:
-        """Show recent commit history with composite SHAs
+        """Show recent commit history with Composite Docker SHAs (CDS)
 
         Args:
             max_commits: Maximum number of commits to show
@@ -112,7 +112,31 @@ class CommitHistoryGenerator:
         # Initialize repo utils for this operation
         repo_utils = DynamoRepositoryUtils(self.repo_path, dry_run=False, verbose=self.verbose)
 
-        # Load cache
+        # Load cache (.commit_history_cache.json in repo_path)
+        # Format (new): {
+        #   "<full_commit_sha>": {
+        #     "composite_docker_sha": "746bc31d05b3",
+        #     "author": "John Doe",
+        #     "date": "2025-12-17 20:03:39",
+        #     "message": "feat: Add new feature (#1234)",
+        #     "full_message": "feat: Add new feature (#1234)\n\nDetailed description...",
+        #     "stats": {"files": 5, "insertions": 100, "deletions": 50},
+        #     "changed_files": ["path/to/file1.py", "path/to/file2.py"]
+        #   },
+        #   ...
+        # }
+        # Format (old, backward compatible): {
+        #   "<full_commit_sha>": "<composite_docker_sha>",
+        #   ...
+        # }
+        # Fields:
+        #   - composite_docker_sha: 12-character hash of container/ directory contents
+        #   - author: Commit author name
+        #   - date: Commit timestamp (YYYY-MM-DD HH:MM:SS)
+        #   - message: First line of commit message
+        #   - full_message: Full commit message
+        #   - stats: Dict with files, insertions, deletions counts
+        #   - changed_files: List of file paths changed in this commit
         cache = {}
         if self.cache_file.exists():
             try:
@@ -151,45 +175,92 @@ class CommitHistoryGenerator:
                 for i, commit in enumerate(commits):
                     sha_short = commit.hexsha[:9]
                     sha_full = commit.hexsha
-                    date_str = commit.committed_datetime.strftime('%Y-%m-%d %H:%M:%S')
-                    author_name = commit.author.name
-                    message_first_line = commit.message.strip().split('\n')[0]
+
+                    # Check cache first - handle both old format (string) and new format (dict)
+                    cached_entry = cache.get(sha_full)
+                    if cached_entry and isinstance(cached_entry, dict):
+                        # New format: Full metadata cached
+                        composite_sha = cached_entry['composite_docker_sha']
+                        date_str = cached_entry['date']
+                        author_name = cached_entry['author']
+                        message_first_line = cached_entry['message']
+
+                        if html_output:
+                            full_message = cached_entry['full_message']
+                            files_changed = cached_entry['stats']['files']
+                            insertions = cached_entry['stats']['insertions']
+                            deletions = cached_entry['stats']['deletions']
+                            changed_files = cached_entry['changed_files']
+
+                        self.logger.debug(f"Cache hit (full metadata) for {sha_short}: {composite_sha}")
+                    else:
+                        # Old format or cache miss: Need to fetch from git
+                        date_str = commit.committed_datetime.strftime('%Y-%m-%d %H:%M:%S')
+                        author_name = commit.author.name
+                        message_first_line = commit.message.strip().split('\n')[0]
+
+                        # Check if we have old-format composite SHA cached
+                        if cached_entry and isinstance(cached_entry, str):
+                            composite_sha = cached_entry
+                            self.logger.debug(f"Cache hit (old format) for {sha_short}: {composite_sha}")
+                            need_checkout = False
+                        else:
+                            # Need to calculate composite SHA
+                            need_checkout = True
+                            try:
+                                repo.git.checkout(commit.hexsha)
+                                composite_sha = repo_utils.generate_composite_sha()
+                                self.logger.debug(f"Calculated {sha_short}: {composite_sha}")
+                            except Exception as e:
+                                composite_sha = "ERROR"
+                                self.logger.error(f"Failed to calculate composite SHA for {sha_short}: {e}")
+
+                        if html_output:
+                            # Get commit stats (expensive operation)
+                            stats = commit.stats.total
+                            files_changed = stats['files']
+                            insertions = stats['insertions']
+                            deletions = stats['deletions']
+
+                            # Get full commit message
+                            full_message = commit.message.strip()
+
+                            # Get list of changed files
+                            changed_files = list(commit.stats.files.keys())
+
+                            # Update cache with full metadata (new format)
+                            cache[sha_full] = {
+                                'composite_docker_sha': composite_sha,
+                                'author': author_name,
+                                'date': date_str,
+                                'message': message_first_line,
+                                'full_message': full_message,
+                                'stats': {
+                                    'files': files_changed,
+                                    'insertions': insertions,
+                                    'deletions': deletions
+                                },
+                                'changed_files': changed_files
+                            }
+                            cache_updated = True
+                        else:
+                            # Terminal mode: Only cache composite SHA if calculated
+                            if need_checkout:
+                                cache[sha_full] = composite_sha
+                                cache_updated = True
 
                     if not html_output:
-                        # Terminal: show progress with placeholder
+                        # Terminal: show progress or final result
                         author_str = author_name[:author_width-1]
                         message_str = message_first_line[:message_width]
-                        print(f"{sha_short:<{sha_width}} {'CALCULATING...':<{composite_width}} {date_str:<{date_width}} {author_str:<{author_width}} {message_str}", end='', flush=True)
-
-                    # Check cache first
-                    if sha_full in cache:
-                        composite_sha = cache[sha_full]
-                        self.logger.debug(f"Cache hit for {sha_short}: {composite_sha} (composite SHA)")
-                    else:
-                        # Checkout commit and calculate composite SHA
-                        try:
-                            repo.git.checkout(commit.hexsha)
-                            composite_sha = repo_utils.generate_composite_sha()
-                            # Update cache
-                            cache[sha_full] = composite_sha
-                            cache_updated = True
-                            self.logger.debug(f"Calculated and cached {sha_short}: {composite_sha}")
-                        except Exception as e:
-                            composite_sha = "ERROR"
+                        if i == 0 or cached_entry:
+                            # First commit or cached: show immediately
+                            print(f"{sha_short:<{sha_width}} {composite_sha:<{composite_width}} {date_str:<{date_width}} {author_str:<{author_width}} {message_str}")
+                        else:
+                            # Calculating: show placeholder then overwrite
+                            print(f"\r{sha_short:<{sha_width}} {composite_sha:<{composite_width}} {date_str:<{date_width}} {author_str:<{author_width}} {message_str}")
 
                     if html_output:
-                        # Get commit stats (files changed, insertions, deletions)
-                        stats = commit.stats.total
-                        files_changed = stats['files']
-                        insertions = stats['insertions']
-                        deletions = stats['deletions']
-
-                        # Get full commit message
-                        full_message = commit.message.strip()
-
-                        # Get list of changed files
-                        changed_files = list(commit.stats.files.keys())
-
                         # Collect data for HTML generation
                         commit_data.append({
                             'sha_short': sha_short,
@@ -206,11 +277,6 @@ class CommitHistoryGenerator:
                             'changed_files': changed_files
                         })
                         self.logger.debug(f"Processed commit {i+1}/{len(commits)}: {sha_short}")
-                    else:
-                        # Terminal: overwrite line with actual composite SHA
-                        author_str = author_name[:author_width-1]
-                        message_str = message_first_line[:message_width]
-                        print(f"\r{sha_short:<{sha_width}} {composite_sha:<{composite_width}} {date_str:<{date_width}} {author_str:<{author_width}} {message_str}")
 
             finally:
                 # Restore original HEAD
@@ -228,15 +294,16 @@ class CommitHistoryGenerator:
                         logs_dir = repo_abs_path.parent / "dynamo_ci" / "logs"
                     else:
                         logs_dir = self.repo_path / "logs"
-                html_content = self._generate_commit_history_html(commit_data, logs_dir)
-                # Determine output path
+                # Determine output path first
                 if output_path is None:
                     # Auto-detect: Write to logs directory within the repo (or current directory if logs doesn't exist)
-                    logs_dir = self.repo_path / "logs"
-                    if logs_dir.exists():
-                        output_path = logs_dir / "commit-history.html"
+                    logs_dir_temp = self.repo_path / "logs"
+                    if logs_dir_temp.exists():
+                        output_path = logs_dir_temp / "commit-history.html"
                     else:
                         output_path = Path("commit-history.html")
+
+                html_content = self._generate_commit_history_html(commit_data, logs_dir, output_path)
                 output_path.parent.mkdir(parents=True, exist_ok=True)
                 output_path.write_text(html_content)
                 print(f"\nHTML report generated: {output_path}")
@@ -264,12 +331,13 @@ class CommitHistoryGenerator:
             self.logger.error(f"Failed to get commit history: {e}")
             return 1
 
-    def _generate_commit_history_html(self, commit_data: List[dict], logs_dir: Path) -> str:
+    def _generate_commit_history_html(self, commit_data: List[dict], logs_dir: Path, output_path: Path) -> str:
         """Generate HTML report for commit history with Docker image detection
 
         Args:
             commit_data: List of commit dictionaries with sha_short, sha_full, composite_sha, date, author, message
             logs_dir: Path to logs directory for build reports
+            output_path: Path where the HTML file will be written (used for relative path calculation)
 
         Returns:
             HTML content as string
@@ -285,7 +353,13 @@ class CommitHistoryGenerator:
 
         # Get GitLab CI pipeline statuses
         gitlab_pipelines = self._get_gitlab_pipeline_statuses([c['sha_full'] for c in commit_data])
-        
+
+        # Get GitLab CI pipeline job counts
+        pipeline_ids = [p['id'] for p in gitlab_pipelines.values() if p and 'id' in p]
+        pipeline_job_counts = {}
+        if pipeline_ids:
+            pipeline_job_counts = self._get_gitlab_pipeline_job_counts(pipeline_ids)
+
         # Process GitLab images: deduplicate and format
         gitlab_images = {}
         for sha_full, registry_imgs in gitlab_images_raw.items():
@@ -356,10 +430,21 @@ class CommitHistoryGenerator:
             '#ffe5b4',  # Light peach
             '#e7d4f7',  # Light lavender
         ]
-        
-        current_color_index = 0
-        previous_composite_sha = None
-        
+
+        # Build deterministic CDS-to-color mapping
+        # Same CDS always gets same color across all HTML generations
+        unique_cds = []
+        seen_cds = set()
+        for commit in commit_data:
+            cds = commit['composite_sha']
+            if cds not in seen_cds:
+                unique_cds.append(cds)
+                seen_cds.add(cds)
+
+        cds_to_color = {}
+        for i, cds in enumerate(unique_cds):
+            cds_to_color[cds] = bg_colors[i % len(bg_colors)]
+
         for commit in commit_data:
             # Handle PR links
             message = commit['message']
@@ -373,15 +458,10 @@ class CommitHistoryGenerator:
                     message
                 )
                 commit['message'] = message
-            
-            # Assign color based on composite SHA changes
+
+            # Assign color deterministically based on Composite Docker SHA (CDS)
             composite_sha = commit['composite_sha']
-            if previous_composite_sha is not None and composite_sha != previous_composite_sha:
-                # Composite SHA changed, move to next color
-                current_color_index = (current_color_index + 1) % len(bg_colors)
-            
-            commit['composite_bg_color'] = bg_colors[current_color_index]
-            previous_composite_sha = composite_sha
+            commit['composite_bg_color'] = cds_to_color[composite_sha]
         
         # Build log paths dictionary and status indicators
         log_paths = {}  # Maps sha_short to list of (date, path) tuples
@@ -410,13 +490,14 @@ class CommitHistoryGenerator:
                 # Store all build attempts with dates
                 log_paths[sha_short] = []
                 for log_file in sorted(matching_logs):
-                    log_path = Path(log_file)
+                    log_path = Path(log_file).resolve()
                     # Extract date from filename (format: YYYY-MM-DD.sha.report.html)
                     date_str = log_path.name.split('.')[0]
                     try:
-                        nvidia_dir = Path.home() / 'nvidia'
-                        relative_parts = log_path.relative_to(nvidia_dir)
-                        log_paths[sha_short].append((date_str, f"../{relative_parts}"))
+                        # Calculate relative path from output HTML file to log file
+                        output_dir = output_path.resolve().parent
+                        relative_path = os.path.relpath(log_path, output_dir)
+                        log_paths[sha_short].append((date_str, relative_path))
                     except ValueError:
                         log_paths[sha_short].append((date_str, str(log_path)))
 
@@ -510,6 +591,7 @@ class CommitHistoryGenerator:
             docker_images=docker_images,
             gitlab_images=gitlab_images,
             gitlab_pipelines=gitlab_pipelines,
+            pipeline_job_counts=pipeline_job_counts,
             log_paths=log_paths,
             build_status=build_status,
             generated_time=generated_time
@@ -552,6 +634,23 @@ class CommitHistoryGenerator:
     def _get_gitlab_pipeline_statuses(self, sha_full_list: List[str]) -> dict:
         """Get GitLab CI pipeline status for commits using the centralized cache.
 
+        Cache file format (.gitlab_pipeline_status_cache.json):
+            {
+                "<full_commit_sha>": {
+                    "status": "failed",
+                    "id": 38895507,
+                    "web_url": "https://gitlab-master.nvidia.com/.../pipelines/38895507"
+                },
+                "<commit_sha_with_no_pipeline>": null,
+                ...
+            }
+
+        Fields:
+            - status: Pipeline status (success, failed, running, etc.)
+            - id: GitLab pipeline ID (integer)
+            - web_url: Full URL to view the pipeline in GitLab UI
+            - null: Commit has no associated pipeline
+
         Args:
             sha_full_list: List of full commit SHAs (40 characters)
 
@@ -559,14 +658,59 @@ class CommitHistoryGenerator:
             Dictionary mapping SHA to pipeline status dict with 'status', 'id', 'web_url'
         """
         cache_file = str(self.repo_path / ".gitlab_pipeline_status_cache.json")
-        
+
         self.logger.debug(f"Getting pipeline status for {len(sha_full_list)} commits")
         
         result = self.gitlab_client.get_cached_pipeline_status(sha_full_list, cache_file=cache_file, skip_fetch=self.skip_gitlab_fetch)
         
         cached_count = sum(1 for v in result.values() if v is not None)
         self.logger.debug(f"Found pipeline status for {cached_count}/{len(sha_full_list)} commits")
-        
+
+        return result
+
+    def _get_gitlab_pipeline_job_counts(self, pipeline_ids: List[int]) -> dict:
+        """Get GitLab CI pipeline job counts using the centralized cache.
+
+        Cache file format (.gitlab_pipeline_jobs_cache.json):
+            {
+                "40118215": {
+                    "counts": {
+                        "success": 15,
+                        "failed": 8,
+                        "running": 0,
+                        "pending": 0
+                    },
+                    "fetched_at": "2025-12-18T02:44:20.118368Z"
+                },
+                ...
+            }
+
+        Fields:
+            - counts: Dict with job counts for this pipeline
+                - success: Number of successful jobs (integer)
+                - failed: Number of failed jobs (integer)
+                - running: Number of currently running jobs (integer)
+                - pending: Number of pending jobs (integer)
+            - fetched_at: ISO 8601 timestamp when this data was fetched
+
+        Note: Completed pipelines (running=0, pending=0) are cached forever.
+              Active pipelines are refetched if older than 30 minutes.
+
+        Args:
+            pipeline_ids: List of pipeline IDs
+
+        Returns:
+            Dictionary mapping pipeline ID to job counts dict with 'success', 'failed', 'running', 'pending'
+        """
+        cache_file = str(self.repo_path / ".gitlab_pipeline_jobs_cache.json")
+
+        self.logger.debug(f"Getting job counts for {len(pipeline_ids)} pipelines")
+
+        result = self.gitlab_client.get_cached_pipeline_job_counts(pipeline_ids, cache_file=cache_file, skip_fetch=self.skip_gitlab_fetch)
+
+        cached_count = sum(1 for v in result.values() if v is not None)
+        self.logger.debug(f"Found job counts for {cached_count}/{len(pipeline_ids)} pipelines")
+
         return result
 
     def _get_local_docker_images_by_sha(self, sha_list: List[str]) -> dict:

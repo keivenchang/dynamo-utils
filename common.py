@@ -296,7 +296,7 @@ class BaseUtils:
 
 
 class DynamoRepositoryUtils(BaseUtils):
-    """Utilities for Dynamo repository operations including composite SHA calculation."""
+    """Utilities for Dynamo repository operations including Composite Docker SHA (CDS) calculation."""
 
     def __init__(self, repo_path: Any, dry_run: bool = False, verbose: bool = False):
         """
@@ -313,7 +313,7 @@ class DynamoRepositoryUtils(BaseUtils):
 
     def generate_composite_sha(self, full_hash: bool = False) -> str:
         """
-        Generate composite SHA from container directory files.
+        Generate Composite Docker SHA (CDS) from container directory files.
 
         This creates a SHA256 hash of all relevant files in the container directory,
         excluding documentation, temporary files, etc. This hash can be used to
@@ -367,7 +367,7 @@ class DynamoRepositoryUtils(BaseUtils):
 
         self.logger.debug(f"Hashing {len(files_to_hash)} files from container directory")
 
-        # Calculate composite SHA
+        # Calculate Composite Docker SHA (CDS)
         try:
             with tempfile.NamedTemporaryFile(mode='w+b', delete=False) as temp_file:
                 temp_path = Path(temp_file.name)
@@ -390,12 +390,12 @@ class DynamoRepositoryUtils(BaseUtils):
                 finally:
                     temp_path.unlink(missing_ok=True)
         except Exception as e:
-            self.logger.error(f"Error calculating composite SHA: {e}")
+            self.logger.error(f"Error calculating Composite Docker SHA (CDS): {e}")
             return "ERROR"
 
     def get_stored_composite_sha(self) -> str:
         """
-        Get stored composite SHA from file.
+        Get stored Composite Docker SHA (CDS) from file.
 
         Returns:
             Stored SHA string, or empty string if not found
@@ -403,27 +403,27 @@ class DynamoRepositoryUtils(BaseUtils):
         sha_file = self.repo_path / ".last_build_composite_sha"
         if sha_file.exists():
             stored = sha_file.read_text().strip()
-            self.logger.debug(f"Found stored composite SHA: {stored[:12]}")
+            self.logger.debug(f"Found stored Composite Docker SHA (CDS): {stored[:12]}")
             return stored
-        self.logger.debug("No stored composite SHA found")
+        self.logger.debug("No stored Composite Docker SHA (CDS) found")
         return ""
 
     def store_composite_sha(self, sha: str) -> None:
         """
-        Store current composite SHA to file.
+        Store current Composite Docker SHA (CDS) to file.
 
         Args:
-            sha: Composite Docker SHA to store
+            sha: Composite Docker SHA (CDS) to store
         """
         sha_file = self.repo_path / ".last_build_composite_sha"
         sha_file.write_text(sha)
-        self.logger.info(f"Stored composite SHA: {sha[:12]}")
+        self.logger.info(f"Stored Composite Docker SHA (CDS): {sha[:12]}")
 
     def check_if_rebuild_needed(self, force_run: bool = False) -> bool:
         """
-        Check if rebuild is needed based on composite SHA comparison.
+        Check if rebuild is needed based on Composite Docker SHA (CDS) comparison.
 
-        Compares current composite SHA with stored SHA to determine if
+        Compares current Composite Docker SHA (CDS) with stored SHA to determine if
         container files have changed since last build.
 
         Args:
@@ -435,33 +435,33 @@ class DynamoRepositoryUtils(BaseUtils):
         self.logger.info("\nChecking if rebuild is needed based on file changes...")
         self.logger.info(f"Composite Docker SHA file: {self.repo_path}/.last_build_composite_sha")
 
-        # Generate current composite SHA (full hash, not truncated)
+        # Generate current Composite Docker SHA (CDS) (full hash, not truncated)
         current_sha = self.generate_composite_sha(full_hash=True)
         if current_sha in ("NO_CONTAINER_DIR", "NO_FILES", "ERROR"):
-            self.logger.warning(f"Failed to generate composite SHA: {current_sha}")
+            self.logger.warning(f"Failed to generate Composite Docker SHA (CDS): {current_sha}")
             return True  # Assume rebuild needed
 
-        # Get stored composite SHA
+        # Get stored Composite Docker SHA (CDS)
         stored_sha = self.get_stored_composite_sha()
 
         if stored_sha:
             if current_sha == stored_sha:
                 if force_run:
-                    self.logger.info(f"Composite Docker SHA unchanged ({current_sha[:12]}) but --force-run specified - proceeding")
+                    self.logger.info(f"Composite Docker SHA (CDS) unchanged ({current_sha[:12]}) but --force-run specified - proceeding")
                     return True
                 else:
-                    self.logger.info(f"Composite Docker SHA unchanged ({current_sha[:12]}) - skipping rebuild")
+                    self.logger.info(f"Composite Docker SHA (CDS) unchanged ({current_sha[:12]}) - skipping rebuild")
                     self.logger.info("Use --force-run to force rebuild")
                     return False  # No rebuild needed
             else:
-                self.logger.info("Composite Docker SHA changed:")
+                self.logger.info("Composite Docker SHA (CDS) changed:")
                 self.logger.info(f"  Previous: {stored_sha[:12]}")
                 self.logger.info(f"  Current:  {current_sha[:12]}")
                 self.logger.info("Rebuild needed")
                 self.store_composite_sha(current_sha)
                 return True
         else:
-            self.logger.info("No previous composite SHA found - rebuild needed")
+            self.logger.info("No previous Composite Docker SHA (CDS) found - rebuild needed")
             self.store_composite_sha(current_sha)
             return True
 
@@ -2470,6 +2470,171 @@ class GitLabAPIClient:
             try:
                 pipeline_cache_path.parent.mkdir(parents=True, exist_ok=True)
                 pipeline_cache_path.write_text(json.dumps(cache, indent=2))
+            except Exception:
+                pass
+
+        return result
+
+    def get_cached_pipeline_job_counts(self, pipeline_ids: List[int],
+                                      cache_file: str = '.gitlab_pipeline_jobs_cache.json',
+                                      skip_fetch: bool = False) -> Dict[int, Optional[Dict[str, int]]]:
+        """Get GitLab CI pipeline job counts with intelligent caching.
+
+        Caching strategy:
+        - If skip_fetch=True: Only return cached data, no API calls
+        - If skip_fetch=False:
+          - Completed pipelines (running=0, pending=0): Cached forever, never refetched
+          - Active pipelines (running>0 or pending>0): Refetch if older than 30 minutes
+
+        Args:
+            pipeline_ids: List of pipeline IDs
+            cache_file: Path to cache file (default: .gitlab_pipeline_jobs_cache.json)
+            skip_fetch: If True, only return cached data without fetching from GitLab
+
+        Returns:
+            Dictionary mapping pipeline ID to job counts dict (or None if fetch failed)
+
+            Example return value:
+            {
+                40355198: {
+                    "success": 16,
+                    "failed": 0,
+                    "running": 6,
+                    "pending": 0
+                },
+                40341238: {
+                    "success": 11,
+                    "failed": 13,
+                    "running": 0,
+                    "pending": 0
+                }
+            }
+
+        Cache file format (with timestamps):
+            {
+                "40355198": {
+                    "counts": {"success": 16, "failed": 0, "running": 6, "pending": 0},
+                    "fetched_at": "2025-12-17T18:15:00Z"
+                }
+            }
+        """
+        import json
+        from pathlib import Path
+        from datetime import datetime, timezone, timedelta
+
+        # Load cache
+        cache = {}
+        jobs_cache_path = Path(cache_file)
+        if jobs_cache_path.exists():
+            try:
+                cache = json.loads(jobs_cache_path.read_text())
+                # Convert string keys back to int
+                cache = {int(k): v for k, v in cache.items()}
+            except Exception:
+                pass
+
+        # Helper function to extract counts from cache entry (handles old and new format)
+        def extract_counts(entry):
+            if not entry:
+                return None
+            return entry.get('counts', entry) if isinstance(entry, dict) else entry
+
+        # Helper function to check if pipeline is completed (no running/pending jobs)
+        def is_completed(entry):
+            counts = extract_counts(entry)
+            if not counts:
+                return False
+            return counts.get('running', 0) == 0 and counts.get('pending', 0) == 0
+
+        # Helper function to check if cache entry is fresh
+        # Completed pipelines (no running/pending) are cached forever
+        # Active pipelines (running/pending) must be < 30 minutes old
+        def is_fresh(entry, now, age_limit):
+            if not isinstance(entry, dict) or 'fetched_at' not in entry:
+                return False  # Old format or missing timestamp = stale
+
+            # If pipeline is completed, cache forever
+            if is_completed(entry):
+                return True
+
+            # Otherwise, check if < 30 minutes old
+            try:
+                fetched_at = datetime.fromisoformat(entry['fetched_at'].replace('Z', '+00:00'))
+                return (now - fetched_at) < age_limit
+            except Exception:
+                return False  # Invalid timestamp = stale
+
+        now = datetime.now(timezone.utc)
+        cache_age_limit = timedelta(minutes=30)
+
+        # If skip_fetch=True, only return cached data - NO API calls
+        if skip_fetch:
+            return {pid: extract_counts(cache.get(pid)) for pid in pipeline_ids}
+
+        # Determine which pipelines need fetching
+        pipeline_ids_to_fetch = []
+        result = {}
+
+        for pipeline_id in pipeline_ids:
+            cached_entry = cache.get(pipeline_id)
+
+            if cached_entry and is_fresh(cached_entry, now, cache_age_limit):
+                # Cache is fresh, use it
+                result[pipeline_id] = extract_counts(cached_entry)
+            else:
+                # Not in cache, or cache is stale - refetch
+                pipeline_ids_to_fetch.append(pipeline_id)
+                result[pipeline_id] = extract_counts(cached_entry)  # Use existing data temporarily if available
+
+        # Fetch missing pipeline job counts from GitLab
+        if pipeline_ids_to_fetch and self.has_token():
+            fetch_timestamp = now.isoformat().replace('+00:00', 'Z')
+
+            for pipeline_id in pipeline_ids_to_fetch:
+                try:
+                    # Get jobs for this pipeline
+                    endpoint = f"/api/v4/projects/169905/pipelines/{pipeline_id}/jobs"
+                    params = {'per_page': 100}  # Get up to 100 jobs
+                    jobs = self.get(endpoint, params=params)
+
+                    if jobs:
+                        # Count jobs by status
+                        counts = {
+                            'success': 0,
+                            'failed': 0,
+                            'running': 0,
+                            'pending': 0
+                        }
+
+                        for job in jobs:
+                            status = job.get('status', 'unknown')
+                            if status in counts:
+                                counts[status] += 1
+                            # Map other statuses to main categories
+                            elif status in ('skipped', 'manual', 'canceled'):
+                                pass  # Don't count these
+                            elif status in ('created', 'waiting_for_resource'):
+                                counts['pending'] += 1
+
+                        result[pipeline_id] = counts
+                        # Store in new format with timestamp
+                        cache[pipeline_id] = {
+                            'counts': counts,
+                            'fetched_at': fetch_timestamp
+                        }
+                    else:
+                        result[pipeline_id] = None
+                        cache[pipeline_id] = None
+                except Exception:
+                    result[pipeline_id] = None
+                    cache[pipeline_id] = None
+
+            # Save updated cache
+            try:
+                jobs_cache_path.parent.mkdir(parents=True, exist_ok=True)
+                # Convert int keys to string for JSON
+                cache_str_keys = {str(k): v for k, v in cache.items()}
+                jobs_cache_path.write_text(json.dumps(cache_str_keys, indent=2))
             except Exception:
                 pass
 
