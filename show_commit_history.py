@@ -20,10 +20,10 @@ import subprocess
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import List, Dict
+from typing import List, Dict, Optional
 
 # Import utilities from common module
-from common import DynamoRepositoryUtils, GitLabAPIClient, get_terminal_width
+from common import DynamoRepositoryUtils, GitLabAPIClient, GitHubAPIClient, get_terminal_width
 
 # Import Jinja2 for HTML template rendering
 try:
@@ -60,6 +60,7 @@ class CommitHistoryGenerator:
         self.logger = self._setup_logger()
         self.cache_file = self.repo_path / ".commit_history_cache.json"
         self.gitlab_client = GitLabAPIClient()  # Single instance for all GitLab operations
+        self.github_client = GitHubAPIClient()  # Single instance for all GitHub operations
 
     def _setup_logger(self) -> logging.Logger:
         """Setup logging configuration"""
@@ -118,6 +119,7 @@ class CommitHistoryGenerator:
         #     "composite_docker_sha": "746bc31d05b3",
         #     "author": "John Doe",
         #     "date": "2025-12-17 20:03:39",
+        #     "merge_date": "2025-12-17 21:15:30",
         #     "message": "feat: Add new feature (#1234)",
         #     "full_message": "feat: Add new feature (#1234)\n\nDetailed description...",
         #     "stats": {"files": 5, "insertions": 100, "deletions": 50},
@@ -133,6 +135,7 @@ class CommitHistoryGenerator:
         #   - composite_docker_sha: 12-character hash of container/ directory contents
         #   - author: Commit author name
         #   - date: Commit timestamp (YYYY-MM-DD HH:MM:SS)
+        #   - merge_date: When MR was merged (YYYY-MM-DD HH:MM:SS), null if not found/merged
         #   - message: First line of commit message
         #   - full_message: Full commit message
         #   - stats: Dict with files, insertions, deletions counts
@@ -149,6 +152,26 @@ class CommitHistoryGenerator:
             repo = git.Repo(self.repo_path)
             commits = list(repo.iter_commits('HEAD', max_count=max_commits))
             original_head = repo.head.commit.hexsha
+
+            # Pre-fetch merge dates for all commits in batch (if HTML mode)
+            pr_to_merge_date = {}
+            if html_output and not self.skip_gitlab_fetch:
+                # Collect all PR numbers from commit messages
+                pr_numbers = []
+                for commit in commits:
+                    message = commit.message.strip().split('\n')[0]
+                    pr_num = GitLabAPIClient.parse_mr_number_from_message(message)  # Works for both MR and PR format
+                    if pr_num:
+                        pr_numbers.append(pr_num)
+
+                # Batch fetch merge dates for all PRs (GitHub)
+                if pr_numbers:
+                    self.logger.info(f"Fetching merge dates for {len(pr_numbers)} PRs...")
+                    pr_to_merge_date = self.github_client.get_cached_pr_merge_dates(
+                        pr_numbers,
+                        cache_file=str(self.repo_path / '.github_pr_merge_dates_cache.json')
+                    )
+                    self.logger.info(f"Got merge dates for {sum(1 for v in pr_to_merge_date.values() if v)} PRs")
 
             # Collect commit data
             commit_data = []
@@ -178,12 +201,15 @@ class CommitHistoryGenerator:
 
                     # Check cache first - handle both old format (string) and new format (dict)
                     cached_entry = cache.get(sha_full)
+                    merge_date = None  # Initialize merge_date
+
                     if cached_entry and isinstance(cached_entry, dict):
                         # New format: Full metadata cached
                         composite_sha = cached_entry['composite_docker_sha']
                         date_str = cached_entry['date']
                         author_name = cached_entry['author']
                         message_first_line = cached_entry['message']
+                        merge_date = cached_entry.get('merge_date')  # May be None if not in cache
 
                         if html_output:
                             full_message = cached_entry['full_message']
@@ -193,11 +219,33 @@ class CommitHistoryGenerator:
                             changed_files = cached_entry['changed_files']
 
                         self.logger.debug(f"Cache hit (full metadata) for {sha_short}: {composite_sha}")
+
+                        # Update merge_date from batch fetch if not in cache
+                        if merge_date is None and html_output:
+                            pr_number = GitLabAPIClient.parse_mr_number_from_message(message_first_line)
+                            if pr_number and pr_number in pr_to_merge_date:
+                                merge_date = pr_to_merge_date[pr_number]
+                                if merge_date:
+                                    self.logger.debug(f"Got merge date for PR {pr_number}: {merge_date}")
+                                    # Update cache with merge_date
+                                    cached_entry['merge_date'] = merge_date
+                                    cache_updated = True
                     else:
                         # Old format or cache miss: Need to fetch from git
-                        date_str = commit.committed_datetime.strftime('%Y-%m-%d %H:%M:%S')
+                        # Convert commit time from UTC to Pacific time
+                        from zoneinfo import ZoneInfo
+                        commit_dt_pacific = commit.committed_datetime.astimezone(ZoneInfo('America/Los_Angeles'))
+                        date_str = commit_dt_pacific.strftime('%Y-%m-%d %H:%M:%S')
                         author_name = commit.author.name
                         message_first_line = commit.message.strip().split('\n')[0]
+
+                        # Get merge_date from batch fetch if HTML mode
+                        if html_output:
+                            pr_number = GitLabAPIClient.parse_mr_number_from_message(message_first_line)
+                            if pr_number and pr_number in pr_to_merge_date:
+                                merge_date = pr_to_merge_date[pr_number]
+                                if merge_date:
+                                    self.logger.debug(f"Got merge date for PR {pr_number}: {merge_date}")
 
                         # Check if we have old-format composite SHA cached
                         if cached_entry and isinstance(cached_entry, str):
@@ -233,6 +281,7 @@ class CommitHistoryGenerator:
                                 'composite_docker_sha': composite_sha,
                                 'author': author_name,
                                 'date': date_str,
+                                'merge_date': merge_date,  # May be None if not found
                                 'message': message_first_line,
                                 'full_message': full_message,
                                 'stats': {
@@ -267,6 +316,7 @@ class CommitHistoryGenerator:
                             'sha_full': sha_full,
                             'composite_sha': composite_sha,
                             'date': date_str,
+                            'merge_date': merge_date,  # May be None if not found
                             'committed_datetime': commit.committed_datetime,  # Store datetime object for time-based filtering
                             'author': author_name,
                             'message': message_first_line,
@@ -466,6 +516,7 @@ class CommitHistoryGenerator:
         # Build log paths dictionary and status indicators
         log_paths = {}  # Maps sha_short to list of (date, path) tuples
         composite_to_status = {}  # Maps composite_sha to status (with priority: failed > building > success)
+        commit_to_status = {}  # Maps commit sha_short to its own build status
         composite_to_commits = {}  # Maps composite_sha to list of commit SHAs
 
         # Status priority for conflict resolution (higher number = higher priority)
@@ -543,7 +594,11 @@ class CommitHistoryGenerator:
                             status = 'success'
                         # If this date has no files, keep previous status
 
-                # Update composite SHA status with priority (failed > building > success)
+                # Store per-commit status
+                commit_to_status[sha_short] = status
+
+                # Also update composite SHA status with priority (failed > building > success)
+                # This is used for commits without their own logs (inherited status)
                 if composite_sha not in composite_to_status:
                     composite_to_status[composite_sha] = status
                 else:
@@ -556,19 +611,31 @@ class CommitHistoryGenerator:
                     composite_to_status[composite_sha] = 'unknown'
                 # Don't override existing status if we have no information
 
-        # Pass 2: Assign status to all commits based on composite SHA
-        # Commits with logs get regular status, commits without logs get inherited status
+        # Pass 2: Assign status to all commits
+        # Commits with logs get their own status, commits without logs inherit from CDS
         build_status = {}
         for commit in commit_data:
             sha_short = commit['sha_short']
             composite_sha = commit['composite_sha']
 
-            if composite_sha in composite_to_status:
-                # Check if this commit has logs (not inherited)
-                has_logs = sha_short in log_paths
+            # Use per-commit status if available, otherwise inherit from CDS
+            if sha_short in commit_to_status:
+                # This commit has its own build logs
+                build_status[sha_short] = {
+                    'status': commit_to_status[sha_short],
+                    'inherited': False
+                }
+            elif composite_sha in composite_to_status:
+                # Inherit status from CDS
                 build_status[sha_short] = {
                     'status': composite_to_status[composite_sha],
-                    'inherited': not has_logs
+                    'inherited': True
+                }
+            else:
+                # No status available
+                build_status[sha_short] = {
+                    'status': 'unknown',
+                    'inherited': False
                 }
         
         # Generate timestamp

@@ -299,12 +299,11 @@ function copyFromClipboardAttr(button) {
 
 <div class="header">
 <h1>Dynamo Commit History</h1>
-<p style="margin: 5px 0 0 0; opacity: 0.9;">Recent commits with Composite Docker SHAs (CDS) and Docker images</p>
-<p style="margin: 5px 0 0 0; opacity: 0.7; font-size: 12px;">Page generated: {{ generated_time }} <span id="page-age" style="color: #ffa657;"></span></p>
+<p style="margin: 5px 0 0 0; opacity: 0.9;">Recent commits with Composite Docker SHAs (CDS) and Docker images &nbsp;&nbsp;|&nbsp;&nbsp; <span style="opacity: 0.77; font-size: 12px;">Page generated: {{ generated_time }} <span id="page-age" style="color: #ffa657;"></span></span></p>
 </div>
 
 <!-- Key/Help Section -->
-<div style="margin: 20px 0; padding: 12px; background-color: #f6f8fa; border: 1px solid #d0d7de; border-radius: 6px;">
+<div class="container" style="margin-bottom: 20px; padding: 12px; background-color: #f6f8fa;">
 <details>
 <summary style="cursor: pointer; font-weight: 600; font-size: 14px; color: #24292f; user-select: none;">
 Legend & Help
@@ -399,7 +398,7 @@ Legend & Help
 <th>Commit SHA</th>
 <th>Composite 🐳 SHA</th>
 <th>CI Status</th>
-<th>Date/Time (PDT)</th>
+<th>Date/Time (PST)</th>
 <th>Author</th>
 <th style="width: 100%;">Message</th>
 </tr>

@@ -1306,6 +1306,102 @@ class GitHubAPIClient:
         except Exception:
             return None
 
+    def get_commit_check_status(self, owner: str, repo: str, sha: str) -> dict:
+        """Get aggregated CI status from GitHub Actions check-runs for a commit.
+
+        Prioritizes test checks over build checks:
+        - If test checks (deploy-test-*) are in_progress/queued → "building" (yellow)
+        - If only builds are in_progress but tests failed → "failed" (red)
+        - If any failures and nothing in progress → "failed" (red)
+        - If all completed successfully → "success" (green)
+        - If no checks → "unknown" (gray)
+
+        Args:
+            owner: Repository owner
+            repo: Repository name
+            sha: Commit SHA (can be short or full)
+
+        Returns:
+            Dict with status info:
+            {
+                "status": "building"|"failed"|"success"|"unknown",
+                "in_progress": int,
+                "queued": int,
+                "failed": int,
+                "success": int,
+                "total": int
+            }
+        """
+        endpoint = f"/repos/{owner}/{repo}/commits/{sha}/check-runs"
+        try:
+            result = self.get(endpoint)
+            if not result:
+                return {"status": "unknown", "in_progress": 0, "queued": 0, "failed": 0, "success": 0, "total": 0}
+
+            # Count by type
+            test_in_progress = 0
+            test_queued = 0
+            build_in_progress = 0
+            build_queued = 0
+            failed = 0
+            success = 0
+
+            for check in result.get('check_runs', []):
+                check_name = check['name']
+                status = check['status']
+                conclusion = check.get('conclusion')
+
+                # Classify as test or build
+                is_test = 'deploy-test-' in check_name or 'test' in check_name.lower()
+
+                if status == 'in_progress':
+                    if is_test:
+                        test_in_progress += 1
+                    else:
+                        build_in_progress += 1
+                elif status == 'queued':
+                    if is_test:
+                        test_queued += 1
+                    else:
+                        build_queued += 1
+                elif status == 'completed':
+                    if conclusion == 'failure':
+                        failed += 1
+                    elif conclusion == 'success':
+                        success += 1
+
+            total = result.get('total_count', 0)
+            total_in_progress = test_in_progress + build_in_progress
+            total_queued = test_queued + build_queued
+
+            # Determine overall status with priority logic
+            if test_in_progress > 0 or test_queued > 0:
+                # Test checks still running → yellow
+                overall_status = "building"
+            elif failed > 0:
+                # Tests done with failures → red (even if builds still running)
+                overall_status = "failed"
+            elif total_in_progress > 0 or total_queued > 0:
+                # Only builds running, no test failures → yellow
+                overall_status = "building"
+            elif total == 0:
+                overall_status = "unknown"
+            else:
+                # All done, no failures → green
+                overall_status = "success"
+
+            return {
+                "status": overall_status,
+                "in_progress": total_in_progress,
+                "queued": total_queued,
+                "failed": failed,
+                "success": success,
+                "total": total
+            }
+        except Exception as e:
+            self.logger.warning(f"Failed to get check status for {sha}: {e}")
+            return {"status": "unknown", "in_progress": 0, "queued": 0, "failed": 0, "success": 0, "total": 0}
+
     def count_unresolved_conversations(self, owner: str, repo: str, pr_number: int) -> int:
         """Count unresolved conversation threads in a PR.
 
@@ -1893,13 +1989,15 @@ class GitHubAPIClient:
                 return []
 
             pr_list = []
-            for pr_data in prs_data:
-                # Fetch PR details in parallel using ThreadPoolExecutor
-                with ThreadPoolExecutor(max_workers=5) as executor:
-                    # Submit all 5 API calls in parallel
+            # Create ThreadPoolExecutor once outside the loop (reuse for all PRs)
+            with ThreadPoolExecutor(max_workers=8) as executor:
+                for pr_data in prs_data:
+                    # Use pr_data directly instead of refetching with get_pr_details
+                    # pr_data already contains most fields from the list PRs endpoint
+
+                    # Submit API calls in parallel
                     future_ci = executor.submit(self.get_ci_status, owner, repo, pr_data['head']['sha'], pr_data['number'])
                     future_conversations = executor.submit(self.count_unresolved_conversations, owner, repo, pr_data['number'])
-                    future_details = executor.submit(self.get_pr_details, owner, repo, pr_data['number'])
                     future_required = executor.submit(self.get_required_checks, owner, repo, pr_data['number'])
 
                     # Wait for required checks first (needed for failed_checks)
@@ -1912,52 +2010,53 @@ class GitHubAPIClient:
                     # Wait for all to complete
                     ci_status = future_ci.result()
                     unresolved_count = future_conversations.result()
-                    pr_details = future_details.result()
                     failed_checks, rerun_url = future_failed_checks.result()
                     running_checks = future_running_checks.result()
 
-                mergeable = pr_details.get('mergeable') if pr_details else None
-                mergeable_state = pr_details.get('mergeable_state') if pr_details else pr_data.get('mergeable_state', 'unknown')
-                has_conflicts = (mergeable is False) or (mergeable_state == 'dirty')
+                    # Use pr_data directly - no need to refetch with get_pr_details
+                    # The list PRs endpoint already returns mergeable_state
+                    mergeable = None  # List endpoint doesn't include this, but we can use mergeable_state
+                    mergeable_state = pr_data.get('mergeable_state', 'unknown')
+                    has_conflicts = (mergeable is False) or (mergeable_state == 'dirty')
 
-                # Extract base branch for all PRs
-                base_branch = pr_data.get('base', {}).get('ref', 'main')
+                    # Extract base branch for all PRs
+                    base_branch = pr_data.get('base', {}).get('ref', 'main')
 
-                # Generate conflict message
-                conflict_message = None
-                if has_conflicts:
-                    conflict_message = f"This branch has conflicts that must be resolved (merge {base_branch} into this branch)"
+                    # Generate conflict message
+                    conflict_message = None
+                    if has_conflicts:
+                        conflict_message = f"This branch has conflicts that must be resolved (merge {base_branch} into this branch)"
 
-                # Generate blocking message based on mergeable_state
-                blocking_message = None
-                if mergeable_state in ['blocked', 'unstable', 'behind']:
-                    if mergeable_state == 'unstable':
-                        blocking_message = "Merging is blocked - Waiting on code owner review or required status checks"
-                    elif mergeable_state == 'blocked':
-                        blocking_message = "Merging is blocked - Required reviews or checks not satisfied"
-                    elif mergeable_state == 'behind':
-                        blocking_message = "This branch is out of date with the base branch"
+                    # Generate blocking message based on mergeable_state
+                    blocking_message = None
+                    if mergeable_state in ['blocked', 'unstable', 'behind']:
+                        if mergeable_state == 'unstable':
+                            blocking_message = "Merging is blocked - Waiting on code owner review or required status checks"
+                        elif mergeable_state == 'blocked':
+                            blocking_message = "Merging is blocked - Required reviews or checks not satisfied"
+                        elif mergeable_state == 'behind':
+                            blocking_message = "This branch is out of date with the base branch"
 
-                pr_info = PRInfo(
-                    number=pr_data['number'],
-                    title=pr_data['title'],
-                    url=pr_data['html_url'],
-                    state=pr_data['state'],
-                    is_merged=pr_data.get('merged_at') is not None,
-                    review_decision=pr_data.get('reviewDecision'),
-                    mergeable_state=mergeable_state,
-                    unresolved_conversations=unresolved_count,
-                    ci_status=ci_status,
-                    base_ref=base_branch,
-                    created_at=pr_data.get('created_at'),
-                    has_conflicts=has_conflicts,
-                    conflict_message=conflict_message,
-                    blocking_message=blocking_message,
-                    failed_checks=failed_checks,
-                    running_checks=running_checks,
-                    rerun_url=rerun_url
-                )
-                pr_list.append(pr_info)
+                    pr_info = PRInfo(
+                        number=pr_data['number'],
+                        title=pr_data['title'],
+                        url=pr_data['html_url'],
+                        state=pr_data['state'],
+                        is_merged=pr_data.get('merged_at') is not None,
+                        review_decision=pr_data.get('reviewDecision'),
+                        mergeable_state=mergeable_state,
+                        unresolved_conversations=unresolved_count,
+                        ci_status=ci_status,
+                        base_ref=base_branch,
+                        created_at=pr_data.get('created_at'),
+                        has_conflicts=has_conflicts,
+                        conflict_message=conflict_message,
+                        blocking_message=blocking_message,
+                        failed_checks=failed_checks,
+                        running_checks=running_checks,
+                        rerun_url=rerun_url
+                    )
+                    pr_list.append(pr_info)
 
             return pr_list
 
@@ -1965,6 +2064,115 @@ class GitHubAPIClient:
             import sys
             print(f"Error fetching PR info for {branch}: {e}", file=sys.stderr)
             return []
+
+    def get_cached_pr_merge_dates(self, pr_numbers: List[int],
+                                  owner: str = "ai-dynamo",
+                                  repo: str = "dynamo",
+                                  cache_file: str = '.github_pr_merge_dates_cache.json') -> Dict[int, Optional[str]]:
+        """Get merge dates for pull requests with caching.
+
+        Merge dates are cached permanently since they don't change once a PR is merged.
+
+        Args:
+            pr_numbers: List of PR numbers
+            owner: Repository owner (default: ai-dynamo)
+            repo: Repository name (default: dynamo)
+            cache_file: Path to cache file
+
+        Returns:
+            Dictionary mapping PR number to merge date string (YYYY-MM-DD HH:MM:SS)
+            Returns None for PRs that are not merged or not found
+
+        Example:
+            >>> client = GitHubAPIClient()
+            >>> merge_dates = client.get_cached_pr_merge_dates([4965, 5009])
+            >>> merge_dates
+            {4965: "2025-12-18 12:34:56", 5009: None}
+
+        Cache file format (.github_pr_merge_dates_cache.json):
+        {
+            "4965": "2025-12-18 12:34:56",
+            "5009": null
+        }
+        """
+        import json
+        from pathlib import Path
+        from datetime import datetime
+
+        # Load cache
+        cache = {}
+        pr_cache_path = Path(cache_file)
+        if pr_cache_path.exists():
+            try:
+                cache_raw = json.loads(pr_cache_path.read_text())
+                cache = {int(k): v for k, v in cache_raw.items()}
+            except Exception:
+                pass
+
+        # Prepare result and track if cache was updated
+        result = {}
+        cache_updated = False
+        from zoneinfo import ZoneInfo
+        import logging
+        logger = logging.getLogger('common')
+        from concurrent.futures import ThreadPoolExecutor
+
+        # First pass: collect cached results and PRs to fetch
+        prs_to_fetch = []
+        for pr_num in pr_numbers:
+            if pr_num in cache:
+                result[pr_num] = cache[pr_num]
+            else:
+                prs_to_fetch.append(pr_num)
+
+        # Fetch uncached PRs in parallel
+        if prs_to_fetch:
+            def fetch_pr_merge_date(pr_num):
+                """Helper function to fetch a single PR's merge date"""
+                try:
+                    pr_details = self.get_pr_details(owner, repo, pr_num)
+
+                    if pr_details and pr_details.get('merged_at'):
+                        # Parse ISO timestamp: "2025-12-18T12:34:56Z" (UTC)
+                        merged_at = pr_details['merged_at']
+                        dt_utc = datetime.fromisoformat(merged_at.replace('Z', '+00:00'))
+
+                        # Convert to Pacific time (PST/PDT)
+                        dt_pacific = dt_utc.astimezone(ZoneInfo('America/Los_Angeles'))
+                        merge_date = dt_pacific.strftime('%Y-%m-%d %H:%M:%S')
+                        return (pr_num, merge_date)
+                    else:
+                        # PR not merged or not found
+                        return (pr_num, None)
+                except Exception as e:
+                    # Log error but continue with other PRs
+                    logger.debug(f"Failed to fetch PR {pr_num} merge date: {e}")
+                    return (pr_num, None)
+
+            # Fetch in parallel with 10 workers
+            with ThreadPoolExecutor(max_workers=10) as executor:
+                futures = [executor.submit(fetch_pr_merge_date, pr_num) for pr_num in prs_to_fetch]
+
+                # Collect results as they complete
+                for future in futures:
+                    try:
+                        pr_num, merge_date = future.result()
+                        result[pr_num] = merge_date
+                        cache[pr_num] = merge_date
+                        cache_updated = True
+                    except Exception as e:
+                        logger.debug(f"Failed to get future result: {e}")
+
+        # Save updated cache
+        if cache_updated:
+            try:
+                pr_cache_path.parent.mkdir(parents=True, exist_ok=True)
+                cache_str_keys = {str(k): v for k, v in cache.items()}
+                pr_cache_path.write_text(json.dumps(cache_str_keys, indent=2))
+            except Exception:
+                pass
+
+        return result
 
 
 class GitLabAPIClient:
@@ -2441,9 +2649,12 @@ class GitLabAPIClient:
                 shas_to_fetch.append(sha)
                 result[sha] = None
 
-        # Fetch missing SHAs and non-success statuses from GitLab
+        # Fetch missing SHAs and non-success statuses from GitLab in parallel
         if shas_to_fetch and self.has_token():
-            for sha in shas_to_fetch:
+            from concurrent.futures import ThreadPoolExecutor
+
+            def fetch_pipeline_status(sha):
+                """Helper function to fetch pipeline status for a single SHA"""
                 try:
                     # Get pipelines for this commit
                     endpoint = f"/api/v4/projects/169905/pipelines"
@@ -2457,14 +2668,24 @@ class GitLabAPIClient:
                             'id': pipeline.get('id'),
                             'web_url': pipeline.get('web_url', ''),
                         }
+                        return (sha, status_info)
+                    else:
+                        return (sha, None)
+                except Exception:
+                    return (sha, None)
+
+            # Fetch in parallel with 10 workers
+            with ThreadPoolExecutor(max_workers=10) as executor:
+                futures = [executor.submit(fetch_pipeline_status, sha) for sha in shas_to_fetch]
+
+                # Collect results as they complete
+                for future in futures:
+                    try:
+                        sha, status_info = future.result()
                         result[sha] = status_info
                         cache[sha] = status_info
-                    else:
-                        result[sha] = None
-                        cache[sha] = None
-                except Exception:
-                    result[sha] = None
-                    cache[sha] = None
+                    except Exception:
+                        pass
 
             # Save updated cache
             try:
@@ -2586,11 +2807,13 @@ class GitLabAPIClient:
                 pipeline_ids_to_fetch.append(pipeline_id)
                 result[pipeline_id] = extract_counts(cached_entry)  # Use existing data temporarily if available
 
-        # Fetch missing pipeline job counts from GitLab
+        # Fetch missing pipeline job counts from GitLab in parallel
         if pipeline_ids_to_fetch and self.has_token():
+            from concurrent.futures import ThreadPoolExecutor
             fetch_timestamp = now.isoformat().replace('+00:00', 'Z')
 
-            for pipeline_id in pipeline_ids_to_fetch:
+            def fetch_pipeline_jobs(pipeline_id):
+                """Helper function to fetch job counts for a single pipeline"""
                 try:
                     # Get jobs for this pipeline
                     endpoint = f"/api/v4/projects/169905/pipelines/{pipeline_id}/jobs"
@@ -2616,18 +2839,31 @@ class GitLabAPIClient:
                             elif status in ('created', 'waiting_for_resource'):
                                 counts['pending'] += 1
 
-                        result[pipeline_id] = counts
-                        # Store in new format with timestamp
-                        cache[pipeline_id] = {
-                            'counts': counts,
-                            'fetched_at': fetch_timestamp
-                        }
+                        # Return with timestamp
+                        return (pipeline_id, counts, fetch_timestamp)
                     else:
-                        result[pipeline_id] = None
-                        cache[pipeline_id] = None
+                        return (pipeline_id, None, None)
                 except Exception:
-                    result[pipeline_id] = None
-                    cache[pipeline_id] = None
+                    return (pipeline_id, None, None)
+
+            # Fetch in parallel with 10 workers
+            with ThreadPoolExecutor(max_workers=10) as executor:
+                futures = [executor.submit(fetch_pipeline_jobs, pid) for pid in pipeline_ids_to_fetch]
+
+                # Collect results as they complete
+                for future in futures:
+                    try:
+                        pipeline_id, counts, timestamp = future.result()
+                        result[pipeline_id] = counts
+                        if counts is not None and timestamp is not None:
+                            cache[pipeline_id] = {
+                                'counts': counts,
+                                'fetched_at': timestamp
+                            }
+                        else:
+                            cache[pipeline_id] = None
+                    except Exception:
+                        pass
 
             # Save updated cache
             try:
@@ -2635,6 +2871,126 @@ class GitLabAPIClient:
                 # Convert int keys to string for JSON
                 cache_str_keys = {str(k): v for k, v in cache.items()}
                 jobs_cache_path.write_text(json.dumps(cache_str_keys, indent=2))
+            except Exception:
+                pass
+
+        return result
+
+    @staticmethod
+    def parse_mr_number_from_message(message: str) -> Optional[int]:
+        """Parse MR/PR number from commit message (e.g., '... (#1234)')
+
+        Args:
+            message: Commit message to parse
+
+        Returns:
+            MR number if found, None otherwise
+
+        Example:
+            >>> GitLabAPIClient.parse_mr_number_from_message("feat: Add feature (#1234)")
+            1234
+            >>> GitLabAPIClient.parse_mr_number_from_message("fix: Bug fix")
+            None
+        """
+        import re
+        match = re.search(r'#(\d+)', message)
+        if match:
+            return int(match.group(1))
+        return None
+
+    def get_cached_mr_merge_dates(self, mr_numbers: List[int],
+                                  project_id: str = "169905",
+                                  cache_file: str = '.gitlab_mr_merge_dates_cache.json',
+                                  skip_fetch: bool = False) -> Dict[int, Optional[str]]:
+        """Get merge dates for merge requests with caching.
+
+        Merge dates are cached permanently since they don't change once a MR is merged.
+
+        Args:
+            mr_numbers: List of MR IIDs (internal IDs)
+            project_id: GitLab project ID (default: 169905 for dynamo)
+            cache_file: Path to cache file
+            skip_fetch: If True, only return cached data without fetching from GitLab
+
+        Returns:
+            Dictionary mapping MR number to merge date string (YYYY-MM-DD HH:MM:SS)
+            Returns None for MRs that are not merged or not found
+
+        Example:
+            >>> client = GitLabAPIClient()
+            >>> merge_dates = client.get_cached_mr_merge_dates([4965, 5009])
+            >>> merge_dates
+            {4965: "2025-12-18 12:34:56", 5009: None}
+
+        Cache file format (.gitlab_mr_merge_dates_cache.json):
+        {
+            "4965": "2025-12-18 12:34:56",
+            "5009": null
+        }
+        """
+        import json
+        from pathlib import Path
+        from datetime import datetime
+
+        # Load cache
+        cache = {}
+        mr_cache_path = Path(cache_file)
+        if mr_cache_path.exists():
+            try:
+                # Keys are stored as strings in JSON, convert back to int
+                cache_raw = json.loads(mr_cache_path.read_text())
+                cache = {int(k): v for k, v in cache_raw.items()}
+            except Exception:
+                pass
+
+        # If skip_fetch=True, only return cached data
+        if skip_fetch:
+            return {mr_num: cache.get(mr_num) for mr_num in mr_numbers}
+
+        # Prepare result and track if cache was updated
+        result = {}
+        cache_updated = False
+
+        for mr_num in mr_numbers:
+            # Check cache first
+            if mr_num in cache:
+                result[mr_num] = cache[mr_num]
+                continue
+
+            # Fetch from GitLab API
+            try:
+                endpoint = f"/api/v4/projects/{project_id}/merge_requests/{mr_num}"
+                response = self.get(endpoint, timeout=5)
+
+                if response and response.get('merged_at'):
+                    # Parse ISO timestamp: "2025-12-18T12:34:56.000Z"
+                    merged_at = response['merged_at']
+                    dt = datetime.fromisoformat(merged_at.replace('Z', '+00:00'))
+                    merge_date = dt.strftime('%Y-%m-%d %H:%M:%S')
+                    result[mr_num] = merge_date
+                    cache[mr_num] = merge_date
+                    cache_updated = True
+                else:
+                    # MR not merged or not found
+                    result[mr_num] = None
+                    cache[mr_num] = None
+                    cache_updated = True
+            except Exception as e:
+                # Log error but continue with other MRs
+                import logging
+                logger = logging.getLogger('common')
+                logger.debug(f"Failed to fetch MR {mr_num} merge date: {e}")
+                result[mr_num] = None
+                cache[mr_num] = None
+                cache_updated = True
+
+        # Save updated cache
+        if cache_updated:
+            try:
+                mr_cache_path.parent.mkdir(parents=True, exist_ok=True)
+                # Convert int keys to string for JSON
+                cache_str_keys = {str(k): v for k, v in cache.items()}
+                mr_cache_path.write_text(json.dumps(cache_str_keys, indent=2))
             except Exception:
                 pass
 
