@@ -4,6 +4,7 @@ Dynamo utilities package.
 Shared constants and utilities for dynamo Docker management scripts.
 """
 
+import hashlib
 import json
 import logging
 import os
@@ -11,11 +12,17 @@ import re
 import shlex
 import shutil
 import subprocess
+import sys
+import tempfile
+import threading
+import urllib.parse
+import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+from zoneinfo import ZoneInfo
 
 # Global logger for the module
 _logger = logging.getLogger(__name__)
@@ -308,7 +315,6 @@ class DynamoRepositoryUtils(BaseUtils):
             verbose: Verbose logging
         """
         super().__init__(dry_run, verbose)
-        from pathlib import Path
         self.repo_path = Path(repo_path) if not isinstance(repo_path, Path) else repo_path
 
     def generate_composite_sha(self, full_hash: bool = False) -> str:
@@ -328,9 +334,6 @@ class DynamoRepositoryUtils(BaseUtils):
             - "NO_FILES": no relevant files found
             - "ERROR": error during calculation
         """
-        import hashlib
-        import tempfile
-        from pathlib import Path
 
         container_dir = self.repo_path / "container"
         if not container_dir.exists():
@@ -692,7 +695,6 @@ class DockerUtils(BaseUtils):
         Base images (dynamo-base) don't use most build arguments. Removing unused
         args helps Docker recognize when builds are truly identical.
         """
-        import re
 
         if not re.search(r'--tag\s+dynamo-base:', docker_command):
             # Only filter base image builds
@@ -777,7 +779,6 @@ class DockerUtils(BaseUtils):
 
     def extract_base_image_from_command(self, docker_cmd: str) -> str:
         """Extract the base/FROM image from docker build command arguments"""
-        import re
 
         # Look for --build-arg DYNAMO_BASE_IMAGE=... (framework-specific builds)
         match = re.search(r'--build-arg\s+DYNAMO_BASE_IMAGE=([^\s]+)', docker_cmd)
@@ -807,7 +808,6 @@ class DockerUtils(BaseUtils):
         Returns the tag string, or empty string if no tag found.
         Raises error if multiple tags are found (should not happen after get_build_commands validation).
         """
-        import re
 
         # Find all --tag arguments in the command
         tags = re.findall(r'--tag\s+([^\s]+)', docker_cmd)
@@ -845,7 +845,6 @@ class GitUtils(BaseUtils):
         """
         super().__init__(dry_run, verbose)
 
-        from pathlib import Path
         self.repo_path = Path(repo_path) if not isinstance(repo_path, Path) else repo_path
 
         try:
@@ -961,7 +960,6 @@ class GitUtils(BaseUtils):
                 "parents": ["5fe0476e605d2564234f00e8123461e1594a9ce7"]
             }
         """
-        from datetime import datetime
 
         return {
             'sha_full': commit.hexsha,
@@ -1209,7 +1207,69 @@ class GitHubAPIClient:
         """Check if a GitHub token is configured."""
         return self.token is not None
 
-    def get_ci_status(self, owner: str, repo: str, sha: str, pr_number: Optional[int] = None) -> Optional[str]:
+    def _fetch_pr_checks_data(self, owner: str, repo: str, pr_number: int) -> Optional[dict]:
+        """Fetch PR checks data once and parse for reuse by multiple methods.
+
+        This method consolidates the subprocess call to 'gh pr checks' to avoid
+        calling it multiple times for the same PR.
+
+        Args:
+            owner: Repository owner
+            repo: Repository name
+            pr_number: Pull request number
+
+        Returns:
+            Dictionary with parsed check data:
+            {
+                'stdout': str,  # Raw stdout for backward compatibility
+                'checks': [     # Parsed check list
+                    {
+                        'name': str,
+                        'status': str,  # 'pass', 'fail', 'pending', etc.
+                        'duration': str,
+                        'url': str
+                    }
+                ]
+            }
+            Returns None if subprocess call fails
+        """
+        try:
+            result = subprocess.run(
+                ['gh', 'pr', 'checks', str(pr_number), '--repo', f'{owner}/{repo}'],
+                capture_output=True,
+                text=True,
+                timeout=10
+            )
+
+            # Parse output even if return code is non-zero (failed checks)
+            if not result.stdout:
+                return None
+
+            # Parse tab-separated output: check_name\tstatus\tduration\turl
+            checks = []
+            for line in result.stdout.strip().split('\n'):
+                if not line.strip():
+                    continue
+
+                parts = line.split('\t')
+                if len(parts) >= 2:
+                    checks.append({
+                        'name': parts[0].strip(),
+                        'status': parts[1].strip(),
+                        'duration': parts[2].strip() if len(parts) > 2 else '',
+                        'url': parts[3].strip() if len(parts) > 3 else ''
+                    })
+
+            return {
+                'stdout': result.stdout,
+                'checks': checks
+            }
+
+        except Exception:
+            return None
+
+    def get_ci_status(self, owner: str, repo: str, sha: str, pr_number: Optional[int] = None,
+                     checks_data: Optional[dict] = None) -> Optional[str]:
         """Get CI status for a commit by checking PR checks.
 
         Args:
@@ -1217,10 +1277,28 @@ class GitHubAPIClient:
             repo: Repository name
             sha: Commit SHA
             pr_number: Optional PR number for faster lookup
+            checks_data: Optional pre-fetched checks data from _fetch_pr_checks_data()
 
         Returns:
             CI status string ('passed', 'failed', 'running'), or None if unavailable
         """
+        # If checks_data is provided, use it instead of fetching
+        if checks_data:
+            checks = checks_data.get('checks', [])
+            if not checks:
+                return None
+
+            # Count check statuses
+            has_fail = any(c['status'].lower() == 'fail' for c in checks)
+            has_pending = any(c['status'].lower() in ('pending', 'queued', 'in_progress') for c in checks)
+
+            if has_fail:
+                return 'failed'
+            elif has_pending:
+                return 'running'
+            else:
+                return 'passed'
+
         # If we don't have PR number, try to find it
         if not pr_number:
             # Try to find PR from commit
@@ -1247,7 +1325,6 @@ class GitHubAPIClient:
 
         # Use gh CLI to get check status (most reliable)
         try:
-            import subprocess
             result = subprocess.run(
                 ['gh', 'pr', 'checks', str(pr_number), '--repo', f'{owner}/{repo}'],
                 capture_output=True,
@@ -1467,7 +1544,6 @@ class GitHubAPIClient:
         """
         try:
             # Use gh CLI to get required checks (more reliable than API)
-            import subprocess
             result = subprocess.run(
                 ['gh', 'pr', 'checks', str(pr_number), '--repo', f'{owner}/{repo}', '--required'],
                 capture_output=True,
@@ -1597,7 +1673,6 @@ class GitHubAPIClient:
                 return disk_cache[job_id]
 
             # Fetch job logs via gh api (more reliable than gh run view)
-            import subprocess
             result = subprocess.run(
                 ['gh', 'api', f'/repos/{owner}/{repo}/actions/jobs/{job_id}/logs'],
                 capture_output=True,
@@ -1691,7 +1766,8 @@ class GitHubAPIClient:
         except Exception as e:
             return f"Error fetching logs: {str(e)}\n\nView full logs at:\n{job_url}"
 
-    def get_failed_checks(self, owner: str, repo: str, sha: str, required_checks: set, pr_number: Optional[int] = None) -> Tuple[List[FailedCheck], Optional[str]]:
+    def get_failed_checks(self, owner: str, repo: str, sha: str, required_checks: set, pr_number: Optional[int] = None,
+                         checks_data: Optional[dict] = None) -> Tuple[List[FailedCheck], Optional[str]]:
         """Get failed CI checks for a commit using gh CLI.
 
         Args:
@@ -1700,6 +1776,7 @@ class GitHubAPIClient:
             sha: Commit SHA (unused, kept for compatibility)
             required_checks: Set of required check names
             pr_number: PR number (optional, if available use gh pr checks)
+            checks_data: Optional pre-fetched checks data from _fetch_pr_checks_data()
 
         Returns:
             Tuple of (List of FailedCheck objects, rerun_url)
@@ -1726,7 +1803,56 @@ class GitHubAPIClient:
             )
         """
         try:
-            import subprocess
+
+            # If checks_data is provided, use it instead of fetching
+            if checks_data:
+                checks = checks_data.get('checks', [])
+                failed_checks = []
+                rerun_run_id = None
+
+                for check in checks:
+                    # Only process failed checks
+                    if check['status'].lower() != 'fail':
+                        continue
+
+                    check_name = check['name']
+                    html_url = check['url']
+                    duration = check['duration']
+
+                    # Extract run ID from html_url
+                    check_run_id = ''
+                    if '/runs/' in html_url:
+                        check_run_id = html_url.split('/runs/')[1].split('/')[0]
+                        if not rerun_run_id and check_run_id:
+                            rerun_run_id = check_run_id
+
+                    # Check if this is a required check
+                    is_required = check_name in required_checks
+
+                    # Get error summary from job logs
+                    error_summary = None
+                    if check_run_id and html_url:
+                        error_summary = self.get_job_error_summary(check_run_id, html_url, owner, repo)
+
+                    failed_check = FailedCheck(
+                        name=check_name,
+                        job_url=html_url,
+                        run_id=check_run_id,
+                        duration=duration,
+                        is_required=is_required,
+                        error_summary=error_summary
+                    )
+                    failed_checks.append(failed_check)
+
+                # Sort: required checks first, then by name
+                failed_checks.sort(key=lambda x: (not x.is_required, x.name))
+
+                # Generate rerun URL if we have a run_id
+                rerun_url = None
+                if rerun_run_id:
+                    rerun_url = f"https://github.com/{owner}/{repo}/actions/runs/{rerun_run_id}"
+
+                return failed_checks, rerun_url
 
             # Use gh pr checks if PR number is available (more reliable)
             if pr_number:
@@ -1826,7 +1952,6 @@ class GitHubAPIClient:
                     duration = ''
                     if started and completed:
                         try:
-                            from datetime import datetime
                             start_time = datetime.fromisoformat(started.replace('Z', '+00:00'))
                             end_time = datetime.fromisoformat(completed.replace('Z', '+00:00'))
                             duration_sec = int((end_time - start_time).total_seconds())
@@ -1866,24 +1991,53 @@ class GitHubAPIClient:
             return failed_checks, rerun_url
 
         except Exception as e:
-            import sys
             print(f"Error fetching failed checks: {e}", file=sys.stderr)
             return [], None
 
-    def get_running_checks(self, pr_number: int, owner: str, repo: str, required_checks: set) -> List[RunningCheck]:
-        """Get running CI checks for a PR using gh CLI.
+    def get_running_checks(self, pr_number: int, owner: str, repo: str, required_checks: set,
+                          checks_data: Optional[dict] = None) -> List[RunningCheck]:
+        """Get running CI checks for a PR.
 
         Args:
             pr_number: PR number
             owner: Repository owner
             repo: Repository name
             required_checks: Set of required check names
+            checks_data: Optional pre-fetched checks data from _fetch_pr_checks_data()
 
         Returns:
             List of RunningCheck objects
         """
         try:
-            import subprocess
+            # If checks_data is provided, use it instead of fetching
+            if checks_data:
+                checks = checks_data.get('checks', [])
+                running_checks = []
+
+                for check in checks:
+                    status = check['status'].lower()
+                    # Check if it's running (gh pr checks returns: pending, queued, in_progress)
+                    if status in ('pending', 'queued', 'in_progress'):
+                        name = check['name']
+                        check_url = check['url']
+                        is_required = name in required_checks
+
+                        # Use duration from gh pr checks (already formatted like "1m30s")
+                        elapsed_time = check['duration'] if check['duration'] else 'queued'
+
+                        running_check = RunningCheck(
+                            name=name,
+                            check_url=check_url,
+                            is_required=is_required,
+                            elapsed_time=elapsed_time
+                        )
+                        running_checks.append(running_check)
+
+                # Sort: required checks first, then by name
+                running_checks.sort(key=lambda x: (not x.is_required, x.name))
+                return running_checks
+
+            # Fallback: use gh pr view if checks_data not provided
             result = subprocess.run(
                 ['gh', 'pr', 'view', str(pr_number), '--repo', f'{owner}/{repo}', '--json', 'statusCheckRollup'],
                 capture_output=True,
@@ -1894,7 +2048,6 @@ class GitHubAPIClient:
             if result.returncode != 0 or not result.stdout:
                 return []
 
-            import json
             data = json.loads(result.stdout)
             checks = data.get('statusCheckRollup', [])
 
@@ -1912,7 +2065,6 @@ class GitHubAPIClient:
                     started_at = check.get('startedAt')
                     if started_at and started_at != '0001-01-01T00:00:00Z':
                         try:
-                            from datetime import datetime, timezone
                             start_time = datetime.fromisoformat(started_at.replace('Z', '+00:00'))
                             now = datetime.now(timezone.utc)
                             elapsed = now - start_time
@@ -1943,7 +2095,6 @@ class GitHubAPIClient:
             return running_checks
 
         except Exception as e:
-            import sys
             print(f"Error fetching running checks for PR {pr_number}: {e}", file=sys.stderr)
             return []
 
@@ -1995,23 +2146,23 @@ class GitHubAPIClient:
                     # Use pr_data directly instead of refetching with get_pr_details
                     # pr_data already contains most fields from the list PRs endpoint
 
-                    # Submit API calls in parallel
-                    future_ci = executor.submit(self.get_ci_status, owner, repo, pr_data['head']['sha'], pr_data['number'])
+                    # Fetch PR checks data once (consolidates 2 of the 3 'gh pr checks' calls)
+                    checks_data = self._fetch_pr_checks_data(owner, repo, pr_data['number'])
+
+                    # Submit API calls in parallel, passing checks_data where applicable
                     future_conversations = executor.submit(self.count_unresolved_conversations, owner, repo, pr_data['number'])
                     future_required = executor.submit(self.get_required_checks, owner, repo, pr_data['number'])
 
                     # Wait for required checks first (needed for failed_checks)
                     required_checks = future_required.result()
 
-                    # Now get failed checks and running checks with required info
-                    future_failed_checks = executor.submit(self.get_failed_checks, owner, repo, pr_data['head']['sha'], required_checks, pr_data['number'])
-                    future_running_checks = executor.submit(self.get_running_checks, pr_data['number'], owner, repo, required_checks)
+                    # Now process checks data synchronously (no need to parallelize since data is already fetched)
+                    ci_status = self.get_ci_status(owner, repo, pr_data['head']['sha'], pr_data['number'], checks_data=checks_data)
+                    failed_checks, rerun_url = self.get_failed_checks(owner, repo, pr_data['head']['sha'], required_checks, pr_data['number'], checks_data=checks_data)
+                    running_checks = self.get_running_checks(pr_data['number'], owner, repo, required_checks, checks_data=checks_data)
 
-                    # Wait for all to complete
-                    ci_status = future_ci.result()
+                    # Wait for remaining async task
                     unresolved_count = future_conversations.result()
-                    failed_checks, rerun_url = future_failed_checks.result()
-                    running_checks = future_running_checks.result()
 
                     # Use pr_data directly - no need to refetch with get_pr_details
                     # The list PRs endpoint already returns mergeable_state
@@ -2061,7 +2212,6 @@ class GitHubAPIClient:
             return pr_list
 
         except Exception as e:
-            import sys
             print(f"Error fetching PR info for {branch}: {e}", file=sys.stderr)
             return []
 
@@ -2095,9 +2245,6 @@ class GitHubAPIClient:
             "5009": null
         }
         """
-        import json
-        from pathlib import Path
-        from datetime import datetime
 
         # Load cache
         cache = {}
@@ -2112,10 +2259,7 @@ class GitHubAPIClient:
         # Prepare result and track if cache was updated
         result = {}
         cache_updated = False
-        from zoneinfo import ZoneInfo
-        import logging
         logger = logging.getLogger('common')
-        from concurrent.futures import ThreadPoolExecutor
 
         # First pass: collect cached results and PRs to fetch
         prs_to_fetch = []
@@ -2265,8 +2409,6 @@ class GitLabAPIClient:
         """
         if not HAS_REQUESTS:
             # Fallback to urllib for basic GET requests
-            import urllib.request
-            import urllib.parse
 
             url = f"{self.base_url}{endpoint}" if endpoint.startswith('/') else f"{self.base_url}/{endpoint}"
 
@@ -2340,9 +2482,6 @@ class GitLabAPIClient:
                 "5fe0476e605d2564234f00e8123461e1594a9ce7": []
             }
         """
-        from pathlib import Path
-        import json
-        from datetime import datetime, timedelta
 
         # Load cache
         cache = {}
@@ -2368,13 +2507,11 @@ class GitLabAPIClient:
             return result
         else:
             # Identify recent SHAs (within 8 hours)
-            from datetime import timezone
             now_utc = datetime.now(timezone.utc)
             eight_hours_ago_utc = now_utc - timedelta(hours=8)
 
             recent_shas = set()
             if sha_to_datetime:
-                from datetime import timezone
                 for sha in sha_list:
                     commit_time = sha_to_datetime.get(sha)
                     if commit_time:
@@ -2398,8 +2535,6 @@ class GitLabAPIClient:
 
             # Fetch ALL pages first, then filter by SHA
             per_page = 100
-            import threading
-            from concurrent.futures import ThreadPoolExecutor, as_completed
 
             if not self.has_token():
                 # No token, show big warning
@@ -2475,38 +2610,53 @@ class GitLabAPIClient:
                     _logger.debug(f"Failed to fetch page {page_num}: {e}")
                     return []
 
-            # Fetch all remaining pages in parallel (8 threads)
-            _logger.debug(f"Fetching all {total_pages} pages in parallel (8 threads)...")
-            pages_fetched = 1  # Already fetched page 1
+            # Helper to check if tag is older than 8 hours
+            def is_old_tag(tag: dict) -> bool:
+                tag_created = tag.get('created_at', '')
+                if not tag_created:
+                    return False
+                try:
+                    tag_time = datetime.fromisoformat(tag_created.replace('Z', '+00:00'))
+                    return tag_time < eight_hours_ago_utc
+                except Exception:
+                    return False
 
-            if total_pages > 1:
+            # Check if first page has old tags
+            found_old_tags = any(is_old_tag(tag) for tag in first_page_tags)
+            pages_fetched = 1
+
+            # Fetch remaining pages until we hit old tags
+            if total_pages > 1 and not found_old_tags:
+                _logger.debug(f"Fetching up to {total_pages} pages with early termination...")
+
                 with ThreadPoolExecutor(max_workers=8) as executor:
-                    # Submit all page fetch tasks (starting from page 2)
+                    # Submit all remaining pages
                     future_to_page = {executor.submit(fetch_page, page_num): page_num
                                      for page_num in range(2, total_pages + 1)}
 
-                    # Collect results as they complete
+                    # Process results as they complete
                     for future in as_completed(future_to_page):
                         page_num = future_to_page[future]
                         tags = future.result()
                         pages_fetched += 1
 
                         if tags:
-                            with lock:
-                                all_tags.extend(tags)
+                            all_tags.extend(tags)
+
+                            # Stop if we found old tags
+                            if any(is_old_tag(tag) for tag in tags):
+                                found_old_tags = True
+                                _logger.debug(f"Found tags older than 8 hours at page {page_num}, stopping early")
+                                # Cancel remaining futures
+                                for f in future_to_page:
+                                    if not f.done():
+                                        f.cancel()
+                                break
 
                         if pages_fetched % 10 == 0:
                             _logger.debug(f"Fetched {pages_fetched}/{total_pages} pages...")
 
-                        # If we got fewer tags than per_page, we've reached the end
-                        if len(tags) < per_page:
-                            # Cancel remaining futures
-                            for f in future_to_page:
-                                if not f.done():
-                                    f.cancel()
-                            break
-
-            _logger.debug(f"Fetched all {pages_fetched} pages, total tags: {len(all_tags)}")
+            _logger.debug(f"Fetched {pages_fetched} pages (stopped early: {found_old_tags}), total tags: {len(all_tags)}")
 
             # Now filter tags by SHA
             sha_to_images = {}
@@ -2610,8 +2760,6 @@ class GitLabAPIClient:
             }
         }
         """
-        import json
-        from pathlib import Path
 
         # Load cache
         cache = {}
@@ -2651,7 +2799,6 @@ class GitLabAPIClient:
 
         # Fetch missing SHAs and non-success statuses from GitLab in parallel
         if shas_to_fetch and self.has_token():
-            from concurrent.futures import ThreadPoolExecutor
 
             def fetch_pipeline_status(sha):
                 """Helper function to fetch pipeline status for a single SHA"""
@@ -2739,10 +2886,6 @@ class GitLabAPIClient:
                 }
             }
         """
-        import json
-        from pathlib import Path
-        from datetime import datetime, timezone, timedelta
-
         # Load cache
         cache = {}
         jobs_cache_path = Path(cache_file)
@@ -2809,7 +2952,6 @@ class GitLabAPIClient:
 
         # Fetch missing pipeline job counts from GitLab in parallel
         if pipeline_ids_to_fetch and self.has_token():
-            from concurrent.futures import ThreadPoolExecutor
             fetch_timestamp = now.isoformat().replace('+00:00', 'Z')
 
             def fetch_pipeline_jobs(pipeline_id):
@@ -2892,7 +3034,6 @@ class GitLabAPIClient:
             >>> GitLabAPIClient.parse_mr_number_from_message("fix: Bug fix")
             None
         """
-        import re
         match = re.search(r'#(\d+)', message)
         if match:
             return int(match.group(1))
@@ -2928,9 +3069,6 @@ class GitLabAPIClient:
             "5009": null
         }
         """
-        import json
-        from pathlib import Path
-        from datetime import datetime
 
         # Load cache
         cache = {}
@@ -2977,7 +3115,6 @@ class GitLabAPIClient:
                     cache_updated = True
             except Exception as e:
                 # Log error but continue with other MRs
-                import logging
                 logger = logging.getLogger('common')
                 logger.debug(f"Failed to fetch MR {mr_num} merge date: {e}")
                 result[mr_num] = None
