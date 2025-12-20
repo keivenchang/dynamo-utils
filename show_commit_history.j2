@@ -174,8 +174,62 @@ summary:hover {
     background-color: transparent;
     border: 2px solid #8c959f;
 }
+.gh-status-tooltip {
+    position: relative;
+    display: inline-block;
+}
+.gh-status-tooltip .tooltiptext {
+    visibility: hidden;
+    max-width: calc(100vw - 40px);
+    background-color: #24292f;
+    color: #ffffff;
+    text-align: left;
+    border-radius: 6px;
+    padding: 8px 12px;
+    position: fixed;
+    z-index: 1000;
+    left: 20px;
+    right: 20px;
+    width: auto;
+    opacity: 0;
+    transition: opacity 0.3s, visibility 0s 1s;
+    font-size: 12px;
+    line-height: 1.5;
+    box-shadow: 0 4px 6px rgba(0, 0, 0, 0.3);
+    white-space: normal;
+    word-wrap: break-word;
+    overflow-wrap: break-word;
+}
+.gh-status-tooltip .tooltiptext::after {
+    content: "";
+    position: absolute;
+    top: 100%;
+    left: 20px;
+    margin-left: -5px;
+    border-width: 5px;
+    border-style: solid;
+    border-color: #24292f transparent transparent transparent;
+}
+.gh-status-tooltip:hover .tooltiptext {
+    visibility: visible;
+    opacity: 1;
+    transition-delay: 1s;
+}
 </style>
 <script>
+// Position tooltips dynamically
+document.addEventListener('DOMContentLoaded', function() {
+    var tooltips = document.querySelectorAll('.gh-status-tooltip');
+    tooltips.forEach(function(tooltip) {
+        tooltip.addEventListener('mouseenter', function() {
+            var tooltipText = this.querySelector('.tooltiptext');
+            var rect = this.getBoundingClientRect();
+            // Position tooltip above the element
+            tooltipText.style.top = (rect.top - tooltipText.offsetHeight - 10) + 'px';
+        });
+    });
+});
+
 function toggleDockerImages(event, linkElement) {
     event.preventDefault();
     // Find the current row
@@ -322,64 +376,22 @@ Legend & Help
 <li><span class="status-indicator status-success-inherited" style="display: inline-block; vertical-align: middle;"></span> Hollow - Inherited status (no direct build for this commit)</li>
 </ul>
 </li>
-<li><strong>CDS:xxxxxx</strong> - Composite Docker SHA (appears in Composite Docker SHA column, click to view build logs)</li>
-<li><strong>🐳</strong> - Search GitLab Docker registry (appears in Status column)</li>
-<li><strong style="padding: 2px 4px; border-radius: 3px; font-size: 11px;">GHA</strong> - View GitHub Actions logs (appears in Status column, badge color indicates status: green=passed, red=failed, yellow=in progress, gray=no checks)</li>
-<li><strong>🦊</strong> - View commit in GitLab (appears in Status column with CI pipeline info)</li>
+<li><strong>CDS:xxxxxx</strong> - Composite Docker SHA: a unique hash representing the exact state of all files in the <code style="background-color: #f6f8fa; padding: 2px 4px; border-radius: 3px;">container/*</code> directory. This concept is unique to this dashboard. Click to view build logs.</li>
+<li><strong>🐳</strong> - Search NVIDIA GitLab Docker registry (appears in Status column)</li>
+<li><strong><svg height="14" width="14" viewBox="0 0 16 16" fill="#24292f" style="display: inline-block; vertical-align: middle;"><path fill-rule="evenodd" clip-rule="evenodd" d="M8 0C3.58 0 0 3.58 0 8C0 11.54 2.29 14.53 5.47 15.59C5.87 15.66 6.02 15.42 6.02 15.21C6.02 15.02 6.01 14.39 6.01 13.72C4 14.09 3.48 13.23 3.32 12.78C3.23 12.55 2.84 11.84 2.5 11.65C2.22 11.5 1.82 11.13 2.49 11.12C3.12 11.11 3.57 11.7 3.72 11.94C4.44 13.15 5.59 12.81 6.05 12.6C6.12 12.08 6.33 11.73 6.56 11.53C4.78 11.33 2.92 10.64 2.92 7.58C2.92 6.71 3.23 5.99 3.74 5.43C3.66 5.23 3.38 4.41 3.82 3.31C3.82 3.31 4.49 3.1 6.02 4.13C6.66 3.95 7.34 3.86 8.02 3.86C8.7 3.86 9.38 3.95 10.02 4.13C11.55 3.09 12.22 3.31 12.22 3.31C12.66 4.41 12.38 5.23 12.3 5.43C12.81 5.99 13.12 6.7 13.12 7.58C13.12 10.65 11.25 11.33 9.47 11.53C9.76 11.78 10.01 12.26 10.01 13.01C10.01 14.08 10 14.94 10 15.21C10 15.42 10.15 15.67 10.55 15.59C13.71 14.53 16 11.53 16 8C16 3.58 12.42 0 8 0Z"></path></svg></strong> - View GitHub Actions logs (appears in Status column)</li>
+<li><strong>🦊</strong> - View commit in NVIDIA GitLab (appears in Status column with CI pipeline info)</li>
 <li><strong>▶</strong> - Expand to see Docker images and commit details</li>
 </ul>
 </div>
 <div style="margin-bottom: 12px;">
-<div style="font-weight: 600; margin-bottom: 6px; color: #24292f;">GitHub Actions Summary:</div>
-<div style="display: flex; align-items: center; gap: 20px;">
-<svg width="100" height="100" viewBox="0 0 100 100" style="transform: rotate(-90deg);">
-{%- set total = gha_success_count + gha_failed_count + gha_in_progress_count + gha_other_count -%}
-{%- if total > 0 -%}
-{%- set success_pct = gha_success_count / total -%}
-{%- set failed_pct = gha_failed_count / total -%}
-{%- set progress_pct = gha_in_progress_count / total -%}
-{%- set other_pct = gha_other_count / total -%}
-{%- set radius = 15.915494309 -%}
-{%- set circumference = 100 -%}
-{# Success segment (green) #}
-{%- set success_dash = success_pct * circumference -%}
-<circle cx="50" cy="50" r="{{ radius }}" fill="none" stroke="#2da44e" stroke-width="12" stroke-dasharray="{{ success_dash }} {{ circumference }}" stroke-dashoffset="0"></circle>
-{# Failed segment (red) #}
-{%- set failed_dash = failed_pct * circumference -%}
-{%- set failed_offset = -(success_dash) -%}
-<circle cx="50" cy="50" r="{{ radius }}" fill="none" stroke="#d73a49" stroke-width="12" stroke-dasharray="{{ failed_dash }} {{ circumference }}" stroke-dashoffset="{{ failed_offset }}"></circle>
-{# In progress segment (yellow) #}
-{%- set progress_dash = progress_pct * circumference -%}
-{%- set progress_offset = -(success_dash + failed_dash) -%}
-<circle cx="50" cy="50" r="{{ radius }}" fill="none" stroke="#dbab09" stroke-width="12" stroke-dasharray="{{ progress_dash }} {{ circumference }}" stroke-dashoffset="{{ progress_offset }}"></circle>
-{# Other segment (gray) #}
-{%- set other_dash = other_pct * circumference -%}
-{%- set other_offset = -(success_dash + failed_dash + progress_dash) -%}
-<circle cx="50" cy="50" r="{{ radius }}" fill="none" stroke="#8c959f" stroke-width="12" stroke-dasharray="{{ other_dash }} {{ circumference }}" stroke-dashoffset="{{ other_offset }}"></circle>
-{# Center text showing total #}
-<text x="50" y="50" text-anchor="middle" dy="0.35em" font-size="20" font-weight="600" fill="#24292f" transform="rotate(90 50 50)">{{ total }}</text>
-{%- endif -%}
-</svg>
-<ul style="margin: 4px 0; padding-left: 0; list-style: none;">
-<li><span style="color: #2da44e; font-weight: 600;">{{ gha_success_count }} ✓</span> - All checks passed ({{ "%.1f"|format((gha_success_count / commit_count * 100) if commit_count > 0 else 0) }}%)</li>
-<li><span style="color: #d73a49; font-weight: 600;">{{ gha_failed_count }} ✗</span> - Some checks failed ({{ "%.1f"|format((gha_failed_count / commit_count * 100) if commit_count > 0 else 0) }}%)</li>
-<li><span style="color: #dbab09; font-weight: 600;">{{ gha_in_progress_count }} ⏳</span> - Checks in progress ({{ "%.1f"|format((gha_in_progress_count / commit_count * 100) if commit_count > 0 else 0) }}%)</li>
-<li><span style="color: #8c959f; font-weight: 600;">{{ gha_other_count }} ○</span> - Cancelled/No checks ({{ "%.1f"|format((gha_other_count / commit_count * 100) if commit_count > 0 else 0) }}%)</li>
-</ul>
-</div>
-</div>
-<div style="margin-bottom: 12px;">
-<div style="font-weight: 600; margin-bottom: 6px; color: #24292f;">CI Status Format:</div>
+<div style="font-weight: 600; margin-bottom: 6px; color: #24292f;">CI Status Symbols (GitHub & NVIDIA GitLab):</div>
 <ul style="margin: 4px 0; padding-left: 20px;">
-<li><span style="color: #2da44e;">16✓</span> - 16 jobs succeeded</li>
-<li><span style="color: #d73a49;">3✗</span> - 3 jobs failed</li>
-<li><span style="color: #dbab09;">2⏳</span> - 2 jobs running</li>
-<li><span style="color: #8c959f;">1⏸</span> - 1 job pending</li>
+<li><span style="color: #2da44e;">✓</span> - Checks/jobs passed or succeeded</li>
+<li><span style="color: #d73a49;">✗</span> - Checks/jobs failed</li>
+<li><span style="color: #dbab09;">⏳</span> - Checks/jobs in progress or running</li>
+<li><span style="color: #8c959f;">⏸</span> - Checks/jobs cancelled or pending</li>
 </ul>
-</div>
-<div>
-<div style="font-weight: 600; margin-bottom: 6px; color: #24292f;">Composite Docker SHA (CDS):</div>
-<p style="margin: 4px 0; color: #57606a;">Commits with the same CDS share identical <code>container/</code> directory contents. These commits can use the same Docker images.</p>
+<p style="margin: 4px 0; color: #57606a; font-size: 12px;">Example: <span style="color: #2da44e;">21✓</span> <span style="color: #d73a49;">1✗</span> <span style="color: #dbab09;">1⏳</span> <span style="color: #8c959f;">3⏸</span> means 21 passed, 1 failed, 1 in progress, 3 cancelled/pending.</p>
 </div>
 </div>
 </details>
@@ -436,8 +448,8 @@ Legend & Help
 <tr>
 <th>Commit SHA</th>
 <th>Composite 🐳 SHA</th>
-<th>GH Status</th>
-<th>GL Status</th>
+<th>GitHub Status</th>
+<th>GitLab Status</th>
 <th>Date/Time (PST)</th>
 <th>Author</th>
 <th style="width: 100%;">Message</th>
@@ -506,35 +518,44 @@ Legend & Help
 {%- set gha_title = 'GitHub Actions: No checks' -%}
 {%- endif -%}
 {# GitHub section #}
-<a href="https://github.com/ai-dynamo/dynamo/commit/{{ sha_full }}/checks" target="_blank" style="text-decoration: none; font-weight: 600; font-size: 11px; padding: 2px 4px; background-color: {{ gha_color }}; color: white; border-radius: 3px;" title="{{ gha_title }}">GHA</a>
-{# Per-commit GHA checks donut chart #}
+<a href="https://github.com/ai-dynamo/dynamo/commit/{{ sha_full }}/checks" target="_blank" style="text-decoration: none; color: #24292f; font-weight: 600;" title="{{ gha_title }}"><svg height="16" width="16" viewBox="0 0 16 16" fill="currentColor" style="display: inline-block; vertical-align: middle;"><path fill-rule="evenodd" clip-rule="evenodd" d="M8 0C3.58 0 0 3.58 0 8C0 11.54 2.29 14.53 5.47 15.59C5.87 15.66 6.02 15.42 6.02 15.21C6.02 15.02 6.01 14.39 6.01 13.72C4 14.09 3.48 13.23 3.32 12.78C3.23 12.55 2.84 11.84 2.5 11.65C2.22 11.5 1.82 11.13 2.49 11.12C3.12 11.11 3.57 11.7 3.72 11.94C4.44 13.15 5.59 12.81 6.05 12.6C6.12 12.08 6.33 11.73 6.56 11.53C4.78 11.33 2.92 10.64 2.92 7.58C2.92 6.71 3.23 5.99 3.74 5.43C3.66 5.23 3.38 4.41 3.82 3.31C3.82 3.31 4.49 3.1 6.02 4.13C6.66 3.95 7.34 3.86 8.02 3.86C8.7 3.86 9.38 3.95 10.02 4.13C11.55 3.09 12.22 3.31 12.22 3.31C12.66 4.41 12.38 5.23 12.3 5.43C12.81 5.99 13.12 6.7 13.12 7.58C13.12 10.65 11.25 11.33 9.47 11.53C9.76 11.78 10.01 12.26 10.01 13.01C10.01 14.08 10 14.94 10 15.21C10 15.42 10.15 15.67 10.55 15.59C13.71 14.53 16 11.53 16 8C16 3.58 12.42 0 8 0Z"></path></svg></a>
+{# Per-commit GH checks status (text format matching GitLab style) #}
 {%- set commit_stats = gha_per_commit_stats.get(sha_full, {'success': 0, 'failure': 0, 'in_progress': 0, 'other': 0, 'total': 0}) -%}
 {%- if commit_stats.total > 0 -%}
-<svg width="24" height="24" viewBox="0 0 100 100" style="transform: rotate(-90deg); vertical-align: middle; margin-left: 4px;" aria-label="GitHub Actions: {{ commit_stats.success }}✓ {{ commit_stats.failure }}✗ {{ commit_stats.in_progress }}⏳ {{ commit_stats.other }}○" title="{{ commit_stats.success }}✓ {{ commit_stats.failure }}✗ {{ commit_stats.in_progress }}⏳ {{ commit_stats.other }}○ ({{ commit_stats.total }} checks)">
-{%- set success_pct = commit_stats.success / commit_stats.total -%}
-{%- set failed_pct = commit_stats.failure / commit_stats.total -%}
-{%- set progress_pct = commit_stats.in_progress / commit_stats.total -%}
-{%- set other_pct = commit_stats.other / commit_stats.total -%}
-{%- set radius = 15.915494309 -%}
-{%- set circumference = 100 -%}
-{# Success segment (green) #}
-{%- set success_dash = success_pct * circumference -%}
-<circle cx="50" cy="50" r="{{ radius }}" fill="none" stroke="#2da44e" stroke-width="28" stroke-dasharray="{{ success_dash }} {{ circumference }}" stroke-dashoffset="0"></circle>
-{# Failed segment (red) #}
-{%- set failed_dash = failed_pct * circumference -%}
-{%- set failed_offset = -(success_dash) -%}
-<circle cx="50" cy="50" r="{{ radius }}" fill="none" stroke="#d73a49" stroke-width="28" stroke-dasharray="{{ failed_dash }} {{ circumference }}" stroke-dashoffset="{{ failed_offset }}"></circle>
-{# In progress segment (yellow) #}
-{%- set progress_dash = progress_pct * circumference -%}
-{%- set progress_offset = -(success_dash + failed_dash) -%}
-<circle cx="50" cy="50" r="{{ radius }}" fill="none" stroke="#dbab09" stroke-width="28" stroke-dasharray="{{ progress_dash }} {{ circumference }}" stroke-dashoffset="{{ progress_offset }}"></circle>
-{# Other segment (gray) #}
-{%- set other_dash = other_pct * circumference -%}
-{%- set other_offset = -(success_dash + failed_dash + progress_dash) -%}
-<circle cx="50" cy="50" r="{{ radius }}" fill="none" stroke="#8c959f" stroke-width="28" stroke-dasharray="{{ other_dash }} {{ circumference }}" stroke-dashoffset="{{ other_offset }}"></circle>
-{# Center text showing total count #}
-<text x="50" y="50" text-anchor="middle" dy="0.35em" font-size="32" font-weight="600" fill="#24292f" transform="rotate(90 50 50)">{{ commit_stats.total }}</text>
-</svg>
+{# Build detailed tooltip with job names #}
+{%- set gha_status = github_actions_status.get(sha_full) -%}
+{%- set passed_jobs = [] -%}
+{%- set failed_jobs = [] -%}
+{%- set progress_jobs = [] -%}
+{%- set other_jobs = [] -%}
+{%- if gha_status and gha_status.get('check_runs') -%}
+{%- for check in gha_status.get('check_runs', []) -%}
+{%- if check.conclusion == 'success' -%}
+{%- set _ = passed_jobs.append(check.name) -%}
+{%- elif check.conclusion in ('failure', 'timed_out', 'action_required') -%}
+{%- set _ = failed_jobs.append(check.name) -%}
+{%- elif check.status in ('queued', 'in_progress') -%}
+{%- set _ = progress_jobs.append(check.name) -%}
+{%- else -%}
+{%- set _ = other_jobs.append(check.name) -%}
+{%- endif -%}
+{%- endfor -%}
+{%- endif -%}
+{%- set tooltip_html_parts = [] -%}
+{%- if passed_jobs -%}{%- set _ = tooltip_html_parts.append('<strong style="color: #2da44e;">Passed:</strong> ' + passed_jobs|join(', ')) -%}{%- endif -%}
+{%- if failed_jobs -%}{%- set _ = tooltip_html_parts.append('<strong style="color: #d73a49;">Failed:</strong> ' + failed_jobs|join(', ')) -%}{%- endif -%}
+{%- if progress_jobs -%}{%- set _ = tooltip_html_parts.append('<strong style="color: #dbab09;">In Progress:</strong> ' + progress_jobs|join(', ')) -%}{%- endif -%}
+{%- if other_jobs -%}{%- set _ = tooltip_html_parts.append('<strong style="color: #8c959f;">Cancelled/Pending:</strong> ' + other_jobs|join(', ')) -%}{%- endif -%}
+{%- set tooltip_html = tooltip_html_parts|join('<br>') -%}
+<span class="gh-status-tooltip" style="margin-left: 4px;">
+<span style="white-space: nowrap; font-weight: 600; font-size: 11px;">
+{%- if commit_stats.success > 0 -%}<span style="color: #2da44e;">{{ commit_stats.success }}✓</span>{%- endif -%}
+{%- if commit_stats.failure > 0 -%}{%- if commit_stats.success > 0 %} {% endif -%}<span style="color: #d73a49;">{{ commit_stats.failure }}✗</span>{%- endif -%}
+{%- if commit_stats.in_progress > 0 -%}{%- if commit_stats.success > 0 or commit_stats.failure > 0 %} {% endif -%}<span style="color: #dbab09;">{{ commit_stats.in_progress }}⏳</span>{%- endif -%}
+{%- if commit_stats.other > 0 -%}{%- if commit_stats.success > 0 or commit_stats.failure > 0 or commit_stats.in_progress > 0 %} {% endif -%}<span style="color: #8c959f;">{{ commit_stats.other }}⏸</span>{%- endif -%}
+</span>
+<span class="tooltiptext">{{ tooltip_html|safe }}</span>
+</span>
 {%- endif -%}
 </td>
 <td class="sha">
