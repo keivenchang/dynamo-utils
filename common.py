@@ -2318,6 +2318,134 @@ class GitHubAPIClient:
 
         return result
 
+    def get_github_actions_status(self, owner, repo, sha_list, cache_file=None, skip_fetch=False):
+        """Get GitHub Actions check status for commits.
+
+        Args:
+            owner: Repository owner
+            repo: Repository name
+            sha_list: List of commit SHAs (full 40-char)
+            cache_file: Path to cache file (default: .github_actions_status_cache.json)
+            skip_fetch: If True, only return cached data
+
+        Returns:
+            Dict mapping SHA -> status info:
+            {
+                "sha": {
+                    "status": "success|failure|pending|in_progress|null",
+                    "conclusion": "success|failure|cancelled|skipped|timed_out|action_required|null",
+                    "total_count": int,
+                    "check_runs": [...]
+                }
+            }
+        """
+        from pathlib import Path
+        from concurrent.futures import ThreadPoolExecutor
+
+        if cache_file is None:
+            cache_file = Path.cwd() / '.github_actions_status_cache.json'
+        else:
+            cache_file = Path(cache_file)
+
+        # Load cache
+        cache = {}
+        if cache_file.exists():
+            try:
+                cache = json.loads(cache_file.read_text())
+            except Exception:
+                cache = {}
+
+        # Determine which SHAs need fetching
+        shas_to_fetch = []
+        result = {}
+
+        for sha in sha_list:
+            if sha in cache:
+                result[sha] = cache[sha]
+            else:
+                if not skip_fetch:
+                    shas_to_fetch.append(sha)
+                else:
+                    result[sha] = None
+
+        # Fetch uncached SHAs in parallel
+        cache_updated = False
+        if shas_to_fetch:
+            def fetch_check_status(sha):
+                """Helper to fetch check status for a single commit"""
+                try:
+                    # Use GitHub API to get check runs
+                    result = subprocess.run(
+                        ['gh', 'api', f'/repos/{owner}/{repo}/commits/{sha}/check-runs',
+                         '--jq', '.'],
+                        capture_output=True,
+                        text=True,
+                        timeout=30
+                    )
+
+                    if result.returncode == 0 and result.stdout.strip():
+                        data = json.loads(result.stdout)
+                        check_runs = data.get('check_runs', [])
+                        total_count = data.get('total_count', 0)
+
+                        # Determine overall status
+                        if total_count == 0:
+                            status = 'null'
+                            conclusion = 'null'
+                        else:
+                            # Check for any failures
+                            has_failure = any(cr.get('conclusion') in ['failure', 'timed_out', 'action_required']
+                                            for cr in check_runs)
+                            has_pending = any(cr.get('status') in ['queued', 'in_progress']
+                                            for cr in check_runs)
+                            has_cancelled = any(cr.get('conclusion') == 'cancelled' for cr in check_runs)
+
+                            if has_failure:
+                                status = 'completed'
+                                conclusion = 'failure'
+                            elif has_pending:
+                                status = 'in_progress'
+                                conclusion = 'null'
+                            elif has_cancelled:
+                                status = 'completed'
+                                conclusion = 'cancelled'
+                            else:
+                                # All succeeded or skipped
+                                status = 'completed'
+                                conclusion = 'success'
+
+                        return (sha, {
+                            'status': status,
+                            'conclusion': conclusion,
+                            'total_count': total_count,
+                            'check_runs': check_runs
+                        })
+                    else:
+                        return (sha, None)
+                except Exception as e:
+                    logger.debug(f"Failed to fetch check status for {sha[:8]}: {e}")
+                    return (sha, None)
+
+            # Fetch in parallel with 10 workers
+            with ThreadPoolExecutor(max_workers=10) as executor:
+                futures = [executor.submit(fetch_check_status, sha) for sha in shas_to_fetch]
+
+                for future in futures:
+                    sha, status_info = future.result()
+                    cache[sha] = status_info
+                    result[sha] = status_info
+                    cache_updated = True
+
+        # Save cache if updated
+        if cache_updated:
+            try:
+                cache_file.parent.mkdir(parents=True, exist_ok=True)
+                cache_file.write_text(json.dumps(cache, indent=2))
+            except Exception:
+                pass
+
+        return result
+
 
 class GitLabAPIClient:
     """GitLab API client with automatic token detection and error handling.

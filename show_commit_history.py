@@ -410,6 +410,15 @@ class CommitHistoryGenerator:
         if pipeline_ids:
             pipeline_job_counts = self._get_gitlab_pipeline_job_counts(pipeline_ids)
 
+        # Get GitHub Actions check status for commits
+        github_actions_status = self.github_client.get_github_actions_status(
+            owner='ai-dynamo',
+            repo='dynamo',
+            sha_list=[c['sha_full'] for c in commit_data],
+            cache_file=str(self.repo_path / '.github_actions_status_cache.json'),
+            skip_fetch=self.skip_gitlab_fetch  # Reuse the skip_fetch flag
+        )
+
         # Process GitLab images: deduplicate and format
         gitlab_images = {}
         for sha_full, registry_imgs in gitlab_images_raw.items():
@@ -645,6 +654,54 @@ class CommitHistoryGenerator:
         else:
             generated_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         
+        # Calculate GitHub Actions status counts (overall summary)
+        gha_success_count = 0
+        gha_failed_count = 0
+        gha_in_progress_count = 0
+        gha_other_count = 0
+
+        for sha_full in [c['sha_full'] for c in commit_data]:
+            gha_status = github_actions_status.get(sha_full)
+            if gha_status and gha_status.get('conclusion') == 'success':
+                gha_success_count += 1
+            elif gha_status and gha_status.get('conclusion') == 'failure':
+                gha_failed_count += 1
+            elif gha_status and gha_status.get('status') == 'in_progress':
+                gha_in_progress_count += 1
+            else:
+                gha_other_count += 1
+
+        # Calculate per-commit check statistics for donut charts
+        gha_per_commit_stats = {}
+        for sha_full in [c['sha_full'] for c in commit_data]:
+            gha_status = github_actions_status.get(sha_full)
+            if not gha_status or not gha_status.get('check_runs'):
+                gha_per_commit_stats[sha_full] = {
+                    'success': 0,
+                    'failure': 0,
+                    'in_progress': 0,
+                    'other': 0,
+                    'total': 0
+                }
+                continue
+
+            stats = {'success': 0, 'failure': 0, 'in_progress': 0, 'other': 0}
+            for check in gha_status.get('check_runs', []):
+                conclusion = check.get('conclusion')
+                status = check.get('status')
+
+                if conclusion == 'success':
+                    stats['success'] += 1
+                elif conclusion in ('failure', 'timed_out', 'action_required'):
+                    stats['failure'] += 1
+                elif status in ('queued', 'in_progress'):
+                    stats['in_progress'] += 1
+                else:
+                    stats['other'] += 1
+
+            stats['total'] = sum(stats.values())
+            gha_per_commit_stats[sha_full] = stats
+
         # Render template
         template_dir = Path(__file__).parent
         env = Environment(
@@ -652,7 +709,7 @@ class CommitHistoryGenerator:
             autoescape=select_autoescape(['html', 'xml'])
         )
         template = env.get_template('show_commit_history.j2')
-        
+
         return template.render(
             commits=commit_data,
             docker_images=docker_images,
@@ -661,7 +718,14 @@ class CommitHistoryGenerator:
             pipeline_job_counts=pipeline_job_counts,
             log_paths=log_paths,
             build_status=build_status,
-            generated_time=generated_time
+            github_actions_status=github_actions_status,
+            generated_time=generated_time,
+            commit_count=len(commit_data),
+            gha_success_count=gha_success_count,
+            gha_failed_count=gha_failed_count,
+            gha_in_progress_count=gha_in_progress_count,
+            gha_other_count=gha_other_count,
+            gha_per_commit_stats=gha_per_commit_stats
         )
 
     def _get_cached_gitlab_images_from_sha(self, commit_data: List[dict]) -> dict:

@@ -47,9 +47,10 @@ th {
     white-space: nowrap;
 }
 td {
-    padding: 6px 8px;
+    padding: 4px 8px;
     border-bottom: 1px solid #d0d7de;
-    vertical-align: top;
+    vertical-align: middle;
+    line-height: 1.2;
 }
 /* Make message column single line and flexible */
 td:last-child {
@@ -310,24 +311,62 @@ Legend & Help
 </summary>
 <div style="margin-top: 12px; font-size: 13px; line-height: 1.6;">
 <div style="margin-bottom: 12px;">
-<div style="font-weight: 600; margin-bottom: 6px; color: #24292f;">Status Indicators:</div>
+<div style="font-weight: 600; margin-bottom: 6px; color: #24292f;">Icons & Links:</div>
 <ul style="margin: 4px 0; padding-left: 20px;">
-<li><span class="status-indicator status-success" style="display: inline-block; vertical-align: middle;"></span> <strong>Green</strong> - All builds/compile/sanity passed</li>
-<li><span class="status-indicator status-failed" style="display: inline-block; vertical-align: middle;"></span> <strong>Red</strong> - Some builds/compile/sanity failed</li>
-<li><span class="status-indicator status-building" style="display: inline-block; vertical-align: middle;"></span> <strong>Yellow</strong> - Build in progress</li>
-<li><span class="status-indicator status-unknown" style="display: inline-block; vertical-align: middle;"></span> <strong>Gray</strong> - No build status available</li>
-<li><span class="status-indicator status-success-inherited" style="display: inline-block; vertical-align: middle;"></span> <strong>Hollow</strong> - Inherited status (no direct build for this commit)</li>
+<li><strong>Local Build Status Indicators</strong> - Circle appears in Composite Docker SHA column (left of CDS)
+<ul style="margin: 2px 0; padding-left: 20px; font-size: 12px;">
+<li><span class="status-indicator status-success" style="display: inline-block; vertical-align: middle;"></span> Green - All builds/compile/sanity passed</li>
+<li><span class="status-indicator status-failed" style="display: inline-block; vertical-align: middle;"></span> Red - Some builds/compile/sanity failed</li>
+<li><span class="status-indicator status-building" style="display: inline-block; vertical-align: middle;"></span> Yellow - Build in progress</li>
+<li><span class="status-indicator status-unknown" style="display: inline-block; vertical-align: middle;"></span> Gray - No build status available</li>
+<li><span class="status-indicator status-success-inherited" style="display: inline-block; vertical-align: middle;"></span> Hollow - Inherited status (no direct build for this commit)</li>
+</ul>
+</li>
+<li><strong>CDS:xxxxxx</strong> - Composite Docker SHA (appears in Composite Docker SHA column, click to view build logs)</li>
+<li><strong>🐳</strong> - Search GitLab Docker registry (appears in Status column)</li>
+<li><strong style="padding: 2px 4px; border-radius: 3px; font-size: 11px;">GHA</strong> - View GitHub Actions logs (appears in Status column, badge color indicates status: green=passed, red=failed, yellow=in progress, gray=no checks)</li>
+<li><strong>🦊</strong> - View commit in GitLab (appears in Status column with CI pipeline info)</li>
+<li><strong>▶</strong> - Expand to see Docker images and commit details</li>
 </ul>
 </div>
 <div style="margin-bottom: 12px;">
-<div style="font-weight: 600; margin-bottom: 6px; color: #24292f;">Icons & Links:</div>
-<ul style="margin: 4px 0; padding-left: 20px;">
-<li><strong>🐳</strong> - Search GitLab Docker registry for this commit SHA</li>
-<li><strong>🦊</strong> - View commit in GitLab (with CI pipeline info)</li>
-<li><strong>▶</strong> - Expand to see Docker images and commit details</li>
-<li><strong>📋</strong> - View build history (multiple builds)</li>
-<li><strong>CDS:xxxxxx</strong> - Composite Docker SHA (click to view build logs)</li>
+<div style="font-weight: 600; margin-bottom: 6px; color: #24292f;">GitHub Actions Summary:</div>
+<div style="display: flex; align-items: center; gap: 20px;">
+<svg width="100" height="100" viewBox="0 0 100 100" style="transform: rotate(-90deg);">
+{%- set total = gha_success_count + gha_failed_count + gha_in_progress_count + gha_other_count -%}
+{%- if total > 0 -%}
+{%- set success_pct = gha_success_count / total -%}
+{%- set failed_pct = gha_failed_count / total -%}
+{%- set progress_pct = gha_in_progress_count / total -%}
+{%- set other_pct = gha_other_count / total -%}
+{%- set radius = 15.915494309 -%}
+{%- set circumference = 100 -%}
+{# Success segment (green) #}
+{%- set success_dash = success_pct * circumference -%}
+<circle cx="50" cy="50" r="{{ radius }}" fill="none" stroke="#2da44e" stroke-width="12" stroke-dasharray="{{ success_dash }} {{ circumference }}" stroke-dashoffset="0"></circle>
+{# Failed segment (red) #}
+{%- set failed_dash = failed_pct * circumference -%}
+{%- set failed_offset = -(success_dash) -%}
+<circle cx="50" cy="50" r="{{ radius }}" fill="none" stroke="#d73a49" stroke-width="12" stroke-dasharray="{{ failed_dash }} {{ circumference }}" stroke-dashoffset="{{ failed_offset }}"></circle>
+{# In progress segment (yellow) #}
+{%- set progress_dash = progress_pct * circumference -%}
+{%- set progress_offset = -(success_dash + failed_dash) -%}
+<circle cx="50" cy="50" r="{{ radius }}" fill="none" stroke="#dbab09" stroke-width="12" stroke-dasharray="{{ progress_dash }} {{ circumference }}" stroke-dashoffset="{{ progress_offset }}"></circle>
+{# Other segment (gray) #}
+{%- set other_dash = other_pct * circumference -%}
+{%- set other_offset = -(success_dash + failed_dash + progress_dash) -%}
+<circle cx="50" cy="50" r="{{ radius }}" fill="none" stroke="#8c959f" stroke-width="12" stroke-dasharray="{{ other_dash }} {{ circumference }}" stroke-dashoffset="{{ other_offset }}"></circle>
+{# Center text showing total #}
+<text x="50" y="50" text-anchor="middle" dy="0.35em" font-size="20" font-weight="600" fill="#24292f" transform="rotate(90 50 50)">{{ total }}</text>
+{%- endif -%}
+</svg>
+<ul style="margin: 4px 0; padding-left: 0; list-style: none;">
+<li><span style="color: #2da44e; font-weight: 600;">{{ gha_success_count }} ✓</span> - All checks passed ({{ "%.1f"|format((gha_success_count / commit_count * 100) if commit_count > 0 else 0) }}%)</li>
+<li><span style="color: #d73a49; font-weight: 600;">{{ gha_failed_count }} ✗</span> - Some checks failed ({{ "%.1f"|format((gha_failed_count / commit_count * 100) if commit_count > 0 else 0) }}%)</li>
+<li><span style="color: #dbab09; font-weight: 600;">{{ gha_in_progress_count }} ⏳</span> - Checks in progress ({{ "%.1f"|format((gha_in_progress_count / commit_count * 100) if commit_count > 0 else 0) }}%)</li>
+<li><span style="color: #8c959f; font-weight: 600;">{{ gha_other_count }} ○</span> - Cancelled/No checks ({{ "%.1f"|format((gha_other_count / commit_count * 100) if commit_count > 0 else 0) }}%)</li>
 </ul>
+</div>
 </div>
 <div style="margin-bottom: 12px;">
 <div style="font-weight: 600; margin-bottom: 6px; color: #24292f;">CI Status Format:</div>
@@ -397,7 +436,8 @@ Legend & Help
 <tr>
 <th>Commit SHA</th>
 <th>Composite 🐳 SHA</th>
-<th>CI Status</th>
+<th>GH Status</th>
+<th>GL Status</th>
 <th>Date/Time (PST)</th>
 <th>Author</th>
 <th style="width: 100%;">Message</th>
@@ -428,11 +468,11 @@ Legend & Help
 {%- set status_info = build_status.get(sha_short, {}) -%}
 {%- set status = status_info.get('status', 'unknown') -%}
 {%- set inherited = status_info.get('inherited', False) -%}
-{# Status indicator ball - show for any commit with a status (including inherited) #}
+{# Local build status indicator before CDS #}
 {%- if status == 'success' -%}
-<span class="status-indicator status-success{%- if inherited -%}-inherited{%- endif -%}" title="{%- if inherited -%}Inherited: {%- endif -%}All tests passed"></span>
+<span class="status-indicator status-success{%- if inherited -%}-inherited{%- endif -%}" title="{%- if inherited -%}Inherited: {%- endif -%}All builds passed"></span>
 {%- elif status == 'failed' -%}
-<span class="status-indicator status-failed{%- if inherited -%}-inherited{%- endif -%}" title="{%- if inherited -%}Inherited: {%- endif -%}Some tests failed"></span>
+<span class="status-indicator status-failed{%- if inherited -%}-inherited{%- endif -%}" title="{%- if inherited -%}Inherited: {%- endif -%}Some builds failed"></span>
 {%- elif status == 'building' -%}
 <span class="status-indicator status-building{%- if inherited -%}-inherited{%- endif -%}" title="{%- if inherited -%}Inherited: {%- endif -%}Build in progress"></span>
 {%- elif status == 'unknown' -%}
@@ -441,12 +481,64 @@ Legend & Help
 {%- if log_paths_list -%}
 {# Most recent build (last in list) #}
 {%- set latest_date, latest_path = log_paths_list[-1] -%}
-<span style="background-color: {{ composite_bg_color }}; padding: 2px 6px; border-radius: 3px;"><a href="{{ latest_path }}" target="_blank" style="color: #0969da; text-decoration: none;" title="View build logs ({{ latest_date }})">CDS:{{ composite_sha[:6] }}</a></span>{# Show history icon if multiple builds exist #}{%- if log_paths_list|length > 1 -%}<a href="#" onclick="toggleBuildHistory(event, '{{ sha_short }}'); return false;" style="text-decoration: none; margin-left: 2px; font-size: 11px; color: #656d76;" title="Show build history ({{ log_paths_list|length }} builds)">📋</a><div id="build-history-{{ sha_short }}" style="display: none; position: absolute; background: #fff; border: 1px solid #d0d7de; border-radius: 6px; padding: 8px; margin-top: 4px; z-index: 1000; box-shadow: 0 8px 24px rgba(140, 149, 159, 0.2);"><div style="font-weight: 600; font-size: 12px; margin-bottom: 6px; color: #24292f;">Build History</div>{%- for date, path in log_paths_list|reverse -%}<div style="padding: 4px 0;"><a href="{{ path }}" target="_blank" style="color: #0969da; text-decoration: none; font-size: 12px;">{{ date }}</a>{%- if loop.first -%} <span style="color: #656d76; font-size: 11px;">(latest)</span>{%- endif -%}</div>{%- endfor -%}</div>{%- endif -%}{%- if has_docker_images or has_gitlab -%}<a href="#" class="composite-sha-link" onclick="toggleDockerImages(event, this); return false;" style="text-decoration: none; margin-left: 4px;" title="Show Docker images">▶</a>{%- endif -%}
+<span style="background-color: {{ composite_bg_color }}; padding: 2px 6px; border-radius: 3px; margin-left: 4px;"><a href="{{ latest_path }}" target="_blank" style="color: #0969da; text-decoration: none;" title="View build logs ({{ latest_date }})">CDS:{{ composite_sha[:6] }}</a></span>{# Show history icon if multiple builds exist #}{%- if log_paths_list|length > 1 -%}<a href="#" onclick="toggleBuildHistory(event, '{{ sha_short }}'); return false;" style="text-decoration: none; margin-left: 2px; font-size: 11px; color: #656d76;" title="Show build history ({{ log_paths_list|length }} builds)">📋</a><div id="build-history-{{ sha_short }}" style="display: none; position: absolute; background: #fff; border: 1px solid #d0d7de; border-radius: 6px; padding: 8px; margin-top: 4px; z-index: 1000; box-shadow: 0 8px 24px rgba(140, 149, 159, 0.2);"><div style="font-weight: 600; font-size: 12px; margin-bottom: 6px; color: #24292f;">Build History</div>{%- for date, path in log_paths_list|reverse -%}<div style="padding: 4px 0;"><a href="{{ path }}" target="_blank" style="color: #0969da; text-decoration: none; font-size: 12px;">{{ date }}</a>{%- if loop.first -%} <span style="color: #656d76; font-size: 11px;">(latest)</span>{%- endif -%}</div>{%- endfor -%}</div>{%- endif -%}{%- if has_docker_images or has_gitlab -%}<a href="#" class="composite-sha-link" onclick="toggleDockerImages(event, this); return false;" style="text-decoration: none; margin-left: 4px;" title="Show Docker images">▶</a>{%- endif -%}
 {%- else -%}
-<span style="background-color: {{ composite_bg_color }}; padding: 2px 6px; border-radius: 3px;">CDS:{{ composite_sha[:6] }}</span>{%- if has_docker_images or has_gitlab -%}<a href="#" class="composite-sha-link" onclick="toggleDockerImages(event, this); return false;" style="text-decoration: none; margin-left: 4px;" title="Show Docker images">▶</a>{%- endif -%}
+<span style="background-color: {{ composite_bg_color }}; padding: 2px 6px; border-radius: 3px; margin-left: 4px;">CDS:{{ composite_sha[:6] }}</span>{%- if has_docker_images or has_gitlab -%}<a href="#" class="composite-sha-link" onclick="toggleDockerImages(event, this); return false;" style="text-decoration: none; margin-left: 4px;" title="Show Docker images">▶</a>{%- endif -%}
 {%- endif -%}
 </td>
 <td class="sha">
+{# GitHub Actions status for GHA badge color #}
+{%- set gha_status = github_actions_status.get(sha_full) -%}
+{%- if gha_status and gha_status.conclusion == 'success' -%}
+{%- set gha_color = '#2da44e' -%}
+{%- set gha_title = 'GitHub Actions: All checks passed' -%}
+{%- elif gha_status and gha_status.conclusion == 'failure' -%}
+{%- set gha_color = '#d73a49' -%}
+{%- set gha_title = 'GitHub Actions: Some checks failed' -%}
+{%- elif gha_status and gha_status.status == 'in_progress' -%}
+{%- set gha_color = '#dbab09' -%}
+{%- set gha_title = 'GitHub Actions: Checks in progress' -%}
+{%- elif gha_status and gha_status.conclusion == 'cancelled' -%}
+{%- set gha_color = '#8c959f' -%}
+{%- set gha_title = 'GitHub Actions: Checks cancelled' -%}
+{%- else -%}
+{%- set gha_color = '#8c959f' -%}
+{%- set gha_title = 'GitHub Actions: No checks' -%}
+{%- endif -%}
+{# GitHub section #}
+<a href="https://github.com/ai-dynamo/dynamo/commit/{{ sha_full }}/checks" target="_blank" style="text-decoration: none; font-weight: 600; font-size: 11px; padding: 2px 4px; background-color: {{ gha_color }}; color: white; border-radius: 3px;" title="{{ gha_title }}">GHA</a>
+{# Per-commit GHA checks donut chart #}
+{%- set commit_stats = gha_per_commit_stats.get(sha_full, {'success': 0, 'failure': 0, 'in_progress': 0, 'other': 0, 'total': 0}) -%}
+{%- if commit_stats.total > 0 -%}
+<svg width="24" height="24" viewBox="0 0 100 100" style="transform: rotate(-90deg); vertical-align: middle; margin-left: 4px;" aria-label="GitHub Actions: {{ commit_stats.success }}✓ {{ commit_stats.failure }}✗ {{ commit_stats.in_progress }}⏳ {{ commit_stats.other }}○" title="{{ commit_stats.success }}✓ {{ commit_stats.failure }}✗ {{ commit_stats.in_progress }}⏳ {{ commit_stats.other }}○ ({{ commit_stats.total }} checks)">
+{%- set success_pct = commit_stats.success / commit_stats.total -%}
+{%- set failed_pct = commit_stats.failure / commit_stats.total -%}
+{%- set progress_pct = commit_stats.in_progress / commit_stats.total -%}
+{%- set other_pct = commit_stats.other / commit_stats.total -%}
+{%- set radius = 15.915494309 -%}
+{%- set circumference = 100 -%}
+{# Success segment (green) #}
+{%- set success_dash = success_pct * circumference -%}
+<circle cx="50" cy="50" r="{{ radius }}" fill="none" stroke="#2da44e" stroke-width="28" stroke-dasharray="{{ success_dash }} {{ circumference }}" stroke-dashoffset="0"></circle>
+{# Failed segment (red) #}
+{%- set failed_dash = failed_pct * circumference -%}
+{%- set failed_offset = -(success_dash) -%}
+<circle cx="50" cy="50" r="{{ radius }}" fill="none" stroke="#d73a49" stroke-width="28" stroke-dasharray="{{ failed_dash }} {{ circumference }}" stroke-dashoffset="{{ failed_offset }}"></circle>
+{# In progress segment (yellow) #}
+{%- set progress_dash = progress_pct * circumference -%}
+{%- set progress_offset = -(success_dash + failed_dash) -%}
+<circle cx="50" cy="50" r="{{ radius }}" fill="none" stroke="#dbab09" stroke-width="28" stroke-dasharray="{{ progress_dash }} {{ circumference }}" stroke-dashoffset="{{ progress_offset }}"></circle>
+{# Other segment (gray) #}
+{%- set other_dash = other_pct * circumference -%}
+{%- set other_offset = -(success_dash + failed_dash + progress_dash) -%}
+<circle cx="50" cy="50" r="{{ radius }}" fill="none" stroke="#8c959f" stroke-width="28" stroke-dasharray="{{ other_dash }} {{ circumference }}" stroke-dashoffset="{{ other_offset }}"></circle>
+{# Center text showing total count #}
+<text x="50" y="50" text-anchor="middle" dy="0.35em" font-size="32" font-weight="600" fill="#24292f" transform="rotate(90 50 50)">{{ commit_stats.total }}</text>
+</svg>
+{%- endif -%}
+</td>
+<td class="sha">
+{# GitLab section #}
 <a href="https://gitlab-master.nvidia.com/dl/ai-dynamo/dynamo/container_registry/85325?orderBy=PUBLISHED_AT&sort=desc&search%5B%5D={{ sha_full }}" target="_blank" style="color: #2496ed; text-decoration: none; font-weight: 600;" title="Search GitLab Docker registry for this SHA">🐳</a>
 {%- if pipeline -%}
 <a href="https://gitlab-master.nvidia.com/dl/ai-dynamo/dynamo/-/commit/{{ sha_full }}" target="_blank" style="margin-left: 4px; color: #fc6d26; text-decoration: none; font-weight: 600;" title="View commit in GitLab">🦊</a>
@@ -479,7 +571,7 @@ Legend & Help
 {%- set gitlab_imgs = gitlab_images.get(sha_full, []) -%}
 
 <tr class="docker-images-row" style="display: none;">
-<td colspan="6" style="padding: 0; background-color: #f6f8fa;">
+<td colspan="7" style="padding: 0; background-color: #f6f8fa;">
 <div style="padding: 8px 12px; border-top: 1px solid #d0d7de;">
 <!-- Commit Details Section -->
 <div style="margin-bottom: 12px; padding: 8px; background-color: white; border: 1px solid #d0d7de; border-radius: 4px;">
