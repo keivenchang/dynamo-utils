@@ -605,7 +605,16 @@ width = get_terminal_width()  # Fallback to 80 if detection fails
 ```
 USER_ID=$(stat -c "%u" .)
 GROUP_ID=$(stat -c "%g" .)
-chown -R $USER_ID:$GROUP_ID .
+
+# 🚨 DO NOT DO THIS:
+# NEVER run recursive permission fixes on large trees (very slow, and easy to break things):
+#   chown -R $USER_ID:$GROUP_ID .
+#
+# Prefer targeted, non-recursive fixes on only the specific directories you need writable.
+# Examples:
+#   chown $USER_ID:$GROUP_ID /path/to/dir
+#   chown $USER_ID:$GROUP_ID /path/to/file
+#   find /path/to/dir -maxdepth 1 -type d -name 'target' -exec chown $USER_ID:$GROUP_ID {} \;
 ```
 
 ## 5.4 Path Display
@@ -717,12 +726,12 @@ After resolving:
 =============================================================================
 
 ## 7.1 Slack RFR Template
-Output format (fill <PR#NUMBER>, verify line counts, map GitHub to Slack logins). If <PR#NUMBER> is unknown, ask.
+Example output format (fill <PR#NUMBER>, verify line counts, map GitHub to Slack logins). If <PR#NUMBER> is unknown, ask.
 ```
 RFR (code: +123/-55 lines, documents: 50 lines changed):
 *feat:* DIS-3456 some feature desc here
 *PR:* http://github.com/ai-dynamo/dynamo/pull/<PR#NUMBER>
-*Reviewers:* <top reviewers based on past commits>, @Ryan McCormick, @Tanmay Verma
+*Reviewers:* <top 3 reviewers based on past commits>, @Ryan McCormick, ...
 ```
 Then add 3 terse bullets about the PR
 Output in plain text surrounded by triple backticks
