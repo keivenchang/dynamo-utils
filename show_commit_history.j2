@@ -579,7 +579,12 @@ Legend & Help
 </td>
 <td class="sha">
 {# GitLab section #}
+{%- if pipeline -%}
 <a href="https://gitlab-master.nvidia.com/dl/ai-dynamo/dynamo/container_registry/85325?orderBy=PUBLISHED_AT&sort=desc&search%5B%5D={{ sha_full }}" target="_blank" style="color: #2496ed; text-decoration: none; font-weight: 600;" title="Search GitLab Docker registry for this SHA">🐳</a>
+{%- else -%}
+{# NOTE: emoji color often ignores CSS `color`, so we also apply grayscale+opacity to make it visually gray #}
+<a href="https://gitlab-master.nvidia.com/dl/ai-dynamo/dynamo/container_registry/85325?orderBy=PUBLISHED_AT&sort=desc&search%5B%5D={{ sha_full }}" target="_blank" style="color: #8c959f; text-decoration: none; font-weight: 600; filter: grayscale(1); opacity: 0.55;" title="No GitLab pipeline data for this commit (search registry anyway)">🐳</a>
+{%- endif -%}
 {%- if pipeline -%}
 <a href="https://gitlab-master.nvidia.com/dl/ai-dynamo/dynamo/-/commit/{{ sha_full }}" target="_blank" style="margin-left: 4px; color: #fc6d26; text-decoration: none; font-weight: 600;" title="View commit in GitLab">🦊</a>
 {%- set job_counts = pipeline_job_counts.get(pipeline.id) -%}
