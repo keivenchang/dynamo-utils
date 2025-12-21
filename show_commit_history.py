@@ -521,6 +521,23 @@ class CommitHistoryGenerator:
             # Assign color deterministically based on Composite Docker SHA (CDS)
             composite_sha = commit['composite_sha']
             commit['composite_bg_color'] = cds_to_color[composite_sha]
+
+        # Compute fork-points for the last 5 release branches and annotate matching commits.
+        # This helps identify "cut points" for release lines (e.g., release/v0.8.0).
+        try:
+            repo_utils = DynamoRepositoryUtils(self.repo_path, dry_run=False, verbose=self.verbose)
+            fork_map = repo_utils.get_release_branch_fork_points(limit=5)
+            for commit in commit_data:
+                sha_full = commit['sha_full']
+                releases = fork_map.get(sha_full, [])
+                if releases:
+                    commit['release_forkpoints'] = releases
+                else:
+                    commit['release_forkpoints'] = []
+        except Exception as e:
+            self.logger.warning(f"Failed to compute release fork points: {e}")
+            for commit in commit_data:
+                commit['release_forkpoints'] = []
         
         # Build log paths dictionary and status indicators
         log_paths = {}  # Maps sha_short to list of (date, path) tuples

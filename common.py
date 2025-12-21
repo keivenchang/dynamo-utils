@@ -301,6 +301,219 @@ class BaseUtils:
                 raise
 
 
+# Git utilities using GitPython API (NO subprocess calls)
+class GitUtils(BaseUtils):
+    """Git utilities using GitPython API only - NO subprocess calls to git.
+
+    Provides clean API for git operations without any subprocess calls.
+    All operations use GitPython's native API.
+
+    Example:
+        git_utils = GitUtils(repo_path="/path/to/repo")
+        commits = git_utils.get_recent_commits(max_count=50)
+        git_utils.checkout(commit_sha)
+    """
+
+    def __init__(self, repo_path: Any, dry_run: bool = False, verbose: bool = False):
+        """Initialize GitUtils.
+
+        Args:
+            repo_path: Path to git repository (Path object or str)
+            dry_run: Dry-run mode
+            verbose: Verbose logging
+        """
+        super().__init__(dry_run, verbose)
+
+        self.repo_path = Path(repo_path) if not isinstance(repo_path, Path) else repo_path
+
+        try:
+            self.repo = git.Repo(self.repo_path)
+            self.logger.debug(f"Initialized git repo at {self.repo_path}")
+        except Exception as e:
+            self.logger.error(f"Failed to initialize git repository at {self.repo_path}: {e}")
+            raise
+
+    def get_current_branch(self) -> Optional[str]:
+        """Get current branch name.
+
+        Returns:
+            Branch name or None if detached HEAD
+        """
+        try:
+            if self.repo.head.is_detached:
+                return None
+            return self.repo.active_branch.name
+        except Exception as e:
+            self.logger.error(f"Failed to get current branch: {e}")
+            return None
+
+    def get_current_commit(self) -> str:
+        """Get current commit SHA.
+
+        Returns:
+            Full commit SHA (40 characters)
+        """
+        return self.repo.head.commit.hexsha
+
+    def checkout(self, ref: str) -> bool:
+        """Checkout a specific commit, branch, or tag using GitPython API.
+
+        Args:
+            ref: Commit SHA, branch name, or tag name
+
+        Returns:
+            True if successful, False otherwise
+        """
+        if self.dry_run:
+            self.logger.info(f"DRY RUN: Would checkout {ref}")
+            return True
+
+        try:
+            self.repo.git.checkout(ref)
+            self.logger.debug(f"Checked out {ref}")
+            return True
+        except Exception as e:
+            self.logger.error(f"Failed to checkout {ref}: {e}")
+            return False
+
+    def get_commit(self, sha: str) -> Optional[Any]:
+        """Get commit object by SHA using GitPython API.
+
+        Args:
+            sha: Commit SHA (full or short)
+
+        Returns:
+            GitPython commit object or None if not found
+        """
+        try:
+            return self.repo.commit(sha)
+        except Exception as e:
+            self.logger.error(f"Failed to get commit {sha}: {e}")
+            return None
+
+    def get_recent_commits(self, max_count: int = 50, branch: str = 'main') -> List[Any]:
+        """Get recent commits from a branch using GitPython API.
+
+        Args:
+            max_count: Maximum number of commits to retrieve
+            branch: Branch name (default: 'main')
+
+        Returns:
+            List of GitPython commit objects
+
+            Example return value (commit objects have these attributes):
+            [
+                <git.Commit "21a03b316dc1e5031183965e5798b0d9fe2e64b3">,  # commit.hexsha
+                <git.Commit "5fe0476e605d2564234f00e8123461e1594a9ce7">,  # commit.message
+                <git.Commit "826eea05c9b3c7a68f04fb70dd44d7783d224df5">   # commit.author.name, commit.committed_datetime
+            ]
+        """
+        try:
+            commits = list(self.repo.iter_commits(branch, max_count=max_count))
+            self.logger.debug(f"Retrieved {len(commits)} commits from {branch}")
+            return commits
+        except Exception as e:
+            self.logger.error(f"Failed to get commits from {branch}: {e}")
+            return []
+
+    def get_commit_info(self, commit: Any) -> Dict[str, Any]:
+        """Extract information from a commit object.
+
+        Args:
+            commit: GitPython commit object
+
+        Returns:
+            Dictionary with commit information
+
+            Example return value:
+            {
+                "sha_full": "21a03b316dc1e5031183965e5798b0d9fe2e64b3",
+                "sha_short": "21a03b316",
+                "author_name": "John Doe",
+                "author_email": "john@nvidia.com",
+                "committer_name": "John Doe",
+                "committer_email": "john@nvidia.com",
+                "date": datetime.datetime(2025, 11, 20, 17, 5, 58),
+                "message": "Fix Docker image fetching for recent commits\\n\\nDetailed description...",
+                "message_first_line": "Fix Docker image fetching for recent commits",
+                "parents": ["5fe0476e605d2564234f00e8123461e1594a9ce7"]
+            }
+        """
+
+        return {
+            'sha_full': commit.hexsha,
+            'sha_short': commit.hexsha[:9],
+            'author_name': commit.author.name,
+            'author_email': commit.author.email,
+            'committer_name': commit.committer.name,
+            'committer_email': commit.committer.email,
+            'date': datetime.fromtimestamp(commit.committed_date),
+            'message': commit.message.strip(),
+            'message_first_line': commit.message.split('\n')[0] if commit.message else '',
+            'parents': [p.hexsha for p in commit.parents]
+        }
+
+    def is_dirty(self) -> bool:
+        """Check if repository has uncommitted changes.
+
+        Returns:
+            True if there are uncommitted changes, False otherwise
+        """
+        return self.repo.is_dirty()
+
+    def get_untracked_files(self) -> List[str]:
+        """Get list of untracked files.
+
+        Returns:
+            List of untracked file paths
+
+            Example return value:
+            [
+                "test_output.txt",
+                ".env.local",
+                "debug.log",
+                "temp/cache_data.json"
+            ]
+        """
+        return self.repo.untracked_files
+
+    def get_tags(self) -> List[str]:
+        """Get all repository tags.
+
+        Returns:
+            List of tag names
+
+            Example return value:
+            [
+                "v1.0.0",
+                "v1.0.1",
+                "v1.1.0",
+                "release-2025-11-20"
+            ]
+        """
+        return [tag.name for tag in self.repo.tags]
+
+    def get_branches(self, remote: bool = False) -> List[str]:
+        """Get list of branches.
+
+        Args:
+            remote: If True, return remote branches. If False, return local branches.
+
+        Returns:
+            List of branch names
+
+            Example return value (local):
+            ["main", "feature/docker-caching", "bugfix/timezone-issue"]
+
+            Example return value (remote):
+            ["origin/main", "origin/develop", "origin/feature/docker-caching"]
+        """
+        if remote:
+            return [ref.name for ref in self.repo.remote().refs]
+        else:
+            return [head.name for head in self.repo.heads]
+
+
 
 class DynamoRepositoryUtils(BaseUtils):
     """Utilities for Dynamo repository operations including Composite Docker SHA (CDS) calculation."""
@@ -316,6 +529,93 @@ class DynamoRepositoryUtils(BaseUtils):
         """
         super().__init__(dry_run, verbose)
         self.repo_path = Path(repo_path) if not isinstance(repo_path, Path) else repo_path
+
+    def get_release_branch_fork_points(
+        self,
+        limit: int = 5,
+        base_ref: str = "origin/main",
+        release_ref_glob: str = "refs/remotes/origin/release/*",
+        github_owner: str = "ai-dynamo",
+        github_repo: str = "dynamo",
+    ) -> Dict[str, List[Dict[str, str]]]:
+        """
+        Dynamo-specific helper: for the latest N origin/release/* branches, compute each branch's
+        fork-point against origin/main and return a mapping from fork-point SHA to release metadata.
+
+        Returns:
+          { "<fork_sha>": [ {"label": "release/v0.8.0", "url": "...", "branch": "release/0.8.0"}, ... ] }
+        """
+        # Prefer GitUtils (GitPython) API for git operations (no manual subprocess calls here).
+        git_utils = GitUtils(repo_path=self.repo_path, dry_run=self.dry_run, verbose=self.verbose)
+
+        if not self.dry_run:
+            # Keep remote refs reasonably fresh; avoid tags to reduce work.
+            try:
+                git_utils.repo.git.fetch("origin", "--prune", "--no-tags", "--quiet")
+            except Exception:
+                # Non-fatal; proceed with whatever refs we have
+                pass
+
+        try:
+            out = git_utils.repo.git.for_each_ref("--format=%(refname:short)", release_ref_glob)
+            branches = [b.strip() for b in out.splitlines() if b.strip()]
+        except Exception:
+            branches = []
+        if not branches:
+            return {}
+
+        def parse_semver(branch_ref: str) -> Optional[tuple]:
+            tail = branch_ref.split("/")[-1].lstrip(".")
+            if tail.startswith("v"):
+                tail = tail[1:]
+            parts = tail.split(".")
+            nums: List[int] = []
+            for p in parts:
+                try:
+                    nums.append(int(p))
+                except ValueError:
+                    return None
+            while len(nums) < 3:
+                nums.append(0)
+            return (nums[0], nums[1], nums[2])
+
+        semver_branches = []
+        for br in branches:
+            ver = parse_semver(br)
+            if ver is None:
+                continue
+            semver_branches.append((ver, br))
+        semver_branches.sort(key=lambda x: x[0], reverse=True)
+        selected = [br for _, br in semver_branches[:limit]]
+
+        fork_map: Dict[str, List[Dict[str, str]]] = {}
+        for branch_ref in selected:
+            mb = ""
+
+            # Preferred: fork-point
+            try:
+                mb = (git_utils.repo.git.merge_base("--fork-point", base_ref, branch_ref) or "").strip()
+            except Exception:
+                mb = ""
+
+            # Fallback: normal merge-base
+            if not mb:
+                try:
+                    mb = (git_utils.repo.git.merge_base(base_ref, branch_ref) or "").strip()
+                except Exception:
+                    mb = ""
+
+            if not mb:
+                continue
+
+            ver_tail = branch_ref.split("/")[-1].lstrip(".")
+            label = f"release/{ver_tail}" if ver_tail.startswith("v") else f"release/v{ver_tail}"
+            branch_name = "/".join(branch_ref.split("/")[1:])  # drop "origin/"
+            url = f"https://github.com/{github_owner}/{github_repo}/tree/{urllib.parse.quote(branch_name, safe='')}"
+
+            fork_map.setdefault(mb, []).append({"label": label, "url": url, "branch": branch_name})
+
+        return fork_map
 
     def generate_composite_sha(self, full_hash: bool = False) -> str:
         """
@@ -820,219 +1120,6 @@ class DockerUtils(BaseUtils):
             # This should not happen if get_build_commands validation is working
             self.logger.error(f"Multiple --tag arguments found in command: {tags}")
             return tags[0]  # Return first tag as fallback
-
-
-# Git utilities using GitPython API (NO subprocess calls)
-class GitUtils(BaseUtils):
-    """Git utilities using GitPython API only - NO subprocess calls to git.
-
-    Provides clean API for git operations without any subprocess calls.
-    All operations use GitPython's native API.
-
-    Example:
-        git_utils = GitUtils(repo_path="/path/to/repo")
-        commits = git_utils.get_recent_commits(max_count=50)
-        git_utils.checkout(commit_sha)
-    """
-
-    def __init__(self, repo_path: Any, dry_run: bool = False, verbose: bool = False):
-        """Initialize GitUtils.
-
-        Args:
-            repo_path: Path to git repository (Path object or str)
-            dry_run: Dry-run mode
-            verbose: Verbose logging
-        """
-        super().__init__(dry_run, verbose)
-
-        self.repo_path = Path(repo_path) if not isinstance(repo_path, Path) else repo_path
-
-        try:
-            self.repo = git.Repo(self.repo_path)
-            self.logger.debug(f"Initialized git repo at {self.repo_path}")
-        except Exception as e:
-            self.logger.error(f"Failed to initialize git repository at {self.repo_path}: {e}")
-            raise
-
-    def get_current_branch(self) -> Optional[str]:
-        """Get current branch name.
-
-        Returns:
-            Branch name or None if detached HEAD
-        """
-        try:
-            if self.repo.head.is_detached:
-                return None
-            return self.repo.active_branch.name
-        except Exception as e:
-            self.logger.error(f"Failed to get current branch: {e}")
-            return None
-
-    def get_current_commit(self) -> str:
-        """Get current commit SHA.
-
-        Returns:
-            Full commit SHA (40 characters)
-        """
-        return self.repo.head.commit.hexsha
-
-    def checkout(self, ref: str) -> bool:
-        """Checkout a specific commit, branch, or tag using GitPython API.
-
-        Args:
-            ref: Commit SHA, branch name, or tag name
-
-        Returns:
-            True if successful, False otherwise
-        """
-        if self.dry_run:
-            self.logger.info(f"DRY RUN: Would checkout {ref}")
-            return True
-
-        try:
-            self.repo.git.checkout(ref)
-            self.logger.debug(f"Checked out {ref}")
-            return True
-        except Exception as e:
-            self.logger.error(f"Failed to checkout {ref}: {e}")
-            return False
-
-    def get_commit(self, sha: str) -> Optional[Any]:
-        """Get commit object by SHA using GitPython API.
-
-        Args:
-            sha: Commit SHA (full or short)
-
-        Returns:
-            GitPython commit object or None if not found
-        """
-        try:
-            return self.repo.commit(sha)
-        except Exception as e:
-            self.logger.error(f"Failed to get commit {sha}: {e}")
-            return None
-
-    def get_recent_commits(self, max_count: int = 50, branch: str = 'main') -> List[Any]:
-        """Get recent commits from a branch using GitPython API.
-
-        Args:
-            max_count: Maximum number of commits to retrieve
-            branch: Branch name (default: 'main')
-
-        Returns:
-            List of GitPython commit objects
-
-            Example return value (commit objects have these attributes):
-            [
-                <git.Commit "21a03b316dc1e5031183965e5798b0d9fe2e64b3">,  # commit.hexsha
-                <git.Commit "5fe0476e605d2564234f00e8123461e1594a9ce7">,  # commit.message
-                <git.Commit "826eea05c9b3c7a68f04fb70dd44d7783d224df5">   # commit.author.name, commit.committed_datetime
-            ]
-        """
-        try:
-            commits = list(self.repo.iter_commits(branch, max_count=max_count))
-            self.logger.debug(f"Retrieved {len(commits)} commits from {branch}")
-            return commits
-        except Exception as e:
-            self.logger.error(f"Failed to get commits from {branch}: {e}")
-            return []
-
-    def get_commit_info(self, commit: Any) -> Dict[str, Any]:
-        """Extract information from a commit object.
-
-        Args:
-            commit: GitPython commit object
-
-        Returns:
-            Dictionary with commit information
-
-            Example return value:
-            {
-                "sha_full": "21a03b316dc1e5031183965e5798b0d9fe2e64b3",
-                "sha_short": "21a03b316",
-                "author_name": "John Doe",
-                "author_email": "john@nvidia.com",
-                "committer_name": "John Doe",
-                "committer_email": "john@nvidia.com",
-                "date": datetime.datetime(2025, 11, 20, 17, 5, 58),
-                "message": "Fix Docker image fetching for recent commits\\n\\nDetailed description...",
-                "message_first_line": "Fix Docker image fetching for recent commits",
-                "parents": ["5fe0476e605d2564234f00e8123461e1594a9ce7"]
-            }
-        """
-
-        return {
-            'sha_full': commit.hexsha,
-            'sha_short': commit.hexsha[:9],
-            'author_name': commit.author.name,
-            'author_email': commit.author.email,
-            'committer_name': commit.committer.name,
-            'committer_email': commit.committer.email,
-            'date': datetime.fromtimestamp(commit.committed_date),
-            'message': commit.message.strip(),
-            'message_first_line': commit.message.split('\n')[0] if commit.message else '',
-            'parents': [p.hexsha for p in commit.parents]
-        }
-
-    def is_dirty(self) -> bool:
-        """Check if repository has uncommitted changes.
-
-        Returns:
-            True if there are uncommitted changes, False otherwise
-        """
-        return self.repo.is_dirty()
-
-    def get_untracked_files(self) -> List[str]:
-        """Get list of untracked files.
-
-        Returns:
-            List of untracked file paths
-
-            Example return value:
-            [
-                "test_output.txt",
-                ".env.local",
-                "debug.log",
-                "temp/cache_data.json"
-            ]
-        """
-        return self.repo.untracked_files
-
-    def get_tags(self) -> List[str]:
-        """Get all repository tags.
-
-        Returns:
-            List of tag names
-
-            Example return value:
-            [
-                "v1.0.0",
-                "v1.0.1",
-                "v1.1.0",
-                "release-2025-11-20"
-            ]
-        """
-        return [tag.name for tag in self.repo.tags]
-
-    def get_branches(self, remote: bool = False) -> List[str]:
-        """Get list of branches.
-
-        Args:
-            remote: If True, return remote branches. If False, return local branches.
-
-        Returns:
-            List of branch names
-
-            Example return value (local):
-            ["main", "feature/docker-caching", "bugfix/timezone-issue"]
-
-            Example return value (remote):
-            ["origin/main", "origin/develop", "origin/feature/docker-caching"]
-        """
-        if remote:
-            return [ref.name for ref in self.repo.remote().refs]
-        else:
-            return [head.name for head in self.repo.heads]
 
 
 # GitHub API utilities
