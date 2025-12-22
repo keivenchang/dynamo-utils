@@ -703,7 +703,7 @@ class DynamoRepositoryUtils(BaseUtils):
         Returns:
             Stored SHA string, or empty string if not found
         """
-        sha_file = self.repo_path / ".last_build_composite_sha"
+        sha_file = self.repo_path / ".build_images_last_composite_sha"
         if sha_file.exists():
             stored = sha_file.read_text().strip()
             self.logger.debug(f"Found stored Composite Docker SHA (CDS): {stored[:12]}")
@@ -718,7 +718,7 @@ class DynamoRepositoryUtils(BaseUtils):
         Args:
             sha: Composite Docker SHA (CDS) to store
         """
-        sha_file = self.repo_path / ".last_build_composite_sha"
+        sha_file = self.repo_path / ".build_images_last_composite_sha"
         sha_file.write_text(sha)
         self.logger.info(f"Stored Composite Docker SHA (CDS): {sha[:12]}")
 
@@ -736,7 +736,7 @@ class DynamoRepositoryUtils(BaseUtils):
             True if rebuild is needed, False otherwise
         """
         self.logger.info("\nChecking if rebuild is needed based on file changes...")
-        self.logger.info(f"Composite Docker SHA file: {self.repo_path}/.last_build_composite_sha")
+        self.logger.info(f"Composite Docker SHA file: {self.repo_path}/.build_images_last_composite_sha")
 
         # Generate current Composite Docker SHA (CDS) (full hash, not truncated)
         current_sha = self.generate_composite_sha(full_hash=True)

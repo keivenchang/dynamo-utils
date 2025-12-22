@@ -253,6 +253,7 @@ def create_task_graph(framework: str, sha: str, repo_path: Path, version: Option
         task_id=f"{framework}-dev-build",
         description=f"Build {framework.upper()} dev image",
         command=f"{repo_path}/container/build.sh --no-tag-latest --framework {framework} --target dev",
+        input_image=runtime_image_tag,
         output_image=dev_image_tag,
         parents=[f"{framework}-runtime-build"],
         timeout=1200.0,  # 20 minutes for builds
@@ -1477,6 +1478,44 @@ def execute_task_parallel(
     failed_tasks = set()
     lock = threading.Lock()
 
+    # Flag to stop the periodic HTML updater thread
+    stop_html_updater = threading.Event()
+
+    def periodic_html_updater():
+        """Background thread to update HTML report every 10 seconds"""
+        while not stop_html_updater.is_set():
+            # Wait for 10 seconds (or until stop signal)
+            if stop_html_updater.wait(10):
+                break  # Stop signal received
+
+            # Generate HTML report
+            if log_dir and log_date and not dry_run:
+                try:
+                    # Update frameworks cache with fresh elapsed times for running tasks
+                    for task_id, task in all_tasks.items():
+                        if task.status == TaskStatus.RUNNING:
+                            update_frameworks_data_cache(task, use_absolute_urls=False)
+
+                    html_content = generate_html_report(
+                        all_tasks=all_tasks,
+                        repo_path=repo_path,
+                        sha=sha,
+                        log_dir=log_dir,
+                        date_str=log_date,
+                        use_absolute_urls=False,
+                    )
+                    html_file = log_dir / f"{log_date}.{sha}.report.html"
+                    html_file.write_text(html_content)
+                except Exception as e:
+                    # Silently continue on error to avoid spam
+                    pass
+
+    # Start periodic HTML updater thread
+    html_updater_thread = None
+    if log_dir and log_date and not dry_run:
+        html_updater_thread = threading.Thread(target=periodic_html_updater, daemon=True)
+        html_updater_thread.start()
+
     def can_execute(task_id: str) -> bool:
         """Check if all dependencies are satisfied"""
         task = all_tasks[task_id]
@@ -1712,6 +1751,11 @@ def execute_task_parallel(
                         active_futures[new_future] = pending_task_id
                         pending_tasks.remove(pending_task_id)
 
+    # Stop the periodic HTML updater thread
+    if html_updater_thread and html_updater_thread.is_alive():
+        stop_html_updater.set()
+        html_updater_thread.join(timeout=2)  # Wait up to 2 seconds for thread to stop
+
     return executed_tasks, failed_tasks
 
 
@@ -1914,7 +1958,7 @@ def update_frameworks_data_cache(task: 'BaseTask', use_absolute_urls: bool = Fal
     def create_task_data_from_task(t: 'BaseTask') -> 'TaskData':
         if t.status == TaskStatus.RUNNING and t.start_time:
             elapsed = time.time() - t.start_time
-            task_time = f"{elapsed:.1f}s (running)"
+            task_time = f"elapsed {elapsed:.1f}s"
         elif t.start_time and t.end_time:
             task_time = f"{t.end_time - t.start_time:.1f}s"
         else:
@@ -1996,15 +2040,31 @@ def generate_html_report(
     running = sum(1 for t in all_tasks.values() if t.status == TaskStatus.RUNNING)
     queued = sum(1 for t in all_tasks.values() if t.status == TaskStatus.QUEUED)
 
+    # Calculate overall build elapsed time (find earliest start time)
+    start_times = [t.start_time for t in all_tasks.values() if t.start_time]
+    overall_elapsed_str = ""
+    if start_times:
+        earliest_start = min(start_times)
+
+        # If build is still in progress, calculate elapsed time
+        if running > 0 or queued > 0:
+            elapsed_seconds = time.time() - earliest_start
+            minutes = int(elapsed_seconds // 60)
+            seconds = int(elapsed_seconds % 60)
+            if minutes > 0:
+                overall_elapsed_str = f" (elapsed {minutes}m {seconds}s)"
+            else:
+                overall_elapsed_str = f" (elapsed {seconds}s)"
+
     # Determine overall status (priority: failed > running/queued > success)
     if failed > 0:
-        overall_status = "❌ TESTS FAILED"
+        overall_status = f"❌ TESTS FAILED{overall_elapsed_str}"
         header_color = "#dc3545"  # Red
     elif running > 0 or queued > 0:
-        overall_status = "🔄 BUILD IN PROGRESS"
+        overall_status = f"🔄 BUILD IN PROGRESS{overall_elapsed_str}"
         header_color = "#ffc107"  # Yellow
     else:
-        overall_status = "✅ ALL TESTS PASSED"
+        overall_status = f"✅ ALL TESTS PASSED{overall_elapsed_str}"
         header_color = "#28a745"  # Green
 
     # Get git information
@@ -2147,6 +2207,8 @@ def generate_html_report(
         succeeded=succeeded,
         failed=failed,
         skipped=skipped,
+        running=running,
+        queued=queued,
         build_date=now.strftime('%Y-%m-%d %H:%M:%S'),
         report_generated=now.strftime('%Y-%m-%d %H:%M:%S'),
         commit=commit_info,
@@ -2460,12 +2522,12 @@ def main() -> int:
                 logger.info("Doing hard reset to clean repository state...")
                 git_utils_temp.repo.git.reset('--hard', 'HEAD')
 
-                # Clean untracked files (except .last_build_composite_sha which we want to keep)
+                # Clean untracked files (except .build_images_last_composite_sha which we want to keep)
                 untracked = git_utils_temp.repo.untracked_files
                 if untracked:
                     logger.info(f"Removing {len(untracked)} untracked file(s)...")
                     for file in untracked:
-                        if file != '.last_build_composite_sha':
+                        if file != '.build_images_last_composite_sha':
                             file_path = repo_path / file
                             try:
                                 if file_path.is_file():
@@ -2547,7 +2609,7 @@ def main() -> int:
         logger.info("DynamoDockerBuilder V2 - Starting")
 
         # Check if rebuild is needed based on Composite Docker SHA (CDS) (container files)
-        # Only check in non-dry-run mode to avoid writing .last_build_composite_sha
+        # Only check in non-dry-run mode to avoid writing .build_images_last_composite_sha
         dynamo_repo_utils = DynamoRepositoryUtils(repo_path)
         if not dynamo_repo_utils.check_if_rebuild_needed(force_run=args.force_run):
             logger.info("✅ No rebuild needed - exiting")
