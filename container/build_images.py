@@ -2392,7 +2392,7 @@ def main() -> int:
         return 1
 
     # Check for lock file to prevent concurrent runs
-    lock_file = repo_path / ".dynamo_builder.lock"
+    lock_file = repo_path / ".build_images.lock"
     if lock_file.exists():
         try:
             with open(lock_file, 'r') as f:

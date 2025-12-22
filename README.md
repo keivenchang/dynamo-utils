@@ -469,7 +469,7 @@ python3 container/build_images.py --repo-path ~/nvidia/dynamo_ci --parallel --fo
 - Build, chown, compilation, sanity checks
 
 **Process Management:**
-- Lock files prevent concurrent runs (`.dynamo_builder.lock`)
+- Lock files prevent concurrent runs (`.build_images.lock`)
 - PID tracking with stale lock cleanup
 - Dry-run mode for testing
 
