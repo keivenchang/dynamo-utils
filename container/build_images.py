@@ -20,6 +20,7 @@ import glob
 import logging
 import os
 import re
+import signal
 import subprocess
 import sys
 import threading
@@ -65,7 +66,7 @@ from common import (
 # CONSTANTS
 # ==============================================================================
 
-FRAMEWORKS = ["vllm", "sglang", "trtllm"]
+FRAMEWORKS = ["none", "vllm", "sglang", "trtllm"]
 
 # Default values for HTML report generation
 DEFAULT_HOSTNAME = "keivenc-linux"
@@ -73,6 +74,9 @@ DEFAULT_HTML_PATH = "/nvidia/dynamo_ci/logs"
 
 # Global frameworks data cache for HTML reporting (initialized once, updated as tasks run)
 _frameworks_data_cache: Optional[Dict[str, Dict[str, Any]]] = None
+
+# Global lock for all compilation tasks (dev + local-dev) to prevent parallel builds from conflicting
+_compilation_lock = threading.Lock()
 
 
 class TaskStatus(Enum):
@@ -82,6 +86,62 @@ class TaskStatus(Enum):
     SUCCESS = "success"
     FAILED = "failed"
     SKIPPED = "skipped"
+    KILLED = "killed"
+
+
+# Global references for signal handler to generate HTML report
+_all_tasks_global: Optional[Dict[str, 'BaseTask']] = None
+_repo_path_global: Optional[Path] = None
+_sha_global: Optional[str] = None
+_log_dir_global: Optional[Path] = None
+_date_str_global: Optional[str] = None
+
+
+def handle_termination_signal(signum, frame):
+    """
+    Signal handler for SIGINT and SIGTERM.
+    Marks all RUNNING tasks as KILLED, generates HTML report, and exits.
+    """
+    logger = logging.getLogger("signal")
+    sig_name = signal.Signals(signum).name
+    logger.warning(f"\n{sig_name} received - marking running tasks as KILLED...")
+
+    if _all_tasks_global:
+        killed_count = 0
+        for task_id, task in _all_tasks_global.items():
+            if task.status == TaskStatus.RUNNING:
+                task.mark_status_as(TaskStatus.KILLED, f"Build interrupted by {sig_name}")
+                killed_count += 1
+                logger.warning(f"  Marked {task_id} as KILLED")
+
+        if killed_count > 0:
+            logger.warning(f"Marked {killed_count} running task(s) as KILLED")
+        else:
+            logger.info("No running tasks to mark as killed")
+
+        # Generate HTML report before exiting
+        if _repo_path_global and _sha_global and _log_dir_global and _date_str_global:
+            try:
+                logger.info("Generating HTML report...")
+                # Force rebuild of frameworks_data_cache to reflect KILLED status
+                global _frameworks_data_cache
+                _frameworks_data_cache = None
+                html_content = generate_html_report(
+                    all_tasks=_all_tasks_global,
+                    repo_path=_repo_path_global,
+                    sha=_sha_global,
+                    log_dir=_log_dir_global,
+                    date_str=_date_str_global,
+                    use_absolute_urls=False,
+                )
+                html_file = _log_dir_global / f"{_date_str_global}.{_sha_global}.report.html"
+                html_file.write_text(html_content)
+                logger.info(f"HTML Report saved: {html_file}")
+            except Exception as e:
+                logger.error(f"Failed to generate HTML report: {e}")
+
+    logger.warning("Exiting...")
+    sys.exit(1)
 
 
 @dataclass
@@ -186,6 +246,34 @@ def extract_version_from_build_sh(framework: str, repo_path: Path) -> str:
         raise RuntimeError(f"Failed to extract version from build.sh: {e}")
 
 
+def is_commit_at_or_before(repo_path: Path, commit_sha: str, cutoff_sha: str) -> bool:
+    """
+    Check if a commit is at or before a cutoff commit in git history.
+
+    Args:
+        repo_path: Path to the git repository
+        commit_sha: The commit to check (can be short or full SHA)
+        cutoff_sha: The cutoff commit (can be short or full SHA)
+
+    Returns:
+        True if commit_sha is at or before cutoff_sha in history, False otherwise
+    """
+    try:
+        # Use git merge-base to check ancestry
+        # If commit_sha is ancestor of cutoff_sha OR commit_sha == cutoff_sha, return True
+        result = subprocess.run(
+            ["git", "merge-base", "--is-ancestor", commit_sha, cutoff_sha],
+            cwd=repo_path,
+            capture_output=True,
+            timeout=5.0
+        )
+        # Exit code 0 means commit_sha is ancestor of cutoff_sha (or equal)
+        return result.returncode == 0
+    except (subprocess.TimeoutExpired, subprocess.CalledProcessError, FileNotFoundError):
+        # If git command fails, assume commit is after cutoff (safer default)
+        return False
+
+
 # Factory function to create task instances for a specific framework
 def create_task_graph(framework: str, sha: str, repo_path: Path, version: Optional[str] = None) -> Dict[str, 'BaseTask']:
     """
@@ -237,10 +325,11 @@ def create_task_graph(framework: str, sha: str, repo_path: Path, version: Option
     )
 
     # Level 2: Runtime sanity check
+    sanity_flags = "--runtime-check"
     tasks[f"{framework}-runtime-sanity"] = CommandTask(
         task_id=f"{framework}-runtime-sanity",
         description=f"Run sanity_check.py in {framework.upper()} runtime container",
-        command=f"{repo_path}/container/run.sh --image {runtime_image_tag} -- python3 /workspace/deploy/sanity_check.py --runtime-check",
+        command=f"{repo_path}/container/run.sh --image {runtime_image_tag} -- python3 /workspace/deploy/sanity_check.py {sanity_flags}",
         input_image=runtime_image_tag,
         parents=[f"{framework}-runtime-build"],
         timeout=45.0,  # 45 seconds for sanity checks
@@ -260,13 +349,18 @@ def create_task_graph(framework: str, sha: str, repo_path: Path, version: Option
     )
 
     # Level 3: Dev compilation
+    # For framework=none, always run compile/sanity tasks but don't count them in summary
+    # (none framework tasks are always experimental and don't affect overall build status)
+    home_dir = str(Path.home())
+    ignore_none_tasks_in_summary = framework == "none"
+
+    # Always create these tasks (but mark as ignored if needed)
     # Use fast build flags from compile.sh:
     # - CARGO_INCREMENTAL=1: Enable incremental compilation
     # - CARGO_PROFILE_DEV_OPT_LEVEL=0: No optimizations (faster compile)
     # - CARGO_BUILD_JOBS=$(nproc): Parallel compilation
     # - CARGO_PROFILE_DEV_CODEGEN_UNITS=256: More parallel code generation
     cargo_cmd = "CARGO_INCREMENTAL=1 CARGO_PROFILE_DEV_OPT_LEVEL=0 CARGO_BUILD_JOBS=$(nproc) CARGO_PROFILE_DEV_CODEGEN_UNITS=256 cargo build --profile dev --features dynamo-llm/block-manager && cd /workspace/lib/bindings/python && CARGO_INCREMENTAL=1 CARGO_PROFILE_DEV_OPT_LEVEL=0 CARGO_BUILD_JOBS=$(nproc) CARGO_PROFILE_DEV_CODEGEN_UNITS=256 maturin develop --uv && uv pip install -e ."
-    home_dir = str(Path.home())
     tasks[f"{framework}-dev-compilation"] = CommandTask(
         task_id=f"{framework}-dev-compilation",
         description=f"Run workspace compilation in {framework.upper()} dev container",
@@ -274,6 +368,7 @@ def create_task_graph(framework: str, sha: str, repo_path: Path, version: Option
         input_image=dev_image_tag,
         parents=[f"{framework}-dev-build"],
         timeout=600.0,  # 10 minutes for compilation
+        ignore_in_summary=ignore_none_tasks_in_summary,
     )
 
     # Level 4: Dev chown (runs after compilation, always runs even if compilation fails)
@@ -284,6 +379,7 @@ def create_task_graph(framework: str, sha: str, repo_path: Path, version: Option
         parents=[f"{framework}-dev-compilation"],
         run_even_if_deps_fail=True,
         timeout=60.0,
+        ignore_in_summary=ignore_none_tasks_in_summary,
     )
 
     # Level 4: Dev sanity check (runs in parallel with chown)
@@ -294,6 +390,7 @@ def create_task_graph(framework: str, sha: str, repo_path: Path, version: Option
         input_image=dev_image_tag,
         parents=[f"{framework}-dev-compilation"],
         timeout=45.0,  # 45 seconds for sanity checks
+        ignore_in_summary=ignore_none_tasks_in_summary,
     )
 
     # Level 3: Local-dev image build
@@ -306,16 +403,23 @@ def create_task_graph(framework: str, sha: str, repo_path: Path, version: Option
         output_image=local_dev_image_tag,
         parents=[f"{framework}-dev-build"],
         timeout=1200.0,  # 20 minutes for builds
+        ignore_in_summary=ignore_none_tasks_in_summary,
     )
 
     # Level 5: Local-dev compilation
+    # Parent depends on whether dev-chown exists
+    local_dev_comp_parents = [f"{framework}-local-dev-build"]
+    if f"{framework}-dev-chown" in tasks:
+        local_dev_comp_parents.append(f"{framework}-dev-chown")
+
     tasks[f"{framework}-local-dev-compilation"] = CommandTask(
         task_id=f"{framework}-local-dev-compilation",
         description=f"Run workspace compilation in {framework.upper()} local-dev container",
         command=f"{repo_path}/container/run.sh --image {local_dev_image_tag} --mount-workspace -v {home_dir}/.cargo:/home/ubuntu/.cargo -- bash -c '{cargo_cmd}'",
         input_image=local_dev_image_tag,
-        parents=[f"{framework}-local-dev-build", f"{framework}-dev-chown"],
+        parents=local_dev_comp_parents,
         timeout=600.0,  # 10 minutes for compilation
+        ignore_in_summary=ignore_none_tasks_in_summary,
     )
 
     # Level 6: Local-dev sanity check
@@ -326,6 +430,7 @@ def create_task_graph(framework: str, sha: str, repo_path: Path, version: Option
         input_image=local_dev_image_tag,
         parents=[f"{framework}-local-dev-compilation"],
         timeout=45.0,  # 45 seconds for sanity checks
+        ignore_in_summary=ignore_none_tasks_in_summary,
     )
 
     return tasks
@@ -364,6 +469,7 @@ class BaseTask(ABC):
     parents: List[str] = field(default_factory=list)
     children: List[str] = field(default_factory=list)
     run_even_if_deps_fail: bool = False  # Run even if dependencies fail
+    ignore_in_summary: bool = False  # Don't count this task in overall success/fail
 
     # Execution state
     _status: TaskStatus = TaskStatus.QUEUED
@@ -841,6 +947,11 @@ class CommandTask(BaseTask):
             self.logger.info("Dry-run mode: skipping actual execution")
             return True
 
+        # For all compilation tasks (dev + local-dev), use locking and fix ownership to prevent
+        # parallel builds from conflicting when they write to the same repository directory
+        if "compilation" in self.task_id:
+            return self._execute_with_lock(repo_path)
+
         command = self.get_command(repo_path)
         exit_code = self._run_command(command, repo_path)
 
@@ -849,6 +960,47 @@ class CommandTask(BaseTask):
             return True
 
         return exit_code == 0
+
+    def _execute_with_lock(self, repo_path: Path) -> bool:
+        """Execute compilation (dev/local-dev) with thread lock and ownership fixing."""
+        # Acquire global lock for all compilation tasks (prevents parallel conflicts)
+        self.logger.info("Acquiring compilation lock...")
+        with _compilation_lock:
+            self.logger.info("Lock acquired")
+
+            try:
+                # Fix file ownership before compilation to ensure ubuntu user can write
+                user_id = os.getuid()
+                group_id = os.getgid()
+                chown_cmd = f"sudo chown -R {user_id}:{group_id} {repo_path}"
+                self.logger.info(f"Fixing ownership: {chown_cmd}")
+
+                chown_exit_code = subprocess.call(
+                    chown_cmd,
+                    shell=True,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL
+                )
+
+                if chown_exit_code != 0:
+                    self.logger.warning(f"chown command exited with code {chown_exit_code}, continuing anyway")
+
+                # Now execute the compilation command
+                command = self.get_command(repo_path)
+                exit_code = self._run_command(command, repo_path)
+
+                # Lock is automatically released when exiting the with block
+                self.logger.info("Releasing lock")
+
+                # If ignore_exit_code is set, always return success
+                if self.ignore_exit_code:
+                    return True
+
+                return exit_code == 0
+
+            except Exception as e:
+                self.logger.error(f"Error during locked execution: {e}")
+                return False
 
     def get_command(self, repo_path: Path) -> str:
         """Get the command to execute (from self.command)."""
@@ -1478,44 +1630,6 @@ def execute_task_parallel(
     failed_tasks = set()
     lock = threading.Lock()
 
-    # Flag to stop the periodic HTML updater thread
-    stop_html_updater = threading.Event()
-
-    def periodic_html_updater():
-        """Background thread to update HTML report every 10 seconds"""
-        while not stop_html_updater.is_set():
-            # Wait for 10 seconds (or until stop signal)
-            if stop_html_updater.wait(10):
-                break  # Stop signal received
-
-            # Generate HTML report
-            if log_dir and log_date and not dry_run:
-                try:
-                    # Update frameworks cache with fresh elapsed times for running tasks
-                    for task_id, task in all_tasks.items():
-                        if task.status == TaskStatus.RUNNING:
-                            update_frameworks_data_cache(task, use_absolute_urls=False)
-
-                    html_content = generate_html_report(
-                        all_tasks=all_tasks,
-                        repo_path=repo_path,
-                        sha=sha,
-                        log_dir=log_dir,
-                        date_str=log_date,
-                        use_absolute_urls=False,
-                    )
-                    html_file = log_dir / f"{log_date}.{sha}.report.html"
-                    html_file.write_text(html_content)
-                except Exception as e:
-                    # Silently continue on error to avoid spam
-                    pass
-
-    # Start periodic HTML updater thread
-    html_updater_thread = None
-    if log_dir and log_date and not dry_run:
-        html_updater_thread = threading.Thread(target=periodic_html_updater, daemon=True)
-        html_updater_thread.start()
-
     def can_execute(task_id: str) -> bool:
         """Check if all dependencies are satisfied"""
         task = all_tasks[task_id]
@@ -1730,6 +1844,8 @@ def execute_task_parallel(
                         with lock:
                             failed_tasks.add(task_id)
                             executed_tasks.add(task_id)
+                            # Update task status so HTML report shows correct final state
+                            all_tasks[task_id].mark_status_as(TaskStatus.FAILED, "Deadlock detected")
                 break
 
             # Wait for next task to complete
@@ -1750,11 +1866,6 @@ def execute_task_parallel(
                         new_future = executor.submit(execute_single_task, pending_task_id)
                         active_futures[new_future] = pending_task_id
                         pending_tasks.remove(pending_task_id)
-
-    # Stop the periodic HTML updater thread
-    if html_updater_thread and html_updater_thread.is_alive():
-        stop_html_updater.set()
-        html_updater_thread.join(timeout=2)  # Wait up to 2 seconds for thread to stop
 
     return executed_tasks, failed_tasks
 
@@ -2037,6 +2148,7 @@ def generate_html_report(
     succeeded = sum(1 for t in all_tasks.values() if t.status == TaskStatus.SUCCESS)
     failed = sum(1 for t in all_tasks.values() if t.status == TaskStatus.FAILED)
     skipped = sum(1 for t in all_tasks.values() if t.status == TaskStatus.SKIPPED)
+    killed = sum(1 for t in all_tasks.values() if t.status == TaskStatus.KILLED)
     running = sum(1 for t in all_tasks.values() if t.status == TaskStatus.RUNNING)
     queued = sum(1 for t in all_tasks.values() if t.status == TaskStatus.QUEUED)
 
@@ -2056,13 +2168,17 @@ def generate_html_report(
             else:
                 overall_elapsed_str = f" (elapsed {seconds}s)"
 
-    # Determine overall status (priority: failed > running/queued > success)
-    if failed > 0:
-        overall_status = f"❌ TESTS FAILED{overall_elapsed_str}"
-        header_color = "#dc3545"  # Red
+    # Determine overall status (priority: killed > running/queued > failed > success)
+    # Orange = killed, Yellow = still running, Red = done with failures, Green = done with all passed
+    if killed > 0:
+        overall_status = f"⚠️ BUILD KILLED{overall_elapsed_str}"
+        header_color = "#ff9800"  # Orange/warning color
     elif running > 0 or queued > 0:
         overall_status = f"🔄 BUILD IN PROGRESS{overall_elapsed_str}"
         header_color = "#ffc107"  # Yellow
+    elif failed > 0:
+        overall_status = f"❌ TESTS FAILED{overall_elapsed_str}"
+        header_color = "#dc3545"  # Red
     else:
         overall_status = f"✅ ALL TESTS PASSED{overall_elapsed_str}"
         header_color = "#28a745"  # Green
@@ -2207,6 +2323,7 @@ def generate_html_report(
         succeeded=succeeded,
         failed=failed,
         skipped=skipped,
+        killed=killed,
         running=running,
         queued=queued,
         build_date=now.strftime('%Y-%m-%d %H:%M:%S'),
@@ -2707,39 +2824,95 @@ def main() -> int:
             if parent_id in all_tasks and task_id not in all_tasks[parent_id].children:
                 all_tasks[parent_id].children.append(task_id)
 
+    # Register signal handlers to mark running tasks as KILLED when interrupted
+    # (only in non-dry-run mode since dry-run doesn't have log_dir/log_date)
+    if not args.dry_run:
+        global _all_tasks_global, _repo_path_global, _sha_global, _log_dir_global, _date_str_global
+        _all_tasks_global = all_tasks
+        _repo_path_global = repo_path
+        _sha_global = sha
+        _log_dir_global = log_dir
+        _date_str_global = log_date
+        signal.signal(signal.SIGINT, handle_termination_signal)
+        signal.signal(signal.SIGTERM, handle_termination_signal)
+        logger.info("Signal handlers registered (SIGINT, SIGTERM)")
+
+    # Start periodic HTML updater thread (for both sequential and parallel modes)
+    stop_html_updater = threading.Event()
+    html_updater_thread = None
+
+    def periodic_html_updater():
+        """Background thread to update HTML report every 5 seconds"""
+        while not stop_html_updater.is_set():
+            # Wait for 5 seconds (or until stop signal)
+            if stop_html_updater.wait(5):
+                break  # Stop signal received
+
+            # Generate HTML report
+            if log_dir and log_date and not args.dry_run:
+                try:
+                    # Update frameworks cache with fresh elapsed times for running tasks
+                    for task_id, task in all_tasks.items():
+                        if task.status == TaskStatus.RUNNING:
+                            update_frameworks_data_cache(task, use_absolute_urls=False)
+
+                    html_content = generate_html_report(
+                        all_tasks=all_tasks,
+                        repo_path=repo_path,
+                        sha=sha,
+                        log_dir=log_dir,
+                        date_str=log_date,
+                        use_absolute_urls=args.email is not None,
+                    )
+                    html_file = log_dir / f"{log_date}.{sha}.report.html"
+                    html_file.write_text(html_content)
+                except Exception:
+                    # Silently ignore errors during periodic updates
+                    pass
+
+    if log_dir and log_date and not args.dry_run:
+        html_updater_thread = threading.Thread(target=periodic_html_updater, daemon=True)
+        html_updater_thread.start()
+
     # Execute based on mode
-    if args.parallel:
-        # Parallel execution
-        executed_tasks, failed_tasks = execute_task_parallel(
-            all_tasks=all_tasks,
-            root_tasks=root_tasks,
-            repo_path=repo_path,
-            sha=sha,
-            log_dir=log_dir if not args.dry_run else None,
-            log_date=log_date if not args.dry_run else None,
-            dry_run=args.dry_run,
-            skip_if_passed=args.skip_action_if_already_passed,
-            no_compile=args.no_compile,
-            max_workers=4,  # TODO: make this configurable
-        )
-    else:
-        # Sequential execution
-        executed_tasks = set()
-        failed_tasks = set()
-        for root_id in root_tasks:
-            execute_task_sequential(
+    try:
+        if args.parallel:
+            # Parallel execution
+            executed_tasks, failed_tasks = execute_task_parallel(
                 all_tasks=all_tasks,
-                executed_tasks=executed_tasks,
-                failed_tasks=failed_tasks,
-                task_id=root_id,
+                root_tasks=root_tasks,
                 repo_path=repo_path,
                 sha=sha,
                 log_dir=log_dir if not args.dry_run else None,
                 log_date=log_date if not args.dry_run else None,
                 dry_run=args.dry_run,
-                skip_action_if_already_passed=args.skip_action_if_already_passed,
+                skip_if_passed=args.skip_action_if_already_passed,
                 no_compile=args.no_compile,
+                max_workers=4,  # TODO: make this configurable
             )
+        else:
+            # Sequential execution
+            executed_tasks = set()
+            failed_tasks = set()
+            for root_id in root_tasks:
+                execute_task_sequential(
+                    all_tasks=all_tasks,
+                    executed_tasks=executed_tasks,
+                    failed_tasks=failed_tasks,
+                    task_id=root_id,
+                    repo_path=repo_path,
+                    sha=sha,
+                    log_dir=log_dir if not args.dry_run else None,
+                    log_date=log_date if not args.dry_run else None,
+                    dry_run=args.dry_run,
+                    skip_action_if_already_passed=args.skip_action_if_already_passed,
+                    no_compile=args.no_compile,
+                )
+    finally:
+        # Stop the periodic HTML updater
+        if html_updater_thread:
+            stop_html_updater.set()
+            html_updater_thread.join(timeout=1.0)
 
     # Calculate total execution time
     execution_end_time = time.time()
@@ -2768,9 +2941,14 @@ def main() -> int:
 
         return 0
     else:
-        success_count = len([t for t in all_tasks.values() if t.status == TaskStatus.SUCCESS])
-        failed_count = len([t for t in all_tasks.values() if t.status == TaskStatus.FAILED])
-        skipped_count = len([t for t in all_tasks.values() if t.status == TaskStatus.SKIPPED])
+        # Count tasks excluding those marked as ignore_in_summary
+        success_count = len([t for t in all_tasks.values() if t.status == TaskStatus.SUCCESS and not t.ignore_in_summary])
+        failed_count = len([t for t in all_tasks.values() if t.status == TaskStatus.FAILED and not t.ignore_in_summary])
+        skipped_count = len([t for t in all_tasks.values() if t.status == TaskStatus.SKIPPED and not t.ignore_in_summary])
+
+        # Also count ignored tasks separately for informational purposes
+        ignored_success = len([t for t in all_tasks.values() if t.status == TaskStatus.SUCCESS and t.ignore_in_summary])
+        ignored_failed = len([t for t in all_tasks.values() if t.status == TaskStatus.FAILED and t.ignore_in_summary])
 
         exit_status = 0 if failed_count == 0 else 1
 
@@ -2778,6 +2956,8 @@ def main() -> int:
         logger.info(f"  ✓ Success: {success_count}")
         logger.info(f"  ✗ Failed: {failed_count}")
         logger.info(f"  ⊘ Skipped: {skipped_count}")
+        if ignored_success > 0 or ignored_failed > 0:
+            logger.info(f"  (Ignored in summary: ✓ {ignored_success}, ✗ {ignored_failed})")
 
         # Show detailed task breakdown
         logger.info(f"\n  Task Details:")
