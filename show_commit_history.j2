@@ -587,14 +587,61 @@ Legend & Help
 {%- endif -%}
 {%- if pipeline -%}
 <a href="https://gitlab-master.nvidia.com/dl/ai-dynamo/dynamo/-/commit/{{ sha_full }}" target="_blank" style="margin-left: 4px; color: #fc6d26; text-decoration: none; font-weight: 600;" title="View commit in GitLab">🦊</a>
-{%- set job_counts = pipeline_job_counts.get(pipeline.id) -%}
-{%- if job_counts -%}
+{%- set job_data = pipeline_job_counts.get(pipeline.id) -%}
+{%- if job_data -%}
+{# Handle both old format (direct counts) and new format (counts + jobs) #}
+{%- if job_data.counts -%}
+{# New format: {'counts': {...}, 'jobs': [...]} #}
+{%- set job_counts = job_data.counts -%}
+{%- set has_job_details = job_data.jobs is defined and job_data.jobs -%}
+{%- else -%}
+{# Old format: {'success': N, 'failed': N, ...} - treat as counts directly #}
+{%- set job_counts = job_data -%}
+{%- set has_job_details = false -%}
+{%- endif -%}
+{# Build detailed tooltip with job names if available #}
+{%- if has_job_details -%}
+{%- set success_jobs = [] -%}
+{%- set failed_jobs = [] -%}
+{%- set running_jobs = [] -%}
+{%- set pending_jobs = [] -%}
+{%- for job in job_data.jobs -%}
+{%- if job.status == 'success' -%}
+{%- set _ = success_jobs.append(job.name) -%}
+{%- elif job.status == 'failed' -%}
+{%- set _ = failed_jobs.append(job.name) -%}
+{%- elif job.status == 'running' -%}
+{%- set _ = running_jobs.append(job.name) -%}
+{%- elif job.status in ('pending', 'created', 'waiting_for_resource') -%}
+{%- set _ = pending_jobs.append(job.name) -%}
+{%- endif -%}
+{%- endfor -%}
+{%- set gitlab_tooltip_parts = [] -%}
+{%- if success_jobs -%}{%- set _ = gitlab_tooltip_parts.append('<strong style="color: #2da44e;">Passed:</strong> ' + success_jobs|join(', ')) -%}{%- endif -%}
+{%- if failed_jobs -%}{%- set _ = gitlab_tooltip_parts.append('<strong style="color: #d73a49;">Failed:</strong> ' + failed_jobs|join(', ')) -%}{%- endif -%}
+{%- if running_jobs -%}{%- set _ = gitlab_tooltip_parts.append('<strong style="color: #dbab09;">Running:</strong> ' + running_jobs|join(', ')) -%}{%- endif -%}
+{%- if pending_jobs -%}{%- set _ = gitlab_tooltip_parts.append('<strong style="color: #8c959f;">Pending:</strong> ' + pending_jobs|join(', ')) -%}{%- endif -%}
+{%- set gitlab_tooltip_html = gitlab_tooltip_parts|join('<br>') -%}
+<span class="gh-status-tooltip" style="margin-left: 4px;">
+<span style="white-space: nowrap; font-weight: 600; font-size: 11px;">
+{%- if job_counts.success > 0 -%}<span style="color: #2da44e;">{{ job_counts.success }}✓</span>{%- endif -%}
+{%- if job_counts.failed > 0 -%}{%- if job_counts.success > 0 %} {% endif -%}<span style="color: #d73a49;">{{ job_counts.failed }}✗</span>{%- endif -%}
+{%- if job_counts.running > 0 -%}{%- if job_counts.success > 0 or job_counts.failed > 0 %} {% endif -%}<span style="color: #dbab09;">{{ job_counts.running }}⏳</span>{%- endif -%}
+{%- if job_counts.pending > 0 -%}{%- if job_counts.success > 0 or job_counts.failed > 0 or job_counts.running > 0 %} {% endif -%}<span style="color: #8c959f;">{{ job_counts.pending }}⏸</span>{%- endif -%}
+</span>
+{%- if gitlab_tooltip_html -%}
+<span class="tooltiptext">{{ gitlab_tooltip_html|safe }}</span>
+{%- endif -%}
+</span>
+{%- else -%}
+{# Old format or no job details - just show counts without tooltip #}
 <a href="{{ pipeline.web_url }}" target="_blank" style="margin-left: 4px; text-decoration: none; font-weight: 600; font-size: 11px;" title="Click to view pipeline">
 {%- if job_counts.success > 0 -%}<span style="color: #2da44e;">{{ job_counts.success }}✓</span>{%- endif -%}
 {%- if job_counts.failed > 0 -%}{%- if job_counts.success > 0 %} {% endif -%}<span style="color: #d73a49;">{{ job_counts.failed }}✗</span>{%- endif -%}
 {%- if job_counts.running > 0 -%}{%- if job_counts.success > 0 or job_counts.failed > 0 %} {% endif -%}<span style="color: #dbab09;">{{ job_counts.running }}⏳</span>{%- endif -%}
 {%- if job_counts.pending > 0 -%}{%- if job_counts.success > 0 or job_counts.failed > 0 or job_counts.running > 0 %} {% endif -%}<span style="color: #8c959f;">{{ job_counts.pending }}⏸</span>{%- endif -%}
 </a>
+{%- endif -%}
 {%- endif -%}
 {%- endif -%}
 </td>

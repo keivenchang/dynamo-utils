@@ -3233,6 +3233,194 @@ class GitLabAPIClient:
 
         return result
 
+    def get_cached_pipeline_job_details(self, pipeline_ids: List[int],
+                                       cache_file: str = '.gitlab_pipeline_jobs_details_cache.json',
+                                       skip_fetch: bool = False) -> Dict[int, Optional[Dict]]:
+        """Get GitLab CI pipeline job details (counts + individual job info) with intelligent caching.
+
+        This is an extension of get_cached_pipeline_job_counts that also returns individual job
+        names and statuses for creating detailed tooltips/popups.
+
+        Caching strategy:
+        - If skip_fetch=True: Only return cached data, no API calls
+        - If skip_fetch=False:
+          - Completed pipelines (running=0, pending=0): Cached forever, never refetched
+          - Active pipelines (running>0 or pending>0): Refetch if older than 30 minutes
+
+        Args:
+            pipeline_ids: List of pipeline IDs
+            cache_file: Path to cache file (default: .gitlab_pipeline_jobs_details_cache.json)
+            skip_fetch: If True, only return cached data without fetching from GitLab
+
+        Returns:
+            Dictionary mapping pipeline ID to job details dict (or None if fetch failed)
+
+            Example return value:
+            {
+                40355198: {
+                    "counts": {"success": 16, "failed": 0, "running": 6, "pending": 0},
+                    "jobs": [
+                        {"name": "build", "status": "success"},
+                        {"name": "test", "status": "running"},
+                        ...
+                    ]
+                },
+                40341238: {
+                    "counts": {"success": 11, "failed": 13, "running": 0, "pending": 0},
+                    "jobs": [...]
+                }
+            }
+
+        Cache file format (with timestamps):
+            {
+                "40355198": {
+                    "counts": {"success": 16, "failed": 0, "running": 6, "pending": 0},
+                    "jobs": [{"name": "build", "status": "success"}, ...],
+                    "fetched_at": "2025-12-17T18:15:00Z"
+                }
+            }
+        """
+        # Load cache
+        cache = {}
+        jobs_cache_path = Path(cache_file)
+        if jobs_cache_path.exists():
+            try:
+                cache = json.loads(jobs_cache_path.read_text())
+                # Convert string keys back to int
+                cache = {int(k): v for k, v in cache.items()}
+            except Exception:
+                pass
+
+        # Helper function to extract data from cache entry
+        def extract_data(entry):
+            if not entry:
+                return None
+            # Return the full data (counts + jobs)
+            if isinstance(entry, dict) and 'counts' in entry and 'jobs' in entry:
+                return {'counts': entry['counts'], 'jobs': entry['jobs']}
+            return None
+
+        # Helper function to check if pipeline is completed (no running/pending jobs)
+        def is_completed(entry):
+            if not entry or not isinstance(entry, dict):
+                return False
+            counts = entry.get('counts', {})
+            return counts.get('running', 0) == 0 and counts.get('pending', 0) == 0
+
+        # Helper function to check if cache entry is fresh
+        def is_fresh(entry, now, age_limit):
+            if not isinstance(entry, dict) or 'fetched_at' not in entry:
+                return False  # Missing timestamp = stale
+
+            # If pipeline is completed, cache forever
+            if is_completed(entry):
+                return True
+
+            # Otherwise, check if < 30 minutes old
+            try:
+                fetched_at = datetime.fromisoformat(entry['fetched_at'].replace('Z', '+00:00'))
+                return (now - fetched_at) < age_limit
+            except Exception:
+                return False  # Invalid timestamp = stale
+
+        now = datetime.now(timezone.utc)
+        cache_age_limit = timedelta(minutes=30)
+
+        # If skip_fetch=True, only return cached data - NO API calls
+        if skip_fetch:
+            return {pid: extract_data(cache.get(pid)) for pid in pipeline_ids}
+
+        # Determine which pipelines need fetching
+        pipeline_ids_to_fetch = []
+        result = {}
+
+        for pipeline_id in pipeline_ids:
+            cached_entry = cache.get(pipeline_id)
+
+            if cached_entry and is_fresh(cached_entry, now, cache_age_limit):
+                # Cache is fresh, use it
+                result[pipeline_id] = extract_data(cached_entry)
+            else:
+                # Not in cache, or cache is stale - refetch
+                pipeline_ids_to_fetch.append(pipeline_id)
+                result[pipeline_id] = extract_data(cached_entry)  # Use existing data temporarily if available
+
+        # Fetch missing pipeline job details from GitLab in parallel
+        if pipeline_ids_to_fetch and self.has_token():
+            fetch_timestamp = now.isoformat().replace('+00:00', 'Z')
+
+            def fetch_pipeline_job_details(pipeline_id):
+                """Helper function to fetch job details for a single pipeline"""
+                try:
+                    # Get jobs for this pipeline
+                    endpoint = f"/api/v4/projects/169905/pipelines/{pipeline_id}/jobs"
+                    params = {'per_page': 100}  # Get up to 100 jobs
+                    jobs = self.get(endpoint, params=params)
+
+                    if jobs:
+                        # Count jobs by status and collect individual job info
+                        counts = {
+                            'success': 0,
+                            'failed': 0,
+                            'running': 0,
+                            'pending': 0
+                        }
+                        job_details = []
+
+                        for job in jobs:
+                            status = job.get('status', 'unknown')
+                            name = job.get('name', 'unnamed')
+
+                            # Store individual job details
+                            job_details.append({'name': name, 'status': status})
+
+                            # Count jobs by status
+                            if status in counts:
+                                counts[status] += 1
+                            # Map other statuses to main categories
+                            elif status in ('skipped', 'manual', 'canceled'):
+                                pass  # Don't count these
+                            elif status in ('created', 'waiting_for_resource'):
+                                counts['pending'] += 1
+
+                        # Return with timestamp
+                        return (pipeline_id, {'counts': counts, 'jobs': job_details}, fetch_timestamp)
+                    else:
+                        return (pipeline_id, None, None)
+                except Exception:
+                    return (pipeline_id, None, None)
+
+            # Fetch in parallel with 10 workers
+            with ThreadPoolExecutor(max_workers=10) as executor:
+                futures = [executor.submit(fetch_pipeline_job_details, pid) for pid in pipeline_ids_to_fetch]
+
+                # Collect results as they complete
+                for future in futures:
+                    try:
+                        pipeline_id, data, timestamp = future.result()
+                        result[pipeline_id] = data
+                        if data is not None and timestamp is not None:
+                            cache[pipeline_id] = {
+                                'counts': data['counts'],
+                                'jobs': data['jobs'],
+                                'fetched_at': timestamp
+                            }
+                        else:
+                            cache[pipeline_id] = None
+                    except Exception:
+                        pass
+
+            # Save updated cache
+            try:
+                jobs_cache_path.parent.mkdir(parents=True, exist_ok=True)
+                # Convert int keys to string for JSON
+                cache_str_keys = {str(k): v for k, v in cache.items()}
+                jobs_cache_path.write_text(json.dumps(cache_str_keys, indent=2))
+            except Exception:
+                pass
+
+        return result
+
     @staticmethod
     def parse_mr_number_from_message(message: str) -> Optional[int]:
         """Parse MR/PR number from commit message (e.g., '... (#1234)')

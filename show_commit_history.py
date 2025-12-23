@@ -541,12 +541,13 @@ class CommitHistoryGenerator:
         
         # Build log paths dictionary and status indicators
         log_paths = {}  # Maps sha_short to list of (date, path) tuples
-        composite_to_status = {}  # Maps composite_sha to status (with priority: failed > building > success)
+        composite_to_status = {}  # Maps composite_sha to status (with priority: building > failed > success)
         commit_to_status = {}  # Maps commit sha_short to its own build status
         composite_to_commits = {}  # Maps composite_sha to list of commit SHAs
 
         # Status priority for conflict resolution (higher number = higher priority)
-        status_priority = {'unknown': 0, 'success': 1, 'building': 2, 'failed': 3}
+        # Building > Failed > Success (if any build is still running, show as building)
+        status_priority = {'unknown': 0, 'success': 1, 'failed': 2, 'building': 3}
 
         # Pass 1: Collect all statuses and map composite SHA to commits
         for commit in commit_data:
@@ -611,11 +612,12 @@ class CommitHistoryGenerator:
                         fail_files = [f for f in date_files if f.endswith('.FAIL')]
                         pass_files = [f for f in date_files if f.endswith('.PASS')]
 
-                        # Update status based on this build run (priority: FAIL > RUNNING > PASS)
-                        if fail_files:
-                            status = 'failed'
-                        elif running_files:
+                        # Update status based on this build run
+                        # Priority: RUNNING > FAIL > PASS (if still running, show building even if some failed)
+                        if running_files:
                             status = 'building'
+                        elif fail_files:
+                            status = 'failed'
                         elif pass_files:
                             status = 'success'
                         # If this date has no files, keep previous status
@@ -623,7 +625,7 @@ class CommitHistoryGenerator:
                 # Store per-commit status
                 commit_to_status[sha_short] = status
 
-                # Also update composite SHA status with priority (failed > building > success)
+                # Also update composite SHA status with priority (building > failed > success)
                 # This is used for commits without their own logs (inherited status)
                 if composite_sha not in composite_to_status:
                     composite_to_status[composite_sha] = status
@@ -642,6 +644,7 @@ class CommitHistoryGenerator:
         build_status = {}
         for commit in commit_data:
             sha_short = commit['sha_short']
+            sha_full = commit['sha_full']
             composite_sha = commit['composite_sha']
 
             # Use per-commit status if available, otherwise inherit from CDS
@@ -663,6 +666,22 @@ class CommitHistoryGenerator:
                     'status': 'unknown',
                     'inherited': False
                 }
+
+            # Override status to 'building' if GitLab pipeline has running/pending jobs
+            # (even if some jobs have already failed - pipeline is still active)
+            pipeline = gitlab_pipelines.get(sha_full)
+            if pipeline and 'id' in pipeline:
+                job_data = pipeline_job_counts.get(pipeline['id'])
+                if job_data:
+                    # Extract counts (handle both old and new format)
+                    if isinstance(job_data, dict) and 'counts' in job_data:
+                        job_counts = job_data['counts']
+                    else:
+                        job_counts = job_data
+
+                    # If there are running or pending jobs, status should be 'building'
+                    if job_counts.get('running', 0) > 0 or job_counts.get('pending', 0) > 0:
+                        build_status[sha_short]['status'] = 'building'
         
         # Generate timestamp
         if HAS_PYTZ:
@@ -817,9 +836,9 @@ class CommitHistoryGenerator:
         return result
 
     def _get_gitlab_pipeline_job_counts(self, pipeline_ids: List[int]) -> dict:
-        """Get GitLab CI pipeline job counts using the centralized cache.
+        """Get GitLab CI pipeline job details (counts + individual job info) using the centralized cache.
 
-        Cache file format (.gitlab_pipeline_jobs_cache.json):
+        Cache file format (.gitlab_pipeline_jobs_details_cache.json):
             {
                 "40118215": {
                     "counts": {
@@ -828,6 +847,11 @@ class CommitHistoryGenerator:
                         "running": 0,
                         "pending": 0
                     },
+                    "jobs": [
+                        {"name": "build", "status": "success"},
+                        {"name": "test", "status": "failed"},
+                        ...
+                    ],
                     "fetched_at": "2025-12-18T02:44:20.118368Z"
                 },
                 ...
@@ -839,6 +863,9 @@ class CommitHistoryGenerator:
                 - failed: Number of failed jobs (integer)
                 - running: Number of currently running jobs (integer)
                 - pending: Number of pending jobs (integer)
+            - jobs: List of individual job details (for tooltip display)
+                - name: Job name (string)
+                - status: Job status (success/failed/running/pending/etc.)
             - fetched_at: ISO 8601 timestamp when this data was fetched
 
         Note: Completed pipelines (running=0, pending=0) are cached forever.
@@ -848,16 +875,16 @@ class CommitHistoryGenerator:
             pipeline_ids: List of pipeline IDs
 
         Returns:
-            Dictionary mapping pipeline ID to job counts dict with 'success', 'failed', 'running', 'pending'
+            Dictionary mapping pipeline ID to job details dict with 'counts' and 'jobs'
         """
-        cache_file = str(self.repo_path / ".gitlab_pipeline_jobs_cache.json")
+        cache_file = str(self.repo_path / ".gitlab_pipeline_jobs_details_cache.json")
 
-        self.logger.debug(f"Getting job counts for {len(pipeline_ids)} pipelines")
+        self.logger.debug(f"Getting job details for {len(pipeline_ids)} pipelines")
 
-        result = self.gitlab_client.get_cached_pipeline_job_counts(pipeline_ids, cache_file=cache_file, skip_fetch=self.skip_gitlab_fetch)
+        result = self.gitlab_client.get_cached_pipeline_job_details(pipeline_ids, cache_file=cache_file, skip_fetch=self.skip_gitlab_fetch)
 
         cached_count = sum(1 for v in result.values() if v is not None)
-        self.logger.debug(f"Found job counts for {cached_count}/{len(pipeline_ids)} pipelines")
+        self.logger.debug(f"Found job details for {cached_count}/{len(pipeline_ids)} pipelines")
 
         return result
 
