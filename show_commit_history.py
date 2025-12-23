@@ -26,7 +26,17 @@ from pathlib import Path
 from typing import List, Dict, Optional
 
 # Import utilities from common module
-from common import DynamoRepositoryUtils, GitLabAPIClient, GitHubAPIClient, get_terminal_width, dynamo_utils_cache_dir
+from common import (
+    DynamoRepositoryUtils,
+    GitLabAPIClient,
+    GitHubAPIClient,
+    get_terminal_width,
+    dynamo_utils_cache_dir,
+    MARKER_RUNNING,
+    MARKER_PASSED,
+    MARKER_FAILED,
+    MARKER_KILLED,
+)
 
 # Import Jinja2 for HTML template rendering
 try:
@@ -45,6 +55,12 @@ try:
 except ImportError:
     HAS_PYTZ = False
     pytz = None  # type: ignore[assignment]
+
+# Constants for build status values
+STATUS_UNKNOWN = 'unknown'
+STATUS_SUCCESS = 'success'
+STATUS_FAILED = 'failed'
+STATUS_BUILDING = 'building'
 
 
 class CommitHistoryGenerator:
@@ -572,7 +588,7 @@ class CommitHistoryGenerator:
 
         # Status priority for conflict resolution (higher number = higher priority)
         # Building > Failed > Success (if any build is still running, show as building)
-        status_priority = {'unknown': 0, 'success': 1, 'failed': 2, 'building': 3}
+        status_priority = {STATUS_UNKNOWN: 0, STATUS_SUCCESS: 1, STATUS_FAILED: 2, STATUS_BUILDING: 3}
 
         # Pass 1: Collect all statuses and map composite SHA to commits
         for commit in commit_data:
@@ -612,11 +628,11 @@ class CommitHistoryGenerator:
                 all_status_files = []
 
                 # Collect all status files for this SHA (from all dates)
-                for status_suffix in ['RUNNING', 'FAIL', 'PASS']:
+                for status_suffix in [MARKER_RUNNING, MARKER_FAILED, MARKER_PASSED]:
                     pattern = str(log_dir / f"*.{sha_short}.*.{status_suffix}")
                     all_status_files.extend(glob.glob(pattern))
 
-                status = 'unknown'  # Default status
+                status = STATUS_UNKNOWN  # Default status
                 if all_status_files:
                     # Extract dates from filenames (format: YYYY-MM-DD.sha.task.STATUS)
                     # Group files by date
@@ -632,18 +648,21 @@ class CommitHistoryGenerator:
                     date_files = files_by_date[latest_date]
 
                     # Check status for the latest build run
-                    running_files = [f for f in date_files if f.endswith('.RUNNING')]
-                    fail_files = [f for f in date_files if f.endswith('.FAIL')]
-                    pass_files = [f for f in date_files if f.endswith('.PASS')]
+                    running_files = [f for f in date_files if f.endswith(f'.{MARKER_RUNNING}')]
+                    # Exclude none-compilation and none-sanity from failure count (they always fail by design)
+                    fail_files = [f for f in date_files
+                                 if f.endswith(f'.{MARKER_FAILED}')
+                                 and not (('none-' in f) and ('compilation' in f or 'sanity' in f))]
+                    pass_files = [f for f in date_files if f.endswith(f'.{MARKER_PASSED}')]
 
                     # Determine status based on latest build run
                     # Priority: RUNNING > FAIL > PASS (if still running, show building even if some failed)
                     if running_files:
-                        status = 'building'
+                        status = STATUS_BUILDING
                     elif fail_files:
-                        status = 'failed'
+                        status = STATUS_FAILED
                     elif pass_files:
-                        status = 'success'
+                        status = STATUS_SUCCESS
 
                 # Store per-commit status
                 commit_to_status[sha_short] = status
@@ -659,7 +678,7 @@ class CommitHistoryGenerator:
             else:
                 # No report yet, status unknown
                 if composite_sha not in composite_to_status:
-                    composite_to_status[composite_sha] = 'unknown'
+                    composite_to_status[composite_sha] = STATUS_UNKNOWN
                 # Don't override existing status if we have no information
 
         # Pass 2: Assign status to all commits
@@ -686,7 +705,7 @@ class CommitHistoryGenerator:
             else:
                 # No status available
                 build_status[sha_short] = {
-                    'status': 'unknown',
+                    'status': STATUS_UNKNOWN,
                     'inherited': False
                 }
 

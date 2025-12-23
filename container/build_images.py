@@ -47,6 +47,14 @@ try:
 except ImportError:
     Environment = None  # type: ignore
     FileSystemLoader = None  # type: ignore
+
+# Global set to track running subprocesses for signal handling
+_running_subprocesses: Set[subprocess.Popen] = set()
+_subprocesses_lock = threading.Lock()
+
+try:
+    select_autoescape  # type: ignore
+except NameError:
     select_autoescape = None  # type: ignore
 
 # Import utilities from common.py
@@ -59,6 +67,10 @@ from common import (
     DynamoRepositoryUtils,
     DockerUtils,
     GitUtils,
+    MARKER_RUNNING,
+    MARKER_PASSED,
+    MARKER_FAILED,
+    MARKER_KILLED,
 )
 
 
@@ -80,7 +92,7 @@ class TaskStatus(Enum):
     """Status of a task in the pipeline"""
     QUEUED = "queued"
     RUNNING = "running"
-    SUCCESS = "success"
+    PASSED = "passed"
     FAILED = "failed"
     SKIPPED = "skipped"
     KILLED = "killed"
@@ -269,12 +281,16 @@ def create_task_graph(framework: str, sha: str, repo_path: Path, version: Option
     # - CARGO_PROFILE_DEV_CODEGEN_UNITS=256: More parallel code generation
     cargo_cmd = "CARGO_INCREMENTAL=1 CARGO_PROFILE_DEV_OPT_LEVEL=0 CARGO_BUILD_JOBS=$(nproc) CARGO_PROFILE_DEV_CODEGEN_UNITS=256 cargo build --profile dev --features dynamo-llm/block-manager && cd /workspace/lib/bindings/python && CARGO_INCREMENTAL=1 CARGO_PROFILE_DEV_OPT_LEVEL=0 CARGO_BUILD_JOBS=$(nproc) CARGO_PROFILE_DEV_CODEGEN_UNITS=256 maturin develop --uv && uv pip install -e ."
     home_dir = str(Path.home())
+    # For 'none' framework, run compilation AFTER sanity (sanity runs first, even if it fails)
+    # For other frameworks, run compilation after build (before sanity)
+    dev_compilation_parent = f"{framework}-dev-sanity" if framework == "none" else f"{framework}-dev-build"
     tasks[f"{framework}-dev-compilation"] = CommandTask(
         task_id=f"{framework}-dev-compilation",
         description=f"Run workspace compilation in {framework.upper()} dev container",
         command=f"{repo_path}/container/run.sh --image {dev_image_tag} --mount-workspace -v {home_dir}/.cargo:/root/.cargo -- bash -c '{cargo_cmd}'",
         input_image=dev_image_tag,
-        parents=[f"{framework}-dev-build"],
+        parents=[dev_compilation_parent],
+        run_even_if_deps_fail=framework == "none",  # For none framework, run even if sanity fails
         timeout=600.0,  # 10 minutes for compilation
     )
 
@@ -289,12 +305,15 @@ def create_task_graph(framework: str, sha: str, repo_path: Path, version: Option
     )
 
     # Level 4: Dev sanity check (runs in parallel with chown)
+    # For 'none' framework, run sanity BEFORE compilation (since compilation will fail)
+    # For other frameworks, run sanity AFTER compilation
+    dev_sanity_parent = f"{framework}-dev-build" if framework == "none" else f"{framework}-dev-compilation"
     tasks[f"{framework}-dev-sanity"] = CommandTask(
         task_id=f"{framework}-dev-sanity",
         description=f"Run sanity_check.py in {framework.upper()} dev container",
         command=f"{repo_path}/container/run.sh --image {dev_image_tag} --mount-workspace -v {home_dir}/.cargo:/root/.cargo -- python3 /workspace/deploy/sanity_check.py",
         input_image=dev_image_tag,
-        parents=[f"{framework}-dev-compilation"],
+        parents=[dev_sanity_parent],
         timeout=45.0,  # 45 seconds for sanity checks
     )
 
@@ -311,22 +330,33 @@ def create_task_graph(framework: str, sha: str, repo_path: Path, version: Option
     )
 
     # Level 5: Local-dev compilation
+    # For 'none' framework, run compilation AFTER sanity (sanity runs first, even if it fails)
+    # For other frameworks, run compilation after build (before sanity)
+    local_dev_compilation_parents = (
+        [f"{framework}-local-dev-sanity", f"{framework}-dev-chown"]
+        if framework == "none"
+        else [f"{framework}-local-dev-build", f"{framework}-dev-chown"]
+    )
     tasks[f"{framework}-local-dev-compilation"] = CommandTask(
         task_id=f"{framework}-local-dev-compilation",
         description=f"Run workspace compilation in {framework.upper()} local-dev container",
         command=f"{repo_path}/container/run.sh --image {local_dev_image_tag} --mount-workspace -v {home_dir}/.cargo:/home/ubuntu/.cargo -- bash -c '{cargo_cmd}'",
         input_image=local_dev_image_tag,
-        parents=[f"{framework}-local-dev-build", f"{framework}-dev-chown"],
+        parents=local_dev_compilation_parents,
+        run_even_if_deps_fail=framework == "none",  # For none framework, run even if sanity fails
         timeout=600.0,  # 10 minutes for compilation
     )
 
     # Level 6: Local-dev sanity check
+    # For 'none' framework, run sanity BEFORE compilation (since compilation will fail)
+    # For other frameworks, run sanity AFTER compilation
+    local_dev_sanity_parent = f"{framework}-local-dev-build" if framework == "none" else f"{framework}-local-dev-compilation"
     tasks[f"{framework}-local-dev-sanity"] = CommandTask(
         task_id=f"{framework}-local-dev-sanity",
         description=f"Run sanity_check.py in {framework.upper()} local-dev container",
         command=f"{repo_path}/container/run.sh --image {local_dev_image_tag} --mount-workspace -v {home_dir}/.cargo:/home/ubuntu/.cargo -- python3 /workspace/deploy/sanity_check.py",
         input_image=local_dev_image_tag,
-        parents=[f"{framework}-local-dev-compilation"],
+        parents=[local_dev_sanity_parent],
         timeout=45.0,  # 45 seconds for sanity checks
     )
 
@@ -465,18 +495,27 @@ class BaseTask(ABC):
                     bufsize=1
                 )
 
-                # Stream output to log file
-                if process.stdout is None:
-                    raise ValueError("process.stdout is None")
-                for line in process.stdout:
-                    log_fh.write(line)
-                    log_fh.flush()
+                # Register subprocess for signal handling
+                with _subprocesses_lock:
+                    _running_subprocesses.add(process)
 
-                # Wait for process to complete
-                process.wait()
-                self.exit_code = process.returncode
+                try:
+                    # Stream output to log file
+                    if process.stdout is None:
+                        raise ValueError("process.stdout is None")
+                    for line in process.stdout:
+                        log_fh.write(line)
+                        log_fh.flush()
 
-                return self.exit_code
+                    # Wait for process to complete
+                    process.wait()
+                    self.exit_code = process.returncode
+
+                    return self.exit_code
+                finally:
+                    # Unregister subprocess
+                    with _subprocesses_lock:
+                        _running_subprocesses.discard(process)
 
         except Exception as e:
             self.error_message = str(e)
@@ -546,35 +585,46 @@ class BaseTask(ABC):
         Examples:
             task.mark_status_as(TaskStatus.RUNNING)  # Creates .RUNNING marker
             task.mark_status_as(TaskStatus.SKIPPED, "Image already exists")
-            task.mark_status_as(TaskStatus.FAILED, "Build timeout")  # Creates .FAIL, removes .RUNNING
+            task.mark_status_as(TaskStatus.FAILED, "Build timeout")  # Creates .FAILED, removes .RUNNING
         """
         self._status = status
         if reason:
             self.error_message = reason
 
+        # Set end_time for terminal statuses (SUCCESS, FAILED, KILLED)
+        if status in [TaskStatus.PASSED, TaskStatus.FAILED, TaskStatus.KILLED]:
+            if not self.end_time:
+                self.end_time = time.time()
+
         # Create/cleanup marker files based on status
         if self.log_file:
             if status == TaskStatus.RUNNING:
                 # Create .RUNNING marker
-                running_marker = self.log_file.with_suffix('.RUNNING')
+                running_marker = self.log_file.with_suffix(f'.{MARKER_RUNNING}')
                 running_marker.touch()
-            elif status == TaskStatus.SUCCESS:
-                # Create .PASS marker, remove .RUNNING
-                pass_marker = self.log_file.with_suffix('.PASS')
-                pass_marker.touch()
-                self._cleanup_marker('.RUNNING')
+            elif status == TaskStatus.PASSED:
+                # Create .PASSED marker, remove .RUNNING
+                passed_marker = self.log_file.with_suffix(f'.{MARKER_PASSED}')
+                passed_marker.touch()
+                self._cleanup_marker(f'.{MARKER_RUNNING}')
             elif status == TaskStatus.FAILED:
-                # Create .FAIL marker, remove .RUNNING
-                fail_marker = self.log_file.with_suffix('.FAIL')
+                # Create .FAILED marker, remove .RUNNING
+                fail_marker = self.log_file.with_suffix(f'.{MARKER_FAILED}')
                 fail_marker.touch()
-                self._cleanup_marker('.RUNNING')
+                self._cleanup_marker(f'.{MARKER_RUNNING}')
+            elif status == TaskStatus.KILLED:
+                # Create .KILLED marker, remove .RUNNING
+                killed_marker = self.log_file.with_suffix(f'.{MARKER_KILLED}')
+                killed_marker.touch()
+                self._cleanup_marker(f'.{MARKER_RUNNING}')
 
         # Log based on status
         status_logs = {
             TaskStatus.SKIPPED: f"Skipped: {reason}",
             TaskStatus.RUNNING: f"Running: {self.task_id}",
-            TaskStatus.SUCCESS: f"Success: {self.task_id}",
+            TaskStatus.PASSED: f"Success: {self.task_id}",
             TaskStatus.FAILED: f"Failed: {reason}" if reason else f"Failed: {self.task_id}",
+            TaskStatus.KILLED: f"Killed: {reason}" if reason else f"Killed: {self.task_id}",
             TaskStatus.QUEUED: f"Queued: {self.task_id}",
         }
         if status in status_logs:
@@ -669,7 +719,7 @@ class BaseTask(ABC):
 
     def passed_previously(self) -> bool:
         """
-        Check if this task passed in a previous run by looking for .PASS marker.
+        Check if this task passed in a previous run by looking for .PASSED marker.
 
         Returns:
             True if task passed previously, False otherwise
@@ -677,7 +727,7 @@ class BaseTask(ABC):
         if not self.log_file:
             return False
 
-        pass_marker = self.log_file.with_suffix('.PASS')
+        pass_marker = self.log_file.with_suffix(f'.{MARKER_PASSED}')
         return pass_marker.exists()
 
     def load_previous_results(self) -> Optional[Dict[str, Any]]:
@@ -694,7 +744,7 @@ class BaseTask(ABC):
 
     def cleanup_markers(self) -> None:
         """
-        Clean up all marker files (.PASS, .FAIL, .RUNNING) and log file for this task.
+        Clean up all marker files (.PASSED, .FAILED, .RUNNING, .KILLED) and log file for this task.
         Should be called before starting task execution.
         """
         if not self.log_file:
@@ -702,9 +752,10 @@ class BaseTask(ABC):
 
         files_to_clean = [
             self.log_file,
-            self.log_file.with_suffix('.PASS'),
-            self.log_file.with_suffix('.FAIL'),
-            self.log_file.with_suffix('.RUNNING'),
+            self.log_file.with_suffix(f'.{MARKER_PASSED}'),
+            self.log_file.with_suffix(f'.{MARKER_FAILED}'),
+            self.log_file.with_suffix(f'.{MARKER_RUNNING}'),
+            self.log_file.with_suffix(f'.{MARKER_KILLED}'),
         ]
 
         for file_to_clean in files_to_clean:
@@ -951,7 +1002,7 @@ class BuildPipeline:
                 status_symbol = {
                     TaskStatus.QUEUED: "⏳",
                     TaskStatus.RUNNING: "🔄",
-                    TaskStatus.SUCCESS: "✅",
+                    TaskStatus.PASSED: "✅",
                     TaskStatus.FAILED: "❌",
                     TaskStatus.SKIPPED: "⏭️",
                 }[task.status]
@@ -1040,7 +1091,7 @@ def parse_args() -> argparse.Namespace:
         "--skip-action-if-already-passed",
         "--skip",
         action="store_true",
-        help="Skip any task if it has already passed (checks for .PASS marker) or if build output image already exists",
+        help="Skip any task if it has already passed (checks for .PASSED marker) or if build output image already exists",
     )
     parser.add_argument(
         "--no-compile",
@@ -1144,15 +1195,18 @@ def parse_log_file_results(log_file: Path) -> Optional[LogParseResult]:
         return None
 
     try:
-        # Check for marker files first (.PASS or .FAIL)
-        pass_marker = log_file.with_suffix('.PASS')
-        fail_marker = log_file.with_suffix('.FAIL')
+        # Check for marker files first (.PASSED, .FAILED, .KILLED)
+        pass_marker = log_file.with_suffix(f'.{MARKER_PASSED}')
+        fail_marker = log_file.with_suffix(f'.{MARKER_FAILED}')
+        killed_marker = log_file.with_suffix(f'.{MARKER_KILLED}')
 
         status = None
         if pass_marker.exists():
-            status = TaskStatus.SUCCESS
+            status = TaskStatus.PASSED
         elif fail_marker.exists():
             status = TaskStatus.FAILED
+        elif killed_marker.exists():
+            status = TaskStatus.KILLED
 
         # Read the last 30 lines to find the results section
         with open(log_file, 'r') as f:
@@ -1181,7 +1235,7 @@ def parse_log_file_results(log_file: Path) -> Optional[LogParseResult]:
             elif line.startswith('Status:') and status is None:
                 # Status: SUCCESS or FAILED (only if not already determined by marker files)
                 status_str = line.split('Status:')[1].strip()
-                status = TaskStatus.SUCCESS if status_str == 'SUCCESS' else TaskStatus.FAILED
+                status = TaskStatus.PASSED if status_str == 'SUCCESS' else TaskStatus.FAILED
 
         if status is not None:
             return LogParseResult(
@@ -1222,7 +1276,7 @@ def execute_task_sequential(
         log_dir: Directory for log files (None in dry-run)
         log_date: Date string for log files (None in dry-run)
         dry_run: If True, only print commands without executing
-        skip_action_if_already_passed: If True, skip any task if .PASS marker exists or if build image exists
+        skip_action_if_already_passed: If True, skip any task if .PASSED marker exists or if build image exists
         no_compile: If True, skip all compilation tasks
 
     Returns:
@@ -1292,7 +1346,7 @@ def execute_task_sequential(
         logger.info("")
 
         # Mark as success for dry-run traversal
-        task.mark_status_as(TaskStatus.SUCCESS)
+        task.mark_status_as(TaskStatus.PASSED)
 
         # Process children
         for child_id in task.children:
@@ -1314,7 +1368,7 @@ def execute_task_sequential(
     # Check if input image exists (required for tasks that depend on previous builds)
     if not task.check_input_image_exists():
         logger.error(f"✗ Skipping {task_id}: Input image missing ({task.input_image})")
-        task.mark_status_as(TaskStatus.FAILED, f"Input image not found: {task.input_image}")  # Also creates .FAIL marker
+        task.mark_status_as(TaskStatus.FAILED, f"Input image not found: {task.input_image}")  # Also creates .FAILED marker
         executed_tasks.add(task_id)
         failed_tasks.add(task_id)
 
@@ -1381,6 +1435,7 @@ def execute_task_sequential(
             )
             html_file = log_dir / f"{log_date}.{sha}.report.html"
             html_file.write_text(html_content)
+            update_report_status_marker(html_file, all_tasks)
         except Exception as e:
             logger.warning(f"Failed to generate HTML report before task execution: {e}")
 
@@ -1396,16 +1451,16 @@ def execute_task_sequential(
             log_fh.write(task.format_log_footer(success))
 
         if success:
-            task.mark_status_as(TaskStatus.SUCCESS)  # Also creates .PASS marker, removes .RUNNING
+            task.mark_status_as(TaskStatus.PASSED)  # Also creates .PASSED marker, removes .RUNNING
             duration = task.end_time - task.start_time if task.start_time and task.end_time else 0.0
             logger.info(f"✓ Completed: {task_id} ({duration:.2f}s)")
         else:
-            task.mark_status_as(TaskStatus.FAILED)  # Also creates .FAIL marker, removes .RUNNING
+            task.mark_status_as(TaskStatus.FAILED)  # Also creates .FAILED marker, removes .RUNNING
             logger.error(f"✗ Failed: {task_id}")
             failed_tasks.add(task_id)
     except Exception as e:
         task.end_time = time.time()
-        task.mark_status_as(TaskStatus.FAILED, str(e))  # Also creates .FAIL marker, removes .RUNNING
+        task.mark_status_as(TaskStatus.FAILED, str(e))  # Also creates .FAILED marker, removes .RUNNING
         logger.error(f"✗ Failed: {task_id} - {e}")
         failed_tasks.add(task_id)
 
@@ -1425,11 +1480,12 @@ def execute_task_sequential(
             )
             html_file = log_dir / f"{log_date}.{sha}.report.html"
             html_file.write_text(html_content)
+            update_report_status_marker(html_file, all_tasks)
         except Exception as e:
             logger.warning(f"Failed to generate incremental HTML report: {e}")
 
     # After successfully executing this task, execute all children
-    if task.status == TaskStatus.SUCCESS:
+    if task.status == TaskStatus.PASSED:
         for child_id in task.children:
             if child_id not in executed_tasks:
                 execute_task_sequential(
@@ -1438,7 +1494,7 @@ def execute_task_sequential(
                     no_compile
                 )
 
-    return task.status == TaskStatus.SUCCESS
+    return task.status == TaskStatus.PASSED
 
 
 def execute_task_parallel(
@@ -1467,7 +1523,7 @@ def execute_task_parallel(
         log_dir: Directory for log files (None in dry-run)
         log_date: Date string for log files (None in dry-run)
         dry_run: If True, only print commands without executing
-        skip_if_passed: If True, skip any task if .PASS marker exists or if build image exists
+        skip_if_passed: If True, skip any task if .PASSED marker exists or if build image exists
         no_compile: If True, skip all compilation tasks
         max_workers: Maximum number of parallel threads
 
@@ -1484,10 +1540,10 @@ def execute_task_parallel(
     stop_html_updater = threading.Event()
 
     def periodic_html_updater():
-        """Background thread to update HTML report every 10 seconds"""
+        """Background thread to update HTML report every 5 seconds"""
         while not stop_html_updater.is_set():
-            # Wait for 10 seconds (or until stop signal)
-            if stop_html_updater.wait(10):
+            # Wait for 5 seconds (or until stop signal)
+            if stop_html_updater.wait(5):
                 break  # Stop signal received
 
             # Generate HTML report
@@ -1508,6 +1564,7 @@ def execute_task_parallel(
                     )
                     html_file = log_dir / f"{log_date}.{sha}.report.html"
                     html_file.write_text(html_content)
+                    update_report_status_marker(html_file, all_tasks)
                 except Exception as e:
                     # Silently continue on error to avoid spam
                     pass
@@ -1517,6 +1574,72 @@ def execute_task_parallel(
     if log_dir and log_date and not dry_run:
         html_updater_thread = threading.Thread(target=periodic_html_updater, daemon=True)
         html_updater_thread.start()
+
+    # Setup signal handlers to mark running tasks as KILLED on interrupt
+    def signal_handler(signum, frame):
+        """Handle SIGTERM/SIGINT by marking running tasks as KILLED"""
+        logger = logging.getLogger("signal")
+        sig_name = "SIGTERM" if signum == signal.SIGTERM else "SIGINT"
+        logger.warning(f"\nReceived {sig_name}, marking running tasks as KILLED...")
+
+        # Stop the background HTML updater thread first
+        if html_updater_thread is not None:
+            logger.info("  Stopping background HTML updater...")
+            stop_html_updater.set()
+            html_updater_thread.join(timeout=2.0)  # Wait up to 2 seconds
+
+        # Terminate all running subprocesses
+        with _subprocesses_lock:
+            subprocesses_to_terminate = list(_running_subprocesses)
+
+        if subprocesses_to_terminate:
+            logger.info(f"  Terminating {len(subprocesses_to_terminate)} running subprocess(es)...")
+            for proc in subprocesses_to_terminate:
+                try:
+                    proc.terminate()
+                except Exception:
+                    pass  # Ignore errors if process already exited
+
+            # Wait up to 2 seconds for processes to terminate
+            time.sleep(2)
+
+            # Force kill any remaining processes
+            for proc in subprocesses_to_terminate:
+                try:
+                    if proc.poll() is None:  # Still running
+                        proc.kill()
+                except Exception:
+                    pass
+
+        # Mark all running tasks as KILLED
+        for task_id, task in all_tasks.items():
+            if task.status == TaskStatus.RUNNING:
+                task.mark_status_as(TaskStatus.KILLED, f"Interrupted by {sig_name}")
+                update_frameworks_data_cache(task, use_absolute_urls=False)
+                logger.info(f"  Marked {task_id} as KILLED")
+
+        # Generate final HTML report
+        if log_dir and log_date and not dry_run:
+            try:
+                html_content = generate_html_report(
+                    all_tasks=all_tasks,
+                    repo_path=repo_path,
+                    sha=sha,
+                    log_dir=log_dir,
+                    date_str=log_date,
+                    use_absolute_urls=False,
+                )
+                html_file = log_dir / f"{log_date}.{sha}.report.html"
+                html_file.write_text(html_content)
+                update_report_status_marker(html_file, all_tasks)
+                logger.info(f"  Generated final HTML report: {html_file}")
+            except Exception as e:
+                logger.error(f"  Failed to generate final HTML report: {e}")
+
+        sys.exit(1)
+
+    signal.signal(signal.SIGTERM, signal_handler)
+    signal.signal(signal.SIGINT, signal_handler)
 
     def can_execute(task_id: str) -> bool:
         """Check if all dependencies are satisfied"""
@@ -1568,7 +1691,7 @@ def execute_task_parallel(
                     logger.info(f"→ {sanitize_token(task.get_command(repo_path))}")
                 logger.info("")
 
-            task.mark_status_as(TaskStatus.SUCCESS)
+            task.mark_status_as(TaskStatus.PASSED)
             with lock:
                 executed_tasks.add(task_id)
             return True
@@ -1582,7 +1705,7 @@ def execute_task_parallel(
         if not task.check_input_image_exists():
             with lock:
                 logger.error(f"✗ Skipping {task_id}: Input image missing ({task.input_image})")
-            task.mark_status_as(TaskStatus.FAILED, f"Input image not found: {task.input_image}")  # Also creates .FAIL marker
+            task.mark_status_as(TaskStatus.FAILED, f"Input image not found: {task.input_image}")  # Also creates .FAILED marker
 
             # Write to log file
             with open(task.log_file, 'w') as log_fh:
@@ -1643,6 +1766,7 @@ def execute_task_parallel(
                 )
                 html_file = log_dir / f"{log_date}.{sha}.report.html"
                 html_file.write_text(html_content)
+                update_report_status_marker(html_file, all_tasks)
             except Exception as e:
                 with lock:
                     logger.warning(f"Failed to generate HTML report before task execution: {e}")
@@ -1658,7 +1782,7 @@ def execute_task_parallel(
 
             with lock:
                 if success:
-                    task.mark_status_as(TaskStatus.SUCCESS)  # Also creates .PASS marker, removes .RUNNING
+                    task.mark_status_as(TaskStatus.PASSED)  # Also creates .PASSED marker, removes .RUNNING
                     duration = task.end_time - task.start_time
 
                     # Show running tasks and their elapsed time
@@ -1675,12 +1799,12 @@ def execute_task_parallel(
                     else:
                         logger.info(f"✓ Completed: {task_id} ({duration:.2f}s)")
                 else:
-                    task.mark_status_as(TaskStatus.FAILED)  # Also creates .FAIL marker, removes .RUNNING
+                    task.mark_status_as(TaskStatus.FAILED)  # Also creates .FAILED marker, removes .RUNNING
                     logger.error(f"✗ Failed: {task_id}")
                     failed_tasks.add(task_id)
         except Exception as e:
             task.end_time = time.time()
-            task.mark_status_as(TaskStatus.FAILED, str(e))  # Also creates .FAIL marker, removes .RUNNING
+            task.mark_status_as(TaskStatus.FAILED, str(e))  # Also creates .FAILED marker, removes .RUNNING
             with lock:
                 logger.error(f"✗ Failed: {task_id} - {e}")
                 failed_tasks.add(task_id)
@@ -1701,6 +1825,7 @@ def execute_task_parallel(
                 )
                 html_file = log_dir / f"{log_date}.{sha}.report.html"
                 html_file.write_text(html_content)
+                update_report_status_marker(html_file, all_tasks)
             except Exception as e:
                 with lock:
                     logger.warning(f"Failed to generate incremental HTML report: {e}")
@@ -1708,7 +1833,7 @@ def execute_task_parallel(
         with lock:
             executed_tasks.add(task_id)
 
-        return task.status == TaskStatus.SUCCESS
+        return task.status == TaskStatus.PASSED
 
     # Execute tasks dynamically based on dependencies
     pending_tasks = set(all_tasks.keys())
@@ -1883,10 +2008,10 @@ def initialize_frameworks_data_cache(
                         log_link = log_file.name
 
                     frameworks_data[framework][target].build = TaskData(
-                        status='SKIPPED',
+                        status='skipped',
                         time=f"{log_results.duration:.1f}s" if log_results.duration else None,
                         log_file=log_link if not use_absolute_urls else f"http://{hostname}{html_path}/{found_log_dir.name}/{log_file.name}",
-                        prev_status=log_results.status.name,
+                        prev_status=log_results.status.value,  # Use .value (lowercase) not .name (uppercase)
                     )
 
             # Load previous compilation log (if exists) - search current and previous dates
@@ -1903,10 +2028,10 @@ def initialize_frameworks_data_cache(
                             log_link = log_file_comp.name
 
                         frameworks_data[framework][target].compilation = TaskData(
-                            status='SKIPPED',
+                            status='skipped',
                             time=f"{log_results.duration:.1f}s" if log_results.duration else None,
                             log_file=log_link if not use_absolute_urls else f"http://{hostname}{html_path}/{found_log_dir.name}/{log_file_comp.name}",
-                            prev_status=log_results.status.name,
+                            prev_status=log_results.status.value,  # Use .value (lowercase) not .name (uppercase)
                         )
 
             # Load previous sanity log (if exists) - search current and previous dates
@@ -1923,10 +2048,10 @@ def initialize_frameworks_data_cache(
                             log_link = log_file_sanity.name
 
                         frameworks_data[framework][target].sanity = TaskData(
-                            status='SKIPPED',
+                            status='skipped',
                             time=f"{log_results.duration:.1f}s" if log_results.duration else None,
                             log_file=log_link if not use_absolute_urls else f"http://{hostname}{html_path}/{found_log_dir.name}/{log_file_sanity.name}",
-                            prev_status=log_results.status.name,
+                            prev_status=log_results.status.value,  # Use .value (lowercase) not .name (uppercase)
                         )
 
     return frameworks_data
@@ -1975,7 +2100,7 @@ def update_frameworks_data_cache(task: 'BaseTask', use_absolute_urls: bool = Fal
                 log_url = t.log_file.name
 
         return TaskData(
-            status=t.status.name,
+            status=t.status.value,
             time=task_time,
             log_file=log_url,
             prev_status=None,
@@ -1997,6 +2122,49 @@ def update_frameworks_data_cache(task: 'BaseTask', use_absolute_urls: bool = Fal
         elif 'sanity' in rest:
             target = rest.replace('-sanity', '')
             _frameworks_data_cache[framework][target].sanity = create_task_data_from_task(task)
+
+
+def update_report_status_marker(
+    html_file: Path,
+    all_tasks: Dict[str, 'BaseTask'],
+) -> None:
+    """
+    Create or update status marker files for the HTML report (.PASSED, .FAILED, .RUNNING).
+
+    Args:
+        html_file: Path to the HTML report file
+        all_tasks: Dictionary of all tasks that were executed
+    """
+    # Count task statistics (excluding none-compilation and none-sanity)
+    succeeded = sum(1 for task_id, t in all_tasks.items()
+                   if t.status == TaskStatus.PASSED
+                   and not (task_id.startswith('none-') and ('compilation' in task_id or 'sanity' in task_id)))
+    failed = sum(1 for task_id, t in all_tasks.items()
+                if t.status == TaskStatus.FAILED
+                and not (task_id.startswith('none-') and ('compilation' in task_id or 'sanity' in task_id)))
+    killed = sum(1 for t in all_tasks.values() if t.status == TaskStatus.KILLED)
+    running = sum(1 for t in all_tasks.values() if t.status == TaskStatus.RUNNING)
+    queued = sum(1 for t in all_tasks.values() if t.status == TaskStatus.QUEUED)
+
+    # Determine overall status (priority: failed > killed > running/queued > success)
+    if failed > 0:
+        status_marker = MARKER_FAILED
+    elif killed > 0:
+        status_marker = MARKER_KILLED
+    elif running > 0 or queued > 0:
+        status_marker = MARKER_RUNNING
+    else:
+        status_marker = MARKER_PASSED
+
+    # Remove old marker files
+    for marker in [MARKER_PASSED, MARKER_FAILED, MARKER_RUNNING, MARKER_KILLED]:
+        old_marker = html_file.with_suffix(f'.{marker}')
+        if old_marker.exists():
+            old_marker.unlink()
+
+    # Create new marker file
+    marker_file = html_file.with_suffix(f'.{status_marker}')
+    marker_file.touch()
 
 
 def generate_html_report(
@@ -2035,10 +2203,17 @@ def generate_html_report(
         logging.getLogger("html").warning("GitPython not installed, skipping git information")
 
     # Count task statistics
+    # Exclude none-compilation and none-sanity from pass/fail counts
+    # (they still run but don't affect overall status)
     total_tasks = len(all_tasks)
-    succeeded = sum(1 for t in all_tasks.values() if t.status == TaskStatus.SUCCESS)
-    failed = sum(1 for t in all_tasks.values() if t.status == TaskStatus.FAILED)
+    succeeded = sum(1 for task_id, t in all_tasks.items()
+                   if t.status == TaskStatus.PASSED
+                   and not (task_id.startswith('none-') and ('compilation' in task_id or 'sanity' in task_id)))
+    failed = sum(1 for task_id, t in all_tasks.items()
+                if t.status == TaskStatus.FAILED
+                and not (task_id.startswith('none-') and ('compilation' in task_id or 'sanity' in task_id)))
     skipped = sum(1 for t in all_tasks.values() if t.status == TaskStatus.SKIPPED)
+    killed = sum(1 for t in all_tasks.values() if t.status == TaskStatus.KILLED)
     running = sum(1 for t in all_tasks.values() if t.status == TaskStatus.RUNNING)
     queued = sum(1 for t in all_tasks.values() if t.status == TaskStatus.QUEUED)
 
@@ -2058,10 +2233,13 @@ def generate_html_report(
             else:
                 overall_elapsed_str = f" (elapsed {seconds}s)"
 
-    # Determine overall status (priority: failed > running/queued > success)
+    # Determine overall status (priority: failed > killed > running/queued > success)
     if failed > 0:
         overall_status = f"❌ TESTS FAILED{overall_elapsed_str}"
         header_color = "#dc3545"  # Red
+    elif killed > 0:
+        overall_status = f"⚠️ BUILD INTERRUPTED{overall_elapsed_str}"
+        header_color = "#ff9800"  # Orange
     elif running > 0 or queued > 0:
         overall_status = f"🔄 BUILD IN PROGRESS{overall_elapsed_str}"
         header_color = "#ffc107"  # Yellow
@@ -2209,6 +2387,7 @@ def generate_html_report(
         succeeded=succeeded,
         failed=failed,
         skipped=skipped,
+        killed=killed,
         running=running,
         queued=queued,
         build_date=now.strftime('%Y-%m-%d %H:%M:%S'),
@@ -2709,17 +2888,42 @@ def main() -> int:
             if parent_id in all_tasks and task_id not in all_tasks[parent_id].children:
                 all_tasks[parent_id].children.append(task_id)
 
-    # Setup signal handlers to mark running tasks as KILLED on interrupt
-    def signal_handler(signum, frame):
+    # Setup basic signal handler for both parallel and sequential modes
+    # (will be enhanced in parallel mode to stop background HTML updater)
+    def basic_signal_handler(signum, frame):
         """Handle SIGTERM/SIGINT by marking running tasks as KILLED"""
         logger = logging.getLogger("signal")
         sig_name = "SIGTERM" if signum == signal.SIGTERM else "SIGINT"
         logger.warning(f"\nReceived {sig_name}, marking running tasks as KILLED...")
 
+        # Terminate all running subprocesses first
+        with _subprocesses_lock:
+            subprocesses_to_terminate = list(_running_subprocesses)
+
+        if subprocesses_to_terminate:
+            logger.info(f"  Terminating {len(subprocesses_to_terminate)} running subprocess(es)...")
+            for proc in subprocesses_to_terminate:
+                try:
+                    proc.terminate()
+                except Exception:
+                    pass  # Ignore errors if process already exited
+
+            # Wait up to 2 seconds for processes to terminate
+            time.sleep(2)
+
+            # Force kill any remaining processes
+            for proc in subprocesses_to_terminate:
+                try:
+                    if proc.poll() is None:  # Still running
+                        proc.kill()
+                except Exception:
+                    pass
+
+        # Mark all running tasks as KILLED
         for task_id, task in all_tasks.items():
             if task.status == TaskStatus.RUNNING:
                 task.mark_status_as(TaskStatus.KILLED, f"Interrupted by {sig_name}")
-                task.cleanup_markers()
+                update_frameworks_data_cache(task, use_absolute_urls=False)
                 logger.info(f"  Marked {task_id} as KILLED")
 
         # Generate final HTML report
@@ -2735,14 +2939,15 @@ def main() -> int:
                 )
                 html_file = log_dir / f"{log_date}.{sha}.report.html"
                 html_file.write_text(html_content)
-                logger.info(f"  HTML Report: {html_file}")
+                update_report_status_marker(html_file, all_tasks)
+                logger.info(f"  Generated final HTML report: {html_file}")
             except Exception as e:
-                logger.error(f"Failed to generate final HTML report: {e}")
+                logger.error(f"  Failed to generate final HTML report: {e}")
 
         sys.exit(1)
 
-    signal.signal(signal.SIGTERM, signal_handler)
-    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, basic_signal_handler)
+    signal.signal(signal.SIGINT, basic_signal_handler)
 
     # Execute based on mode
     if args.parallel:
@@ -2805,15 +3010,15 @@ def main() -> int:
 
         return 0
     else:
-        success_count = len([t for t in all_tasks.values() if t.status == TaskStatus.SUCCESS])
+        success_count = len([t for t in all_tasks.values() if t.status == TaskStatus.PASSED])
         failed_count = len([t for t in all_tasks.values() if t.status == TaskStatus.FAILED])
         skipped_count = len([t for t in all_tasks.values() if t.status == TaskStatus.SKIPPED])
 
-        # Exclude none-*-sanity tasks from exit status calculation
+        # Exclude none-compilation and none-sanity tasks from exit status calculation
         # (they're expected to fail since framework=none has no inference frameworks)
         critical_failures = [
             task_id for task_id, t in all_tasks.items()
-            if t.status == TaskStatus.FAILED and not (task_id.startswith('none-') and 'sanity' in task_id)
+            if t.status == TaskStatus.FAILED and not (task_id.startswith('none-') and ('compilation' in task_id or 'sanity' in task_id))
         ]
         exit_status = 0 if len(critical_failures) == 0 else 1
 
@@ -2825,7 +3030,7 @@ def main() -> int:
         # Show detailed task breakdown
         logger.info(f"\n  Task Details:")
         for task_id, task in all_tasks.items():
-            if task.status == TaskStatus.SUCCESS and task.start_time and task.end_time:
+            if task.status == TaskStatus.PASSED and task.start_time and task.end_time:
                 duration = task.end_time - task.start_time
                 logger.info(f"    ✓ {task_id}: {duration:.1f}s")
             elif task.status == TaskStatus.FAILED:
@@ -2858,6 +3063,10 @@ def main() -> int:
             # Always save HTML file
             html_file = log_dir / f"{log_date}.{sha}.report.html"
             html_file.write_text(html_content_file)
+
+            # Create status marker file for the report
+            update_report_status_marker(html_file, all_tasks)
+
             logger.info(f"  HTML Report: {html_file}")
         except Exception as e:
             logger.error(f"Failed to generate HTML report: {e}")

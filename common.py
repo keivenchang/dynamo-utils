@@ -113,6 +113,12 @@ FRAMEWORKS_UPPER = ["VLLM", "SGLANG", "TRTLLM"]
 FRAMEWORKS = [f.lower() for f in FRAMEWORKS_UPPER]
 FRAMEWORK_NAMES = {"vllm": "VLLM", "sglang": "SGLang", "trtllm": "TensorRT-LLM"}
 
+# Marker file suffixes (shared by build_images.py and show_commit_history.py)
+MARKER_RUNNING = 'RUNNING'
+MARKER_PASSED = 'PASSED'
+MARKER_FAILED = 'FAILED'
+MARKER_KILLED = 'KILLED'
+
 def normalize_framework(framework: str) -> str:
     """Normalize framework name to canonical lowercase form. DEPRECATED: V1/retag only."""
     return framework.lower()
