@@ -147,13 +147,13 @@ h2 { margin: 0; font-size: 1.2em; font-weight: bold; }
 {%- if build_task.status == 'SUCCESS' %}
 <span class="success">✅ PASS</span>{%- if build_task.time %} <span class="chart-timing">({{ build_task.time }})</span>{%- endif %}
 {%- elif build_task.status == 'RUNNING' %}
-<span style="color: #3498db;">🔄 RUNNING</span>{%- if build_task.time %} <span class="chart-timing">({{ build_task.time }})</span>{%- endif %}
+<span style="color: #3498db;">🔄 RUNNING</span>{%- if build_task.time and build_task.start_time %} <span class="chart-timing elapsed-timer" data-start-time="{{ build_task.start_time }}">(elapsed <span class="elapsed-seconds">0.0</span>s)</span>{%- elif build_task.time %} <span class="chart-timing">({{ build_task.time }})</span>{%- endif %}
 {%- elif build_task.status == 'KILLED' %}
 <span style="color: #ff9800; font-weight: bold;">⚠️ KILLED</span>{%- if build_task.time %} <span class="chart-timing">({{ build_task.time }})</span>{%- endif %}
 {%- elif build_task.status == 'QUEUED' %}
 <span style="color: #95a5a6;">⏳ to be run</span>{%- if build_task.time %} <span class="chart-timing">(prev: {{ build_task.time }})</span>{%- endif %}
 {%- elif build_task.status == 'SKIPPED' %}
-{%- if build_task.time and build_task.prev_status %}prev: {%- if build_task.prev_status == 'SUCCESS' %}<span class="success">PASS</span>{%- else %}<span class="failure">FAIL</span>{%- endif %} ({{ build_task.time }}){%- endif %}
+{%- if build_task.time and build_task.prev_status %}<span class="chart-timing">prev: {%- if build_task.prev_status == 'SUCCESS' %}<span class="success">PASS</span>{%- else %}<span class="failure">FAIL</span>{%- endif %} ({{ build_task.time }})</span>{%- endif %}
 {%- else %}
 <span class="failure">❌ FAIL</span> <span class="chart-timing">({{ build_task.time if build_task.time else 'n/a' }})</span>
 {%- endif %}
@@ -165,13 +165,13 @@ h2 { margin: 0; font-size: 1.2em; font-weight: bold; }
 {%- if compilation_task.status == 'SUCCESS' %}
 <span class="success">✅ PASS</span>{%- if compilation_task.time %} <span class="chart-timing">({{ compilation_task.time }})</span>{%- endif %}
 {%- elif compilation_task.status == 'RUNNING' %}
-<span style="color: #3498db;">🔄 RUNNING</span>{%- if compilation_task.time %} <span class="chart-timing">({{ compilation_task.time }})</span>{%- endif %}
+<span style="color: #3498db;">🔄 RUNNING</span>{%- if compilation_task.time and compilation_task.start_time %} <span class="chart-timing elapsed-timer" data-start-time="{{ compilation_task.start_time }}">(elapsed <span class="elapsed-seconds">0.0</span>s)</span>{%- elif compilation_task.time %} <span class="chart-timing">({{ compilation_task.time }})</span>{%- endif %}
 {%- elif compilation_task.status == 'KILLED' %}
 <span style="color: #ff9800; font-weight: bold;">⚠️ KILLED</span>{%- if compilation_task.time %} <span class="chart-timing">({{ compilation_task.time }})</span>{%- endif %}
 {%- elif compilation_task.status == 'QUEUED' %}
 <span style="color: #95a5a6;">⏳ to be run</span>{%- if compilation_task.time %} <span class="chart-timing">(prev: {{ compilation_task.time }})</span>{%- endif %}
 {%- elif compilation_task.status == 'SKIPPED' %}
-{%- if compilation_task.time and compilation_task.prev_status %}prev: {%- if compilation_task.prev_status == 'SUCCESS' %}<span class="success">PASS</span>{%- else %}<span class="failure">FAIL</span>{%- endif %} ({{ compilation_task.time }}){%- endif %}
+{%- if compilation_task.time and compilation_task.prev_status %}<span class="chart-timing">prev: {%- if compilation_task.prev_status == 'SUCCESS' %}<span class="success">PASS</span>{%- else %}<span class="failure">FAIL</span>{%- endif %} ({{ compilation_task.time }})</span>{%- endif %}
 {%- else %}
 <span class="failure">❌ FAIL</span> <span class="chart-timing">({{ compilation_task.time if compilation_task.time else 'n/a' }})</span>
 {%- endif %}
@@ -183,13 +183,13 @@ h2 { margin: 0; font-size: 1.2em; font-weight: bold; }
 {%- if sanity_task.status == 'SUCCESS' %}
 <span class="success">✅ PASS</span>{%- if sanity_task.time %} <span class="chart-timing">({{ sanity_task.time }})</span>{%- endif %}
 {%- elif sanity_task.status == 'RUNNING' %}
-<span style="color: #3498db;">🔄 RUNNING</span>{%- if sanity_task.time %} <span class="chart-timing">({{ sanity_task.time }})</span>{%- endif %}
+<span style="color: #3498db;">🔄 RUNNING</span>{%- if sanity_task.time and sanity_task.start_time %} <span class="chart-timing elapsed-timer" data-start-time="{{ sanity_task.start_time }}">(elapsed <span class="elapsed-seconds">0.0</span>s)</span>{%- elif sanity_task.time %} <span class="chart-timing">({{ sanity_task.time }})</span>{%- endif %}
 {%- elif sanity_task.status == 'KILLED' %}
 <span style="color: #ff9800; font-weight: bold;">⚠️ KILLED</span>{%- if sanity_task.time %} <span class="chart-timing">({{ sanity_task.time }})</span>{%- endif %}
 {%- elif sanity_task.status == 'QUEUED' %}
 <span style="color: #95a5a6;">⏳ to be run</span>{%- if sanity_task.time %} <span class="chart-timing">(prev: {{ sanity_task.time }})</span>{%- endif %}
 {%- elif sanity_task.status == 'SKIPPED' %}
-{%- if sanity_task.time and sanity_task.prev_status %}prev: {%- if sanity_task.prev_status == 'SUCCESS' %}<span class="success">PASS</span>{%- else %}<span class="failure">FAIL</span>{%- endif %} ({{ sanity_task.time }}){%- endif %}
+{%- if sanity_task.time and sanity_task.prev_status %}<span class="chart-timing">prev: {%- if sanity_task.prev_status == 'SUCCESS' %}<span class="success">PASS</span>{%- else %}<span class="failure">FAIL</span>{%- endif %} ({{ sanity_task.time }})</span>{%- endif %}
 {%- else %}
 <span class="failure">❌ FAIL</span> <span class="chart-timing">({{ sanity_task.time if sanity_task.time else 'n/a' }})</span>
 {%- endif %}
@@ -202,5 +202,29 @@ h2 { margin: 0; font-size: 1.2em; font-weight: bold; }
 {%- endfor %}
 </div></div>
 {%- endfor %}
+<script>
+// Update elapsed time for all RUNNING tasks every second
+function updateElapsedTimers() {
+    const timers = document.querySelectorAll('.elapsed-timer');
+    const now = Date.now() / 1000;  // Current time in seconds (Unix timestamp)
+
+    timers.forEach(timer => {
+        const startTime = parseFloat(timer.getAttribute('data-start-time'));
+        if (startTime) {
+            const elapsed = now - startTime;
+            const secondsSpan = timer.querySelector('.elapsed-seconds');
+            if (secondsSpan) {
+                secondsSpan.textContent = elapsed.toFixed(1);
+            }
+        }
+    });
+}
+
+// Update immediately on page load
+updateElapsedTimers();
+
+// Update every second
+setInterval(updateElapsedTimers, 1000);
+</script>
 </body></html>
 

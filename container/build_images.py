@@ -159,6 +159,7 @@ class TaskData:
     time: Optional[str] = None  # Duration for any task type
     log_file: Optional[str] = None
     prev_status: Optional[str] = None  # Previous status (for SKIPPED tasks)
+    start_time: Optional[float] = None  # Start timestamp (for RUNNING tasks with live updates)
 
 
 @dataclass
@@ -351,6 +352,7 @@ def create_task_graph(framework: str, sha: str, repo_path: Path, version: Option
     # Level 3: Dev compilation
     # For framework=none, always run compile/sanity tasks but don't count them in summary
     # (none framework tasks are always experimental and don't affect overall build status)
+    # NOTE: Compilation tasks have built-in retry logic (up to 3 attempts) for LFS errors
     home_dir = str(Path.home())
     ignore_none_tasks_in_summary = framework == "none"
 
@@ -658,19 +660,28 @@ class BaseTask(ABC):
 
         # Create/cleanup marker files based on status
         if self.log_file:
+            # Check if this is a "none" framework compilation or sanity task
+            # For these tasks, we skip creating PASS/FAIL markers but still track RUNNING status
+            is_none_comp_or_sanity = (
+                self.task_id.startswith('none-') and
+                ('-compilation' in self.task_id or '-sanity' in self.task_id)
+            )
+
             if status == TaskStatus.RUNNING:
                 # Create .RUNNING marker
                 running_marker = self.log_file.with_suffix('.RUNNING')
                 running_marker.touch()
             elif status == TaskStatus.SUCCESS:
-                # Create .PASS marker, remove .RUNNING
-                pass_marker = self.log_file.with_suffix('.PASS')
-                pass_marker.touch()
+                # Create .PASS marker (unless it's a none-compilation/sanity task), remove .RUNNING
+                if not is_none_comp_or_sanity:
+                    pass_marker = self.log_file.with_suffix('.PASS')
+                    pass_marker.touch()
                 self._cleanup_marker('.RUNNING')
             elif status == TaskStatus.FAILED:
-                # Create .FAIL marker, remove .RUNNING
-                fail_marker = self.log_file.with_suffix('.FAIL')
-                fail_marker.touch()
+                # Create .FAIL marker (unless it's a none-compilation/sanity task), remove .RUNNING
+                if not is_none_comp_or_sanity:
+                    fail_marker = self.log_file.with_suffix('.FAIL')
+                    fail_marker.touch()
                 self._cleanup_marker('.RUNNING')
 
         # Log based on status
@@ -962,7 +973,7 @@ class CommandTask(BaseTask):
         return exit_code == 0
 
     def _execute_with_lock(self, repo_path: Path) -> bool:
-        """Execute compilation (dev/local-dev) with thread lock and ownership fixing."""
+        """Execute compilation (dev/local-dev) with thread lock, ownership fixing, and LFS retry logic."""
         # Acquire global lock for all compilation tasks (prevents parallel conflicts)
         self.logger.info("Acquiring compilation lock...")
         with _compilation_lock:
@@ -985,9 +996,60 @@ class CommandTask(BaseTask):
                 if chown_exit_code != 0:
                     self.logger.warning(f"chown command exited with code {chown_exit_code}, continuing anyway")
 
-                # Now execute the compilation command
+                # Execute compilation with retry logic for LFS errors (up to 3 attempts)
                 command = self.get_command(repo_path)
-                exit_code = self._run_command(command, repo_path)
+                max_retries = 3
+                exit_code = -1
+
+                for attempt in range(1, max_retries + 1):
+                    if attempt > 1:
+                        self.logger.warning(f"Retry attempt {attempt}/{max_retries} due to LFS error")
+                        # Append retry message to log
+                        if self.log_file:
+                            with open(self.log_file, 'a') as log_fh:
+                                log_fh.write(f"\n{'='*80}\n")
+                                log_fh.write(f"RETRY ATTEMPT {attempt}/{max_retries} - LFS error detected\n")
+                                log_fh.write(f"{'='*80}\n\n")
+
+                    exit_code = self._run_command(command, repo_path)
+
+                    # Check if we should retry due to LFS error
+                    if exit_code == 0:
+                        # Success - no retry needed
+                        break
+
+                    # Check log file for LFS errors
+                    has_lfs_error = False
+                    if self.log_file and self.log_file.exists():
+                        try:
+                            with open(self.log_file, 'r') as log_fh:
+                                log_content = log_fh.read()
+                                # Common LFS error patterns
+                                lfs_error_patterns = [
+                                    'smudge filter lfs failed',
+                                    'Git LFS:',
+                                    'git-lfs',
+                                    'LFS: connection',
+                                    'external filter \'git-lfs',
+                                    'Failed to download',
+                                    'batch response:',
+                                    'error: unable to access',
+                                ]
+                                # Check for LFS errors
+                                for pattern in lfs_error_patterns:
+                                    if pattern.lower() in log_content.lower():
+                                        has_lfs_error = True
+                                        self.logger.warning(f"LFS error pattern detected: '{pattern}'")
+                                        break
+                        except Exception as e:
+                            self.logger.warning(f"Failed to read log file for LFS error detection: {e}")
+
+                    # Only retry if we detected an LFS error and haven't exhausted retries
+                    if not has_lfs_error or attempt >= max_retries:
+                        break
+
+                    # Sleep before retry to allow transient issues to resolve
+                    time.sleep(2)
 
                 # Lock is automatically released when exiting the with block
                 self.logger.info("Releasing lock")
@@ -2070,10 +2132,13 @@ def update_frameworks_data_cache(task: 'BaseTask', use_absolute_urls: bool = Fal
         if t.status == TaskStatus.RUNNING and t.start_time:
             elapsed = time.time() - t.start_time
             task_time = f"elapsed {elapsed:.1f}s"
+            task_start_time = t.start_time
         elif t.start_time and t.end_time:
             task_time = f"{t.end_time - t.start_time:.1f}s"
+            task_start_time = None
         else:
             task_time = None
+            task_start_time = None
 
         log_url = None
         if t.log_file:
@@ -2087,6 +2152,7 @@ def update_frameworks_data_cache(task: 'BaseTask', use_absolute_urls: bool = Fal
             status=t.status.name,
             time=task_time,
             log_file=log_url,
+            start_time=task_start_time,
             prev_status=None,
         )
 
@@ -2144,13 +2210,20 @@ def generate_html_report(
         logging.getLogger("html").warning("GitPython not installed, skipping git information")
 
     # Count task statistics
-    total_tasks = len(all_tasks)
-    succeeded = sum(1 for t in all_tasks.values() if t.status == TaskStatus.SUCCESS)
-    failed = sum(1 for t in all_tasks.values() if t.status == TaskStatus.FAILED)
-    skipped = sum(1 for t in all_tasks.values() if t.status == TaskStatus.SKIPPED)
-    killed = sum(1 for t in all_tasks.values() if t.status == TaskStatus.KILLED)
-    running = sum(1 for t in all_tasks.values() if t.status == TaskStatus.RUNNING)
-    queued = sum(1 for t in all_tasks.values() if t.status == TaskStatus.QUEUED)
+    # Only count tasks that actually ran (have log_file), not dependency failures (0-byte .FAIL markers)
+    # This ensures the summary matches what's visually displayed in the HTML table
+    # NOTE: Exclude "none" framework sanity checks from failure count - they're expected to fail
+    # since "none" containers don't have any LLM frameworks installed
+    total_tasks = len([t for t in all_tasks.values() if t.log_file])
+    succeeded = sum(1 for t in all_tasks.values() if t.status == TaskStatus.SUCCESS and t.log_file)
+    failed = sum(1 for task_id, t in all_tasks.items()
+                 if t.status == TaskStatus.FAILED
+                 and t.log_file
+                 and not (task_id.startswith('none-') and task_id.endswith('-sanity')))
+    skipped = sum(1 for t in all_tasks.values() if t.status == TaskStatus.SKIPPED and t.log_file)
+    killed = sum(1 for t in all_tasks.values() if t.status == TaskStatus.KILLED and t.log_file)
+    running = sum(1 for t in all_tasks.values() if t.status == TaskStatus.RUNNING and t.log_file)
+    queued = sum(1 for t in all_tasks.values() if t.status == TaskStatus.QUEUED and t.log_file)
 
     # Calculate overall build elapsed time (find earliest start time)
     start_times = [t.start_time for t in all_tasks.values() if t.start_time]
@@ -2639,12 +2712,12 @@ def main() -> int:
                 logger.info("Doing hard reset to clean repository state...")
                 git_utils_temp.repo.git.reset('--hard', 'HEAD')
 
-                # Clean untracked files (except .build_images_last_composite_sha which we want to keep)
+                # Clean untracked files (except .cache directory which contains our cache files)
                 untracked = git_utils_temp.repo.untracked_files
                 if untracked:
                     logger.info(f"Removing {len(untracked)} untracked file(s)...")
                     for file in untracked:
-                        if file != '.build_images_last_composite_sha':
+                        if not file.startswith('.cache/') and file != '.cache':
                             file_path = repo_path / file
                             try:
                                 if file_path.is_file():
@@ -2726,7 +2799,7 @@ def main() -> int:
         logger.info("DynamoDockerBuilder V2 - Starting")
 
         # Check if rebuild is needed based on Composite Docker SHA (CDS) (container files)
-        # Only check in non-dry-run mode to avoid writing .build_images_last_composite_sha
+        # Only check in non-dry-run mode to avoid writing .cache/build_images_composite_sha
         dynamo_repo_utils = DynamoRepositoryUtils(repo_path)
         if not dynamo_repo_utils.check_if_rebuild_needed(force_run=args.force_run):
             logger.info("✅ No rebuild needed - exiting")
