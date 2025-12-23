@@ -119,8 +119,9 @@ fi
 
 # Generate 1-day resource report HTML (best-effort; do not fail the entire cron if DB is missing)
 RESOURCE_DB="${RESOURCE_DB:-$HOME/.cache/dynamo-utils/resource_monitor.sqlite}"
-RESOURCE_REPORT_HTML="$SCRIPT_DIR/resource_report_1d.html"
-RESOURCE_REPORT_TMP="$SCRIPT_DIR/.resource_report_1d.html.tmp"
+# Output to the top-level nvidia directory so nginx can serve it at /
+RESOURCE_REPORT_HTML="$NVIDIA_HOME/resource_report.html"
+RESOURCE_REPORT_TMP="$NVIDIA_HOME/.resource_report.html.tmp"
 
 if [ -f "$RESOURCE_DB" ]; then
     if python3 "$SCRIPT_DIR/resource_report.py" \
