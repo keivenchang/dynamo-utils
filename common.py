@@ -703,7 +703,7 @@ class DynamoRepositoryUtils(BaseUtils):
         Returns:
             Stored SHA string, or empty string if not found
         """
-        sha_file = self.repo_path / ".build_images_last_composite_sha"
+        sha_file = self.repo_path / ".cache/build_images_composite_sha"
         if sha_file.exists():
             stored = sha_file.read_text().strip()
             self.logger.debug(f"Found stored Composite Docker SHA (CDS): {stored[:12]}")
@@ -718,7 +718,8 @@ class DynamoRepositoryUtils(BaseUtils):
         Args:
             sha: Composite Docker SHA (CDS) to store
         """
-        sha_file = self.repo_path / ".build_images_last_composite_sha"
+        sha_file = self.repo_path / ".cache/build_images_composite_sha"
+        sha_file.parent.mkdir(parents=True, exist_ok=True)
         sha_file.write_text(sha)
         self.logger.info(f"Stored Composite Docker SHA (CDS): {sha[:12]}")
 
@@ -736,7 +737,7 @@ class DynamoRepositoryUtils(BaseUtils):
             True if rebuild is needed, False otherwise
         """
         self.logger.info("\nChecking if rebuild is needed based on file changes...")
-        self.logger.info(f"Composite Docker SHA file: {self.repo_path}/.build_images_last_composite_sha")
+        self.logger.info(f"Composite Docker SHA file: {self.repo_path}/.cache/build_images_composite_sha")
 
         # Generate current Composite Docker SHA (CDS) (full hash, not truncated)
         current_sha = self.generate_composite_sha(full_hash=True)
@@ -2305,7 +2306,7 @@ class GitHubAPIClient:
     def get_cached_pr_merge_dates(self, pr_numbers: List[int],
                                   owner: str = "ai-dynamo",
                                   repo: str = "dynamo",
-                                  cache_file: str = '.github_pr_merge_dates_cache.json') -> Dict[int, Optional[str]]:
+                                  cache_file: str = '.cache/github_pr_merge_dates.json') -> Dict[int, Optional[str]]:
         """Get merge dates for pull requests with caching.
 
         Merge dates are cached permanently since they don't change once a PR is merged.
@@ -2326,7 +2327,7 @@ class GitHubAPIClient:
             >>> merge_dates
             {4965: "2025-12-18 12:34:56", 5009: None}
 
-        Cache file format (.github_pr_merge_dates_cache.json):
+        Cache file format (.cache/github_pr_merge_dates.json):
         {
             "4965": "2025-12-18 12:34:56",
             "5009": null
@@ -2412,7 +2413,7 @@ class GitHubAPIClient:
             owner: Repository owner
             repo: Repository name
             sha_list: List of commit SHAs (full 40-char)
-            cache_file: Path to cache file (default: .github_actions_status_cache.json)
+            cache_file: Path to cache file (default: .cache/github_actions_status.json)
             skip_fetch: If True, only return cached data
 
         Returns:
@@ -2430,7 +2431,7 @@ class GitHubAPIClient:
         from concurrent.futures import ThreadPoolExecutor
 
         if cache_file is None:
-            cache_file = Path.cwd() / '.github_actions_status_cache.json'
+            cache_file = Path.cwd() / '.cache/github_actions_status.json'
         else:
             cache_file = Path(cache_file)
 
@@ -2659,7 +2660,7 @@ class GitLabAPIClient:
     def get_cached_registry_images_for_shas(self, project_id: str, registry_id: str,
                                            sha_list: List[str],
                                            sha_to_datetime: Optional[Dict[str, datetime]] = None,
-                                           cache_file: str = '.gitlab_commit_sha_cache.json',
+                                           cache_file: str = '.cache/gitlab_commit_sha.json',
                                            skip_fetch: bool = False) -> Dict[str, List[Dict[str, Any]]]:
         """Get container registry images for commit SHAs with caching.
 
@@ -2675,13 +2676,13 @@ class GitLabAPIClient:
             registry_id: Container registry ID
             sha_list: List of full commit SHAs (40 characters)
             sha_to_datetime: Optional dict mapping SHA to committed_datetime for time-based filtering
-            cache_file: Path to cache file (default: .gitlab_commit_sha_cache.json)
+            cache_file: Path to cache file (default: .cache/gitlab_commit_sha.json)
             skip_fetch: If True, only return cached data without fetching from GitLab
 
         Returns:
             Dictionary mapping SHA to list of image info dicts
 
-        Cache file format (.gitlab_commit_sha_cache.json):
+        Cache file format (.cache/gitlab_commit_sha.json):
             {
                 "21a03b316dc1e5031183965e5798b0d9fe2e64b3": [
                     {
@@ -2932,7 +2933,7 @@ class GitLabAPIClient:
         return result
 
     def get_cached_pipeline_status(self, sha_list: List[str],
-                                  cache_file: str = '.gitlab_pipeline_status_cache.json',
+                                  cache_file: str = '.cache/gitlab_pipeline_status.json',
                                   skip_fetch: bool = False) -> Dict[str, Optional[Dict[str, Any]]]:
         """Get GitLab CI pipeline status for commits with intelligent caching.
 
@@ -2945,7 +2946,7 @@ class GitLabAPIClient:
 
         Args:
             sha_list: List of full commit SHAs (40 characters)
-            cache_file: Path to cache file (default: .gitlab_pipeline_status_cache.json)
+            cache_file: Path to cache file (default: .cache/gitlab_pipeline_status.json)
             skip_fetch: If True, only return cached data without fetching from GitLab
 
         Returns:
@@ -2961,7 +2962,7 @@ class GitLabAPIClient:
                 "5fe0476e605d2564234f00e8123461e1594a9ce7": None
             }
 
-        Cache file format (.gitlab_pipeline_status_cache.json) - internally used:
+        Cache file format (.cache/gitlab_pipeline_status.json) - internally used:
         {
             "21a03b316dc1e5031183965e5798b0d9fe2e64b3": {
                 "status": "success",
@@ -3059,7 +3060,7 @@ class GitLabAPIClient:
         return result
 
     def get_cached_pipeline_job_counts(self, pipeline_ids: List[int],
-                                      cache_file: str = '.gitlab_pipeline_jobs_cache.json',
+                                      cache_file: str = '.cache/gitlab_pipeline_jobs.json',
                                       skip_fetch: bool = False) -> Dict[int, Optional[Dict[str, int]]]:
         """Get GitLab CI pipeline job counts with intelligent caching.
 
@@ -3071,7 +3072,7 @@ class GitLabAPIClient:
 
         Args:
             pipeline_ids: List of pipeline IDs
-            cache_file: Path to cache file (default: .gitlab_pipeline_jobs_cache.json)
+            cache_file: Path to cache file (default: .cache/gitlab_pipeline_jobs.json)
             skip_fetch: If True, only return cached data without fetching from GitLab
 
         Returns:
@@ -3234,7 +3235,7 @@ class GitLabAPIClient:
         return result
 
     def get_cached_pipeline_job_details(self, pipeline_ids: List[int],
-                                       cache_file: str = '.gitlab_pipeline_jobs_details_cache.json',
+                                       cache_file: str = '.cache/gitlab_pipeline_jobs_details.json',
                                        skip_fetch: bool = False) -> Dict[int, Optional[Dict]]:
         """Get GitLab CI pipeline job details (counts + individual job info) with intelligent caching.
 
@@ -3249,7 +3250,7 @@ class GitLabAPIClient:
 
         Args:
             pipeline_ids: List of pipeline IDs
-            cache_file: Path to cache file (default: .gitlab_pipeline_jobs_details_cache.json)
+            cache_file: Path to cache file (default: .cache/gitlab_pipeline_jobs_details.json)
             skip_fetch: If True, only return cached data without fetching from GitLab
 
         Returns:
@@ -3444,7 +3445,7 @@ class GitLabAPIClient:
 
     def get_cached_mr_merge_dates(self, mr_numbers: List[int],
                                   project_id: str = "169905",
-                                  cache_file: str = '.gitlab_mr_merge_dates_cache.json',
+                                  cache_file: str = '.cache/gitlab_mr_merge_dates.json',
                                   skip_fetch: bool = False) -> Dict[int, Optional[str]]:
         """Get merge dates for merge requests with caching.
 
@@ -3466,7 +3467,7 @@ class GitLabAPIClient:
             >>> merge_dates
             {4965: "2025-12-18 12:34:56", 5009: None}
 
-        Cache file format (.gitlab_mr_merge_dates_cache.json):
+        Cache file format (.cache/gitlab_mr_merge_dates.json):
         {
             "4965": "2025-12-18 12:34:56",
             "5009": null

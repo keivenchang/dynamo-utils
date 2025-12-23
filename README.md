@@ -224,17 +224,17 @@ python3 show_commit_history.py --repo-path ~/nvidia/dynamo_latest --max-commits 
 - First run will be slower (~50-100s) as it builds the cache
 - Subsequent runs are fast (~5-10s for terminal, ~34s for HTML with API calls)
 - Use `--skip-gitlab-fetch` for instant results when you don't need fresh data
-- Cache files are stored in the repository root (`.commit_history_cache.json`, etc.)
+- Cache files are stored in `.cache/` directory in repository root
 - HTML auto-reloads every 15 minutes when viewed in browser
 
 #### Caching System
 
-**Cache Files** (5 active):
-- `.commit_history_cache.json` (186 KB) - Full commit metadata
-- `.github_pr_merge_dates_cache.json` (210 PRs) - GitHub PR merge dates (forever cache)
-- `.gitlab_commit_sha_cache.json` (2.5 MB, 1349 entries) - Docker registry images
-- `.gitlab_pipeline_status_cache.json` (61 KB, 458 entries) - CI pipeline status
-- `.gitlab_pipeline_jobs_cache.json` (13 KB, 87 entries) - Pipeline job counts
+**Cache Files** (5 active, stored in `.cache/`):
+- `commit_history.json` (186 KB) - Full commit metadata
+- `github_pr_merge_dates.json` (210 PRs) - GitHub PR merge dates (forever cache)
+- `gitlab_commit_sha.json` (2.5 MB, 1349 entries) - Docker registry images
+- `gitlab_pipeline_status.json` (61 KB, 458 entries) - CI pipeline status
+- `gitlab_pipeline_jobs.json` (13 KB, 87 entries) - Pipeline job counts
 
 **Cache Strategy:**
 - Forever cache: Immutable data (merge dates, completed pipelines)
@@ -598,8 +598,11 @@ docker run --rm --gpus all nvidia/cuda:11.8.0-base-ubuntu22.04 nvidia-smi
 
 ### Cache Issues
 ```bash
-# Clear specific cache
-rm ~/nvidia/dynamo_latest/.github_pr_merge_dates_cache.json
+# Clear specific cache file
+rm ~/nvidia/dynamo_latest/.cache/github_pr_merge_dates.json
+
+# Or clear all cache files
+rm -rf ~/nvidia/dynamo_latest/.cache/
 
 # Regenerate with fresh data
 python3 show_commit_history.py --repo-path ~/nvidia/dynamo_latest --max-commits 200 --html --output ~/nvidia/dynamo_latest/index.html

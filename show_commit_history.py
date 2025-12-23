@@ -58,7 +58,7 @@ class CommitHistoryGenerator:
         self.debug = debug
         self.skip_gitlab_fetch = skip_gitlab_fetch
         self.logger = self._setup_logger()
-        self.cache_file = self.repo_path / ".commit_history_cache.json"
+        self.cache_file = self.repo_path / ".cache/commit_history.json"
         self.gitlab_client = GitLabAPIClient()  # Single instance for all GitLab operations
         self.github_client = GitHubAPIClient()  # Single instance for all GitHub operations
 
@@ -113,7 +113,7 @@ class CommitHistoryGenerator:
         # Initialize repo utils for this operation
         repo_utils = DynamoRepositoryUtils(self.repo_path, dry_run=False, verbose=self.verbose)
 
-        # Load cache (.commit_history_cache.json in repo_path)
+        # Load cache (.cache/commit_history.json in repo_path)
         # Format (new): {
         #   "<full_commit_sha>": {
         #     "composite_docker_sha": "746bc31d05b3",
@@ -169,7 +169,7 @@ class CommitHistoryGenerator:
                     self.logger.info(f"Fetching merge dates for {len(pr_numbers)} PRs...")
                     pr_to_merge_date = self.github_client.get_cached_pr_merge_dates(
                         pr_numbers,
-                        cache_file=str(self.repo_path / '.github_pr_merge_dates_cache.json')
+                        cache_file=str(self.repo_path / '.cache/github_pr_merge_dates.json')
                     )
                     self.logger.info(f"Got merge dates for {sum(1 for v in pr_to_merge_date.values() if v)} PRs")
 
@@ -415,7 +415,7 @@ class CommitHistoryGenerator:
             owner='ai-dynamo',
             repo='dynamo',
             sha_list=[c['sha_full'] for c in commit_data],
-            cache_file=str(self.repo_path / '.github_actions_status_cache.json'),
+            cache_file=str(self.repo_path / '.cache/github_actions_status.json'),
             skip_fetch=self.skip_gitlab_fetch  # Reuse the skip_fetch flag
         )
 
@@ -582,8 +582,7 @@ class CommitHistoryGenerator:
                 # Use the most recent log for status determination
                 log_path = Path(sorted(matching_logs)[-1])
 
-                # Determine build status by traversing build history chronologically
-                # Traverse from oldest to newest, updating status as we go
+                # Determine build status using only the LATEST build date
                 log_dir = log_path.parent
                 all_status_files = []
 
@@ -595,7 +594,7 @@ class CommitHistoryGenerator:
                 status = 'unknown'  # Default status
                 if all_status_files:
                     # Extract dates from filenames (format: YYYY-MM-DD.sha.task.STATUS)
-                    # Group files by date for chronological traversal
+                    # Group files by date
                     from collections import defaultdict
                     files_by_date = defaultdict(list)
                     for f in all_status_files:
@@ -603,24 +602,23 @@ class CommitHistoryGenerator:
                         date_part = filename.split('.')[0]  # Extract YYYY-MM-DD
                         files_by_date[date_part].append(f)
 
-                    # Traverse dates chronologically (oldest to newest)
-                    for date in sorted(files_by_date.keys()):
-                        date_files = files_by_date[date]
+                    # Use only the LATEST date
+                    latest_date = max(files_by_date.keys())
+                    date_files = files_by_date[latest_date]
 
-                        # Check status for this date's build run
-                        running_files = [f for f in date_files if f.endswith('.RUNNING')]
-                        fail_files = [f for f in date_files if f.endswith('.FAIL')]
-                        pass_files = [f for f in date_files if f.endswith('.PASS')]
+                    # Check status for the latest build run
+                    running_files = [f for f in date_files if f.endswith('.RUNNING')]
+                    fail_files = [f for f in date_files if f.endswith('.FAIL')]
+                    pass_files = [f for f in date_files if f.endswith('.PASS')]
 
-                        # Update status based on this build run
-                        # Priority: RUNNING > FAIL > PASS (if still running, show building even if some failed)
-                        if running_files:
-                            status = 'building'
-                        elif fail_files:
-                            status = 'failed'
-                        elif pass_files:
-                            status = 'success'
-                        # If this date has no files, keep previous status
+                    # Determine status based on latest build run
+                    # Priority: RUNNING > FAIL > PASS (if still running, show building even if some failed)
+                    if running_files:
+                        status = 'building'
+                    elif fail_files:
+                        status = 'failed'
+                    elif pass_files:
+                        status = 'success'
 
                 # Store per-commit status
                 commit_to_status[sha_short] = status
@@ -667,21 +665,9 @@ class CommitHistoryGenerator:
                     'inherited': False
                 }
 
-            # Override status to 'building' if GitLab pipeline has running/pending jobs
-            # (even if some jobs have already failed - pipeline is still active)
-            pipeline = gitlab_pipelines.get(sha_full)
-            if pipeline and 'id' in pipeline:
-                job_data = pipeline_job_counts.get(pipeline['id'])
-                if job_data:
-                    # Extract counts (handle both old and new format)
-                    if isinstance(job_data, dict) and 'counts' in job_data:
-                        job_counts = job_data['counts']
-                    else:
-                        job_counts = job_data
-
-                    # If there are running or pending jobs, status should be 'building'
-                    if job_counts.get('running', 0) > 0 or job_counts.get('pending', 0) > 0:
-                        build_status[sha_short]['status'] = 'building'
+            # Note: We do NOT override local build status based on GitLab/GitHub status
+            # The status indicator reflects LOCAL builds only (.PASS/.FAIL/.RUNNING markers)
+            # GitHub Actions and GitLab pipeline status are shown separately in their own columns
         
         # Generate timestamp
         if HAS_PYTZ:
@@ -777,8 +763,8 @@ class CommitHistoryGenerator:
         Returns:
             Dictionary mapping SHA to list of registry image info
         """
-        cache_file = str(self.repo_path / ".gitlab_commit_sha_cache.json")
-        
+        cache_file = str(self.repo_path / ".cache/gitlab_commit_sha.json")
+
         sha_full_list = [c['sha_full'] for c in commit_data]
         sha_to_datetime = {c['sha_full']: c['committed_datetime'] for c in commit_data}
         
@@ -801,7 +787,7 @@ class CommitHistoryGenerator:
     def _get_gitlab_pipeline_statuses(self, sha_full_list: List[str]) -> dict:
         """Get GitLab CI pipeline status for commits using the centralized cache.
 
-        Cache file format (.gitlab_pipeline_status_cache.json):
+        Cache file format (.cache/gitlab_pipeline_status.json):
             {
                 "<full_commit_sha>": {
                     "status": "failed",
@@ -824,7 +810,7 @@ class CommitHistoryGenerator:
         Returns:
             Dictionary mapping SHA to pipeline status dict with 'status', 'id', 'web_url'
         """
-        cache_file = str(self.repo_path / ".gitlab_pipeline_status_cache.json")
+        cache_file = str(self.repo_path / ".cache/gitlab_pipeline_status.json")
 
         self.logger.debug(f"Getting pipeline status for {len(sha_full_list)} commits")
         
@@ -838,7 +824,7 @@ class CommitHistoryGenerator:
     def _get_gitlab_pipeline_job_counts(self, pipeline_ids: List[int]) -> dict:
         """Get GitLab CI pipeline job details (counts + individual job info) using the centralized cache.
 
-        Cache file format (.gitlab_pipeline_jobs_details_cache.json):
+        Cache file format (.cache/gitlab_pipeline_jobs_details.json):
             {
                 "40118215": {
                     "counts": {
@@ -877,7 +863,7 @@ class CommitHistoryGenerator:
         Returns:
             Dictionary mapping pipeline ID to job details dict with 'counts' and 'jobs'
         """
-        cache_file = str(self.repo_path / ".gitlab_pipeline_jobs_details_cache.json")
+        cache_file = str(self.repo_path / ".cache/gitlab_pipeline_jobs_details.json")
 
         self.logger.debug(f"Getting job details for {len(pipeline_ids)} pipelines")
 
