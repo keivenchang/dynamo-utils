@@ -384,6 +384,10 @@ def _build_html(payload: Dict[str, Any]) -> str:
       overflow: hidden;
       box-shadow: 0 10px 30px rgba(0,0,0,0.25);
     }}
+    /* Plotly hover labels can extend outside the plot area; don't clip them. */
+    .card.chart {{
+      overflow: visible;
+    }}
     .card .hdr {{
       display: flex;
       gap: 10px;
@@ -485,7 +489,7 @@ def _build_html(payload: Dict[str, Any]) -> str:
     </div>
 
     <div class="grid">
-      <div class="card">
+      <div class="card chart">
         <div class="hdr">
           <div class="title">System: CPU / Memory / IO</div>
           <div class="hint">Hover to inspect; drag to zoom; double-click to reset</div>
@@ -507,7 +511,7 @@ def _build_html(payload: Dict[str, Any]) -> str:
     </div>
 
     <div class="grid" style="grid-template-columns: 1.2fr 0.8fr; margin-top: 16px;">
-      <div class="card">
+      <div class="card chart">
         <div class="hdr">
           <div class="title">GPU: Util / Memory / Temp / Power</div>
           <div class="hint">If no GPU samples exist, this stays empty</div>
@@ -540,6 +544,17 @@ def _build_html(payload: Dict[str, Any]) -> str:
   function bpsToMiBps(x) {{
     if (x === null || x === undefined) return null;
     return x / 1024 / 1024;
+  }}
+
+  function wrapLine(s, width) {{
+    if (!s) return '';
+    const w = Math.max(10, width || 80);
+    // Hard-wrap long unbroken strings so hover labels don't get clipped.
+    const out = [];
+    for (let i = 0; i < s.length; i += w) {{
+      out.push(s.slice(i, i + w));
+    }}
+    return out.join('<br>');
   }}
 
   function buildSpikeTable(spikes) {{
@@ -655,7 +670,7 @@ def _build_html(payload: Dict[str, Any]) -> str:
     const spikes = PAYLOAD.spikes || [];
     const spikeX = spikes.map(e => e.ts);
     const spikeY = spikes.map(e => e.cpu_percent);
-    const spikeText = spikes.map(e => `${{e.name || ''}} #${{e.pid ?? ''}}<br>${{(e.cmdline||'').slice(0,120)}}`);
+    const spikeText = spikes.map(e => `${{e.name || ''}} #${{e.pid ?? ''}}<br>${{wrapLine((e.cmdline||'').slice(0,240), 80)}}`);
 
     const traces = [
       {{ x, y: cpu, name: 'CPU % (system)', mode: 'lines', line: {{ color: '#6ee7ff', width: 2 }} , yaxis: 'y1' }},
