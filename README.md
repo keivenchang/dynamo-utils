@@ -37,7 +37,8 @@ dynamo-utils/
 ├── git_stats.py                  # Git repository statistics analyzer
 ├── gpu_reset.sh                  # GPU reset utility
 ├── inference.sh                  # Launch Dynamo inference services
-├── resource_monitor.py           # Single-instance system/GPU resource sampler -> SQLite
+├── resource_monitor.py           # Periodic system + GPU sampler -> SQLite
+├── resource_report.py            # Fancy interactive HTML charts from resource_monitor.sqlite
 ├── show_commit_history.j2        # HTML template for commit history
 ├── show_commit_history.py        # Commit history with CI status and Docker images
 ├── show_dynamo_branches.py       # Branch status checker
@@ -120,29 +121,6 @@ Launches Dynamo inference services (frontend and backend).
 **Environment variables:**
 - `DYN_FRONTEND_PORT`: Frontend port (default: 8000)
 - `DYN_BACKEND_PORT`: Backend port (default: 8081)
-
----
-
-### Monitoring
-
-#### `resource_monitor.py`
-Single-instance system + GPU resource monitor that periodically samples CPU/MEM/NET/DISK/GPU and stores
-results in a lightweight SQLite DB. It also records the top resource-consuming processes per sample.
-
-```bash
-# Run continuously (default: every 15s). Uses a lock file so only one instance runs.
-./resource_monitor.py
-
-# One sample then exit
-./resource_monitor.py --once
-
-# Customize DB location and sampling frequency
-./resource_monitor.py --db-path ~/.cache/dynamo-utils/resource_monitor.sqlite --interval-seconds 10
-```
-
-**Default storage:**
-- `~/.cache/dynamo-utils/resource_monitor.sqlite`
-- Lock file: `<db-path>.lock`
 
 ---
 
@@ -248,12 +226,12 @@ python3 show_commit_history.py --repo-path ~/nvidia/dynamo_latest --max-commits 
 - First run will be slower (~50-100s) as it builds the cache
 - Subsequent runs are fast (~5-10s for terminal, ~34s for HTML with API calls)
 - Use `--skip-gitlab-fetch` for instant results when you don't need fresh data
-- Cache files are stored in `.cache/` directory in repository root
+- Cache files are stored under `~/.cache/dynamo-utils/` (or override via `DYNAMO_UTILS_CACHE_DIR`)
 - HTML auto-reloads every 15 minutes when viewed in browser
 
 #### Caching System
 
-**Cache Files** (5 active, stored in `.cache/`):
+**Cache Files** (5 active, stored in `~/.cache/dynamo-utils/`):
 - `commit_history.json` (186 KB) - Full commit metadata
 - `github_pr_merge_dates.json` (210 PRs) - GitHub PR merge dates (forever cache)
 - `gitlab_commit_sha.json` (2.5 MB, 1349 entries) - Docker registry images
@@ -511,6 +489,28 @@ python3 container/build_images.py --repo-path ~/nvidia/dynamo_ci --parallel --fo
 
 ---
 
+### resource_monitor.py / resource_report.py
+
+**Overview**:
+- `resource_monitor.py` periodically samples CPU/MEM/IO + NVIDIA GPU metrics and appends them to a SQLite DB.
+- `resource_report.py` generates a **fancy interactive HTML report** (Plotly, zoom/pan/range buttons) and marks best-effort **top-process CPU spikes**.
+
+#### Usage
+
+```bash
+# 7-day report (includes zoom buttons for 1d / 12h / 6h / 1h)
+python3 resource_report.py \
+  --db-path ~/.cache/dynamo-utils/resource_monitor.sqlite \
+  --output ~/nvidia/dynamo_latest/resource_report_7d.html \
+  --days 7
+
+# 1-day report (smaller + faster)
+python3 resource_report.py \
+  --db-path ~/.cache/dynamo-utils/resource_monitor.sqlite \
+  --output ~/nvidia/dynamo_latest/resource_report_1d.html \
+  --days 1
+```
+
 ### show_dynamo_branches.py
 
 **Overview**: Branch status checker with GitHub PR integration.
@@ -623,10 +623,10 @@ docker run --rm --gpus all nvidia/cuda:11.8.0-base-ubuntu22.04 nvidia-smi
 ### Cache Issues
 ```bash
 # Clear specific cache file
-rm ~/nvidia/dynamo_latest/.cache/github_pr_merge_dates.json
+rm ~/.cache/dynamo-utils/github_pr_merge_dates.json
 
 # Or clear all cache files
-rm -rf ~/nvidia/dynamo_latest/.cache/
+rm -rf ~/.cache/dynamo-utils/
 
 # Regenerate with fresh data
 python3 show_commit_history.py --repo-path ~/nvidia/dynamo_latest --max-commits 200 --html --output ~/nvidia/dynamo_latest/index.html

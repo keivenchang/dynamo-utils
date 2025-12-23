@@ -81,7 +81,14 @@ fi
 
 # Generate commit history HTML
 DYNAMO_REPO="$NVIDIA_HOME/dynamo_latest"
-COMMIT_HISTORY_HTML="$DYNAMO_REPO/index.html"
+# When testing, avoid overwriting the main dashboard
+# Usage:
+#   DYNAMO_UTILS_TESTING=1 NVIDIA_HOME=$HOME/nvidia /path/to/update_html_pages.sh
+COMMIT_HISTORY_BASENAME="${COMMIT_HISTORY_BASENAME:-index.html}"
+if [ -n "${DYNAMO_UTILS_TESTING:-}" ]; then
+    COMMIT_HISTORY_BASENAME="index2.html"
+fi
+COMMIT_HISTORY_HTML="$DYNAMO_REPO/$COMMIT_HISTORY_BASENAME"
 
 if [ ! -d "$DYNAMO_REPO/.git" ]; then
     echo "$(date '+%Y-%m-%d %H:%M:%S') - ERROR: Not a git repository: $DYNAMO_REPO" >> "$LOG_FILE"
@@ -108,4 +115,25 @@ if python3 "$SCRIPT_DIR/show_commit_history.py" --repo-path . --html --max-commi
 else
     echo "$(date '+%Y-%m-%d %H:%M:%S') - ERROR: Failed to update commit-history.html" >> "$LOG_FILE"
     exit 1
+fi
+
+# Generate 1-day resource report HTML (best-effort; do not fail the entire cron if DB is missing)
+RESOURCE_DB="${RESOURCE_DB:-$HOME/.cache/dynamo-utils/resource_monitor.sqlite}"
+RESOURCE_REPORT_HTML="$SCRIPT_DIR/resource_report_1d.html"
+RESOURCE_REPORT_TMP="$SCRIPT_DIR/.resource_report_1d.html.tmp"
+
+if [ -f "$RESOURCE_DB" ]; then
+    if python3 "$SCRIPT_DIR/resource_report.py" \
+        --db-path "$RESOURCE_DB" \
+        --output "$RESOURCE_REPORT_TMP" \
+        --days 1 \
+        --title "keivenc-linux Resource Report" >> "$LOG_FILE" 2>&1; then
+        mv "$RESOURCE_REPORT_TMP" "$RESOURCE_REPORT_HTML"
+        echo "$(date '+%Y-%m-%d %H:%M:%S') - Updated $RESOURCE_REPORT_HTML" >> "$LOG_FILE"
+    else
+        rm -f "$RESOURCE_REPORT_TMP"
+        echo "$(date '+%Y-%m-%d %H:%M:%S') - WARNING: Failed to update $RESOURCE_REPORT_HTML" >> "$LOG_FILE"
+    fi
+else
+    echo "$(date '+%Y-%m-%d %H:%M:%S') - WARNING: Resource DB not found: $RESOURCE_DB" >> "$LOG_FILE"
 fi

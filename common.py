@@ -27,26 +27,80 @@ from zoneinfo import ZoneInfo
 # Global logger for the module
 _logger = logging.getLogger(__name__)
 
+# ======================================================================================
+# IMPORTANT: Cache location policy (dynamo-utils)
+#
+# All *persistent* caches for dynamo-utils MUST live under:
+#   - $DYNAMO_UTILS_CACHE_DIR       (explicit override), else
+#   - ~/.cache/dynamo-utils         (default)
+#
+# Do NOT write caches into a repo checkout (e.g. `dynamo_latest/.cache/...`), because:
+#   - it dirties the checkout (untracked files) and can break automation like `git checkout`
+#   - it scatters caches across multiple clones/paths
+#
+# Legacy behavior:
+#   - Some older call sites passed paths like ".cache/foo.json".
+#     `resolve_cache_path()` strips the leading ".cache/" and places the file in the global
+#     cache dir so older paths still work without polluting the repo.
+# ======================================================================================
+
+def dynamo_utils_cache_dir() -> Path:
+    """Return the cache directory for dynamo-utils.
+
+    Resolution order:
+    - DYNAMO_UTILS_CACHE_DIR (explicit override)
+    - ~/.cache/dynamo-utils
+    """
+    override = os.environ.get("DYNAMO_UTILS_CACHE_DIR")
+    if override:
+        return Path(override).expanduser()
+
+    return Path.home() / ".cache" / "dynamo-utils"
+
+
+def resolve_cache_path(cache_file: str) -> Path:
+    """Resolve a cache file path into the global dynamo-utils cache directory.
+
+    - Absolute paths are used as-is.
+    - Relative paths are rooted under `dynamo_utils_cache_dir()`.
+    - If the relative path starts with ".cache/", that prefix is stripped so older
+      call sites can pass ".cache/foo.json" but still land in ~/.cache/dynamo-utils/foo.json.
+    """
+    p = Path(cache_file).expanduser()
+    if p.is_absolute():
+        return p
+
+    # Normalize any leading "./"
+    rel = Path(*p.parts[1:]) if p.parts[:1] == (".",) else p
+
+    # Strip leading ".cache/" if present
+    if rel.parts[:1] == (".cache",):
+        rel = Path(*rel.parts[1:])
+
+    return dynamo_utils_cache_dir() / rel
+
 try:
     import docker  # type: ignore[import-untyped]
 except ImportError:
     docker = None  # type: ignore[assignment]
 
 try:
-    import yaml
+    import yaml  # type: ignore[import-not-found]
     HAS_YAML = True
 except ImportError:
+    yaml = None  # type: ignore[assignment]
     HAS_YAML = False
 
 try:
-    import requests
+    import requests  # type: ignore[import-not-found]
     HAS_REQUESTS = True
 except ImportError:
+    requests = None  # type: ignore[assignment]
     HAS_REQUESTS = False
 
 # GitPython is required - hard error if not installed
 try:
-    import git
+    import git  # type: ignore[import-not-found]
 except ImportError as e:
     raise ImportError("GitPython is required. Install with: pip install gitpython") from e
 
@@ -703,7 +757,7 @@ class DynamoRepositoryUtils(BaseUtils):
         Returns:
             Stored SHA string, or empty string if not found
         """
-        sha_file = self.repo_path / ".cache/build_images_composite_sha"
+        sha_file = self.repo_path / ".last_build_composite_sha"
         if sha_file.exists():
             stored = sha_file.read_text().strip()
             self.logger.debug(f"Found stored Composite Docker SHA (CDS): {stored[:12]}")
@@ -718,8 +772,7 @@ class DynamoRepositoryUtils(BaseUtils):
         Args:
             sha: Composite Docker SHA (CDS) to store
         """
-        sha_file = self.repo_path / ".cache/build_images_composite_sha"
-        sha_file.parent.mkdir(parents=True, exist_ok=True)
+        sha_file = self.repo_path / ".last_build_composite_sha"
         sha_file.write_text(sha)
         self.logger.info(f"Stored Composite Docker SHA (CDS): {sha[:12]}")
 
@@ -737,7 +790,7 @@ class DynamoRepositoryUtils(BaseUtils):
             True if rebuild is needed, False otherwise
         """
         self.logger.info("\nChecking if rebuild is needed based on file changes...")
-        self.logger.info(f"Composite Docker SHA file: {self.repo_path}/.cache/build_images_composite_sha")
+        self.logger.info(f"Composite Docker SHA file: {self.repo_path}/.last_build_composite_sha")
 
         # Generate current Composite Docker SHA (CDS) (full hash, not truncated)
         current_sha = self.generate_composite_sha(full_hash=True)
@@ -857,7 +910,7 @@ class DockerUtils(BaseUtils):
                 name=image_name,
                 repository=repository,
                 tag=tag,
-                image_id=image.id,  # Full ID
+                image_id=str(image.id) if getattr(image, "id", None) else "",  # Full ID
                 created_at=created_at,
                 size_bytes=size_bytes,
                 size_human=self._format_size(size_bytes),
@@ -1191,6 +1244,7 @@ class GitHubAPIClient:
         """
         if not HAS_YAML:
             return None
+        assert yaml is not None
 
         try:
             gh_config_path = Path.home() / '.config' / 'gh' / 'hosts.yml'
@@ -1219,18 +1273,20 @@ class GitHubAPIClient:
         """
         if not HAS_REQUESTS:
             raise ImportError("requests package required for GitHub API client. Install with: pip install requests")
+        assert requests is not None
 
         # Token priority: 1) provided token, 2) environment variable, 3) GitHub CLI config
         self.token = token or os.environ.get('GITHUB_TOKEN') or self.get_github_token_from_cli()
         self.base_url = "https://api.github.com"
         self.headers = {'Accept': 'application/vnd.github.v3+json'}
+        self.logger = logging.getLogger(self.__class__.__name__)
 
         if self.token:
             self.headers['Authorization'] = f'token {self.token}'
 
         # Cache for job logs (two-tier: memory + disk)
         self._job_log_cache: Dict[str, Optional[str]] = {}
-        self._cache_dir = Path.home() / ".cache" / "dynamo-utils" / "job-logs"
+        self._cache_dir = dynamo_utils_cache_dir() / "job-logs"
 
     def get(self, endpoint: str, params: Optional[Dict[str, Any]] = None, timeout: int = 10) -> Optional[Dict]:
         """Make GET request to GitHub API.
@@ -1276,6 +1332,7 @@ class GitHubAPIClient:
         url = f"{self.base_url}{endpoint}" if endpoint.startswith('/') else f"{self.base_url}/{endpoint}"
 
         try:
+            assert requests is not None
             response = requests.get(url, headers=self.headers, params=params, timeout=timeout)
 
             if response.status_code == 403:
@@ -1288,7 +1345,7 @@ class GitHubAPIClient:
             response.raise_for_status()
             return response.json()
 
-        except requests.exceptions.RequestException as e:
+        except requests.exceptions.RequestException as e:  # type: ignore[union-attr]
             raise Exception(f"GitHub API request failed for {endpoint}: {e}")
 
     def has_token(self) -> bool:
@@ -1741,6 +1798,7 @@ class GitHubAPIClient:
         Returns:
             Error summary string or None
         """
+        job_id = "unknown"
         try:
             # Extract job ID from URL
             # Example: https://github.com/ai-dynamo/dynamo/actions/runs/18697156351/job/53317461976
@@ -2306,7 +2364,7 @@ class GitHubAPIClient:
     def get_cached_pr_merge_dates(self, pr_numbers: List[int],
                                   owner: str = "ai-dynamo",
                                   repo: str = "dynamo",
-                                  cache_file: str = '.cache/github_pr_merge_dates.json') -> Dict[int, Optional[str]]:
+                                  cache_file: str = '.github_pr_merge_dates_cache.json') -> Dict[int, Optional[str]]:
         """Get merge dates for pull requests with caching.
 
         Merge dates are cached permanently since they don't change once a PR is merged.
@@ -2327,7 +2385,7 @@ class GitHubAPIClient:
             >>> merge_dates
             {4965: "2025-12-18 12:34:56", 5009: None}
 
-        Cache file format (.cache/github_pr_merge_dates.json):
+        Cache file format (.github_pr_merge_dates_cache.json):
         {
             "4965": "2025-12-18 12:34:56",
             "5009": null
@@ -2336,7 +2394,7 @@ class GitHubAPIClient:
 
         # Load cache
         cache = {}
-        pr_cache_path = Path(cache_file)
+        pr_cache_path = resolve_cache_path(cache_file)
         if pr_cache_path.exists():
             try:
                 cache_raw = json.loads(pr_cache_path.read_text())
@@ -2413,7 +2471,7 @@ class GitHubAPIClient:
             owner: Repository owner
             repo: Repository name
             sha_list: List of commit SHAs (full 40-char)
-            cache_file: Path to cache file (default: .cache/github_actions_status.json)
+            cache_file: Path to cache file (default: .github_actions_status_cache.json)
             skip_fetch: If True, only return cached data
 
         Returns:
@@ -2431,9 +2489,9 @@ class GitHubAPIClient:
         from concurrent.futures import ThreadPoolExecutor
 
         if cache_file is None:
-            cache_file = Path.cwd() / '.cache/github_actions_status.json'
+            cache_file = resolve_cache_path('.github_actions_status_cache.json')
         else:
-            cache_file = Path(cache_file)
+            cache_file = resolve_cache_path(str(cache_file))
 
         # Load cache
         cache = {}
@@ -2511,7 +2569,7 @@ class GitHubAPIClient:
                     else:
                         return (sha, None)
                 except Exception as e:
-                    logger.debug(f"Failed to fetch check status for {sha[:8]}: {e}")
+                    _logger.debug(f"Failed to fetch check status for {sha[:8]}: {e}")
                     return (sha, None)
 
             # Fetch in parallel with 10 workers
@@ -2642,6 +2700,7 @@ class GitLabAPIClient:
         url = f"{self.base_url}{endpoint}" if endpoint.startswith('/') else f"{self.base_url}/{endpoint}"
 
         try:
+            assert requests is not None
             response = requests.get(url, headers=self.headers, params=params, timeout=timeout)
 
             if response.status_code == 401:
@@ -2654,13 +2713,13 @@ class GitLabAPIClient:
             response.raise_for_status()
             return response.json()
 
-        except requests.exceptions.RequestException as e:
+        except requests.exceptions.RequestException as e:  # type: ignore[union-attr]
             raise Exception(f"GitLab API request failed for {endpoint}: {e}")
 
     def get_cached_registry_images_for_shas(self, project_id: str, registry_id: str,
                                            sha_list: List[str],
                                            sha_to_datetime: Optional[Dict[str, datetime]] = None,
-                                           cache_file: str = '.cache/gitlab_commit_sha.json',
+                                           cache_file: str = '.gitlab_commit_sha_cache.json',
                                            skip_fetch: bool = False) -> Dict[str, List[Dict[str, Any]]]:
         """Get container registry images for commit SHAs with caching.
 
@@ -2676,13 +2735,13 @@ class GitLabAPIClient:
             registry_id: Container registry ID
             sha_list: List of full commit SHAs (40 characters)
             sha_to_datetime: Optional dict mapping SHA to committed_datetime for time-based filtering
-            cache_file: Path to cache file (default: .cache/gitlab_commit_sha.json)
+            cache_file: Path to cache file (default: .gitlab_commit_sha_cache.json)
             skip_fetch: If True, only return cached data without fetching from GitLab
 
         Returns:
             Dictionary mapping SHA to list of image info dicts
 
-        Cache file format (.cache/gitlab_commit_sha.json):
+        Cache file format (.gitlab_commit_sha_cache.json):
             {
                 "21a03b316dc1e5031183965e5798b0d9fe2e64b3": [
                     {
@@ -2701,7 +2760,7 @@ class GitLabAPIClient:
 
         # Load cache
         cache = {}
-        cache_path = Path(cache_file)
+        cache_path = resolve_cache_path(cache_file)
         if cache_path.exists():
             try:
                 cache = json.loads(cache_path.read_text())
@@ -2778,7 +2837,7 @@ class GitLabAPIClient:
 
             try:
                 # Make direct request to get headers
-                if HAS_REQUESTS:
+                if HAS_REQUESTS and requests is not None:
                     url = f"{self.base_url}{endpoint}"
                     response = requests.get(url, headers=self.headers, params=params, timeout=10)
                     response.raise_for_status()
@@ -2933,7 +2992,7 @@ class GitLabAPIClient:
         return result
 
     def get_cached_pipeline_status(self, sha_list: List[str],
-                                  cache_file: str = '.cache/gitlab_pipeline_status.json',
+                                  cache_file: str = '.gitlab_pipeline_status_cache.json',
                                   skip_fetch: bool = False) -> Dict[str, Optional[Dict[str, Any]]]:
         """Get GitLab CI pipeline status for commits with intelligent caching.
 
@@ -2946,7 +3005,7 @@ class GitLabAPIClient:
 
         Args:
             sha_list: List of full commit SHAs (40 characters)
-            cache_file: Path to cache file (default: .cache/gitlab_pipeline_status.json)
+            cache_file: Path to cache file (default: .gitlab_pipeline_status_cache.json)
             skip_fetch: If True, only return cached data without fetching from GitLab
 
         Returns:
@@ -2962,7 +3021,7 @@ class GitLabAPIClient:
                 "5fe0476e605d2564234f00e8123461e1594a9ce7": None
             }
 
-        Cache file format (.cache/gitlab_pipeline_status.json) - internally used:
+        Cache file format (.gitlab_pipeline_status_cache.json) - internally used:
         {
             "21a03b316dc1e5031183965e5798b0d9fe2e64b3": {
                 "status": "success",
@@ -2979,7 +3038,7 @@ class GitLabAPIClient:
 
         # Load cache
         cache = {}
-        pipeline_cache_path = Path(cache_file)
+        pipeline_cache_path = resolve_cache_path(cache_file)
         if pipeline_cache_path.exists():
             try:
                 cache = json.loads(pipeline_cache_path.read_text())
@@ -3060,7 +3119,7 @@ class GitLabAPIClient:
         return result
 
     def get_cached_pipeline_job_counts(self, pipeline_ids: List[int],
-                                      cache_file: str = '.cache/gitlab_pipeline_jobs.json',
+                                      cache_file: str = '.gitlab_pipeline_jobs_cache.json',
                                       skip_fetch: bool = False) -> Dict[int, Optional[Dict[str, int]]]:
         """Get GitLab CI pipeline job counts with intelligent caching.
 
@@ -3072,7 +3131,7 @@ class GitLabAPIClient:
 
         Args:
             pipeline_ids: List of pipeline IDs
-            cache_file: Path to cache file (default: .cache/gitlab_pipeline_jobs.json)
+            cache_file: Path to cache file (default: .gitlab_pipeline_jobs_cache.json)
             skip_fetch: If True, only return cached data without fetching from GitLab
 
         Returns:
@@ -3104,7 +3163,7 @@ class GitLabAPIClient:
         """
         # Load cache
         cache = {}
-        jobs_cache_path = Path(cache_file)
+        jobs_cache_path = resolve_cache_path(cache_file)
         if jobs_cache_path.exists():
             try:
                 cache = json.loads(jobs_cache_path.read_text())
@@ -3234,13 +3293,16 @@ class GitLabAPIClient:
 
         return result
 
-    def get_cached_pipeline_job_details(self, pipeline_ids: List[int],
-                                       cache_file: str = '.cache/gitlab_pipeline_jobs_details.json',
-                                       skip_fetch: bool = False) -> Dict[int, Optional[Dict]]:
-        """Get GitLab CI pipeline job details (counts + individual job info) with intelligent caching.
+    def get_cached_pipeline_job_details(
+        self,
+        pipeline_ids: List[int],
+        cache_file: str = ".gitlab_pipeline_jobs_details_cache.json",
+        skip_fetch: bool = False,
+    ) -> Dict[int, Optional[Dict[str, Any]]]:
+        """Get GitLab CI pipeline job details (counts + job list) with intelligent caching.
 
-        This is an extension of get_cached_pipeline_job_counts that also returns individual job
-        names and statuses for creating detailed tooltips/popups.
+        This is a richer variant of `get_cached_pipeline_job_counts` that also returns a
+        slim per-job list for UI tooltips.
 
         Caching strategy:
         - If skip_fetch=True: Only return cached data, no API calls
@@ -3250,171 +3312,144 @@ class GitLabAPIClient:
 
         Args:
             pipeline_ids: List of pipeline IDs
-            cache_file: Path to cache file (default: .cache/gitlab_pipeline_jobs_details.json)
+            cache_file: Path to cache file
             skip_fetch: If True, only return cached data without fetching from GitLab
 
         Returns:
-            Dictionary mapping pipeline ID to job details dict (or None if fetch failed)
+            Dictionary mapping pipeline ID -> details dict (or None if unavailable)
 
             Example return value:
             {
-                40355198: {
-                    "counts": {"success": 16, "failed": 0, "running": 6, "pending": 0},
-                    "jobs": [
-                        {"name": "build", "status": "success"},
-                        {"name": "test", "status": "running"},
-                        ...
-                    ]
+                40118215: {
+                    "counts": {"success": 15, "failed": 8, "running": 0, "pending": 0},
+                    "jobs": [{"name": "build", "status": "success"}, {"name": "test", "status": "failed"}],
+                    "fetched_at": "2025-12-18T02:44:20.118368Z"
                 },
-                40341238: {
-                    "counts": {"success": 11, "failed": 13, "running": 0, "pending": 0},
-                    "jobs": [...]
-                }
-            }
-
-        Cache file format (with timestamps):
-            {
-                "40355198": {
-                    "counts": {"success": 16, "failed": 0, "running": 6, "pending": 0},
-                    "jobs": [{"name": "build", "status": "success"}, ...],
-                    "fetched_at": "2025-12-17T18:15:00Z"
-                }
+                40118216: None
             }
         """
         # Load cache
-        cache = {}
-        jobs_cache_path = Path(cache_file)
+        cache: Dict[int, Any] = {}
+        jobs_cache_path = resolve_cache_path(cache_file)
         if jobs_cache_path.exists():
             try:
-                cache = json.loads(jobs_cache_path.read_text())
+                raw = json.loads(jobs_cache_path.read_text())
                 # Convert string keys back to int
-                cache = {int(k): v for k, v in cache.items()}
+                cache = {int(k): v for k, v in raw.items()}
             except Exception:
-                pass
+                cache = {}
 
-        # Helper function to extract data from cache entry
-        def extract_data(entry):
+        def normalize_entry(entry: Any) -> Optional[Dict[str, Any]]:
+            """Normalize cache entry to {counts, jobs, fetched_at} (best-effort)."""
             if not entry:
                 return None
-            # Return the full data (counts + jobs)
-            if isinstance(entry, dict) and 'counts' in entry and 'jobs' in entry:
-                return {'counts': entry['counts'], 'jobs': entry['jobs']}
+            if not isinstance(entry, dict):
+                return None
+            # New format
+            if "counts" in entry or "jobs" in entry or "fetched_at" in entry:
+                counts = entry.get("counts") if isinstance(entry.get("counts"), dict) else None
+                jobs = entry.get("jobs") if isinstance(entry.get("jobs"), list) else []
+                fetched_at = entry.get("fetched_at")
+                return {
+                    "counts": counts or {"success": 0, "failed": 0, "running": 0, "pending": 0},
+                    "jobs": jobs,
+                    "fetched_at": fetched_at,
+                }
+            # Old format fallback: counts-only dict
+            if all(k in entry for k in ("success", "failed", "running", "pending")):
+                return {"counts": entry, "jobs": [], "fetched_at": None}
             return None
 
-        # Helper function to check if pipeline is completed (no running/pending jobs)
-        def is_completed(entry):
-            if not entry or not isinstance(entry, dict):
+        def is_completed(entry_norm: Optional[Dict[str, Any]]) -> bool:
+            if not entry_norm:
                 return False
-            counts = entry.get('counts', {})
-            return counts.get('running', 0) == 0 and counts.get('pending', 0) == 0
+            counts = entry_norm.get("counts") or {}
+            return counts.get("running", 0) == 0 and counts.get("pending", 0) == 0
 
-        # Helper function to check if cache entry is fresh
-        def is_fresh(entry, now, age_limit):
-            if not isinstance(entry, dict) or 'fetched_at' not in entry:
-                return False  # Missing timestamp = stale
-
-            # If pipeline is completed, cache forever
-            if is_completed(entry):
+        def is_fresh(entry_norm: Optional[Dict[str, Any]], now: datetime, age_limit: timedelta) -> bool:
+            if not entry_norm:
+                return False
+            # Completed pipelines are cached forever
+            if is_completed(entry_norm):
                 return True
-
-            # Otherwise, check if < 30 minutes old
+            fetched_at = entry_norm.get("fetched_at")
+            if not fetched_at or not isinstance(fetched_at, str):
+                return False
             try:
-                fetched_at = datetime.fromisoformat(entry['fetched_at'].replace('Z', '+00:00'))
-                return (now - fetched_at) < age_limit
+                ts = datetime.fromisoformat(fetched_at.replace("Z", "+00:00"))
+                return (now - ts) < age_limit
             except Exception:
-                return False  # Invalid timestamp = stale
+                return False
 
         now = datetime.now(timezone.utc)
         cache_age_limit = timedelta(minutes=30)
 
-        # If skip_fetch=True, only return cached data - NO API calls
+        # skip_fetch => return cached values only
         if skip_fetch:
-            return {pid: extract_data(cache.get(pid)) for pid in pipeline_ids}
+            return {pid: normalize_entry(cache.get(pid)) for pid in pipeline_ids}
 
-        # Determine which pipelines need fetching
-        pipeline_ids_to_fetch = []
-        result = {}
+        pipeline_ids_to_fetch: List[int] = []
+        result: Dict[int, Optional[Dict[str, Any]]] = {}
 
         for pipeline_id in pipeline_ids:
-            cached_entry = cache.get(pipeline_id)
-
-            if cached_entry and is_fresh(cached_entry, now, cache_age_limit):
-                # Cache is fresh, use it
-                result[pipeline_id] = extract_data(cached_entry)
+            cached_entry_norm = normalize_entry(cache.get(pipeline_id))
+            if cached_entry_norm and is_fresh(cached_entry_norm, now, cache_age_limit):
+                result[pipeline_id] = cached_entry_norm
             else:
-                # Not in cache, or cache is stale - refetch
                 pipeline_ids_to_fetch.append(pipeline_id)
-                result[pipeline_id] = extract_data(cached_entry)  # Use existing data temporarily if available
+                result[pipeline_id] = cached_entry_norm
 
-        # Fetch missing pipeline job details from GitLab in parallel
         if pipeline_ids_to_fetch and self.has_token():
-            fetch_timestamp = now.isoformat().replace('+00:00', 'Z')
+            fetch_timestamp = now.isoformat().replace("+00:00", "Z")
 
-            def fetch_pipeline_job_details(pipeline_id):
-                """Helper function to fetch job details for a single pipeline"""
+            def fetch_pipeline_jobs_details(pipeline_id: int) -> Tuple[int, Optional[Dict[str, Any]]]:
                 try:
-                    # Get jobs for this pipeline
                     endpoint = f"/api/v4/projects/169905/pipelines/{pipeline_id}/jobs"
-                    params = {'per_page': 100}  # Get up to 100 jobs
+                    params = {"per_page": 100}
                     jobs = self.get(endpoint, params=params)
+                    if not jobs:
+                        return pipeline_id, None
 
-                    if jobs:
-                        # Count jobs by status and collect individual job info
-                        counts = {
-                            'success': 0,
-                            'failed': 0,
-                            'running': 0,
-                            'pending': 0
-                        }
-                        job_details = []
+                    counts = {"success": 0, "failed": 0, "running": 0, "pending": 0}
+                    slim_jobs: List[Dict[str, Any]] = []
 
-                        for job in jobs:
-                            status = job.get('status', 'unknown')
-                            name = job.get('name', 'unnamed')
+                    for job in jobs:
+                        status = job.get("status", "unknown")
+                        name = job.get("name", "")
 
-                            # Store individual job details
-                            job_details.append({'name': name, 'status': status})
+                        # Counts (map GitLab statuses to our buckets)
+                        if status in counts:
+                            counts[status] += 1
+                        elif status in ("created", "waiting_for_resource"):
+                            counts["pending"] += 1
+                        elif status in ("skipped", "manual", "canceled"):
+                            pass
+                        else:
+                            # Keep unknown statuses out of counts
+                            pass
 
-                            # Count jobs by status
-                            if status in counts:
-                                counts[status] += 1
-                            # Map other statuses to main categories
-                            elif status in ('skipped', 'manual', 'canceled'):
-                                pass  # Don't count these
-                            elif status in ('created', 'waiting_for_resource'):
-                                counts['pending'] += 1
+                        # Tooltip list (keep it light)
+                        if name:
+                            slim_jobs.append({"name": name, "status": status})
 
-                        # Return with timestamp
-                        return (pipeline_id, {'counts': counts, 'jobs': job_details}, fetch_timestamp)
-                    else:
-                        return (pipeline_id, None, None)
+                    details = {"counts": counts, "jobs": slim_jobs, "fetched_at": fetch_timestamp}
+                    return pipeline_id, details
                 except Exception:
-                    return (pipeline_id, None, None)
+                    return pipeline_id, None
 
-            # Fetch in parallel with 10 workers
             with ThreadPoolExecutor(max_workers=10) as executor:
-                futures = [executor.submit(fetch_pipeline_job_details, pid) for pid in pipeline_ids_to_fetch]
-
-                # Collect results as they complete
+                futures = [executor.submit(fetch_pipeline_jobs_details, pid) for pid in pipeline_ids_to_fetch]
                 for future in futures:
                     try:
-                        pipeline_id, data, timestamp = future.result()
-                        result[pipeline_id] = data
-                        if data is not None and timestamp is not None:
-                            cache[pipeline_id] = {
-                                'counts': data['counts'],
-                                'jobs': data['jobs'],
-                                'fetched_at': timestamp
-                            }
-                        else:
-                            cache[pipeline_id] = None
+                        pid, details = future.result()
+                        result[pid] = details
+                        cache[pid] = details
                     except Exception:
                         pass
 
             # Save updated cache
             try:
                 jobs_cache_path.parent.mkdir(parents=True, exist_ok=True)
-                # Convert int keys to string for JSON
                 cache_str_keys = {str(k): v for k, v in cache.items()}
                 jobs_cache_path.write_text(json.dumps(cache_str_keys, indent=2))
             except Exception:
@@ -3445,7 +3480,7 @@ class GitLabAPIClient:
 
     def get_cached_mr_merge_dates(self, mr_numbers: List[int],
                                   project_id: str = "169905",
-                                  cache_file: str = '.cache/gitlab_mr_merge_dates.json',
+                                  cache_file: str = '.gitlab_mr_merge_dates_cache.json',
                                   skip_fetch: bool = False) -> Dict[int, Optional[str]]:
         """Get merge dates for merge requests with caching.
 
@@ -3467,7 +3502,7 @@ class GitLabAPIClient:
             >>> merge_dates
             {4965: "2025-12-18 12:34:56", 5009: None}
 
-        Cache file format (.cache/gitlab_mr_merge_dates.json):
+        Cache file format (.gitlab_mr_merge_dates_cache.json):
         {
             "4965": "2025-12-18 12:34:56",
             "5009": null
@@ -3476,7 +3511,7 @@ class GitLabAPIClient:
 
         # Load cache
         cache = {}
-        mr_cache_path = Path(cache_file)
+        mr_cache_path = resolve_cache_path(cache_file)
         if mr_cache_path.exists():
             try:
                 # Keys are stored as strings in JSON, convert back to int

@@ -10,7 +10,10 @@ Can output to terminal or HTML format.
 """
 
 import argparse
-import git
+try:
+    import git  # type: ignore[import-not-found]
+except Exception:  # pragma: no cover
+    git = None  # type: ignore[assignment]
 import glob
 import json
 import logging
@@ -23,7 +26,7 @@ from pathlib import Path
 from typing import List, Dict, Optional
 
 # Import utilities from common module
-from common import DynamoRepositoryUtils, GitLabAPIClient, GitHubAPIClient, get_terminal_width
+from common import DynamoRepositoryUtils, GitLabAPIClient, GitHubAPIClient, get_terminal_width, dynamo_utils_cache_dir
 
 # Import Jinja2 for HTML template rendering
 try:
@@ -31,6 +34,9 @@ try:
     HAS_JINJA2 = True
 except ImportError:
     HAS_JINJA2 = False
+    Environment = None  # type: ignore[assignment]
+    FileSystemLoader = None  # type: ignore[assignment]
+    select_autoescape = None  # type: ignore[assignment]
 
 # Try to import pytz, but make it optional
 try:
@@ -38,6 +44,7 @@ try:
     HAS_PYTZ = True
 except ImportError:
     HAS_PYTZ = False
+    pytz = None  # type: ignore[assignment]
 
 
 class CommitHistoryGenerator:
@@ -58,7 +65,8 @@ class CommitHistoryGenerator:
         self.debug = debug
         self.skip_gitlab_fetch = skip_gitlab_fetch
         self.logger = self._setup_logger()
-        self.cache_file = self.repo_path / ".cache/commit_history.json"
+        # Cache files live in ~/.cache/dynamo-utils to avoid polluting the repo checkout
+        self.cache_file = dynamo_utils_cache_dir() / "commit_history.json"
         self.gitlab_client = GitLabAPIClient()  # Single instance for all GitLab operations
         self.github_client = GitHubAPIClient()  # Single instance for all GitHub operations
 
@@ -72,16 +80,16 @@ class CommitHistoryGenerator:
         else:
             logger.setLevel(logging.WARNING)
 
+        handler = logging.StreamHandler()
+        if self.debug:
+            handler.setLevel(logging.DEBUG)
+        elif self.verbose:
+            handler.setLevel(logging.INFO)
+        else:
+            handler.setLevel(logging.WARNING)
+        formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+        handler.setFormatter(formatter)
         if not logger.handlers:
-            handler = logging.StreamHandler()
-            if self.debug:
-                handler.setLevel(logging.DEBUG)
-            elif self.verbose:
-                handler.setLevel(logging.INFO)
-            else:
-                handler.setLevel(logging.WARNING)
-            formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-            handler.setFormatter(formatter)
             logger.addHandler(handler)
         
         # Also configure the common module logger
@@ -98,7 +106,7 @@ class CommitHistoryGenerator:
         
         return logger
 
-    def show_commit_history(self, max_commits: int = 50, html_output: bool = False, output_path: Path = None, logs_dir: Path = None) -> int:
+    def show_commit_history(self, max_commits: int = 50, html_output: bool = False, output_path: Optional[Path] = None, logs_dir: Optional[Path] = None) -> int:
         """Show recent commit history with Composite Docker SHAs (CDS)
 
         Args:
@@ -148,7 +156,11 @@ class CommitHistoryGenerator:
             except Exception as e:
                 self.logger.warning(f"Failed to load cache: {e}")
 
+        repo = None
+        original_head = None
         try:
+            if git is None:
+                raise ImportError("GitPython is required. Install with: pip install gitpython")
             repo = git.Repo(self.repo_path)
             commits = list(repo.iter_commits('HEAD', max_count=max_commits))
             original_head = repo.head.commit.hexsha
@@ -169,7 +181,7 @@ class CommitHistoryGenerator:
                     self.logger.info(f"Fetching merge dates for {len(pr_numbers)} PRs...")
                     pr_to_merge_date = self.github_client.get_cached_pr_merge_dates(
                         pr_numbers,
-                        cache_file=str(self.repo_path / '.cache/github_pr_merge_dates.json')
+                        cache_file="github_pr_merge_dates.json"
                     )
                     self.logger.info(f"Got merge dates for {sum(1 for v in pr_to_merge_date.values() if v)} PRs")
 
@@ -177,16 +189,18 @@ class CommitHistoryGenerator:
             commit_data = []
             cache_updated = False
 
+            # Terminal width settings (initialize unconditionally so static analyzers don't complain)
+            term_width = get_terminal_width(padding=2, default=118)
+            sha_width = 10
+            composite_width = 13
+            date_width = 20
+            author_width = 20
+            separator_width = 3
+            fixed_width = sha_width + composite_width + date_width + author_width + separator_width
+            message_width = max(30, term_width - fixed_width)
+
             if not html_output:
                 # Terminal output mode
-                term_width = get_terminal_width(padding=2, default=118)
-                sha_width = 10
-                composite_width = 13
-                date_width = 20
-                author_width = 20
-                separator_width = 3
-                fixed_width = sha_width + composite_width + date_width + author_width + separator_width
-                message_width = max(30, term_width - fixed_width)
 
                 print(f"\nCommit History with Composite Docker SHAs")
                 print(f"Repository: {self.repo_path}")
@@ -198,6 +212,13 @@ class CommitHistoryGenerator:
                 for i, commit in enumerate(commits):
                     sha_short = commit.hexsha[:9]
                     sha_full = commit.hexsha
+
+                    # Defaults to keep static analyzers happy (only used in HTML mode)
+                    full_message = ""
+                    files_changed = 0
+                    insertions = 0
+                    deletions = 0
+                    changed_files: List[str] = []
 
                     # Check cache first - handle both old format (string) and new format (dict)
                     cached_entry = cache.get(sha_full)
@@ -329,10 +350,11 @@ class CommitHistoryGenerator:
                         self.logger.debug(f"Processed commit {i+1}/{len(commits)}: {sha_short}")
 
             finally:
-                # Restore original HEAD
-                repo.git.checkout(original_head)
-                if not html_output:
-                    print(f"\nRestored HEAD to {original_head[:9]}")
+                # Restore original HEAD (best-effort)
+                if repo is not None and original_head is not None:
+                    repo.git.checkout(original_head)
+                    if not html_output:
+                        print(f"\nRestored HEAD to {original_head[:9]}")
 
             # Generate HTML if requested
             if html_output:
@@ -373,7 +395,8 @@ class CommitHistoryGenerator:
             print("\n\nOperation interrupted by user")
             # Try to restore HEAD
             try:
-                repo.git.checkout(original_head)
+                if repo is not None and original_head is not None:
+                    repo.git.checkout(original_head)
             except:
                 pass
             return 1
@@ -394,6 +417,8 @@ class CommitHistoryGenerator:
         """
         if not HAS_JINJA2:
             raise ImportError("jinja2 is required for HTML generation. Install with: pip install jinja2")
+        # Make type checkers happy: these are only None when HAS_JINJA2 is False.
+        assert Environment is not None and FileSystemLoader is not None and select_autoescape is not None
         
         # Get local Docker images containing SHAs
         docker_images = self._get_local_docker_images_by_sha([c['sha_short'] for c in commit_data])
@@ -415,7 +440,7 @@ class CommitHistoryGenerator:
             owner='ai-dynamo',
             repo='dynamo',
             sha_list=[c['sha_full'] for c in commit_data],
-            cache_file=str(self.repo_path / '.cache/github_actions_status.json'),
+            cache_file="github_actions_status.json",
             skip_fetch=self.skip_gitlab_fetch  # Reuse the skip_fetch flag
         )
 
@@ -463,7 +488,7 @@ class CommitHistoryGenerator:
                         # Parse UTC timestamp
                         dt = datetime.fromisoformat(created_at.replace('Z', '+00:00'))
                         # Convert to PDT if pytz is available
-                        if HAS_PYTZ:
+                        if HAS_PYTZ and pytz is not None:
                             pdt = pytz.timezone('America/Los_Angeles')
                             dt = dt.astimezone(pdt)
                         created_display = dt.strftime('%Y-%m-%d %H:%M')
@@ -671,8 +696,11 @@ class CommitHistoryGenerator:
         
         # Generate timestamp
         if HAS_PYTZ:
-            pdt = pytz.timezone('America/Los_Angeles')
-            generated_time = datetime.now(pdt).strftime('%Y-%m-%d %H:%M:%S %Z')
+            if HAS_PYTZ and pytz is not None:
+                pdt = pytz.timezone('America/Los_Angeles')
+                generated_time = datetime.now(pdt).strftime('%Y-%m-%d %H:%M:%S %Z')
+            else:
+                generated_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         else:
             generated_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         
@@ -763,7 +791,7 @@ class CommitHistoryGenerator:
         Returns:
             Dictionary mapping SHA to list of registry image info
         """
-        cache_file = str(self.repo_path / ".cache/gitlab_commit_sha.json")
+        cache_file = "gitlab_commit_sha.json"
 
         sha_full_list = [c['sha_full'] for c in commit_data]
         sha_to_datetime = {c['sha_full']: c['committed_datetime'] for c in commit_data}
@@ -810,7 +838,7 @@ class CommitHistoryGenerator:
         Returns:
             Dictionary mapping SHA to pipeline status dict with 'status', 'id', 'web_url'
         """
-        cache_file = str(self.repo_path / ".cache/gitlab_pipeline_status.json")
+        cache_file = "gitlab_pipeline_status.json"
 
         self.logger.debug(f"Getting pipeline status for {len(sha_full_list)} commits")
         
@@ -863,7 +891,7 @@ class CommitHistoryGenerator:
         Returns:
             Dictionary mapping pipeline ID to job details dict with 'counts' and 'jobs'
         """
-        cache_file = str(self.repo_path / ".cache/gitlab_pipeline_jobs_details.json")
+        cache_file = "gitlab_pipeline_jobs_details.json"
 
         self.logger.debug(f"Getting job details for {len(pipeline_ids)} pipelines")
 
