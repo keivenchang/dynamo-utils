@@ -141,8 +141,7 @@ results in a lightweight SQLite DB. It also records the top resource-consuming p
 ```
 
 **Default storage:**
-- If run from a repo directory: `./.cache/resource_monitor.sqlite`
-- Otherwise: `~/.cache/dynamo-utils/resource_monitor.sqlite`
+- `~/.cache/dynamo-utils/resource_monitor.sqlite`
 - Lock file: `<db-path>.lock`
 
 ---
