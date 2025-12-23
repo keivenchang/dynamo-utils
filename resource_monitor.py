@@ -653,7 +653,10 @@ class Monitor:
 
 
 def _default_db_path() -> Path:
-    # Always use a stable per-user location by default.
+    # Prefer current repo-style ".cache/" if it exists; else fall back to ~/.cache/dynamo-utils/
+    cwd_cache = Path.cwd() / ".cache"
+    if cwd_cache.exists() or (Path.cwd() / ".git").exists():
+        return cwd_cache / "resource_monitor.sqlite"
     return Path.home() / ".cache" / "dynamo-utils" / "resource_monitor.sqlite"
 
 
