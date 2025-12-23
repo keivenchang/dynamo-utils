@@ -37,6 +37,7 @@ dynamo-utils/
 ├── git_stats.py                  # Git repository statistics analyzer
 ├── gpu_reset.sh                  # GPU reset utility
 ├── inference.sh                  # Launch Dynamo inference services
+├── resource_monitor.py           # Single-instance system/GPU resource sampler -> SQLite
 ├── show_commit_history.j2        # HTML template for commit history
 ├── show_commit_history.py        # Commit history with CI status and Docker images
 ├── show_dynamo_branches.py       # Branch status checker
@@ -119,6 +120,30 @@ Launches Dynamo inference services (frontend and backend).
 **Environment variables:**
 - `DYN_FRONTEND_PORT`: Frontend port (default: 8000)
 - `DYN_BACKEND_PORT`: Backend port (default: 8081)
+
+---
+
+### Monitoring
+
+#### `resource_monitor.py`
+Single-instance system + GPU resource monitor that periodically samples CPU/MEM/NET/DISK/GPU and stores
+results in a lightweight SQLite DB. It also records the top resource-consuming processes per sample.
+
+```bash
+# Run continuously (default: every 15s). Uses a lock file so only one instance runs.
+./resource_monitor.py
+
+# One sample then exit
+./resource_monitor.py --once
+
+# Customize DB location and sampling frequency
+./resource_monitor.py --db-path ~/.cache/dynamo-utils/resource_monitor.sqlite --interval-seconds 10
+```
+
+**Default storage:**
+- If run from a repo directory: `./.cache/resource_monitor.sqlite`
+- Otherwise: `~/.cache/dynamo-utils/resource_monitor.sqlite`
+- Lock file: `<db-path>.lock`
 
 ---
 
