@@ -16,6 +16,7 @@ import json
 import os
 import sqlite3
 import statistics
+import urllib.parse
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -24,6 +25,16 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 def _json(obj: Any) -> str:
     return json.dumps(obj, ensure_ascii=False, separators=(",", ":"), default=str)
+
+_FAVICON_SVG = """<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
+  <rect width="100" height="100" fill="#76b900" rx="15"/>
+  <text x="50" y="75" font-family="Arial, sans-serif" font-size="70" font-weight="bold" fill="white" text-anchor="middle">K</text>
+</svg>"""
+
+
+def _favicon_data_url() -> str:
+    # Inline favicon so it works under any base path (/ vs /dynamo_ci/ etc) and when opened as a file.
+    return "data:image/svg+xml," + urllib.parse.quote(_FAVICON_SVG)
 
 
 def _default_db_path() -> Path:
@@ -387,6 +398,104 @@ def _query_net_timeseries(
     return out
 
 
+def _query_docker_leaderboard(
+    con: sqlite3.Connection, *, start_ts: float, limit: int
+) -> List[Dict[str, Any]]:
+    """
+    Container leaderboard from docker_container_samples.
+    """
+    if not _table_exists(con, "docker_container_samples"):
+        return []
+    cur = con.cursor()
+    rows = cur.execute(
+        """
+        SELECT
+          d.container_id AS container_id,
+          MAX(COALESCE(d.image,'')) AS image,
+          MAX(d.container_id) AS container_id,
+          MAX(d.name) AS name,
+          AVG(COALESCE(d.cpu_percent,0)) AS avg_cpu_percent,
+          MAX(COALESCE(d.cpu_percent,0)) AS max_cpu_percent,
+          AVG(COALESCE(d.mem_usage_bytes,0)) AS avg_mem_usage_bytes,
+          MAX(COALESCE(d.mem_usage_bytes,0)) AS max_mem_usage_bytes,
+          AVG(COALESCE(d.mem_percent,0)) AS avg_mem_percent,
+          MAX(COALESCE(d.mem_percent,0)) AS max_mem_percent,
+          COUNT(*) AS sample_rows
+        FROM docker_container_samples d
+        JOIN samples s ON s.id = d.sample_id
+        WHERE s.ts_unix >= ?
+        GROUP BY d.container_id
+        ORDER BY avg_mem_usage_bytes DESC, avg_cpu_percent DESC
+        LIMIT ?
+        """,
+        (start_ts, int(limit)),
+    ).fetchall()
+
+    out: List[Dict[str, Any]] = []
+    for r in rows:
+        out.append(
+            {
+                "container_id": r["container_id"] or "",
+                "image": r["image"] or "",
+                "name": r["name"] or "",
+                "avg_cpu_percent": float(r["avg_cpu_percent"] or 0.0),
+                "max_cpu_percent": float(r["max_cpu_percent"] or 0.0),
+                "avg_mem_usage_bytes": float(r["avg_mem_usage_bytes"] or 0.0),
+                "max_mem_usage_bytes": float(r["max_mem_usage_bytes"] or 0.0),
+                "avg_mem_percent": float(r["avg_mem_percent"] or 0.0),
+                "max_mem_percent": float(r["max_mem_percent"] or 0.0),
+                "sample_rows": int(r["sample_rows"] or 0),
+            }
+        )
+    return out
+
+
+def _query_docker_timeseries(
+    con: sqlite3.Connection, *, start_ts: float, keys: Sequence[str]
+) -> Dict[str, Dict[str, Any]]:
+    """
+    Returns:
+      {key: {"x": [...], "cpu_percent": [...], "mem_usage_bytes": [...], "mem_percent": [...]} }
+    """
+    if not keys:
+        return {}
+    if not _table_exists(con, "docker_container_samples"):
+        return {}
+    cur = con.cursor()
+
+    placeholders = ",".join("?" for _ in keys)
+    q = f"""
+        SELECT
+          s.ts_unix AS ts_unix,
+          d.container_id AS key,
+          d.cpu_percent AS cpu_percent,
+          d.mem_usage_bytes AS mem_usage_bytes,
+          d.mem_percent AS mem_percent
+        FROM docker_container_samples d
+        JOIN samples s ON s.id = d.sample_id
+        WHERE s.ts_unix >= ?
+          AND d.container_id IN ({placeholders})
+        ORDER BY s.ts_unix ASC, d.container_id ASC
+    """
+    rows = cur.execute(q, (start_ts, *list(keys))).fetchall()
+
+    out: Dict[str, Dict[str, Any]] = {}
+    for r in rows:
+        k = (r["key"] or "").strip()
+        if not k:
+            continue
+        d = out.setdefault(
+            k, {"x": [], "cpu_percent": [], "mem_usage_bytes": [], "mem_percent": []}
+        )
+        d["x"].append(_ts_to_iso(float(r["ts_unix"])))
+        d["cpu_percent"].append(float(r["cpu_percent"]) if r["cpu_percent"] is not None else None)
+        d["mem_usage_bytes"].append(
+            float(r["mem_usage_bytes"]) if r["mem_usage_bytes"] is not None else None
+        )
+        d["mem_percent"].append(float(r["mem_percent"]) if r["mem_percent"] is not None else None)
+    return out
+
+
 def _query_top_process_per_sample(con: sqlite3.Connection, *, start_ts: float) -> List[Dict[str, Any]]:
     """
     Best-effort: process_samples only stores "offenders", so this finds the max cpu process among recorded ones.
@@ -561,6 +670,7 @@ def _build_html(payload: Dict[str, Any]) -> str:
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>{payload.get("title","Resource Report")}</title>
+  <link rel="icon" href="{_favicon_data_url()}" type="image/svg+xml" />
   <script src="https://cdn.plot.ly/plotly-2.30.0.min.js"></script>
   <style>
     :root {{
@@ -615,6 +725,15 @@ def _build_html(payload: Dict[str, Any]) -> str:
       margin: 0;
       font-size: 22px;
       letter-spacing: 0.2px;
+    }}
+    .hero .brand {{
+      display: inline-flex;
+      align-items: center;
+      gap: 10px;
+    }}
+    .hero .brand img {{
+      width: 22px;
+      height: 22px;
     }}
     .meta {{
       font-size: 12px;
@@ -770,7 +889,10 @@ def _build_html(payload: Dict[str, Any]) -> str:
   <div class="wrap">
     <div class="hero">
       <div>
-        <h1>⚡ {payload.get("title","Resource Report")}</h1>
+        <h1 class="brand">
+          <img src="{_favicon_data_url()}" alt="" />
+          {payload.get("title","Resource Report")}
+        </h1>
         <div class="small" style="margin-top:6px;">
           Interactive charts: zoom / pan / range buttons. Use the x-axis range selector to jump to <span class="k">1d</span> or <span class="k">7d</span>.
         </div>
@@ -823,6 +945,29 @@ def _build_html(payload: Dict[str, Any]) -> str:
         </div>
         <div class="body" style="max-height: 560px; overflow:auto;">
           <table class="table" id="leader_table"></table>
+        </div>
+      </div>
+    </div>
+
+    <!-- Containers: match the same chart/table width ratio as System/GPU (this is the 3rd chart) -->
+    <div class="grid" style="grid-template-columns: 1.4fr 0.6fr; margin-top: 16px;">
+      <div class="card chart">
+        <div class="hdr">
+          <div class="title">Containers: CPU / Memory</div>
+          <div class="hint">From `docker stats --no-stream` (best-effort). Solid=mem GiB, dashed=CPU%.</div>
+        </div>
+        <div class="body">
+          <div id="docker_graph" class="plot"></div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="hdr">
+          <div class="title">Container summary</div>
+          <div class="hint"><span class="pill">avg / max</span></div>
+        </div>
+        <div class="body" style="max-height: 560px; overflow:auto;">
+          <table class="table" id="docker_table"></table>
         </div>
       </div>
     </div>
@@ -1019,6 +1164,35 @@ def _build_html(payload: Dict[str, Any]) -> str:
           </td>
           <td class="mono"><span class="badge warn">${{bpsToMiBps(r.avg_bps).toFixed(2)}}</span> MiB/s</td>
           <td class="mono">${{bpsToMiBps(r.max_bps).toFixed(2)}} MiB/s</td>
+          <td class="mono">${{r.sample_rows}}</td>
+        </tr>
+      `).join('')}}
+    `;
+  }}
+
+  function buildDockerTable(rows) {{
+    const el = document.getElementById('docker_table');
+    if (!rows || rows.length === 0) {{
+      el.innerHTML = `<tr><th>status</th></tr><tr><td class="muted">No docker_container_samples in window (enable monitor with --docker-stats).</td></tr>`;
+      return;
+    }}
+    el.innerHTML = `
+      <tr>
+        <th>container id</th>
+        <th>image</th>
+        <th>cpu avg/max</th>
+        <th>mem avg/max</th>
+        <th>rows</th>
+      </tr>
+      ${{rows.map(r => `
+        <tr>
+          <td class="mono">${{(r.container_id || '').slice(0,12)}}</td>
+          <td>
+            <div class="mono">${{(r.image || '').slice(0,36)}}</div>
+            <div class="small muted">${{(r.image || '').slice(0,90)}}</div>
+          </td>
+          <td class="mono"><span class="badge warn">${{(r.avg_cpu_percent ?? 0).toFixed(1)}}%</span> / ${{(r.max_cpu_percent ?? 0).toFixed(1)}}%</td>
+          <td class="mono"><span class="badge warn">${{bytesToGiB(r.avg_mem_usage_bytes ?? 0).toFixed(2)}}</span> / ${{bytesToGiB(r.max_mem_usage_bytes ?? 0).toFixed(2)}} GiB</td>
           <td class="mono">${{r.sample_rows}}</td>
         </tr>
       `).join('')}}
@@ -1582,16 +1756,69 @@ def _build_html(payload: Dict[str, Any]) -> str:
     return Plotly.newPlot('net_graph', traces, layout, config).then(() => installHoverDelay('net_graph'));
   }}
 
+  function renderDockerGraph() {{
+    const d = PAYLOAD.docker || {{}};
+    const meta = PAYLOAD.docker_meta || {{}};
+    const keys = Object.keys(d);
+    const traces = [];
+    for (const k of keys) {{
+      const r = d[k];
+      const x = r.x || [];
+      const memGiB = (r.mem_usage_bytes || []).map(v => bytesToGiB(v));
+      const cpu = (r.cpu_percent || []).map(v => v);
+      const img = (meta[k] && meta[k].image) ? meta[k].image : '';
+      const label = `${{k.slice(0,12)}} ${{img}}`.trim();
+
+      traces.push({{
+        x,
+        y: memGiB,
+        name: `${{label}} mem`,
+        mode: 'lines',
+        line: {{ width: 2, dash: 'solid' }},
+        yaxis: 'y1',
+      }});
+      traces.push({{
+        x,
+        y: cpu,
+        name: `${{label}} cpu`,
+        mode: 'lines',
+        line: {{ width: 1.8, dash: 'dash' }},
+        yaxis: 'y2',
+      }});
+    }}
+    const layout = commonLayout('');
+    layout.yaxis = {{ title: 'mem GiB', rangemode: 'tozero', gridcolor: 'rgba(255,255,255,0.09)' }};
+    layout.yaxis2 = {{
+      title: 'cpu %',
+      overlaying: 'y',
+      side: 'right',
+      anchor: 'free',
+      position: 1.00,
+      showgrid: false,
+      tickfont: {{ size: 10 }},
+      titlefont: {{ size: 10 }},
+      automargin: true,
+    }};
+    const config = {{ displayModeBar: true, responsive: true }};
+    if (!keys.length) {{
+      return Plotly.newPlot('docker_graph', [{{x: [PAYLOAD.window_end], y: [0], mode:'text', text:['No docker stats in window'], textfont:{{size:14}}, hoverinfo:'skip'}}], layout, config)
+        .then(() => installHoverDelay('docker_graph'));
+    }}
+    return Plotly.newPlot('docker_graph', traces, layout, config).then(() => installHoverDelay('docker_graph'));
+  }}
+
   buildSpikeTable(PAYLOAD.spikes || []);
   buildLeaderTable(PAYLOAD.cpu_leaderboard || []);
+  buildDockerTable(PAYLOAD.docker_leaderboard || []);
   buildPingTable(PAYLOAD.ping_summary || []);
   buildNetTable(PAYLOAD.net_leaderboard || []);
   const pSys = renderSystemGraph();
   const pGpu = renderGpuGraph();
+  const pDocker = renderDockerGraph();
   const pPing = renderPingGraph();
   const pNet = renderNetGraph();
-  Promise.allSettled([pSys, pGpu, pPing, pNet]).then(() => {{
-    installTimeSync(['sys_graph', 'gpu_graph', 'ping_graph', 'net_graph']);
+  Promise.allSettled([pSys, pGpu, pDocker, pPing, pNet]).then(() => {{
+    installTimeSync(['sys_graph', 'gpu_graph', 'docker_graph', 'ping_graph', 'net_graph']);
   }});
   </script>
 </body>
@@ -1618,6 +1845,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     )
 
     p.add_argument("--leaderboard-limit", type=int, default=20, help="How many leaderboard rows to include")
+    p.add_argument("--docker-limit", type=int, default=5, help="How many containers to include (default: 5)")
     p.add_argument("--net-limit", type=int, default=5, help="How many network offenders to include (default: 5)")
     return p.parse_args(argv)
 
@@ -1633,6 +1861,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         start_ts, end_ts = _get_time_window(con, days=float(args.days))
         samples = _query_samples(con, start_ts=start_ts)
         gpus = _query_gpu_timeseries(con, start_ts=start_ts)
+        docker_leaderboard = _query_docker_leaderboard(
+            con, start_ts=start_ts, limit=int(args.docker_limit)
+        )
+        docker_keys = [str(r.get("container_id") or "") for r in docker_leaderboard if (r.get("container_id") or "")]
+        docker = _query_docker_timeseries(con, start_ts=start_ts, keys=docker_keys)
+        docker_meta = {str(r.get("container_id") or ""): {"image": r.get("image") or ""} for r in docker_leaderboard}
         pings = _query_ping_timeseries(con, start_ts=start_ts)
         ping_summary = _query_ping_summary(con, start_ts=start_ts)
         net_leaderboard = _query_net_leaderboard(con, start_ts=start_ts, limit=int(args.net_limit))
@@ -1684,6 +1918,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 for s in samples
             ],
             "gpus": gpus,
+            "docker": docker,
+            "docker_leaderboard": docker_leaderboard,
+            "docker_meta": docker_meta,
             "pings": pings,
             "ping_summary": ping_summary,
             "net": net,

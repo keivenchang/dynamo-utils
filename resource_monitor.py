@@ -81,6 +81,30 @@ def _run_cmd(cmd: Sequence[str], timeout_s: float = 2.0) -> Tuple[int, str, str]
         return 1, "", str(e)
 
 
+def _run_cmd_maybe_sudo(
+    cmd: Sequence[str],
+    *,
+    timeout_s: float,
+    allow_sudo: bool = True,
+) -> Tuple[int, str, str]:
+    """
+    Run a command; if it fails due to permissions and sudo is available, retry with `sudo -n`.
+
+    This keeps the monitor usable when run as a normal user but the underlying tooling
+    (docker stats / nethogs) requires elevated privileges.
+    """
+    rc, out, err = _run_cmd(cmd, timeout_s=timeout_s)
+    if rc == 0 or not allow_sudo:
+        return rc, out, err
+    if not shutil.which("sudo"):
+        return rc, out, err
+    # Common permission-denied patterns
+    msg = f"{out}\n{err}".lower()
+    if "permission denied" not in msg and "got permission denied" not in msg and "operation not permitted" not in msg:
+        return rc, out, err
+    sudo_cmd = ["sudo", "-n", *list(cmd)]
+    return _run_cmd(sudo_cmd, timeout_s=timeout_s)
+
 def _ping_rtt_ms(target: str, *, timeout_s: float) -> Tuple[Optional[float], Optional[str]]:
     """
     Best-effort ICMP ping RTT measurement.
@@ -142,9 +166,6 @@ def _collect_net_top_nethogs(*, top_k: int, timeout_s: float) -> List[Dict[str, 
     exe = shutil.which("nethogs")
     if not exe:
         return []
-    # nethogs needs privileges to sniff interfaces.
-    if hasattr(os, "geteuid") and os.geteuid() != 0:
-        return []
 
     # Trace mode with one refresh. Default view mode is KB/s.
     # -t: trace mode (stdout)
@@ -153,7 +174,7 @@ def _collect_net_top_nethogs(*, top_k: int, timeout_s: float) -> List[Dict[str, 
     # -C: capture TCP+UDP
     # -b: short program name (less noise)
     cmd = [exe, "-t", "-c", "1", "-d", "1", "-C", "-b"]
-    rc, out, err = _run_cmd(cmd, timeout_s=timeout_s)
+    rc, out, err = _run_cmd_maybe_sudo(cmd, timeout_s=timeout_s, allow_sudo=True)
     if rc != 0 or not out.strip():
         # Don't spam logs; callers may choose to log at DEBUG.
         return []
@@ -200,6 +221,161 @@ def _collect_net_top_nethogs(*, top_k: int, timeout_s: float) -> List[Dict[str, 
 
     rows.sort(key=lambda r: float(r.get("sent_bps", 0.0)) + float(r.get("recv_bps", 0.0)), reverse=True)
     return rows[: max(0, int(top_k))]
+
+
+def _parse_bytes(s: str) -> Optional[int]:
+    """
+    Parse Docker-ish byte strings like: '0B', '12.3kB', '4.1MB', '1.2GiB', '512KiB'.
+    Returns integer bytes or None if parsing fails.
+    """
+    if not s:
+        return None
+    t = str(s).strip()
+    if not t:
+        return None
+    if t.lower() == "0b":
+        return 0
+    m = re.match(r"^\s*([0-9]+(?:\.[0-9]+)?)\s*([a-zA-Z]+)\s*$", t)
+    if not m:
+        return None
+    val = float(m.group(1))
+    unit = m.group(2)
+
+    # IEC (base-1024)
+    iec = {
+        "B": 1,
+        "KiB": 1024,
+        "MiB": 1024**2,
+        "GiB": 1024**3,
+        "TiB": 1024**4,
+        "PiB": 1024**5,
+    }
+    if unit in iec:
+        return int(val * iec[unit])
+
+    # SI (base-1000) - docker often uses kB/MB/GB for IO.
+    si = {
+        "b": 1,
+        "B": 1,
+        "kB": 1000,
+        "KB": 1000,
+        "MB": 1000**2,
+        "GB": 1000**3,
+        "TB": 1000**4,
+        "PB": 1000**5,
+    }
+    if unit in si:
+        return int(val * si[unit])
+    return None
+
+
+def _parse_pair_bytes(s: str) -> Tuple[Optional[int], Optional[int]]:
+    """
+    Parse 'X / Y' style strings into bytes.
+    """
+    if not s:
+        return None, None
+    parts = [p.strip() for p in str(s).split("/") if p.strip()]
+    if len(parts) != 2:
+        return None, None
+    return _parse_bytes(parts[0]), _parse_bytes(parts[1])
+
+
+def _collect_docker_stats(*, timeout_s: float) -> List[Dict[str, Any]]:
+    """
+    Best-effort per-container CPU/memory stats using `docker stats --no-stream`.
+
+    Returns rows:
+      {container_id, name, cpu_percent, mem_usage_bytes, mem_limit_bytes, mem_percent, pids,
+       net_rx_bytes, net_tx_bytes, block_read_bytes, block_write_bytes}
+
+    Tolerant of missing docker, permissions, or parse errors (returns []).
+    """
+    exe = shutil.which("docker")
+    if not exe:
+        return []
+    # Map container ID -> image name (docker stats doesn't expose Image)
+    id_to_image: Dict[str, str] = {}
+    try:
+        rc_ps, out_ps, _err_ps = _run_cmd_maybe_sudo(
+            [exe, "ps", "--format", "{{.ID}}\t{{.Image}}"],
+            timeout_s=min(2.0, timeout_s),
+            allow_sudo=True,
+        )
+        if rc_ps == 0 and out_ps.strip():
+            for ln in out_ps.splitlines():
+                ln = ln.strip()
+                if not ln:
+                    continue
+                parts = ln.split("\t", 1)
+                if len(parts) != 2:
+                    continue
+                cid, img = parts[0].strip(), parts[1].strip()
+                if cid:
+                    id_to_image[cid] = img
+    except Exception:
+        pass
+
+    cmd = [exe, "stats", "--no-stream", "--format", "{{json .}}"]
+    rc, out, _err = _run_cmd_maybe_sudo(cmd, timeout_s=timeout_s, allow_sudo=True)
+    if rc != 0 or not out.strip():
+        return []
+
+    rows: List[Dict[str, Any]] = []
+    for ln in out.splitlines():
+        ln = ln.strip()
+        if not ln:
+            continue
+        try:
+            d = json.loads(ln)
+        except Exception:
+            continue
+
+        cid = str(d.get("ID") or "").strip()
+        name = str(d.get("Name") or "").strip()
+        if not cid and not name:
+            continue
+        image = id_to_image.get(cid, "")
+
+        cpu_percent = None
+        try:
+            cpu_percent = float(str(d.get("CPUPerc") or "").strip().rstrip("%"))
+        except Exception:
+            cpu_percent = None
+
+        mem_usage_bytes, mem_limit_bytes = _parse_pair_bytes(str(d.get("MemUsage") or ""))
+        mem_percent = None
+        try:
+            mem_percent = float(str(d.get("MemPerc") or "").strip().rstrip("%"))
+        except Exception:
+            mem_percent = None
+
+        net_rx_bytes, net_tx_bytes = _parse_pair_bytes(str(d.get("NetIO") or ""))
+        blk_read_bytes, blk_write_bytes = _parse_pair_bytes(str(d.get("BlockIO") or ""))
+
+        pids = None
+        try:
+            pids = int(str(d.get("PIDs") or "").strip())
+        except Exception:
+            pids = None
+
+        rows.append(
+            {
+                "container_id": cid,
+                "name": name,
+                "image": image,
+                "cpu_percent": cpu_percent,
+                "mem_usage_bytes": mem_usage_bytes,
+                "mem_limit_bytes": mem_limit_bytes,
+                "mem_percent": mem_percent,
+                "pids": pids,
+                "net_rx_bytes": net_rx_bytes,
+                "net_tx_bytes": net_tx_bytes,
+                "block_read_bytes": blk_read_bytes,
+                "block_write_bytes": blk_write_bytes,
+            }
+        )
+    return rows
 
 @dataclass(frozen=True)
 class Thresholds:
@@ -432,6 +608,36 @@ class ResourceDB:
         )
 
         cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS docker_container_samples (
+              sample_id INTEGER NOT NULL,
+              container_id TEXT NOT NULL,
+              name TEXT,
+              image TEXT,
+              cpu_percent REAL,
+              mem_usage_bytes INTEGER,
+              mem_limit_bytes INTEGER,
+              mem_percent REAL,
+              pids INTEGER,
+              net_rx_bytes INTEGER,
+              net_tx_bytes INTEGER,
+              block_read_bytes INTEGER,
+              block_write_bytes INTEGER,
+              PRIMARY KEY (sample_id, container_id),
+              FOREIGN KEY(sample_id) REFERENCES samples(id) ON DELETE CASCADE
+            );
+            """
+        )
+
+        # Backwards-compatible migration for older DBs created before `image` existed.
+        try:
+            cols = [r[1] for r in cur.execute("PRAGMA table_info(docker_container_samples);").fetchall()]
+            if "image" not in cols:
+                cur.execute("ALTER TABLE docker_container_samples ADD COLUMN image TEXT;")
+        except Exception:
+            pass
+
+        cur.execute(
             "CREATE INDEX IF NOT EXISTS idx_samples_ts ON samples(ts_unix);"
         )
         cur.execute(
@@ -442,6 +648,9 @@ class ResourceDB:
         )
         cur.execute(
             "CREATE INDEX IF NOT EXISTS idx_net_proc ON net_process_samples(proc);"
+        )
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_docker_name ON docker_container_samples(name);"
         )
         self.conn.commit()
 
@@ -596,6 +805,39 @@ class ResourceDB:
                     r.get("sent_bps"),
                     r.get("recv_bps"),
                     r.get("tool"),
+                ),
+            )
+
+    def insert_docker_container_samples(self, sample_id: int, rows: List[Dict[str, Any]]) -> None:
+        if not rows:
+            return
+        cur = self.conn.cursor()
+        for r in rows:
+            cid = str(r.get("container_id") or "")
+            if not cid:
+                continue
+            cur.execute(
+                """
+                INSERT OR REPLACE INTO docker_container_samples(
+                  sample_id, container_id, name, image,
+                  cpu_percent, mem_usage_bytes, mem_limit_bytes, mem_percent, pids,
+                  net_rx_bytes, net_tx_bytes, block_read_bytes, block_write_bytes
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    sample_id,
+                    cid,
+                    r.get("name"),
+                    r.get("image"),
+                    r.get("cpu_percent"),
+                    r.get("mem_usage_bytes"),
+                    r.get("mem_limit_bytes"),
+                    r.get("mem_percent"),
+                    r.get("pids"),
+                    r.get("net_rx_bytes"),
+                    r.get("net_tx_bytes"),
+                    r.get("block_read_bytes"),
+                    r.get("block_write_bytes"),
                 ),
             )
 
@@ -821,6 +1063,8 @@ class Monitor:
         net_top: bool,
         net_top_interval_s: float,
         net_top_k: int,
+        docker_stats: bool,
+        docker_stats_interval_s: float,
         once: bool,
         duration_s: Optional[float],
     ):
@@ -833,6 +1077,8 @@ class Monitor:
         self.net_top = net_top
         self.net_top_interval_s = float(net_top_interval_s)
         self.net_top_k = int(net_top_k)
+        self.docker_stats = bool(docker_stats)
+        self.docker_stats_interval_s = float(docker_stats_interval_s)
         self.once = once
         self.duration_s = duration_s
         self._stop = False
@@ -842,6 +1088,7 @@ class Monitor:
         self._prev_ts: Optional[float] = None
         self._prev_proc_io: Dict[int, Tuple[int, int]] = {}
         self._prev_net_top_ts: float = 0.0
+        self._prev_docker_stats_ts: float = 0.0
 
     def request_stop(self) -> None:
         self._stop = True
@@ -942,6 +1189,16 @@ class Monitor:
                         # Never fail the monitor due to optional tooling.
                         net_top_rows = []
 
+            # Per-container resource usage (optional; best-effort)
+            docker_rows: List[Dict[str, Any]] = []
+            if self.docker_stats:
+                if (ts - float(self._prev_docker_stats_ts)) >= max(1.0, float(self.docker_stats_interval_s)):
+                    self._prev_docker_stats_ts = ts
+                    try:
+                        docker_rows = _collect_docker_stats(timeout_s=min(4.0, max(1.0, float(self.docker_stats_interval_s))))
+                    except Exception:
+                        docker_rows = []
+
             # Persist
             extra = {
                 "pid": os.getpid(),
@@ -971,6 +1228,7 @@ class Monitor:
                 self.db.insert_process_samples(sample_id, offenders)
                 self.db.insert_ping_samples(sample_id, ping_rows)
                 self.db.insert_net_process_samples(sample_id, net_top_rows)
+                self.db.insert_docker_container_samples(sample_id, docker_rows)
                 self.db.conn.commit()
             except Exception as e:
                 self.db.conn.rollback()
@@ -1067,14 +1325,26 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     p.add_argument(
         "--net-top-interval-seconds",
         type=float,
-        default=60.0,
-        help="How often to sample per-process network usage when --net-top is enabled (default: 60s)",
+        default=20.0,
+        help="How often to sample per-process network usage when --net-top is enabled (default: 20s)",
     )
     p.add_argument(
         "--net-top-k",
         type=int,
         default=5,
         help="How many top talkers to store per net-top sample (default: 5)",
+    )
+
+    p.add_argument(
+        "--docker-stats",
+        action="store_true",
+        help="Best-effort per-container CPU/memory sampling via `docker stats --no-stream`; stored in docker_container_samples",
+    )
+    p.add_argument(
+        "--docker-stats-interval-seconds",
+        type=float,
+        default=20.0,
+        help="How often to sample docker container stats when enabled (default: 20s)",
     )
 
     p.add_argument("--log-level", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR"])
@@ -1117,6 +1387,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         net_top=bool(args.net_top),
         net_top_interval_s=float(args.net_top_interval_seconds),
         net_top_k=int(args.net_top_k),
+        docker_stats=bool(getattr(args, "docker_stats", False)),
+        docker_stats_interval_s=float(getattr(args, "docker_stats_interval_seconds", 60.0)),
         once=bool(args.once),
         duration_s=args.duration_seconds,
     )
