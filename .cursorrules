@@ -172,10 +172,12 @@ DO NOT use these BS words in docs/comments:
 ### 2.3.2 Long-Running Programs
 - For long-running programs (vllm, sglang, trtllm), use tee to log output to a file and background it
 - Do NOT filter output using grep - everything must be visible in the log file
-- Format: program args 2>&1 | tee /tmp/program.N.log &
-- Example: vllm serve 2>&1 | tee /tmp/vllm.1.log &
-- Use sequential numbering: .1, .2, .3, etc for multiple runs
+- Format: program args 2>&1 | tee /tmp/program.log &
+- Example: vllm serve 2>&1 | tee /tmp/vllm.log &
+- Prefer a stable filename (same path) so it’s easy to `tail -f` (e.g. `/tmp/output1.log`)
 - This allows monitoring while keeping the terminal responsive
+- Do NOT use `-it` in scripts/background jobs (non-interactive runs will fail with `the input device is not a TTY`)
+- If you want to `tail -f`, write to a stable log path (e.g. `/tmp/output1.log`) and tail that file (don’t invent per-run filenames unless requested)
 
 ### 2.3.3 Piping and Filtering
 **CRITICAL BEST PRACTICE: For long-running or expensive commands, ALWAYS capture the full, unprocessed output first (to a temp file) and only filter that saved file afterward.**
@@ -224,6 +226,8 @@ When reviewing saved logs, filter out unimportant cargo test output (on the save
 - Set appropriate user permissions
 - Use .dockerignore
 - Pin dependency versions
+- When one script delegates to another (e.g. build wrappers), do not re-derive values in the callee; pass through the computed values for parity.
+- For BuildKit features, remember named contexts (`--build-context name=path`): missing passthrough can cause `COPY --from=<name>` to try pulling an image.
 - DO NOT use BS jargon: intuitive, comprehensive, optimal, seamless, next-generation, holistic, cutting-edge
 
 #### 2.4.2.1 Setting umask for Group-Writable Permissions in Dockerfiles
@@ -531,6 +535,10 @@ After changes in lib/bindings/python/rust/*:
 1. cd lib/bindings/python && maturin develop --uv
 3. Or use _/compile.sh shortcut (handles full build workflow)
 
+Notes:
+- `maturin develop` may update `Cargo.lock` if the dependency graph/features require it.
+- Decide intentionally: allow lockfile updates for local iteration, or require locked builds (`--locked`) and commit the lockfile update once.
+
 ## 4.5 Python Development
 
 ### 4.5.1 Code Style
@@ -600,6 +608,7 @@ width = get_terminal_width()  # Fallback to 80 if detection fails
 - Check if file is under git before moving
 - Use git mv for tracked files, mv for untracked
 - Delete *.lock files instead of stashing
+- Do not edit `.gitignore` unless explicitly requested (prefer leaving local-only scripts untracked or placing them under `/tmp/`)
 
 ## 5.3 Permissions
 ```
@@ -616,6 +625,8 @@ GROUP_ID=$(stat -c "%g" .)
 #   chown $USER_ID:$GROUP_ID /path/to/file
 #   find /path/to/dir -maxdepth 1 -type d -name 'target' -exec chown $USER_ID:$GROUP_ID {} \;
 ```
+
+- If you add a new `.sh` script that is meant to be executed, ensure it has a shebang and is executable (`chmod +x`) before committing.
 
 ## 5.4 Path Display
 - Use tilde (~) instead of full paths: ~/path not /home/ubuntu/path
