@@ -521,14 +521,14 @@ class CommitHistoryGenerator:
         
         # Process commit messages for PR links and assign colors
         bg_colors = [
-            '#bbccee',  # Light blue
-            '#cceeff',  # Pale cyan
-            '#ccddaa',  # Light green-yellow
-            '#eeeebb',  # Light yellow
-            '#ffcccc',  # Light pink
-            '#dddddd',  # Light gray
-            '#ffe5b4',  # Light peach
-            '#e7d4f7',  # Light lavender
+            '#e8e8e8',  # Light gray
+            '#d4d4d4',  # Medium-light gray
+            '#c0c0c0',  # Medium gray
+            '#acacac',  # Medium-dark gray
+            '#989898',  # Dark gray
+            '#e0e0e0',  # Very light gray
+            '#cccccc',  # Light-medium gray
+            '#b4b4b4',  # Medium-darker gray
         ]
 
         # Build deterministic CDS-to-color mapping
