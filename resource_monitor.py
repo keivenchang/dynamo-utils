@@ -15,7 +15,9 @@ import argparse
 import json
 import logging
 import os
+import re
 import shlex
+import shutil
 import signal
 import socket
 import sqlite3
@@ -28,6 +30,33 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 import psutil
 
 LOGGER = logging.getLogger("resource_monitor")
+
+# Optional per-process network bandwidth attribution (host)
+# --------------------------------------------------------
+# This monitor already records system-wide network totals, but those cannot be attributed to a PID.
+# If you want "who used the bandwidth", you need an external collector. Two practical options:
+#
+# 1) nethogs (pcap-based, works without eBPF)
+#    sudo apt-get update -y
+#    sudo apt-get install -y nethogs
+#    NOTE: requires root (or CAP_NET_RAW/CAP_NET_ADMIN). The script will skip collection if it can't run.
+#
+# 2) BCC/eBPF tools (more accurate/cheaper, but can fail if headers/toolchain/kernel don't match)
+#    sudo apt-get update -y
+#    sudo apt-get install -y bpfcc-tools linux-headers-$(uname -r)
+#    Example tools: /usr/sbin/tcptop-bpfcc, /usr/sbin/tcpconnect-bpfcc
+#    NOTE: on some hosts these may fail to compile BPF programs. The script remains tolerant.
+#
+# Enable via CLI: --net-top (defaults off).
+
+DEFAULT_PING_TARGETS: Tuple[str, ...] = (
+    "www.yahoo.com",
+    "www.google.com",
+    "10.110.41.1",
+    "10.110.40.1",
+)
+
+_PING_TIME_RE = re.compile(r"time[=<]\s*([0-9.]+)\s*ms")
 
 
 def _now_unix() -> float:
@@ -52,6 +81,126 @@ def _run_cmd(cmd: Sequence[str], timeout_s: float = 2.0) -> Tuple[int, str, str]
         return 1, "", str(e)
 
 
+def _ping_rtt_ms(target: str, *, timeout_s: float) -> Tuple[Optional[float], Optional[str]]:
+    """
+    Best-effort ICMP ping RTT measurement.
+
+    Returns:
+      (rtt_ms, error) where rtt_ms is float on success; error is a short string on failure.
+    """
+    ping = shutil.which("ping")
+    if not ping:
+        return None, "ping_not_found"
+
+    # Linux iputils ping:
+    # -c 1: one probe
+    # -n: numeric output (avoid reverse DNS delays)
+    # -W <sec>: per-probe timeout (seconds)
+    # -w <sec>: overall deadline (seconds)
+    w = max(1, int(timeout_s))
+    cmd = [ping, "-n", "-c", "1", "-W", str(w), "-w", str(w), str(target)]
+    rc, out, err = _run_cmd(cmd, timeout_s=float(timeout_s) + 0.5)
+    if rc == 0:
+        m = _PING_TIME_RE.search(out)
+        if m:
+            try:
+                return float(m.group(1)), None
+            except Exception:
+                return None, "parse_error"
+        return None, "parse_missing_time"
+
+    msg = (err or out).strip()
+    if msg:
+        msg = msg.replace("\n", " ")[:200]
+    else:
+        msg = f"rc={rc}"
+    return None, msg
+
+
+def _collect_ping_samples(targets: Sequence[str], *, timeout_s: float) -> List[Dict[str, Any]]:
+    rows: List[Dict[str, Any]] = []
+    for t in targets:
+        rtt_ms, err = _ping_rtt_ms(t, timeout_s=timeout_s)
+        rows.append(
+            {
+                "target": str(t),
+                "rtt_ms": rtt_ms,
+                "success": 1 if rtt_ms is not None else 0,
+                "error": err,
+            }
+        )
+    return rows
+
+
+def _collect_net_top_nethogs(*, top_k: int, timeout_s: float) -> List[Dict[str, Any]]:
+    """
+    Best-effort per-process network throughput using nethogs trace mode.
+
+    Returns a list of rows with:
+      pid (int), proc (str), sent_bps (float), recv_bps (float), tool (str)
+    """
+    exe = shutil.which("nethogs")
+    if not exe:
+        return []
+    # nethogs needs privileges to sniff interfaces.
+    if hasattr(os, "geteuid") and os.geteuid() != 0:
+        return []
+
+    # Trace mode with one refresh. Default view mode is KB/s.
+    # -t: trace mode (stdout)
+    # -c 1: one update then exit
+    # -d 1: 1s refresh window
+    # -C: capture TCP+UDP
+    # -b: short program name (less noise)
+    cmd = [exe, "-t", "-c", "1", "-d", "1", "-C", "-b"]
+    rc, out, err = _run_cmd(cmd, timeout_s=timeout_s)
+    if rc != 0 or not out.strip():
+        # Don't spam logs; callers may choose to log at DEBUG.
+        return []
+
+    lines = out.splitlines()
+    # Only parse the last "Refreshing:" block.
+    start = 0
+    for i, ln in enumerate(lines):
+        if ln.strip().startswith("Refreshing"):
+            start = i + 1
+
+    rows: List[Dict[str, Any]] = []
+    for ln in lines[start:]:
+        if "\t" not in ln:
+            continue
+        parts = [p.strip() for p in ln.split("\t") if p.strip() != ""]
+        if len(parts) < 3:
+            continue
+        proc = parts[0]
+        try:
+            sent_kbs = float(parts[1])
+            recv_kbs = float(parts[2])
+        except Exception:
+            continue
+
+        # nethogs often reports proc as "name/PID/UID" (or "unknown TCP/0/0").
+        pid = 0
+        try:
+            segs = proc.split("/")
+            if len(segs) >= 2 and segs[1].isdigit():
+                pid = int(segs[1])
+        except Exception:
+            pid = 0
+
+        rows.append(
+            {
+                "pid": pid,
+                "proc": proc,
+                "sent_bps": float(sent_kbs) * 1024.0,
+                "recv_bps": float(recv_kbs) * 1024.0,
+                "tool": "nethogs",
+            }
+        )
+
+    rows.sort(key=lambda r: float(r.get("sent_bps", 0.0)) + float(r.get("recv_bps", 0.0)), reverse=True)
+    return rows[: max(0, int(top_k))]
+
 @dataclass(frozen=True)
 class Thresholds:
     cpu_percent: float
@@ -61,22 +210,88 @@ class Thresholds:
 
 
 class SingleInstanceLock:
-    """Simple single-instance lock using fcntl.flock (Linux)."""
+    """
+    Single-instance lock using fcntl.flock (Linux) plus a PID guard written into the lock file.
+
+    Behavior:
+    - Normal start: takes an exclusive non-blocking flock on the lock file and writes our PID into it.
+    - While running: if the PID stored in the lock file changes (someone "force started" another instance),
+      the current process notices and exits gracefully.
+    - Force start: overwrites the PID in the lock file first (to signal any existing instance to exit),
+      then waits to acquire the flock.
+    """
 
     def __init__(self, lock_path: Path):
         self.lock_path = lock_path
         self._fd: Optional[int] = None
+        self._pid: int = int(os.getpid())
 
-    def acquire_or_exit(self) -> None:
+    def _read_pid(self) -> Optional[int]:
+        try:
+            raw = self.lock_path.read_text(encoding="utf-8").strip()
+            if not raw:
+                return None
+            return int(raw.splitlines()[0].strip())
+        except Exception:
+            return None
+
+    def _write_pid(self, pid: int) -> None:
+        self.lock_path.parent.mkdir(parents=True, exist_ok=True)
+        # Write via low-level fd to avoid partial writes.
+        fd = os.open(self.lock_path, os.O_CREAT | os.O_RDWR, 0o644)
+        try:
+            os.ftruncate(fd, 0)
+            os.write(fd, str(int(pid)).encode("utf-8"))
+            os.fsync(fd)
+        finally:
+            try:
+                os.close(fd)
+            except Exception:
+                pass
+
+    def pid_changed(self) -> bool:
+        """Return True if the PID stored in the lock file differs from our PID."""
+        pid = self._read_pid()
+        return pid is not None and int(pid) != int(self._pid)
+
+    def acquire_or_exit(
+        self,
+        *,
+        force_start: bool = False,
+        force_timeout_s: float = 10.0,
+        force_poll_s: float = 0.2,
+    ) -> None:
         self.lock_path.parent.mkdir(parents=True, exist_ok=True)
         fd = os.open(self.lock_path, os.O_CREAT | os.O_RDWR, 0o644)
         self._fd = fd
         try:
             import fcntl  # Linux only
 
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            if force_start:
+                # Signal any existing instance to exit by clobbering the PID in the lock file.
+                # Note: this does NOT break an existing flock; we still wait until we can acquire it.
+                try:
+                    self._write_pid(self._pid)
+                except Exception:
+                    pass
+
+                deadline = time.monotonic() + max(0.1, float(force_timeout_s))
+                while True:
+                    try:
+                        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        break
+                    except BlockingIOError:
+                        if time.monotonic() >= deadline:
+                            raise SystemExit(
+                                f"Force-start timed out waiting for lock: {self.lock_path}"
+                            )
+                        time.sleep(max(0.05, float(force_poll_s)))
+            else:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+            # Record our PID in the lock file (also acts as the "PID guard" checked by the running loop).
             os.ftruncate(fd, 0)
-            os.write(fd, str(os.getpid()).encode("utf-8"))
+            os.write(fd, str(self._pid).encode("utf-8"))
             os.fsync(fd)
         except BlockingIOError:
             raise SystemExit(
@@ -188,10 +403,45 @@ class ResourceDB:
         )
 
         cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS ping_samples (
+              sample_id INTEGER NOT NULL,
+              target TEXT NOT NULL,
+              rtt_ms REAL,
+              success INTEGER NOT NULL,
+              error TEXT,
+              PRIMARY KEY (sample_id, target),
+              FOREIGN KEY(sample_id) REFERENCES samples(id) ON DELETE CASCADE
+            );
+            """
+        )
+
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS net_process_samples (
+              sample_id INTEGER NOT NULL,
+              pid INTEGER NOT NULL,
+              proc TEXT NOT NULL,
+              sent_bps REAL,
+              recv_bps REAL,
+              tool TEXT,
+              PRIMARY KEY (sample_id, pid, proc),
+              FOREIGN KEY(sample_id) REFERENCES samples(id) ON DELETE CASCADE
+            );
+            """
+        )
+
+        cur.execute(
             "CREATE INDEX IF NOT EXISTS idx_samples_ts ON samples(ts_unix);"
         )
         cur.execute(
             "CREATE INDEX IF NOT EXISTS idx_proc_sample ON process_samples(sample_id);"
+        )
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_ping_target ON ping_samples(target);"
+        )
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_net_proc ON net_process_samples(proc);"
         )
         self.conn.commit()
 
@@ -203,11 +453,12 @@ class ResourceDB:
         interval_s: float,
         cpu_percent: Optional[float],
         load: Tuple[Optional[float], Optional[float], Optional[float]],
-        mem: psutil._common.svmem,
-        swap: psutil._common.sswap,
-        net_totals: psutil._common.snetio,
+        # psutil's public API returns namedtuples; avoid depending on psutil._common types.
+        mem: Any,
+        swap: Any,
+        net_totals: Any,
         net_rates: Tuple[Optional[float], Optional[float]],
-        disk_totals: Optional[psutil._common.sdiskio],
+        disk_totals: Optional[Any],
         disk_rates: Tuple[Optional[float], Optional[float]],
         extra: Dict[str, Any],
     ) -> int:
@@ -247,7 +498,10 @@ class ResourceDB:
                 _safe_json(extra),
             ),
         )
-        sample_id = int(cur.lastrowid)
+        lastrowid = cur.lastrowid
+        if lastrowid is None:
+            raise RuntimeError("Failed to insert sample row (no lastrowid).")
+        sample_id = int(lastrowid)
         return sample_id
 
     def insert_gpu_samples(self, sample_id: int, gpus: List[Dict[str, Any]]) -> None:
@@ -301,6 +555,47 @@ class ResourceDB:
                     p.get("io_read_bps"),
                     p.get("io_write_bps"),
                     p.get("gpu_mem_mb"),
+                ),
+            )
+
+    def insert_ping_samples(self, sample_id: int, pings: List[Dict[str, Any]]) -> None:
+        if not pings:
+            return
+        cur = self.conn.cursor()
+        for p in pings:
+            cur.execute(
+                """
+                INSERT OR REPLACE INTO ping_samples(
+                  sample_id, target, rtt_ms, success, error
+                ) VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    sample_id,
+                    str(p.get("target") or ""),
+                    p.get("rtt_ms"),
+                    int(p.get("success") or 0),
+                    p.get("error"),
+                ),
+            )
+
+    def insert_net_process_samples(self, sample_id: int, rows: List[Dict[str, Any]]) -> None:
+        if not rows:
+            return
+        cur = self.conn.cursor()
+        for r in rows:
+            cur.execute(
+                """
+                INSERT OR REPLACE INTO net_process_samples(
+                  sample_id, pid, proc, sent_bps, recv_bps, tool
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    sample_id,
+                    int(r.get("pid") or 0),
+                    str(r.get("proc") or ""),
+                    r.get("sent_bps"),
+                    r.get("recv_bps"),
+                    r.get("tool"),
                 ),
             )
 
@@ -518,18 +813,26 @@ class Monitor:
         self,
         *,
         db: ResourceDB,
+        lock: SingleInstanceLock,
         hostname: str,
         interval_s: float,
         thresholds: Thresholds,
         top_k: int,
+        net_top: bool,
+        net_top_interval_s: float,
+        net_top_k: int,
         once: bool,
         duration_s: Optional[float],
     ):
         self.db = db
+        self.lock = lock
         self.hostname = hostname
         self.interval_s = interval_s
         self.thresholds = thresholds
         self.top_k = top_k
+        self.net_top = net_top
+        self.net_top_interval_s = float(net_top_interval_s)
+        self.net_top_k = int(net_top_k)
         self.once = once
         self.duration_s = duration_s
         self._stop = False
@@ -538,15 +841,32 @@ class Monitor:
         self._prev_disk: Optional[psutil._common.sdiskio] = None
         self._prev_ts: Optional[float] = None
         self._prev_proc_io: Dict[int, Tuple[int, int]] = {}
+        self._prev_net_top_ts: float = 0.0
 
     def request_stop(self) -> None:
         self._stop = True
+
+    def _should_exit_due_to_pid_guard(self) -> bool:
+        """
+        If the lock file PID has changed, another instance has been force-started.
+        Exit so the new instance can take over.
+        """
+        try:
+            if self.lock.pid_changed():
+                LOGGER.warning("PID guard changed in lock file; exiting (new instance takeover).")
+                return True
+        except Exception:
+            # If we can't read the file, don't kill the monitor; keep running.
+            pass
+        return False
 
     def run(self) -> int:
         _ensure_cpu_percent_primed()
         start_ts = _now_unix()
 
         while True:
+            if self._should_exit_due_to_pid_guard():
+                return 0
             if self._stop:
                 return 0
             if self.duration_s is not None and (_now_unix() - start_ts) >= self.duration_s:
@@ -572,15 +892,25 @@ class Monitor:
             net_sent_bps = None
             net_recv_bps = None
             if self._prev_net is not None:
-                net_sent_bps = (net.bytes_sent - self._prev_net.bytes_sent) / dt_s
-                net_recv_bps = (net.bytes_recv - self._prev_net.bytes_recv) / dt_s
+                d_sent = net.bytes_sent - self._prev_net.bytes_sent
+                d_recv = net.bytes_recv - self._prev_net.bytes_recv
+                # Counters can reset (iface bounce, namespace changes, wrap); never emit negative rates.
+                if d_sent >= 0:
+                    net_sent_bps = d_sent / dt_s
+                if d_recv >= 0:
+                    net_recv_bps = d_recv / dt_s
 
             disk = _get_disk_io()
             disk_read_bps = None
             disk_write_bps = None
             if disk is not None and self._prev_disk is not None:
-                disk_read_bps = (disk.read_bytes - self._prev_disk.read_bytes) / dt_s
-                disk_write_bps = (disk.write_bytes - self._prev_disk.write_bytes) / dt_s
+                d_read = disk.read_bytes - self._prev_disk.read_bytes
+                d_write = disk.write_bytes - self._prev_disk.write_bytes
+                # Same counter-reset guard as net.
+                if d_read >= 0:
+                    disk_read_bps = d_read / dt_s
+                if d_write >= 0:
+                    disk_write_bps = d_write / dt_s
 
             gpus, pid_to_gpu_mem = _get_gpu_metrics()
 
@@ -591,6 +921,26 @@ class Monitor:
                 thresholds=self.thresholds,
                 top_k=self.top_k,
             )
+
+            # Network latency (best-effort; store for querying/averaging)
+            ping_rows = _collect_ping_samples(
+                DEFAULT_PING_TARGETS,
+                timeout_s=min(1.0, max(0.2, float(self.interval_s) / 5.0)),
+            )
+
+            # Per-process network attribution (optional; best-effort)
+            net_top_rows: List[Dict[str, Any]] = []
+            if self.net_top:
+                if (ts - float(self._prev_net_top_ts)) >= max(1.0, float(self.net_top_interval_s)):
+                    self._prev_net_top_ts = ts
+                    try:
+                        net_top_rows = _collect_net_top_nethogs(
+                            top_k=int(self.net_top_k),
+                            timeout_s=min(5.0, max(1.5, float(self.net_top_interval_s))),
+                        )
+                    except Exception:
+                        # Never fail the monitor due to optional tooling.
+                        net_top_rows = []
 
             # Persist
             extra = {
@@ -619,6 +969,8 @@ class Monitor:
                 )
                 self.db.insert_gpu_samples(sample_id, gpus)
                 self.db.insert_process_samples(sample_id, offenders)
+                self.db.insert_ping_samples(sample_id, ping_rows)
+                self.db.insert_net_process_samples(sample_id, net_top_rows)
                 self.db.conn.commit()
             except Exception as e:
                 self.db.conn.rollback()
@@ -647,6 +999,8 @@ class Monitor:
             # Sleep (interruptible)
             end_sleep = time.monotonic() + self.interval_s
             while time.monotonic() < end_sleep:
+                if self._should_exit_due_to_pid_guard():
+                    return 0
                 if self._stop:
                     return 0
                 time.sleep(0.2)
@@ -661,22 +1015,67 @@ def _default_db_path() -> Path:
 
 
 def _default_lock_path(db_path: Path) -> Path:
+    # Default to a GLOBAL lock so starting from different CWDs (and thus different default DB paths)
+    # doesn't accidentally allow multiple monitors to run.
+    return Path.home() / ".cache" / "dynamo-utils" / "resource_monitor.lock"
+
+
+def _per_db_lock_path(db_path: Path) -> Path:
     return db_path.with_suffix(".lock")
 
 
 def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Single-instance resource monitor -> SQLite")
     p.add_argument("--db-path", type=Path, default=_default_db_path(), help="SQLite DB path")
-    p.add_argument("--lock-path", type=Path, default=None, help="Lock file path (default: <db>.lock)")
+    p.add_argument(
+        "--lock-path",
+        type=Path,
+        default=None,
+        help="Lock file path (default: ~/.cache/dynamo-utils/resource_monitor.lock)",
+    )
+    p.add_argument(
+        "--per-db-lock",
+        action="store_true",
+        help="Use a per-db lock file (<db>.lock) instead of the global default lock",
+    )
+    p.add_argument(
+        "--force-start",
+        action="store_true",
+        help="Force start: clobber PID in lock file to signal an existing instance to exit, then wait for the flock",
+    )
+    p.add_argument(
+        "--force-start-timeout-seconds",
+        type=float,
+        default=10.0,
+        help="How long to wait for the existing instance to release the lock when using --force-start (default: 10s)",
+    )
     p.add_argument("--interval-seconds", type=float, default=15.0, help="Sampling interval (seconds)")
     p.add_argument("--once", action="store_true", help="Take one sample and exit")
     p.add_argument("--duration-seconds", type=float, default=None, help="Run for N seconds then exit")
 
-    p.add_argument("--top-k", type=int, default=12, help="Top-k processes per metric to store")
+    p.add_argument("--top-k", type=int, default=5, help="Top-k processes per metric to store")
     p.add_argument("--cpu-threshold", type=float, default=50.0, help="Record any process >= this CPU%%")
     p.add_argument("--rss-threshold-mb", type=float, default=2048.0, help="Record any process >= this RSS (MB)")
     p.add_argument("--io-threshold-mbps", type=float, default=50.0, help="Record any process >= this IO rate (MB/s)")
     p.add_argument("--gpu-mem-threshold-mb", type=float, default=1024.0, help="Record any process >= this GPU mem (MB)")
+
+    p.add_argument(
+        "--net-top",
+        action="store_true",
+        help="Best-effort per-process network throughput attribution (requires nethogs and root); stored in net_process_samples",
+    )
+    p.add_argument(
+        "--net-top-interval-seconds",
+        type=float,
+        default=60.0,
+        help="How often to sample per-process network usage when --net-top is enabled (default: 60s)",
+    )
+    p.add_argument(
+        "--net-top-k",
+        type=int,
+        default=5,
+        help="How many top talkers to store per net-top sample (default: 5)",
+    )
 
     p.add_argument("--log-level", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR"])
     return p.parse_args(argv)
@@ -687,10 +1086,16 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     logging.basicConfig(level=getattr(logging, args.log_level))
 
     db_path: Path = args.db_path
-    lock_path: Path = args.lock_path or _default_lock_path(db_path)
+    if args.lock_path is not None:
+        lock_path = args.lock_path
+    else:
+        lock_path = _per_db_lock_path(db_path) if bool(getattr(args, "per_db_lock", False)) else _default_lock_path(db_path)
 
     lock = SingleInstanceLock(lock_path)
-    lock.acquire_or_exit()
+    lock.acquire_or_exit(
+        force_start=bool(getattr(args, "force_start", False)),
+        force_timeout_s=float(getattr(args, "force_start_timeout_seconds", 10.0)),
+    )
 
     db = ResourceDB(db_path)
     hostname = socket.gethostname()
@@ -704,10 +1109,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     monitor = Monitor(
         db=db,
+        lock=lock,
         hostname=hostname,
         interval_s=float(args.interval_seconds),
         thresholds=thresholds,
         top_k=int(args.top_k),
+        net_top=bool(args.net_top),
+        net_top_interval_s=float(args.net_top_interval_seconds),
+        net_top_k=int(args.net_top_k),
         once=bool(args.once),
         duration_s=args.duration_seconds,
     )

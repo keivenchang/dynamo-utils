@@ -41,6 +41,7 @@ def _ts_to_iso(ts_unix: float) -> str:
 
 @dataclass(frozen=True)
 class SampleRow:
+    sample_id: int
     ts_unix: float
     interval_s: float
     cpu_percent: Optional[float]
@@ -87,6 +88,7 @@ def _query_samples(con: sqlite3.Connection, *, start_ts: float) -> List[SampleRo
           GROUP BY sample_id
         )
         SELECT
+          s.id AS sample_id,
           s.ts_unix, s.interval_s,
           s.cpu_percent, s.mem_percent, s.load1,
           s.net_sent_bps, s.net_recv_bps,
@@ -106,6 +108,7 @@ def _query_samples(con: sqlite3.Connection, *, start_ts: float) -> List[SampleRo
     for r in rows:
         out.append(
             SampleRow(
+                sample_id=int(r["sample_id"]),
                 ts_unix=float(r["ts_unix"]),
                 interval_s=float(r["interval_s"] or 0.0),
                 cpu_percent=(float(r["cpu_percent"]) if r["cpu_percent"] is not None else None),
@@ -178,6 +181,212 @@ def _query_gpu_timeseries(con: sqlite3.Connection, *, start_ts: float) -> Dict[i
     return out
 
 
+def _table_exists(con: sqlite3.Connection, name: str) -> bool:
+    cur = con.cursor()
+    r = cur.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=? LIMIT 1", (name,)
+    ).fetchone()
+    return bool(r)
+
+
+def _percentile(sorted_vals: List[float], p: float) -> float:
+    if not sorted_vals:
+        return 0.0
+    if p <= 0:
+        return float(sorted_vals[0])
+    if p >= 100:
+        return float(sorted_vals[-1])
+    # Nearest-rank percentile
+    k = int((p / 100.0) * (len(sorted_vals) - 1))
+    k = max(0, min(len(sorted_vals) - 1, k))
+    return float(sorted_vals[k])
+
+
+def _query_ping_timeseries(con: sqlite3.Connection, *, start_ts: float) -> Dict[str, Dict[str, Any]]:
+    """
+    Returns:
+      {target: {"x": [...], "rtt_ms": [...], "success": [...], "error": [...]} }
+    """
+    if not _table_exists(con, "ping_samples"):
+        return {}
+    cur = con.cursor()
+    rows = cur.execute(
+        """
+        SELECT
+          s.ts_unix AS ts_unix,
+          p.target AS target,
+          p.rtt_ms AS rtt_ms,
+          p.success AS success,
+          p.error AS error
+        FROM ping_samples p
+        JOIN samples s ON s.id = p.sample_id
+        WHERE s.ts_unix >= ?
+        ORDER BY s.ts_unix ASC, p.target ASC
+        """,
+        (start_ts,),
+    ).fetchall()
+
+    out: Dict[str, Dict[str, Any]] = {}
+    for r in rows:
+        tgt = (r["target"] or "").strip()
+        if not tgt:
+            continue
+        d = out.setdefault(tgt, {"x": [], "rtt_ms": [], "success": [], "error": []})
+        d["x"].append(_ts_to_iso(float(r["ts_unix"])))
+        d["rtt_ms"].append(float(r["rtt_ms"]) if r["rtt_ms"] is not None else None)
+        d["success"].append(int(r["success"] or 0))
+        d["error"].append((r["error"] or "") if r["error"] is not None else "")
+    return out
+
+
+def _query_ping_summary(con: sqlite3.Connection, *, start_ts: float) -> List[Dict[str, Any]]:
+    """
+    Returns per-target summary rows: loss%, count, avg, p95.
+    """
+    if not _table_exists(con, "ping_samples"):
+        return []
+    cur = con.cursor()
+    rows = cur.execute(
+        """
+        SELECT
+          p.target AS target,
+          COUNT(*) AS n,
+          SUM(CASE WHEN p.success != 0 THEN 1 ELSE 0 END) AS ok_n,
+          SUM(CASE WHEN p.success = 0 THEN 1 ELSE 0 END) AS fail_n
+        FROM ping_samples p
+        JOIN samples s ON s.id = p.sample_id
+        WHERE s.ts_unix >= ?
+        GROUP BY p.target
+        ORDER BY p.target ASC
+        """,
+        (start_ts,),
+    ).fetchall()
+
+    out: List[Dict[str, Any]] = []
+    for r in rows:
+        tgt = (r["target"] or "").strip()
+        n = int(r["n"] or 0)
+        ok_n = int(r["ok_n"] or 0)
+        fail_n = int(r["fail_n"] or 0)
+        loss_pct = (100.0 * float(fail_n) / float(n)) if n > 0 else 0.0
+
+        rtts = con.execute(
+            """
+            SELECT p.rtt_ms
+            FROM ping_samples p
+            JOIN samples s ON s.id = p.sample_id
+            WHERE s.ts_unix >= ? AND p.target = ? AND p.success != 0 AND p.rtt_ms IS NOT NULL
+            ORDER BY p.rtt_ms ASC
+            """,
+            (start_ts, tgt),
+        ).fetchall()
+        vals = [float(x[0]) for x in rtts if x and x[0] is not None]
+        vals.sort()
+        avg = (sum(vals) / float(len(vals))) if vals else 0.0
+        p95 = _percentile(vals, 95.0) if vals else 0.0
+
+        out.append(
+            {
+                "target": tgt,
+                "n": n,
+                "ok_n": ok_n,
+                "fail_n": fail_n,
+                "loss_pct": loss_pct,
+                "avg_ms": avg,
+                "p95_ms": p95,
+            }
+        )
+    return out
+
+
+def _query_net_leaderboard(
+    con: sqlite3.Connection, *, start_ts: float, limit: int
+) -> List[Dict[str, Any]]:
+    """
+    Best-effort network "top talkers" leaderboard from net_process_samples.
+
+    Note: net_process_samples typically contains only the top-K rows per sampling interval (from the monitor),
+    so this is not "all processes", it's "top-K of top-K".
+    """
+    if not _table_exists(con, "net_process_samples"):
+        return []
+    cur = con.cursor()
+    rows = cur.execute(
+        """
+        SELECT
+          n.proc AS proc,
+          SUM(COALESCE(n.sent_bps,0) + COALESCE(n.recv_bps,0)) AS sum_bps,
+          AVG(COALESCE(n.sent_bps,0) + COALESCE(n.recv_bps,0)) AS avg_bps,
+          MAX(COALESCE(n.sent_bps,0) + COALESCE(n.recv_bps,0)) AS max_bps,
+          COUNT(*) AS sample_rows
+        FROM net_process_samples n
+        JOIN samples s ON s.id = n.sample_id
+        WHERE s.ts_unix >= ?
+        GROUP BY n.proc
+        ORDER BY sum_bps DESC
+        LIMIT ?
+        """,
+        (start_ts, int(limit)),
+    ).fetchall()
+
+    out: List[Dict[str, Any]] = []
+    for r in rows:
+        out.append(
+            {
+                "proc": r["proc"] or "",
+                "sum_bps": float(r["sum_bps"] or 0.0),
+                "avg_bps": float(r["avg_bps"] or 0.0),
+                "max_bps": float(r["max_bps"] or 0.0),
+                "sample_rows": int(r["sample_rows"] or 0),
+            }
+        )
+    return out
+
+
+def _query_net_timeseries(
+    con: sqlite3.Connection, *, start_ts: float, procs: Sequence[str]
+) -> Dict[str, Dict[str, Any]]:
+    """
+    Returns:
+      {proc: {"x": [...], "sent_bps": [...], "recv_bps": [...], "total_bps": [...]} }
+    """
+    if not procs:
+        return {}
+    if not _table_exists(con, "net_process_samples"):
+        return {}
+    cur = con.cursor()
+
+    # Build an IN (...) clause safely.
+    placeholders = ",".join("?" for _ in procs)
+    q = f"""
+        SELECT
+          s.ts_unix AS ts_unix,
+          n.proc AS proc,
+          n.sent_bps AS sent_bps,
+          n.recv_bps AS recv_bps
+        FROM net_process_samples n
+        JOIN samples s ON s.id = n.sample_id
+        WHERE s.ts_unix >= ?
+          AND n.proc IN ({placeholders})
+        ORDER BY s.ts_unix ASC, n.proc ASC
+    """
+    rows = cur.execute(q, (start_ts, *list(procs))).fetchall()
+
+    out: Dict[str, Dict[str, Any]] = {}
+    for r in rows:
+        proc = (r["proc"] or "").strip()
+        if not proc:
+            continue
+        d = out.setdefault(proc, {"x": [], "sent_bps": [], "recv_bps": [], "total_bps": []})
+        sent = float(r["sent_bps"]) if r["sent_bps"] is not None else 0.0
+        recv = float(r["recv_bps"]) if r["recv_bps"] is not None else 0.0
+        d["x"].append(_ts_to_iso(float(r["ts_unix"])))
+        d["sent_bps"].append(sent)
+        d["recv_bps"].append(recv)
+        d["total_bps"].append(sent + recv)
+    return out
+
+
 def _query_top_process_per_sample(con: sqlite3.Connection, *, start_ts: float) -> List[Dict[str, Any]]:
     """
     Best-effort: process_samples only stores "offenders", so this finds the max cpu process among recorded ones.
@@ -187,6 +396,7 @@ def _query_top_process_per_sample(con: sqlite3.Connection, *, start_ts: float) -
         """
         WITH ranked AS (
           SELECT
+            p.sample_id AS sample_id,
             s.ts_unix AS ts_unix,
             s.interval_s AS interval_s,
             p.pid AS pid,
@@ -213,6 +423,7 @@ def _query_top_process_per_sample(con: sqlite3.Connection, *, start_ts: float) -
         cpu_total = raw_cpu / float(cpu_count) if cpu_count > 0 else raw_cpu
         out.append(
             {
+                "sample_id": int(r["sample_id"]) if r["sample_id"] is not None else None,
                 "ts_unix": float(r["ts_unix"]),
                 "ts": _ts_to_iso(float(r["ts_unix"])),
                 "interval_s": float(r["interval_s"] or 0.0),
@@ -531,6 +742,28 @@ def _build_html(payload: Dict[str, Any]) -> str:
     .badge.good {{ border-color: rgba(52,211,153,0.38); background: rgba(52,211,153,0.08); }}
     .mono {{ font-family: var(--mono); }}
     .muted {{ color: var(--muted); }}
+
+    /* Hover label delay:
+       Plotly doesn't support a built-in hover delay, so we keep the hover layer hidden by default
+       and reveal it after a timeout once the cursor is stable on a point. */
+    .hover-delay .hoverlayer {{
+      opacity: 0;
+      transition: opacity 70ms linear;
+    }}
+    .hover-delay.show-hover .hoverlayer {{
+      opacity: 1;
+    }}
+
+    /* Spike table row hover/selection */
+    .table tr.spike-row {{
+      cursor: pointer;
+    }}
+    .table tr.spike-row:hover td {{
+      background: rgba(255,255,255,0.04);
+    }}
+    .table tr.spike-row.selected td {{
+      background: rgba(251,191,36,0.16);
+    }}
   </style>
 </head>
 <body>
@@ -571,7 +804,8 @@ def _build_html(payload: Dict[str, Any]) -> str:
       </div>
     </div>
 
-    <div class="grid" style="grid-template-columns: 1.2fr 0.8fr; margin-top: 16px;">
+    <!-- Match the System grid column ratio so the GPU chart has the same width. -->
+    <div class="grid" style="grid-template-columns: 1.4fr 0.6fr; margin-top: 16px;">
       <div class="card chart">
         <div class="hdr">
           <div class="title">GPU: Util / Memory / Temp / Power</div>
@@ -589,6 +823,52 @@ def _build_html(payload: Dict[str, Any]) -> str:
         </div>
         <div class="body" style="max-height: 560px; overflow:auto;">
           <table class="table" id="leader_table"></table>
+        </div>
+      </div>
+    </div>
+
+    <!-- Ping: match the same chart/table width ratio as System/GPU -->
+    <div class="grid" style="grid-template-columns: 1.4fr 0.6fr; margin-top: 16px;">
+      <div class="card chart">
+        <div class="hdr">
+          <div class="title">Ping: RTT / availability</div>
+          <div class="hint">Lines = RTT (ms). X markers at 0ms = ping failure.</div>
+        </div>
+        <div class="body">
+          <div id="ping_graph" class="plot"></div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="hdr">
+          <div class="title">Ping summary</div>
+          <div class="hint"><span class="pill">loss% / avg / p95</span></div>
+        </div>
+        <div class="body" style="max-height: 560px; overflow:auto;">
+          <table class="table" id="ping_table"></table>
+        </div>
+      </div>
+    </div>
+
+    <!-- Network top talkers: match same width ratio -->
+    <div class="grid" style="grid-template-columns: 1.4fr 0.6fr; margin-top: 16px;">
+      <div class="card chart">
+        <div class="hdr">
+          <div class="title">Network: top talkers (best-effort)</div>
+          <div class="hint">Uses monitor’s `--net-top` sampling (typically top-K only). Lines = (sent+recv) MiB/s.</div>
+        </div>
+        <div class="body">
+          <div id="net_graph" class="plot"></div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="hdr">
+          <div class="title">Network offenders (aggregated)</div>
+          <div class="hint"><span class="pill">avg / max</span></div>
+        </div>
+        <div class="body" style="max-height: 560px; overflow:auto;">
+          <table class="table" id="net_table"></table>
         </div>
       </div>
     </div>
@@ -634,6 +914,9 @@ def _build_html(payload: Dict[str, Any]) -> str:
       el.innerHTML = `<tr><th>status</th></tr><tr><td class="muted">No spikes detected (or process data missing in window).</td></tr>`;
       return;
     }}
+    // Show latest first (top of the table), but keep data-idx pointing to the original spike index
+    // so table↔plot highlighting still works.
+    const rev = spikes.slice().reverse();
     el.innerHTML = `
       <tr>
         <th>time</th>
@@ -642,8 +925,8 @@ def _build_html(payload: Dict[str, Any]) -> str:
         <th>rss</th>
         <th>gpu</th>
       </tr>
-      ${{spikes.map(s => `
-        <tr>
+      ${{rev.map((s, j) => `
+        <tr class="spike-row" data-idx="${{(spikes.length - 1 - j)}}">
           <td class="mono">${{s.ts.replace('T',' ')}}</td>
           <td>
             <span class="badge bad">${{(s.cpu_percent_total ?? s.cpu_percent).toFixed(1)}}%</span>
@@ -689,6 +972,59 @@ def _build_html(payload: Dict[str, Any]) -> str:
     `;
   }}
 
+  function buildPingTable(rows) {{
+    const el = document.getElementById('ping_table');
+    if (!rows || rows.length === 0) {{
+      el.innerHTML = `<tr><th>status</th></tr><tr><td class="muted">No ping samples in window.</td></tr>`;
+      return;
+    }}
+    el.innerHTML = `
+      <tr>
+        <th>target</th>
+        <th>loss%</th>
+        <th>avg</th>
+        <th>p95</th>
+        <th>n</th>
+      </tr>
+      ${{rows.map(r => `
+        <tr>
+          <td class="mono">${{r.target}}</td>
+          <td class="mono"><span class="badge ${{(r.loss_pct ?? 0) > 5 ? 'bad' : ((r.loss_pct ?? 0) > 0 ? 'warn' : 'good')}}">${{(r.loss_pct ?? 0).toFixed(1)}}%</span></td>
+          <td class="mono">${{(r.avg_ms ?? 0).toFixed(1)}} ms</td>
+          <td class="mono">${{(r.p95_ms ?? 0).toFixed(1)}} ms</td>
+          <td class="mono">${{r.ok_n}}/${{r.n}}</td>
+        </tr>
+      `).join('')}}
+    `;
+  }}
+
+  function buildNetTable(rows) {{
+    const el = document.getElementById('net_table');
+    if (!rows || rows.length === 0) {{
+      el.innerHTML = `<tr><th>status</th></tr><tr><td class="muted">No net_process_samples in window (enable monitor with --net-top).</td></tr>`;
+      return;
+    }}
+    el.innerHTML = `
+      <tr>
+        <th>process</th>
+        <th>avg</th>
+        <th>max</th>
+        <th>rows</th>
+      </tr>
+      ${{rows.map(r => `
+        <tr>
+          <td>
+            <div class="mono">${{(r.proc||'').slice(0,40)}}</div>
+            <div class="small muted">${{(r.proc||'').slice(0,120)}}</div>
+          </td>
+          <td class="mono"><span class="badge warn">${{bpsToMiBps(r.avg_bps).toFixed(2)}}</span> MiB/s</td>
+          <td class="mono">${{bpsToMiBps(r.max_bps).toFixed(2)}} MiB/s</td>
+          <td class="mono">${{r.sample_rows}}</td>
+        </tr>
+      `).join('')}}
+    `;
+  }}
+
   function commonLayout(title) {{
     const grid = 'rgba(255,255,255,0.09)';
     // Default initial view: current last 1 hour (ending at "now").
@@ -711,11 +1047,14 @@ def _build_html(payload: Dict[str, Any]) -> str:
     }} catch (e) {{
       // ignore
     }}
+    // The card header already provides a title; keep the Plotly title empty to avoid overlapping the legend.
     return {{
-      title: {{ text: title, font: {{ size: 13, color: 'rgba(255,255,255,0.85)' }} }},
+      title: {{ text: '', font: {{ size: 13, color: 'rgba(255,255,255,0.85)' }} }},
       paper_bgcolor: 'rgba(0,0,0,0)',
       plot_bgcolor: 'rgba(0,0,0,0)',
-      margin: {{ l: 55, r: 20, t: 42, b: 40 }},
+      // Give extra headroom for the horizontal legend and extra right-side axes.
+      // This prevents the GPU plot from looking "shorter" when its legend wraps to multiple rows.
+      margin: {{ l: 55, r: 90, t: 92, b: 40 }},
       hovermode: 'x unified',
       // Our page uses a light hover box by default; since layout font is light, it can look "empty".
       // Force a dark hoverlabel so values are always readable.
@@ -751,7 +1090,14 @@ def _build_html(payload: Dict[str, Any]) -> str:
         }},
         rangeslider: {{ visible: true, thickness: 0.08, bgcolor: 'rgba(255,255,255,0.03)' }},
       }},
-      legend: {{ orientation: 'h', y: 1.08, x: 0.0 }},
+      legend: {{
+        orientation: 'h',
+        y: 1.24,
+        x: 0.0,
+        yanchor: 'bottom',
+        font: {{ size: 11 }},
+        itemwidth: 110,
+      }},
     }};
   }}
 
@@ -792,26 +1138,286 @@ def _build_html(payload: Dict[str, Any]) -> str:
     ];
 
     if (spikes.length > 0) {{
+      // Plotly has no native marker shadow/glow; simulate with a "glow" marker trace behind the main trace.
+      const spikeGlowTraceIndex = traces.length;
+      traces.push({{
+        x: spikeX,
+        y: spikeY,
+        name: '',
+        mode: 'markers',
+        marker: {{ size: 18, color: 'rgba(251,113,133,0.22)', line: {{ width: 0 }} }},
+        hoverinfo: 'skip',
+        showlegend: false,
+        yaxis: 'y1'
+      }});
+
+      const spikeTraceIndex = traces.length;
       traces.push({{
         x: spikeX,
         y: spikeY,
         name: 'Top-proc CPU spike',
         mode: 'markers',
-        marker: {{ size: 10, color: '#fb7185', line: {{ width: 1, color: 'rgba(255,255,255,0.7)' }} }},
+        marker: {{ size: 10, color: '#fb7185', line: {{ width: 1, color: 'rgba(255,255,255,0.75)' }} }},
         text: spikeText,
         hovertemplate: '<b>Spike</b><br>%{{x}}<br>top-proc cpu (of total)=%{{y:.1f}}%<br>%{{text}}<extra></extra>',
         yaxis: 'y1'
       }});
+      // Expose mapping so the spike table can highlight points on hover/click.
+      window.__SPIKE_GLOW_TRACE_INDEX = spikeGlowTraceIndex;
+      window.__SPIKE_TRACE_INDEX = spikeTraceIndex;
+      window.__SPIKE_COUNT = spikeX.length;
+      window.__SPIKE_DEFAULT_COLOR = '#fb7185';
+      // Use a high-contrast highlight (yellow) so it’s obvious.
+      window.__SPIKE_HILITE_COLOR = '#fbbf24';
+      window.__SPIKE_DEFAULT_SIZE = 10;
+      window.__SPIKE_HILITE_SIZE = 14;
+      window.__SPIKE_GLOW_DEFAULT_COLOR = 'rgba(251,113,133,0.22)';
+      window.__SPIKE_GLOW_HILITE_COLOR = 'rgba(251,191,36,0.30)';
+      window.__SPIKE_GLOW_DEFAULT_SIZE = 18;
+      window.__SPIKE_GLOW_HILITE_SIZE = 24;
     }}
 
-    const layout = commonLayout('System timeline');
+    const layout = commonLayout('');
     layout.yaxis = {{ title: 'CPU% / MEM%', range: [0, 100], gridcolor: 'rgba(255,255,255,0.09)' }};
-    layout.yaxis2 = {{ title: 'load1', overlaying: 'y', side: 'right', showgrid: false }};
-    layout.yaxis3 = {{ title: 'net MiB/s', anchor: 'x', overlaying: 'y', side: 'right', position: 0.98, showgrid: false }};
-    layout.yaxis4 = {{ title: 'disk MiB/s', anchor: 'x', overlaying: 'y', side: 'right', position: 0.92, showgrid: false }};
+    // Push right-side axes *outside* the plot area to prevent tick-label pileups.
+    // Keep tick labels small; hover shows exact values anyway.
+    layout.yaxis2 = {{
+      title: 'load1',
+      overlaying: 'y',
+      side: 'right',
+      anchor: 'free',
+      position: 1.00,
+      showgrid: false,
+      tickfont: {{ size: 10 }},
+      titlefont: {{ size: 10 }},
+      automargin: true,
+    }};
+    layout.yaxis3 = {{
+      title: 'net MiB/s',
+      overlaying: 'y',
+      side: 'right',
+      anchor: 'free',
+      position: 1.06,
+      showgrid: false,
+      tickfont: {{ size: 10 }},
+      titlefont: {{ size: 10 }},
+      automargin: true,
+    }};
+    layout.yaxis4 = {{
+      title: 'disk MiB/s',
+      overlaying: 'y',
+      side: 'right',
+      anchor: 'free',
+      position: 1.12,
+      showgrid: false,
+      tickfont: {{ size: 10 }},
+      titlefont: {{ size: 10 }},
+      automargin: true,
+    }};
 
     const config = {{ displayModeBar: true, responsive: true }};
-    Plotly.newPlot('sys_graph', traces, layout, config);
+    return Plotly.newPlot('sys_graph', traces, layout, config).then(() => {{
+      installHoverDelay('sys_graph');
+      installSpikeTableLinkage();
+    }});
+  }}
+
+  function installSpikeTableLinkage() {{
+    const table = document.getElementById('spike_table');
+    const plot = document.getElementById('sys_graph');
+    if (!table || !plot) return;
+    const traceIndex = window.__SPIKE_TRACE_INDEX;
+    const glowTraceIndex = window.__SPIKE_GLOW_TRACE_INDEX
+    const spikeCount = Number(window.__SPIKE_COUNT ?? 0);
+    if (traceIndex === undefined || traceIndex === null) return;
+
+    let pinnedIdx = null;
+
+    function setSelectedRow(idx) {{
+      // Visual selection in table
+      const rows = table.querySelectorAll('tr.spike-row');
+      rows.forEach(r => {{
+        const ridx = r.getAttribute('data-idx');
+        if (idx !== null && idx !== undefined && String(idx) === String(ridx)) r.classList.add('selected');
+        else r.classList.remove('selected');
+      }});
+    }}
+
+    function highlightSpikeByIdx(idx) {{
+      if (idx === null || idx === undefined) return;
+      const i = Number(idx);
+      if (!Number.isFinite(i) || i < 0 || i >= spikeCount) return;
+      // Create per-point styles so only one marker pops.
+      const colors = Array(spikeCount).fill(window.__SPIKE_DEFAULT_COLOR || '#fb7185');
+      colors[i] = window.__SPIKE_HILITE_COLOR || '#fbbf24';
+      const baseSize = Number(window.__SPIKE_DEFAULT_SIZE ?? 10);
+      const hiSize = Number(window.__SPIKE_HILITE_SIZE ?? 14);
+      const sizes = Array(spikeCount).fill(baseSize);
+      sizes[i] = hiSize;
+      Plotly.restyle(plot, {{ 'marker.color': [colors], 'marker.size': [sizes] }}, [traceIndex]);
+
+      // Glow layer (if present)
+      if (glowTraceIndex !== undefined && glowTraceIndex !== null) {{
+        const gColors = Array(spikeCount).fill(window.__SPIKE_GLOW_DEFAULT_COLOR || 'rgba(251,113,133,0.22)');
+        gColors[i] = window.__SPIKE_GLOW_HILITE_COLOR || 'rgba(251,191,36,0.30)';
+        const gBase = Number(window.__SPIKE_GLOW_DEFAULT_SIZE ?? 18);
+        const gHi = Number(window.__SPIKE_GLOW_HILITE_SIZE ?? 24);
+        const gSizes = Array(spikeCount).fill(gBase);
+        gSizes[i] = gHi;
+        Plotly.restyle(plot, {{ 'marker.color': [gColors], 'marker.size': [gSizes] }}, [glowTraceIndex]);
+      }}
+      setSelectedRow(i);
+    }}
+
+    function clearHighlight() {{
+      const colors = Array(spikeCount).fill(window.__SPIKE_DEFAULT_COLOR || '#fb7185');
+      const baseSize = Number(window.__SPIKE_DEFAULT_SIZE ?? 10);
+      const sizes = Array(spikeCount).fill(baseSize);
+      Plotly.restyle(plot, {{ 'marker.color': [colors], 'marker.size': [sizes] }}, [traceIndex]);
+
+      if (glowTraceIndex !== undefined && glowTraceIndex !== null) {{
+        const gColors = Array(spikeCount).fill(window.__SPIKE_GLOW_DEFAULT_COLOR || 'rgba(251,113,133,0.22)');
+        const gBase = Number(window.__SPIKE_GLOW_DEFAULT_SIZE ?? 18);
+        const gSizes = Array(spikeCount).fill(gBase);
+        Plotly.restyle(plot, {{ 'marker.color': [gColors], 'marker.size': [gSizes] }}, [glowTraceIndex]);
+      }}
+      setSelectedRow(null);
+    }}
+
+    // Event delegation so this works even if the table is rebuilt later.
+    table.addEventListener('mouseover', (ev) => {{
+      const tr = ev.target.closest('tr.spike-row');
+      if (!tr) return;
+      if (pinnedIdx !== null) return; // when pinned, ignore hover
+      const idx = tr.getAttribute('data-idx');
+      if (idx !== null) highlightSpikeByIdx(idx);
+    }});
+    table.addEventListener('mouseout', (ev) => {{
+      const tr = ev.target.closest('tr.spike-row');
+      if (!tr) return;
+      if (pinnedIdx !== null) return;
+      clearHighlight();
+    }});
+    table.addEventListener('click', (ev) => {{
+      const tr = ev.target.closest('tr.spike-row');
+      if (!tr) return;
+      const idx = tr.getAttribute('data-idx');
+      if (idx === null) return;
+      const i = Number(idx);
+      if (!Number.isFinite(i)) return;
+      if (pinnedIdx === i) {{
+        pinnedIdx = null;
+        clearHighlight();
+      }} else {{
+        pinnedIdx = i;
+        highlightSpikeByIdx(i);
+      }}
+    }});
+
+    // If user clicks elsewhere on the plot, unpin.
+    plot.on('plotly_click', () => {{
+      pinnedIdx = null;
+      clearHighlight();
+    }});
+  }}
+
+  function installHoverDelay(divId) {{
+    const delayMs = Number(PAYLOAD.hover_delay_ms ?? 0);
+    const el = document.getElementById(divId);
+    if (!el) return;
+    // Mark this plot as opt-in for delayed hover behavior
+    el.classList.add('hover-delay');
+    let timer = null;
+
+    function clearTimer() {{
+      if (timer !== null) {{
+        clearTimeout(timer);
+        timer = null;
+      }}
+    }}
+
+    function hideNow() {{
+      el.classList.remove('show-hover');
+    }}
+
+    function showLater() {{
+      hideNow();
+      clearTimer();
+      if (!delayMs || delayMs <= 0) {{
+        el.classList.add('show-hover');
+        return;
+      }}
+      timer = setTimeout(() => {{
+        el.classList.add('show-hover');
+      }}, delayMs);
+    }}
+
+    // On hover updates, restart the delay.
+    el.on('plotly_hover', () => showLater());
+    el.on('plotly_unhover', () => {{
+      clearTimer();
+      hideNow();
+    }});
+    // If the plot redraws or changes range, hide hover immediately.
+    el.on('plotly_relayout', () => {{
+      clearTimer();
+      hideNow();
+    }});
+  }}
+
+  function installTimeSync(plotIds) {{
+    // Sync x-axis range across multiple Plotly charts (zoom/pan/rangeselector/rangeslider/dblclick reset).
+    // Plotly emits 'plotly_relayout' with keys like:
+    //   'xaxis.range[0]', 'xaxis.range[1]' OR 'xaxis.autorange'
+    // We forward only xaxis.* changes to other plots.
+    const ids = (plotIds || []).filter(Boolean);
+    const plots = ids
+      .map(id => document.getElementById(id))
+      .filter(Boolean);
+    if (plots.length <= 1) return;
+
+    let syncing = false;
+
+    function pickXUpdate(update) {{
+      if (!update) return null;
+      const out = {{}};
+      for (const [k, v] of Object.entries(update)) {{
+        if (k === 'xaxis.autorange' ||
+            k === 'xaxis.range' ||
+            k.startsWith('xaxis.range[') ||
+            k.startsWith('xaxis.rangeslider') ||
+            k.startsWith('xaxis.showspikes') ||
+            k.startsWith('xaxis.spikes')) {{
+          out[k] = v;
+        }}
+      }}
+      return Object.keys(out).length ? out : null;
+    }}
+
+    function applyToOthers(sourceEl, xUpdate) {{
+      if (!xUpdate) return;
+      syncing = true;
+      const ps = [];
+      for (const el of plots) {{
+        if (el === sourceEl) continue;
+        try {{
+          ps.push(Plotly.relayout(el, xUpdate));
+        }} catch (e) {{
+          // ignore
+        }}
+      }}
+      Promise.allSettled(ps).finally(() => {{
+        syncing = false;
+      }});
+    }}
+
+    for (const el of plots) {{
+      el.on('plotly_relayout', (update) => {{
+        if (syncing) return;
+        const xUpdate = pickXUpdate(update);
+        applyToOthers(el, xUpdate);
+      }});
+    }}
   }}
 
   function renderGpuGraph() {{
@@ -854,24 +1460,139 @@ def _build_html(payload: Dict[str, Any]) -> str:
       }});
     }}
 
-    const layout = commonLayout('GPU timeline');
+    const layout = commonLayout('');
     layout.yaxis = {{ title: 'util %', rangemode: 'tozero', gridcolor: 'rgba(255,255,255,0.09)' }};
-    layout.yaxis2 = {{ title: 'mem MB', overlaying: 'y', side: 'right', showgrid: false }};
-    layout.yaxis3 = {{ title: 'temp C', overlaying: 'y', side: 'right', position: 0.96, showgrid: false }};
-    layout.yaxis4 = {{ title: 'power W', overlaying: 'y', side: 'right', position: 0.92, showgrid: false }};
+    layout.yaxis2 = {{
+      title: 'mem MB',
+      overlaying: 'y',
+      side: 'right',
+      anchor: 'free',
+      position: 1.00,
+      showgrid: false,
+      tickfont: {{ size: 10 }},
+      titlefont: {{ size: 10 }},
+      automargin: true,
+    }};
+    layout.yaxis3 = {{
+      title: 'temp C',
+      overlaying: 'y',
+      side: 'right',
+      anchor: 'free',
+      position: 1.06,
+      showgrid: false,
+      tickfont: {{ size: 10 }},
+      titlefont: {{ size: 10 }},
+      automargin: true,
+    }};
+    layout.yaxis4 = {{
+      title: 'power W',
+      overlaying: 'y',
+      side: 'right',
+      anchor: 'free',
+      position: 1.12,
+      showgrid: false,
+      tickfont: {{ size: 10 }},
+      titlefont: {{ size: 10 }},
+      automargin: true,
+    }};
 
     const config = {{ displayModeBar: true, responsive: true }};
     if (!keys.length) {{
-      Plotly.newPlot('gpu_graph', [{{x: [PAYLOAD.window_end], y: [0], mode:'text', text:['No GPU samples in window'], textfont:{{size:14}}, hoverinfo:'skip'}}], layout, config);
+      return Plotly.newPlot('gpu_graph', [{{x: [PAYLOAD.window_end], y: [0], mode:'text', text:['No GPU samples in window'], textfont:{{size:14}}, hoverinfo:'skip'}}], layout, config)
+        .then(() => installHoverDelay('gpu_graph'));
     }} else {{
-      Plotly.newPlot('gpu_graph', traces, layout, config);
+      return Plotly.newPlot('gpu_graph', traces, layout, config)
+        .then(() => installHoverDelay('gpu_graph'));
     }}
+  }}
+
+  function renderPingGraph() {{
+    const p = PAYLOAD.pings || {{}};
+    const targets = Object.keys(p);
+    const traces = [];
+    for (const t of targets) {{
+      const d = p[t];
+      traces.push({{
+        x: d.x,
+        y: d.rtt_ms,
+        name: t,
+        mode: 'lines+markers',
+        marker: {{ size: 5 }},
+        line: {{ width: 2 }},
+        yaxis: 'y1',
+      }});
+
+      // Failures: plot at y=0 with 'x' markers (status output)
+      const fx = [];
+      const fy = [];
+      const ft = [];
+      for (let i = 0; i < (d.x || []).length; i++) {{
+        const ok = (d.success && d.success[i]) ? 1 : 0;
+        if (ok) continue;
+        fx.push(d.x[i]);
+        fy.push(0);
+        const err = (d.error && d.error[i]) ? d.error[i] : 'ping_failed';
+        ft.push(`${{t}}<br>${{err}}`);
+      }}
+      if (fx.length) {{
+        traces.push({{
+          x: fx,
+          y: fy,
+          name: `${{t}} fail`,
+          mode: 'markers',
+          marker: {{ size: 9, symbol: 'x', color: '#fb7185', line: {{ width: 2, color: 'rgba(255,255,255,0.65)' }} }},
+          text: ft,
+          hovertemplate: '<b>Ping fail</b><br>%{{x}}<br>%{{text}}<extra></extra>',
+          showlegend: false,
+          yaxis: 'y1',
+        }});
+      }}
+    }}
+
+    const layout = commonLayout('');
+    layout.yaxis = {{ title: 'RTT (ms)', rangemode: 'tozero', gridcolor: 'rgba(255,255,255,0.09)' }};
+    const config = {{ displayModeBar: true, responsive: true }};
+    return Plotly.newPlot('ping_graph', traces, layout, config).then(() => installHoverDelay('ping_graph'));
+  }}
+
+  function renderNetGraph() {{
+    const n = PAYLOAD.net || {{}};
+    const procs = Object.keys(n);
+    const traces = [];
+    for (const p of procs) {{
+      const d = n[p];
+      const x = d.x || [];
+      const total = (d.total_bps || []).map(v => bpsToMiBps(v));
+      const sent = (d.sent_bps || []).map(v => bpsToMiBps(v));
+      const recv = (d.recv_bps || []).map(v => bpsToMiBps(v));
+      const text = total.map((_, i) => `sent=${{sent[i]?.toFixed(2)}} MiB/s<br>recv=${{recv[i]?.toFixed(2)}} MiB/s`);
+      traces.push({{
+        x,
+        y: total,
+        name: p,
+        mode: 'lines',
+        line: {{ width: 2 }},
+        text,
+        hovertemplate: '<b>%{{fullData.name}}</b><br>%{{x}}<br>total=%{{y:.2f}} MiB/s<br>%{{text}}<extra></extra>',
+      }});
+    }}
+    const layout = commonLayout('');
+    layout.yaxis = {{ title: 'MiB/s', rangemode: 'tozero', gridcolor: 'rgba(255,255,255,0.09)' }};
+    const config = {{ displayModeBar: true, responsive: true }};
+    return Plotly.newPlot('net_graph', traces, layout, config).then(() => installHoverDelay('net_graph'));
   }}
 
   buildSpikeTable(PAYLOAD.spikes || []);
   buildLeaderTable(PAYLOAD.cpu_leaderboard || []);
-  renderSystemGraph();
-  renderGpuGraph();
+  buildPingTable(PAYLOAD.ping_summary || []);
+  buildNetTable(PAYLOAD.net_leaderboard || []);
+  const pSys = renderSystemGraph();
+  const pGpu = renderGpuGraph();
+  const pPing = renderPingGraph();
+  const pNet = renderNetGraph();
+  Promise.allSettled([pSys, pGpu, pPing, pNet]).then(() => {{
+    installTimeSync(['sys_graph', 'gpu_graph', 'ping_graph', 'net_graph']);
+  }});
   </script>
 </body>
 </html>
@@ -889,7 +1610,15 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     p.add_argument("--spike-sigma", type=float, default=4.0, help="MAD-based sigma threshold multiplier")
     p.add_argument("--max-spikes", type=int, default=50, help="Max spikes to show/annotate")
 
+    p.add_argument(
+        "--hover-delay-ms",
+        type=int,
+        default=700,
+        help="Delay (ms) before hover labels appear (default: 700)",
+    )
+
     p.add_argument("--leaderboard-limit", type=int, default=20, help="How many leaderboard rows to include")
+    p.add_argument("--net-limit", type=int, default=5, help="How many network offenders to include (default: 5)")
     return p.parse_args(argv)
 
 
@@ -904,6 +1633,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         start_ts, end_ts = _get_time_window(con, days=float(args.days))
         samples = _query_samples(con, start_ts=start_ts)
         gpus = _query_gpu_timeseries(con, start_ts=start_ts)
+        pings = _query_ping_timeseries(con, start_ts=start_ts)
+        ping_summary = _query_ping_summary(con, start_ts=start_ts)
+        net_leaderboard = _query_net_leaderboard(con, start_ts=start_ts, limit=int(args.net_limit))
+        net_procs = [str(r.get("proc") or "") for r in net_leaderboard if (r.get("proc") or "")]
+        net = _query_net_timeseries(con, start_ts=start_ts, procs=net_procs)
         top_proc = _query_top_process_per_sample(con, start_ts=start_ts)
         spikes = _detect_cpu_spikes(
             top_proc,
@@ -926,8 +1660,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             "window_end": _ts_to_iso(end_ts),
             "sample_count": len(samples),
             "avg_interval_s": avg_interval,
+            "hover_delay_ms": int(args.hover_delay_ms),
             "samples": [
                 {
+                    "sample_id": s.sample_id,
                     "ts": _ts_to_iso(s.ts_unix),
                     "cpu_percent": s.cpu_percent,
                     "mem_percent": s.mem_percent,
@@ -948,6 +1684,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 for s in samples
             ],
             "gpus": gpus,
+            "pings": pings,
+            "ping_summary": ping_summary,
+            "net": net,
+            "net_leaderboard": net_leaderboard,
             "spikes": spikes,
             "cpu_leaderboard": leaderboard,
         }
