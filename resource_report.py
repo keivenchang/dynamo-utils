@@ -52,6 +52,9 @@ class SampleRow:
     disk_write_bps: Optional[float]
     mem_used_bytes: Optional[int]
     mem_total_bytes: Optional[int]
+    gpu_util_max: Optional[float]
+    gpu_mem_used_mb_total: Optional[float]
+    gpu_mem_total_mb_total: Optional[float]
 
 
 def _connect(db_path: Path) -> sqlite3.Connection:
@@ -74,15 +77,28 @@ def _query_samples(con: sqlite3.Connection, *, start_ts: float) -> List[SampleRo
     cur = con.cursor()
     rows = cur.execute(
         """
+        WITH gagg AS (
+          SELECT
+            sample_id,
+            MAX(util_gpu) AS gpu_util_max,
+            SUM(mem_used_mb) AS gpu_mem_used_mb_total,
+            SUM(mem_total_mb) AS gpu_mem_total_mb_total
+          FROM gpu_samples
+          GROUP BY sample_id
+        )
         SELECT
-          ts_unix, interval_s,
-          cpu_percent, mem_percent, load1,
-          net_sent_bps, net_recv_bps,
-          disk_read_bps, disk_write_bps,
-          mem_used_bytes, mem_total_bytes
-        FROM samples
-        WHERE ts_unix >= ?
-        ORDER BY ts_unix ASC
+          s.ts_unix, s.interval_s,
+          s.cpu_percent, s.mem_percent, s.load1,
+          s.net_sent_bps, s.net_recv_bps,
+          s.disk_read_bps, s.disk_write_bps,
+          s.mem_used_bytes, s.mem_total_bytes,
+          gagg.gpu_util_max,
+          gagg.gpu_mem_used_mb_total,
+          gagg.gpu_mem_total_mb_total
+        FROM samples s
+        LEFT JOIN gagg ON gagg.sample_id = s.id
+        WHERE s.ts_unix >= ?
+        ORDER BY s.ts_unix ASC
         """,
         (start_ts,),
     ).fetchall()
@@ -101,6 +117,13 @@ def _query_samples(con: sqlite3.Connection, *, start_ts: float) -> List[SampleRo
                 disk_write_bps=(float(r["disk_write_bps"]) if r["disk_write_bps"] is not None else None),
                 mem_used_bytes=(int(r["mem_used_bytes"]) if r["mem_used_bytes"] is not None else None),
                 mem_total_bytes=(int(r["mem_total_bytes"]) if r["mem_total_bytes"] is not None else None),
+                gpu_util_max=(float(r["gpu_util_max"]) if r["gpu_util_max"] is not None else None),
+                gpu_mem_used_mb_total=(
+                    float(r["gpu_mem_used_mb_total"]) if r["gpu_mem_used_mb_total"] is not None else None
+                ),
+                gpu_mem_total_mb_total=(
+                    float(r["gpu_mem_total_mb_total"]) if r["gpu_mem_total_mb_total"] is not None else None
+                ),
             )
         )
     return out
@@ -185,6 +208,9 @@ def _query_top_process_per_sample(con: sqlite3.Connection, *, start_ts: float) -
 
     out: List[Dict[str, Any]] = []
     for r in rows:
+        raw_cpu = float(r["cpu_percent"]) if r["cpu_percent"] is not None else 0.0
+        cpu_count = os.cpu_count() or 1
+        cpu_total = raw_cpu / float(cpu_count) if cpu_count > 0 else raw_cpu
         out.append(
             {
                 "ts_unix": float(r["ts_unix"]),
@@ -194,7 +220,10 @@ def _query_top_process_per_sample(con: sqlite3.Connection, *, start_ts: float) -
                 "name": r["name"] or "",
                 "username": r["username"] or "",
                 "cmdline": r["cmdline"] or "",
-                "cpu_percent": float(r["cpu_percent"]) if r["cpu_percent"] is not None else 0.0,
+                # `psutil.Process.cpu_percent()` can be >100 on multi-core machines.
+                # Normalize to "percent of total machine capacity" (0-100) for plotting alongside system CPU%.
+                "cpu_percent": raw_cpu,
+                "cpu_percent_total": cpu_total,
                 "rss_mb": (float(r["rss_bytes"]) / 1024.0 / 1024.0) if r["rss_bytes"] is not None else 0.0,
                 "gpu_mem_mb": float(r["gpu_mem_mb"]) if r["gpu_mem_mb"] is not None else 0.0,
             }
@@ -219,27 +248,36 @@ def _detect_cpu_spikes(
     max_spikes: int,
 ) -> List[Dict[str, Any]]:
     # Robust threshold using MAD.
-    vals = [float(p.get("cpu_percent") or 0.0) for p in top_proc]
+    # Use normalized "percent of total machine capacity" so spikes align with the system CPU% chart scale.
+    vals = [float(p.get("cpu_percent_total") or 0.0) for p in top_proc]
     med, mad = _median_mad(vals)
     # Scale MAD -> approx stddev for normal dist.
     robust_std = 1.4826 * mad
-    thresh = max(float(min_cpu_percent), med + float(sigma) * robust_std)
+    # Backwards-compatible interpretation:
+    # `--min-cpu-spike` is specified in "raw per-process CPU%" units, where 100% ~= 1 core.
+    # Convert to "percent of total machine capacity" for our normalized series.
+    cpu_count = os.cpu_count() or 1
+    min_cpu_total = float(min_cpu_percent) / float(cpu_count) if cpu_count > 0 else float(
+        min_cpu_percent
+    )
+    thresh = max(min_cpu_total, med + float(sigma) * robust_std)
 
     spikes: List[Dict[str, Any]] = []
     for i, p in enumerate(top_proc):
-        v = float(p.get("cpu_percent") or 0.0)
+        v = float(p.get("cpu_percent_total") or 0.0)
         if v < thresh:
             continue
         # Local max guard to reduce flat "plateaus"
-        prev_v = float(top_proc[i - 1].get("cpu_percent") or 0.0) if i > 0 else -1.0
-        next_v = float(top_proc[i + 1].get("cpu_percent") or 0.0) if i + 1 < len(top_proc) else -1.0
+        prev_v = float(top_proc[i - 1].get("cpu_percent_total") or 0.0) if i > 0 else -1.0
+        next_v = float(top_proc[i + 1].get("cpu_percent_total") or 0.0) if i + 1 < len(top_proc) else -1.0
         if v < prev_v or v < next_v:
             continue
         spikes.append(
             {
                 "ts": p["ts"],
                 "ts_unix": p["ts_unix"],
-                "cpu_percent": v,
+                "cpu_percent_total": v,
+                "cpu_percent": float(p.get("cpu_percent") or 0.0),
                 "pid": p.get("pid"),
                 "name": p.get("name"),
                 "username": p.get("username"),
@@ -330,9 +368,14 @@ def _build_html(payload: Dict[str, Any]) -> str:
       --mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
       --sans: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, "Apple Color Emoji","Segoe UI Emoji";
     }}
+    /* Prevent horizontal overflow caused by 100%-width containers + padding. */
+    *, *::before, *::after {{
+      box-sizing: border-box;
+    }}
     html, body {{
       height: 100%;
       margin: 0;
+      overflow-x: hidden;
       background: radial-gradient(1200px 700px at 10% 10%, rgba(124,58,237,0.22), transparent 60%),
                   radial-gradient(1000px 700px at 90% 20%, rgba(110,231,255,0.18), transparent 60%),
                   linear-gradient(180deg, var(--bg0), var(--bg1));
@@ -340,8 +383,10 @@ def _build_html(payload: Dict[str, Any]) -> str:
       font-family: var(--sans);
     }}
     .wrap {{
-      max-width: 1280px;
-      margin: 0 auto;
+      /* Let charts use the full browser width (no fixed max). */
+      max-width: none;
+      width: 100%;
+      margin: 0;
       padding: 24px 18px 60px 18px;
     }}
     .hero {{
@@ -387,6 +432,8 @@ def _build_html(payload: Dict[str, Any]) -> str:
     /* Plotly hover labels can extend outside the plot area; don't clip them. */
     .card.chart {{
       overflow: visible;
+      display: flex;
+      flex-direction: column;
     }}
     .card .hdr {{
       display: flex;
@@ -410,6 +457,20 @@ def _build_html(payload: Dict[str, Any]) -> str:
     }}
     .card .body {{
       padding: 12px 12px 6px 12px;
+      flex: 1 1 auto;
+      min-height: 0; /* allow children to flex without overflowing */
+    }}
+    /* Plot containers: scale with the viewport height instead of a fixed px height. */
+    .plot {{
+      width: 100%;
+      height: 72vh;
+      min-height: 520px;
+    }}
+    @media (max-width: 1100px) {{
+      .plot {{
+        height: 62vh;
+        min-height: 420px;
+      }}
     }}
     .pill {{
       display: inline-flex;
@@ -495,7 +556,7 @@ def _build_html(payload: Dict[str, Any]) -> str:
           <div class="hint">Hover to inspect; drag to zoom; double-click to reset</div>
         </div>
         <div class="body">
-          <div id="sys_graph" style="height:520px;"></div>
+          <div id="sys_graph" class="plot"></div>
         </div>
       </div>
 
@@ -517,7 +578,7 @@ def _build_html(payload: Dict[str, Any]) -> str:
           <div class="hint">If no GPU samples exist, this stays empty</div>
         </div>
         <div class="body">
-          <div id="gpu_graph" style="height:520px;"></div>
+          <div id="gpu_graph" class="plot"></div>
         </div>
       </div>
 
@@ -535,6 +596,16 @@ def _build_html(payload: Dict[str, Any]) -> str:
 
   <script>
   const PAYLOAD = {_json(payload)};
+  // Plotly line dash styles (SVG stroke-dasharray presets):
+  // 'solid', 'dot', 'dash', 'longdash', 'dashdot', 'longdashdot'
+  const DASH = {{
+    solid: 'solid',
+    dot: 'dot',
+    dash: 'dash',
+    longdash: 'longdash',
+    dashdot: 'dashdot',
+    longdashdot: 'longdashdot',
+  }};
 
   function bytesToGiB(b) {{
     if (b === null || b === undefined) return null;
@@ -574,7 +645,12 @@ def _build_html(payload: Dict[str, Any]) -> str:
       ${{spikes.map(s => `
         <tr>
           <td class="mono">${{s.ts.replace('T',' ')}}</td>
-          <td><span class="badge bad">${{s.cpu_percent.toFixed(1)}}%</span></td>
+          <td>
+            <span class="badge bad">${{(s.cpu_percent_total ?? s.cpu_percent).toFixed(1)}}%</span>
+            <div class="small muted mono" title="raw per-process cpu% (can exceed 100 on multi-core)">
+              raw: ${{(s.cpu_percent ?? 0).toFixed(1)}}%
+            </div>
+          </td>
           <td>
             <div class="mono">${{(s.name||'').slice(0,22)}} <span class="muted">#${{s.pid ?? ''}}</span></div>
             <div class="small muted">${{(s.cmdline||'').slice(0,90)}}</div>
@@ -615,6 +691,26 @@ def _build_html(payload: Dict[str, Any]) -> str:
 
   function commonLayout(title) {{
     const grid = 'rgba(255,255,255,0.09)';
+    // Default initial view: current last 1 hour (ending at "now").
+    // (Not "last sample timestamp" — that can be stale and land on e.g. the last hour of a day.)
+    // Users can zoom out via range selector buttons (15m/30m/1h/6h/...).
+    let defaultStart = null;
+    let defaultEnd = null;
+    try {{
+      // Important: sample timestamps are emitted as "localtime ISO without timezone".
+      // If we use toISOString() (UTC + Z), Plotly can interpret the range in a different timezone
+      // than the data, causing a shifted initial view (e.g. "starts at 3AM").
+      function toLocalIsoSeconds(d) {{
+        const pad = (n) => String(n).padStart(2, '0');
+        return `${{d.getFullYear()}}-${{pad(d.getMonth()+1)}}-${{pad(d.getDate())}}T${{pad(d.getHours())}}:${{pad(d.getMinutes())}}:${{pad(d.getSeconds())}}`;
+      }}
+      const end = new Date(); // now (viewer local time)
+      const start = new Date(end.getTime() - 60 * 60 * 1000);
+      defaultEnd = toLocalIsoSeconds(end);
+      defaultStart = toLocalIsoSeconds(start);
+    }} catch (e) {{
+      // ignore
+    }}
     return {{
       title: {{ text: title, font: {{ size: 13, color: 'rgba(255,255,255,0.85)' }} }},
       paper_bgcolor: 'rgba(0,0,0,0)',
@@ -637,11 +733,14 @@ def _build_html(payload: Dict[str, Any]) -> str:
         type: 'date',
         gridcolor: grid,
         zeroline: false,
+        range: (defaultStart && defaultEnd) ? [defaultStart, defaultEnd] : undefined,
         rangeselector: {{
           bgcolor: 'rgba(255,255,255,0.06)',
           bordercolor: 'rgba(255,255,255,0.12)',
           borderwidth: 1,
           buttons: [
+            {{count: 15, label: '15m', step: 'minute', stepmode: 'backward'}},
+            {{count: 30, label: '30m', step: 'minute', stepmode: 'backward'}},
             {{count: 1, label: '1h', step: 'hour', stepmode: 'backward'}},
             {{count: 6, label: '6h', step: 'hour', stepmode: 'backward'}},
             {{count: 12, label: '12h', step: 'hour', stepmode: 'backward'}},
@@ -662,6 +761,8 @@ def _build_html(payload: Dict[str, Any]) -> str:
     const cpu = s.map(r => r.cpu_percent);
     const mem = s.map(r => r.mem_percent);
     const load1 = s.map(r => r.load1);
+    const gpuUtil = s.map(r => r.gpu_util_max);
+    const gpuMemPct = s.map(r => r.gpu_mem_percent_total);
     const netOut = s.map(r => bpsToMiBps(r.net_sent_bps));
     const netIn = s.map(r => bpsToMiBps(r.net_recv_bps));
     const diskR = s.map(r => bpsToMiBps(r.disk_read_bps));
@@ -669,17 +770,25 @@ def _build_html(payload: Dict[str, Any]) -> str:
 
     const spikes = PAYLOAD.spikes || [];
     const spikeX = spikes.map(e => e.ts);
-    const spikeY = spikes.map(e => e.cpu_percent);
-    const spikeText = spikes.map(e => `${{e.name || ''}} #${{e.pid ?? ''}}<br>${{wrapLine((e.cmdline||'').slice(0,240), 80)}}`);
+    const spikeY = spikes.map(e => (e.cpu_percent_total ?? e.cpu_percent));
+    const spikeText = spikes.map(e =>
+      `${{e.name || ''}} #${{e.pid ?? ''}}` +
+      `<br>raw cpu%: ${{(e.cpu_percent ?? 0).toFixed(1)}}` +
+      `<br>${{wrapLine((e.cmdline||'').slice(0,240), 80)}}`
+    );
 
     const traces = [
-      {{ x, y: cpu, name: 'CPU % (system)', mode: 'lines', line: {{ color: '#6ee7ff', width: 2 }} , yaxis: 'y1' }},
-      {{ x, y: mem, name: 'MEM % (system)', mode: 'lines', line: {{ color: '#a78bfa', width: 2 }} , yaxis: 'y1' }},
-      {{ x, y: load1, name: 'load1', mode: 'lines', line: {{ color: 'rgba(255,255,255,0.45)', width: 1.6, dash: 'dot' }} , yaxis: 'y2' }},
-      {{ x, y: netOut, name: 'net out (MiB/s)', mode: 'lines', line: {{ color: '#34d399', width: 1.6 }} , yaxis: 'y3' }},
-      {{ x, y: netIn, name: 'net in (MiB/s)', mode: 'lines', line: {{ color: '#22c55e', width: 1.6, dash: 'dot' }} , yaxis: 'y3' }},
-      {{ x, y: diskR, name: 'disk read (MiB/s)', mode: 'lines', line: {{ color: '#fbbf24', width: 1.6 }} , yaxis: 'y4' }},
-      {{ x, y: diskW, name: 'disk write (MiB/s)', mode: 'lines', line: {{ color: '#fb7185', width: 1.6 }} , yaxis: 'y4' }},
+      {{ x, y: cpu, name: 'CPU % (system)', mode: 'lines', line: {{ color: '#6ee7ff', width: 2, dash: DASH.solid }} , yaxis: 'y1' }},
+      {{ x, y: mem, name: 'MEM % (system)', mode: 'lines', line: {{ color: '#a78bfa', width: 2, dash: DASH.solid }} , yaxis: 'y1' }},
+      // GPU overlays on the same 0-100% axis; use distinct dash styles so they don't blend.
+      {{ x, y: gpuUtil, name: 'GPU util % (max)', mode: 'lines', line: {{ color: '#f97316', width: 1.8, dash: DASH.longdash }} , yaxis: 'y1' }},
+      {{ x, y: gpuMemPct, name: 'GPU mem % (total)', mode: 'lines', line: {{ color: '#fb7185', width: 1.6, dash: DASH.dashdot }} , yaxis: 'y1' }},
+      {{ x, y: load1, name: 'load1', mode: 'lines', line: {{ color: 'rgba(255,255,255,0.45)', width: 1.6, dash: DASH.dot }} , yaxis: 'y2' }},
+      {{ x, y: netOut, name: 'net out (MiB/s)', mode: 'lines', line: {{ color: '#34d399', width: 1.6, dash: DASH.solid }} , yaxis: 'y3' }},
+      {{ x, y: netIn, name: 'net in (MiB/s)', mode: 'lines', line: {{ color: '#22c55e', width: 1.6, dash: DASH.dot }} , yaxis: 'y3' }},
+      {{ x, y: diskR, name: 'disk read (MiB/s)', mode: 'lines', line: {{ color: '#fbbf24', width: 1.6, dash: DASH.solid }} , yaxis: 'y4' }},
+      // Use a different color than GPU mem% (also pink) to avoid visual confusion.
+      {{ x, y: diskW, name: 'disk write (MiB/s)', mode: 'lines', line: {{ color: '#38bdf8', width: 1.6, dash: DASH.longdashdot }} , yaxis: 'y4' }},
     ];
 
     if (spikes.length > 0) {{
@@ -690,13 +799,13 @@ def _build_html(payload: Dict[str, Any]) -> str:
         mode: 'markers',
         marker: {{ size: 10, color: '#fb7185', line: {{ width: 1, color: 'rgba(255,255,255,0.7)' }} }},
         text: spikeText,
-        hovertemplate: '<b>Spike</b><br>%{{x}}<br>top-proc cpu=%{{y:.1f}}%<br>%{{text}}<extra></extra>',
+        hovertemplate: '<b>Spike</b><br>%{{x}}<br>top-proc cpu (of total)=%{{y:.1f}}%<br>%{{text}}<extra></extra>',
         yaxis: 'y1'
       }});
     }}
 
     const layout = commonLayout('System timeline');
-    layout.yaxis = {{ title: 'CPU% / MEM%', rangemode: 'tozero', gridcolor: 'rgba(255,255,255,0.09)' }};
+    layout.yaxis = {{ title: 'CPU% / MEM%', range: [0, 100], gridcolor: 'rgba(255,255,255,0.09)' }};
     layout.yaxis2 = {{ title: 'load1', overlaying: 'y', side: 'right', showgrid: false }};
     layout.yaxis3 = {{ title: 'net MiB/s', anchor: 'x', overlaying: 'y', side: 'right', position: 0.98, showgrid: false }};
     layout.yaxis4 = {{ title: 'disk MiB/s', anchor: 'x', overlaying: 'y', side: 'right', position: 0.92, showgrid: false }};
@@ -716,7 +825,7 @@ def _build_html(payload: Dict[str, Any]) -> str:
         y: gpu.util,
         name: `GPU${{k}} util%`,
         mode: 'lines',
-        line: {{ width: 2 }},
+        line: {{ width: 2, dash: DASH.solid }},
         yaxis: 'y1',
       }});
       traces.push({{
@@ -724,7 +833,7 @@ def _build_html(payload: Dict[str, Any]) -> str:
         y: gpu.mem_used,
         name: `GPU${{k}} mem used (MB)`,
         mode: 'lines',
-        line: {{ width: 1.7, dash: 'dot' }},
+        line: {{ width: 1.7, dash: DASH.longdash }},
         yaxis: 'y2',
       }});
       traces.push({{
@@ -732,7 +841,7 @@ def _build_html(payload: Dict[str, Any]) -> str:
         y: gpu.temp,
         name: `GPU${{k}} temp (C)`,
         mode: 'lines',
-        line: {{ width: 1.4, dash: 'dash' }},
+        line: {{ width: 1.4, dash: DASH.dashdot }},
         yaxis: 'y3',
       }});
       traces.push({{
@@ -740,7 +849,7 @@ def _build_html(payload: Dict[str, Any]) -> str:
         y: gpu.power,
         name: `GPU${{k}} power (W)`,
         mode: 'lines',
-        line: {{ width: 1.4, dash: 'dashdot' }},
+        line: {{ width: 1.4, dash: DASH.longdashdot }},
         yaxis: 'y4',
       }});
     }}
@@ -829,6 +938,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                     "disk_write_bps": s.disk_write_bps,
                     "mem_used_gib": (s.mem_used_bytes / 1024 / 1024 / 1024) if s.mem_used_bytes else None,
                     "mem_total_gib": (s.mem_total_bytes / 1024 / 1024 / 1024) if s.mem_total_bytes else None,
+                    "gpu_util_max": s.gpu_util_max,
+                    "gpu_mem_percent_total": (
+                        (s.gpu_mem_used_mb_total / s.gpu_mem_total_mb_total * 100.0)
+                        if (s.gpu_mem_used_mb_total is not None and s.gpu_mem_total_mb_total)
+                        else None
+                    ),
                 }
                 for s in samples
             ],
