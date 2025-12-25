@@ -444,9 +444,10 @@ Legend & Help
 <li><span style="color: #2da44e;">✓</span> - Checks/jobs passed or succeeded</li>
 <li><span style="color: #d73a49;">✗</span> - Checks/jobs failed</li>
 <li><span style="color: #dbab09;">⏳</span> - Checks/jobs in progress or running</li>
-<li><span style="color: #8c959f;">⏸</span> - Checks/jobs cancelled or pending</li>
+<li><span style="color: #8c959f;">⏸</span> - Checks/jobs pending (not started yet)</li>
+<li><span style="color: #8c959f;">✖️</span> - Checks/jobs canceled</li>
 </ul>
-<p style="margin: 4px 0; color: #57606a; font-size: 12px;">Example: <span style="color: #2da44e;">21✓</span> <span style="color: #d73a49;">1✗</span> <span style="color: #dbab09;">1⏳</span> <span style="color: #8c959f;">3⏸</span> means 21 passed, 1 failed, 1 in progress, 3 cancelled/pending.</p>
+<p style="margin: 4px 0; color: #57606a; font-size: 12px;">Example: <span style="color: #2da44e;">21✓</span> <span style="color: #d73a49;">1✗</span> <span style="color: #dbab09;">1⏳</span> <span style="color: #8c959f;">3⏸</span> <span style="color: #8c959f;">1✖️</span> means 21 passed, 1 failed, 1 in progress, 3 pending, 1 canceled.</p>
 </div>
 </div>
 </details>
@@ -587,8 +588,8 @@ Legend & Help
 {%- endif -%}
 {# Github section #}
 <a href="https://github.com/ai-dynamo/dynamo/commit/{{ sha_full }}/checks" target="_blank" style="text-decoration: none; color: #24292f; font-weight: 600;" title="{{ gha_title }}"><svg height="14" width="14" viewBox="0 0 16 16" fill="currentColor" style="display: inline-block; vertical-align: middle;"><path fill-rule="evenodd" clip-rule="evenodd" d="M8 0C3.58 0 0 3.58 0 8C0 11.54 2.29 14.53 5.47 15.59C5.87 15.66 6.02 15.42 6.02 15.21C6.02 15.02 6.01 14.39 6.01 13.72C4 14.09 3.48 13.23 3.32 12.78C3.23 12.55 2.84 11.84 2.5 11.65C2.22 11.5 1.82 11.13 2.49 11.12C3.12 11.11 3.57 11.7 3.72 11.94C4.44 13.15 5.59 12.81 6.05 12.6C6.12 12.08 6.33 11.73 6.56 11.53C4.78 11.33 2.92 10.64 2.92 7.58C2.92 6.71 3.23 5.99 3.74 5.43C3.66 5.23 3.38 4.41 3.82 3.31C3.82 3.31 4.49 3.1 6.02 4.13C6.66 3.95 7.34 3.86 8.02 3.86C8.7 3.86 9.38 3.95 10.02 4.13C11.55 3.09 12.22 3.31 12.22 3.31C12.66 4.41 12.38 5.23 12.3 5.43C12.81 5.99 13.12 6.7 13.12 7.58C13.12 10.65 11.25 11.33 9.47 11.53C9.76 11.78 10.01 12.26 10.01 13.01C10.01 14.08 10 14.94 10 15.21C10 15.42 10.15 15.67 10.55 15.59C13.71 14.53 16 11.53 16 8C16 3.58 12.42 0 8 0Z"></path></svg></a>
-{# Per-commit GH checks status (split required vs optional failures) #}
-{%- set commit_stats = gha_per_commit_stats.get(sha_full, {'success': 0, 'failure_required': 0, 'failure_optional': 0, 'in_progress_required': 0, 'in_progress_optional': 0, 'other': 0, 'total': 0}) -%}
+{# Per-commit GH checks status (split required vs optional failures, plus pending vs cancelled) #}
+{%- set commit_stats = gha_per_commit_stats.get(sha_full, {'success': 0, 'failure_required': 0, 'failure_optional': 0, 'in_progress_required': 0, 'in_progress_optional': 0, 'pending': 0, 'cancelled': 0, 'other': 0, 'total': 0}) -%}
 {%- if commit_stats.total > 0 -%}
 {# Build detailed tooltip with job names #}
 {%- set gha_status = github_actions_status.get(sha_full) -%}
@@ -597,6 +598,8 @@ Legend & Help
 {%- set failed_optional_jobs = [] -%}
 {%- set progress_required_jobs = [] -%}
 {%- set progress_optional_jobs = [] -%}
+{%- set pending_jobs = [] -%}
+{%- set cancelled_jobs = [] -%}
 {%- set other_jobs = [] -%}
 {%- if gha_status and gha_status.get('check_runs') -%}
 {%- for check in gha_status.get('check_runs', []) -%}
@@ -608,12 +611,16 @@ Legend & Help
 {%- else -%}
 {%- set _ = failed_optional_jobs.append(check.name) -%}
 {%- endif -%}
-{%- elif check.status in ('queued', 'in_progress') -%}
+{%- elif check.status == 'in_progress' -%}
 {%- if check.is_required -%}
 {%- set _ = progress_required_jobs.append(check.name) -%}
 {%- else -%}
 {%- set _ = progress_optional_jobs.append(check.name) -%}
 {%- endif -%}
+{%- elif check.status in ('queued', 'pending') -%}
+{%- set _ = pending_jobs.append(check.name) -%}
+{%- elif check.conclusion == 'cancelled' -%}
+{%- set _ = cancelled_jobs.append(check.name) -%}
 {%- else -%}
 {%- set _ = other_jobs.append(check.name) -%}
 {%- endif -%}
@@ -625,7 +632,9 @@ Legend & Help
 {%- if failed_optional_jobs -%}{%- set _ = tooltip_html_parts.append('<strong style="color: #f59e0b;">⚠ Failed (optional):</strong> ' + (failed_optional_jobs|sort)|join(', ')) -%}{%- endif -%}
 {%- if progress_required_jobs -%}{%- set _ = tooltip_html_parts.append('<strong style="color: #dbab09;">⏳ In Progress (required):</strong> ' + (progress_required_jobs|sort)|join(', ')) -%}{%- endif -%}
 {%- if progress_optional_jobs -%}{%- set _ = tooltip_html_parts.append('<strong style="color: #8c959f;">⏳ In Progress (optional):</strong> ' + (progress_optional_jobs|sort)|join(', ')) -%}{%- endif -%}
-{%- if other_jobs -%}{%- set _ = tooltip_html_parts.append('<strong style="color: #8c959f;">⏸ Cancelled/Pending:</strong> ' + (other_jobs|sort)|join(', ')) -%}{%- endif -%}
+{%- if pending_jobs -%}{%- set _ = tooltip_html_parts.append('<strong style="color: #8c959f;">⏸ Pending:</strong> ' + (pending_jobs|sort)|join(', ')) -%}{%- endif -%}
+{%- if cancelled_jobs -%}{%- set _ = tooltip_html_parts.append('<strong style="color: #8c959f;">✖️ Canceled:</strong> ' + (cancelled_jobs|sort)|join(', ')) -%}{%- endif -%}
+{%- if other_jobs -%}{%- set _ = tooltip_html_parts.append('<strong style="color: #8c959f;">Other:</strong> ' + (other_jobs|sort)|join(', ')) -%}{%- endif -%}
 {%- set tooltip_html = tooltip_html_parts|join('<br>') -%}
 <span class="gh-status-tooltip" style="margin-left: 4px;">
 <span style="white-space: nowrap; font-weight: 600; font-size: 11px;">
@@ -634,7 +643,8 @@ Legend & Help
 {%- if commit_stats.failure_optional > 0 -%}{%- if commit_stats.success > 0 or commit_stats.failure_required > 0 %} {% endif -%}<span style="color: #f59e0b;" title="Optional failures">{{ commit_stats.failure_optional }}<span style="font-size: 13px; font-weight: 900; line-height: 1; margin-left: 2px;">⚠</span></span>{%- endif -%}
 {%- set inprog_total = commit_stats.in_progress_required + commit_stats.in_progress_optional -%}
 {%- if inprog_total > 0 -%}{%- if commit_stats.success > 0 or commit_stats.failure_required > 0 or commit_stats.failure_optional > 0 %} {% endif -%}<span style="color: #dbab09;">{{ inprog_total }}⏳</span>{%- endif -%}
-{%- if commit_stats.other > 0 -%}{%- if commit_stats.success > 0 or commit_stats.failure_required > 0 or commit_stats.failure_optional > 0 or inprog_total > 0 %} {% endif -%}<span style="color: #8c959f;">{{ commit_stats.other }}⏸</span>{%- endif -%}
+{%- if commit_stats.pending > 0 -%}{%- if commit_stats.success > 0 or commit_stats.failure_required > 0 or commit_stats.failure_optional > 0 or inprog_total > 0 %} {% endif -%}<span style="color: #8c959f;">{{ commit_stats.pending }}⏸</span>{%- endif -%}
+{%- if commit_stats.cancelled > 0 -%}{%- if commit_stats.success > 0 or commit_stats.failure_required > 0 or commit_stats.failure_optional > 0 or inprog_total > 0 or commit_stats.pending > 0 %} {% endif -%}<span style="color: #8c959f;">{{ commit_stats.cancelled }}✖️</span>{%- endif -%}
 </span>
 <span class="tooltiptext">{{ tooltip_html|safe }}</span>
 </span>
@@ -678,6 +688,7 @@ Legend & Help
 {%- set running_required_jobs = [] -%}
 {%- set running_optional_jobs = [] -%}
 {%- set pending_jobs = [] -%}
+{%- set canceled_jobs = [] -%}
 {%- for job in job_data.jobs -%}
 {# Mandatory job names: contains ".pre" OR starts with "build" OR starts with "test" #}
 {%- set job_name = job.name or "" -%}
@@ -703,6 +714,8 @@ Legend & Help
 {%- endif -%}
 {%- elif job.status in ('pending', 'created', 'waiting_for_resource') -%}
 {%- set _ = pending_jobs.append(job_label) -%}
+{%- elif job.status == 'canceled' -%}
+{%- set _ = canceled_jobs.append(job_label) -%}
 {%- endif -%}
 {%- endfor -%}
 {%- set gitlab_tooltip_parts = [] -%}
@@ -711,7 +724,8 @@ Legend & Help
 {%- if failed_optional_jobs -%}{%- set _ = gitlab_tooltip_parts.append('<strong style="color: #f59e0b;">⚠ Failed (non-mandatory):</strong> ' + (failed_optional_jobs|sort)|join(', ')) -%}{%- endif -%}
 {%- if running_required_jobs -%}{%- set _ = gitlab_tooltip_parts.append('<strong style="color: #dbab09;">⏳ In Progress (mandatory):</strong> ' + (running_required_jobs|sort)|join(', ')) -%}{%- endif -%}
 {%- if running_optional_jobs -%}{%- set _ = gitlab_tooltip_parts.append('<strong style="color: #8c959f;">⏳ In Progress (non-mandatory):</strong> ' + (running_optional_jobs|sort)|join(', ')) -%}{%- endif -%}
-{%- if pending_jobs -%}{%- set _ = gitlab_tooltip_parts.append('<strong style="color: #8c959f;">Pending:</strong> ' + (pending_jobs|sort)|join(', ')) -%}{%- endif -%}
+{%- if pending_jobs -%}{%- set _ = gitlab_tooltip_parts.append('<strong style="color: #8c959f;">⏸ Pending:</strong> ' + (pending_jobs|sort)|join(', ')) -%}{%- endif -%}
+{%- if canceled_jobs -%}{%- set _ = gitlab_tooltip_parts.append('<strong style="color: #8c959f;">✖️ Canceled:</strong> ' + (canceled_jobs|sort)|join(', ')) -%}{%- endif -%}
 {%- set gitlab_tooltip_html = gitlab_tooltip_parts|join('<br>') -%}
 <span class="gh-status-tooltip" style="margin-left: 4px;">
 <span style="white-space: nowrap; font-weight: 600; font-size: 11px;">
@@ -723,6 +737,7 @@ Legend & Help
 {%- set inprog_total = (running_required_jobs|length) + (running_optional_jobs|length) -%}
 {%- if inprog_total > 0 -%}{%- if job_counts.success > 0 or req_failed > 0 or opt_failed > 0 %} {% endif -%}<span style="color: #dbab09;">{{ inprog_total }}⏳</span>{%- endif -%}
 {%- if job_counts.pending > 0 -%}{%- if job_counts.success > 0 or job_counts.failed > 0 or job_counts.running > 0 %} {% endif -%}<span style="color: #8c959f;">{{ job_counts.pending }}⏸</span>{%- endif -%}
+{%- if job_counts.canceled > 0 -%}{%- if job_counts.success > 0 or req_failed > 0 or opt_failed > 0 or inprog_total > 0 or job_counts.pending > 0 %} {% endif -%}<span style="color: #8c959f;">{{ job_counts.canceled }}✖️</span>{%- endif -%}
 </span>
 {%- if gitlab_tooltip_html -%}
 <span class="tooltiptext">{{ gitlab_tooltip_html|safe }}</span>
@@ -735,6 +750,7 @@ Legend & Help
 {%- if job_counts.failed > 0 -%}{%- if job_counts.success > 0 %} {% endif -%}<span style="color: #d73a49;">{{ job_counts.failed }}✗</span>{%- endif -%}
 {%- if job_counts.running > 0 -%}{%- if job_counts.success > 0 or job_counts.failed > 0 %} {% endif -%}<span style="color: #dbab09;">{{ job_counts.running }}⏳</span>{%- endif -%}
 {%- if job_counts.pending > 0 -%}{%- if job_counts.success > 0 or job_counts.failed > 0 or job_counts.running > 0 %} {% endif -%}<span style="color: #8c959f;">{{ job_counts.pending }}⏸</span>{%- endif -%}
+{%- if job_counts.canceled > 0 -%}{%- if job_counts.success > 0 or job_counts.failed > 0 or job_counts.running > 0 or job_counts.pending > 0 %} {% endif -%}<span style="color: #8c959f;">{{ job_counts.canceled }}✖️</span>{%- endif -%}
 </a>
 {%- endif -%}
 {%- endif -%}

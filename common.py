@@ -3453,13 +3453,19 @@ class GitLabAPIClient:
                 counts = entry.get("counts") if isinstance(entry.get("counts"), dict) else None
                 jobs = entry.get("jobs") if isinstance(entry.get("jobs"), list) else []
                 fetched_at = entry.get("fetched_at")
+                # Ensure expected keys exist even if older cache entries are missing fields.
+                base_counts = {"success": 0, "failed": 0, "running": 0, "pending": 0, "canceled": 0}
+                if counts:
+                    for k, v in base_counts.items():
+                        counts.setdefault(k, v)
                 return {
-                    "counts": counts or {"success": 0, "failed": 0, "running": 0, "pending": 0},
+                    "counts": counts or base_counts,
                     "jobs": jobs,
                     "fetched_at": fetched_at,
                 }
             # Old format fallback: counts-only dict
             if all(k in entry for k in ("success", "failed", "running", "pending")):
+                entry.setdefault("canceled", 0)
                 return {"counts": entry, "jobs": [], "fetched_at": None}
             return None
 
@@ -3469,23 +3475,19 @@ class GitLabAPIClient:
             counts = entry_norm.get("counts") or {}
             return counts.get("running", 0) == 0 and counts.get("pending", 0) == 0
 
-        def is_fresh(entry_norm: Optional[Dict[str, Any]], now: datetime, age_limit: timedelta) -> bool:
+        def is_fresh(entry_norm: Optional[Dict[str, Any]]) -> bool:
             if not entry_norm:
                 return False
-            # Completed pipelines are cached forever
+            # Completed pipelines are cached forever.
+            #
+            # Active pipelines (running/pending > 0) should be refetched aggressively to avoid
+            # showing stale status. We intentionally treat them as *not fresh* regardless of age.
             if is_completed(entry_norm):
                 return True
-            fetched_at = entry_norm.get("fetched_at")
-            if not fetched_at or not isinstance(fetched_at, str):
-                return False
-            try:
-                ts = datetime.fromisoformat(fetched_at.replace("Z", "+00:00"))
-                return (now - ts) < age_limit
-            except Exception:
-                return False
+            return False
 
-        now = datetime.now(timezone.utc)
-        cache_age_limit = timedelta(minutes=30)
+        # NOTE: We intentionally refetch active pipelines on every run, so we no longer
+        # use a time-based "freshness" threshold here.
 
         # skip_fetch => return cached values only
         if skip_fetch:
@@ -3496,14 +3498,14 @@ class GitLabAPIClient:
 
         for pipeline_id in pipeline_ids:
             cached_entry_norm = normalize_entry(cache.get(pipeline_id))
-            if cached_entry_norm and is_fresh(cached_entry_norm, now, cache_age_limit):
+            if cached_entry_norm and is_fresh(cached_entry_norm):
                 result[pipeline_id] = cached_entry_norm
             else:
                 pipeline_ids_to_fetch.append(pipeline_id)
                 result[pipeline_id] = cached_entry_norm
 
         if pipeline_ids_to_fetch and self.has_token():
-            fetch_timestamp = now.isoformat().replace("+00:00", "Z")
+            fetch_timestamp = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
             def fetch_pipeline_jobs_details(pipeline_id: int) -> Tuple[int, Optional[Dict[str, Any]]]:
                 try:
@@ -3513,7 +3515,7 @@ class GitLabAPIClient:
                     if not jobs:
                         return pipeline_id, None
 
-                    counts = {"success": 0, "failed": 0, "running": 0, "pending": 0}
+                    counts = {"success": 0, "failed": 0, "running": 0, "pending": 0, "canceled": 0}
                     slim_jobs: List[Dict[str, Any]] = []
 
                     for job in jobs:
@@ -3526,7 +3528,7 @@ class GitLabAPIClient:
                             counts[status] += 1
                         elif status in ("created", "waiting_for_resource"):
                             counts["pending"] += 1
-                        elif status in ("skipped", "manual", "canceled"):
+                        elif status in ("skipped", "manual"):
                             pass
                         else:
                             # Keep unknown statuses out of counts

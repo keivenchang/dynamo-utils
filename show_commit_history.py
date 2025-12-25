@@ -914,6 +914,8 @@ class CommitHistoryGenerator:
                     'failure_optional': 0,
                     'in_progress_required': 0,
                     'in_progress_optional': 0,
+                    'pending': 0,
+                    'cancelled': 0,
                     'other': 0,
                     'total': 0
                 }
@@ -925,6 +927,8 @@ class CommitHistoryGenerator:
                 'failure_optional': 0,
                 'in_progress_required': 0,
                 'in_progress_optional': 0,
+                'pending': 0,
+                'cancelled': 0,
                 'other': 0,
             }
             for check in gha_status.get('check_runs', []):
@@ -939,11 +943,15 @@ class CommitHistoryGenerator:
                         stats['failure_required'] += 1
                     else:
                         stats['failure_optional'] += 1
-                elif status in ('queued', 'in_progress'):
+                elif status == 'in_progress':
                     if is_required:
                         stats['in_progress_required'] += 1
                     else:
                         stats['in_progress_optional'] += 1
+                elif status in ('queued', 'pending'):
+                    stats['pending'] += 1
+                elif conclusion == 'cancelled':
+                    stats['cancelled'] += 1
                 else:
                     stats['other'] += 1
 
@@ -1091,9 +1099,9 @@ class CommitHistoryGenerator:
         Returns:
             Dictionary mapping pipeline ID to job details dict with 'counts' and 'jobs'
         """
-        # v2: include per-job "stage" in cached job list; old cache entries lacked stage and
-        # lead to confusing labels (e.g. "misc.<job>"). Bumping cache key forces a refetch.
-        cache_file = "gitlab_pipeline_jobs_details_v2.json"
+        # v3: include per-job "stage" in cached job list and split pending vs canceled counts.
+        # Bumping cache key forces a refetch even for completed pipelines (cached forever).
+        cache_file = "gitlab_pipeline_jobs_details_v3.json"
 
         self.logger.debug(f"Getting job details for {len(pipeline_ids)} pipelines")
 
