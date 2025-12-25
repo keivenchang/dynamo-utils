@@ -1191,6 +1191,9 @@ class FailedCheck:
     job_url: str
     run_id: str
     duration: str
+    # Raw job log download URL (usually a time-limited blob URL). Optional because it may
+    # require auth, may be unavailable for older jobs, or may fail due to rate limits.
+    raw_log_url: Optional[str] = None
     is_required: bool = False
     error_summary: Optional[str] = None
 
@@ -2012,6 +2015,35 @@ class GitHubAPIClient:
         except Exception as e:
             return f"Error fetching logs: {str(e)}\n\nView full logs at:\n{job_url}"
 
+    def get_job_raw_log_url(self, job_url: str, owner: str, repo: str, timeout: int = 10) -> Optional[str]:
+        """Return the raw job log download URL for a GitHub Actions job.
+
+        GitHub exposes a job log download endpoint:
+          GET /repos/{owner}/{repo}/actions/jobs/{job_id}/logs
+        which typically returns a 302 redirect to a time-limited blob URL.
+
+        We intentionally do NOT follow redirects so we can capture the final URL
+        and render it as a direct "raw log" link in HTML.
+        """
+        try:
+            if "/job/" not in job_url:
+                return None
+            job_id = job_url.split("/job/")[1].split("?")[0]
+            if not job_id:
+                return None
+
+            if not HAS_REQUESTS:
+                return None
+            assert requests is not None
+
+            url = f"{self.base_url}/repos/{owner}/{repo}/actions/jobs/{job_id}/logs"
+            resp = requests.get(url, headers=self.headers, timeout=timeout, allow_redirects=False)
+            if resp.status_code in (301, 302, 303, 307, 308):
+                return resp.headers.get("Location")
+            return None
+        except Exception:
+            return None
+
     def get_failed_checks(self, owner: str, repo: str, sha: str, required_checks: set, pr_number: Optional[int] = None,
                          checks_data: Optional[dict] = None) -> Tuple[List[FailedCheck], Optional[str]]:
         """Get failed CI checks for a commit using gh CLI.
@@ -2080,9 +2112,14 @@ class GitHubAPIClient:
                     if check_run_id and html_url:
                         error_summary = self.get_job_error_summary(check_run_id, html_url, owner, repo)
 
+                    raw_log_url = None
+                    if html_url:
+                        raw_log_url = self.get_job_raw_log_url(html_url, owner, repo)
+
                     failed_check = FailedCheck(
                         name=check_name,
                         job_url=html_url,
+                        raw_log_url=raw_log_url,
                         run_id=check_run_id,
                         duration=duration,
                         is_required=is_required,
@@ -2154,9 +2191,14 @@ class GitHubAPIClient:
                     if check_run_id and html_url:
                         error_summary = self.get_job_error_summary(check_run_id, html_url, owner, repo)
 
+                    raw_log_url = None
+                    if html_url:
+                        raw_log_url = self.get_job_raw_log_url(html_url, owner, repo)
+
                     failed_check = FailedCheck(
                         name=check_name,
                         job_url=html_url,
+                        raw_log_url=raw_log_url,
                         run_id=check_run_id,
                         duration=duration,
                         is_required=is_required,
@@ -2216,9 +2258,14 @@ class GitHubAPIClient:
                     if run_id and html_url:
                         error_summary = self.get_job_error_summary(run_id, html_url, owner, repo)
 
+                    raw_log_url = None
+                    if html_url:
+                        raw_log_url = self.get_job_raw_log_url(html_url, owner, repo)
+
                     failed_check = FailedCheck(
                         name=check_name,
                         job_url=html_url,
+                        raw_log_url=raw_log_url,
                         run_id=run_id or '',
                         duration=duration,
                         is_required=is_required,

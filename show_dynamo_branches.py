@@ -165,9 +165,37 @@ class BranchInfoNode(BranchNode):
             else:
                 sha_str = f' [{self.sha}]'
 
-        if self.is_current:
-            return f'<span class="current">{self.label}</span>{sha_str}{marker}'
-        return f'{self.label}{sha_str}{marker}'
+        # Gray out branch name if its PR is already merged.
+        # (BranchInfoNode children include PRNode nodes when present.)
+        is_merged_branch = any(
+            (getattr(ch, "pr", None) is not None) and bool(getattr(getattr(ch, "pr", None), "is_merged", False))
+            for ch in (self.children or [])
+        )
+
+        # Copy button (match show_commit_history style + behavior)
+        label_escaped = html.escape(self.label, quote=True)
+        copy_btn = (
+            f'<button data-clipboard-text="{label_escaped}" onclick="copyFromClipboardAttr(this)" '
+            f'style="padding: 4px 6px; font-size: 11px; background-color: transparent; color: #57606a; '
+            f'border: 1px solid #d0d7de; border-radius: 6px; cursor: pointer; display: inline-flex; '
+            f'align-items: center; vertical-align: middle; margin-right: 6px;" '
+            f'title="Click to copy branch name" '
+            f'onmouseover="this.style.backgroundColor=\'#f3f4f6\'; this.style.borderColor=\'#8c959f\';" '
+            f'onmouseout="this.style.backgroundColor=\'transparent\'; this.style.borderColor=\'#d0d7de\';">'
+            f'<svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" style="display: inline-block;">'
+            f'<path d="M0 6.75C0 5.784.784 5 1.75 5h1.5a.75.75 0 0 1 0 1.5h-1.5a.25.25 0 0 0-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 0 0 .25-.25v-1.5a.75.75 0 0 1 1.5 0v1.5A1.75 1.75 0 0 1 9.25 16h-7.5A1.75 1.75 0 0 1 0 14.25Z"></path>'
+            f'<path d="M5 1.75C5 .784 5.784 0 6.75 0h7.5C15.216 0 16 .784 16 1.75v7.5A1.75 1.75 0 0 1 14.25 11h-7.5A1.75 1.75 0 0 1 5 9.25Zm1.75-.25a.25.25 0 0 0-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 0 0 .25-.25v-7.5a.25.25 0 0 0-.25-.25Z"></path>'
+            f'</svg>'
+            f'</button>'
+        )
+
+        cls = "current" if self.is_current else ""
+        if is_merged_branch:
+            cls = (cls + " merged-branch").strip()
+
+        if cls:
+            return f'{copy_btn}<span class="{cls}">{self.label}</span>{sha_str}{marker}'
+        return f'{copy_btn}{self.label}{sha_str}{marker}'
 
 
 @dataclass
@@ -203,7 +231,11 @@ class PRNode(BranchNode):
                 pass
 
         metadata_str = f" ({', '.join(metadata)})" if metadata else ""
-        return f"{emoji} PR#{self.pr.number}: {title}{metadata_str}"
+        # Prefer standard GitHub-style formatting: "title (#1234)" over "PR#1234: title"
+        pr_suffix = f"(#{self.pr.number})"
+        if pr_suffix not in title:
+            title = f"{title} {pr_suffix}"
+        return f"{emoji} {title}{metadata_str}"
 
     def _format_html_content(self) -> str:
         if not self.pr:
@@ -234,11 +266,16 @@ class PRNode(BranchNode):
 
         metadata_str = f" ({', '.join(metadata)})" if metadata else ""
 
+        # Prefer standard GitHub-style formatting: "title (#1234)" over "PR#1234: title"
+        pr_suffix = f"(#{self.pr.number})"
+        if pr_suffix not in title:
+            title = f"{title} {pr_suffix}"
+
         # Gray out merged PRs
         if self.pr.is_merged:
-            return f'<span style="color: #999;">{emoji} <a href="{self.pr.url}" target="_blank" style="color: #999;">PR#{self.pr.number}</a>: {title}{metadata_str}</span>'
+            return f'<span style="color: #999;">{emoji} <a href="{self.pr.url}" target="_blank" style="color: #999;">{title}</a>{metadata_str}</span>'
         else:
-            return f'{emoji} <a href="{self.pr.url}" target="_blank">PR#{self.pr.number}</a>: {title}{metadata_str}'
+            return f'{emoji} <a href="{self.pr.url}" target="_blank">{title}</a>{metadata_str}'
 
 
 @dataclass
@@ -342,8 +379,17 @@ class PRStatusNode(BranchNode):
 
                     # Generate unique ID for this checks div
                     checks_id = f"checks_{uuid.uuid4().hex[:8]}"
-                    # Add expandable section with formatted table
-                    base_html += f' <span style="cursor: pointer; color: #0066cc; margin-left: 10px;" onclick="document.getElementById(\'{checks_id}\').style.display = document.getElementById(\'{checks_id}\').style.display === \'none\' ? \'block\' : \'none\'">▶ Show checks</span><div id="{checks_id}" style="display: none; margin-left: 20px; margin-top: 5px;">{table_html}</div>'
+                    # Add expandable section with formatted table.
+                    # Match show_commit_history behavior: toggle the triangle (▶/▼) based on expanded state.
+                    base_html += (
+                        f' <span style="cursor: pointer; color: #0066cc; margin-left: 10px;" '
+                        f'onclick="var el=document.getElementById(\'{checks_id}\');'
+                        f'var isHidden=(el.style.display===\'none\'||el.style.display===\'\');'
+                        f'el.style.display=isHidden?\'block\':\'none\';'
+                        f'this.textContent=isHidden?\'▼ Hide checks\':\'▶ Show checks\';"'
+                        f'>▶ Show checks</span>'
+                        f'<div id="{checks_id}" style="display: none; margin-left: 20px; margin-top: 5px;">{table_html}</div>'
+                    )
             except (subprocess.TimeoutExpired, FileNotFoundError, Exception):
                 # Silently fail if gh command is not available or times out
                 pass
@@ -399,22 +445,29 @@ class FailedTestNode(BranchNode):
 
         base_html = f'{icon} <a href="{self.failed_check.job_url}" target="_blank">{self.failed_check.name}</a>{required_marker} ({self.failed_check.duration})'
 
-        # Extract job ID for raw log link
-        job_id = None
-        if '/job/' in self.failed_check.job_url:
-            job_id = self.failed_check.job_url.split('/job/')[1].split('?')[0]
-
-        # Add raw log link
-        if job_id:
-            # GitHub provides raw logs at the job URL
-            base_html += f' <a href="{self.failed_check.job_url}" target="_blank" style="color: #666; font-size: 11px; margin-left: 5px;">[raw log]</a>'
+        # Add explicit "log" + "raw log" links.
+        # - "log" is the normal GitHub job page (HTML)
+        # - "raw log" is the direct download URL (typically a time-limited blob URL)
+        base_html += f' <a href="{self.failed_check.job_url}" target="_blank" style="color: #666; font-size: 11px; margin-left: 5px;">[log]</a>'
+        if getattr(self.failed_check, "raw_log_url", None):
+            base_html += f' <a href="{self.failed_check.raw_log_url}" target="_blank" style="color: #666; font-size: 11px; margin-left: 5px;">[raw log]</a>'
 
         # Add expandable error details if available
         if self.failed_check.error_summary:
             # Escape HTML in error summary
             escaped_error = html.escape(self.failed_check.error_summary)
-            # Keep "Show error" on the same line, but put the error div on a new line
-            base_html += f' <span style="cursor: pointer; color: #0066cc; margin-left: 10px;" onclick="document.getElementById(\'error_{detail_id}\').style.display = document.getElementById(\'error_{detail_id}\').style.display === \'none\' ? \'block\' : \'none\'">▶ Show error</span><div id="error_{detail_id}" style="display: none; margin-left: 20px; margin-top: 5px; padding: 10px; background-color: #fff5f5; border-left: 3px solid #cc0000; font-family: monospace; font-size: 11px; white-space: pre-wrap;">{escaped_error}</div>'
+            # Keep "Show error" on the same line, but put the error div on a new line.
+            # Also toggle the triangle (▶/▼) like show_commit_history.
+            err_id = f"error_{detail_id}"
+            base_html += (
+                f' <span style="cursor: pointer; color: #0066cc; margin-left: 10px;" '
+                f'onclick="var el=document.getElementById(\'{err_id}\');'
+                f'var isHidden=(el.style.display===\'none\'||el.style.display===\'\');'
+                f'el.style.display=isHidden?\'block\':\'none\';'
+                f'this.textContent=isHidden?\'▼ Hide error\':\'▶ Show error\';"'
+                f'>▶ Show error</span>'
+                f'<div id="{err_id}" style="display: none; margin-left: 20px; margin-top: 5px; padding: 10px; background-color: #fff5f5; border-left: 3px solid #cc0000; font-family: monospace; font-size: 11px; white-space: pre-wrap;">{escaped_error}</div>'
+            )
 
         return base_html
 
@@ -433,7 +486,29 @@ class RerunLinkNode(BranchNode):
     def _format_html_content(self) -> str:
         if not self.url or not self.run_id:
             return ""
-        return f'🔄 <a href="{self.url}" target="_blank">Restart failed jobs</a> (or: <code>gh run rerun {self.run_id} --repo ai-dynamo/dynamo --failed</code>)'
+        cmd = f"gh run rerun {self.run_id} --repo ai-dynamo/dynamo --failed"
+        cmd_escaped = html.escape(cmd, quote=True)
+
+        # Copy button (match show_commit_history style + behavior)
+        copy_btn = (
+            f'<button data-clipboard-text="{cmd_escaped}" onclick="copyFromClipboardAttr(this)" '
+            f'style="padding: 4px 6px; font-size: 11px; background-color: transparent; color: #57606a; '
+            f'border: 1px solid #d0d7de; border-radius: 6px; cursor: pointer; display: inline-flex; '
+            f'align-items: center; vertical-align: middle; margin-right: 6px;" '
+            f'title="Click to copy rerun command" '
+            f'onmouseover="this.style.backgroundColor=\'#f3f4f6\'; this.style.borderColor=\'#8c959f\';" '
+            f'onmouseout="this.style.backgroundColor=\'transparent\'; this.style.borderColor=\'#d0d7de\';">'
+            f'<svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" style="display: inline-block;">'
+            f'<path d="M0 6.75C0 5.784.784 5 1.75 5h1.5a.75.75 0 0 1 0 1.5h-1.5a.25.25 0 0 0-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 0 0 .25-.25v-1.5a.75.75 0 0 1 1.5 0v1.5A1.75 1.75 0 0 1 9.25 16h-7.5A1.75 1.75 0 0 1 0 14.25Z"></path>'
+            f'<path d="M5 1.75C5 .784 5.784 0 6.75 0h7.5C15.216 0 16 .784 16 1.75v7.5A1.75 1.75 0 0 1 14.25 11h-7.5A1.75 1.75 0 0 1 5 9.25Zm1.75-.25a.25.25 0 0 0-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 0 0 .25-.25v-7.5a.25.25 0 0 0-.25-.25Z"></path>'
+            f'</svg>'
+            f'</button>'
+        )
+
+        return (
+            f'🔄 <a href="{self.url}" target="_blank">Restart failed jobs</a> '
+            f'(or: {copy_btn}<code>{cmd}</code>)'
+        )
 
 
 @dataclass
@@ -720,10 +795,43 @@ def generate_html(root: BranchNode) -> str:
         a:hover {{ text-decoration: underline; }}
         .repo-name {{ font-weight: bold; margin-top: 10px; }}
         .current {{ font-weight: bold; }}
+        .merged-branch {{ color: #999999; }}
         .indent {{ margin-left: 20px; }}
         .error {{ color: #cc0000; }}
         .timestamp {{ color: #666666; font-size: 12px; margin-bottom: 10px; }}
     </style>
+    <script>
+      // Copied from show_commit_history: button uses data-clipboard-text and swaps innerHTML briefly.
+      function copyFromClipboardAttr(button) {{
+        var text = button.getAttribute('data-clipboard-text');
+        if (!text) return;
+
+        // Fallback for non-HTTPS contexts (file:// protocol)
+        var textArea = document.createElement('textarea');
+        textArea.value = text;
+        textArea.style.position = 'fixed';
+        textArea.style.left = '-999999px';
+        textArea.style.top = '-999999px';
+        document.body.appendChild(textArea);
+        textArea.focus();
+        textArea.select();
+
+        try {{
+          var successful = document.execCommand('copy');
+          document.body.removeChild(textArea);
+
+          if (successful) {{
+            var originalHTML = button.innerHTML;
+            button.innerHTML = '<svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" style="display: inline-block;"><path d="M0 6.75C0 5.784.784 5 1.75 5h1.5a.75.75 0 0 1 0 1.5h-1.5a.25.25 0 0 0-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 0 0 .25-.25v-1.5a.75.75 0 0 1 1.5 0v1.5A1.75 1.75 0 0 1 9.25 16h-7.5A1.75 1.75 0 0 1 0 14.25Z"></path><path d="M5 1.75C5 .784 5.784 0 6.75 0h7.5C15.216 0 16 .784 16 1.75v7.5A1.75 1.75 0 0 1 14.25 11h-7.5A1.75 1.75 0 0 1 5 9.25Zm1.75-.25a.25.25 0 0 0-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 0 0 .25-.25v-7.5a.25.25 0 0 0-.25-.25Z"></path></svg><span style="margin-left: 6px;">Copied!</span>';
+            setTimeout(function() {{
+              button.innerHTML = originalHTML;
+            }}, 2000);
+          }}
+        }} catch (err) {{
+          document.body.removeChild(textArea);
+        }}
+      }}
+    </script>
 </head>
 <body>
 <pre><span class="timestamp">Generated: {pdt_str} / {utc_str}</span>
