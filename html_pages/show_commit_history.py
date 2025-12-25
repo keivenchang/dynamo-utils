@@ -25,6 +25,12 @@ from datetime import datetime
 from pathlib import Path
 from typing import List, Dict, Optional, Set
 
+# Ensure we can import sibling utilities (common.py) from the parent dynamo-utils directory
+_THIS_DIR = Path(__file__).resolve().parent
+_UTILS_DIR = _THIS_DIR.parent
+if str(_UTILS_DIR) not in sys.path:
+    sys.path.insert(0, str(_UTILS_DIR))
+
 # Shared UI snippets (keep styling consistent with show_dynamo_branches.py)
 from html_ui import GH_STATUS_TOOLTIP_CSS, GH_STATUS_TOOLTIP_JS, PASS_PLUS_STYLE
 

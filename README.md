@@ -38,11 +38,13 @@ dynamo-utils/
 ├── gpu_reset.sh                  # GPU reset utility
 ├── inference.sh                  # Launch Dynamo inference services
 ├── resource_monitor.py           # Periodic system + GPU sampler -> SQLite
-├── resource_report.py            # Fancy interactive HTML charts from resource_monitor.sqlite
-├── show_commit_history.j2        # HTML template for commit history
-├── show_commit_history.py        # Commit history with CI status and Docker images
-├── show_dynamo_branches.py       # Branch status checker
-├── update_html_pages.sh          # HTML page update cron script
+├── html_pages/                   # HTML generators + shared UI snippets
+│   ├── resource_report.py            # Fancy interactive HTML charts from resource_monitor.sqlite
+│   ├── show_commit_history.j2        # HTML template for commit history
+│   ├── show_commit_history.py        # Commit history with CI status and Docker images
+│   ├── show_dynamo_branches.py       # Branch status checker
+│   ├── html_ui.py                   # Shared HTML/CSS/JS snippets (keep styles in sync)
+│   └── update_html_pages.sh          # HTML page update cron script
 └── container/                    # Docker-related scripts
     ├── build_images.py               # Automated Docker build/test pipeline
     ├── build_images_report.html.j2   # HTML report template
@@ -147,7 +149,7 @@ Automatically syncs development configuration files across multiple Dynamo proje
 
 ## Python Utilities
 
-### show_commit_history.py
+### html_pages/show_commit_history.py
 
 **Overview**: Displays recent commits with CI status, Docker images, and metadata in terminal or HTML format.
 
@@ -173,12 +175,12 @@ Automatically syncs development configuration files across multiple Dynamo proje
 **Simplest usage** (terminal output, 50 commits):
 ```bash
 cd ~/nvidia/dynamo-utils
-python3 show_commit_history.py --repo-path ~/nvidia/dynamo_latest --max-commits 50
+python3 html_pages/show_commit_history.py --repo-path ~/nvidia/dynamo_latest --max-commits 50
 ```
 
 **Production HTML** (what the cron job runs):
 ```bash
-python3 show_commit_history.py \
+python3 html_pages/show_commit_history.py \
   --repo-path ~/nvidia/dynamo_latest \
   --max-commits 200 \
   --html \
@@ -189,19 +191,19 @@ python3 show_commit_history.py \
 
 ```bash
 # Terminal output (default, 50 commits)
-python3 show_commit_history.py --repo-path ~/nvidia/dynamo_latest --max-commits 50
+python3 html_pages/show_commit_history.py --repo-path ~/nvidia/dynamo_latest --max-commits 50
 
 # HTML output with all features (200 commits)
-python3 show_commit_history.py --repo-path ~/nvidia/dynamo_latest --max-commits 200 --html --output ~/nvidia/dynamo_latest/index.html
+python3 html_pages/show_commit_history.py --repo-path ~/nvidia/dynamo_latest --max-commits 200 --html --output ~/nvidia/dynamo_latest/index.html
 
 # Fast mode: Skip GitLab fetch (use cache only)
-python3 show_commit_history.py --repo-path ~/nvidia/dynamo_latest --max-commits 50 --skip-gitlab-fetch
+python3 html_pages/show_commit_history.py --repo-path ~/nvidia/dynamo_latest --max-commits 50 --skip-gitlab-fetch
 
 # Debug mode: Show cache hits/misses
-python3 show_commit_history.py --repo-path ~/nvidia/dynamo_latest --max-commits 50 --verbose
+python3 html_pages/show_commit_history.py --repo-path ~/nvidia/dynamo_latest --max-commits 50 --verbose
 
 # Debug mode: Show even more details
-python3 show_commit_history.py --repo-path ~/nvidia/dynamo_latest --max-commits 50 --debug
+python3 html_pages/show_commit_history.py --repo-path ~/nvidia/dynamo_latest --max-commits 50 --debug
 ```
 
 #### Command-Line Options
@@ -426,14 +428,14 @@ python3 gitlab_pipeline_pr_map.py 40743226 https://gitlab-master.nvidia.com/dl/a
 
 ---
 
-### update_html_pages.sh
+### html_pages/update_html_pages.sh
 
 **Overview**: Automated cron script that updates HTML pages every 15 minutes.
 
 #### Schedule
 
 ```cron
-*/15 * * * * $HOME/nvidia/dynamo-utils/update_html_pages.sh
+*/15 * * * * $HOME/nvidia/dynamo-utils/html_pages/update_html_pages.sh
 ```
 
 #### Tasks Performed
@@ -505,23 +507,23 @@ python3 container/build_images.py --repo-path ~/nvidia/dynamo_ci --parallel --fo
 
 ---
 
-### resource_monitor.py / resource_report.py
+### resource_monitor.py / html_pages/resource_report.py
 
 **Overview**:
 - `resource_monitor.py` periodically samples CPU/MEM/IO + NVIDIA GPU metrics and appends them to a SQLite DB.
-- `resource_report.py` generates a **fancy interactive HTML report** (Plotly, zoom/pan/range buttons) and marks best-effort **top-process CPU spikes**.
+- `html_pages/resource_report.py` generates a **fancy interactive HTML report** (Plotly, zoom/pan/range buttons) and marks best-effort **top-process CPU spikes**.
 
 #### Usage
 
 ```bash
 # 7-day report (includes zoom buttons for 1d / 12h / 6h / 1h)
-python3 resource_report.py \
+python3 html_pages/resource_report.py \
   --db-path ~/.cache/dynamo-utils/resource_monitor.sqlite \
   --output ~/nvidia/dynamo_latest/resource_report_7d.html \
   --days 7
 
 # 1-day report (smaller + faster)
-python3 resource_report.py \
+python3 html_pages/resource_report.py \
   --db-path ~/.cache/dynamo-utils/resource_monitor.sqlite \
   --output ~/nvidia/dynamo_latest/resource_report_1d.html \
   --days 1
@@ -543,10 +545,10 @@ python3 resource_report.py \
 
 ```bash
 # Terminal output
-python3 show_dynamo_branches.py
+python3 html_pages/show_dynamo_branches.py
 
 # HTML output
-python3 show_dynamo_branches.py --html --output ~/nvidia/index.html
+python3 html_pages/show_dynamo_branches.py --html --output ~/nvidia/index.html
 ```
 
 ---
@@ -645,14 +647,14 @@ rm ~/.cache/dynamo-utils/github_pr_merge_dates.json
 rm -rf ~/.cache/dynamo-utils/
 
 # Regenerate with fresh data
-python3 show_commit_history.py --repo-path ~/nvidia/dynamo_latest --max-commits 200 --html --output ~/nvidia/dynamo_latest/index.html
+python3 html_pages/show_commit_history.py --repo-path ~/nvidia/dynamo_latest --max-commits 200 --html --output ~/nvidia/dynamo_latest/index.html
 ```
 
 ---
 
 ## Performance Metrics
 
-### show_commit_history.py (200 commits)
+### html_pages/show_commit_history.py (200 commits)
 
 **Generation Time:**
 - Current (optimized): 34.4 seconds

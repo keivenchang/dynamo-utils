@@ -10,12 +10,19 @@ Supports parallel data gathering for improved performance.
 import argparse
 import hashlib
 import html
+import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import List, Optional
 from zoneinfo import ZoneInfo
+
+# Ensure we can import sibling utilities (common.py) from the parent dynamo-utils directory
+_THIS_DIR = Path(__file__).resolve().parent
+_UTILS_DIR = _THIS_DIR.parent
+if str(_UTILS_DIR) not in sys.path:
+    sys.path.insert(0, str(_UTILS_DIR))
 
 try:
     import git  # type: ignore[import-not-found]

@@ -18,8 +18,9 @@
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # Base directory - can be overridden by environment variable
-# Default: parent directory of script location
-NVIDIA_HOME="${NVIDIA_HOME:-$(dirname "$SCRIPT_DIR")}"
+# Default: parent of dynamo-utils/ (i.e. .../nvidia) because this script lives in dynamo-utils/html_pages/
+UTILS_DIR="$(dirname "$SCRIPT_DIR")"
+NVIDIA_HOME="${NVIDIA_HOME:-$(dirname "$UTILS_DIR")}"
 
 LOGS_DIR="$NVIDIA_HOME/logs"
 LOG_FILE="$LOGS_DIR/cron.log"
