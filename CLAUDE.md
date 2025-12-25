@@ -505,7 +505,9 @@ When investigating CI failures, immediately search for error patterns instead of
 
 **Command pattern**:
 ```bash
-curl -s "<CI_LOG_URL>" | grep -E "ERROR|FAIL|Error|error:|failed|Failed" | head -50
+# ALWAYS save to temp file first, then grep repeatedly (see .cursorrules section 2.3.3)
+curl -s "<CI_LOG_URL>" > /tmp/ci-log.txt
+grep -E "ERROR|FAIL|Error|error:|failed|Failed" /tmp/ci-log.txt | head -50
 ```
 
 **Common error patterns to search for**:
@@ -534,10 +536,10 @@ curl -s "<CI_LOG_URL>" | grep -E "ERROR|FAIL|Error|error:|failed|Failed" | head 
 ```bash
 # 1. Get the CI log URL from gh pr checks or workflow run
 # 2. Search for errors immediately
-curl -s "$CI_LOG_URL" | grep -B 5 -A 10 "ERROR"
+curl -s "$CI_LOG_URL" > /tmp/CI-12345.log && grep -B 5 -A 10 "ERROR" /tmp/CI-12345.log
 
 # 3. If specific error found, get more context
-curl -s "$CI_LOG_URL" | grep -B 20 -A 20 "ModuleNotFoundError: No module named"
+grep -B 20 -A 20 "ModuleNotFoundError: No module named" /tmp/CI-12345.log
 ```
 
 **Why this matters**:
@@ -549,7 +551,7 @@ curl -s "$CI_LOG_URL" | grep -B 20 -A 20 "ModuleNotFoundError: No module named"
 **Real example from dynamo PR #5050**:
 ```bash
 # Instead of reading 50k lines, immediately found:
-curl -s "$LOG" | grep "ERROR at setup"
+curl -s "$LOG" > /tmp/CI-12345.log && grep "ERROR at setup" /tmp/CI-12345.log
 # Found: RuntimeError: Failed to get git HEAD commit
 # Root cause: Missing DYNAMO_COMMIT_SHA environment variable
 ```
