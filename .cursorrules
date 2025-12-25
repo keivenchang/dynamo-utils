@@ -230,6 +230,20 @@ When reviewing saved logs, filter out unimportant cargo test output (on the save
 - For BuildKit features, remember named contexts (`--build-context name=path`): missing passthrough can cause `COPY --from=<name>` to try pulling an image.
 - DO NOT use BS jargon: intuitive, comprehensive, optimal, seamless, next-generation, holistic, cutting-edge
 
+## 2.5 Agent Session Learnings (avoid repeat mistakes)
+
+### Mistakes I made repeatedly (don’t do this again)
+- **Don’t suggest committing unless the user explicitly says to commit.**
+- **Cron path edits**: `crontab -l` often contains literal strings like `$HOME/...` (not expanded). When replacing paths, match the literal text, then verify with `crontab -l | grep`.
+- **Don’t assume tools exist** (e.g., `rg`). Prefer Cursor search/`grep`; if an external binary is needed, check for it first.
+- **Be careful with shell quoting** in long one-liners (especially nested quotes). Prefer simpler, verifiable commands.
+- **When moving scripts**, preserve history with `git mv`, and ensure executable bits survive (`chmod +x`), then run a quick smoke test.
+
+### Things I did right (repeat these patterns)
+- **Single source of truth**: put shared HTML/CSS/JS in a common module (e.g., `html_ui.py`) so multiple generators can’t drift.
+- **Validate end-to-end**: `python3 -m py_compile ...` plus running the update script to ensure HTML is generated.
+- **Scope commits**: keep reorganizations, code changes, and docs changes as separate commits when asked.
+
 #### 2.4.2.1 Setting umask for Group-Writable Permissions in Dockerfiles
 
 To create group-writable files/directories (775/664) in Dockerfiles:
@@ -273,6 +287,32 @@ FROM debian:bullseye-slim
 COPY --from=builder /app/target/release/app /usr/local/bin/
 CMD ["app"]
 ```
+
+#### 2.4.2.3 Container Permission Optimization (runtime/dev/local-dev)
+
+Key rules (learned from debugging slow builds + permission issues):
+- Terminology (be precise):
+  - **Stages** refer to Dynamo container build targets: `--target` (e.g. `runtime`, `dev`, `local-dev`).
+  - **Frameworks** refer to the LLM engine selection: `--framework` (same thing), typically one of: `none`, `vllm`, `sglang`, `trtllm`.
+- Avoid recursive chmod/chown on large trees (e.g. `chmod -R g+w /workspace`, `chown -R ...`) — they can add minutes.
+- Prefer targeted, non-recursive permission fixes for the minimal runtime-writable directories:
+  - `/home/dynamo` (user home)
+  - `/home/dynamo/.cache` (uv/pip cache)
+  - `/opt/dynamo` (runtime scratch files like `.launch_screen`)
+  - `/workspace` (workspace writability)
+- Use a three-tier container approach when possible:
+  - `runtime`: production, minimal permissions, runs as `dynamo`
+  - `dev`: development with extra tools, often root (use with caution)
+  - `local-dev`: maps to host UID/GID for local development
+- Always sanity-check permission changes:
+  - For **runtime** images: `sanity_check.py --runtime-check-only --thorough`
+  - For **dev/local-dev** images: `sanity_check.py --thorough`
+- Monitor build times when adding permission operations; treat them as performance-sensitive code.
+
+Build/run helpers (if present in the repo):
+- Build images: `container/build.sh`
+- Run containers: `container/run.sh`
+- Comprehensive verification: `dynamo-utils/container/build_all_targets_and_verify.sh`
 
 =============================================================================
 3. PROJECT OVERVIEW
