@@ -98,6 +98,16 @@ def _run_cmd_maybe_sudo(
         return rc, out, err
     if not shutil.which("sudo"):
         return rc, out, err
+    # Special-case: nethogs often fails as non-root with pcap handler errors (not always "permission denied").
+    # Since we already require `sudo -n` (non-interactive), it's safe to retry on ANY failure for nethogs.
+    try:
+        exe = str(cmd[0]) if cmd else ""
+        base = os.path.basename(exe)
+        if base == "nethogs":
+            sudo_cmd = ["sudo", "-n", *list(cmd)]
+            return _run_cmd(sudo_cmd, timeout_s=timeout_s)
+    except Exception:
+        pass
     # Common permission-denied patterns
     msg = f"{out}\n{err}".lower()
     if "permission denied" not in msg and "got permission denied" not in msg and "operation not permitted" not in msg:
@@ -1325,8 +1335,8 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     p.add_argument(
         "--net-top-interval-seconds",
         type=float,
-        default=20.0,
-        help="How often to sample per-process network usage when --net-top is enabled (default: 20s)",
+        default=15.0,
+        help="How often to sample per-process network usage when --net-top is enabled (default: 15s)",
     )
     p.add_argument(
         "--net-top-k",
@@ -1385,7 +1395,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         thresholds=thresholds,
         top_k=int(args.top_k),
         net_top=bool(args.net_top),
-        net_top_interval_s=float(args.net_top_interval_seconds),
+        # Keep net-top attribution at least as frequent as the main sampling interval
+        # (avoids many "unattributed" net spike rows in the report).
+        net_top_interval_s=min(float(args.net_top_interval_seconds), float(args.interval_seconds)),
         net_top_k=int(args.net_top_k),
         docker_stats=bool(getattr(args, "docker_stats", False)),
         docker_stats_interval_s=float(getattr(args, "docker_stats_interval_seconds", 60.0)),
