@@ -628,6 +628,12 @@ class LocalRepoScanner:
         except Exception:
             current_branch = None
 
+        # Always capture current HEAD SHA (for display even when we skip "main" branches, or when detached).
+        try:
+            head_sha = repo.head.commit.hexsha[:7]
+        except Exception:
+            head_sha = None
+
         # Collect branch information
         branches_with_prs = {}
         local_only_branches = []
@@ -784,6 +790,24 @@ class LocalRepoScanner:
                 local_section.add_child(branch_node)
 
             repo_node.add_child(local_section)
+
+        # If the current checkout didn't show up in the PR/local sections (common when on main),
+        # add a single line for it so repos like dynamo_latest/ and dynamo_ci/ are informative.
+        has_current_line = any(
+            isinstance(ch, BranchInfoNode) and bool(getattr(ch, "is_current", False))
+            for ch in (repo_node.children or [])
+        )
+        if not has_current_line:
+            current_label = current_branch or "HEAD"
+            commit_url = f"https://github.com/ai-dynamo/dynamo/commit/{head_sha}" if head_sha else None
+            repo_node.add_child(
+                BranchInfoNode(
+                    label=current_label,
+                    sha=head_sha,
+                    is_current=True,
+                    commit_url=commit_url,
+                )
+            )
 
         # Add "no branches" message if needed
         if not repo_node.children:
