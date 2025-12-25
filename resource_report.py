@@ -448,6 +448,56 @@ def _query_top_io_read_process_per_sample(
     return out
 
 
+def _query_top_io_write_process_per_sample(
+    con: sqlite3.Connection, *, start_ts: float
+) -> Dict[int, Dict[str, Any]]:
+    """
+    Best-effort: process_samples only stores "offenders", so this finds the max IO-write process among recorded ones.
+
+    Returns:
+      {sample_id: {pid,name,username,cmdline,io_write_bps,io_read_bps,rss_bytes}}
+    """
+    cur = con.cursor()
+    rows = cur.execute(
+        """
+        WITH ranked AS (
+          SELECT
+            p.sample_id AS sample_id,
+            p.pid AS pid,
+            p.name AS name,
+            p.username AS username,
+            p.cmdline AS cmdline,
+            p.io_write_bps AS io_write_bps,
+            p.io_read_bps AS io_read_bps,
+            p.rss_bytes AS rss_bytes,
+            ROW_NUMBER() OVER (
+              PARTITION BY p.sample_id
+              ORDER BY p.io_write_bps DESC NULLS LAST
+            ) AS rn
+          FROM process_samples p
+          JOIN samples s ON s.id = p.sample_id
+          WHERE s.ts_unix >= ?
+        )
+        SELECT * FROM ranked WHERE rn = 1
+        """,
+        (start_ts,),
+    ).fetchall()
+
+    out: Dict[int, Dict[str, Any]] = {}
+    for r in rows:
+        sid = int(r["sample_id"])
+        out[sid] = {
+            "pid": int(r["pid"]) if r["pid"] is not None else None,
+            "name": r["name"] or "",
+            "username": r["username"] or "",
+            "cmdline": r["cmdline"] or "",
+            "io_write_bps": float(r["io_write_bps"]) if r["io_write_bps"] is not None else None,
+            "io_read_bps": float(r["io_read_bps"]) if r["io_read_bps"] is not None else None,
+            "rss_mb": (float(r["rss_bytes"]) / 1024.0 / 1024.0) if r["rss_bytes"] is not None else 0.0,
+        }
+    return out
+
+
 def _detect_disk_read_spikes(
     samples: List[SampleRow],
     *,
@@ -485,6 +535,211 @@ def _detect_disk_read_spikes(
         )
 
     spikes.sort(key=lambda x: x["disk_read_mibps"], reverse=True)
+    spikes = spikes[: int(max_spikes)]
+    spikes.sort(key=lambda x: x["ts_unix"])
+    return spikes
+
+
+def _detect_disk_write_spikes(
+    samples: List[SampleRow],
+    *,
+    min_mibps: float,
+    sigma: float,
+    max_spikes: int,
+) -> List[Dict[str, Any]]:
+    """
+    Detect spikes on system disk_write_bps (MiB/s) using a robust MAD threshold + local-max guard.
+    """
+    vals: List[float] = []
+    for s in samples:
+        v = (float(s.disk_write_bps) / 1024.0 / 1024.0) if s.disk_write_bps is not None else 0.0
+        vals.append(v)
+    med, mad = _median_mad(vals)
+    robust_std = 1.4826 * mad
+    thresh = max(float(min_mibps), med + float(sigma) * robust_std)
+
+    spikes: List[Dict[str, Any]] = []
+    for i, s in enumerate(samples):
+        v = (float(s.disk_write_bps) / 1024.0 / 1024.0) if s.disk_write_bps is not None else 0.0
+        if v < thresh:
+            continue
+        prev_v = vals[i - 1] if i > 0 else -1.0
+        next_v = vals[i + 1] if i + 1 < len(vals) else -1.0
+        if v < prev_v or v < next_v:
+            continue
+        spikes.append(
+            {
+                "sample_id": int(s.sample_id),
+                "ts_unix": float(s.ts_unix),
+                "ts": _ts_to_iso(float(s.ts_unix)),
+                "disk_write_mibps": float(v),
+            }
+        )
+
+    spikes.sort(key=lambda x: x["disk_write_mibps"], reverse=True)
+    spikes = spikes[: int(max_spikes)]
+    spikes.sort(key=lambda x: x["ts_unix"])
+    return spikes
+
+
+def _query_top_net_by_sample(
+    con: sqlite3.Connection, *, start_ts: float, direction: str
+) -> Dict[int, Dict[str, Any]]:
+    """
+    direction: 'recv' or 'sent'
+    Best-effort from net_process_samples (top-K only).
+    Returns {sample_id: {pid, proc, recv_bps, sent_bps}}
+    """
+    if direction not in ("recv", "sent"):
+        raise ValueError("direction must be 'recv' or 'sent'")
+    if not _table_exists(con, "net_process_samples"):
+        return {}
+    col = "recv_bps" if direction == "recv" else "sent_bps"
+    cur = con.cursor()
+    rows = cur.execute(
+        f"""
+        WITH ranked AS (
+          SELECT
+            n.sample_id AS sample_id,
+            n.pid AS pid,
+            n.proc AS proc,
+            n.sent_bps AS sent_bps,
+            n.recv_bps AS recv_bps,
+            ROW_NUMBER() OVER (
+              PARTITION BY n.sample_id
+              ORDER BY COALESCE(n.{col},0) DESC
+            ) AS rn
+          FROM net_process_samples n
+          JOIN samples s ON s.id = n.sample_id
+          WHERE s.ts_unix >= ?
+        )
+        SELECT * FROM ranked WHERE rn = 1
+        """,
+        (start_ts,),
+    ).fetchall()
+
+    out: Dict[int, Dict[str, Any]] = {}
+    for r in rows:
+        sid = int(r["sample_id"])
+        out[sid] = {
+            "pid": int(r["pid"]) if r["pid"] is not None else None,
+            "proc": r["proc"] or "",
+            "sent_bps": float(r["sent_bps"]) if r["sent_bps"] is not None else None,
+            "recv_bps": float(r["recv_bps"]) if r["recv_bps"] is not None else None,
+        }
+    return out
+
+
+def _query_net_top_points(con: sqlite3.Connection, *, start_ts: float) -> List[Dict[str, Any]]:
+    """
+    Best-effort: net_process_samples is only collected periodically (may not exist for every system sample_id).
+
+    Returns a list of points sorted by ts_unix:
+      {
+        sample_id, ts_unix,
+        top_recv_pid, top_recv_proc, top_recv_bps,
+        top_sent_pid, top_sent_proc, top_sent_bps,
+      }
+    """
+    if not _table_exists(con, "net_process_samples"):
+        return []
+    cur = con.cursor()
+    rows = cur.execute(
+        """
+        SELECT
+          s.id AS sample_id,
+          s.ts_unix AS ts_unix,
+          n.pid AS pid,
+          n.proc AS proc,
+          n.sent_bps AS sent_bps,
+          n.recv_bps AS recv_bps
+        FROM net_process_samples n
+        JOIN samples s ON s.id = n.sample_id
+        WHERE s.ts_unix >= ?
+        ORDER BY s.ts_unix ASC
+        """,
+        (start_ts,),
+    ).fetchall()
+
+    by_sid: Dict[int, Dict[str, Any]] = {}
+    for r in rows:
+        sid = int(r["sample_id"])
+        tsu = float(r["ts_unix"])
+        pid = int(r["pid"]) if r["pid"] is not None else None
+        proc = r["proc"] or ""
+        sent_bps = float(r["sent_bps"]) if r["sent_bps"] is not None else None
+        recv_bps = float(r["recv_bps"]) if r["recv_bps"] is not None else None
+
+        e = by_sid.get(sid)
+        if e is None:
+            e = {
+                "sample_id": sid,
+                "ts_unix": tsu,
+                "top_recv_pid": None,
+                "top_recv_proc": "",
+                "top_recv_bps": None,
+                "top_sent_pid": None,
+                "top_sent_proc": "",
+                "top_sent_bps": None,
+            }
+            by_sid[sid] = e
+
+        if recv_bps is not None and (e["top_recv_bps"] is None or recv_bps > float(e["top_recv_bps"])):
+            e["top_recv_bps"] = recv_bps
+            e["top_recv_pid"] = pid
+            e["top_recv_proc"] = proc
+        if sent_bps is not None and (e["top_sent_bps"] is None or sent_bps > float(e["top_sent_bps"])):
+            e["top_sent_bps"] = sent_bps
+            e["top_sent_pid"] = pid
+            e["top_sent_proc"] = proc
+
+    pts = list(by_sid.values())
+    pts.sort(key=lambda x: float(x["ts_unix"]))
+    return pts
+
+
+def _detect_net_spikes(
+    samples: List[SampleRow],
+    *,
+    which: str,
+    min_mibps: float,
+    sigma: float,
+    max_spikes: int,
+) -> List[Dict[str, Any]]:
+    """
+    which: 'recv' or 'sent' for system net_{recv,sent}_bps spikes.
+    """
+    if which not in ("recv", "sent"):
+        raise ValueError("which must be 'recv' or 'sent'")
+    vals: List[float] = []
+    for s in samples:
+        bps = s.net_recv_bps if which == "recv" else s.net_sent_bps
+        v = (float(bps) / 1024.0 / 1024.0) if bps is not None else 0.0
+        vals.append(v)
+    med, mad = _median_mad(vals)
+    robust_std = 1.4826 * mad
+    thresh = max(float(min_mibps), med + float(sigma) * robust_std)
+
+    spikes: List[Dict[str, Any]] = []
+    for i, s in enumerate(samples):
+        bps = s.net_recv_bps if which == "recv" else s.net_sent_bps
+        v = (float(bps) / 1024.0 / 1024.0) if bps is not None else 0.0
+        if v < thresh:
+            continue
+        prev_v = vals[i - 1] if i > 0 else -1.0
+        next_v = vals[i + 1] if i + 1 < len(vals) else -1.0
+        if v < prev_v or v < next_v:
+            continue
+        spikes.append(
+            {
+                "sample_id": int(s.sample_id),
+                "ts_unix": float(s.ts_unix),
+                "ts": _ts_to_iso(float(s.ts_unix)),
+                f"net_{which}_mibps": float(v),
+            }
+        )
+
+    spikes.sort(key=lambda x: float(x.get(f"net_{which}_mibps") or 0.0), reverse=True)
     spikes = spikes[: int(max_spikes)]
     spikes.sort(key=lambda x: x["ts_unix"])
     return spikes
@@ -836,7 +1091,8 @@ def _build_html(payload: Dict[str, Any]) -> str:
     }}
     .grid {{
       display: grid;
-      grid-template-columns: 1.4fr 0.6fr;
+      /* Default layout: 60/40 (3/5 + 2/5) */
+      grid-template-columns: 3fr 2fr;
       gap: 16px;
       margin-top: 16px;
     }}
@@ -975,6 +1231,19 @@ def _build_html(payload: Dict[str, Any]) -> str:
     .table tr.spike-row.selected td {{
       background: rgba(251,191,36,0.16);
     }}
+
+    /* Keep the spike tables constrained to the same height as the System chart (single scroll area). */
+    .spike-scroll {{
+      height: 72vh;
+      min-height: 520px;
+      overflow: auto;
+    }}
+    @media (max-width: 1100px) {{
+      .spike-scroll {{
+        height: 62vh;
+        min-height: 420px;
+      }}
+    }}
   </style>
 </head>
 <body>
@@ -996,7 +1265,8 @@ def _build_html(payload: Dict[str, Any]) -> str:
       </div>
     </div>
 
-    <div class="grid">
+    <!-- System: keep the same 3/5 vs 2/5 chart/table ratio as the other dashboard rows. -->
+    <div class="grid" style="grid-template-columns: 3fr 2fr;">
       <div class="card chart">
         <div class="hdr">
           <div class="title">System: CPU / Memory / IO</div>
@@ -1007,31 +1277,20 @@ def _build_html(payload: Dict[str, Any]) -> str:
         </div>
       </div>
 
-      <div style="display:flex; flex-direction:column; gap:16px;">
-        <div class="card">
-          <div class="hdr">
-            <div class="title">Spike events (top process CPU)</div>
-            <div class="hint"><span class="pill">MAD threshold</span></div>
-          </div>
-          <div class="body" style="max-height: 270px; overflow:auto;">
-            <table class="table" id="spike_table"></table>
-          </div>
+      <div class="card">
+        <div class="hdr">
+          <div class="title">Spike events</div>
+          <div class="hint"><span class="pill">MAD threshold</span></div>
         </div>
-
-        <div class="card">
-          <div class="hdr">
-            <div class="title">Disk read spikes (best-effort)</div>
-            <div class="hint"><span class="pill">MAD threshold</span></div>
-          </div>
-          <div class="body" style="max-height: 270px; overflow:auto;">
-            <table class="table" id="disk_spike_table"></table>
-          </div>
+        <!-- One scrollable section containing all spike events (CPU + Disk + Network), newest first. -->
+        <div class="body spike-scroll">
+          <table class="table" id="spike_table"></table>
         </div>
       </div>
     </div>
 
     <!-- Match the System grid column ratio so the GPU chart has the same width. -->
-    <div class="grid" style="grid-template-columns: 1.4fr 0.6fr; margin-top: 16px;">
+    <div class="grid" style="grid-template-columns: 3fr 2fr; margin-top: 16px;">
       <div class="card chart">
         <div class="hdr">
           <div class="title">GPU: Util / Memory / Temp / Power</div>
@@ -1054,7 +1313,7 @@ def _build_html(payload: Dict[str, Any]) -> str:
     </div>
 
     <!-- Containers: match the same chart/table width ratio as System/GPU (this is the 3rd chart) -->
-    <div class="grid" style="grid-template-columns: 1.4fr 0.6fr; margin-top: 16px;">
+    <div class="grid" style="grid-template-columns: 3fr 2fr; margin-top: 16px;">
       <div class="card chart">
         <div class="hdr">
           <div class="title">Containers: CPU / Memory</div>
@@ -1077,7 +1336,7 @@ def _build_html(payload: Dict[str, Any]) -> str:
     </div>
 
     <!-- Ping: match the same chart/table width ratio as System/GPU -->
-    <div class="grid" style="grid-template-columns: 1.4fr 0.6fr; margin-top: 16px;">
+    <div class="grid" style="grid-template-columns: 3fr 2fr; margin-top: 16px;">
       <div class="card chart">
         <div class="hdr">
           <div class="title">Ping: RTT / availability</div>
@@ -1100,7 +1359,7 @@ def _build_html(payload: Dict[str, Any]) -> str:
     </div>
 
     <!-- Network top talkers: match same width ratio -->
-    <div class="grid" style="grid-template-columns: 1.4fr 0.6fr; margin-top: 16px;">
+    <div class="grid" style="grid-template-columns: 3fr 2fr; margin-top: 16px;">
       <div class="card chart">
         <div class="hdr">
           <div class="title">Network: top talkers (best-effort)</div>
@@ -1159,61 +1418,204 @@ def _build_html(payload: Dict[str, Any]) -> str:
 
   function buildSpikeTable(spikes) {{
     const el = document.getElementById('spike_table');
-    if (!spikes || spikes.length === 0) {{
-      el.innerHTML = `<tr><th>status</th></tr><tr><td class="muted">No spikes detected (or process data missing in window).</td></tr>`;
+    const cpu = spikes || [];
+    const diskR = PAYLOAD.disk_spikes || [];
+    const diskW = PAYLOAD.disk_write_spikes || [];
+    const netIn = PAYLOAD.net_recv_spikes || [];
+    const netOut = PAYLOAD.net_sent_spikes || [];
+
+    const rows = [];
+    for (let i = 0; i < cpu.length; i++) {{
+      const s = cpu[i] || {{}};
+      rows.push({{
+        kind: 'cpu',
+        idx: i,
+        ts: s.ts,
+        ts_unix: Number(s.ts_unix || 0),
+        badge: 'bad',
+        valueFmt: `${{Number((s.cpu_percent_total ?? s.cpu_percent) || 0).toFixed(1)}}%`,
+        detail: `raw: ${{Number(s.cpu_percent || 0).toFixed(1)}}%`,
+        proc: (s.name && String(s.name).length) ? String(s.name) : '(unattributed)',
+        pid: s.pid,
+        cmdline: s.cmdline || '',
+      }});
+    }}
+    for (let i = 0; i < diskR.length; i++) {{
+      const s = diskR[i] || {{}};
+      rows.push({{
+        kind: 'disk_read',
+        idx: i,
+        ts: s.ts,
+        ts_unix: Number(s.ts_unix || 0),
+        badge: 'warn',
+        valueFmt: `${{Number(s.disk_read_mibps || 0).toFixed(2)}} MiB/s`,
+        detail: `proc read: ${{Number(s.proc_io_read_mibps || 0).toFixed(2)}} MiB/s`,
+        proc: (s.proc_name && String(s.proc_name).length) ? String(s.proc_name) : '(unattributed)',
+        pid: s.pid,
+        cmdline: s.cmdline || '',
+      }});
+    }}
+    for (let i = 0; i < diskW.length; i++) {{
+      const s = diskW[i] || {{}};
+      rows.push({{
+        kind: 'disk_write',
+        idx: i,
+        ts: s.ts,
+        ts_unix: Number(s.ts_unix || 0),
+        badge: 'good',
+        valueFmt: `${{Number(s.disk_write_mibps || 0).toFixed(2)}} MiB/s`,
+        detail: `proc write: ${{Number(s.proc_io_write_mibps || 0).toFixed(2)}} MiB/s`,
+        proc: (s.proc_name && String(s.proc_name).length) ? String(s.proc_name) : '(unattributed)',
+        pid: s.pid,
+        cmdline: s.cmdline || '',
+      }});
+    }}
+    for (let i = 0; i < netIn.length; i++) {{
+      const s = netIn[i] || {{}};
+      rows.push({{
+        kind: 'net_in',
+        idx: i,
+        ts: s.ts,
+        ts_unix: Number(s.ts_unix || 0),
+        badge: 'good',
+        valueFmt: `${{Number(s.net_recv_mibps || 0).toFixed(2)}} MiB/s`,
+        detail: `proc recv: ${{Number(s.proc_recv_mibps || 0).toFixed(2)}} MiB/s` + (s.attrib_skew_s !== undefined ? ` (skew ${{Number(s.attrib_skew_s).toFixed(1)}}s)` : ''),
+        proc: (s.proc && String(s.proc).length) ? String(s.proc) : '(unattributed)',
+        pid: s.pid,
+        cmdline: '',
+      }});
+    }}
+    for (let i = 0; i < netOut.length; i++) {{
+      const s = netOut[i] || {{}};
+      rows.push({{
+        kind: 'net_out',
+        idx: i,
+        ts: s.ts,
+        ts_unix: Number(s.ts_unix || 0),
+        badge: 'warn',
+        valueFmt: `${{Number(s.net_sent_mibps || 0).toFixed(2)}} MiB/s`,
+        detail: `proc sent: ${{Number(s.proc_sent_mibps || 0).toFixed(2)}} MiB/s` + (s.attrib_skew_s !== undefined ? ` (skew ${{Number(s.attrib_skew_s).toFixed(1)}}s)` : ''),
+        proc: (s.proc && String(s.proc).length) ? String(s.proc) : '(unattributed)',
+        pid: s.pid,
+        cmdline: '',
+      }});
+    }}
+
+    if (!rows.length) {{
+      el.innerHTML = `<tr><th>status</th></tr><tr><td class="muted">No spike events in window.</td></tr>`;
       return;
     }}
-    // Show latest first (top of the table), but keep data-idx pointing to the original spike index
-    // so table↔plot highlighting still works.
-    const rev = spikes.slice().reverse();
+
+    // Most recent first.
+    rows.sort((a, b) => Number(b.ts_unix || 0) - Number(a.ts_unix || 0));
+
+    function kindLabel(k) {{
+      if (k === 'cpu') return 'CPU';
+      if (k === 'disk_read') return 'disk read';
+      if (k === 'disk_write') return 'disk write';
+      if (k === 'net_in') return 'net in';
+      if (k === 'net_out') return 'net out';
+      return k;
+    }}
+
     el.innerHTML = `
       <tr>
         <th>time</th>
-        <th>cpu%</th>
+        <th>type</th>
+        <th>value</th>
         <th>proc</th>
-        <th>rss</th>
-        <th>gpu</th>
       </tr>
-      ${{rev.map((s, j) => `
-        <tr class="spike-row" data-idx="${{(spikes.length - 1 - j)}}">
-          <td class="mono">${{s.ts.replace('T',' ')}}</td>
+      ${{rows.map(r => `
+        <tr class="spike-row" data-kind="${{r.kind}}" data-idx="${{r.idx}}">
+          <td class="mono">${{String(r.ts||'').replace('T',' ')}}</td>
+          <td class="mono"><span class="badge">${{kindLabel(r.kind)}}</span></td>
+          <td class="mono"><span class="badge ${{r.badge}}">${{r.valueFmt}}</span><div class="small muted mono">${{r.detail}}</div></td>
           <td>
-            <span class="badge bad">${{(s.cpu_percent_total ?? s.cpu_percent).toFixed(1)}}%</span>
-            <div class="small muted mono" title="raw per-process cpu% (can exceed 100 on multi-core)">
-              raw: ${{(s.cpu_percent ?? 0).toFixed(1)}}%
-            </div>
+            <div class="mono" title="${{r.proc}} #${{r.pid ?? ''}}">${{String(r.proc||'').slice(0,34)}} <span class="muted">#${{r.pid ?? ''}}</span></div>
+            ${{r.cmdline ? `<div class=\"small muted\" title=\"${{r.cmdline}}\">${{String(r.cmdline).slice(0,90)}}</div>` : ''}}
           </td>
-          <td>
-            <div class="mono">${{(s.name||'').slice(0,22)}} <span class="muted">#${{s.pid ?? ''}}</span></div>
-            <div class="small muted">${{(s.cmdline||'').slice(0,90)}}</div>
-          </td>
-          <td class="mono">${{(s.rss_mb||0).toFixed(0)}} MB</td>
-          <td class="mono">${{(s.gpu_mem_mb||0).toFixed(0)}} MB</td>
         </tr>
       `).join('')}}
     `;
   }}
 
-  function buildDiskSpikeTable(rows) {{
+  function buildDiskSpikeTable(readRows, writeRows) {{
     const el = document.getElementById('disk_spike_table');
-    if (!rows || rows.length === 0) {{
-      el.innerHTML = `<tr><th>status</th></tr><tr><td class="muted">No disk read spikes detected (or missing disk/process data).</td></tr>`;
+    const rr = readRows || [];
+    const wr = writeRows || [];
+    if (rr.length === 0 && wr.length === 0) {{
+      el.innerHTML = `<tr><th>status</th></tr><tr><td class="muted">No disk spikes detected (or missing disk/process data).</td></tr>`;
       return;
     }}
-    const rev = rows.slice().reverse();
+    // Latest first; keep separate indices per series for linkage.
+    const revR = rr.slice().reverse();
+    const revW = wr.slice().reverse();
     el.innerHTML = `
       <tr>
         <th>time</th>
-        <th>read</th>
+        <th>op</th>
+        <th>rate</th>
         <th>proc</th>
       </tr>
-      ${{rev.map((r, j) => `
-        <tr class="spike-row disk-spike-row" data-idx="${{(rows.length - 1 - j)}}">
+      ${{revR.map((r, j) => `
+        <tr class="spike-row disk-read-spike-row" data-idx="${{(rr.length - 1 - j)}}">
           <td class="mono">${{r.ts.replace('T',' ')}}</td>
-          <td class="mono"><span class="badge warn">${{(r.disk_read_mibps ?? 0).toFixed(2)}}</span> MiB/s</td>
+          <td class="mono"><span class="badge warn">read</span></td>
+          <td class="mono">${{(r.disk_read_mibps ?? 0).toFixed(2)}} MiB/s</td>
           <td>
-            <div class="mono">${{(r.proc_name||'').slice(0,22)}} <span class="muted">#${{r.pid ?? ''}}</span></div>
-            <div class="small muted">${{(r.cmdline||'').slice(0,90)}}</div>
+            <div class="mono" title="${{r.proc_name || '(unattributed)'}} #${{r.pid ?? ''}}">${{(r.proc_name||'(unattributed)').slice(0,22)}} <span class="muted">#${{r.pid ?? ''}}</span></div>
+            <div class="small muted" title="${{r.cmdline || ''}}">${{(r.cmdline||'').slice(0,90)}}</div>
+          </td>
+        </tr>
+      `).join('')}}
+      ${{revW.map((r, j) => `
+        <tr class="spike-row disk-write-spike-row" data-idx="${{(wr.length - 1 - j)}}">
+          <td class="mono">${{r.ts.replace('T',' ')}}</td>
+          <td class="mono"><span class="badge good">write</span></td>
+          <td class="mono">${{(r.disk_write_mibps ?? 0).toFixed(2)}} MiB/s</td>
+          <td>
+            <div class="mono" title="${{r.proc_name || '(unattributed)'}} #${{r.pid ?? ''}}">${{(r.proc_name||'(unattributed)').slice(0,22)}} <span class="muted">#${{r.pid ?? ''}}</span></div>
+            <div class="small muted" title="${{r.cmdline || ''}}">${{(r.cmdline||'').slice(0,90)}}</div>
+          </td>
+        </tr>
+      `).join('')}}
+    `;
+  }}
+
+  function buildNetSpikeTable(recvRows, sentRows) {{
+    const el = document.getElementById('net_spike_table');
+    const rr = recvRows || [];
+    const sr = sentRows || [];
+    if (rr.length === 0 && sr.length === 0) {{
+      el.innerHTML = `<tr><th>status</th></tr><tr><td class="muted">No network spikes detected (or missing net/top-talker data).</td></tr>`;
+      return;
+    }}
+    const revR = rr.slice().reverse();
+    const revS = sr.slice().reverse();
+    el.innerHTML = `
+      <tr>
+        <th>time</th>
+        <th>dir</th>
+        <th>rate</th>
+        <th>proc</th>
+      </tr>
+      ${{revR.map((r, j) => `
+        <tr class="spike-row net-recv-spike-row" data-idx="${{(rr.length - 1 - j)}}">
+          <td class="mono">${{r.ts.replace('T',' ')}}</td>
+          <td class="mono"><span class="badge good">in</span></td>
+          <td class="mono">${{(r.net_recv_mibps ?? 0).toFixed(2)}} MiB/s</td>
+          <td>
+            <div class="mono" title="${{r.proc || '(unattributed)'}} #${{r.pid ?? ''}}">${{(r.proc||'(unattributed)').slice(0,34)}} <span class="muted">#${{r.pid ?? ''}}</span></div>
+          </td>
+        </tr>
+      `).join('')}}
+      ${{revS.map((r, j) => `
+        <tr class="spike-row net-sent-spike-row" data-idx="${{(sr.length - 1 - j)}}">
+          <td class="mono">${{r.ts.replace('T',' ')}}</td>
+          <td class="mono"><span class="badge warn">out</span></td>
+          <td class="mono">${{(r.net_sent_mibps ?? 0).toFixed(2)}} MiB/s</td>
+          <td>
+            <div class="mono" title="${{r.proc || '(unattributed)'}} #${{r.pid ?? ''}}">${{(r.proc||'(unattributed)').slice(0,34)}} <span class="muted">#${{r.pid ?? ''}}</span></div>
           </td>
         </tr>
       `).join('')}}
@@ -1445,9 +1847,36 @@ def _build_html(payload: Dict[str, Any]) -> str:
     const diskSpikeX = diskSpikes.map(e => e.ts);
     const diskSpikeY = diskSpikes.map(e => e.disk_read_mibps);
     const diskSpikeText = diskSpikes.map(e =>
-      `${{e.proc_name || ''}} #${{e.pid ?? ''}}` +
+      `${{(e.proc_name && String(e.proc_name).length) ? e.proc_name : '(unattributed)'}} #${{e.pid ?? ''}}` +
       `<br>proc read: ${{(e.proc_io_read_mibps ?? 0).toFixed(2)}} MiB/s` +
       `<br>${{wrapLine((e.cmdline||'').slice(0,240), 80)}}`
+    );
+
+    const diskWriteSpikes = PAYLOAD.disk_write_spikes || [];
+    const diskWriteSpikeX = diskWriteSpikes.map(e => e.ts);
+    const diskWriteSpikeY = diskWriteSpikes.map(e => e.disk_write_mibps);
+    const diskWriteSpikeText = diskWriteSpikes.map(e =>
+      `${{(e.proc_name && String(e.proc_name).length) ? e.proc_name : '(unattributed)'}} #${{e.pid ?? ''}}` +
+      `<br>proc write: ${{(e.proc_io_write_mibps ?? 0).toFixed(2)}} MiB/s` +
+      `<br>${{wrapLine((e.cmdline||'').slice(0,240), 80)}}`
+    );
+
+    const netRecvSpikes = PAYLOAD.net_recv_spikes || [];
+    const netRecvSpikeX = netRecvSpikes.map(e => e.ts);
+    const netRecvSpikeY = netRecvSpikes.map(e => e.net_recv_mibps);
+    const netRecvSpikeText = netRecvSpikes.map(e =>
+      `${{(e.proc && String(e.proc).length) ? e.proc : '(unattributed)'}} #${{e.pid ?? ''}}` +
+      `<br>proc recv: ${{(e.proc_recv_mibps ?? 0).toFixed(2)}} MiB/s` +
+      (e.attrib_skew_s !== undefined ? `<br><span class="muted">attribution skew: ${{Number(e.attrib_skew_s).toFixed(1)}}s</span>` : '')
+    );
+
+    const netSentSpikes = PAYLOAD.net_sent_spikes || [];
+    const netSentSpikeX = netSentSpikes.map(e => e.ts);
+    const netSentSpikeY = netSentSpikes.map(e => e.net_sent_mibps);
+    const netSentSpikeText = netSentSpikes.map(e =>
+      `${{(e.proc && String(e.proc).length) ? e.proc : '(unattributed)'}} #${{e.pid ?? ''}}` +
+      `<br>proc sent: ${{(e.proc_sent_mibps ?? 0).toFixed(2)}} MiB/s` +
+      (e.attrib_skew_s !== undefined ? `<br><span class="muted">attribution skew: ${{Number(e.attrib_skew_s).toFixed(1)}}s</span>` : '')
     );
 
     if (spikes.length > 0) {{
@@ -1502,12 +1931,72 @@ def _build_html(payload: Dict[str, Any]) -> str:
         hovertemplate: '<b>Disk read spike</b><br>%{{x}}<br>disk read=%{{y:.2f}} MiB/s<br>%{{text}}<extra></extra>',
         yaxis: 'y4'
       }});
-      window.__DISK_SPIKE_TRACE_INDEX = diskSpikeTraceIndex;
-      window.__DISK_SPIKE_COUNT = diskSpikeX.length;
-      window.__DISK_SPIKE_DEFAULT_COLOR = '#fbbf24';
-      window.__DISK_SPIKE_HILITE_COLOR = '#fde047';
-      window.__DISK_SPIKE_DEFAULT_SIZE = 10;
-      window.__DISK_SPIKE_HILITE_SIZE = 14;
+      window.__DISK_READ_SPIKE_TRACE_INDEX = diskSpikeTraceIndex;
+      window.__DISK_READ_SPIKE_COUNT = diskSpikeX.length;
+      window.__DISK_READ_SPIKE_DEFAULT_COLOR = '#fbbf24';
+      window.__DISK_READ_SPIKE_HILITE_COLOR = '#fde047';
+      window.__DISK_READ_SPIKE_DEFAULT_SIZE = 10;
+      window.__DISK_READ_SPIKE_HILITE_SIZE = 14;
+    }}
+
+    if (diskWriteSpikes.length > 0) {{
+      const diskWriteSpikeTraceIndex = traces.length;
+      traces.push({{
+        x: diskWriteSpikeX,
+        y: diskWriteSpikeY,
+        name: 'Disk write spike',
+        mode: 'markers',
+        marker: {{ size: 10, color: '#38bdf8', symbol: 'diamond-open', line: {{ width: 1, color: 'rgba(255,255,255,0.75)' }} }},
+        text: diskWriteSpikeText,
+        hovertemplate: '<b>Disk write spike</b><br>%{{x}}<br>disk write=%{{y:.2f}} MiB/s<br>%{{text}}<extra></extra>',
+        yaxis: 'y4'
+      }});
+      window.__DISK_WRITE_SPIKE_TRACE_INDEX = diskWriteSpikeTraceIndex;
+      window.__DISK_WRITE_SPIKE_COUNT = diskWriteSpikeX.length;
+      window.__DISK_WRITE_SPIKE_DEFAULT_COLOR = '#38bdf8';
+      window.__DISK_WRITE_SPIKE_HILITE_COLOR = '#a5f3fc';
+      window.__DISK_WRITE_SPIKE_DEFAULT_SIZE = 10;
+      window.__DISK_WRITE_SPIKE_HILITE_SIZE = 14;
+    }}
+
+    if (netRecvSpikes.length > 0) {{
+      const netRecvSpikeTraceIndex = traces.length;
+      traces.push({{
+        x: netRecvSpikeX,
+        y: netRecvSpikeY,
+        name: 'Net in spike',
+        mode: 'markers',
+        marker: {{ size: 9, color: '#22c55e', symbol: 'triangle-down', line: {{ width: 1, color: 'rgba(255,255,255,0.75)' }} }},
+        text: netRecvSpikeText,
+        hovertemplate: '<b>Net in spike</b><br>%{{x}}<br>net in=%{{y:.2f}} MiB/s<br>%{{text}}<extra></extra>',
+        yaxis: 'y3'
+      }});
+      window.__NET_RECV_SPIKE_TRACE_INDEX = netRecvSpikeTraceIndex;
+      window.__NET_RECV_SPIKE_COUNT = netRecvSpikeX.length;
+      window.__NET_RECV_SPIKE_DEFAULT_COLOR = '#22c55e';
+      window.__NET_RECV_SPIKE_HILITE_COLOR = '#fbbf24';
+      window.__NET_RECV_SPIKE_DEFAULT_SIZE = 9;
+      window.__NET_RECV_SPIKE_HILITE_SIZE = 13;
+    }}
+
+    if (netSentSpikes.length > 0) {{
+      const netSentSpikeTraceIndex = traces.length;
+      traces.push({{
+        x: netSentSpikeX,
+        y: netSentSpikeY,
+        name: 'Net out spike',
+        mode: 'markers',
+        marker: {{ size: 9, color: '#34d399', symbol: 'triangle-up', line: {{ width: 1, color: 'rgba(255,255,255,0.75)' }} }},
+        text: netSentSpikeText,
+        hovertemplate: '<b>Net out spike</b><br>%{{x}}<br>net out=%{{y:.2f}} MiB/s<br>%{{text}}<extra></extra>',
+        yaxis: 'y3'
+      }});
+      window.__NET_SENT_SPIKE_TRACE_INDEX = netSentSpikeTraceIndex;
+      window.__NET_SENT_SPIKE_COUNT = netSentSpikeX.length;
+      window.__NET_SENT_SPIKE_DEFAULT_COLOR = '#34d399';
+      window.__NET_SENT_SPIKE_HILITE_COLOR = '#fbbf24';
+      window.__NET_SENT_SPIKE_DEFAULT_SIZE = 9;
+      window.__NET_SENT_SPIKE_HILITE_SIZE = 13;
     }}
 
     const layout = commonLayout('');
@@ -1552,22 +2041,21 @@ def _build_html(payload: Dict[str, Any]) -> str:
     return Plotly.newPlot('sys_graph', traces, layout, config).then(() => {{
       installHoverDelay('sys_graph');
       installSpikeTableLinkage();
-      installDiskSpikeTableLinkage();
     }});
   }}
 
-  function installDiskSpikeTableLinkage() {{
-    const table = document.getElementById('disk_spike_table');
-    const plot = document.getElementById('sys_graph');
+  function _installMarkerTableLinkage(opts) {{
+    const table = document.getElementById(opts.tableId);
+    const plot = document.getElementById(opts.plotId);
     if (!table || !plot) return;
-    const traceIndex = window.__DISK_SPIKE_TRACE_INDEX;
-    const spikeCount = Number(window.__DISK_SPIKE_COUNT ?? 0);
+    const traceIndex = window[opts.traceIndexVar];
+    const spikeCount = Number(window[opts.countVar] ?? 0);
     if (traceIndex === undefined || traceIndex === null) return;
 
     let pinnedIdx = null;
 
     function setSelectedRow(idx) {{
-      const rows = table.querySelectorAll('tr.disk-spike-row');
+      const rows = table.querySelectorAll(opts.rowSelector);
       rows.forEach(r => {{
         const ridx = r.getAttribute('data-idx');
         if (idx !== null && idx !== undefined && String(idx) === String(ridx)) r.classList.add('selected');
@@ -1579,10 +2067,12 @@ def _build_html(payload: Dict[str, Any]) -> str:
       if (idx === null || idx === undefined) return;
       const i = Number(idx);
       if (!Number.isFinite(i) || i < 0 || i >= spikeCount) return;
-      const colors = Array(spikeCount).fill(window.__DISK_SPIKE_DEFAULT_COLOR || '#fbbf24');
-      colors[i] = window.__DISK_SPIKE_HILITE_COLOR || '#fde047';
-      const baseSize = Number(window.__DISK_SPIKE_DEFAULT_SIZE ?? 10);
-      const hiSize = Number(window.__DISK_SPIKE_HILITE_SIZE ?? 14);
+      const defaultColor = window[opts.defaultColorVar] || opts.fallbackDefaultColor;
+      const hiColor = window[opts.hiliteColorVar] || opts.fallbackHiliteColor;
+      const baseSize = Number(window[opts.defaultSizeVar] ?? opts.fallbackDefaultSize);
+      const hiSize = Number(window[opts.hiliteSizeVar] ?? opts.fallbackHiliteSize);
+      const colors = Array(spikeCount).fill(defaultColor);
+      colors[i] = hiColor;
       const sizes = Array(spikeCount).fill(baseSize);
       sizes[i] = hiSize;
       Plotly.restyle(plot, {{ 'marker.color': [colors], 'marker.size': [sizes] }}, [traceIndex]);
@@ -1590,28 +2080,29 @@ def _build_html(payload: Dict[str, Any]) -> str:
     }}
 
     function clearHighlight() {{
-      const colors = Array(spikeCount).fill(window.__DISK_SPIKE_DEFAULT_COLOR || '#fbbf24');
-      const baseSize = Number(window.__DISK_SPIKE_DEFAULT_SIZE ?? 10);
+      const defaultColor = window[opts.defaultColorVar] || opts.fallbackDefaultColor;
+      const baseSize = Number(window[opts.defaultSizeVar] ?? opts.fallbackDefaultSize);
+      const colors = Array(spikeCount).fill(defaultColor);
       const sizes = Array(spikeCount).fill(baseSize);
       Plotly.restyle(plot, {{ 'marker.color': [colors], 'marker.size': [sizes] }}, [traceIndex]);
       setSelectedRow(null);
     }}
 
     table.addEventListener('mouseover', (ev) => {{
-      const tr = ev.target.closest('tr.disk-spike-row');
+      const tr = ev.target.closest(opts.rowSelector);
       if (!tr) return;
       if (pinnedIdx !== null) return;
       const idx = tr.getAttribute('data-idx');
       if (idx !== null) highlightByIdx(idx);
     }});
     table.addEventListener('mouseout', (ev) => {{
-      const tr = ev.target.closest('tr.disk-spike-row');
+      const tr = ev.target.closest(opts.rowSelector);
       if (!tr) return;
       if (pinnedIdx !== null) return;
       clearHighlight();
     }});
     table.addEventListener('click', (ev) => {{
-      const tr = ev.target.closest('tr.disk-spike-row');
+      const tr = ev.target.closest(opts.rowSelector);
       if (!tr) return;
       const idx = tr.getAttribute('data-idx');
       if (idx === null) return;
@@ -1632,101 +2123,215 @@ def _build_html(payload: Dict[str, Any]) -> str:
     }});
   }}
 
+  function installDiskSpikeTableLinkage() {{
+    _installMarkerTableLinkage({{
+      tableId: 'disk_spike_table',
+      plotId: 'sys_graph',
+      rowSelector: 'tr.disk-read-spike-row',
+      traceIndexVar: '__DISK_READ_SPIKE_TRACE_INDEX',
+      countVar: '__DISK_READ_SPIKE_COUNT',
+      defaultColorVar: '__DISK_READ_SPIKE_DEFAULT_COLOR',
+      hiliteColorVar: '__DISK_READ_SPIKE_HILITE_COLOR',
+      defaultSizeVar: '__DISK_READ_SPIKE_DEFAULT_SIZE',
+      hiliteSizeVar: '__DISK_READ_SPIKE_HILITE_SIZE',
+      fallbackDefaultColor: '#fbbf24',
+      fallbackHiliteColor: '#fde047',
+      fallbackDefaultSize: 10,
+      fallbackHiliteSize: 14,
+    }});
+    _installMarkerTableLinkage({{
+      tableId: 'disk_spike_table',
+      plotId: 'sys_graph',
+      rowSelector: 'tr.disk-write-spike-row',
+      traceIndexVar: '__DISK_WRITE_SPIKE_TRACE_INDEX',
+      countVar: '__DISK_WRITE_SPIKE_COUNT',
+      defaultColorVar: '__DISK_WRITE_SPIKE_DEFAULT_COLOR',
+      hiliteColorVar: '__DISK_WRITE_SPIKE_HILITE_COLOR',
+      defaultSizeVar: '__DISK_WRITE_SPIKE_DEFAULT_SIZE',
+      hiliteSizeVar: '__DISK_WRITE_SPIKE_HILITE_SIZE',
+      fallbackDefaultColor: '#38bdf8',
+      fallbackHiliteColor: '#a5f3fc',
+      fallbackDefaultSize: 10,
+      fallbackHiliteSize: 14,
+    }});
+  }}
+
+  function installNetSpikeTableLinkage() {{
+    _installMarkerTableLinkage({{
+      tableId: 'net_spike_table',
+      plotId: 'sys_graph',
+      rowSelector: 'tr.net-recv-spike-row',
+      traceIndexVar: '__NET_RECV_SPIKE_TRACE_INDEX',
+      countVar: '__NET_RECV_SPIKE_COUNT',
+      defaultColorVar: '__NET_RECV_SPIKE_DEFAULT_COLOR',
+      hiliteColorVar: '__NET_RECV_SPIKE_HILITE_COLOR',
+      defaultSizeVar: '__NET_RECV_SPIKE_DEFAULT_SIZE',
+      hiliteSizeVar: '__NET_RECV_SPIKE_HILITE_SIZE',
+      fallbackDefaultColor: '#22c55e',
+      fallbackHiliteColor: '#fbbf24',
+      fallbackDefaultSize: 9,
+      fallbackHiliteSize: 13,
+    }});
+    _installMarkerTableLinkage({{
+      tableId: 'net_spike_table',
+      plotId: 'sys_graph',
+      rowSelector: 'tr.net-sent-spike-row',
+      traceIndexVar: '__NET_SENT_SPIKE_TRACE_INDEX',
+      countVar: '__NET_SENT_SPIKE_COUNT',
+      defaultColorVar: '__NET_SENT_SPIKE_DEFAULT_COLOR',
+      hiliteColorVar: '__NET_SENT_SPIKE_HILITE_COLOR',
+      defaultSizeVar: '__NET_SENT_SPIKE_DEFAULT_SIZE',
+      hiliteSizeVar: '__NET_SENT_SPIKE_HILITE_SIZE',
+      fallbackDefaultColor: '#34d399',
+      fallbackHiliteColor: '#fbbf24',
+      fallbackDefaultSize: 9,
+      fallbackHiliteSize: 13,
+    }});
+  }}
+
   function installSpikeTableLinkage() {{
+    // Unified spike table: rows have data-kind + data-idx which map into the corresponding marker traces.
     const table = document.getElementById('spike_table');
     const plot = document.getElementById('sys_graph');
     if (!table || !plot) return;
-    const traceIndex = window.__SPIKE_TRACE_INDEX;
-    const glowTraceIndex = window.__SPIKE_GLOW_TRACE_INDEX
-    const spikeCount = Number(window.__SPIKE_COUNT ?? 0);
-    if (traceIndex === undefined || traceIndex === null) return;
 
-    let pinnedIdx = null;
+    let pinned = null; // pinned.kind (string), pinned.idx (number)
 
-    function setSelectedRow(idx) {{
-      // Visual selection in table
+    function setSelected(kind, idx) {{
       const rows = table.querySelectorAll('tr.spike-row');
       rows.forEach(r => {{
-        const ridx = r.getAttribute('data-idx');
-        if (idx !== null && idx !== undefined && String(idx) === String(ridx)) r.classList.add('selected');
+        const rk = r.getAttribute('data-kind');
+        const ri = r.getAttribute('data-idx');
+        if (kind && idx !== null && idx !== undefined && rk === kind && String(ri) === String(idx)) r.classList.add('selected');
         else r.classList.remove('selected');
       }});
     }}
 
-    function highlightSpikeByIdx(idx) {{
-      if (idx === null || idx === undefined) return;
+    function resetCpu() {{
+      const trace = window.__SPIKE_TRACE_INDEX;
+      const glow = window.__SPIKE_GLOW_TRACE_INDEX;
+      const count = Number(window.__SPIKE_COUNT ?? 0);
+      if (trace === undefined || trace === null || count <= 0) return;
+      Plotly.restyle(plot, {{
+        'marker.color': [Array(count).fill(window.__SPIKE_DEFAULT_COLOR || '#fb7185')],
+        'marker.size': [Array(count).fill(Number(window.__SPIKE_DEFAULT_SIZE ?? 10))],
+      }}, [trace]);
+      if (glow !== undefined && glow !== null) {{
+        Plotly.restyle(plot, {{
+          'marker.color': [Array(count).fill(window.__SPIKE_GLOW_DEFAULT_COLOR || 'rgba(251,113,133,0.22)')],
+          'marker.size': [Array(count).fill(Number(window.__SPIKE_GLOW_DEFAULT_SIZE ?? 18))],
+        }}, [glow]);
+      }}
+    }}
+
+    function resetSimple(prefix, fallbackColor, fallbackSize) {{
+      const trace = window[`__${{prefix}}_TRACE_INDEX`];
+      const count = Number(window[`__${{prefix}}_COUNT`] ?? 0);
+      if (trace === undefined || trace === null || count <= 0) return;
+      const c0 = window[`__${{prefix}}_DEFAULT_COLOR`] || fallbackColor;
+      const s0 = Number(window[`__${{prefix}}_DEFAULT_SIZE`] ?? fallbackSize);
+      Plotly.restyle(plot, {{ 'marker.color': [Array(count).fill(c0)], 'marker.size': [Array(count).fill(s0)] }}, [trace]);
+    }}
+
+    function resetAll() {{
+      resetCpu();
+      resetSimple('DISK_READ_SPIKE', '#fbbf24', 10);
+      resetSimple('DISK_WRITE_SPIKE', '#38bdf8', 10);
+      resetSimple('NET_RECV_SPIKE', '#22c55e', 9);
+      resetSimple('NET_SENT_SPIKE', '#34d399', 9);
+      setSelected(null, null);
+    }}
+
+    function highlightCpu(idx) {{
+      const trace = window.__SPIKE_TRACE_INDEX;
+      const glow = window.__SPIKE_GLOW_TRACE_INDEX;
+      const count = Number(window.__SPIKE_COUNT ?? 0);
       const i = Number(idx);
-      if (!Number.isFinite(i) || i < 0 || i >= spikeCount) return;
-      // Create per-point styles so only one marker pops.
-      const colors = Array(spikeCount).fill(window.__SPIKE_DEFAULT_COLOR || '#fb7185');
+      if (trace === undefined || trace === null || count <= 0 || !Number.isFinite(i) || i < 0 || i >= count) return;
+
+      const colors = Array(count).fill(window.__SPIKE_DEFAULT_COLOR || '#fb7185');
       colors[i] = window.__SPIKE_HILITE_COLOR || '#fbbf24';
       const baseSize = Number(window.__SPIKE_DEFAULT_SIZE ?? 10);
       const hiSize = Number(window.__SPIKE_HILITE_SIZE ?? 14);
-      const sizes = Array(spikeCount).fill(baseSize);
+      const sizes = Array(count).fill(baseSize);
       sizes[i] = hiSize;
-      Plotly.restyle(plot, {{ 'marker.color': [colors], 'marker.size': [sizes] }}, [traceIndex]);
+      Plotly.restyle(plot, {{ 'marker.color': [colors], 'marker.size': [sizes] }}, [trace]);
 
-      // Glow layer (if present)
-      if (glowTraceIndex !== undefined && glowTraceIndex !== null) {{
-        const gColors = Array(spikeCount).fill(window.__SPIKE_GLOW_DEFAULT_COLOR || 'rgba(251,113,133,0.22)');
+      if (glow !== undefined && glow !== null) {{
+        const gColors = Array(count).fill(window.__SPIKE_GLOW_DEFAULT_COLOR || 'rgba(251,113,133,0.22)');
         gColors[i] = window.__SPIKE_GLOW_HILITE_COLOR || 'rgba(251,191,36,0.30)';
         const gBase = Number(window.__SPIKE_GLOW_DEFAULT_SIZE ?? 18);
         const gHi = Number(window.__SPIKE_GLOW_HILITE_SIZE ?? 24);
-        const gSizes = Array(spikeCount).fill(gBase);
+        const gSizes = Array(count).fill(gBase);
         gSizes[i] = gHi;
-        Plotly.restyle(plot, {{ 'marker.color': [gColors], 'marker.size': [gSizes] }}, [glowTraceIndex]);
+        Plotly.restyle(plot, {{ 'marker.color': [gColors], 'marker.size': [gSizes] }}, [glow]);
       }}
-      setSelectedRow(i);
+      setSelected('cpu', i);
+    }}
+
+    function highlightSimple(prefix, idx, kind, fallbackColor, fallbackHi, fallbackSize, fallbackHiSize) {{
+      const trace = window[`__${{prefix}}_TRACE_INDEX`];
+      const count = Number(window[`__${{prefix}}_COUNT`] ?? 0);
+      const i = Number(idx);
+      if (trace === undefined || trace === null || count <= 0 || !Number.isFinite(i) || i < 0 || i >= count) return;
+      const c0 = window[`__${{prefix}}_DEFAULT_COLOR`] || fallbackColor;
+      const c1 = window[`__${{prefix}}_HILITE_COLOR`] || fallbackHi;
+      const s0 = Number(window[`__${{prefix}}_DEFAULT_SIZE`] ?? fallbackSize);
+      const s1 = Number(window[`__${{prefix}}_HILITE_SIZE`] ?? fallbackHiSize);
+      const colors = Array(count).fill(c0); colors[i] = c1;
+      const sizes = Array(count).fill(s0); sizes[i] = s1;
+      Plotly.restyle(plot, {{ 'marker.color': [colors], 'marker.size': [sizes] }}, [trace]);
+      setSelected(kind, i);
+    }}
+
+    function highlight(kind, idx) {{
+      resetAll();
+      if (kind === 'cpu') return highlightCpu(idx);
+      if (kind === 'disk_read') return highlightSimple('DISK_READ_SPIKE', idx, kind, '#fbbf24', '#fde047', 10, 14);
+      if (kind === 'disk_write') return highlightSimple('DISK_WRITE_SPIKE', idx, kind, '#38bdf8', '#a5f3fc', 10, 14);
+      if (kind === 'net_in') return highlightSimple('NET_RECV_SPIKE', idx, kind, '#22c55e', '#fbbf24', 9, 13);
+      if (kind === 'net_out') return highlightSimple('NET_SENT_SPIKE', idx, kind, '#34d399', '#fbbf24', 9, 13);
     }}
 
     function clearHighlight() {{
-      const colors = Array(spikeCount).fill(window.__SPIKE_DEFAULT_COLOR || '#fb7185');
-      const baseSize = Number(window.__SPIKE_DEFAULT_SIZE ?? 10);
-      const sizes = Array(spikeCount).fill(baseSize);
-      Plotly.restyle(plot, {{ 'marker.color': [colors], 'marker.size': [sizes] }}, [traceIndex]);
-
-      if (glowTraceIndex !== undefined && glowTraceIndex !== null) {{
-        const gColors = Array(spikeCount).fill(window.__SPIKE_GLOW_DEFAULT_COLOR || 'rgba(251,113,133,0.22)');
-        const gBase = Number(window.__SPIKE_GLOW_DEFAULT_SIZE ?? 18);
-        const gSizes = Array(spikeCount).fill(gBase);
-        Plotly.restyle(plot, {{ 'marker.color': [gColors], 'marker.size': [gSizes] }}, [glowTraceIndex]);
-      }}
-      setSelectedRow(null);
+      resetAll();
     }}
 
     // Event delegation so this works even if the table is rebuilt later.
     table.addEventListener('mouseover', (ev) => {{
       const tr = ev.target.closest('tr.spike-row');
       if (!tr) return;
-      if (pinnedIdx !== null) return; // when pinned, ignore hover
+      if (pinned) return;
+      const kind = tr.getAttribute('data-kind') || '';
       const idx = tr.getAttribute('data-idx');
-      if (idx !== null) highlightSpikeByIdx(idx);
+      if (kind && idx !== null) highlight(kind, idx);
     }});
     table.addEventListener('mouseout', (ev) => {{
       const tr = ev.target.closest('tr.spike-row');
       if (!tr) return;
-      if (pinnedIdx !== null) return;
+      if (pinned) return;
       clearHighlight();
     }});
     table.addEventListener('click', (ev) => {{
       const tr = ev.target.closest('tr.spike-row');
       if (!tr) return;
+      const kind = tr.getAttribute('data-kind') || '';
       const idx = tr.getAttribute('data-idx');
-      if (idx === null) return;
+      if (!kind || idx === null) return;
       const i = Number(idx);
       if (!Number.isFinite(i)) return;
-      if (pinnedIdx === i) {{
-        pinnedIdx = null;
+      if (pinned && pinned.kind === kind && pinned.idx === i) {{
+        pinned = null;
         clearHighlight();
       }} else {{
-        pinnedIdx = i;
-        highlightSpikeByIdx(i);
+        pinned = {{ kind, idx: i }};
+        highlight(kind, i);
       }}
     }});
 
     // If user clicks elsewhere on the plot, unpin.
     plot.on('plotly_click', () => {{
-      pinnedIdx = null;
+      pinned = null;
       clearHighlight();
     }});
   }}
@@ -2044,7 +2649,6 @@ def _build_html(payload: Dict[str, Any]) -> str:
   }}
 
   buildSpikeTable(PAYLOAD.spikes || []);
-  buildDiskSpikeTable(PAYLOAD.disk_spikes || []);
   buildLeaderTable(PAYLOAD.cpu_leaderboard || []);
   buildDockerTable(PAYLOAD.docker_leaderboard || []);
   buildPingTable(PAYLOAD.ping_summary || []);
@@ -2085,8 +2689,13 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     p.add_argument("--docker-limit", type=int, default=5, help="How many containers to include (default: 5)")
     p.add_argument("--net-limit", type=int, default=5, help="How many network offenders to include (default: 5)")
     p.add_argument("--min-disk-read-spike-mibps", type=float, default=50.0, help="Minimum disk read MiB/s for a spike")
+    p.add_argument("--min-disk-write-spike-mibps", type=float, default=50.0, help="Minimum disk write MiB/s for a spike")
     p.add_argument("--disk-spike-sigma", type=float, default=4.0, help="MAD-based sigma threshold multiplier for disk spikes")
     p.add_argument("--max-disk-spikes", type=int, default=50, help="Max disk spikes to show/annotate")
+    p.add_argument("--min-net-recv-spike-mibps", type=float, default=20.0, help="Minimum net in MiB/s for a spike")
+    p.add_argument("--min-net-sent-spike-mibps", type=float, default=20.0, help="Minimum net out MiB/s for a spike")
+    p.add_argument("--net-spike-sigma", type=float, default=4.0, help="MAD-based sigma threshold multiplier for net spikes")
+    p.add_argument("--max-net-spikes", type=int, default=50, help="Max net spikes to show/annotate")
     return p.parse_args(argv)
 
 
@@ -2100,8 +2709,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     try:
         start_ts, end_ts = _get_time_window(con, days=float(args.days))
         samples = _query_samples(con, start_ts=start_ts)
+        avg_interval = 0.0
+        if samples:
+            avg_interval = sum(s.interval_s for s in samples) / max(1, len(samples))
         gpus = _query_gpu_timeseries(con, start_ts=start_ts)
         top_io = _query_top_io_read_process_per_sample(con, start_ts=start_ts)
+        top_io_w = _query_top_io_write_process_per_sample(con, start_ts=start_ts)
         disk_spikes = _detect_disk_read_spikes(
             samples,
             min_mibps=float(args.min_disk_read_spike_mibps),
@@ -2121,6 +2734,24 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 else 0.0
             )
 
+        disk_write_spikes = _detect_disk_write_spikes(
+            samples,
+            min_mibps=float(args.min_disk_write_spike_mibps),
+            sigma=float(args.disk_spike_sigma),
+            max_spikes=int(args.max_disk_spikes),
+        )
+        for e in disk_write_spikes:
+            sid = int(e.get("sample_id") or 0)
+            p = top_io_w.get(sid) or {}
+            e["pid"] = p.get("pid")
+            e["proc_name"] = p.get("name", "")
+            e["cmdline"] = p.get("cmdline", "")
+            e["proc_io_write_mibps"] = (
+                float(p.get("io_write_bps") or 0.0) / 1024.0 / 1024.0
+                if p.get("io_write_bps") is not None
+                else 0.0
+            )
+
         docker_leaderboard = _query_docker_leaderboard(
             con, start_ts=start_ts, limit=int(args.docker_limit)
         )
@@ -2132,6 +2763,73 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         net_leaderboard = _query_net_leaderboard(con, start_ts=start_ts, limit=int(args.net_limit))
         net_procs = [str(r.get("proc") or "") for r in net_leaderboard if (r.get("proc") or "")]
         net = _query_net_timeseries(con, start_ts=start_ts, procs=net_procs)
+
+        net_recv_spikes = _detect_net_spikes(
+            samples,
+            which="recv",
+            min_mibps=float(args.min_net_recv_spike_mibps),
+            sigma=float(args.net_spike_sigma),
+            max_spikes=int(args.max_net_spikes),
+        )
+        net_sent_spikes = _detect_net_spikes(
+            samples,
+            which="sent",
+            min_mibps=float(args.min_net_sent_spike_mibps),
+            sigma=float(args.net_spike_sigma),
+            max_spikes=int(args.max_net_spikes),
+        )
+        # Network attribution: net_process_samples may only exist on some sample_ids (collected every ~N seconds).
+        # Correlate each net spike to the nearest net_process_samples sample in time (within a tolerance).
+        net_pts = _query_net_top_points(con, start_ts=start_ts)
+        if net_pts:
+            import bisect
+
+            ts_list = [float(p["ts_unix"]) for p in net_pts]
+            # Allow a little slack vs the system sampling interval, since net-top is periodic and can drift.
+            # In practice, net_process_samples can be sparse (tool failures, permissions, interval drift).
+            # Use a larger tolerance so we can still show "best-effort" offender attribution; the hover/table
+            # includes attrib_skew_s so users can judge how close the match was.
+            max_skew_s = max(300.0, 3.0 * float(avg_interval or 0.0))
+
+            def nearest_point(tsu: float) -> Optional[Dict[str, Any]]:
+                i = bisect.bisect_left(ts_list, tsu)
+                cand: List[Dict[str, Any]] = []
+                if 0 <= i < len(net_pts):
+                    cand.append(net_pts[i])
+                if 0 <= i - 1 < len(net_pts):
+                    cand.append(net_pts[i - 1])
+                if not cand:
+                    return None
+                best = min(cand, key=lambda p: abs(float(p["ts_unix"]) - tsu))
+                if abs(float(best["ts_unix"]) - tsu) <= max_skew_s:
+                    return best
+                return None
+
+            for e in net_recv_spikes:
+                tsu = float(e.get("ts_unix") or 0.0)
+                p = nearest_point(tsu) or {}
+                e["pid"] = p.get("top_recv_pid")
+                e["proc"] = p.get("top_recv_proc", "")
+                e["proc_recv_mibps"] = (
+                    float(p.get("top_recv_bps") or 0.0) / 1024.0 / 1024.0
+                    if p.get("top_recv_bps") is not None
+                    else 0.0
+                )
+                if p:
+                    e["attrib_skew_s"] = abs(float(p.get("ts_unix") or 0.0) - tsu)
+
+            for e in net_sent_spikes:
+                tsu = float(e.get("ts_unix") or 0.0)
+                p = nearest_point(tsu) or {}
+                e["pid"] = p.get("top_sent_pid")
+                e["proc"] = p.get("top_sent_proc", "")
+                e["proc_sent_mibps"] = (
+                    float(p.get("top_sent_bps") or 0.0) / 1024.0 / 1024.0
+                    if p.get("top_sent_bps") is not None
+                    else 0.0
+                )
+                if p:
+                    e["attrib_skew_s"] = abs(float(p.get("ts_unix") or 0.0) - tsu)
         top_proc = _query_top_process_per_sample(con, start_ts=start_ts)
         spikes = _detect_cpu_spikes(
             top_proc,
@@ -2142,10 +2840,6 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         leaderboard = _query_cpu_leaderboard(
             con, start_ts=start_ts, limit=int(args.leaderboard_limit)
         )
-
-        avg_interval = 0.0
-        if samples:
-            avg_interval = sum(s.interval_s for s in samples) / max(1, len(samples))
 
         payload: Dict[str, Any] = {
             "title": str(args.title),
@@ -2187,6 +2881,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             "net_leaderboard": net_leaderboard,
             "spikes": spikes,
             "disk_spikes": disk_spikes,
+            "disk_write_spikes": disk_write_spikes,
+            "net_recv_spikes": net_recv_spikes,
+            "net_sent_spikes": net_sent_spikes,
             "cpu_leaderboard": leaderboard,
         }
 
