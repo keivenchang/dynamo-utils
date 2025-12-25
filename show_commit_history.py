@@ -211,13 +211,25 @@ class CommitHistoryGenerator:
                 self.logger.warning(f"Failed to load cache: {e}")
 
         repo = None
-        original_head = None
+        # IMPORTANT: restore to the original ref (branch name when possible).
+        # Restoring to a SHA (repo.head.commit.hexsha) leaves the repo in detached HEAD.
+        original_ref = None
         try:
             if git is None:
                 raise ImportError("GitPython is required. Install with: pip install gitpython")
             repo = git.Repo(self.repo_path)
             commits = list(repo.iter_commits('HEAD', max_count=max_commits))
-            original_head = repo.head.commit.hexsha
+            # Record the original ref so we can restore it at the end without detaching.
+            # - If we started on a branch, restore that branch name (e.g. "main")
+            # - If we started detached, best-effort restore the original SHA
+            try:
+                if repo.head.is_detached:
+                    original_ref = repo.head.commit.hexsha
+                else:
+                    original_ref = repo.active_branch.name
+            except Exception:
+                # Fallback: SHA (may restore detached)
+                original_ref = repo.head.commit.hexsha
 
             # Collect PR numbers for commits (cheap; used for HTML and for pipeline->PR exports).
             pr_to_merge_date: Dict[int, Optional[str]] = {}
@@ -424,11 +436,14 @@ class CommitHistoryGenerator:
                     sha_to_message_first_line[sha_full] = message_first_line
 
             finally:
-                # Restore original HEAD (best-effort)
-                if repo is not None and original_head is not None:
-                    repo.git.checkout(original_head)
-                    if not html_output:
-                        print(f"\nRestored HEAD to {original_head[:9]}")
+                # Restore original ref (best-effort)
+                if repo is not None and original_ref is not None:
+                    try:
+                        repo.git.checkout(original_ref)
+                        if not html_output:
+                            print(f"\nRestored HEAD to {original_ref}")
+                    except Exception:
+                        pass
 
             # Optional: export pipeline -> PR mapping as CSV for this commit window.
             if export_pipeline_pr_csv:
@@ -508,7 +523,8 @@ class CommitHistoryGenerator:
                 output_path.parent.mkdir(parents=True, exist_ok=True)
                 output_path.write_text(html_content)
                 print(f"\nHTML report generated: {output_path}")
-                print(f"Restored HEAD to {original_head[:9]}")
+                if original_ref is not None:
+                    print(f"Restored HEAD to {original_ref}")
 
             # Save cache if updated
             if cache_updated:
@@ -524,8 +540,8 @@ class CommitHistoryGenerator:
             print("\n\nOperation interrupted by user")
             # Try to restore HEAD
             try:
-                if repo is not None and original_head is not None:
-                    repo.git.checkout(original_head)
+                if repo is not None and original_ref is not None:
+                    repo.git.checkout(original_ref)
             except:
                 pass
             return 1
