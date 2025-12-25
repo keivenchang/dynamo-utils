@@ -497,6 +497,63 @@ cat /tmp/broken-links-report.json | python3 -m json.tool | head -30
 - **Sphinx build**: Validates documentation can be built as HTML
 - Both are important and run independently in CI
 
+### Analyzing CI Failures
+
+**CRITICAL: Always grep for errors when analyzing CI logs**
+
+When investigating CI failures, immediately search for error patterns instead of reading the entire log:
+
+**Command pattern**:
+```bash
+curl -s "<CI_LOG_URL>" | grep -E "ERROR|FAIL|Error|error:|failed|Failed" | head -50
+```
+
+**Common error patterns to search for**:
+
+1. **Python/pytest errors**:
+   ```bash
+   grep -E "ERROR at setup|ModuleNotFoundError|ImportError|RuntimeError|AssertionError"
+   ```
+
+2. **Build errors**:
+   ```bash
+   grep -E "error:|ERROR:|fatal error|compilation terminated"
+   ```
+
+3. **Docker build errors**:
+   ```bash
+   grep -E "failed to|ERROR \[|RUN failed"
+   ```
+
+4. **Test failures**:
+   ```bash
+   grep -E "FAILED|ERRORS|tests.*ERROR"
+   ```
+
+**Example workflow**:
+```bash
+# 1. Get the CI log URL from gh pr checks or workflow run
+# 2. Search for errors immediately
+curl -s "$CI_LOG_URL" | grep -B 5 -A 10 "ERROR"
+
+# 3. If specific error found, get more context
+curl -s "$CI_LOG_URL" | grep -B 20 -A 20 "ModuleNotFoundError: No module named"
+```
+
+**Why this matters**:
+- CI logs can be 50,000+ lines long
+- Reading sequentially wastes time
+- Errors usually have clear error messages
+- Context lines (-B/-A) provide surrounding information
+
+**Real example from dynamo PR #5050**:
+```bash
+# Instead of reading 50k lines, immediately found:
+curl -s "$LOG" | grep "ERROR at setup"
+# Found: RuntimeError: Failed to get git HEAD commit
+# Root cause: Missing DYNAMO_COMMIT_SHA environment variable
+```
+
 ## Important Reminders
 
 - **NEVER delete `nvidia/dynamo_latest/index.html`** - This is the production HTML page for commit history
