@@ -25,6 +25,9 @@ from datetime import datetime
 from pathlib import Path
 from typing import List, Dict, Optional, Set
 
+# Shared UI snippets (keep styling consistent with show_dynamo_branches.py)
+from html_ui import GH_STATUS_TOOLTIP_CSS, GH_STATUS_TOOLTIP_JS, PASS_PLUS_STYLE
+
 # Import utilities from common module
 from common import (
     DynamoRepositoryUtils,
@@ -925,7 +928,8 @@ class CommitHistoryGenerator:
             gha_status = github_actions_status.get(sha_full)
             if not gha_status or not gha_status.get('check_runs'):
                 gha_per_commit_stats[sha_full] = {
-                    'success': 0,
+                    'success_required': 0,
+                    'success_optional': 0,
                     'failure_required': 0,
                     'failure_optional': 0,
                     'in_progress_required': 0,
@@ -938,7 +942,8 @@ class CommitHistoryGenerator:
                 continue
 
             stats = {
-                'success': 0,
+                'success_required': 0,
+                'success_optional': 0,
                 'failure_required': 0,
                 'failure_optional': 0,
                 'in_progress_required': 0,
@@ -953,7 +958,10 @@ class CommitHistoryGenerator:
                 is_required = bool(check.get('is_required', False))
 
                 if conclusion == 'success':
-                    stats['success'] += 1
+                    if is_required:
+                        stats['success_required'] += 1
+                    else:
+                        stats['success_optional'] += 1
                 elif conclusion in ('failure', 'timed_out', 'action_required'):
                     if is_required:
                         stats['failure_required'] += 1
@@ -998,7 +1006,11 @@ class CommitHistoryGenerator:
             gha_failed_count=gha_failed_count,
             gha_in_progress_count=gha_in_progress_count,
             gha_other_count=gha_other_count,
-            gha_per_commit_stats=gha_per_commit_stats
+            gha_per_commit_stats=gha_per_commit_stats,
+            # Shared UI snippets
+            gh_status_tooltip_css=GH_STATUS_TOOLTIP_CSS,
+            gh_status_tooltip_js=GH_STATUS_TOOLTIP_JS,
+            pass_plus_style=PASS_PLUS_STYLE,
         )
 
     def _get_cached_gitlab_images_from_sha(self, commit_data: List[dict]) -> dict:

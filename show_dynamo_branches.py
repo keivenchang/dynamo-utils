@@ -17,7 +17,13 @@ from pathlib import Path
 from typing import List, Optional
 from zoneinfo import ZoneInfo
 
-import git
+try:
+    import git  # type: ignore[import-not-found]
+except Exception:  # pragma: no cover
+    git = None  # type: ignore[assignment]
+
+# Shared UI snippets (keep styling consistent with show_commit_history)
+from html_ui import GH_STATUS_TOOLTIP_CSS, GH_STATUS_TOOLTIP_JS, PASS_PLUS_STYLE
 
 # Import GitHub utilities from common module
 from common import FailedCheck, GitHubAPIClient, PRInfo
@@ -358,7 +364,23 @@ class PRStatusNode(BranchNode):
 
         if self.pr.ci_status:
             ci_icon = "✅" if self.pr.ci_status == "passed" else "❌" if self.pr.ci_status == "failed" else "⏳"
-            status_parts.append(f"CI: {ci_icon} {self.pr.ci_status}")
+
+            # If CI failed, show required vs optional failure counts (based on branch protection required checks).
+            if self.pr.ci_status == "failed":
+                failed = list(getattr(self.pr, "failed_checks", []) or [])
+                req_failed = sum(1 for c in failed if getattr(c, "is_required", False))
+                opt_failed = sum(1 for c in failed if not getattr(c, "is_required", False))
+
+                if req_failed > 0 and opt_failed > 0:
+                    status_parts.append(f"CI: {ci_icon} required failed, {opt_failed} (not-required) failed")
+                elif req_failed > 0:
+                    status_parts.append(f"CI: {ci_icon} required failed")
+                elif opt_failed > 0:
+                    status_parts.append(f"CI: {ci_icon} {opt_failed} (not-required) failed")
+                else:
+                    status_parts.append(f"CI: {ci_icon} failed")
+            else:
+                status_parts.append(f"CI: {ci_icon} {self.pr.ci_status}")
 
         if status_parts:
             return f"Status: {', '.join(status_parts)}"
@@ -384,6 +406,36 @@ class PRStatusNode(BranchNode):
 
                 # Display checks output if available (exit code 8 means some checks failed, but output is still useful)
                 if result.stdout.strip():
+                    # Compact CI summary counts (styled to match show_commit_history.j2):
+                    #   - green:  REQ+OPT✓  (passed; required count bold)
+                    #   - red:    N✗   (required failures, rendered as a red badge)
+                    #   - amber:  N⚠   (optional failures)
+                    #   - amber:  N⏳   (in progress)
+                    #   - grey:   N⏸   (pending/queued/skipping)
+                    #   - grey:   N✖️  (cancelled)
+                    counts = {
+                        "success_required": 0,
+                        "success_optional": 0,
+                        "failure_required": 0,
+                        "failure_optional": 0,
+                        "in_progress": 0,
+                        "pending": 0,
+                        "cancelled": 0,
+                        "other": 0,
+                    }
+
+                    # Build a hover tooltip (same style as show_commit_history) by collecting
+                    # check names into buckets. This lets us distinguish required vs optional passes.
+                    passed_required_jobs: list[str] = []
+                    passed_optional_jobs: list[str] = []
+                    failed_required_jobs: list[str] = []
+                    failed_optional_jobs: list[str] = []
+                    progress_required_jobs: list[str] = []
+                    progress_optional_jobs: list[str] = []
+                    pending_jobs: list[str] = []
+                    cancelled_jobs: list[str] = []
+                    other_jobs: list[str] = []
+
                     # Parse tab-separated output into a formatted table
                     lines = result.stdout.strip().split('\n')
                     table_html = '<table style="border-collapse: collapse; font-size: 11px; margin-top: 5px;">'
@@ -410,7 +462,8 @@ class PRStatusNode(BranchNode):
                         if len(parts) >= 3:
                             name_raw = parts[0]
                             name = html_module.escape(name_raw)
-                            status = html_module.escape(parts[1])
+                            status_raw = (parts[1] or "").strip()
+                            status = html_module.escape(status_raw)
                             duration = html_module.escape(parts[2]) if len(parts) > 2 else ''
                             url = parts[3] if len(parts) > 3 else ''
                             description = html_module.escape(parts[4]) if len(parts) > 4 else ''
@@ -420,8 +473,44 @@ class PRStatusNode(BranchNode):
                                 name += ' <span style="color: #cc0000; font-weight: bold;">[REQUIRED]</span>'
 
                             # Color code the status
-                            status_color = '#059669' if status == 'pass' else '#dc2626' if status == 'fail' else '#6b7280'
+                            status_lc = status_raw.lower()
+                            status_color = '#059669' if status_lc in ('pass', 'success') else '#dc2626' if status_lc in ('fail', 'failure') else '#6b7280'
                             status_html = f'<span style="color: {status_color}; font-weight: bold;">{status}</span>'
+
+                            # Update compact summary counts
+                            if status_lc in ('pass', 'success'):
+                                if name_raw in required_set:
+                                    counts["success_required"] += 1
+                                    passed_required_jobs.append(name_raw)
+                                else:
+                                    counts["success_optional"] += 1
+                                    passed_optional_jobs.append(name_raw)
+                            elif status_lc in ('fail', 'failure'):
+                                if name_raw in required_set:
+                                    counts["failure_required"] += 1
+                                    failed_required_jobs.append(name_raw)
+                                else:
+                                    counts["failure_optional"] += 1
+                                    failed_optional_jobs.append(name_raw)
+                            elif status_lc in ('in_progress', 'in progress', 'running'):
+                                counts["in_progress"] += 1
+                                if name_raw in required_set:
+                                    progress_required_jobs.append(name_raw)
+                                else:
+                                    progress_optional_jobs.append(name_raw)
+                            elif status_lc in ('queued', 'pending'):
+                                counts["pending"] += 1
+                                pending_jobs.append(name_raw)
+                            elif status_lc in ('skipping', 'skipped'):
+                                # Show as paused (same bucket as pending) for readability.
+                                counts["pending"] += 1
+                                pending_jobs.append(name_raw)
+                            elif status_lc in ('cancelled', 'canceled'):
+                                counts["cancelled"] += 1
+                                cancelled_jobs.append(name_raw)
+                            else:
+                                counts["other"] += 1
+                                other_jobs.append(name_raw)
 
                             # Make URL clickable if present
                             if url and url.strip():
@@ -437,6 +526,116 @@ class PRStatusNode(BranchNode):
                             table_html += f'<tr><td style="padding: 4px 8px; border: 1px solid #d0d0d0;">{name}</td><td style="padding: 4px 8px; border: 1px solid #d0d0d0;">{status_html}</td><td style="padding: 4px 8px; border: 1px solid #d0d0d0;">{duration}</td><td style="padding: 4px 8px; border: 1px solid #d0d0d0;">{details}</td></tr>'
 
                     table_html += '</table>'
+
+                    # Rebuild the "Status:" line for HTML so CI uses the compact colored counts.
+                    ci_parts = []
+                    success_req = counts["success_required"]
+                    success_opt = counts["success_optional"]
+                    if success_req > 0 or success_opt > 0:
+                        # Convention: 15+5✓ (first number is required, and bold)
+                        if success_opt > 0:
+                            ci_parts.append(
+                                f'<span style="color: #2da44e;">'
+                                f'<strong>{success_req}</strong>'
+                                f'<span style="{PASS_PLUS_STYLE}">+{success_opt}</span>✓'
+                                f'</span>'
+                            )
+                        else:
+                            ci_parts.append(
+                                f'<span style="color: #2da44e;">'
+                                f'<strong>{success_req}</strong>✓'
+                                f'</span>'
+                            )
+                    if counts["failure_required"] > 0:
+                        ci_parts.append(
+                            f'<span style="color: #d73a49; font-weight: 800; font-size: 12px;" title="Required failures">'
+                            f'{counts["failure_required"]}'
+                            f'<span style="display: inline-flex; align-items: center; justify-content: center; width: 12px; height: 12px; margin-left: 2px; border-radius: 999px; background-color: #d73a49; color: #ffffff; font-size: 10px; font-weight: 900; line-height: 1;">✗</span>'
+                            f'</span>'
+                        )
+                    if counts["failure_optional"] > 0:
+                        ci_parts.append(
+                            f'<span style="color: #f59e0b;" title="Optional failures">'
+                            f'{counts["failure_optional"]}<span style="font-size: 13px; font-weight: 900; line-height: 1; margin-left: 2px;">⚠</span>'
+                            f'</span>'
+                        )
+                    if counts["in_progress"] > 0:
+                        ci_parts.append(f'<span style="color: #dbab09;">{counts["in_progress"]}⏳</span>')
+                    if counts["pending"] > 0:
+                        ci_parts.append(f'<span style="color: #8c959f;">{counts["pending"]}⏸</span>')
+                    if counts["cancelled"] > 0:
+                        ci_parts.append(f'<span style="color: #8c959f;">{counts["cancelled"]}✖️</span>')
+
+                    # Tooltip HTML (match show_commit_history look/labels).
+                    tooltip_parts: list[str] = []
+                    if passed_required_jobs:
+                        tooltip_parts.append(
+                            '<strong style="color: #2da44e;">✓ Passed (required):</strong> '
+                            + ", ".join(sorted(html_module.escape(n) for n in passed_required_jobs))
+                        )
+                    if passed_optional_jobs:
+                        tooltip_parts.append(
+                            '<strong style="color: #2da44e;">✓ Passed (optional):</strong> '
+                            + ", ".join(sorted(html_module.escape(n) for n in passed_optional_jobs))
+                        )
+                    if failed_required_jobs:
+                        tooltip_parts.append(
+                            '<strong style="color: #d73a49;"><span style="display: inline-flex; align-items: center; justify-content: center; width: 14px; height: 14px; margin-right: 6px; border-radius: 999px; background-color: #d73a49; color: #ffffff; font-size: 11px; font-weight: 900; line-height: 1;">✗</span>Failed (required):</strong> '
+                            + ", ".join(sorted(html_module.escape(n) for n in failed_required_jobs))
+                        )
+                    if failed_optional_jobs:
+                        tooltip_parts.append(
+                            '<strong style="color: #f59e0b;">⚠ Failed (optional):</strong> '
+                            + ", ".join(sorted(html_module.escape(n) for n in failed_optional_jobs))
+                        )
+                    if progress_required_jobs:
+                        tooltip_parts.append(
+                            '<strong style="color: #dbab09;">⏳ In Progress (required):</strong> '
+                            + ", ".join(sorted(html_module.escape(n) for n in progress_required_jobs))
+                        )
+                    if progress_optional_jobs:
+                        tooltip_parts.append(
+                            '<strong style="color: #8c959f;">⏳ In Progress (optional):</strong> '
+                            + ", ".join(sorted(html_module.escape(n) for n in progress_optional_jobs))
+                        )
+                    if pending_jobs:
+                        tooltip_parts.append(
+                            '<strong style="color: #8c959f;">⏸ Pending:</strong> '
+                            + ", ".join(sorted(html_module.escape(n) for n in pending_jobs))
+                        )
+                    if cancelled_jobs:
+                        tooltip_parts.append(
+                            '<strong style="color: #8c959f;">✖️ Canceled:</strong> '
+                            + ", ".join(sorted(html_module.escape(n) for n in cancelled_jobs))
+                        )
+                    if other_jobs:
+                        tooltip_parts.append(
+                            '<strong style="color: #8c959f;">Other:</strong> '
+                            + ", ".join(sorted(html_module.escape(n) for n in other_jobs))
+                        )
+                    tooltip_html = "<br>".join(tooltip_parts)
+
+                    status_parts = []
+                    if self.pr.review_decision == 'APPROVED':
+                        status_parts.append("Review: ✅ Approved")
+                    elif self.pr.review_decision == 'CHANGES_REQUESTED':
+                        status_parts.append("Review: 🔴 Changes Requested")
+
+                    if self.pr.unresolved_conversations > 0:
+                        status_parts.append(f"💬 Unresolved: {self.pr.unresolved_conversations}")
+
+                    if ci_parts:
+                        ci_summary = " ".join(ci_parts)
+                        if tooltip_html:
+                            ci_summary = (
+                                '<span class="gh-status-tooltip" style="margin-left: 2px;">'
+                                f'<span style="white-space: nowrap; font-weight: 600; font-size: 11px;">{ci_summary}</span>'
+                                f'<span class="tooltiptext">{tooltip_html}</span>'
+                                '</span>'
+                            )
+                        status_parts.append(f"CI: {ci_summary}")
+
+                    base_html = f"Status: {', '.join(status_parts)}" if status_parts else ""
 
                     # Generate unique ID for this checks div
                     checks_id = f"checks_{uuid.uuid4().hex[:8]}"
@@ -620,6 +819,10 @@ class LocalRepoScanner:
         """Scan a single repository"""
         repo_name = f"{repo_dir.name}/"
         repo_node = RepoNode(label=repo_name, path=repo_dir)
+
+        if git is None:
+            repo_node.error = "GitPython is required. Install with: pip install gitpython"
+            return repo_node
 
         try:
             repo = git.Repo(repo_dir)
@@ -868,6 +1071,9 @@ def generate_html(root: BranchNode) -> str:
         .indent {{ margin-left: 20px; }}
         .error {{ color: #cc0000; }}
         .timestamp {{ color: #666666; font-size: 12px; margin-bottom: 10px; }}
+        
+        /* Shared tooltip styling (single source of truth in html_ui.py) */
+        {GH_STATUS_TOOLTIP_CSS}
     </style>
     <script>
       // Copied from show_commit_history: button uses data-clipboard-text and swaps innerHTML briefly.
@@ -900,6 +1106,9 @@ def generate_html(root: BranchNode) -> str:
           document.body.removeChild(textArea);
         }}
       }}
+      
+      /* Shared tooltip JS (single source of truth in html_ui.py) */
+      {GH_STATUS_TOOLTIP_JS}
     </script>
 </head>
 <body>
