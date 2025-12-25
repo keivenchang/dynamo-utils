@@ -153,7 +153,14 @@ class CommitHistoryGenerator:
         
         return logger
 
-    def show_commit_history(self, max_commits: int = 50, html_output: bool = False, output_path: Optional[Path] = None, logs_dir: Optional[Path] = None) -> int:
+    def show_commit_history(
+        self,
+        max_commits: int = 50,
+        html_output: bool = False,
+        output_path: Optional[Path] = None,
+        logs_dir: Optional[Path] = None,
+        export_pipeline_pr_csv: Optional[Path] = None,
+    ) -> int:
         """Show recent commit history with Composite Docker SHAs (CDS)
 
         Args:
@@ -212,20 +219,19 @@ class CommitHistoryGenerator:
             commits = list(repo.iter_commits('HEAD', max_count=max_commits))
             original_head = repo.head.commit.hexsha
 
-            # Pre-fetch PR metadata for all commits in batch (HTML mode)
+            # Collect PR numbers for commits (cheap; used for HTML and for pipeline->PR exports).
             pr_to_merge_date: Dict[int, Optional[str]] = {}
             sha_to_pr_number: Dict[str, int] = {}
             pr_to_required_checks: Dict[int, List[str]] = {}
             pr_numbers: List[int] = []
-            if html_output:
-                # Collect all PR numbers from commit messages (works for both MR and PR format)
-                for commit in commits:
-                    message = commit.message.strip().split('\n')[0]
-                    pr_num = GitLabAPIClient.parse_mr_number_from_message(message)
-                    if pr_num:
-                        pr_numbers.append(pr_num)
-                        sha_to_pr_number[commit.hexsha] = pr_num
+            for commit in commits:
+                message = commit.message.strip().split('\n')[0]
+                pr_num = GitLabAPIClient.parse_mr_number_from_message(message)
+                if pr_num:
+                    pr_numbers.append(pr_num)
+                    sha_to_pr_number[commit.hexsha] = pr_num
 
+            if html_output:
                 if pr_numbers and not self.skip_gitlab_fetch:
                     # Batch fetch merge dates for all PRs (GitHub)
                     self.logger.info(f"Fetching merge dates for {len(pr_numbers)} PRs...")
@@ -252,6 +258,7 @@ class CommitHistoryGenerator:
             # Collect commit data
             commit_data = []
             cache_updated = False
+            sha_to_message_first_line: Dict[str, str] = {}
 
             # Terminal width settings (initialize unconditionally so static analyzers don't complain)
             term_width = get_terminal_width(padding=2, default=118)
@@ -413,12 +420,64 @@ class CommitHistoryGenerator:
                         })
                         self.logger.debug(f"Processed commit {i+1}/{len(commits)}: {sha_short}")
 
+                    # Always keep a minimal per-SHA message map (used for exports)
+                    sha_to_message_first_line[sha_full] = message_first_line
+
             finally:
                 # Restore original HEAD (best-effort)
                 if repo is not None and original_head is not None:
                     repo.git.checkout(original_head)
                     if not html_output:
                         print(f"\nRestored HEAD to {original_head[:9]}")
+
+            # Optional: export pipeline -> PR mapping as CSV for this commit window.
+            if export_pipeline_pr_csv:
+                try:
+                    sha_full_list = list(sha_to_message_first_line.keys())
+                    gitlab_pipelines = self._get_gitlab_pipeline_statuses(sha_full_list)
+                    export_pipeline_pr_csv.parent.mkdir(parents=True, exist_ok=True)
+                    import csv
+
+                    with export_pipeline_pr_csv.open("w", newline="") as f:
+                        w = csv.DictWriter(
+                            f,
+                            fieldnames=[
+                                "pipeline_id",
+                                "pipeline_web_url",
+                                "pipeline_status",
+                                "sha",
+                                "commit_web_url",
+                                "pr_number",
+                                "pr_web_url",
+                                "commit_message",
+                            ],
+                        )
+                        w.writeheader()
+                        for sha in sha_full_list:
+                            p = gitlab_pipelines.get(sha)
+                            if not p:
+                                continue
+                            pipeline_id = p.get("id", "")
+                            pipeline_web_url = p.get("web_url", "")
+                            pipeline_status = p.get("status", "")
+                            pr_number = sha_to_pr_number.get(sha)
+                            pr_web_url = f"https://github.com/ai-dynamo/dynamo/pull/{pr_number}" if pr_number else ""
+                            commit_web_url = f"https://github.com/ai-dynamo/dynamo/commit/{sha}"
+                            w.writerow(
+                                {
+                                    "pipeline_id": pipeline_id,
+                                    "pipeline_web_url": pipeline_web_url,
+                                    "pipeline_status": pipeline_status,
+                                    "sha": sha,
+                                    "commit_web_url": commit_web_url,
+                                    "pr_number": pr_number or "",
+                                    "pr_web_url": pr_web_url,
+                                    "commit_message": sha_to_message_first_line.get(sha, ""),
+                                }
+                            )
+                    print(f"\nExported pipeline→PR mapping: {export_pipeline_pr_csv}")
+                except Exception as e:
+                    self.logger.warning(f"Failed to export pipeline→PR CSV: {e}")
 
             # Generate HTML if requested
             if html_output:
@@ -508,6 +567,21 @@ class CommitHistoryGenerator:
         # Get GitLab CI pipeline statuses
         gitlab_pipelines = self._get_gitlab_pipeline_statuses([c['sha_full'] for c in commit_data])
 
+        # Get GitLab MR pipelines for PR-linked commits (fallback when SHA has no pipeline)
+        sha_to_pr_number = sha_to_pr_number or {}
+        pr_numbers = sorted({v for v in sha_to_pr_number.values() if v})
+        mr_pipelines: Dict[int, Optional[dict]] = {}
+        if pr_numbers:
+            try:
+                mr_pipelines = self.gitlab_client.get_cached_merge_request_pipelines(
+                    pr_numbers,
+                    project_id="169905",
+                    cache_file="gitlab_mr_pipelines.json",
+                    skip_fetch=self.skip_gitlab_fetch,
+                )
+            except Exception:
+                mr_pipelines = {}
+
         # Get GitLab CI pipeline job counts
         pipeline_ids = [p['id'] for p in gitlab_pipelines.values() if p and 'id' in p]
         pipeline_job_counts = {}
@@ -524,7 +598,6 @@ class CommitHistoryGenerator:
         )
 
         # Annotate GitHub check runs with "is_required" using PR required-checks + fallback patterns.
-        sha_to_pr_number = sha_to_pr_number or {}
         pr_to_required_checks = pr_to_required_checks or {}
         for sha_full, gha in (github_actions_status or {}).items():
             if not gha or not gha.get('check_runs'):
@@ -641,6 +714,12 @@ class CommitHistoryGenerator:
                     message
                 )
                 commit['message'] = message
+                try:
+                    commit['pr_number'] = int(pr_number)
+                except Exception:
+                    commit['pr_number'] = None
+            else:
+                commit['pr_number'] = sha_to_pr_number.get(commit.get("sha_full", ""))
 
             # Assign color deterministically based on Composite Docker SHA (CDS)
             composite_sha = commit['composite_sha']
@@ -884,6 +963,7 @@ class CommitHistoryGenerator:
             docker_images=docker_images,
             gitlab_images=gitlab_images,
             gitlab_pipelines=gitlab_pipelines,
+            mr_pipelines=mr_pipelines,
             pipeline_job_counts=pipeline_job_counts,
             log_paths=log_paths,
             build_status=build_status,
@@ -971,7 +1051,7 @@ class CommitHistoryGenerator:
     def _get_gitlab_pipeline_job_counts(self, pipeline_ids: List[int]) -> dict:
         """Get GitLab CI pipeline job details (counts + individual job info) using the centralized cache.
 
-        Cache file format (.cache/gitlab_pipeline_jobs_details.json):
+        Cache file format (in dynamo-utils cache dir; see `cache_file` below):
             {
                 "40118215": {
                     "counts": {
@@ -981,8 +1061,8 @@ class CommitHistoryGenerator:
                         "pending": 0
                     },
                     "jobs": [
-                        {"name": "build", "status": "success"},
-                        {"name": "test", "status": "failed"},
+                        {"stage": "build", "name": "build-dynamo-image-amd64", "status": "success"},
+                        {"stage": "test", "name": "pre-merge-vllm", "status": "failed"},
                         ...
                     ],
                     "fetched_at": "2025-12-18T02:44:20.118368Z"
@@ -997,6 +1077,7 @@ class CommitHistoryGenerator:
                 - running: Number of currently running jobs (integer)
                 - pending: Number of pending jobs (integer)
             - jobs: List of individual job details (for tooltip display)
+                - stage: Job stage (string), e.g. "build", "test", "pre"
                 - name: Job name (string)
                 - status: Job status (success/failed/running/pending/etc.)
             - fetched_at: ISO 8601 timestamp when this data was fetched
@@ -1010,7 +1091,9 @@ class CommitHistoryGenerator:
         Returns:
             Dictionary mapping pipeline ID to job details dict with 'counts' and 'jobs'
         """
-        cache_file = "gitlab_pipeline_jobs_details.json"
+        # v2: include per-job "stage" in cached job list; old cache entries lacked stage and
+        # lead to confusing labels (e.g. "misc.<job>"). Bumping cache key forces a refetch.
+        cache_file = "gitlab_pipeline_jobs_details_v2.json"
 
         self.logger.debug(f"Getting job details for {len(pipeline_ids)} pipelines")
 
@@ -1169,6 +1252,12 @@ Examples:
         help='Path to logs directory for build reports (default: repo-path/logs)'
     )
 
+    parser.add_argument(
+        '--export-pipeline-pr-csv',
+        type=Path,
+        help='Write a CSV mapping GitLab pipeline URL/ID -> commit SHA -> PR number for the commit window'
+    )
+
     args = parser.parse_args()
 
     # Validate repository path
@@ -1192,7 +1281,8 @@ Examples:
         max_commits=args.max_commits,
         html_output=args.html,
         output_path=args.output,
-        logs_dir=args.logs_dir
+        logs_dir=args.logs_dir,
+        export_pipeline_pr_csv=args.export_pipeline_pr_csv,
     )
 
 

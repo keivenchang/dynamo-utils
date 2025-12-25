@@ -366,6 +366,22 @@ python3 show_commit_history.py --repo-path ~/nvidia/dynamo_latest --max-commits 
 
 ---
 
+### gitlab_pipeline_pr_map.py
+
+**Overview**: Map GitLab pipeline URLs/IDs to the Merge Request IID(s) ("PR#") by resolving:
+pipeline → SHA → MR(s).
+
+#### Usage
+
+```bash
+# Read pipeline URLs from stdin, output CSV
+cat pipelines.txt | python3 gitlab_pipeline_pr_map.py --format csv > out.csv
+
+# Mix URLs and numeric IDs, show a compact table
+python3 gitlab_pipeline_pr_map.py 40743226 https://gitlab-master.nvidia.com/dl/ai-dynamo/dynamo/-/pipelines/38895507 --format table
+```
+
+
 ### backup.sh
 
 **Overview**: Smart backup with versioned history using rsync.

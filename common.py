@@ -3422,7 +3422,10 @@ class GitLabAPIClient:
             {
                 40118215: {
                     "counts": {"success": 15, "failed": 8, "running": 0, "pending": 0},
-                    "jobs": [{"name": "build", "status": "success"}, {"name": "test", "status": "failed"}],
+                    "jobs": [
+                        {"stage": "build", "name": "build-dynamo-image-amd64", "status": "success"},
+                        {"stage": "test", "name": "pre-merge-vllm", "status": "failed"},
+                    ],
                     "fetched_at": "2025-12-18T02:44:20.118368Z"
                 },
                 40118216: None
@@ -3516,6 +3519,7 @@ class GitLabAPIClient:
                     for job in jobs:
                         status = job.get("status", "unknown")
                         name = job.get("name", "")
+                        stage = job.get("stage", "")
 
                         # Counts (map GitLab statuses to our buckets)
                         if status in counts:
@@ -3530,7 +3534,7 @@ class GitLabAPIClient:
 
                         # Tooltip list (keep it light)
                         if name:
-                            slim_jobs.append({"name": name, "status": status})
+                            slim_jobs.append({"name": name, "stage": stage, "status": status})
 
                     details = {"counts": counts, "jobs": slim_jobs, "fetched_at": fetch_timestamp}
                     return pipeline_id, details
@@ -3552,6 +3556,101 @@ class GitLabAPIClient:
                 jobs_cache_path.parent.mkdir(parents=True, exist_ok=True)
                 cache_str_keys = {str(k): v for k, v in cache.items()}
                 jobs_cache_path.write_text(json.dumps(cache_str_keys, indent=2))
+            except Exception:
+                pass
+
+        return result
+
+    def get_cached_merge_request_pipelines(
+        self,
+        mr_numbers: List[int],
+        project_id: str = "169905",
+        cache_file: str = ".gitlab_mr_pipelines_cache.json",
+        skip_fetch: bool = False,
+    ) -> Dict[int, Optional[Dict[str, Any]]]:
+        """Get most recent pipeline for each Merge Request (MR IID) with caching.
+
+        This helps link a PR/MR to a pipeline even when the final merge commit SHA
+        doesn't have a pipeline (e.g. pipeline is created for merge_request_event only).
+
+        Args:
+            mr_numbers: List of MR IIDs (internal IDs)
+            project_id: GitLab project ID (default: 169905 for dl/ai-dynamo/dynamo)
+            cache_file: Cache file name under the dynamo-utils cache dir
+            skip_fetch: If True, only return cached data (no API calls)
+
+        Returns:
+            Mapping MR IID -> pipeline dict (id, status, web_url, sha, ref), or None.
+
+        Cache format:
+            {
+              "5063": {"id": 40743226, "status": "success", "web_url": "...", "sha": "...", "ref": "..."},
+              "5064": null
+            }
+        """
+        # Load cache
+        cache: Dict[int, Optional[Dict[str, Any]]] = {}
+        cache_path = resolve_cache_path(cache_file)
+        if cache_path.exists():
+            try:
+                raw = json.loads(cache_path.read_text())
+                cache = {int(k): v for k, v in raw.items()}
+            except Exception:
+                cache = {}
+
+        if skip_fetch:
+            return {mr: cache.get(mr) for mr in mr_numbers}
+
+        result: Dict[int, Optional[Dict[str, Any]]] = {}
+        cache_updated = False
+
+        # Determine which MRs to fetch (only if missing from cache or cached None).
+        to_fetch = [mr for mr in mr_numbers if mr not in cache]
+        for mr in mr_numbers:
+            if mr in cache:
+                result[mr] = cache[mr]
+            else:
+                result[mr] = None
+
+        if to_fetch and self.has_token():
+            logger = logging.getLogger("common")
+
+            def fetch_one(mr_iid: int) -> Tuple[int, Optional[Dict[str, Any]]]:
+                try:
+                    endpoint = f"/api/v4/projects/{project_id}/merge_requests/{mr_iid}/pipelines"
+                    pipelines = self.get(endpoint, params={"per_page": 1, "order_by": "id", "sort": "desc"}, timeout=10)
+                    if isinstance(pipelines, list) and pipelines:
+                        p = pipelines[0]
+                        if isinstance(p, dict):
+                            return mr_iid, {
+                                "id": p.get("id"),
+                                "status": p.get("status", "unknown"),
+                                "web_url": p.get("web_url", ""),
+                                "sha": p.get("sha", ""),
+                                "ref": p.get("ref", ""),
+                            }
+                    return mr_iid, None
+                except Exception as e:
+                    logger.debug(f"Failed to fetch MR {mr_iid} pipelines: {e}")
+                    return mr_iid, None
+
+            with ThreadPoolExecutor(max_workers=10) as executor:
+                futures = [executor.submit(fetch_one, mr) for mr in to_fetch]
+                for fut in futures:
+                    try:
+                        mr_iid, p = fut.result()
+                        result[mr_iid] = p
+                        cache[mr_iid] = p
+                        cache_updated = True
+                    except Exception:
+                        pass
+
+        # Save updated cache
+        if cache_updated:
+            try:
+                cache_path.parent.mkdir(parents=True, exist_ok=True)
+                cache_str = {str(k): v for k, v in cache.items()}
+                cache_path.write_text(json.dumps(cache_str, indent=2))
             except Exception:
                 pass
 

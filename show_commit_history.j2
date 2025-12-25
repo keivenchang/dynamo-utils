@@ -78,6 +78,26 @@ tr:hover {
 .sha a:hover {
     text-decoration: underline;
 }
+.icon-link {
+    text-decoration: none;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    vertical-align: middle;
+}
+.gitlab-icons {
+    display: inline-flex;
+    align-items: center;
+    gap: 2px;
+    white-space: nowrap;
+}
+.icon-link:hover {
+    opacity: 0.9;
+}
+.icon-muted {
+    filter: grayscale(1);
+    opacity: 0.55;
+}
 .message {
     color: #24292f;
 }
@@ -412,13 +432,14 @@ Legend & Help
 </li>
 <li><strong>CDS:xxxxxx</strong> - Composite Docker SHA: a unique hash representing the exact state of all files in the <code style="background-color: #f6f8fa; padding: 2px 4px; border-radius: 3px;">container/*</code> directory. This concept is unique to this dashboard.</li>
 <li><strong>🐳</strong> - Search NVIDIA GitLab Docker registry (appears in Status column)</li>
-<li><strong><svg height="14" width="14" viewBox="0 0 16 16" fill="#24292f" style="display: inline-block; vertical-align: middle;"><path fill-rule="evenodd" clip-rule="evenodd" d="M8 0C3.58 0 0 3.58 0 8C0 11.54 2.29 14.53 5.47 15.59C5.87 15.66 6.02 15.42 6.02 15.21C6.02 15.02 6.01 14.39 6.01 13.72C4 14.09 3.48 13.23 3.32 12.78C3.23 12.55 2.84 11.84 2.5 11.65C2.22 11.5 1.82 11.13 2.49 11.12C3.12 11.11 3.57 11.7 3.72 11.94C4.44 13.15 5.59 12.81 6.05 12.6C6.12 12.08 6.33 11.73 6.56 11.53C4.78 11.33 2.92 10.64 2.92 7.58C2.92 6.71 3.23 5.99 3.74 5.43C3.66 5.23 3.38 4.41 3.82 3.31C3.82 3.31 4.49 3.1 6.02 4.13C6.66 3.95 7.34 3.86 8.02 3.86C8.7 3.86 9.38 3.95 10.02 4.13C11.55 3.09 12.22 3.31 12.22 3.31C12.66 4.41 12.38 5.23 12.3 5.43C12.81 5.99 13.12 6.7 13.12 7.58C13.12 10.65 11.25 11.33 9.47 11.53C9.76 11.78 10.01 12.26 10.01 13.01C10.01 14.08 10 14.94 10 15.21C10 15.42 10.15 15.67 10.55 15.59C13.71 14.53 16 11.53 16 8C16 3.58 12.42 0 8 0Z"></path></svg></strong> - View GitHub Actions logs (appears in Status column)</li>
+<li><strong><svg height="14" width="14" viewBox="0 0 16 16" fill="#24292f" style="display: inline-block; vertical-align: middle;"><path fill-rule="evenodd" clip-rule="evenodd" d="M8 0C3.58 0 0 3.58 0 8C0 11.54 2.29 14.53 5.47 15.59C5.87 15.66 6.02 15.42 6.02 15.21C6.02 15.02 6.01 14.39 6.01 13.72C4 14.09 3.48 13.23 3.32 12.78C3.23 12.55 2.84 11.84 2.5 11.65C2.22 11.5 1.82 11.13 2.49 11.12C3.12 11.11 3.57 11.7 3.72 11.94C4.44 13.15 5.59 12.81 6.05 12.6C6.12 12.08 6.33 11.73 6.56 11.53C4.78 11.33 2.92 10.64 2.92 7.58C2.92 6.71 3.23 5.99 3.74 5.43C3.66 5.23 3.38 4.41 3.82 3.31C3.82 3.31 4.49 3.1 6.02 4.13C6.66 3.95 7.34 3.86 8.02 3.86C8.7 3.86 9.38 3.95 10.02 4.13C11.55 3.09 12.22 3.31 12.22 3.31C12.66 4.41 12.38 5.23 12.3 5.43C12.81 5.99 13.12 6.7 13.12 7.58C13.12 10.65 11.25 11.33 9.47 11.53C9.76 11.78 10.01 12.26 10.01 13.01C10.01 14.08 10 14.94 10 15.21C10 15.42 10.15 15.67 10.55 15.59C13.71 14.53 16 11.53 16 8C16 3.58 12.42 0 8 0Z"></path></svg></strong> - View Github Actions logs (appears in Status column)</li>
 <li><strong>🦊</strong> - View commit in NVIDIA GitLab (appears in Status column with CI pipeline info)</li>
+<li><strong>🛠️</strong> - View GitLab build pipeline (appears next to the 🦊 icon when available)</li>
 <li><strong>▶</strong> - Expand to see Docker images and commit details</li>
 </ul>
 </div>
 <div style="margin-bottom: 12px;">
-<div style="font-weight: 600; margin-bottom: 6px; color: #24292f;">CI Status Symbols (GitHub & NVIDIA GitLab):</div>
+<div style="font-weight: 600; margin-bottom: 6px; color: #24292f;">CI Status Symbols (Github & NVIDIA GitLab):</div>
 <ul style="margin: 4px 0; padding-left: 20px;">
 <li><span style="color: #2da44e;">✓</span> - Checks/jobs passed or succeeded</li>
 <li><span style="color: #d73a49;">✗</span> - Checks/jobs failed</li>
@@ -482,7 +503,7 @@ Legend & Help
 <tr>
 <th>Commit SHA</th>
 <th>Composite Docker SHA</th>
-<th>GitHub Status</th>
+<th>Github Status</th>
 <th>GitLab Status</th>
 <th>Date/Time (PST)</th>
 <th>Author</th>
@@ -504,6 +525,9 @@ Legend & Help
 {%- set has_gitlab = sha_full in gitlab_images and gitlab_images[sha_full] -%}
 {%- set composite_bg_color = commit.composite_bg_color -%}
 {%- set pipeline = gitlab_pipelines.get(sha_full) -%}
+{%- set pr_number = commit.pr_number -%}
+{%- set mr_pipeline = mr_pipelines.get(pr_number) if pr_number else none -%}
+{%- set effective_pipeline = pipeline if pipeline else mr_pipeline -%}
 
 <tr>
 <td class="sha">
@@ -547,21 +571,21 @@ Legend & Help
 {%- set gha_status = github_actions_status.get(sha_full) -%}
 {%- if gha_status and gha_status.conclusion == 'success' -%}
 {%- set gha_color = '#2da44e' -%}
-{%- set gha_title = 'GitHub Actions: All checks passed' -%}
+{%- set gha_title = 'Github Actions: All checks passed' -%}
 {%- elif gha_status and gha_status.conclusion == 'failure' -%}
 {%- set gha_color = '#d73a49' -%}
-{%- set gha_title = 'GitHub Actions: Some checks failed' -%}
+{%- set gha_title = 'Github Actions: Some checks failed' -%}
 {%- elif gha_status and gha_status.status == 'in_progress' -%}
 {%- set gha_color = '#dbab09' -%}
-{%- set gha_title = 'GitHub Actions: Checks in progress' -%}
+{%- set gha_title = 'Github Actions: Checks in progress' -%}
 {%- elif gha_status and gha_status.conclusion == 'cancelled' -%}
 {%- set gha_color = '#8c959f' -%}
-{%- set gha_title = 'GitHub Actions: Checks cancelled' -%}
+{%- set gha_title = 'Github Actions: Checks cancelled' -%}
 {%- else -%}
 {%- set gha_color = '#8c959f' -%}
-{%- set gha_title = 'GitHub Actions: No checks' -%}
+{%- set gha_title = 'Github Actions: No checks' -%}
 {%- endif -%}
-{# GitHub section #}
+{# Github section #}
 <a href="https://github.com/ai-dynamo/dynamo/commit/{{ sha_full }}/checks" target="_blank" style="text-decoration: none; color: #24292f; font-weight: 600;" title="{{ gha_title }}"><svg height="14" width="14" viewBox="0 0 16 16" fill="currentColor" style="display: inline-block; vertical-align: middle;"><path fill-rule="evenodd" clip-rule="evenodd" d="M8 0C3.58 0 0 3.58 0 8C0 11.54 2.29 14.53 5.47 15.59C5.87 15.66 6.02 15.42 6.02 15.21C6.02 15.02 6.01 14.39 6.01 13.72C4 14.09 3.48 13.23 3.32 12.78C3.23 12.55 2.84 11.84 2.5 11.65C2.22 11.5 1.82 11.13 2.49 11.12C3.12 11.11 3.57 11.7 3.72 11.94C4.44 13.15 5.59 12.81 6.05 12.6C6.12 12.08 6.33 11.73 6.56 11.53C4.78 11.33 2.92 10.64 2.92 7.58C2.92 6.71 3.23 5.99 3.74 5.43C3.66 5.23 3.38 4.41 3.82 3.31C3.82 3.31 4.49 3.1 6.02 4.13C6.66 3.95 7.34 3.86 8.02 3.86C8.7 3.86 9.38 3.95 10.02 4.13C11.55 3.09 12.22 3.31 12.22 3.31C12.66 4.41 12.38 5.23 12.3 5.43C12.81 5.99 13.12 6.7 13.12 7.58C13.12 10.65 11.25 11.33 9.47 11.53C9.76 11.78 10.01 12.26 10.01 13.01C10.01 14.08 10 14.94 10 15.21C10 15.42 10.15 15.67 10.55 15.59C13.71 14.53 16 11.53 16 8C16 3.58 12.42 0 8 0Z"></path></svg></a>
 {# Per-commit GH checks status (split required vs optional failures) #}
 {%- set commit_stats = gha_per_commit_stats.get(sha_full, {'success': 0, 'failure_required': 0, 'failure_optional': 0, 'in_progress_required': 0, 'in_progress_optional': 0, 'other': 0, 'total': 0}) -%}
@@ -596,12 +620,12 @@ Legend & Help
 {%- endfor -%}
 {%- endif -%}
 {%- set tooltip_html_parts = [] -%}
-{%- if passed_jobs -%}{%- set _ = tooltip_html_parts.append('<strong style="color: #2da44e;">✓ Passed:</strong> ' + passed_jobs|join(', ')) -%}{%- endif -%}
-{%- if failed_required_jobs -%}{%- set _ = tooltip_html_parts.append('<strong style="color: #d73a49;">✗ Failed (required):</strong> ' + failed_required_jobs|join(', ')) -%}{%- endif -%}
-{%- if failed_optional_jobs -%}{%- set _ = tooltip_html_parts.append('<strong style="color: #f59e0b;">⚠ Failed (optional):</strong> ' + failed_optional_jobs|join(', ')) -%}{%- endif -%}
-{%- if progress_required_jobs -%}{%- set _ = tooltip_html_parts.append('<strong style="color: #dbab09;">⏳ In Progress (required):</strong> ' + progress_required_jobs|join(', ')) -%}{%- endif -%}
-{%- if progress_optional_jobs -%}{%- set _ = tooltip_html_parts.append('<strong style="color: #8c959f;">⏳ In Progress (optional):</strong> ' + progress_optional_jobs|join(', ')) -%}{%- endif -%}
-{%- if other_jobs -%}{%- set _ = tooltip_html_parts.append('<strong style="color: #8c959f;">⏸ Cancelled/Pending:</strong> ' + other_jobs|join(', ')) -%}{%- endif -%}
+{%- if passed_jobs -%}{%- set _ = tooltip_html_parts.append('<strong style="color: #2da44e;">✓ Passed:</strong> ' + (passed_jobs|sort)|join(', ')) -%}{%- endif -%}
+{%- if failed_required_jobs -%}{%- set _ = tooltip_html_parts.append('<strong style="color: #d73a49;"><span style="display: inline-flex; align-items: center; justify-content: center; width: 14px; height: 14px; margin-right: 6px; border-radius: 999px; background-color: #d73a49; color: #ffffff; font-size: 11px; font-weight: 900; line-height: 1;">✗</span>Failed (required):</strong> ' + (failed_required_jobs|sort)|join(', ')) -%}{%- endif -%}
+{%- if failed_optional_jobs -%}{%- set _ = tooltip_html_parts.append('<strong style="color: #f59e0b;">⚠ Failed (optional):</strong> ' + (failed_optional_jobs|sort)|join(', ')) -%}{%- endif -%}
+{%- if progress_required_jobs -%}{%- set _ = tooltip_html_parts.append('<strong style="color: #dbab09;">⏳ In Progress (required):</strong> ' + (progress_required_jobs|sort)|join(', ')) -%}{%- endif -%}
+{%- if progress_optional_jobs -%}{%- set _ = tooltip_html_parts.append('<strong style="color: #8c959f;">⏳ In Progress (optional):</strong> ' + (progress_optional_jobs|sort)|join(', ')) -%}{%- endif -%}
+{%- if other_jobs -%}{%- set _ = tooltip_html_parts.append('<strong style="color: #8c959f;">⏸ Cancelled/Pending:</strong> ' + (other_jobs|sort)|join(', ')) -%}{%- endif -%}
 {%- set tooltip_html = tooltip_html_parts|join('<br>') -%}
 <span class="gh-status-tooltip" style="margin-left: 4px;">
 <span style="white-space: nowrap; font-weight: 600; font-size: 11px;">
@@ -618,14 +642,22 @@ Legend & Help
 </td>
 <td class="sha">
 {# GitLab section #}
-{%- if pipeline -%}
-<a href="https://gitlab-master.nvidia.com/dl/ai-dynamo/dynamo/container_registry/85325?orderBy=PUBLISHED_AT&sort=desc&search%5B%5D={{ sha_full }}" target="_blank" style="color: #2496ed; text-decoration: none; font-weight: 600;" title="Search GitLab Docker registry for this SHA">🐳</a>
+<span class="gitlab-icons">
+{# Always show GitLab commit link (fox). Gray it out if we don't have pipeline context. #}
+<a href="{{ gitlab_commit_link }}" target="_blank" class="icon-link{%- if not effective_pipeline -%} icon-muted{%- endif -%}" style="color: #fc6d26; font-weight: 600;" title="View commit in GitLab">🦊</a>
+
+{# Registry search icon (whale). Always linked; gray out if no pipeline context. #}
+<a href="https://gitlab-master.nvidia.com/dl/ai-dynamo/dynamo/container_registry/85325?orderBy=PUBLISHED_AT&sort=desc&search%5B%5D={{ sha_full }}" target="_blank" class="icon-link{%- if not effective_pipeline -%} icon-muted{%- endif -%}" style="color: #2496ed; font-weight: 600;" title="{%- if effective_pipeline -%}Search GitLab Docker registry for this SHA{%- else -%}No GitLab pipeline context (search registry anyway){%- endif -%}">🐳</a>
+
+{# Pipeline icon (build link). Uses SHA pipeline if present, else MR pipeline as fallback. #}
+{%- if effective_pipeline and effective_pipeline.web_url -%}
+<a href="{{ effective_pipeline.web_url }}" target="_blank" class="icon-link" style="color: #0969da;" title="View build pipeline in GitLab">🛠️</a>
 {%- else -%}
-{# NOTE: emoji color often ignores CSS `color`, so we also apply grayscale+opacity to make it visually gray #}
-<a href="https://gitlab-master.nvidia.com/dl/ai-dynamo/dynamo/container_registry/85325?orderBy=PUBLISHED_AT&sort=desc&search%5B%5D={{ sha_full }}" target="_blank" style="color: #8c959f; text-decoration: none; font-weight: 600; filter: grayscale(1); opacity: 0.55;" title="No GitLab pipeline data for this commit (search registry anyway)">🐳</a>
+<span class="icon-link icon-muted" title="No pipeline found for this commit/PR">🛠️</span>
 {%- endif -%}
+ </span>
+
 {%- if pipeline -%}
-<a href="https://gitlab-master.nvidia.com/dl/ai-dynamo/dynamo/-/commit/{{ sha_full }}" target="_blank" style="margin-left: 4px; color: #fc6d26; text-decoration: none; font-weight: 600;" title="View commit in GitLab">🦊</a>
 {%- set job_data = pipeline_job_counts.get(pipeline.id) -%}
 {%- if job_data -%}
 {# Handle both old format (direct counts) and new format (counts + jobs) #}
@@ -641,31 +673,55 @@ Legend & Help
 {# Build detailed tooltip with job names if available #}
 {%- if has_job_details -%}
 {%- set success_jobs = [] -%}
-{%- set failed_jobs = [] -%}
-{%- set running_jobs = [] -%}
+{%- set failed_required_jobs = [] -%}
+{%- set failed_optional_jobs = [] -%}
+{%- set running_required_jobs = [] -%}
+{%- set running_optional_jobs = [] -%}
 {%- set pending_jobs = [] -%}
 {%- for job in job_data.jobs -%}
+{# Mandatory job names: contains ".pre" OR starts with "build" OR starts with "test" #}
+{%- set job_name = job.name or "" -%}
+{%- set job_stage_raw = (job.stage if job.stage is defined else "") or "unknown" -%}
+{# GitLab stage "pre" is typically shown as ".pre" in the UI; normalize for readability #}
+{%- set job_stage = ".pre" if job_stage_raw == "pre" else job_stage_raw -%}
+{%- set job_label = job_stage ~ "." ~ job_name -%}
+{# Mandatory are: .pre, build, test (match on either stage or full label) #}
+{%- set is_required = (job_name.startswith(".pre") or (".pre" in job_label) or (job_stage in ("pre", ".pre")) or job_name.startswith("build") or job_name.startswith("test")) -%}
 {%- if job.status == 'success' -%}
-{%- set _ = success_jobs.append(job.name) -%}
+{%- set _ = success_jobs.append(job_label) -%}
 {%- elif job.status == 'failed' -%}
-{%- set _ = failed_jobs.append(job.name) -%}
+{%- if is_required -%}
+{%- set _ = failed_required_jobs.append(job_label) -%}
+{%- else -%}
+{%- set _ = failed_optional_jobs.append(job_label) -%}
+{%- endif -%}
 {%- elif job.status == 'running' -%}
-{%- set _ = running_jobs.append(job.name) -%}
+{%- if is_required -%}
+{%- set _ = running_required_jobs.append(job_label) -%}
+{%- else -%}
+{%- set _ = running_optional_jobs.append(job_label) -%}
+{%- endif -%}
 {%- elif job.status in ('pending', 'created', 'waiting_for_resource') -%}
-{%- set _ = pending_jobs.append(job.name) -%}
+{%- set _ = pending_jobs.append(job_label) -%}
 {%- endif -%}
 {%- endfor -%}
 {%- set gitlab_tooltip_parts = [] -%}
-{%- if success_jobs -%}{%- set _ = gitlab_tooltip_parts.append('<strong style="color: #2da44e;">Passed:</strong> ' + success_jobs|join(', ')) -%}{%- endif -%}
-{%- if failed_jobs -%}{%- set _ = gitlab_tooltip_parts.append('<strong style="color: #d73a49;">Failed:</strong> ' + failed_jobs|join(', ')) -%}{%- endif -%}
-{%- if running_jobs -%}{%- set _ = gitlab_tooltip_parts.append('<strong style="color: #dbab09;">Running:</strong> ' + running_jobs|join(', ')) -%}{%- endif -%}
-{%- if pending_jobs -%}{%- set _ = gitlab_tooltip_parts.append('<strong style="color: #8c959f;">Pending:</strong> ' + pending_jobs|join(', ')) -%}{%- endif -%}
+{%- if success_jobs -%}{%- set _ = gitlab_tooltip_parts.append('<strong style="color: #2da44e;">✓ Passed:</strong> ' + (success_jobs|sort)|join(', ')) -%}{%- endif -%}
+{%- if failed_required_jobs -%}{%- set _ = gitlab_tooltip_parts.append('<strong style="color: #d73a49;"><span style="display: inline-flex; align-items: center; justify-content: center; width: 14px; height: 14px; margin-right: 6px; border-radius: 999px; background-color: #d73a49; color: #ffffff; font-size: 11px; font-weight: 900; line-height: 1;">✗</span>Failed (mandatory):</strong> ' + (failed_required_jobs|sort)|join(', ')) -%}{%- endif -%}
+{%- if failed_optional_jobs -%}{%- set _ = gitlab_tooltip_parts.append('<strong style="color: #f59e0b;">⚠ Failed (non-mandatory):</strong> ' + (failed_optional_jobs|sort)|join(', ')) -%}{%- endif -%}
+{%- if running_required_jobs -%}{%- set _ = gitlab_tooltip_parts.append('<strong style="color: #dbab09;">⏳ In Progress (mandatory):</strong> ' + (running_required_jobs|sort)|join(', ')) -%}{%- endif -%}
+{%- if running_optional_jobs -%}{%- set _ = gitlab_tooltip_parts.append('<strong style="color: #8c959f;">⏳ In Progress (non-mandatory):</strong> ' + (running_optional_jobs|sort)|join(', ')) -%}{%- endif -%}
+{%- if pending_jobs -%}{%- set _ = gitlab_tooltip_parts.append('<strong style="color: #8c959f;">Pending:</strong> ' + (pending_jobs|sort)|join(', ')) -%}{%- endif -%}
 {%- set gitlab_tooltip_html = gitlab_tooltip_parts|join('<br>') -%}
 <span class="gh-status-tooltip" style="margin-left: 4px;">
 <span style="white-space: nowrap; font-weight: 600; font-size: 11px;">
 {%- if job_counts.success > 0 -%}<span style="color: #2da44e;">{{ job_counts.success }}✓</span>{%- endif -%}
-{%- if job_counts.failed > 0 -%}{%- if job_counts.success > 0 %} {% endif -%}<span style="color: #d73a49;">{{ job_counts.failed }}✗</span>{%- endif -%}
-{%- if job_counts.running > 0 -%}{%- if job_counts.success > 0 or job_counts.failed > 0 %} {% endif -%}<span style="color: #dbab09;">{{ job_counts.running }}⏳</span>{%- endif -%}
+{%- set req_failed = failed_required_jobs|length -%}
+{%- set opt_failed = failed_optional_jobs|length -%}
+{%- if req_failed > 0 -%}{%- if job_counts.success > 0 %} {% endif -%}<span style="color: #d73a49; font-weight: 800; font-size: 12px;" title="Mandatory failures">{{ req_failed }}<span style="display: inline-flex; align-items: center; justify-content: center; width: 12px; height: 12px; margin-left: 2px; border-radius: 999px; background-color: #d73a49; color: #ffffff; font-size: 10px; font-weight: 900; line-height: 1;">✗</span></span>{%- endif -%}
+{%- if opt_failed > 0 -%}{%- if job_counts.success > 0 or req_failed > 0 %} {% endif -%}<span style="color: #f59e0b;" title="Non-mandatory failures">{{ opt_failed }}<span style="font-size: 13px; font-weight: 900; line-height: 1; margin-left: 2px;">⚠</span></span>{%- endif -%}
+{%- set inprog_total = (running_required_jobs|length) + (running_optional_jobs|length) -%}
+{%- if inprog_total > 0 -%}{%- if job_counts.success > 0 or req_failed > 0 or opt_failed > 0 %} {% endif -%}<span style="color: #dbab09;">{{ inprog_total }}⏳</span>{%- endif -%}
 {%- if job_counts.pending > 0 -%}{%- if job_counts.success > 0 or job_counts.failed > 0 or job_counts.running > 0 %} {% endif -%}<span style="color: #8c959f;">{{ job_counts.pending }}⏸</span>{%- endif -%}
 </span>
 {%- if gitlab_tooltip_html -%}
