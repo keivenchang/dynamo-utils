@@ -23,7 +23,8 @@ These are the canonical project instructions. Do NOT read .cursorrules or CLAUDE
 **NEVER auto-commit changes without explicit user approval.** Always wait for the user to explicitly request a commit before running git commit commands.
 
 ### Permission Policy
-- No need to ask permission when running any read-only operations, such as `echo`, `cat`, `tail`, `head`, `grep`, `egrep`, `ls`, `uname`, `soak_fe.py` or `curl` commands
+- Full permission to run any read-only operations; no need to ask. Examples: `wget`, `curl`, `echo`, `cat`, `tail`, `head`, `grep`, `egrep`, `ls`, `uname`
+- Always OK to `curl` without asking. You can always curl`*.blob.core.windows.net` or whatever site.
 - When executing `docker exec ... bash -c "<command> ..." and the <command> is one of the read-only operations, just execute the command, no need to ask for permission.
 
 ### Python Virtual Environment
@@ -427,6 +428,74 @@ python3 -m http.server 8000  # View at http://localhost:8000
 git diff --name-only HEAD~5 | grep '\.md$' | xargs grep -l 'http.*github.com.*dynamo'  # Check links
 find docs -name '*.md' -newer docs/build/html 2>/dev/null  # Find modified docs
 ```
+
+### Documentation Link Check
+
+Test markdown documentation links (same as CI) to verify no broken internal/external links.
+
+**CI Workflow**: `.github/workflows/docs-link-check.yml` runs **two separate jobs**:
+
+1. **`lychee` job** - External URL checker (lines 13-77)
+   - Checks external URLs (HTTP/HTTPS links)
+   - Uses [lychee](https://github.com/lycheeverse/lychee) tool
+   - Offline mode for PRs (internal links only), full check for main branch
+   - Caches results to avoid rate limits
+
+2. **`broken-links-check` job** - Internal markdown link checker (lines 79-268)
+   - Checks internal relative links between markdown files
+   - Uses `.github/workflows/detect_broken_links.py` script
+   - Validates file paths, symlinks, anchors
+   - Creates GitHub annotations for broken links
+   - **This is the most common check that fails**
+
+**To verify broken link fixes locally**:
+```bash
+cd /path/to/dynamo/repo
+
+# Run the same check as CI
+python3 .github/workflows/detect_broken_links.py \
+  --verbose \
+  --format json \
+  --check-symlinks \
+  --output /tmp/broken-links-report.json \
+  .
+
+# Check exit code
+echo $?  # 0 = pass, 1 = broken links found
+
+# View summary
+cat /tmp/broken-links-report.json | python3 -m json.tool | head -30
+```
+
+**Expected result**: Exit code 0, no broken links in summary
+
+**Common broken link issues**:
+
+1. **Stale relative paths after file moves**:
+   - Error: `Broken link: [Pre-Deployment Checks](../../deploy/cloud/pre-deployment/README.md)`
+   - Cause: Directory was moved/deleted (`deploy/cloud/` → `deploy/`)
+   - Fix: Update relative path to match new location
+   - Example: Change `../../deploy/cloud/pre-deployment/README.md` to `../../deploy/pre-deployment/README.md`
+
+2. **Wrong relative path depth**:
+   - Error: Link target doesn't exist
+   - Cause: Incorrect `../` count in relative path
+   - Fix: Count directory levels correctly from source to target
+
+3. **Problematic symlinks**:
+   - Warning: Suspicious symlink with many directory traversals
+   - Cause: Symlink uses excessive `../../../../` patterns
+   - Fix: Consider using direct file copy or shorter path
+
+**Workflow integration**:
+- Both checks run on every PR and push to main
+- `broken-links-check` creates annotations in "Files Changed" tab
+- Failed checks block merge (required status check)
+
+**Difference from Sphinx build**:
+- **Link check**: Validates link targets exist (files, URLs)
+- **Sphinx build**: Validates documentation can be built as HTML
+- Both are important and run independently in CI
 
 ## Important Reminders
 
