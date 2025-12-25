@@ -398,6 +398,98 @@ def _query_net_timeseries(
     return out
 
 
+def _query_top_io_read_process_per_sample(
+    con: sqlite3.Connection, *, start_ts: float
+) -> Dict[int, Dict[str, Any]]:
+    """
+    Best-effort: process_samples only stores "offenders", so this finds the max IO-read process among recorded ones.
+
+    Returns:
+      {sample_id: {pid,name,username,cmdline,io_read_bps,io_write_bps,rss_bytes}}
+    """
+    cur = con.cursor()
+    rows = cur.execute(
+        """
+        WITH ranked AS (
+          SELECT
+            p.sample_id AS sample_id,
+            p.pid AS pid,
+            p.name AS name,
+            p.username AS username,
+            p.cmdline AS cmdline,
+            p.io_read_bps AS io_read_bps,
+            p.io_write_bps AS io_write_bps,
+            p.rss_bytes AS rss_bytes,
+            ROW_NUMBER() OVER (
+              PARTITION BY p.sample_id
+              ORDER BY p.io_read_bps DESC NULLS LAST
+            ) AS rn
+          FROM process_samples p
+          JOIN samples s ON s.id = p.sample_id
+          WHERE s.ts_unix >= ?
+        )
+        SELECT * FROM ranked WHERE rn = 1
+        """,
+        (start_ts,),
+    ).fetchall()
+
+    out: Dict[int, Dict[str, Any]] = {}
+    for r in rows:
+        sid = int(r["sample_id"])
+        out[sid] = {
+            "pid": int(r["pid"]) if r["pid"] is not None else None,
+            "name": r["name"] or "",
+            "username": r["username"] or "",
+            "cmdline": r["cmdline"] or "",
+            "io_read_bps": float(r["io_read_bps"]) if r["io_read_bps"] is not None else None,
+            "io_write_bps": float(r["io_write_bps"]) if r["io_write_bps"] is not None else None,
+            "rss_mb": (float(r["rss_bytes"]) / 1024.0 / 1024.0) if r["rss_bytes"] is not None else 0.0,
+        }
+    return out
+
+
+def _detect_disk_read_spikes(
+    samples: List[SampleRow],
+    *,
+    min_mibps: float,
+    sigma: float,
+    max_spikes: int,
+) -> List[Dict[str, Any]]:
+    """
+    Detect spikes on system disk_read_bps (MiB/s) using a robust MAD threshold + local-max guard.
+    """
+    vals: List[float] = []
+    for s in samples:
+        v = (float(s.disk_read_bps) / 1024.0 / 1024.0) if s.disk_read_bps is not None else 0.0
+        vals.append(v)
+    med, mad = _median_mad(vals)
+    robust_std = 1.4826 * mad
+    thresh = max(float(min_mibps), med + float(sigma) * robust_std)
+
+    spikes: List[Dict[str, Any]] = []
+    for i, s in enumerate(samples):
+        v = (float(s.disk_read_bps) / 1024.0 / 1024.0) if s.disk_read_bps is not None else 0.0
+        if v < thresh:
+            continue
+        prev_v = vals[i - 1] if i > 0 else -1.0
+        next_v = vals[i + 1] if i + 1 < len(vals) else -1.0
+        if v < prev_v or v < next_v:
+            continue
+        spikes.append(
+            {
+                "sample_id": int(s.sample_id),
+                "ts_unix": float(s.ts_unix),
+                "ts": _ts_to_iso(float(s.ts_unix)),
+                "disk_read_mibps": float(v),
+            }
+        )
+
+    spikes.sort(key=lambda x: x["disk_read_mibps"], reverse=True)
+    spikes = spikes[: int(max_spikes)]
+    spikes.sort(key=lambda x: x["ts_unix"])
+    return spikes
+
+
 def _query_docker_leaderboard(
     con: sqlite3.Connection, *, start_ts: float, limit: int
 ) -> List[Dict[str, Any]]:
@@ -915,13 +1007,25 @@ def _build_html(payload: Dict[str, Any]) -> str:
         </div>
       </div>
 
-      <div class="card">
-        <div class="hdr">
-          <div class="title">Spike events (top process CPU)</div>
-          <div class="hint"><span class="pill">MAD threshold</span></div>
+      <div style="display:flex; flex-direction:column; gap:16px;">
+        <div class="card">
+          <div class="hdr">
+            <div class="title">Spike events (top process CPU)</div>
+            <div class="hint"><span class="pill">MAD threshold</span></div>
+          </div>
+          <div class="body" style="max-height: 270px; overflow:auto;">
+            <table class="table" id="spike_table"></table>
+          </div>
         </div>
-        <div class="body" style="max-height: 560px; overflow:auto;">
-          <table class="table" id="spike_table"></table>
+
+        <div class="card">
+          <div class="hdr">
+            <div class="title">Disk read spikes (best-effort)</div>
+            <div class="hint"><span class="pill">MAD threshold</span></div>
+          </div>
+          <div class="body" style="max-height: 270px; overflow:auto;">
+            <table class="table" id="disk_spike_table"></table>
+          </div>
         </div>
       </div>
     </div>
@@ -1085,6 +1189,32 @@ def _build_html(payload: Dict[str, Any]) -> str:
           </td>
           <td class="mono">${{(s.rss_mb||0).toFixed(0)}} MB</td>
           <td class="mono">${{(s.gpu_mem_mb||0).toFixed(0)}} MB</td>
+        </tr>
+      `).join('')}}
+    `;
+  }}
+
+  function buildDiskSpikeTable(rows) {{
+    const el = document.getElementById('disk_spike_table');
+    if (!rows || rows.length === 0) {{
+      el.innerHTML = `<tr><th>status</th></tr><tr><td class="muted">No disk read spikes detected (or missing disk/process data).</td></tr>`;
+      return;
+    }}
+    const rev = rows.slice().reverse();
+    el.innerHTML = `
+      <tr>
+        <th>time</th>
+        <th>read</th>
+        <th>proc</th>
+      </tr>
+      ${{rev.map((r, j) => `
+        <tr class="spike-row disk-spike-row" data-idx="${{(rows.length - 1 - j)}}">
+          <td class="mono">${{r.ts.replace('T',' ')}}</td>
+          <td class="mono"><span class="badge warn">${{(r.disk_read_mibps ?? 0).toFixed(2)}}</span> MiB/s</td>
+          <td>
+            <div class="mono">${{(r.proc_name||'').slice(0,22)}} <span class="muted">#${{r.pid ?? ''}}</span></div>
+            <div class="small muted">${{(r.cmdline||'').slice(0,90)}}</div>
+          </td>
         </tr>
       `).join('')}}
     `;
@@ -1311,6 +1441,15 @@ def _build_html(payload: Dict[str, Any]) -> str:
       {{ x, y: diskW, name: 'disk write (MiB/s)', mode: 'lines', line: {{ color: '#38bdf8', width: 1.6, dash: DASH.longdashdot }} , yaxis: 'y4' }},
     ];
 
+    const diskSpikes = PAYLOAD.disk_spikes || [];
+    const diskSpikeX = diskSpikes.map(e => e.ts);
+    const diskSpikeY = diskSpikes.map(e => e.disk_read_mibps);
+    const diskSpikeText = diskSpikes.map(e =>
+      `${{e.proc_name || ''}} #${{e.pid ?? ''}}` +
+      `<br>proc read: ${{(e.proc_io_read_mibps ?? 0).toFixed(2)}} MiB/s` +
+      `<br>${{wrapLine((e.cmdline||'').slice(0,240), 80)}}`
+    );
+
     if (spikes.length > 0) {{
       // Plotly has no native marker shadow/glow; simulate with a "glow" marker trace behind the main trace.
       const spikeGlowTraceIndex = traces.length;
@@ -1349,6 +1488,26 @@ def _build_html(payload: Dict[str, Any]) -> str:
       window.__SPIKE_GLOW_HILITE_COLOR = 'rgba(251,191,36,0.30)';
       window.__SPIKE_GLOW_DEFAULT_SIZE = 18;
       window.__SPIKE_GLOW_HILITE_SIZE = 24;
+    }}
+
+    if (diskSpikes.length > 0) {{
+      const diskSpikeTraceIndex = traces.length;
+      traces.push({{
+        x: diskSpikeX,
+        y: diskSpikeY,
+        name: 'Disk read spike',
+        mode: 'markers',
+        marker: {{ size: 10, color: '#fbbf24', symbol: 'diamond', line: {{ width: 1, color: 'rgba(255,255,255,0.75)' }} }},
+        text: diskSpikeText,
+        hovertemplate: '<b>Disk read spike</b><br>%{{x}}<br>disk read=%{{y:.2f}} MiB/s<br>%{{text}}<extra></extra>',
+        yaxis: 'y4'
+      }});
+      window.__DISK_SPIKE_TRACE_INDEX = diskSpikeTraceIndex;
+      window.__DISK_SPIKE_COUNT = diskSpikeX.length;
+      window.__DISK_SPIKE_DEFAULT_COLOR = '#fbbf24';
+      window.__DISK_SPIKE_HILITE_COLOR = '#fde047';
+      window.__DISK_SPIKE_DEFAULT_SIZE = 10;
+      window.__DISK_SPIKE_HILITE_SIZE = 14;
     }}
 
     const layout = commonLayout('');
@@ -1393,6 +1552,83 @@ def _build_html(payload: Dict[str, Any]) -> str:
     return Plotly.newPlot('sys_graph', traces, layout, config).then(() => {{
       installHoverDelay('sys_graph');
       installSpikeTableLinkage();
+      installDiskSpikeTableLinkage();
+    }});
+  }}
+
+  function installDiskSpikeTableLinkage() {{
+    const table = document.getElementById('disk_spike_table');
+    const plot = document.getElementById('sys_graph');
+    if (!table || !plot) return;
+    const traceIndex = window.__DISK_SPIKE_TRACE_INDEX;
+    const spikeCount = Number(window.__DISK_SPIKE_COUNT ?? 0);
+    if (traceIndex === undefined || traceIndex === null) return;
+
+    let pinnedIdx = null;
+
+    function setSelectedRow(idx) {{
+      const rows = table.querySelectorAll('tr.disk-spike-row');
+      rows.forEach(r => {{
+        const ridx = r.getAttribute('data-idx');
+        if (idx !== null && idx !== undefined && String(idx) === String(ridx)) r.classList.add('selected');
+        else r.classList.remove('selected');
+      }});
+    }}
+
+    function highlightByIdx(idx) {{
+      if (idx === null || idx === undefined) return;
+      const i = Number(idx);
+      if (!Number.isFinite(i) || i < 0 || i >= spikeCount) return;
+      const colors = Array(spikeCount).fill(window.__DISK_SPIKE_DEFAULT_COLOR || '#fbbf24');
+      colors[i] = window.__DISK_SPIKE_HILITE_COLOR || '#fde047';
+      const baseSize = Number(window.__DISK_SPIKE_DEFAULT_SIZE ?? 10);
+      const hiSize = Number(window.__DISK_SPIKE_HILITE_SIZE ?? 14);
+      const sizes = Array(spikeCount).fill(baseSize);
+      sizes[i] = hiSize;
+      Plotly.restyle(plot, {{ 'marker.color': [colors], 'marker.size': [sizes] }}, [traceIndex]);
+      setSelectedRow(i);
+    }}
+
+    function clearHighlight() {{
+      const colors = Array(spikeCount).fill(window.__DISK_SPIKE_DEFAULT_COLOR || '#fbbf24');
+      const baseSize = Number(window.__DISK_SPIKE_DEFAULT_SIZE ?? 10);
+      const sizes = Array(spikeCount).fill(baseSize);
+      Plotly.restyle(plot, {{ 'marker.color': [colors], 'marker.size': [sizes] }}, [traceIndex]);
+      setSelectedRow(null);
+    }}
+
+    table.addEventListener('mouseover', (ev) => {{
+      const tr = ev.target.closest('tr.disk-spike-row');
+      if (!tr) return;
+      if (pinnedIdx !== null) return;
+      const idx = tr.getAttribute('data-idx');
+      if (idx !== null) highlightByIdx(idx);
+    }});
+    table.addEventListener('mouseout', (ev) => {{
+      const tr = ev.target.closest('tr.disk-spike-row');
+      if (!tr) return;
+      if (pinnedIdx !== null) return;
+      clearHighlight();
+    }});
+    table.addEventListener('click', (ev) => {{
+      const tr = ev.target.closest('tr.disk-spike-row');
+      if (!tr) return;
+      const idx = tr.getAttribute('data-idx');
+      if (idx === null) return;
+      const i = Number(idx);
+      if (!Number.isFinite(i)) return;
+      if (pinnedIdx === i) {{
+        pinnedIdx = null;
+        clearHighlight();
+      }} else {{
+        pinnedIdx = i;
+        highlightByIdx(i);
+      }}
+    }});
+
+    plot.on('plotly_click', () => {{
+      pinnedIdx = null;
+      clearHighlight();
     }});
   }}
 
@@ -1808,6 +2044,7 @@ def _build_html(payload: Dict[str, Any]) -> str:
   }}
 
   buildSpikeTable(PAYLOAD.spikes || []);
+  buildDiskSpikeTable(PAYLOAD.disk_spikes || []);
   buildLeaderTable(PAYLOAD.cpu_leaderboard || []);
   buildDockerTable(PAYLOAD.docker_leaderboard || []);
   buildPingTable(PAYLOAD.ping_summary || []);
@@ -1847,6 +2084,9 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     p.add_argument("--leaderboard-limit", type=int, default=20, help="How many leaderboard rows to include")
     p.add_argument("--docker-limit", type=int, default=5, help="How many containers to include (default: 5)")
     p.add_argument("--net-limit", type=int, default=5, help="How many network offenders to include (default: 5)")
+    p.add_argument("--min-disk-read-spike-mibps", type=float, default=50.0, help="Minimum disk read MiB/s for a spike")
+    p.add_argument("--disk-spike-sigma", type=float, default=4.0, help="MAD-based sigma threshold multiplier for disk spikes")
+    p.add_argument("--max-disk-spikes", type=int, default=50, help="Max disk spikes to show/annotate")
     return p.parse_args(argv)
 
 
@@ -1861,6 +2101,26 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         start_ts, end_ts = _get_time_window(con, days=float(args.days))
         samples = _query_samples(con, start_ts=start_ts)
         gpus = _query_gpu_timeseries(con, start_ts=start_ts)
+        top_io = _query_top_io_read_process_per_sample(con, start_ts=start_ts)
+        disk_spikes = _detect_disk_read_spikes(
+            samples,
+            min_mibps=float(args.min_disk_read_spike_mibps),
+            sigma=float(args.disk_spike_sigma),
+            max_spikes=int(args.max_disk_spikes),
+        )
+        # Attach best-effort top-IO process info to disk spikes
+        for e in disk_spikes:
+            sid = int(e.get("sample_id") or 0)
+            p = top_io.get(sid) or {}
+            e["pid"] = p.get("pid")
+            e["proc_name"] = p.get("name", "")
+            e["cmdline"] = p.get("cmdline", "")
+            e["proc_io_read_mibps"] = (
+                float(p.get("io_read_bps") or 0.0) / 1024.0 / 1024.0
+                if p.get("io_read_bps") is not None
+                else 0.0
+            )
+
         docker_leaderboard = _query_docker_leaderboard(
             con, start_ts=start_ts, limit=int(args.docker_limit)
         )
@@ -1926,6 +2186,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             "net": net,
             "net_leaderboard": net_leaderboard,
             "spikes": spikes,
+            "disk_spikes": disk_spikes,
             "cpu_leaderboard": leaderboard,
         }
 
