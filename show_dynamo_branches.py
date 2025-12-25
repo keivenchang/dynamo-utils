@@ -23,6 +23,64 @@ import git
 from common import FailedCheck, GitHubAPIClient, PRInfo
 
 
+#
+# Small HTML helpers
+#
+
+_COPY_ICON_SVG = (
+    '<svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" style="display: inline-block;">'
+    '<path d="M0 6.75C0 5.784.784 5 1.75 5h1.5a.75.75 0 0 1 0 1.5h-1.5a.25.25 0 0 0-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 0 0 .25-.25v-1.5a.75.75 0 0 1 1.5 0v1.5A1.75 1.75 0 0 1 9.25 16h-7.5A1.75 1.75 0 0 1 0 14.25Z"></path>'
+    '<path d="M5 1.75C5 .784 5.784 0 6.75 0h7.5C15.216 0 16 .784 16 1.75v7.5A1.75 1.75 0 0 1 14.25 11h-7.5A1.75 1.75 0 0 1 5 9.25Zm1.75-.25a.25.25 0 0 0-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 0 0 .25-.25v-7.5a.25.25 0 0 0-.25-.25Z"></path>'
+    "</svg>"
+)
+
+_COPY_BTN_STYLE = (
+    "padding: 4px 6px; font-size: 11px; background-color: transparent; color: #57606a; "
+    "border: 1px solid #d0d7de; border-radius: 6px; cursor: pointer; display: inline-flex; "
+    "align-items: center; vertical-align: middle; margin-right: 6px;"
+)
+
+
+def _html_copy_button(*, clipboard_text: str, title: str) -> str:
+    """Return a show_commit_history-style copy button that calls copyFromClipboardAttr(this)."""
+    text_escaped = html.escape(clipboard_text, quote=True)
+    title_escaped = html.escape(title, quote=True)
+    return (
+        f'<button data-clipboard-text="{text_escaped}" onclick="copyFromClipboardAttr(this)" '
+        f'style="{_COPY_BTN_STYLE}" '
+        f'title="{title_escaped}" '
+        f'onmouseover="this.style.backgroundColor=\'#f3f4f6\'; this.style.borderColor=\'#8c959f\';" '
+        f'onmouseout="this.style.backgroundColor=\'transparent\'; this.style.borderColor=\'#d0d7de\';">'
+        f"{_COPY_ICON_SVG}"
+        f"</button>"
+    )
+
+
+def _html_toggle_span(*, target_id: str, show_text: str, hide_text: str) -> str:
+    """Return a small inline toggle span that flips ▶/▼ and toggles display of target div."""
+    # Note: keep JS and quoting simple because this is emitted inside an HTML attribute.
+    target_id_escaped = html.escape(target_id, quote=True)
+    show_escaped = html.escape(show_text, quote=True)
+    hide_escaped = html.escape(hide_text, quote=True)
+    return (
+        f'<span style="cursor: pointer; color: #0066cc; margin-left: 10px;" '
+        f'onclick="var el=document.getElementById(\'{target_id_escaped}\');'
+        f'var isHidden=(el.style.display===\'none\'||el.style.display===\'\');'
+        f'el.style.display=isHidden?\'block\':\'none\';'
+        f'this.textContent=isHidden?\'{hide_escaped}\':\'{show_escaped}\';"'
+        f">{show_escaped}</span>"
+    )
+
+
+def _html_small_link(*, url: str, label: str) -> str:
+    url_escaped = html.escape(url, quote=True)
+    label_escaped = html.escape(label)
+    return (
+        f' <a href="{url_escaped}" target="_blank" '
+        f'style="color: #666; font-size: 11px; margin-left: 5px;">{label_escaped}</a>'
+    )
+
+
 @dataclass
 class BranchNode:
     """Base class for tree nodes"""
@@ -172,22 +230,7 @@ class BranchInfoNode(BranchNode):
             for ch in (self.children or [])
         )
 
-        # Copy button (match show_commit_history style + behavior)
-        label_escaped = html.escape(self.label, quote=True)
-        copy_btn = (
-            f'<button data-clipboard-text="{label_escaped}" onclick="copyFromClipboardAttr(this)" '
-            f'style="padding: 4px 6px; font-size: 11px; background-color: transparent; color: #57606a; '
-            f'border: 1px solid #d0d7de; border-radius: 6px; cursor: pointer; display: inline-flex; '
-            f'align-items: center; vertical-align: middle; margin-right: 6px;" '
-            f'title="Click to copy branch name" '
-            f'onmouseover="this.style.backgroundColor=\'#f3f4f6\'; this.style.borderColor=\'#8c959f\';" '
-            f'onmouseout="this.style.backgroundColor=\'transparent\'; this.style.borderColor=\'#d0d7de\';">'
-            f'<svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" style="display: inline-block;">'
-            f'<path d="M0 6.75C0 5.784.784 5 1.75 5h1.5a.75.75 0 0 1 0 1.5h-1.5a.25.25 0 0 0-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 0 0 .25-.25v-1.5a.75.75 0 0 1 1.5 0v1.5A1.75 1.75 0 0 1 9.25 16h-7.5A1.75 1.75 0 0 1 0 14.25Z"></path>'
-            f'<path d="M5 1.75C5 .784 5.784 0 6.75 0h7.5C15.216 0 16 .784 16 1.75v7.5A1.75 1.75 0 0 1 14.25 11h-7.5A1.75 1.75 0 0 1 5 9.25Zm1.75-.25a.25.25 0 0 0-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 0 0 .25-.25v-7.5a.25.25 0 0 0-.25-.25Z"></path>'
-            f'</svg>'
-            f'</button>'
-        )
+        copy_btn = _html_copy_button(clipboard_text=self.label, title="Click to copy branch name")
 
         cls = "current" if self.is_current else ""
         if is_merged_branch:
@@ -382,13 +425,13 @@ class PRStatusNode(BranchNode):
                     # Add expandable section with formatted table.
                     # Match show_commit_history behavior: toggle the triangle (▶/▼) based on expanded state.
                     base_html += (
-                        f' <span style="cursor: pointer; color: #0066cc; margin-left: 10px;" '
-                        f'onclick="var el=document.getElementById(\'{checks_id}\');'
-                        f'var isHidden=(el.style.display===\'none\'||el.style.display===\'\');'
-                        f'el.style.display=isHidden?\'block\':\'none\';'
-                        f'this.textContent=isHidden?\'▼ Hide checks\':\'▶ Show checks\';"'
-                        f'>▶ Show checks</span>'
-                        f'<div id="{checks_id}" style="display: none; margin-left: 20px; margin-top: 5px;">{table_html}</div>'
+                        " "
+                        + _html_toggle_span(
+                            target_id=checks_id,
+                            show_text="▶ Show checks",
+                            hide_text="▼ Hide checks",
+                        )
+                        + f'<div id="{checks_id}" style="display: none; margin-left: 20px; margin-top: 5px;">{table_html}</div>'
                     )
             except (subprocess.TimeoutExpired, FileNotFoundError, Exception):
                 # Silently fail if gh command is not available or times out
@@ -448,9 +491,9 @@ class FailedTestNode(BranchNode):
         # Add explicit "log" + "raw log" links.
         # - "log" is the normal GitHub job page (HTML)
         # - "raw log" is the direct download URL (typically a time-limited blob URL)
-        base_html += f' <a href="{self.failed_check.job_url}" target="_blank" style="color: #666; font-size: 11px; margin-left: 5px;">[log]</a>'
+        base_html += _html_small_link(url=str(self.failed_check.job_url), label="[log]")
         if getattr(self.failed_check, "raw_log_url", None):
-            base_html += f' <a href="{self.failed_check.raw_log_url}" target="_blank" style="color: #666; font-size: 11px; margin-left: 5px;">[raw log]</a>'
+            base_html += _html_small_link(url=str(self.failed_check.raw_log_url), label="[raw log]")
 
         # Add expandable error details if available
         if self.failed_check.error_summary:
@@ -460,13 +503,13 @@ class FailedTestNode(BranchNode):
             # Also toggle the triangle (▶/▼) like show_commit_history.
             err_id = f"error_{detail_id}"
             base_html += (
-                f' <span style="cursor: pointer; color: #0066cc; margin-left: 10px;" '
-                f'onclick="var el=document.getElementById(\'{err_id}\');'
-                f'var isHidden=(el.style.display===\'none\'||el.style.display===\'\');'
-                f'el.style.display=isHidden?\'block\':\'none\';'
-                f'this.textContent=isHidden?\'▼ Hide error\':\'▶ Show error\';"'
-                f'>▶ Show error</span>'
-                f'<div id="{err_id}" style="display: none; margin-left: 20px; margin-top: 5px; padding: 10px; background-color: #fff5f5; border-left: 3px solid #cc0000; font-family: monospace; font-size: 11px; white-space: pre-wrap;">{escaped_error}</div>'
+                " "
+                + _html_toggle_span(
+                    target_id=err_id,
+                    show_text="▶ Show error",
+                    hide_text="▼ Hide error",
+                )
+                + f'<div id="{err_id}" style="display: none; margin-left: 20px; margin-top: 5px; padding: 10px; background-color: #fff5f5; border-left: 3px solid #cc0000; font-family: monospace; font-size: 11px; white-space: pre-wrap;">{escaped_error}</div>'
             )
 
         return base_html
@@ -487,23 +530,7 @@ class RerunLinkNode(BranchNode):
         if not self.url or not self.run_id:
             return ""
         cmd = f"gh run rerun {self.run_id} --repo ai-dynamo/dynamo --failed"
-        cmd_escaped = html.escape(cmd, quote=True)
-
-        # Copy button (match show_commit_history style + behavior)
-        copy_btn = (
-            f'<button data-clipboard-text="{cmd_escaped}" onclick="copyFromClipboardAttr(this)" '
-            f'style="padding: 4px 6px; font-size: 11px; background-color: transparent; color: #57606a; '
-            f'border: 1px solid #d0d7de; border-radius: 6px; cursor: pointer; display: inline-flex; '
-            f'align-items: center; vertical-align: middle; margin-right: 6px;" '
-            f'title="Click to copy rerun command" '
-            f'onmouseover="this.style.backgroundColor=\'#f3f4f6\'; this.style.borderColor=\'#8c959f\';" '
-            f'onmouseout="this.style.backgroundColor=\'transparent\'; this.style.borderColor=\'#d0d7de\';">'
-            f'<svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" style="display: inline-block;">'
-            f'<path d="M0 6.75C0 5.784.784 5 1.75 5h1.5a.75.75 0 0 1 0 1.5h-1.5a.25.25 0 0 0-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 0 0 .25-.25v-1.5a.75.75 0 0 1 1.5 0v1.5A1.75 1.75 0 0 1 9.25 16h-7.5A1.75 1.75 0 0 1 0 14.25Z"></path>'
-            f'<path d="M5 1.75C5 .784 5.784 0 6.75 0h7.5C15.216 0 16 .784 16 1.75v7.5A1.75 1.75 0 0 1 14.25 11h-7.5A1.75 1.75 0 0 1 5 9.25Zm1.75-.25a.25.25 0 0 0-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 0 0 .25-.25v-7.5a.25.25 0 0 0-.25-.25Z"></path>'
-            f'</svg>'
-            f'</button>'
-        )
+        copy_btn = _html_copy_button(clipboard_text=cmd, title="Click to copy rerun command")
 
         return (
             f'🔄 <a href="{self.url}" target="_blank">Restart failed jobs</a> '
@@ -822,7 +849,7 @@ def generate_html(root: BranchNode) -> str:
 
           if (successful) {{
             var originalHTML = button.innerHTML;
-            button.innerHTML = '<svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" style="display: inline-block;"><path d="M0 6.75C0 5.784.784 5 1.75 5h1.5a.75.75 0 0 1 0 1.5h-1.5a.25.25 0 0 0-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 0 0 .25-.25v-1.5a.75.75 0 0 1 1.5 0v1.5A1.75 1.75 0 0 1 9.25 16h-7.5A1.75 1.75 0 0 1 0 14.25Z"></path><path d="M5 1.75C5 .784 5.784 0 6.75 0h7.5C15.216 0 16 .784 16 1.75v7.5A1.75 1.75 0 0 1 14.25 11h-7.5A1.75 1.75 0 0 1 5 9.25Zm1.75-.25a.25.25 0 0 0-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 0 0 .25-.25v-7.5a.25.25 0 0 0-.25-.25Z"></path></svg><span style="margin-left: 6px;">Copied!</span>';
+            button.innerHTML = '{_COPY_ICON_SVG}<span style="margin-left: 6px;">Copied!</span>';
             setTimeout(function() {{
               button.innerHTML = originalHTML;
             }}, 2000);
