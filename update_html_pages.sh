@@ -26,6 +26,16 @@ LOG_FILE="$LOGS_DIR/cron.log"
 BRANCHES_OUTPUT_FILE="$NVIDIA_HOME/index.html"
 BRANCHES_TEMP_FILE="$NVIDIA_HOME/.index.html.tmp"
 
+#
+# Timing reference (rough, from one interactive run on keivenc-linux, 2025-12-25):
+# - show_dynamo_branches.py: ~15.6s (often the longest)
+# - git checkout+pull dynamo_latest: ~1.4s
+# - resource_report.py (1 day): ~0.6s
+# - mv operations + cleanup: ~0-2ms each
+# Notes:
+# - show_commit_history.py can dominate if it fetches from GitLab (use SKIP_GITLAB_FETCH=1 for faster runs).
+# - Real timings vary with network conditions, repo state, and API responsiveness.
+
 # Create logs directory if it doesn't exist
 mkdir -p "$LOGS_DIR"
 
