@@ -23,6 +23,8 @@ _THIS_DIR = Path(__file__).resolve().parent
 _UTILS_DIR = _THIS_DIR.parent
 if str(_UTILS_DIR) not in sys.path:
     sys.path.insert(0, str(_UTILS_DIR))
+if str(_THIS_DIR) not in sys.path:
+    sys.path.insert(0, str(_THIS_DIR))
 
 try:
     import git  # type: ignore[import-not-found]
@@ -31,6 +33,16 @@ except Exception:  # pragma: no cover
 
 # Shared UI snippets (keep styling consistent with show_commit_history)
 from html_ui import GH_STATUS_TOOLTIP_CSS, GH_STATUS_TOOLTIP_JS, PASS_PLUS_STYLE
+
+# Jinja2 is optional (keep CLI usable in minimal envs).
+try:
+    from jinja2 import Environment, FileSystemLoader, select_autoescape
+    HAS_JINJA2 = True
+except Exception:  # pragma: no cover
+    HAS_JINJA2 = False
+    Environment = None  # type: ignore[assignment]
+    FileSystemLoader = None  # type: ignore[assignment]
+    select_autoescape = None  # type: ignore[assignment]
 
 # Import GitHub utilities from common module
 from common import FailedCheck, GitHubAPIClient, PRInfo
@@ -76,7 +88,7 @@ def _html_toggle_span(*, target_id: str, show_text: str, hide_text: str) -> str:
     show_escaped = html.escape(show_text, quote=True)
     hide_escaped = html.escape(hide_text, quote=True)
     return (
-        f'<span style="cursor: pointer; color: #0066cc; margin-left: 10px;" '
+        f'<span style="cursor: pointer; color: #0969da; margin-left: 10px; font-weight: 500;" '
         f'onclick="var el=document.getElementById(\'{target_id_escaped}\');'
         f'var isHidden=(el.style.display===\'none\'||el.style.display===\'\');'
         f'el.style.display=isHidden?\'block\':\'none\';'
@@ -90,7 +102,7 @@ def _html_small_link(*, url: str, label: str) -> str:
     label_escaped = html.escape(label)
     return (
         f' <a href="{url_escaped}" target="_blank" '
-        f'style="color: #666; font-size: 11px; margin-left: 5px;">{label_escaped}</a>'
+        f'style="color: #0969da; font-size: 11px; margin-left: 5px; text-decoration: none;">{label_escaped}</a>'
     )
 
 
@@ -262,9 +274,10 @@ class PRNode(BranchNode):
     def _format_content(self) -> str:
         if not self.pr:
             return ""
+        state_lc = (self.pr.state or "").lower()
         if self.pr.is_merged:
             emoji = '🔀'
-        elif self.pr.state == 'open':
+        elif state_lc == 'open':
             emoji = '📖'
         else:
             emoji = '❌'
@@ -296,9 +309,10 @@ class PRNode(BranchNode):
     def _format_html_content(self) -> str:
         if not self.pr:
             return ""
+        state_lc = (self.pr.state or "").lower()
         if self.pr.is_merged:
             emoji = '🔀'
-        elif self.pr.state == 'open':
+        elif state_lc == 'open':
             emoji = '📖'
         else:
             emoji = '❌'
@@ -361,14 +375,6 @@ class PRStatusNode(BranchNode):
             return ""
         status_parts = []
 
-        if self.pr.review_decision == 'APPROVED':
-            status_parts.append("Review: ✅ Approved")
-        elif self.pr.review_decision == 'CHANGES_REQUESTED':
-            status_parts.append("Review: 🔴 Changes Requested")
-
-        if self.pr.unresolved_conversations > 0:
-            status_parts.append(f"💬 Unresolved: {self.pr.unresolved_conversations}")
-
         if self.pr.ci_status:
             ci_icon = "✅" if self.pr.ci_status == "passed" else "❌" if self.pr.ci_status == "failed" else "⏳"
 
@@ -389,8 +395,16 @@ class PRStatusNode(BranchNode):
             else:
                 status_parts.append(f"CI: {ci_icon} {self.pr.ci_status}")
 
+        if self.pr.review_decision == 'APPROVED':
+            status_parts.append("Review: ✅ Approved")
+        elif self.pr.review_decision == 'CHANGES_REQUESTED':
+            status_parts.append("Review: 🔴 Changes Requested")
+
+        if self.pr.unresolved_conversations > 0:
+            status_parts.append(f"💬 Unresolved: {self.pr.unresolved_conversations}")
+
         if status_parts:
-            return f"Status: {', '.join(status_parts)}"
+            return f"{', '.join(status_parts)}"
         return ""
 
     def _format_html_content(self) -> str:
@@ -477,7 +491,7 @@ class PRStatusNode(BranchNode):
 
                             # Mark required checks (branch protection) inline.
                             if name_raw in required_set:
-                                name += ' <span style="color: #cc0000; font-weight: bold;">[REQUIRED]</span>'
+                                name += ' <span style="color: #d73a49; font-weight: 700;">[REQUIRED]</span>'
 
                             # Color code the status
                             status_lc = status_raw.lower()
@@ -522,7 +536,7 @@ class PRStatusNode(BranchNode):
                             # Make URL clickable if present
                             if url and url.strip():
                                 url_escaped = html_module.escape(url.strip())
-                                details = f'<a href="{url_escaped}" target="_blank" style="color: #0066cc;">View</a>'
+                                details = f'<a href="{url_escaped}" target="_blank" style="color: #0969da; text-decoration: none;">View</a>'
                                 if description:
                                     details += f' - {description}'
                             elif description:
@@ -623,14 +637,6 @@ class PRStatusNode(BranchNode):
                     tooltip_html = "<br>".join(tooltip_parts)
 
                     status_parts = []
-                    if self.pr.review_decision == 'APPROVED':
-                        status_parts.append("Review: ✅ Approved")
-                    elif self.pr.review_decision == 'CHANGES_REQUESTED':
-                        status_parts.append("Review: 🔴 Changes Requested")
-
-                    if self.pr.unresolved_conversations > 0:
-                        status_parts.append(f"💬 Unresolved: {self.pr.unresolved_conversations}")
-
                     if ci_parts:
                         ci_summary = " ".join(ci_parts)
                         if tooltip_html:
@@ -640,9 +646,24 @@ class PRStatusNode(BranchNode):
                                 f'<span class="tooltiptext">{tooltip_html}</span>'
                                 '</span>'
                             )
-                        status_parts.append(f"CI: {ci_summary}")
+                        # If there are no required failures (red ✗ badge), call it PASS even if there are optional ⚠.
+                        ci_label = (
+                            '<span class="status-indicator status-success">PASS</span>'
+                            if counts["failure_required"] == 0
+                            else '<span class="status-indicator status-failed">FAIL</span>'
+                        )
+                        # Put PASS/FAIL first so the line reads "Status: PASS, CI: ..."
+                        status_parts.append(f"{ci_label} CI: {ci_summary}")
 
-                    base_html = f"Status: {', '.join(status_parts)}" if status_parts else ""
+                    if self.pr.review_decision == 'APPROVED':
+                        status_parts.append("Review: ✅ Approved")
+                    elif self.pr.review_decision == 'CHANGES_REQUESTED':
+                        status_parts.append("Review: 🔴 Changes Requested")
+
+                    if self.pr.unresolved_conversations > 0:
+                        status_parts.append(f"💬 Unresolved: {self.pr.unresolved_conversations}")
+
+                    base_html = f"{', '.join(status_parts)}" if status_parts else ""
 
                     # Generate unique ID for this checks div
                     checks_id = f"checks_{uuid.uuid4().hex[:8]}"
@@ -652,8 +673,8 @@ class PRStatusNode(BranchNode):
                         " "
                         + _html_toggle_span(
                             target_id=checks_id,
-                            show_text="▶ Show checks",
-                            hide_text="▼ Hide checks",
+                            show_text="▶ Details",
+                            hide_text="▼ Hide details",
                         )
                         + f'<div id="{checks_id}" style="display: none; margin-left: 20px; margin-top: 5px;">{table_html}</div>'
                     )
@@ -694,7 +715,7 @@ class FailedTestNode(BranchNode):
     def _format_content(self) -> str:
         if not self.failed_check:
             return ""
-        # Use red X for required failures, plain black X for non-required
+        # Keep the per-check failure icon (requested): required gets ❌, optional gets ✗.
         icon = "❌" if self.failed_check.is_required else "✗"
         required_marker = " [REQUIRED]" if self.failed_check.is_required else ""
         error_indicator = " [Error details available]" if self.failed_check.error_summary else ""
@@ -703,9 +724,9 @@ class FailedTestNode(BranchNode):
     def _format_html_content(self) -> str:
         if not self.failed_check:
             return ""
-        # Use red X for required failures, plain black X for non-required
+        # Keep the per-check failure icon (requested): required gets ❌, optional gets ✗.
         icon = "❌" if self.failed_check.is_required else '<span style="color: #000;">✗</span>'
-        required_marker = ' <span style="color: #cc0000; font-weight: bold;">[REQUIRED]</span>' if self.failed_check.is_required else ""
+        required_marker = ' <span style="color: #d73a49; font-weight: 700;">[REQUIRED]</span>' if self.failed_check.is_required else ""
 
         # Create unique ID for this error details section
         detail_id = hashlib.md5(f"{self.failed_check.name}{self.failed_check.job_url}".encode()).hexdigest()[:8]
@@ -780,7 +801,7 @@ class RunningCheckNode(BranchNode):
     def _format_html_content(self) -> str:
         if not self.check_name:
             return ""
-        required_marker = ' <span style="color: #0066cc; font-weight: bold;">[REQUIRED]</span>' if self.is_required else ""
+        required_marker = ' <span style="color: #d73a49; font-weight: 700;">[REQUIRED]</span>' if self.is_required else ""
         time_info = f' <span style="color: #666; font-size: 11px;">({self.elapsed_time})</span>' if self.elapsed_time else ""
         if self.check_url:
             return f'⏳ <a href="{self.check_url}" target="_blank">{self.check_name}</a>{required_marker}{time_info}'
@@ -1055,86 +1076,36 @@ def generate_html(root: BranchNode) -> str:
     utc_str = now_utc.strftime('%Y-%m-%d %H:%M:%S UTC')
     pdt_str = now_pdt.strftime('%Y-%m-%d %H:%M:%S %Z')
 
-    html = f"""<!DOCTYPE html>
-<html>
-<head>
-    <meta charset="UTF-8">
-    <title>Dynamo Branch Status</title>
-    <link rel="icon" type="image/svg+xml" href="favicon.svg">
-    <style>
-        body {{
-            font-family: 'Courier New', monospace;
-            margin: 20px;
-            background-color: #ffffff;
-            color: #000000;
-            font-size: 13px;
-            line-height: 1.4;
-        }}
-        a {{ color: #0000ee; text-decoration: none; }}
-        a:hover {{ text-decoration: underline; }}
-        .repo-name {{ font-weight: bold; margin-top: 10px; }}
-        .current {{ font-weight: bold; }}
-        .merged-branch {{ color: #999999; }}
-        .indent {{ margin-left: 20px; }}
-        .error {{ color: #cc0000; }}
-        .timestamp {{ color: #666666; font-size: 12px; margin-bottom: 10px; }}
-        
-        /* Shared tooltip styling (single source of truth in html_ui.py) */
-        {GH_STATUS_TOOLTIP_CSS}
-    </style>
-    <script>
-      // Copied from show_commit_history: button uses data-clipboard-text and swaps innerHTML briefly.
-      function copyFromClipboardAttr(button) {{
-        var text = button.getAttribute('data-clipboard-text');
-        if (!text) return;
-
-        // Fallback for non-HTTPS contexts (file:// protocol)
-        var textArea = document.createElement('textarea');
-        textArea.value = text;
-        textArea.style.position = 'fixed';
-        textArea.style.left = '-999999px';
-        textArea.style.top = '-999999px';
-        document.body.appendChild(textArea);
-        textArea.focus();
-        textArea.select();
-
-        try {{
-          var successful = document.execCommand('copy');
-          document.body.removeChild(textArea);
-
-          if (successful) {{
-            var originalHTML = button.innerHTML;
-            button.innerHTML = '{_COPY_ICON_SVG}<span style="margin-left: 6px;">Copied!</span>';
-            setTimeout(function() {{
-              button.innerHTML = originalHTML;
-            }}, 2000);
-          }}
-        }} catch (err) {{
-          document.body.removeChild(textArea);
-        }}
-      }}
-      
-      /* Shared tooltip JS (single source of truth in html_ui.py) */
-      {GH_STATUS_TOOLTIP_JS}
-    </script>
-</head>
-<body>
-<pre><span class="timestamp">Generated: {pdt_str} / {utc_str}</span>
-
-"""
-
-    # Render all children (skip root)
+    # Render all children (skip root) into a single <pre> block payload.
+    rendered_lines: list[str] = []
     for i, child in enumerate(root.children):
         is_last = i == len(root.children) - 1
-        lines = child.render_html(prefix="", is_last=is_last, is_root=True)
-        html += "\n".join(lines) + "\n\n"
+        rendered_lines.extend(child.render_html(prefix="", is_last=is_last, is_root=True))
+        rendered_lines.append("")  # spacing between repos
+    tree_html = "\n".join(rendered_lines).rstrip() + "\n"
 
-    html += """</pre>
-</body>
-</html>
-"""
+    if not HAS_JINJA2:
+        raise RuntimeError(
+            "Jinja2 is required for --html output. Install with: pip install jinja2"
+        )
 
-    return html
+    # Help type-checkers: these are set only when HAS_JINJA2 is True.
+    assert Environment is not None
+    assert FileSystemLoader is not None
+    assert select_autoescape is not None
+
+    env = Environment(
+        loader=FileSystemLoader(str(_THIS_DIR)),
+        autoescape=select_autoescape(["html", "xml"]),
+    )
+    template = env.get_template("show_dynamo_branches.j2")
+    return template.render(
+        generated_time=pdt_str,
+        gh_status_tooltip_css=GH_STATUS_TOOLTIP_CSS,
+        gh_status_tooltip_js=GH_STATUS_TOOLTIP_JS,
+        copy_icon_svg=_COPY_ICON_SVG,
+        tree_html=tree_html,
+    )
 
 
 def compute_state_hash(root: BranchNode) -> str:

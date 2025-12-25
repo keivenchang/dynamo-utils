@@ -1,0 +1,158 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>Dynamo Branch Status</title>
+  <link rel="icon" type="image/svg+xml" href="favicon.svg">
+  <style>
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif;
+      margin: 10px;
+      line-height: 1.3;
+      background-color: #f6f8fa;
+      font-size: 13px;
+      color: #24292f;
+    }
+    .header {
+      background-color: #24292f;
+      color: white;
+      padding: 10px 15px;
+      border-radius: 4px;
+      margin-bottom: 10px;
+    }
+    .header h1 {
+      margin: 0;
+      font-size: 18px;
+    }
+    .timestamp {
+      margin: 5px 0 0 0;
+      opacity: 0.9;
+      font-size: 12px;
+    }
+    pre {
+      background-color: #ffffff;
+      border: 1px solid #d0d7de;
+      border-radius: 4px;
+      padding: 12px;
+      overflow: auto;
+      font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
+      font-size: 13px;
+      line-height: 1.4;
+    }
+    a { color: #0969da; text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    .repo-name { font-weight: bold; margin-top: 10px; }
+    .current { font-weight: bold; }
+    .merged-branch { color: #999999; }
+    .indent { margin-left: 20px; }
+    .error { color: #d73a49; }
+
+    /* Status indicator pill (same look as show_commit_history.j2) */
+    .status-indicator {
+      display: inline-block;
+      padding: 2px 8px;
+      border-radius: 4px;
+      margin-right: 6px;
+      vertical-align: middle;
+      font-size: 10px;
+      font-weight: 600;
+      color: white;
+      text-transform: uppercase;
+      letter-spacing: 0.3px;
+      border: 1px solid transparent;
+    }
+    .status-success {
+      background-color: #2da44e;
+      border-color: #1f7a37;
+    }
+    .status-failed {
+      background-color: #d73a49;
+      border-color: #b62d3b;
+    }
+
+    /* Shared tooltip styling (single source of truth in html_ui.py) */
+    {{ gh_status_tooltip_css | safe }}
+  </style>
+  <script>
+    function copyFromClipboardAttr(button) {
+      var text = button.getAttribute('data-clipboard-text');
+      if (!text) return;
+
+      // Fallback for non-HTTPS contexts (file:// protocol)
+      var textArea = document.createElement('textarea');
+      textArea.value = text;
+      textArea.style.position = 'fixed';
+      textArea.style.left = '-999999px';
+      textArea.style.top = '-999999px';
+      document.body.appendChild(textArea);
+      textArea.focus();
+      textArea.select();
+
+      try {
+        var successful = document.execCommand('copy');
+        document.body.removeChild(textArea);
+
+        if (successful) {
+          var originalHTML = button.innerHTML;
+          button.innerHTML = '{{ copy_icon_svg | safe }}<span style="margin-left: 6px;">Copied!</span>';
+          setTimeout(function() {
+            button.innerHTML = originalHTML;
+          }, 2000);
+        }
+      } catch (err) {
+        document.body.removeChild(textArea);
+      }
+    }
+
+    {{ gh_status_tooltip_js | safe }}
+
+    // Calculate and display page age (same behavior as show_commit_history)
+    (function() {
+      const timeStr = '{{ generated_time }}';
+      const timeStrFixed = timeStr.replace(' PST', '-08:00').replace(' PDT', '-07:00');
+      const generatedTime = new Date(timeStrFixed);
+
+      function updatePageAge() {
+        const ageEl = document.getElementById('page-age');
+        if (!ageEl) return;
+        if (isNaN(generatedTime.getTime())) {
+          ageEl.textContent = '(invalid date)';
+          return;
+        }
+        const now = new Date();
+        const ageMs = now - generatedTime;
+        const seconds = Math.floor(ageMs / 1000);
+        const minutes = Math.floor(seconds / 60);
+        const hours = Math.floor(minutes / 60);
+        const days = Math.floor(hours / 24);
+
+        let ageText = '';
+        if (days > 0) {
+          ageText = `(${days} day${days > 1 ? 's' : ''} ${hours % 24} hour${(hours % 24) !== 1 ? 's' : ''} old)`;
+        } else if (hours > 0) {
+          ageText = `(${hours} hour${hours > 1 ? 's' : ''} ${minutes % 60} min old)`;
+        } else if (minutes > 0) {
+          ageText = `(${minutes} minute${minutes > 1 ? 's' : ''} old)`;
+        } else {
+          ageText = `(${seconds} second${seconds !== 1 ? 's' : ''} old)`;
+        }
+
+        ageEl.textContent = ageText;
+      }
+
+      updatePageAge();
+      setInterval(updatePageAge, 3000);
+    })();
+  </script>
+</head>
+<body>
+  <div class="header">
+    <h1>Dynamo Branch Status</h1>
+    <p class="timestamp">Page generated: {{ generated_time }} <span id="page-age" style="color: #ffa657;"></span></p>
+  </div>
+
+  <pre>{{ tree_html | safe }}</pre>
+</body>
+</html>
+
+
