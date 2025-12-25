@@ -1224,6 +1224,9 @@ class PRInfo:
     has_conflicts: bool = False
     conflict_message: Optional[str] = None
     blocking_message: Optional[str] = None
+    # Names of required status checks for this PR's base branch (from GitHub branch protection).
+    # Used to label checks as REQUIRED vs optional in the UI.
+    required_checks: List[str] = field(default_factory=list)
     failed_checks: List['FailedCheck'] = field(default_factory=list)
     running_checks: List['RunningCheck'] = field(default_factory=list)
     rerun_url: Optional[str] = None
@@ -2496,6 +2499,7 @@ class GitHubAPIClient:
                         has_conflicts=has_conflicts,
                         conflict_message=conflict_message,
                         blocking_message=blocking_message,
+                        required_checks=sorted(list(required_checks or set())),
                         failed_checks=failed_checks,
                         running_checks=running_checks,
                         rerun_url=rerun_url

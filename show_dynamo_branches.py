@@ -389,17 +389,35 @@ class PRStatusNode(BranchNode):
                     table_html = '<table style="border-collapse: collapse; font-size: 11px; margin-top: 5px;">'
                     table_html += '<tr style="background-color: #e8eaed;"><th style="text-align: left; padding: 4px 8px; border: 1px solid #d0d0d0;">Check Name</th><th style="text-align: left; padding: 4px 8px; border: 1px solid #d0d0d0;">Status</th><th style="text-align: left; padding: 4px 8px; border: 1px solid #d0d0d0;">Duration</th><th style="text-align: left; padding: 4px 8px; border: 1px solid #d0d0d0;">Details</th></tr>'
 
+                    # Determine which checks are required (branch protection).
+                    # Prefer the full required_checks list from PRInfo; fall back to "is_required" flags on known checks.
+                    required_set = set(getattr(self.pr, "required_checks", []) or [])
+                    if not required_set:
+                        try:
+                            required_set = {
+                                c.name
+                                for c in (list(getattr(self.pr, "failed_checks", []) or []) + list(getattr(self.pr, "running_checks", []) or []))
+                                if getattr(c, "is_required", False)
+                            }
+                        except Exception:
+                            required_set = set()
+
                     for line in lines:
                         if not line.strip():
                             continue
                         # Split by tabs (gh pr checks uses tabs)
                         parts = line.split('\t')
                         if len(parts) >= 3:
-                            name = html_module.escape(parts[0])
+                            name_raw = parts[0]
+                            name = html_module.escape(name_raw)
                             status = html_module.escape(parts[1])
                             duration = html_module.escape(parts[2]) if len(parts) > 2 else ''
                             url = parts[3] if len(parts) > 3 else ''
                             description = html_module.escape(parts[4]) if len(parts) > 4 else ''
+
+                            # Mark required checks (branch protection) inline.
+                            if name_raw in required_set:
+                                name += ' <span style="color: #cc0000; font-weight: bold;">[REQUIRED]</span>'
 
                             # Color code the status
                             status_color = '#059669' if status == 'pass' else '#dc2626' if status == 'fail' else '#6b7280'
