@@ -23,7 +23,7 @@ import subprocess
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Set
 
 # Import utilities from common module
 from common import (
@@ -61,6 +61,37 @@ STATUS_UNKNOWN = 'unknown'
 STATUS_SUCCESS = 'success'
 STATUS_FAILED = 'failed'
 STATUS_BUILDING = 'building'
+
+def _normalize_check_name(name: str) -> str:
+    """Normalize check names for robust comparison."""
+    return re.sub(r"\s+", " ", (name or "").strip().lower())
+
+
+def _is_required_check_name(check_name: str, required_names_normalized: Set[str]) -> bool:
+    """Classify whether a check run is required (blocking) vs optional (informational).
+
+    Primary source of truth: branch-protection required checks from `gh pr checks --required`,
+    passed in via `required_names_normalized`.
+
+    Fallback/overrides: hard-coded patterns for known blocking checks (user-provided).
+    """
+    name_norm = _normalize_check_name(check_name)
+    if not name_norm:
+        return False
+    if name_norm in required_names_normalized:
+        return True
+
+    # Fallback patterns (case-insensitive via normalized string).
+    # These cover common "must pass" checks even when we can't resolve PR required checks.
+    mandatory_patterns = [
+        r"^build and test - dynamo$",
+        r"check for broken markdown links",
+        r"docs link",  # e.g. "Docs Link check"
+        r"\blychee\b",
+        r"\b(vllm|sglang|trtllm)\s*\(amd64\)\b",
+        r"rust[- ]pre[- ]merge",
+    ]
+    return any(re.search(pat, name_norm) for pat in mandatory_patterns)
 
 
 class CommitHistoryGenerator:
@@ -181,25 +212,42 @@ class CommitHistoryGenerator:
             commits = list(repo.iter_commits('HEAD', max_count=max_commits))
             original_head = repo.head.commit.hexsha
 
-            # Pre-fetch merge dates for all commits in batch (if HTML mode)
-            pr_to_merge_date = {}
-            if html_output and not self.skip_gitlab_fetch:
-                # Collect all PR numbers from commit messages
-                pr_numbers = []
+            # Pre-fetch PR metadata for all commits in batch (HTML mode)
+            pr_to_merge_date: Dict[int, Optional[str]] = {}
+            sha_to_pr_number: Dict[str, int] = {}
+            pr_to_required_checks: Dict[int, List[str]] = {}
+            pr_numbers: List[int] = []
+            if html_output:
+                # Collect all PR numbers from commit messages (works for both MR and PR format)
                 for commit in commits:
                     message = commit.message.strip().split('\n')[0]
-                    pr_num = GitLabAPIClient.parse_mr_number_from_message(message)  # Works for both MR and PR format
+                    pr_num = GitLabAPIClient.parse_mr_number_from_message(message)
                     if pr_num:
                         pr_numbers.append(pr_num)
+                        sha_to_pr_number[commit.hexsha] = pr_num
 
-                # Batch fetch merge dates for all PRs (GitHub)
-                if pr_numbers:
+                if pr_numbers and not self.skip_gitlab_fetch:
+                    # Batch fetch merge dates for all PRs (GitHub)
                     self.logger.info(f"Fetching merge dates for {len(pr_numbers)} PRs...")
                     pr_to_merge_date = self.github_client.get_cached_pr_merge_dates(
                         pr_numbers,
                         cache_file="github_pr_merge_dates.json"
                     )
                     self.logger.info(f"Got merge dates for {sum(1 for v in pr_to_merge_date.values() if v)} PRs")
+
+                if pr_numbers:
+                    # Batch fetch required checks for all PRs (branch protection required checks).
+                    # If skip_gitlab_fetch=True, we still read from cache (skip_fetch=True).
+                    self.logger.info(f"Fetching required checks for {len(pr_numbers)} PRs...")
+                    pr_to_required_checks = self.github_client.get_cached_required_checks(
+                        pr_numbers,
+                        owner="ai-dynamo",
+                        repo="dynamo",
+                        cache_file="github_required_checks.json",
+                        skip_fetch=self.skip_gitlab_fetch,
+                    )
+                    self.logger.info("Got required-checks metadata for "
+                                     f"{sum(1 for v in pr_to_required_checks.values() if v)}/{len(set(pr_numbers))} PRs")
 
             # Collect commit data
             commit_data = []
@@ -391,7 +439,13 @@ class CommitHistoryGenerator:
                     else:
                         output_path = Path("commit-history.html")
 
-                html_content = self._generate_commit_history_html(commit_data, logs_dir, output_path)
+                html_content = self._generate_commit_history_html(
+                    commit_data,
+                    logs_dir,
+                    output_path,
+                    sha_to_pr_number=sha_to_pr_number,
+                    pr_to_required_checks=pr_to_required_checks,
+                )
                 output_path.parent.mkdir(parents=True, exist_ok=True)
                 output_path.write_text(html_content)
                 print(f"\nHTML report generated: {output_path}")
@@ -420,13 +474,22 @@ class CommitHistoryGenerator:
             self.logger.error(f"Failed to get commit history: {e}")
             return 1
 
-    def _generate_commit_history_html(self, commit_data: List[dict], logs_dir: Path, output_path: Path) -> str:
+    def _generate_commit_history_html(
+        self,
+        commit_data: List[dict],
+        logs_dir: Path,
+        output_path: Path,
+        sha_to_pr_number: Optional[Dict[str, int]] = None,
+        pr_to_required_checks: Optional[Dict[int, List[str]]] = None,
+    ) -> str:
         """Generate HTML report for commit history with Docker image detection
 
         Args:
             commit_data: List of commit dictionaries with sha_short, sha_full, composite_sha, date, author, message
             logs_dir: Path to logs directory for build reports
             output_path: Path where the HTML file will be written (used for relative path calculation)
+            sha_to_pr_number: Mapping full commit SHA -> PR number (if known)
+            pr_to_required_checks: Mapping PR number -> list of required check names (if known)
 
         Returns:
             HTML content as string
@@ -459,6 +522,23 @@ class CommitHistoryGenerator:
             cache_file="github_actions_status.json",
             skip_fetch=self.skip_gitlab_fetch  # Reuse the skip_fetch flag
         )
+
+        # Annotate GitHub check runs with "is_required" using PR required-checks + fallback patterns.
+        sha_to_pr_number = sha_to_pr_number or {}
+        pr_to_required_checks = pr_to_required_checks or {}
+        for sha_full, gha in (github_actions_status or {}).items():
+            if not gha or not gha.get('check_runs'):
+                continue
+            pr_number = sha_to_pr_number.get(sha_full)
+            required_list = pr_to_required_checks.get(pr_number, []) if pr_number else []
+            required_norm = {_normalize_check_name(n) for n in (required_list or []) if n}
+            for check in gha.get('check_runs', []):
+                try:
+                    check_name = check.get('name', '')
+                    check['is_required'] = _is_required_check_name(check_name, required_norm)
+                except Exception:
+                    # Best-effort; never break page generation.
+                    check['is_required'] = False
 
         # Process GitLab images: deduplicate and format
         gitlab_images = {}
@@ -519,20 +599,17 @@ class CommitHistoryGenerator:
             
             gitlab_images[sha_full] = formatted_imgs
         
-        # Process commit messages for PR links and assign colors
-        bg_colors = [
-            '#e8e8e8',  # Light gray
-            '#d4d4d4',  # Medium-light gray
-            '#c0c0c0',  # Medium gray
-            '#acacac',  # Medium-dark gray
-            '#989898',  # Dark gray
-            '#e0e0e0',  # Very light gray
-            '#cccccc',  # Light-medium gray
-            '#b4b4b4',  # Medium-darker gray
-        ]
-
-        # Build deterministic CDS-to-color mapping
-        # Same CDS always gets same color across all HTML generations
+        # Process commit messages for PR links and assign CDS colors
+        #
+        # CDS badge colors: alternate dark/light for high contrast. We do this per *unique CDS*
+        # encountered in the commit list, so the page alternates visually while keeping a stable
+        # color for each CDS within the page.
+        # Softer greys (requested): alternating light grey / dark grey.
+        # Keep text readable (white on dark, dark on light).
+        dark_cds_bg = "#4b5563"   # gray-600
+        light_cds_bg = "#e5e7eb"  # gray-200
+        dark_cds_fg = "#ffffff"
+        light_cds_fg = "#111827"
         unique_cds = []
         seen_cds = set()
         for commit in commit_data:
@@ -541,9 +618,15 @@ class CommitHistoryGenerator:
                 unique_cds.append(cds)
                 seen_cds.add(cds)
 
-        cds_to_color = {}
+        cds_to_color: Dict[str, str] = {}
+        cds_to_text_color: Dict[str, str] = {}
         for i, cds in enumerate(unique_cds):
-            cds_to_color[cds] = bg_colors[i % len(bg_colors)]
+            if i % 2 == 0:
+                cds_to_color[cds] = dark_cds_bg
+                cds_to_text_color[cds] = dark_cds_fg
+            else:
+                cds_to_color[cds] = light_cds_bg
+                cds_to_text_color[cds] = light_cds_fg
 
         for commit in commit_data:
             # Handle PR links
@@ -562,6 +645,7 @@ class CommitHistoryGenerator:
             # Assign color deterministically based on Composite Docker SHA (CDS)
             composite_sha = commit['composite_sha']
             commit['composite_bg_color'] = cds_to_color[composite_sha]
+            commit['composite_text_color'] = cds_to_text_color[composite_sha]
 
         # Compute fork-points for the last 5 release branches and annotate matching commits.
         # This helps identify "cut points" for release lines (e.g., release/v0.8.0).
@@ -740,31 +824,47 @@ class CommitHistoryGenerator:
             else:
                 gha_other_count += 1
 
-        # Calculate per-commit check statistics for donut charts
+        # Calculate per-commit check statistics (includes required vs optional failure split)
         gha_per_commit_stats = {}
         for sha_full in [c['sha_full'] for c in commit_data]:
             gha_status = github_actions_status.get(sha_full)
             if not gha_status or not gha_status.get('check_runs'):
                 gha_per_commit_stats[sha_full] = {
                     'success': 0,
-                    'failure': 0,
-                    'in_progress': 0,
+                    'failure_required': 0,
+                    'failure_optional': 0,
+                    'in_progress_required': 0,
+                    'in_progress_optional': 0,
                     'other': 0,
                     'total': 0
                 }
                 continue
 
-            stats = {'success': 0, 'failure': 0, 'in_progress': 0, 'other': 0}
+            stats = {
+                'success': 0,
+                'failure_required': 0,
+                'failure_optional': 0,
+                'in_progress_required': 0,
+                'in_progress_optional': 0,
+                'other': 0,
+            }
             for check in gha_status.get('check_runs', []):
                 conclusion = check.get('conclusion')
                 status = check.get('status')
+                is_required = bool(check.get('is_required', False))
 
                 if conclusion == 'success':
                     stats['success'] += 1
                 elif conclusion in ('failure', 'timed_out', 'action_required'):
-                    stats['failure'] += 1
+                    if is_required:
+                        stats['failure_required'] += 1
+                    else:
+                        stats['failure_optional'] += 1
                 elif status in ('queued', 'in_progress'):
-                    stats['in_progress'] += 1
+                    if is_required:
+                        stats['in_progress_required'] += 1
+                    else:
+                        stats['in_progress_optional'] += 1
                 else:
                     stats['other'] += 1
 

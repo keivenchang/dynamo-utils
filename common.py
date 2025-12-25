@@ -1725,6 +1725,100 @@ class GitHubAPIClient:
             # If we can't get required checks, return empty set
             return set()
 
+    def get_cached_required_checks(
+        self,
+        pr_numbers: List[int],
+        owner: str = "ai-dynamo",
+        repo: str = "dynamo",
+        cache_file: str = "github_required_checks.json",
+        skip_fetch: bool = False,
+    ) -> Dict[int, List[str]]:
+        """Get required check names for a list of PRs, with a persistent cache.
+
+        Uses `gh pr checks --required` which reflects branch protection "required status checks".
+
+        Cache file format (in dynamo-utils cache dir):
+            {
+              "1234": ["Build and Test - dynamo", "lychee", ...],
+              "5678": [],
+              ...
+            }
+
+        Args:
+            pr_numbers: PR numbers to query
+            owner: GitHub org/user
+            repo: GitHub repo
+            cache_file: Cache file name (stored via resolve_cache_path)
+            skip_fetch: If True, do not call gh; return cached values only
+
+        Returns:
+            Mapping PR number -> list of required check names (may be empty)
+        """
+        from concurrent.futures import ThreadPoolExecutor
+
+        cache_path = resolve_cache_path(str(cache_file))
+        cache: Dict[str, List[str]] = {}
+        if cache_path.exists():
+            try:
+                cache = json.loads(cache_path.read_text()) or {}
+            except Exception:
+                cache = {}
+
+        # Normalize input & preserve order-ish
+        pr_numbers_unique: List[int] = []
+        seen = set()
+        for n in pr_numbers:
+            if n is None:
+                continue
+            try:
+                n_int = int(n)
+            except Exception:
+                continue
+            if n_int not in seen:
+                seen.add(n_int)
+                pr_numbers_unique.append(n_int)
+
+        result: Dict[int, List[str]] = {}
+        prs_to_fetch: List[int] = []
+
+        for pr in pr_numbers_unique:
+            key = str(pr)
+            if key in cache:
+                result[pr] = cache.get(key, []) or []
+            else:
+                if skip_fetch:
+                    result[pr] = []
+                else:
+                    prs_to_fetch.append(pr)
+
+        cache_updated = False
+        if prs_to_fetch:
+            def fetch_one(pr: int) -> tuple[int, List[str]]:
+                required = self.get_required_checks(owner, repo, pr) or set()
+                # Stable, deterministic ordering
+                return pr, sorted(required)
+
+            # Small number of workers: each call shells out to `gh`.
+            with ThreadPoolExecutor(max_workers=8) as executor:
+                futures = [executor.submit(fetch_one, pr) for pr in prs_to_fetch]
+                for future in futures:
+                    try:
+                        pr, required_list = future.result()
+                    except Exception:
+                        continue
+                    cache[str(pr)] = required_list
+                    result[pr] = required_list
+                    cache_updated = True
+
+        if cache_updated:
+            try:
+                cache_path.parent.mkdir(parents=True, exist_ok=True)
+                cache_path.write_text(json.dumps(cache, indent=2))
+            except Exception:
+                pass
+
+        return result
+
     def _extract_pytest_summary(self, all_lines: list) -> Optional[str]:
         """Extract pytest short test summary from log lines.
 
