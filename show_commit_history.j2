@@ -596,18 +596,18 @@ Legend & Help
 {%- endfor -%}
 {%- endif -%}
 {%- set tooltip_html_parts = [] -%}
-{%- if passed_jobs -%}{%- set _ = tooltip_html_parts.append('<strong style="color: #2da44e;">Passed:</strong> ' + passed_jobs|join(', ')) -%}{%- endif -%}
-{%- if failed_required_jobs -%}{%- set _ = tooltip_html_parts.append('<strong style="color: #d73a49;">Failed (required):</strong> ' + failed_required_jobs|join(', ')) -%}{%- endif -%}
-{%- if failed_optional_jobs -%}{%- set _ = tooltip_html_parts.append('<strong style="color: #f66a0a;">Failed (optional):</strong> ' + failed_optional_jobs|join(', ')) -%}{%- endif -%}
-{%- if progress_required_jobs -%}{%- set _ = tooltip_html_parts.append('<strong style="color: #dbab09;">In Progress (required):</strong> ' + progress_required_jobs|join(', ')) -%}{%- endif -%}
-{%- if progress_optional_jobs -%}{%- set _ = tooltip_html_parts.append('<strong style="color: #8c959f;">In Progress (optional):</strong> ' + progress_optional_jobs|join(', ')) -%}{%- endif -%}
-{%- if other_jobs -%}{%- set _ = tooltip_html_parts.append('<strong style="color: #8c959f;">Cancelled/Pending:</strong> ' + other_jobs|join(', ')) -%}{%- endif -%}
+{%- if passed_jobs -%}{%- set _ = tooltip_html_parts.append('<strong style="color: #2da44e;">✓ Passed:</strong> ' + passed_jobs|join(', ')) -%}{%- endif -%}
+{%- if failed_required_jobs -%}{%- set _ = tooltip_html_parts.append('<strong style="color: #d73a49;">✗ Failed (required):</strong> ' + failed_required_jobs|join(', ')) -%}{%- endif -%}
+{%- if failed_optional_jobs -%}{%- set _ = tooltip_html_parts.append('<strong style="color: #f59e0b;">⚠ Failed (optional):</strong> ' + failed_optional_jobs|join(', ')) -%}{%- endif -%}
+{%- if progress_required_jobs -%}{%- set _ = tooltip_html_parts.append('<strong style="color: #dbab09;">⏳ In Progress (required):</strong> ' + progress_required_jobs|join(', ')) -%}{%- endif -%}
+{%- if progress_optional_jobs -%}{%- set _ = tooltip_html_parts.append('<strong style="color: #8c959f;">⏳ In Progress (optional):</strong> ' + progress_optional_jobs|join(', ')) -%}{%- endif -%}
+{%- if other_jobs -%}{%- set _ = tooltip_html_parts.append('<strong style="color: #8c959f;">⏸ Cancelled/Pending:</strong> ' + other_jobs|join(', ')) -%}{%- endif -%}
 {%- set tooltip_html = tooltip_html_parts|join('<br>') -%}
 <span class="gh-status-tooltip" style="margin-left: 4px;">
 <span style="white-space: nowrap; font-weight: 600; font-size: 11px;">
 {%- if commit_stats.success > 0 -%}<span style="color: #2da44e;">{{ commit_stats.success }}✓</span>{%- endif -%}
-{%- if commit_stats.failure_required > 0 -%}{%- if commit_stats.success > 0 %} {% endif -%}<span style="color: #d73a49;" title="Required failures">{{ commit_stats.failure_required }}✗</span>{%- endif -%}
-{%- if commit_stats.failure_optional > 0 -%}{%- if commit_stats.success > 0 or commit_stats.failure_required > 0 %} {% endif -%}<span style="color: #f66a0a;" title="Optional failures">{{ commit_stats.failure_optional }}✗</span>{%- endif -%}
+{%- if commit_stats.failure_required > 0 -%}{%- if commit_stats.success > 0 %} {% endif -%}<span style="color: #d73a49; font-weight: 800; font-size: 12px;" title="Required failures">{{ commit_stats.failure_required }}<span style="display: inline-flex; align-items: center; justify-content: center; width: 12px; height: 12px; margin-left: 2px; border-radius: 999px; background-color: #d73a49; color: #ffffff; font-size: 10px; font-weight: 900; line-height: 1;">✗</span></span>{%- endif -%}
+{%- if commit_stats.failure_optional > 0 -%}{%- if commit_stats.success > 0 or commit_stats.failure_required > 0 %} {% endif -%}<span style="color: #f59e0b;" title="Optional failures">{{ commit_stats.failure_optional }}<span style="font-size: 13px; font-weight: 900; line-height: 1; margin-left: 2px;">⚠</span></span>{%- endif -%}
 {%- set inprog_total = commit_stats.in_progress_required + commit_stats.in_progress_optional -%}
 {%- if inprog_total > 0 -%}{%- if commit_stats.success > 0 or commit_stats.failure_required > 0 or commit_stats.failure_optional > 0 %} {% endif -%}<span style="color: #dbab09;">{{ inprog_total }}⏳</span>{%- endif -%}
 {%- if commit_stats.other > 0 -%}{%- if commit_stats.success > 0 or commit_stats.failure_required > 0 or commit_stats.failure_optional > 0 or inprog_total > 0 %} {% endif -%}<span style="color: #8c959f;">{{ commit_stats.other }}⏸</span>{%- endif -%}
