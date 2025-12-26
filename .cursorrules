@@ -33,6 +33,7 @@ TABLE OF CONTENTS
   3.5 Deployment Modes
     3.5.1 Aggregated vs Disaggregated
     3.5.2 Metrics Server Configuration
+    3.5.3 Prometheus Metrics (VLLM vs SGLANG vs TRTLLM)
 
 4. UNIVERSAL CODE STYLE
   4.1 Emojis
@@ -134,15 +135,6 @@ DO NOT use these BS words in docs/comments:
 2. BEST PRACTICES
 =============================================================================
 
-## 2.0 Git Commit Practices
-- In dynamo-utils repository: No --signoff required for commits
-- In dynamo* repositories (dynamo1, dynamo2, dynamo3, etc.): ALWAYS use --signoff for commits
-- In /workspace directory: ALWAYS use --signoff for commits
-- NEVER skip --signoff in dynamo* or /workspace directories
-- **CONFLICT RESOLUTION**: After resolving merge conflicts in a file, you MUST run `git add <file>` to mark it as resolved
-  - This applies during rebase, merge, cherry-pick operations
-  - Forgetting to `git add` after conflict resolution will cause the operation to fail
-
 ## 2.1 Security
 - Never commit API keys or secrets
 - Use environment variables for config
@@ -168,6 +160,7 @@ DO NOT use these BS words in docs/comments:
   - cmd1; cmd2; cmd3
   - (cd dir1 && cargo fmt); (cd dir2 && cargo fmt)
 - Reduces latency and improves efficiency
+- Be careful with shell quoting in long one-liners (especially nested quotes). Prefer simpler, verifiable commands (or write a small script) over clever quoting.
 
 ### 2.3.2 Long-Running Programs
 - For long-running programs (vllm, sglang, trtllm), use tee to log output to a file and background it
@@ -206,6 +199,8 @@ command 2>&1 | tee /tmp/output.txt &
 - `docker ps -a > /tmp/containers.txt` ✅ (NOT `docker ps -a | grep something` ❌)
 - `cargo test > /tmp/test.txt 2>&1 &` ✅ (NOT `cargo test | grep PASS` ❌)
 - `kubectl get pods > /tmp/pods.txt` ✅ (NOT `kubectl get pods | head -20` ❌)
+- Don’t assume tools exist (e.g. `rg`). Prefer Cursor search/`grep`; if an external binary is needed, check for it first (`command -v rg`).
+- Cron path edits: `crontab -l` often contains literal strings like `$HOME/...` (not expanded). When replacing paths, match the literal text, then verify with `crontab -l | grep`.
 
 When reviewing saved logs, filter out unimportant cargo test output (on the saved file, not the live command output):
 - Example: `grep -v -E "running 0 tests|test result: ok\\. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out|tower_http::trace::on_failure:" /tmp/test.txt`
@@ -217,9 +212,12 @@ When reviewing saved logs, filter out unimportant cargo test output (on the save
 
 ### 2.4.1 Virtualenv Activation (Host Machine Only)
 - At the start of each context, check if on host machine (not in Docker)
-- If on host: source ~/nvidia/venv/bin/activate
+- If on host: source ~/nvidia/venv/bin/activate, but if inside Docker, it's already activated.
 - This ensures pre-commit and other Python tools are available
 - Detection: Check if running in container by looking for /.dockerenv or checking hostname
+- Path mapping (same repo, different mount points):
+  - Host machine: `~/nvidia/dynamo-utils`
+  - Inside dev container: `/workspace/_` (this is the host repo bind-mounted into the container)
 
 ### 2.4.2 Docker Environment
 - Multi-stage builds for smaller images
@@ -228,21 +226,6 @@ When reviewing saved logs, filter out unimportant cargo test output (on the save
 - Pin dependency versions
 - When one script delegates to another (e.g. build wrappers), do not re-derive values in the callee; pass through the computed values for parity.
 - For BuildKit features, remember named contexts (`--build-context name=path`): missing passthrough can cause `COPY --from=<name>` to try pulling an image.
-- DO NOT use BS jargon: intuitive, comprehensive, optimal, seamless, next-generation, holistic, cutting-edge
-
-## 2.5 Agent Session Learnings (avoid repeat mistakes)
-
-### Mistakes I made repeatedly (don’t do this again)
-- **Don’t suggest committing unless the user explicitly says to commit.**
-- **Cron path edits**: `crontab -l` often contains literal strings like `$HOME/...` (not expanded). When replacing paths, match the literal text, then verify with `crontab -l | grep`.
-- **Don’t assume tools exist** (e.g., `rg`). Prefer Cursor search/`grep`; if an external binary is needed, check for it first.
-- **Be careful with shell quoting** in long one-liners (especially nested quotes). Prefer simpler, verifiable commands.
-- **When moving scripts**, preserve history with `git mv`, and ensure executable bits survive (`chmod +x`), then run a quick smoke test.
-
-### Things I did right (repeat these patterns)
-- **Single source of truth**: put shared HTML/CSS/JS in a common module (e.g., `html_ui.py`) so multiple generators can’t drift.
-- **Validate end-to-end**: `python3 -m py_compile ...` plus running the update script to ensure HTML is generated.
-- **Scope commits**: keep reorganizations, code changes, and docs changes as separate commits when asked.
 
 #### 2.4.2.1 Setting umask for Group-Writable Permissions in Dockerfiles
 
@@ -321,6 +304,7 @@ Build/run helpers (if present in the repo):
 ## 3.1 Project Structure
 - Rust-based and Python-based project with Python bindings and web components
 - Build tools: cargo (Rust), uv (Python packages), maturin (Python bindings), Docker (containers)
+- For HTML dashboards generated by `dynamo-utils/html_pages/*`, keep shared HTML/CSS/JS in a single source of truth module (e.g. `html_pages/html_ui.py`) so multiple generators can’t drift.
 
 ## 3.2 Quick Start Commands (Inside Dev Container)
 
@@ -428,6 +412,42 @@ python -m dynamo.backend_name --model <model> [other_args]
 ```
 Without this: tests fail with "Connection refused" on port 8081
 
+### 3.5.3 Prometheus Metrics (VLLM vs SGLANG vs TRTLLM)
+Operational collection commands (Docker) are documented in `CLAUDE.md` under **Running Inference Servers**.
+This section keeps the comparison + engine/observability notes.
+
+#### Prometheus Metrics Comparison: VLLM vs SGLANG vs TRTLLM
+
+Collection Date: 2025-10-21 (updated with correct test parameters)
+
+Test Parameters: `--max-tokens 1000 --requests_per_worker 5`
+
+Summary (same model: Qwen/Qwen3-0.6B; 5 requests × 1000 tokens each):
+
+| Framework | Total Lines | Unique Metrics | Dynamo Metrics | Request Duration | TTFT | Throughput |
+|-----------|-------------|----------------|----------------|------------------|------|------------|
+| TRTLLM | 220 | 5 (trtllm:*) | 53 lines | 2.19s | 10.3ms | 456 tok/s |
+| SGLANG | 224 | 25 (sglang:*) | 35 lines | 2.77s | N/A | 361 tok/s |
+| VLLM | 527 | 25 (vllm:*) | 53 lines | 5.94s | 20.6ms | 168 tok/s |
+
+Key result: TRTLLM is 2.7x faster than VLLM and 1.3x faster than SGLANG for this workload.
+
+Key findings:
+1. Metrics structure differences
+   - VLLM: 25 unique metrics, detailed token-level histograms + multiple latency breakdowns + cache metrics.
+   - SGLANG: 25 unique metrics, strong queue management + KV transfer + speculative decoding metrics.
+   - TRTLLM: 5 unique metrics, core performance only (E2E latency, TTFT, time-per-output-token, queue time, success counter).
+   - Dynamo common metrics (shared across all): `dynamo_component_*` metrics (uptime, NATS client, KV stats, request handling).
+2. Performance characteristics
+   - TRTLLM: fastest; TTFT 10.3ms avg; 456 tok/s.
+   - SGLANG: middle; actual throughput 361 tok/s (reported metric can differ).
+   - VLLM: slowest; TTFT 20.6ms avg; 168 tok/s.
+
+Recommendations:
+- Use TRTLLM when maximum performance is critical and minimal observability overhead is acceptable.
+- Use SGLANG when you want a balance of speed and features.
+- Use VLLM when detailed observability and debugging are required.
+
 =============================================================================
 4. UNIVERSAL CODE STYLE
 =============================================================================
@@ -447,6 +467,7 @@ Without this: tests fail with "Connection refused" on port 8081
 - Don't remove TODO comments or commented lines below them
 - Don't generate *.md files unless explicitly requested
 - Verify HTML/markdown links work before adding them
+- When editing via apply-patch: hunks must be top-to-bottom ordered and match current file context; if a patch fails, re-read the relevant region and re-apply with narrower, accurate context.
 
 ## 4.4 Rust Development
 
@@ -649,6 +670,8 @@ width = get_terminal_width()  # Fallback to 80 if detection fails
 - Use git mv for tracked files, mv for untracked
 - Delete *.lock files instead of stashing
 - Do not edit `.gitignore` unless explicitly requested (prefer leaving local-only scripts untracked or placing them under `/tmp/`)
+- Dedup safely: use hashes/diffs + reference search before deleting duplicates; when paths are relied on, prefer symlinks to keep compatibility.
+- When moving scripts, preserve history with `git mv`, ensure executable bits survive (`chmod +x`), and run a quick smoke test.
 
 ## 5.3 Permissions
 ```
@@ -667,6 +690,7 @@ GROUP_ID=$(stat -c "%g" .)
 ```
 
 - If you add a new `.sh` script that is meant to be executed, ensure it has a shebang and is executable (`chmod +x`) before committing.
+- Permission-aware discovery: when scanning the filesystem (repos, logs, etc.), gate on permissions (e.g. world `r+x`) so dashboards don’t try to traverse private dirs.
 
 ## 5.4 Path Display
 - Use tilde (~) instead of full paths: ~/path not /home/ubuntu/path
@@ -684,6 +708,7 @@ ALWAYS run pre-commit checks before committing:
 
 ## 6.1 Review Before Git Operations
 Periodically review this .cursorrules before git operations
+- Don’t assume the current working directory is a git repo. Confirm repo root first (`git rev-parse --show-toplevel`) or use `git -C <dir> ...` for the intended repo.
 
 ## 6.2 Git Interactive Editors
 - Git commands like `git rebase --continue`, `git commit --amend`, and `git rebase -i` launch interactive text editors (vim/nano)
@@ -698,18 +723,24 @@ Periodically review this .cursorrules before git operations
 ## 6.3 Merge Conflicts
 After resolving:
 1. git add <resolved_files>
+   - You MUST `git add` each conflict-resolved file to mark it as resolved (merge/rebase/cherry-pick).
+   - Forgetting to `git add` after conflict resolution will cause the operation to fail or repeat conflicts.
 2. If in rebase: use `GIT_EDITOR=true git rebase --continue` (never let vim open)
 3. Run cargo fmt on directories
 
 ## 6.4 Commit Process
 - NEVER launch vim or any editor (always provide -m flag with message)
+- Don’t suggest committing unless the user explicitly says to commit.
 - Never commit top-level Cargo.toml or Cargo.lock (unless explicitly told)
 - Never use --no-verify
-- Always use --signoff: git commit --signoff ...
+- Signoff rules:
+  - In dynamo-utils repository: --signoff is NOT required
+  - In dynamo* repositories and /workspace: ALWAYS use --signoff (never skip it)
 - Run cargo fmt before committing Rust changes
 - Never add untracked files (unless explicitly told)
 - List untracked files separately from modified files
 - Prompt to git add modified files
+- Scope commits when asked: keep reorganizations, code changes, and docs changes as separate commits.
 - **BEFORE writing commit message:** Check `git log --oneline origin/main..HEAD`
   - Empty output = FIRST commit = Use verbose format with prefix
   - Shows commits = SUBSEQUENT commit = Use terse format without prefix
@@ -1007,6 +1038,7 @@ Before committing Rust changes, run:
 2. cargo clippy --no-deps --all-targets -- -D warnings
 3. cargo test --locked --all-targets
 4. pre-commit run --all-files  (if Python changes)
+5. If scripts or HTML generators changed: `python3 -m py_compile <touched_py_files>` and run the relevant generator/update script to validate end-to-end output.
 
 Expected result: All checks pass with no errors
 
