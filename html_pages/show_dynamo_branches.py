@@ -106,6 +106,18 @@ def _html_small_link(*, url: str, label: str) -> str:
         f'style="color: #0969da; font-size: 11px; margin-left: 5px; text-decoration: none;">{label_escaped}</a>'
     )
 
+def _format_utc_datetime_from_iso(iso_utc: str) -> Optional[str]:
+    """Format a GitHub ISO timestamp (UTC) as UTC time string (YYYY-MM-DD HH:MM)."""
+    try:
+        dt = datetime.fromisoformat(iso_utc.replace("Z", "+00:00"))
+        # Ensure tz-aware
+        if getattr(dt, "tzinfo", None) is None:
+            dt = dt.replace(tzinfo=ZoneInfo("UTC"))
+        dt_utc = dt.astimezone(ZoneInfo("UTC"))
+        return dt_utc.strftime("%Y-%m-%d %H:%M")
+    except Exception:
+        return None
+
 
 @dataclass
 class BranchNode:
@@ -262,7 +274,21 @@ class BranchInfoNode(BranchNode):
         sha_str = f" [{self.sha}]" if self.sha else ""
         time_str = f" {self.commit_time_pt}" if self.commit_time_pt else ""
         age = self._format_age(self.commit_datetime)
-        age_str = f" {age}" if age else ""
+        # If the branch has a PR child, also show PR created time in the branch line.
+        pr_created_pt: Optional[str] = None
+        for ch in (self.children or []):
+            pr = getattr(ch, "pr", None)
+            created_at = getattr(pr, "created_at", None) if pr is not None else None
+            if created_at:
+                pr_created_pt = _format_utc_datetime_from_iso(created_at)
+                break
+        if pr_created_pt and age:
+            age_plain = age[1:-1] if (age.startswith("(") and age.endswith(")")) else age
+            age_str = f" (created {pr_created_pt}, {age_plain})"
+        elif age:
+            age_str = f" {age}"
+        else:
+            age_str = ""
         if self.is_current:
             return f"\033[1m{self.label}\033[0m{sha_str}{time_str}{age_str}"
         return f"{self.label}{sha_str}{time_str}{age_str}"
@@ -280,9 +306,26 @@ class BranchInfoNode(BranchNode):
             else ""
         )
         age = self._format_age(self.commit_datetime)
-        age_str = (
-            f' <span style="color: #666; font-size: 11px;">{html.escape(age)}</span>' if age else ""
-        )
+
+        # Prefer the first PR's created time (PT) if present, and show the commit age bold.
+        pr_created_pt: Optional[str] = None
+        for ch in (self.children or []):
+            pr = getattr(ch, "pr", None)
+            created_at = getattr(pr, "created_at", None) if pr is not None else None
+            if created_at:
+                pr_created_pt = _format_utc_datetime_from_iso(created_at)
+                break
+
+        if pr_created_pt and age:
+            age_plain = age[1:-1] if (age.startswith("(") and age.endswith(")")) else age
+            age_str = (
+                f' <span style="color: #666; font-size: 11px;">(created {html.escape(pr_created_pt)}, '
+                f'<span style="font-weight: 700; color: #24292f;">{html.escape(age_plain)}</span>)</span>'
+            )
+        elif age:
+            age_str = f' <span style="color: #666; font-size: 11px;">{html.escape(age)}</span>'
+        else:
+            age_str = ""
 
         # Gray out branch name if its PR is already merged.
         # (BranchInfoNode children include PRNode nodes when present.)
@@ -335,26 +378,13 @@ class PRNode(BranchNode):
         # Truncate title at 80 characters
         title = self.pr.title[:80] + '...' if len(self.pr.title) > 80 else self.pr.title
 
-        # Add base branch and created date
-        metadata = []
-        if self.pr.base_ref:
-            metadata.append(f"→ {self.pr.base_ref}")
-        if self.pr.created_at:
-            # Parse and format date (ISO format: 2025-11-12T17:15:32Z)
-            try:
-                from datetime import datetime
-                dt = datetime.fromisoformat(self.pr.created_at.replace('Z', '+00:00'))
-                date_str = dt.strftime('%Y-%m-%d %H:%M')
-                metadata.append(f"created {date_str}")
-            except:
-                pass
-
-        metadata_str = f" ({', '.join(metadata)})" if metadata else ""
+        # Add base branch (new format)
+        base_str = f" → {self.pr.base_ref} branch" if self.pr.base_ref else ""
         # Prefer standard GitHub-style formatting: "title (#1234)" over "PR#1234: title"
         pr_suffix = f"(#{self.pr.number})"
         if pr_suffix not in title:
             title = f"{title} {pr_suffix}"
-        return f"{emoji} {title}{metadata_str}"
+        return f"{emoji} {title}{base_str}"
 
     def _format_html_content(self) -> str:
         if not self.pr:
@@ -370,21 +400,9 @@ class PRNode(BranchNode):
         # Truncate title at 80 characters
         title = self.pr.title[:80] + '...' if len(self.pr.title) > 80 else self.pr.title
 
-        # Add base branch and created date
-        metadata = []
+        base_html = ""
         if self.pr.base_ref:
-            metadata.append(f'<span style="color: #0969da; font-weight: 500;">→ {self.pr.base_ref}</span>')
-        if self.pr.created_at:
-            # Parse and format date (ISO format: 2025-11-12T17:15:32Z)
-            try:
-                from datetime import datetime
-                dt = datetime.fromisoformat(self.pr.created_at.replace('Z', '+00:00'))
-                date_str = dt.strftime('%Y-%m-%d %H:%M')
-                metadata.append(f'<span style="color: #666;">created {date_str}</span>')
-            except:
-                pass
-
-        metadata_str = f" ({', '.join(metadata)})" if metadata else ""
+            base_html = f' <span style="font-weight: 700;">→ {html.escape(self.pr.base_ref)}</span> branch'
 
         # Prefer standard GitHub-style formatting: "title (#1234)" over "PR#1234: title"
         pr_suffix = f"(#{self.pr.number})"
@@ -393,9 +411,9 @@ class PRNode(BranchNode):
 
         # Gray out merged PRs
         if self.pr.is_merged:
-            return f'<span style="color: #999;">{emoji} <a href="{self.pr.url}" target="_blank" style="color: #999;">{title}</a>{metadata_str}</span>'
+            return f'<span style="color: #999;">{emoji} <a href="{self.pr.url}" target="_blank" style="color: #999;">{title}</a>{base_html}</span>'
         else:
-            return f'{emoji} <a href="{self.pr.url}" target="_blank">{title}</a>{metadata_str}'
+            return f'{emoji} <a href="{self.pr.url}" target="_blank">{title}</a>{base_html}'
 
 
 @dataclass
