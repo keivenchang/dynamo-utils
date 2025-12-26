@@ -10,6 +10,7 @@ Supports parallel data gathering for improved performance.
 import argparse
 import hashlib
 import html
+import stat
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
@@ -197,13 +198,13 @@ class RepoNode(BranchNode):
     path: Optional[Path] = None
     error: Optional[str] = None
     remote_url: Optional[str] = None
+    # Historical: we used to warn and stop scanning repos that weren't ai-dynamo/dynamo.
+    # Keep the field for backward compatibility, but we no longer treat "non-dynamo" as an error.
     is_correct_repo: bool = True
 
     def _format_content(self) -> str:
         if self.error:
             return f"\033[1m{self.label}\033[0m\n  \033[91m⚠️  {self.error}\033[0m"
-        if not self.is_correct_repo:
-            return f"\033[1m{self.label}\033[0m\n  \033[91m⚠️  Not ai-dynamo/dynamo repository\033[0m\n  Remote: {self.remote_url}"
         return f"\033[1m{self.label}\033[0m"
 
     def _format_html_content(self) -> str:
@@ -214,8 +215,6 @@ class RepoNode(BranchNode):
 
         if self.error:
             return f'{repo_link}\n<span class="error">⚠️  {self.error}</span>'
-        if not self.is_correct_repo:
-            return f'{repo_link}\n<span class="error">⚠️  Not ai-dynamo/dynamo repository</span>\n  Remote: {self.remote_url}'
         return repo_link
 
 
@@ -231,22 +230,59 @@ class BranchInfoNode(BranchNode):
     sha: Optional[str] = None
     is_current: bool = False
     commit_url: Optional[str] = None
+    commit_time_pt: Optional[str] = None
+    commit_datetime: Optional[datetime] = None
+
+    @staticmethod
+    def _format_age(dt: Optional[datetime]) -> Optional[str]:
+        """Return a compact '(… old)' string for the commit datetime."""
+        if dt is None:
+            return None
+        try:
+            now = datetime.now(ZoneInfo("UTC"))
+            if getattr(dt, "tzinfo", None) is None:
+                dt = dt.replace(tzinfo=ZoneInfo("UTC"))
+            delta_s = max(0, int((now - dt.astimezone(ZoneInfo("UTC"))).total_seconds()))
+        except Exception:
+            return None
+
+        if delta_s < 60:
+            return f"({delta_s}s old)"
+        if delta_s < 3600:
+            return f"({delta_s // 60}m old)"
+        if delta_s < 86400:
+            h = delta_s // 3600
+            m = (delta_s % 3600) // 60
+            return f"({h}h {m}m old)" if m else f"({h}h old)"
+        d = delta_s // 86400
+        h = (delta_s % 86400) // 3600
+        return f"({d}d {h}h old)" if h else f"({d}d old)"
 
     def _format_content(self) -> str:
-        marker = " ⭐" if self.is_current else ""
         sha_str = f" [{self.sha}]" if self.sha else ""
+        time_str = f" {self.commit_time_pt}" if self.commit_time_pt else ""
+        age = self._format_age(self.commit_datetime)
+        age_str = f" {age}" if age else ""
         if self.is_current:
-            return f"\033[1m{self.label}\033[0m{sha_str}{marker}"
-        return f"{self.label}{sha_str}{marker}"
+            return f"\033[1m{self.label}\033[0m{sha_str}{time_str}{age_str}"
+        return f"{self.label}{sha_str}{time_str}{age_str}"
 
     def _format_html_content(self) -> str:
-        marker = " ⭐" if self.is_current else ""
         sha_str = ""
         if self.sha:
             if self.commit_url:
                 sha_str = f' [<a href="{self.commit_url}" target="_blank">{self.sha}</a>]'
             else:
                 sha_str = f' [{self.sha}]'
+        time_str = (
+            f' <span style="color: #666; font-size: 11px;">{html.escape(self.commit_time_pt)}</span>'
+            if self.commit_time_pt
+            else ""
+        )
+        age = self._format_age(self.commit_datetime)
+        age_str = (
+            f' <span style="color: #666; font-size: 11px;">{html.escape(age)}</span>' if age else ""
+        )
 
         # Gray out branch name if its PR is already merged.
         # (BranchInfoNode children include PRNode nodes when present.)
@@ -262,8 +298,8 @@ class BranchInfoNode(BranchNode):
             cls = (cls + " merged-branch").strip()
 
         if cls:
-            return f'{copy_btn}<span class="{cls}">{self.label}</span>{sha_str}{marker}'
-        return f'{copy_btn}{self.label}{sha_str}{marker}'
+            return f'{copy_btn}<span class="{cls}">{self.label}</span>{sha_str}{time_str}{age_str}'
+        return f'{copy_btn}{self.label}{sha_str}{time_str}{age_str}'
 
 
 @dataclass
@@ -818,13 +854,56 @@ class LocalRepoScanner:
     def __init__(self, token: Optional[str] = None):
         self.github_api = GitHubAPIClient(token=token)
 
+    @staticmethod
+    def _is_world_readable_executable_dir(p: Path) -> bool:
+        """
+        True iff `p` is a directory with world-readable + world-executable permissions (o+r and o+x).
+
+        For directories, readable enables listing and executable enables traversal.
+        """
+        try:
+            st = p.stat()
+        except Exception:
+            return False
+        mode = st.st_mode
+        return bool(mode & stat.S_IROTH) and bool(mode & stat.S_IXOTH)
+
+    @staticmethod
+    def _looks_like_git_repo_dir(p: Path) -> bool:
+        """
+        Lightweight git repo detection without invoking GitPython.
+
+        Supports normal repos ('.git' directory) and worktrees/submodules ('.git' file).
+        """
+        try:
+            if not p.is_dir():
+                return False
+            git_marker = p / ".git"
+            return git_marker.is_dir() or git_marker.is_file()
+        except Exception:
+            return False
+
     def scan_repositories(self, base_dir: Path) -> BranchNode:
-        """Scan all dynamo* repositories and build tree structure"""
+        """Scan all git repositories under `base_dir` (direct children only) and build tree structure."""
         root = BranchNode(label="")
 
-        # Find all dynamo* directories
-        repo_dirs = sorted([d for d in base_dir.iterdir()
-                          if d.is_dir() and d.name.startswith('dynamo')])
+        # Discover git repos among direct children (and include base_dir itself if it's a repo).
+        #
+        # We intentionally do NOT walk the whole tree because this workspace can be huge (targets, caches, etc.).
+        candidate_dirs: list[Path] = []
+        if self._looks_like_git_repo_dir(base_dir) and self._is_world_readable_executable_dir(base_dir):
+            candidate_dirs.append(base_dir)
+
+        for d in base_dir.iterdir():
+            if not d.is_dir():
+                continue
+            if not self._is_world_readable_executable_dir(d):
+                continue
+            if not self._looks_like_git_repo_dir(d):
+                continue
+            candidate_dirs.append(d)
+
+        repo_dirs = sorted(candidate_dirs, key=lambda p: p.name)
 
         # Scan each repository in parallel
         with ThreadPoolExecutor(max_workers=4) as executor:
@@ -858,15 +937,15 @@ class LocalRepoScanner:
             repo_node.error = f"Not a valid git repository: {e}"
             return repo_node
 
-        # Check if it's the correct repo
+        # Capture origin URL (if present). We no longer treat "non-dynamo" repos as an error; we
+        # just skip PR/CI lookups that are wired to ai-dynamo/dynamo.
+        is_dynamo_repo = False
         try:
             remote = repo.remote('origin')
             remote_url = next(remote.urls)
             repo_node.remote_url = remote_url
 
-            if 'ai-dynamo/dynamo' not in remote_url:
-                repo_node.is_correct_repo = False
-                return repo_node
+            is_dynamo_repo = ('ai-dynamo/dynamo' in remote_url)
         except Exception:
             repo_node.error = "No origin remote found"
             return repo_node
@@ -879,9 +958,24 @@ class LocalRepoScanner:
 
         # Always capture current HEAD SHA (for display even when we skip "main" branches, or when detached).
         try:
-            head_sha = repo.head.commit.hexsha[:7]
+            head_commit = repo.head.commit
+            head_sha = head_commit.hexsha[:7]
+            head_commit_dt = getattr(head_commit, "committed_datetime", None)
         except Exception:
             head_sha = None
+            head_commit_dt = None
+
+        def _format_pt_time(dt) -> Optional[str]:
+            try:
+                if dt is None:
+                    return None
+                # GitPython often returns tz-aware datetimes; if not, assume UTC.
+                if getattr(dt, "tzinfo", None) is None:
+                    dt = dt.replace(tzinfo=ZoneInfo("UTC"))
+                pt = dt.astimezone(ZoneInfo("America/Los_Angeles"))
+                return f"{pt.strftime('%Y-%m-%d %H:%M')} PT"
+            except Exception:
+                return None
 
         # Collect branch information
         branches_with_prs = {}
@@ -922,8 +1016,10 @@ class LocalRepoScanner:
             # Get commit SHA
             try:
                 sha = branch.commit.hexsha[:7]
+                commit_dt = getattr(branch.commit, "committed_datetime", None)
             except Exception:
                 sha = None
+                commit_dt = None
 
             is_current = (branch_name == current_branch)
 
@@ -932,17 +1028,21 @@ class LocalRepoScanner:
                 branches_with_prs[branch_name] = {
                     'sha': sha,
                     'is_current': is_current,
-                    'branch': branch
+                    'branch': branch,
+                    'commit_time_pt': _format_pt_time(commit_dt),
+                    'commit_dt': commit_dt,
                 }
             else:
                 local_only_branches.append({
                     'name': branch_name,
                     'sha': sha,
-                    'is_current': is_current
+                    'is_current': is_current,
+                    'commit_time_pt': _format_pt_time(commit_dt),
+                    'commit_dt': commit_dt,
                 })
 
         # Fetch PR information in parallel
-        if branches_with_prs:
+        if branches_with_prs and is_dynamo_repo:
             pr_section = SectionNode(label="Branches with PRs")
 
             with ThreadPoolExecutor(max_workers=4) as executor:
@@ -970,7 +1070,9 @@ class LocalRepoScanner:
                     label=branch_name,
                     sha=info['sha'],
                     is_current=info['is_current'],
-                    commit_url=commit_url
+                    commit_url=commit_url,
+                    commit_time_pt=info.get('commit_time_pt'),
+                    commit_datetime=info.get('commit_dt'),
                 )
 
                 # Add PR nodes
@@ -1026,15 +1128,49 @@ class LocalRepoScanner:
             if pr_section.children:
                 repo_node.add_child(pr_section)
 
-        # Add local-only branches
-        if local_only_branches:
+        # For non-dynamo repos: show branches but skip PR/CI lookup (treat as "any other repo").
+        if not is_dynamo_repo:
+            all_branches_section = SectionNode(label="Branches")
+
+            combined = []
+            for branch_name, info in branches_with_prs.items():
+                combined.append(
+                    {
+                        "name": branch_name,
+                        "sha": info.get("sha"),
+                        "is_current": bool(info.get("is_current")),
+                        "commit_time_pt": info.get("commit_time_pt"),
+                        "commit_dt": info.get("commit_dt"),
+                    }
+                )
+            combined.extend(local_only_branches)
+
+            for b in sorted(combined, key=lambda x: x.get("name", "")):
+                all_branches_section.add_child(
+                    BranchInfoNode(
+                        label=b.get("name", ""),
+                        sha=b.get("sha"),
+                        is_current=bool(b.get("is_current", False)),
+                        commit_time_pt=b.get("commit_time_pt"),
+                        commit_datetime=b.get("commit_dt"),
+                    )
+                )
+
+            if all_branches_section.children:
+                repo_node.add_child(all_branches_section)
+
+        # Add local-only branches (only meaningful for ai-dynamo/dynamo because "Branches with PRs"
+        # already covers tracked branches there).
+        if local_only_branches and is_dynamo_repo:
             local_section = SectionNode(label="Local-only branches")
 
             for branch_info in local_only_branches:
                 branch_node = BranchInfoNode(
                     label=branch_info['name'],
                     sha=branch_info['sha'],
-                    is_current=branch_info['is_current']
+                    is_current=branch_info['is_current'],
+                    commit_time_pt=branch_info.get('commit_time_pt'),
+                    commit_datetime=branch_info.get('commit_dt'),
                 )
                 local_section.add_child(branch_node)
 
@@ -1048,13 +1184,15 @@ class LocalRepoScanner:
         )
         if not has_current_line:
             current_label = current_branch or "HEAD"
-            commit_url = f"https://github.com/ai-dynamo/dynamo/commit/{head_sha}" if head_sha else None
+            commit_url = f"https://github.com/ai-dynamo/dynamo/commit/{head_sha}" if (head_sha and is_dynamo_repo) else None
             repo_node.add_child(
                 BranchInfoNode(
                     label=current_label,
                     sha=head_sha,
                     is_current=True,
                     commit_url=commit_url,
+                    commit_time_pt=_format_pt_time(head_commit_dt),
+                    commit_datetime=head_commit_dt,
                 )
             )
 
@@ -1127,7 +1265,7 @@ def main():
         type=Path,
         nargs='?',
         default=Path.cwd(),
-        help='Base directory to search for dynamo* repos (default: current directory)'
+        help='Base directory to search for git repos (direct children only) (default: current directory)'
     )
     parser.add_argument(
         '--token',
