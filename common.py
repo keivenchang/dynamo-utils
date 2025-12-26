@@ -1219,6 +1219,8 @@ class PRInfo:
     mergeable_state: str
     unresolved_conversations: int
     ci_status: Optional[str]
+    # Head commit SHA for the PR (used to link to per-commit checks page).
+    head_sha: Optional[str] = None
     base_ref: Optional[str] = None
     created_at: Optional[str] = None
     has_conflicts: bool = False
@@ -2494,6 +2496,7 @@ class GitHubAPIClient:
                         mergeable_state=mergeable_state,
                         unresolved_conversations=unresolved_count,
                         ci_status=ci_status,
+                        head_sha=pr_data.get('head', {}).get('sha'),
                         base_ref=base_branch,
                         created_at=pr_data.get('created_at'),
                         has_conflicts=has_conflicts,
