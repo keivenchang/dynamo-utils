@@ -43,6 +43,7 @@ dynamo-utils/
 │   ├── show_commit_history.j2        # HTML template for commit history
 │   ├── show_commit_history.py        # Commit history with CI status and Docker images
 │   ├── show_dynamo_branches.py       # Branch status checker
+│   ├── show_dynamo_branches.j2       # HTML template for branch status
 │   ├── html_ui.py                   # Shared HTML/CSS/JS snippets (keep styles in sync)
 │   └── update_html_pages.sh          # HTML page update cron script
 └── container/                    # Docker-related scripts
@@ -544,12 +545,21 @@ python3 html_pages/resource_report.py \
 #### Usage
 
 ```bash
-# Terminal output
-python3 html_pages/show_dynamo_branches.py
+# Terminal output (scan git repos under a base directory)
+python3 html_pages/show_dynamo_branches.py ~/nvidia
 
 # HTML output
-python3 html_pages/show_dynamo_branches.py --html --output ~/nvidia/index.html
+python3 html_pages/show_dynamo_branches.py ~/nvidia --html --output ~/nvidia/index.html
 ```
+
+#### Notes
+
+- **CI hierarchy**: In HTML output, the CI hierarchy is derived from `.github/workflows/*.yml` (`needs:` graph) and annotated with live `gh pr checks` status. It is expandable from the PR status **PASS/FAIL** line.
+- **Auto-refresh**: The HTML includes a meta refresh (default: 5 minutes).
+- **Caching**:
+  - **Job log error summaries** (disk): `~/.cache/dynamo-utils/job-logs/job_logs_cache.json`
+  - **PR checks rows** (disk, short TTL): `~/.cache/dynamo-utils/pr-checks/pr_checks_cache.json`
+  - Override cache root with `DYNAMO_UTILS_CACHE_DIR=/some/path`
 
 ---
 

@@ -1234,6 +1234,37 @@ class PRInfo:
     rerun_url: Optional[str] = None
 
 
+@dataclass(frozen=True)
+class GHPRCheckRow:
+    """A single row from `gh pr checks` (tab-separated output)."""
+
+    name: str
+    status_raw: str
+    duration: str = ""
+    url: str = ""
+    description: str = ""
+    is_required: bool = False
+
+    @property
+    def status_norm(self) -> str:
+        s = (self.status_raw or "").strip().lower()
+        # gh pr checks typically uses: pass, fail, skipped, cancelled, pending, in_progress, queued, neutral
+        if s in {"pass", "success"}:
+            return "success"
+        # Treat "skipped"/"neutral" as success-like for UI aggregation.
+        if s in {"skipped", "skip", "neutral"}:
+            return "success"
+        if s in {"fail", "failure", "timed_out", "action_required"}:
+            return "failure"
+        if s in {"in_progress", "running"}:
+            return "in_progress"
+        if s in {"pending", "queued"}:
+            return "pending"
+        if s in {"cancelled", "canceled"}:
+            return "cancelled"
+        return "unknown"
+
+
 class GitHubAPIClient:
     """GitHub API client with automatic token detection and rate limit handling.
 
@@ -1299,8 +1330,194 @@ class GitHubAPIClient:
             self.headers['Authorization'] = f'token {self.token}'
 
         # Cache for job logs (two-tier: memory + disk)
+        # - memory: { "53317461976": "Failed unit tests: ..." }
+        # - disk:   ~/.cache/dynamo-utils/job-logs/job_logs_cache.json:
+        #   {
+        #     "53317461976": "Failed unit tests:\n ...",
+        #     "53317461234": null
+        #   }
         self._job_log_cache: Dict[str, Optional[str]] = {}
         self._cache_dir = dynamo_utils_cache_dir() / "job-logs"
+
+        # Cache for gh pr checks rows (two-tier: memory + disk, short TTL because status changes).
+        #
+        # Memory example:
+        #   {
+        #     "ai-dynamo/dynamo#5050": {
+        #       "ts": 1766790000,
+        #       "rows": [{"name": "build-test", "status_raw": "pass", "duration": "35m", "url": "...", "description": "", "is_required": true}]
+        #     }
+        #   }
+        #
+        # Disk example (pr_checks_cache.json):
+        #   {
+        #     "ai-dynamo/dynamo#5050": {"ts": 1766790000, "rows": [ ... same row dicts ... ] }
+        #   }
+        self._pr_checks_mem_cache: Dict[str, Dict[str, Any]] = {}
+        self._pr_checks_cache_dir = dynamo_utils_cache_dir() / "pr-checks"
+
+    def _pr_checks_cache_key(self, owner: str, repo: str, pr_number: int) -> str:
+        return f"{owner}/{repo}#{int(pr_number)}"
+
+    def _load_pr_checks_disk_cache(self) -> Dict[str, Any]:
+        cache_file = self._pr_checks_cache_dir / "pr_checks_cache.json"
+        if cache_file.exists():
+            try:
+                with open(cache_file, "r") as f:
+                    return json.load(f)
+            except Exception:
+                return {}
+        return {}
+
+    def _save_pr_checks_disk_cache(self, cache: Dict[str, Any]) -> None:
+        try:
+            self._pr_checks_cache_dir.mkdir(parents=True, exist_ok=True)
+            cache_file = self._pr_checks_cache_dir / "pr_checks_cache.json"
+            with open(cache_file, "w") as f:
+                json.dump(cache, f, indent=2)
+        except Exception:
+            pass
+
+    def get_pr_checks_rows(
+        self,
+        owner: str,
+        repo: str,
+        pr_number: int,
+        *,
+        required_checks: Optional[set] = None,
+        ttl_s: int = 300,
+        skip_fetch: bool = False,
+    ) -> List[GHPRCheckRow]:
+        """Get structured rows from `gh pr checks`, with a short-lived persistent cache.
+
+        Note: the raw-log links are time-limited, but the checks rows themselves are cheap to cache
+        for a short TTL to speed repeated HTML generation.
+        """
+        required_checks = required_checks or set()
+        key = self._pr_checks_cache_key(owner, repo, pr_number)
+        now = int(datetime.now(timezone.utc).timestamp())
+
+        # 1) memory cache
+        try:
+            ent = self._pr_checks_mem_cache.get(key)
+            if ent and isinstance(ent, dict):
+                ts = int(ent.get("ts", 0) or 0)
+                if ts and (now - ts) <= max(0, int(ttl_s)):
+                    rows = ent.get("rows") or []
+                    out: List[GHPRCheckRow] = []
+                    for r in rows:
+                        try:
+                            name = str(r.get("name", "") or "")
+                            out.append(
+                                GHPRCheckRow(
+                                    name=name,
+                                    status_raw=str(r.get("status_raw", "") or ""),
+                                    duration=str(r.get("duration", "") or ""),
+                                    url=str(r.get("url", "") or ""),
+                                    description=str(r.get("description", "") or ""),
+                                    is_required=(name in required_checks) or bool(r.get("is_required", False)),
+                                )
+                            )
+                        except Exception:
+                            continue
+                    return out
+        except Exception:
+            pass
+
+        # 2) disk cache
+        try:
+            disk = self._load_pr_checks_disk_cache()
+            ent = disk.get(key) if isinstance(disk, dict) else None
+            if ent and isinstance(ent, dict):
+                ts = int(ent.get("ts", 0) or 0)
+                if ts and (now - ts) <= max(0, int(ttl_s)):
+                    rows = ent.get("rows") or []
+                    out: List[GHPRCheckRow] = []
+                    for r in rows:
+                        try:
+                            name = str(r.get("name", "") or "")
+                            out.append(
+                                GHPRCheckRow(
+                                    name=name,
+                                    status_raw=str(r.get("status_raw", "") or ""),
+                                    duration=str(r.get("duration", "") or ""),
+                                    url=str(r.get("url", "") or ""),
+                                    description=str(r.get("description", "") or ""),
+                                    is_required=(name in required_checks) or bool(r.get("is_required", False)),
+                                )
+                            )
+                        except Exception:
+                            continue
+                    # promote to memory
+                    self._pr_checks_mem_cache[key] = {"ts": ts, "rows": rows}
+                    return out
+        except Exception:
+            pass
+
+        if skip_fetch:
+            return []
+
+        # 3) fetch via gh
+        try:
+            result = subprocess.run(
+                ["gh", "pr", "checks", str(int(pr_number)), "--repo", f"{owner}/{repo}"],
+                capture_output=True,
+                text=True,
+                timeout=15,
+            )
+            stdout = (result.stdout or "").strip()
+            if not stdout:
+                return []
+
+            rows_dicts: List[Dict[str, Any]] = []
+            out: List[GHPRCheckRow] = []
+            for line in stdout.split("\n"):
+                if not line.strip():
+                    continue
+                parts = line.split("\t")
+                if len(parts) < 2:
+                    continue
+                name = (parts[0] or "").strip()
+                status_raw = (parts[1] or "").strip()
+                duration = (parts[2] or "").strip() if len(parts) > 2 else ""
+                url = (parts[3] or "").strip() if len(parts) > 3 else ""
+                description = (parts[4] or "").strip() if len(parts) > 4 else ""
+                is_req = name in required_checks
+                out.append(
+                    GHPRCheckRow(
+                        name=name,
+                        status_raw=status_raw,
+                        duration=duration,
+                        url=url,
+                        description=description,
+                        is_required=is_req,
+                    )
+                )
+                rows_dicts.append(
+                    {
+                        "name": name,
+                        "status_raw": status_raw,
+                        "duration": duration,
+                        "url": url,
+                        "description": description,
+                        "is_required": is_req,
+                    }
+                )
+
+            # persist caches
+            try:
+                self._pr_checks_mem_cache[key] = {"ts": now, "rows": rows_dicts}
+                disk = self._load_pr_checks_disk_cache()
+                if not isinstance(disk, dict):
+                    disk = {}
+                disk[key] = {"ts": now, "rows": rows_dicts}
+                self._save_pr_checks_disk_cache(disk)
+            except Exception:
+                pass
+
+            return out
+        except Exception:
+            return []
 
     def get(self, endpoint: str, params: Optional[Dict[str, Any]] = None, timeout: int = 10) -> Optional[Dict]:
         """Make GET request to GitHub API.
@@ -1378,19 +1595,15 @@ class GitHubAPIClient:
             pr_number: Pull request number
 
         Returns:
-            Dictionary with parsed check data:
-            {
-                'stdout': str,  # Raw stdout for backward compatibility
-                'checks': [     # Parsed check list
-                    {
-                        'name': str,
-                        'status': str,  # 'pass', 'fail', 'pending', etc.
-                        'duration': str,
-                        'url': str
-                    }
-                ]
-            }
-            Returns None if subprocess call fails
+            Parsed dict (example shape):
+                {
+                  "stdout": "build-test\tpass\t35m\thttps://...\n...",
+                  "checks": [
+                    {"name": "build-test", "status": "pass", "duration": "35m", "url": "https://..."},
+                    {"name": "backend-status-check", "status": "fail", "duration": "2s", "url": "https://..."}
+                  ]
+                }
+            Returns None if the subprocess call fails.
         """
         try:
             result = subprocess.run(

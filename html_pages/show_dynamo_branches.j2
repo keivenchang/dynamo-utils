@@ -45,7 +45,8 @@
       overflow: auto;
       font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
       font-size: 13px;
-      line-height: 1.4;
+      line-height: 1;
+      margin: 0;
     }
     a { color: #0969da; text-decoration: none; }
     a:hover { text-decoration: underline; }
@@ -109,6 +110,27 @@
         }
       } catch (err) {
         document.body.removeChild(textArea);
+      }
+    }
+
+    // Expand/collapse CI hierarchy nodes (used inside <pre>)
+    function toggleCiChildren(childrenId, toggleEl) {
+      var el = document.getElementById(childrenId);
+      if (!el) return;
+      var hidden = (el.style.display === 'none' || el.style.display === '');
+      el.style.display = hidden ? 'inline' : 'none';
+      if (toggleEl) {
+        toggleEl.textContent = hidden ? '▼' : '▶';
+      }
+    }
+
+    function toggleCiError(errorId, toggleEl) {
+      var el = document.getElementById(errorId);
+      if (!el) return;
+      var hidden = (el.style.display === 'none' || el.style.display === '');
+      el.style.display = hidden ? 'inline' : 'none';
+      if (toggleEl) {
+        toggleEl.textContent = hidden ? '▼ Hide error' : '▶ Show error';
       }
     }
 

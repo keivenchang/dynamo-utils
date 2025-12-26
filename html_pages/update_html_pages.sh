@@ -79,7 +79,7 @@ cleanup_old_logs "$LOGS_DIR"
 
 # Update branch status HTML
 cd "$NVIDIA_HOME" || exit 1
-if python3 "$SCRIPT_DIR/show_dynamo_branches.py" --html --output "$BRANCHES_TEMP_FILE" 2>> "$LOG_FILE"; then
+if python3 "$SCRIPT_DIR/show_dynamo_branches.py" "$NVIDIA_HOME" --html --output "$BRANCHES_TEMP_FILE" 2>> "$LOG_FILE"; then
     # Atomic move - only replace if generation succeeded
     mv "$BRANCHES_TEMP_FILE" "$BRANCHES_OUTPUT_FILE"
     echo "$(date '+%Y-%m-%d %H:%M:%S') - Updated $BRANCHES_OUTPUT_FILE" >> "$LOG_FILE"
