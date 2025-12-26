@@ -30,6 +30,7 @@ TABLE OF CONTENTS
   4.4 Documentation Build Test
   4.5 Documentation Link Check
   4.6 Analyzing CI Failures (log-grepping workflow)
+  4.7 GitHub CI job dependencies (needs:)
 
 5. GITHUB OPERATIONS
   5.1 GitHub API Access
@@ -448,6 +449,106 @@ curl -s "$LOG" > /tmp/CI-12345.log && grep "ERROR at setup" /tmp/CI-12345.log
 # Found: RuntimeError: Failed to get git HEAD commit
 # Root cause: Missing DYNAMO_COMMIT_SHA environment variable
 ```
+
+## 4.7 GitHub CI job dependencies (needs:)
+
+Two common patterns:
+
+- **Execution dependency (`needs:`)**: the job can’t start until the `needs` jobs finish. GitHub also exposes `needs.<job>.result`.
+- **Aggregator / gating job (`needs:`)**: depends on multiple upstream jobs and fails based on their results (often named `*-status-check`).
+
+Below is a tree view of the **pure `needs:` job dependency graph** in `dynamo_latest/.github/workflows/*` (guards/`if:` conditions omitted):
+
+### `dynamo_latest/.github/workflows/container-validation-dynamo.yml`
+
+```
+dynamo-status-check
+└── build-test — "Build and Test - dynamo"
+    └── changed-files
+```
+
+### `dynamo_latest/.github/workflows/container-validation-backends.yml`
+
+```
+backend-status-check
+├── operator — "operator (${{ matrix.platform.arch }})"
+│   └── changed-files
+├── vllm — "vllm (${{ matrix.platform.arch }})"
+│   └── changed-files
+├── sglang — "sglang (${{ matrix.platform.arch }})"
+│   └── changed-files
+└── trtllm — "trtllm (${{ matrix.platform.arch }})"
+    └── changed-files
+
+deploy-operator
+├── changed-files
+├── operator
+├── vllm
+├── sglang
+└── trtllm
+
+deploy-test-vllm — "deploy-test-vllm (${{ matrix.profile }})"
+├── changed-files
+├── deploy-operator
+└── vllm
+
+deploy-test-sglang — "deploy-test-sglang (${{ matrix.profile }})"
+├── changed-files
+├── deploy-operator
+└── sglang
+
+deploy-test-trtllm — "deploy-test-trtllm (${{ matrix.profile }})"
+├── changed-files
+├── deploy-operator
+└── trtllm
+
+cleanup
+├── changed-files
+├── deploy-operator
+├── deploy-test-trtllm
+├── deploy-test-sglang
+├── deploy-test-vllm
+└── deploy-test-vllm-disagg-router
+```
+
+### `dynamo_latest/.github/workflows/nightly-ci.yml`
+
+```
+notify-slack — "Notify Slack"
+└── results-summary — "Results Summary"
+    ├── build-amd64 — "Build ${{ matrix.framework }} (amd64)"
+    ├── build-arm64 — "Build ${{ matrix.framework }} (arm64)"
+    ├── unit-tests — "${{ matrix.framework }}-${{ matrix.arch.arch }}-unit"
+    │   ├── build-amd64
+    │   └── build-arm64
+    ├── integration-tests — "${{ matrix.framework }}-${{ matrix.arch.arch }}-integ"
+    │   ├── build-amd64
+    │   └── build-arm64
+    ├── e2e-single-gpu-tests — "${{ matrix.framework }}-${{ matrix.arch.arch }}-1gpu-e2e"
+    │   ├── build-amd64
+    │   └── build-arm64
+    ├── e2e-multi-gpu-tests — "${{ matrix.framework }}-${{ matrix.arch.arch }}-2gpu-e2e"
+    │   ├── build-amd64
+    │   └── build-arm64
+    └── fault-tolerance-tests — "${{ matrix.framework.name }}-amd64-ft"
+        └── build-amd64
+```
+
+### `dynamo_latest/.github/workflows/generate-docs.yml`
+
+```
+publish-s3 — "Publish docs to S3 and flush Akamai"
+└── build-docs — "Build Documentation"
+```
+
+### `dynamo_latest/.github/workflows/trigger_ci.yml`
+
+```
+trigger-ci — "Trigger CI Pipeline"
+└── mirror_repo — "Mirror Repository to GitLab"
+```
+
+**Debugging tip**: If an aggregator job fails (e.g., `backend-status-check`), go straight to its upstream jobs listed in `needs:`; the aggregator is typically just reporting their results.
 
 =============================================================================
 5. GITHUB OPERATIONS
