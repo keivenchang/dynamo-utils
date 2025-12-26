@@ -160,7 +160,6 @@ _RAW_LOG_ALLOWLIST_JOB_IDS: Set[str] = {
     "changed-files",
 }
 
-
 def _should_resolve_raw_log_url(*, job_id: str, status_norm: str, is_required: bool) -> bool:
     """Return True if we should spend a network call to resolve a raw log URL."""
     if status_norm != "success":
@@ -756,13 +755,12 @@ def _build_ci_hierarchy_nodes(
             mapped = f"check::{r.name}"
         grouped.setdefault(mapped, []).append(r)
 
-    # Keep required checks and any non-success checks; plus their upstream deps when available.
-    important_ids: Set[str] = set()
-    for job_id, bucket in grouped.items():
-        if any(b.is_required for b in bucket):
-            important_ids.add(job_id)
-        if any(b.status_norm != "success" for b in bucket):
-            important_ids.add(job_id)
+    # Hierarchy inclusion policy:
+    # Always include *all* check rows (whether green/warn/red/etc). Expand/collapse is a separate concern.
+    # This makes the hierarchy list stable/consistent across branches and PR base refs.
+    #
+    # (We still render the workflow-needs graph: checks are mapped into job_ids when possible.)
+    important_ids: Set[str] = set(grouped.keys())
 
     def add_needs(job_id: str) -> None:
         spec = specs.get(job_id)
