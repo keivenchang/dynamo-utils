@@ -233,6 +233,55 @@ def _collect_net_top_nethogs(*, top_k: int, timeout_s: float) -> List[Dict[str, 
     return rows[: max(0, int(top_k))]
 
 
+def _collect_github_rate_limit(
+    *,
+    resources: Sequence[str],
+    timeout_s: float,
+) -> List[Dict[str, Any]]:
+    """
+    Best-effort GitHub rate limit sampling via `gh api rate_limit`.
+
+    Returns rows like:
+      {resource, limit, remaining, used, reset_epoch}
+    """
+    exe = shutil.which("gh")
+    if not exe:
+        return []
+    rc, out, _err = _run_cmd([exe, "api", "rate_limit"], timeout_s=timeout_s)
+    if rc != 0 or not out.strip():
+        return []
+    try:
+        payload = json.loads(out)
+    except Exception:
+        return []
+    res = payload.get("resources")
+    if not isinstance(res, dict):
+        return []
+
+    out_rows: List[Dict[str, Any]] = []
+    for name in resources:
+        info = res.get(name)
+        if not isinstance(info, dict):
+            continue
+        try:
+            limit = info.get("limit")
+            remaining = info.get("remaining")
+            used = info.get("used")
+            reset_epoch = info.get("reset")
+            out_rows.append(
+                {
+                    "resource": str(name),
+                    "limit": int(limit) if limit is not None else None,
+                    "remaining": int(remaining) if remaining is not None else None,
+                    "used": int(used) if used is not None else None,
+                    "reset_epoch": int(reset_epoch) if reset_epoch is not None else None,
+                }
+            )
+        except Exception:
+            continue
+    return out_rows
+
+
 def _parse_bytes(s: str) -> Optional[int]:
     """
     Parse Docker-ish byte strings like: '0B', '12.3kB', '4.1MB', '1.2GiB', '512KiB'.
@@ -639,6 +688,21 @@ class ResourceDB:
             """
         )
 
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS gh_rate_limit_samples (
+              sample_id INTEGER NOT NULL,
+              resource TEXT NOT NULL,
+              "limit" INTEGER,
+              remaining INTEGER,
+              used INTEGER,
+              reset_epoch INTEGER,
+              PRIMARY KEY (sample_id, resource),
+              FOREIGN KEY(sample_id) REFERENCES samples(id) ON DELETE CASCADE
+            );
+            """
+        )
+
         # Backwards-compatible migration for older DBs created before `image` existed.
         try:
             cols = [r[1] for r in cur.execute("PRAGMA table_info(docker_container_samples);").fetchall()]
@@ -661,6 +725,9 @@ class ResourceDB:
         )
         cur.execute(
             "CREATE INDEX IF NOT EXISTS idx_docker_name ON docker_container_samples(name);"
+        )
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_gh_rate_limit_resource ON gh_rate_limit_samples(resource);"
         )
         self.conn.commit()
 
@@ -848,6 +915,27 @@ class ResourceDB:
                     r.get("net_tx_bytes"),
                     r.get("block_read_bytes"),
                     r.get("block_write_bytes"),
+                ),
+            )
+
+    def insert_gh_rate_limit_samples(self, sample_id: int, rows: List[Dict[str, Any]]) -> None:
+        if not rows:
+            return
+        cur = self.conn.cursor()
+        for r in rows:
+            cur.execute(
+                """
+                INSERT OR REPLACE INTO gh_rate_limit_samples(
+                  sample_id, resource, "limit", remaining, used, reset_epoch
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    sample_id,
+                    str(r.get("resource") or ""),
+                    int(r.get("limit")) if r.get("limit") is not None else None,
+                    int(r.get("remaining")) if r.get("remaining") is not None else None,
+                    int(r.get("used")) if r.get("used") is not None else None,
+                    int(r.get("reset_epoch")) if r.get("reset_epoch") is not None else None,
                 ),
             )
 
@@ -1075,6 +1163,9 @@ class Monitor:
         net_top_k: int,
         docker_stats: bool,
         docker_stats_interval_s: float,
+        gh_rate_limit: bool,
+        gh_rate_limit_interval_s: float,
+        gh_rate_limit_resources: Sequence[str],
         once: bool,
         duration_s: Optional[float],
     ):
@@ -1089,6 +1180,9 @@ class Monitor:
         self.net_top_k = int(net_top_k)
         self.docker_stats = bool(docker_stats)
         self.docker_stats_interval_s = float(docker_stats_interval_s)
+        self.gh_rate_limit = bool(gh_rate_limit)
+        self.gh_rate_limit_interval_s = float(gh_rate_limit_interval_s)
+        self.gh_rate_limit_resources = [str(s) for s in gh_rate_limit_resources]
         self.once = once
         self.duration_s = duration_s
         self._stop = False
@@ -1099,6 +1193,7 @@ class Monitor:
         self._prev_proc_io: Dict[int, Tuple[int, int]] = {}
         self._prev_net_top_ts: float = 0.0
         self._prev_docker_stats_ts: float = 0.0
+        self._prev_gh_rate_limit_ts: float = 0.0
 
     def request_stop(self) -> None:
         self._stop = True
@@ -1209,6 +1304,19 @@ class Monitor:
                     except Exception:
                         docker_rows = []
 
+            # GitHub API rate limit (optional; best-effort)
+            gh_rl_rows: List[Dict[str, Any]] = []
+            if self.gh_rate_limit:
+                if (ts - float(self._prev_gh_rate_limit_ts)) >= max(10.0, float(self.gh_rate_limit_interval_s)):
+                    self._prev_gh_rate_limit_ts = ts
+                    try:
+                        gh_rl_rows = _collect_github_rate_limit(
+                            resources=self.gh_rate_limit_resources,
+                            timeout_s=min(4.0, max(1.0, float(self.gh_rate_limit_interval_s) / 4.0)),
+                        )
+                    except Exception:
+                        gh_rl_rows = []
+
             # Persist
             extra = {
                 "pid": os.getpid(),
@@ -1239,6 +1347,7 @@ class Monitor:
                 self.db.insert_ping_samples(sample_id, ping_rows)
                 self.db.insert_net_process_samples(sample_id, net_top_rows)
                 self.db.insert_docker_container_samples(sample_id, docker_rows)
+                self.db.insert_gh_rate_limit_samples(sample_id, gh_rl_rows)
                 self.db.conn.commit()
             except Exception as e:
                 self.db.conn.rollback()
@@ -1357,6 +1466,23 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         help="How often to sample docker container stats when enabled (default: 20s)",
     )
 
+    p.add_argument(
+        "--gh-rate-limit",
+        action="store_true",
+        help="Best-effort GitHub API rate limit sampling via `gh api rate_limit`; stored in gh_rate_limit_samples",
+    )
+    p.add_argument(
+        "--gh-rate-limit-interval-seconds",
+        type=float,
+        default=60.0,
+        help="How often to sample GitHub rate limits when enabled (default: 60s)",
+    )
+    p.add_argument(
+        "--gh-rate-limit-resources",
+        default="core,search,graphql",
+        help="Comma-separated GitHub rate-limit resources to record (default: core,search,graphql)",
+    )
+
     p.add_argument("--log-level", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR"])
     return p.parse_args(argv)
 
@@ -1401,6 +1527,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         net_top_k=int(args.net_top_k),
         docker_stats=bool(getattr(args, "docker_stats", False)),
         docker_stats_interval_s=float(getattr(args, "docker_stats_interval_seconds", 60.0)),
+        gh_rate_limit=bool(getattr(args, "gh_rate_limit", False)),
+        gh_rate_limit_interval_s=float(getattr(args, "gh_rate_limit_interval_seconds", 60.0)),
+        gh_rate_limit_resources=[
+            s.strip()
+            for s in str(getattr(args, "gh_rate_limit_resources", "") or "").split(",")
+            if s.strip()
+        ],
         once=bool(args.once),
         duration_s=args.duration_seconds,
     )

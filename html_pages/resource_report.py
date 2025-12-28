@@ -49,6 +49,79 @@ def _ts_to_iso(ts_unix: float) -> str:
     # Plotly parses ISO8601 strings (localtime is OK; keep it simple)
     return datetime.fromtimestamp(ts_unix).isoformat(timespec="seconds")
 
+def _query_gh_rate_limit_timeseries(
+    con: sqlite3.Connection,
+    *,
+    start_ts: float,
+    resources: Sequence[str],
+) -> Tuple[Dict[str, Dict[str, Any]], Dict[str, Dict[str, Any]]]:
+    """
+    Query gh_rate_limit_samples joined with samples into Plotly-friendly series.
+
+    Returns:
+      (series, latest)
+    where series is:
+      {resource: {"x":[...], "remaining":[...], "limit":[...], "reset_epoch":[...]}}
+    """
+    if not _table_exists(con, "gh_rate_limit_samples"):
+        return {}, {}
+    cur = con.cursor()
+    rows = cur.execute(
+        """
+        SELECT
+          s.ts_unix AS ts_unix,
+          g.resource AS resource,
+          g."limit" AS lim,
+          g.remaining AS rem,
+          g.reset_epoch AS reset_epoch
+        FROM gh_rate_limit_samples g
+        JOIN samples s ON s.id = g.sample_id
+        WHERE s.ts_unix >= ?
+        ORDER BY s.ts_unix ASC
+        """,
+        (float(start_ts),),
+    ).fetchall()
+
+    want = {str(r) for r in resources}
+    series: Dict[str, Dict[str, Any]] = {}
+    latest: Dict[str, Dict[str, Any]] = {}
+    for r in resources:
+        series[str(r)] = {"x": [], "remaining": [], "limit": [], "reset_epoch": []}
+
+    for row in rows:
+        try:
+            res = str(row["resource"] or "")
+        except Exception:
+            continue
+        if not res or (want and res not in want):
+            continue
+        try:
+            tsu = float(row["ts_unix"])
+        except Exception:
+            continue
+        x = _ts_to_iso(tsu)
+        rem = row["rem"]
+        lim = row["lim"]
+        reset_epoch = row["reset_epoch"]
+        try:
+            rem_i = int(rem) if rem is not None else None
+            lim_i = int(lim) if lim is not None else None
+            reset_i = int(reset_epoch) if reset_epoch is not None else None
+        except Exception:
+            continue
+
+        d = series.setdefault(res, {"x": [], "remaining": [], "limit": [], "reset_epoch": []})
+        d["x"].append(x)
+        d["remaining"].append(rem_i)
+        d["limit"].append(lim_i)
+        d["reset_epoch"].append(reset_i)
+        latest[res] = {"ts_unix": int(tsu), "remaining": rem_i, "limit": lim_i, "reset_epoch": reset_i}
+
+    # Drop empties.
+    series = {k: v for k, v in series.items() if v.get("x")}
+    latest = {k: v for k, v in latest.items() if k in series}
+    return series, latest
+
 
 @dataclass(frozen=True)
 class SampleRow:
@@ -1232,6 +1305,10 @@ def _build_html(payload: Dict[str, Any]) -> str:
       background: rgba(251,191,36,0.16);
     }}
 
+    .grid.onecol {{
+      grid-template-columns: 1fr;
+    }}
+
     /* Keep the spike tables constrained to the same height as the System chart (single scroll area). */
     .spike-scroll {{
       height: 72vh;
@@ -1377,6 +1454,19 @@ def _build_html(payload: Dict[str, Any]) -> str:
         </div>
         <div class="body" style="max-height: 560px; overflow:auto;">
           <table class="table" id="net_table"></table>
+        </div>
+      </div>
+    </div>
+
+    <!-- GitHub rate limit (recorded by resource_monitor.py into SQLite) -->
+    <div class="grid onecol" style="margin-top: 16px;">
+      <div class="card chart">
+        <div class="hdr">
+          <div class="title">GitHub API rate limit</div>
+          <div class="hint">Read from SQLite table <span class="mono">gh_rate_limit_samples</span> (written by <span class="mono">resource_monitor.py</span>). Lines = remaining requests.</div>
+        </div>
+        <div class="body">
+          <div id="gh_rate_limit_graph" class="plot"></div>
         </div>
       </div>
     </div>
@@ -2648,6 +2738,48 @@ def _build_html(payload: Dict[str, Any]) -> str:
     return Plotly.newPlot('docker_graph', traces, layout, config).then(() => installHoverDelay('docker_graph'));
   }}
 
+  function renderGhRateLimitGraph() {{
+    const d = PAYLOAD.gh_rate_limit || {{}};
+    const keys = Object.keys(d || {{}});
+    const traces = [];
+    for (let i = 0; i < keys.length; i++) {{
+      const k = keys[i];
+      const row = d[k] || {{}};
+      const x = row.x || [];
+      const rem = row.remaining || [];
+      const lim = row.limit || [];
+      // Remaining
+      traces.push({{
+        x,
+        y: rem,
+        name: `${{k}} remaining`,
+        mode: 'lines',
+        line: {{ width: 2.0 }},
+        hovertemplate: `resource=${{k}}<br>remaining=%{{y}}<extra></extra>`,
+      }});
+      // Limit (dashed)
+      const limConst = lim && lim.length ? lim[lim.length - 1] : null;
+      if (limConst !== null && limConst !== undefined) {{
+        traces.push({{
+          x,
+          y: x.map(() => limConst),
+          name: `${{k}} limit`,
+          mode: 'lines',
+          line: {{ width: 1.2, dash: DASH.dot }},
+          hovertemplate: `resource=${{k}}<br>limit=%{{y}}<extra></extra>`,
+        }});
+      }}
+    }}
+    const layout = commonLayout('');
+    layout.yaxis = {{ title: 'requests remaining', rangemode: 'tozero', gridcolor: 'rgba(255,255,255,0.09)' }};
+    const config = {{ displayModeBar: true, responsive: true }};
+    if (!keys.length) {{
+      return Plotly.newPlot('gh_rate_limit_graph', [{{x: [PAYLOAD.window_end], y: [0], mode:'text', text:['No GitHub rate-limit samples in window'], textfont:{{size:14}}, hoverinfo:'skip'}}], layout, config)
+        .then(() => installHoverDelay('gh_rate_limit_graph'));
+    }}
+    return Plotly.newPlot('gh_rate_limit_graph', traces, layout, config).then(() => installHoverDelay('gh_rate_limit_graph'));
+  }}
+
   buildSpikeTable(PAYLOAD.spikes || []);
   buildLeaderTable(PAYLOAD.cpu_leaderboard || []);
   buildDockerTable(PAYLOAD.docker_leaderboard || []);
@@ -2658,8 +2790,9 @@ def _build_html(payload: Dict[str, Any]) -> str:
   const pDocker = renderDockerGraph();
   const pPing = renderPingGraph();
   const pNet = renderNetGraph();
-  Promise.allSettled([pSys, pGpu, pDocker, pPing, pNet]).then(() => {{
-    installTimeSync(['sys_graph', 'gpu_graph', 'docker_graph', 'ping_graph', 'net_graph']);
+  const pGh = renderGhRateLimitGraph();
+  Promise.allSettled([pSys, pGpu, pDocker, pPing, pNet, pGh]).then(() => {{
+    installTimeSync(['sys_graph', 'gpu_graph', 'docker_graph', 'ping_graph', 'net_graph', 'gh_rate_limit_graph']);
   }});
   </script>
 </body>
@@ -2673,6 +2806,11 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     p.add_argument("--output", type=Path, required=True, help="Output HTML file path")
     p.add_argument("--days", type=float, default=7.0, help="How many days to include (default: 7)")
     p.add_argument("--title", default="keivenc-linux Resource Report", help="HTML title")
+    p.add_argument(
+        "--gh-rate-limit-resources",
+        default="core,search,graphql",
+        help="Comma-separated GitHub rate-limit resources to chart (default: core,search,graphql)",
+    )
 
     p.add_argument("--min-cpu-spike", type=float, default=50.0, help="Minimum top-process cpu%% for a spike")
     p.add_argument("--spike-sigma", type=float, default=4.0, help="MAD-based sigma threshold multiplier")
@@ -2708,6 +2846,20 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     con = _connect(db_path)
     try:
         start_ts, end_ts = _get_time_window(con, days=float(args.days))
+
+        gh_resources = [
+            s.strip()
+            for s in str(getattr(args, "gh_rate_limit_resources", "") or "").split(",")
+            if s.strip()
+        ]
+        if not gh_resources:
+            gh_resources = ["core", "search", "graphql"]
+
+        # GitHub rate limit series MUST come from the DB (recorded by resource_monitor.py).
+        gh_rate_limit, gh_rate_limit_latest = _query_gh_rate_limit_timeseries(
+            con, start_ts=start_ts, resources=gh_resources
+        )
+
         samples = _query_samples(con, start_ts=start_ts)
         avg_interval = 0.0
         if samples:
@@ -2844,6 +2996,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         payload: Dict[str, Any] = {
             "title": str(args.title),
             "db_path": str(db_path),
+            "gh_rate_limit": gh_rate_limit,
+            "gh_rate_limit_latest": gh_rate_limit_latest,
             "window": f"{datetime.fromtimestamp(start_ts)} → {datetime.fromtimestamp(end_ts)} (localtime) | last {args.days:g} days",
             "window_end": _ts_to_iso(end_ts),
             "sample_count": len(samples),
