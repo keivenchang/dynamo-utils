@@ -34,8 +34,20 @@ try:
 except Exception:  # pragma: no cover
     git = None  # type: ignore[assignment]
 
-# Shared UI snippets (keep styling consistent with show_commit_history)
-from html_ui import GH_STATUS_TOOLTIP_CSS, GH_STATUS_TOOLTIP_JS, PASS_PLUS_STYLE
+# Shared dashboard helpers (UI + workflow graph)
+from dashboard_lib import (
+    GH_STATUS_TOOLTIP_CSS,
+    GH_STATUS_TOOLTIP_JS,
+    PASS_PLUS_STYLE,
+    TREE_TOGGLE_JS,
+    TreeNodeVM,
+    build_check_name_matchers,
+    check_line_html,
+    load_workflow_specs,
+    render_tree_pre_lines,
+    required_badge_html,
+    status_icon_html,
+)
 
 # Jinja2 is optional (keep CLI usable in minimal envs).
 try:
@@ -48,7 +60,14 @@ except Exception:  # pragma: no cover
     select_autoescape = None  # type: ignore[assignment]
 
 # Import GitHub utilities from common module
-from common import FailedCheck, GHPRCheckRow, GitHubAPIClient, PRInfo, summarize_pr_check_rows
+from common import (
+    FailedCheck,
+    GHPRCheckRow,
+    GitHubAPIClient,
+    PRInfo,
+    summarize_pr_check_rows,
+    prune_dashboard_raw_logs,
+)
 
 #
 # Repo constants (avoid scattering hardcoded strings)
@@ -136,184 +155,6 @@ def _format_utc_datetime_from_iso(iso_utc: str) -> Optional[str]:
 # GitHub CI hierarchy helpers (workflow needs graph + PR checks)
 #
 
-_WORKFLOW_SPECS_CACHE: Dict[str, Dict[str, "WorkflowJobSpec"]] = {}
-_RAW_LOG_URL_CACHE: Dict[str, Optional[str]] = {}
-
-# Cache shapes (examples):
-# - _WORKFLOW_SPECS_CACHE:
-#   {
-#     "/abs/path/to/repo": {
-#       "backend-status-check": WorkflowJobSpec(job_id="backend-status-check", display_name="backend-status-check", name_template="", needs=("vllm","sglang"))
-#     }
-#   }
-# - _RAW_LOG_URL_CACHE:
-#   {
-#     "https://github.com/ai-dynamo/dynamo/actions/runs/123/job/456": "https://.../job-logs.txt?...",
-#     "https://github.com/ai-dynamo/dynamo/actions/runs/999/job/888": None
-#   }
-
-
-# Fetching raw-log redirect URLs can be slow (extra API calls) and the resulting signed URLs
-# are time-limited. Prefer to only resolve raw logs when they are actually useful.
-_RAW_LOG_ALLOWLIST_JOB_IDS: Set[str] = {
-    # Explicit: show raw logs for changed-files even when green.
-    "changed-files",
-}
-
-def _should_resolve_raw_log_url(*, job_id: str, status_norm: str, is_required: bool) -> bool:
-    """Return True if we should spend a network call to resolve a raw log URL."""
-    if status_norm != "success":
-        return True
-    if job_id in _RAW_LOG_ALLOWLIST_JOB_IDS:
-        return True
-    # Avoid resolving raw logs for every green job (dominant perf cost).
-    _ = is_required
-    return False
-
-
-def _get_raw_log_url(github_api: Optional[GitHubAPIClient], job_url: str) -> Optional[str]:
-    """Best-effort: resolve a GitHub Actions job's raw log download URL, with caching."""
-    if not github_api:
-        return None
-    if not job_url or "/job/" not in job_url:
-        return None
-    if job_url in _RAW_LOG_URL_CACHE:
-        return _RAW_LOG_URL_CACHE[job_url]
-    try:
-        raw = github_api.get_job_raw_log_url(job_url=job_url, owner=DYNAMO_OWNER, repo=DYNAMO_REPO)
-    except Exception:
-        raw = None
-    _RAW_LOG_URL_CACHE[job_url] = raw
-    return raw
-
-
-@dataclass(frozen=True)
-class WorkflowJobSpec:
-    job_id: str
-    display_name: str
-    name_template: str
-    needs: Tuple[str, ...]
-
-
-def _parse_workflow_jobs(workflow_path: Path) -> Dict[str, WorkflowJobSpec]:
-    """Parse minimal job metadata from a workflow YAML (job_id, name, needs)."""
-    try:
-        lines = workflow_path.read_text(encoding="utf-8", errors="replace").splitlines()
-    except Exception:
-        return {}
-
-    in_jobs = False
-    cur_job: Optional[str] = None
-    cur_name: str = ""
-    cur_needs: List[str] = []
-    reading_needs_list = False
-
-    jobs: Dict[str, WorkflowJobSpec] = {}
-
-    def flush() -> None:
-        nonlocal cur_job, cur_name, cur_needs, reading_needs_list
-        if not cur_job:
-            return
-        name_clean = cur_name.strip().strip('"').strip("'")
-        jobs[cur_job] = WorkflowJobSpec(
-            job_id=cur_job,
-            display_name=(name_clean if name_clean else cur_job),
-            name_template=(name_clean if ("${{" in name_clean) else ""),
-            needs=tuple(cur_needs),
-        )
-        cur_job = None
-        cur_name = ""
-        cur_needs = []
-        reading_needs_list = False
-
-    for line in lines:
-        if not in_jobs:
-            if line.strip() == "jobs:":
-                in_jobs = True
-            continue
-
-        m_job = re.match(r"^  ([A-Za-z0-9_-]+):\s*$", line)
-        if m_job:
-            flush()
-            cur_job = m_job.group(1)
-            continue
-
-        if not cur_job:
-            continue
-
-        m_name = re.match(r"^    name:\s*(.+?)\s*$", line)
-        if m_name:
-            cur_name = m_name.group(1)
-            continue
-
-        m_needs_inline = re.match(r"^    needs:\s*\[(.*?)\]\s*$", line)
-        if m_needs_inline:
-            reading_needs_list = False
-            inner = m_needs_inline.group(1).strip()
-            cur_needs = [p.strip() for p in inner.split(",") if p.strip()] if inner else []
-            continue
-
-        if re.match(r"^    needs:\s*$", line):
-            reading_needs_list = True
-            cur_needs = []
-            continue
-
-        if reading_needs_list:
-            m_item = re.match(r"^      -\s*([A-Za-z0-9_-]+)\s*$", line)
-            if m_item:
-                cur_needs.append(m_item.group(1))
-                continue
-            if line.startswith("    ") and not line.startswith("      -"):
-                reading_needs_list = False
-
-    flush()
-    return jobs
-
-
-def _load_workflow_specs(repo_path: Path) -> Dict[str, WorkflowJobSpec]:
-    """Load workflow job specs from a repo checkout (cached per repo path)."""
-    key = str(repo_path.resolve())
-    if key in _WORKFLOW_SPECS_CACHE:
-        return _WORKFLOW_SPECS_CACHE[key]
-
-    specs: Dict[str, WorkflowJobSpec] = {}
-    wf_dir = repo_path / ".github" / "workflows"
-    if wf_dir.exists():
-        for wf in sorted(wf_dir.glob("*.yml")) + sorted(wf_dir.glob("*.yaml")):
-            for job_id, spec in _parse_workflow_jobs(wf).items():
-                if job_id not in specs:
-                    specs[job_id] = spec
-                else:
-                    prev = specs[job_id]
-                    if prev.display_name == prev.job_id and spec.display_name != spec.job_id:
-                        specs[job_id] = spec
-    _WORKFLOW_SPECS_CACHE[key] = specs
-    return specs
-
-
-def _template_to_regex(name_template: str) -> Optional[re.Pattern]:
-    if not name_template or "${{" not in name_template:
-        return None
-    parts: List[str] = []
-    idx = 0
-    for m in re.finditer(r"\$\{\{.*?\}\}", name_template):
-        parts.append(re.escape(name_template[idx:m.start()]))
-        parts.append(r"(.+?)")
-        idx = m.end()
-    parts.append(re.escape(name_template[idx:]))
-    return re.compile("^" + "".join(parts) + "$")
-
-
-def _build_check_name_matchers(specs: Dict[str, WorkflowJobSpec]) -> List[Tuple[str, re.Pattern]]:
-    out: List[Tuple[str, re.Pattern]] = []
-    for job_id, spec in specs.items():
-        out.append((job_id, re.compile(r"^" + re.escape(job_id) + r"$")))
-        if spec.display_name and "${{" not in spec.display_name:
-            out.append((job_id, re.compile(r"^" + re.escape(spec.display_name) + r"$")))
-        rx = _template_to_regex(spec.name_template)
-        if rx is not None:
-            out.append((job_id, rx))
-    return out
 
 def _aggregate_status(statuses: Iterable[str]) -> str:
     priority = {"failure": 5, "cancelled": 4, "in_progress": 3, "pending": 2, "success": 1, "unknown": 0}
@@ -423,6 +264,19 @@ class BranchNode:
 
         return lines
 
+    def to_tree_vm(self) -> TreeNodeVM:
+        """Convert this node subtree into a TreeNodeVM tree (shared renderer)."""
+        # Default behavior: non-collapsible, always-expanded node.
+        # Subclasses that previously had custom expand/collapse UI should override this.
+        key = f"{self.__class__.__name__}:{self.label}"
+        return TreeNodeVM(
+            node_key=key,
+            label_html=self._format_html_content(),
+            children=[c.to_tree_vm() for c in (self.children or [])],
+            collapsible=False,
+            default_expanded=True,
+        )
+
     def print_tree(self) -> None:
         """Print the tree to console"""
         for line in self.render():
@@ -446,7 +300,7 @@ class CIJobTreeNode(BranchNode):
     status: str = "unknown"
     duration: str = ""
     url: str = ""
-    raw_log_url: str = ""
+    raw_log_href: str = ""
     is_required: bool = False
     failed_check: Optional[FailedCheck] = None
 
@@ -556,79 +410,28 @@ class CIJobTreeNode(BranchNode):
         return f"{self.job_id}{name_part}{dur_part}"
 
     def _format_html_content(self) -> str:
+        # Prefer FailedCheck URLs when available (they include raw log + error summary)
+        job_url = ""
+        if self.failed_check is not None:
+            job_url = str(getattr(self.failed_check, "job_url", "") or "")
+        if not job_url:
+            job_url = self.url or ""
         # Icon: show the *worst descendant status* so it’s obvious why a parent expanded.
-        # (Example: deploy-operator expanding due to a failing/trtllm child.)
         roll = self._subtree_rollup(self) if self.children else None
         effective_status = (roll.status if roll is not None else self.status)
         effective_required_failure = (roll.has_required_failure if roll is not None else False)
 
-        icon = '<span style="color: #8c959f;">•</span>'
-        if effective_status == "success" or (not self.children and self._is_success_like(self)):
-            icon = '<span style="color: #2da44e;">✓</span>'
-        elif effective_status == "failure":
-            if self.is_required or effective_required_failure:
-                icon = (
-                    '<span style="display: inline-flex; align-items: center; justify-content: center; '
-                    'width: 12px; height: 12px; border-radius: 999px; background-color: #d73a49; '
-                    'color: #ffffff; font-size: 10px; font-weight: 900; line-height: 1;">✗</span>'
-                )
-            else:
-                icon = '<span style="color: #f59e0b; font-weight: 900;">⚠</span>'
-        elif effective_status == "in_progress":
-            icon = '<span style="color: #dbab09;">⏳</span>'
-        elif effective_status == "pending":
-            icon = '<span style="color: #8c959f;">⏸</span>'
-        elif effective_status == "cancelled":
-            icon = '<span style="color: #8c959f;">✖️</span>'
-
-        id_html = (
-            '<span style="font-family: SFMono-Regular, Consolas, Liberation Mono, Menlo, monospace; font-size: 12px;">'
-            + html.escape(self.job_id)
-            + "</span>"
+        # Error toggle is appended in to_tree_vm() so it can inject a newline safely in <pre>.
+        return check_line_html(
+            job_id=self.job_id,
+            display_name=self.display_name,
+            status_norm=effective_status,
+            is_required=bool(self.is_required),
+            duration=self.duration,
+            log_url=job_url,
+            raw_log_href=self.raw_log_href,
+            required_failure=bool(effective_required_failure),
         )
-        req_html = ""
-        if self.is_required:
-            # REQUIRED badge:
-            # - passing required checks: green, not bold
-            # - failing required checks: red, bold
-            # - other states: neutral gray, not bold
-            is_fail = (self.status == "failure")
-            is_pass = (self.status == "success")
-            if is_fail:
-                req_color = "#d73a49"
-                req_weight = "700"
-            elif is_pass:
-                req_color = "#2da44e"
-                req_weight = "400"
-            else:
-                req_color = "#57606a"
-                req_weight = "400"
-            req_html = f' <span style="color: {req_color}; font-weight: {req_weight};">[REQUIRED]</span>'
-        name_html = ""
-        if self.display_name and self.display_name != self.job_id:
-            name_html = f'<span style="color: #57606a; font-size: 12px;"> — {html.escape(self.display_name)}</span>'
-        dur_html = f'<span style="color: #57606a; font-size: 12px;"> ({html.escape(self.duration)})</span>' if self.duration else ""
-        # Prefer FailedCheck URLs when available (they include raw log + error summary)
-        job_url = ""
-        raw_log_url = ""
-        error_summary = ""
-        if self.failed_check is not None:
-            job_url = str(getattr(self.failed_check, "job_url", "") or "")
-            raw_log_url = str(getattr(self.failed_check, "raw_log_url", "") or "")
-            error_summary = str(getattr(self.failed_check, "error_summary", "") or "")
-        if not job_url:
-            job_url = self.url or ""
-        if not raw_log_url:
-            raw_log_url = self.raw_log_url or ""
-
-        links_html = ""
-        if job_url:
-            links_html += _html_small_link(url=job_url, label="[log]")
-        if raw_log_url:
-            links_html += _html_small_link(url=raw_log_url, label="[raw log]")
-
-        # Error toggle is appended in render_html() so it can inject a newline safely in <pre>.
-        return f"{icon} {id_html}{req_html}{name_html}{dur_html}{links_html}"
 
     def render_html(self, prefix: str = "", is_last: bool = True, is_root: bool = True) -> List[str]:
         """Render CI subtree with an expand/collapse triangle.
@@ -719,17 +522,61 @@ class CIJobTreeNode(BranchNode):
 
         return lines
 
+    def to_tree_vm(self) -> TreeNodeVM:
+        # Mirror the existing expand/collapse policy and include the error toggle HTML in the label.
+        has_children = bool(self.children)
+        default_expanded = self._subtree_needs_attention(self) if has_children else False
+
+        # Error toggle (only when we have an error summary from FailedCheck)
+        err_toggle_html = ""
+        err_body_html = ""
+        if self.failed_check is not None and getattr(self.failed_check, "error_summary", None):
+            dom_hash_err = hashlib.sha1((self.job_id + "|ERR|" + (self.url or "")).encode("utf-8")).hexdigest()[:10]
+            err_id = f"ci_err_{dom_hash_err}"
+            err_toggle_html = (
+                f' <span style="cursor: pointer; color: #0969da; font-weight: 500;" '
+                f'onclick="toggleCiError(\'{err_id}\', this)">▶ Show error</span>'
+            )
+            escaped_error = _highlight_error_keywords(str(getattr(self.failed_check, "error_summary", "")))
+            err_body_html = (
+                f'<span id="{err_id}" style="display: none;">'
+                f"<br>"
+                f'<span style="display: inline-block; border: 1px solid #d0d7de; background: #f6f8fa; '
+                f'border-radius: 6px; padding: 6px 8px; white-space: pre-wrap; color: #24292f;">'
+                f'<span style="color: #d73a49; font-weight: 700;">error:</span> {escaped_error}'
+                f"</span>"
+                f"</span>"
+            )
+
+        return TreeNodeVM(
+            node_key=f"CI:{self.job_id}:{self.url}",
+            label_html=self._format_html_content() + err_toggle_html + err_body_html,
+            children=[c.to_tree_vm() for c in (self.children or []) if isinstance(c, BranchNode)],
+            collapsible=True,  # show triangle placeholder for alignment, even on leaves
+            default_expanded=bool(default_expanded),
+            triangle_tooltip=None,
+        )
+
 
 def _build_ci_hierarchy_nodes(
     repo_path: Path,
     pr: PRInfo,
     github_api: Optional[GitHubAPIClient] = None,
+    *,
+    page_root_dir: Optional[Path] = None,
+    checks_ttl_s: int = 300,
 ) -> List[CIJobTreeNode]:
     """Build a workflow-needs hierarchy annotated with actual PR check status."""
     if not pr or not getattr(pr, "number", None) or not github_api:
         return []
     required_set: Set[str] = set(getattr(pr, "required_checks", []) or [])
-    rows = github_api.get_pr_checks_rows(DYNAMO_OWNER, DYNAMO_REPO, int(pr.number), required_checks=required_set)
+    rows = github_api.get_pr_checks_rows(
+        DYNAMO_OWNER,
+        DYNAMO_REPO,
+        int(pr.number),
+        required_checks=required_set,
+        ttl_s=int(checks_ttl_s),
+    )
     if not rows:
         return []
 
@@ -741,8 +588,8 @@ def _build_ci_hierarchy_nodes(
     except Exception:
         failed_by_name = {}
 
-    specs = _load_workflow_specs(repo_path)
-    matchers = _build_check_name_matchers(specs)
+    specs = load_workflow_specs(repo_path)
+    matchers = build_check_name_matchers(specs)
 
     grouped: Dict[str, List[GHPRCheckRow]] = {}
     for r in rows:
@@ -786,6 +633,10 @@ def _build_ci_hierarchy_nodes(
     synthetic_roots = sorted([jid for jid in important_ids if jid.startswith("check::")])
 
     memo: Dict[str, CIJobTreeNode] = {}
+    # Cache raw log *content* (not URL) for failed jobs. Keep a small cap so a single PR doesn't
+    # trigger an unbounded number of downloads.
+    raw_log_prefetch_budget = {"n": 15}
+    page_root_dir = Path(page_root_dir) if page_root_dir is not None else repo_path
 
     def build_node(job_id: str) -> CIJobTreeNode:
         if job_id in memo:
@@ -796,9 +647,29 @@ def _build_ci_hierarchy_nodes(
             bucket = grouped.get(job_id, [])
             node = CIJobTreeNode(label="", job_id=check_name, status=_aggregate_status([b.status_norm for b in bucket]))
             for b in bucket:
-                raw_log_url = ""
-                if _should_resolve_raw_log_url(job_id=b.name, status_norm=b.status_norm, is_required=b.is_required):
-                    raw_log_url = _get_raw_log_url(github_api, b.url or "") or ""
+                # Cache raw log content for failures (best-effort).
+                raw_href = ""
+                if (
+                    github_api
+                    and b.status_norm == "failure"
+                    and "/job/" in (b.url or "")
+                ):
+                    allow_fetch = int(raw_log_prefetch_budget.get("n", 0) or 0) > 0
+                    try:
+                        raw_href = (
+                            github_api.materialize_job_raw_log_text_local_link(
+                                job_url=b.url or "",
+                                owner=DYNAMO_OWNER,
+                                repo=DYNAMO_REPO,
+                                page_root_dir=page_root_dir,
+                                allow_fetch=bool(allow_fetch),
+                            )
+                            or ""
+                        )
+                    except Exception:
+                        raw_href = ""
+                    if allow_fetch:
+                        raw_log_prefetch_budget["n"] = int(raw_log_prefetch_budget.get("n", 0) or 0) - 1
                 node.children.append(
                     CIJobTreeNode(
                         label="",
@@ -806,7 +677,7 @@ def _build_ci_hierarchy_nodes(
                         status=b.status_norm,
                         duration=b.duration,
                         url=b.url,
-                        raw_log_url=raw_log_url,
+                        raw_log_href=raw_href,
                         is_required=b.is_required,
                     )
                 )
@@ -819,9 +690,28 @@ def _build_ci_hierarchy_nodes(
 
         if len(bucket) == 1:
             b = bucket[0]
-            raw_log_url = ""
-            if _should_resolve_raw_log_url(job_id=b.name, status_norm=b.status_norm, is_required=b.is_required):
-                raw_log_url = _get_raw_log_url(github_api, b.url or "") or ""
+            raw_href = ""
+            if (
+                github_api
+                and b.status_norm == "failure"
+                and "/job/" in (b.url or "")
+            ):
+                allow_fetch = int(raw_log_prefetch_budget.get("n", 0) or 0) > 0
+                try:
+                    raw_href = (
+                        github_api.materialize_job_raw_log_text_local_link(
+                            job_url=b.url or "",
+                            owner=DYNAMO_OWNER,
+                            repo=DYNAMO_REPO,
+                            page_root_dir=page_root_dir,
+                            allow_fetch=bool(allow_fetch),
+                        )
+                        or ""
+                    )
+                except Exception:
+                    raw_href = ""
+                if allow_fetch:
+                    raw_log_prefetch_budget["n"] = int(raw_log_prefetch_budget.get("n", 0) or 0) - 1
             node = CIJobTreeNode(
                 label="",
                 job_id=job_id,
@@ -829,7 +719,7 @@ def _build_ci_hierarchy_nodes(
                 status=b.status_norm,
                 duration=b.duration,
                 url=b.url,
-                raw_log_url=raw_log_url,
+                raw_log_href=raw_href,
                 is_required=b.is_required,
                 failed_check=failed_by_name.get(b.name),
             )
@@ -842,9 +732,28 @@ def _build_ci_hierarchy_nodes(
                 is_required=any(b.is_required for b in bucket),
             )
             for b in sorted(bucket, key=lambda x: x.name):
-                raw_log_url = ""
-                if _should_resolve_raw_log_url(job_id=b.name, status_norm=b.status_norm, is_required=b.is_required):
-                    raw_log_url = _get_raw_log_url(github_api, b.url or "") or ""
+                raw_href = ""
+                if (
+                    github_api
+                    and b.status_norm == "failure"
+                    and "/job/" in (b.url or "")
+                ):
+                    allow_fetch = int(raw_log_prefetch_budget.get("n", 0) or 0) > 0
+                    try:
+                        raw_href = (
+                            github_api.materialize_job_raw_log_text_local_link(
+                                job_url=b.url or "",
+                                owner=DYNAMO_OWNER,
+                                repo=DYNAMO_REPO,
+                                page_root_dir=page_root_dir,
+                                allow_fetch=bool(allow_fetch),
+                            )
+                            or ""
+                        )
+                    except Exception:
+                        raw_href = ""
+                    if allow_fetch:
+                        raw_log_prefetch_budget["n"] = int(raw_log_prefetch_budget.get("n", 0) or 0) - 1
                 node.children.append(
                     CIJobTreeNode(
                         label="",
@@ -852,7 +761,7 @@ def _build_ci_hierarchy_nodes(
                         status=b.status_norm,
                         duration=b.duration,
                         url=b.url,
-                        raw_log_url=raw_log_url,
+                        raw_log_href=raw_href,
                         is_required=b.is_required,
                         failed_check=failed_by_name.get(b.name),
                     )
@@ -1109,6 +1018,8 @@ class PRStatusNode(BranchNode):
     """PR status information node"""
     pr: Optional[PRInfo] = None
     github_api: Optional[GitHubAPIClient] = None
+    refresh_checks: bool = False
+    branch_commit_dt: Optional[datetime] = None
 
     def _format_content(self) -> str:
         if not self.pr:
@@ -1156,9 +1067,23 @@ class PRStatusNode(BranchNode):
             import uuid
 
             try:
+                pr_state_lc = (getattr(self.pr, "state", "") or "").lower()
+                is_closed = bool(getattr(self.pr, "is_merged", False)) or (pr_state_lc and pr_state_lc != "open")
+                ttl_s = GitHubAPIClient.compute_checks_cache_ttl_s(
+                    self.branch_commit_dt,
+                    refresh=bool(self.refresh_checks),
+                )
+                # For closed/merged PRs, default stable TTL (30d) is already long; no need to override here.
+
                 required_set = set(getattr(self.pr, "required_checks", []) or [])
                 rows = (
-                    self.github_api.get_pr_checks_rows(DYNAMO_OWNER, DYNAMO_REPO, int(self.pr.number), required_checks=required_set)
+                    self.github_api.get_pr_checks_rows(
+                        DYNAMO_OWNER,
+                        DYNAMO_REPO,
+                        int(self.pr.number),
+                        required_checks=required_set,
+                        ttl_s=ttl_s,
+                    )
                     if self.github_api
                     else []
                 )
@@ -1214,26 +1139,24 @@ class PRStatusNode(BranchNode):
                     summary = summarize_pr_check_rows(rows)
 
                     # Map summary buckets into the local display buckets.
-                    counts["success_required"] = int(summary.counts.get("success_required", 0) or 0)
-                    counts["success_optional"] = int(summary.counts.get("success_optional", 0) or 0)
-                    counts["failure_required"] = int(summary.counts.get("failure_required", 0) or 0)
-                    counts["failure_optional"] = int(summary.counts.get("failure_optional", 0) or 0)
-                    counts["in_progress"] = int(summary.counts.get("in_progress_required", 0) or 0) + int(
-                        summary.counts.get("in_progress_optional", 0) or 0
-                    )
-                    counts["pending"] = int(summary.counts.get("pending", 0) or 0)
-                    counts["cancelled"] = int(summary.counts.get("cancelled", 0) or 0)
-                    counts["other"] = int(summary.counts.get("other", 0) or 0)
+                    counts["success_required"] = int(summary.counts.success_required)
+                    counts["success_optional"] = int(summary.counts.success_optional)
+                    counts["failure_required"] = int(summary.counts.failure_required)
+                    counts["failure_optional"] = int(summary.counts.failure_optional)
+                    counts["in_progress"] = int(summary.counts.in_progress_required + summary.counts.in_progress_optional)
+                    counts["pending"] = int(summary.counts.pending)
+                    counts["cancelled"] = int(summary.counts.cancelled)
+                    counts["other"] = int(summary.counts.other)
 
-                    passed_required_jobs = list(summary.names.get("success_required", []) or [])
-                    passed_optional_jobs = list(summary.names.get("success_optional", []) or [])
-                    failed_required_jobs = list(summary.names.get("failure_required", []) or [])
-                    failed_optional_jobs = list(summary.names.get("failure_optional", []) or [])
-                    progress_required_jobs = list(summary.names.get("in_progress_required", []) or [])
-                    progress_optional_jobs = list(summary.names.get("in_progress_optional", []) or [])
-                    pending_jobs = list(summary.names.get("pending", []) or [])
-                    cancelled_jobs = list(summary.names.get("cancelled", []) or [])
-                    other_jobs = list(summary.names.get("other", []) or [])
+                    passed_required_jobs = list(summary.names.success_required)
+                    passed_optional_jobs = list(summary.names.success_optional)
+                    failed_required_jobs = list(summary.names.failure_required)
+                    failed_optional_jobs = list(summary.names.failure_optional)
+                    progress_required_jobs = list(summary.names.in_progress_required)
+                    progress_optional_jobs = list(summary.names.in_progress_optional)
+                    pending_jobs = list(summary.names.pending)
+                    cancelled_jobs = list(summary.names.cancelled)
+                    other_jobs = list(summary.names.other)
 
                     # Still build the detailed per-check table (this is presentation-specific).
                     for row in rows:
@@ -1279,13 +1202,13 @@ class PRStatusNode(BranchNode):
                             ci_parts.append(
                                 f'<span style="color: #2da44e;">'
                                 f'<strong>{success_req}</strong>'
-                                f'<span style="{PASS_PLUS_STYLE}">+{success_opt}</span>✓'
+                                f'<span style="{PASS_PLUS_STYLE}">+{success_opt}</span>{status_icon_html(status_norm="success", is_required=False)}'
                                 f'</span>'
                             )
                         else:
                             ci_parts.append(
                                 f'<span style="color: #2da44e;">'
-                                f'<strong>{success_req}</strong>✓'
+                                f'<strong>{success_req}</strong>{status_icon_html(status_norm="success", is_required=False)}'
                                 f'</span>'
                             )
                     if counts["failure_required"] > 0:
@@ -1312,12 +1235,12 @@ class PRStatusNode(BranchNode):
                     tooltip_parts: list[str] = []
                     if passed_required_jobs:
                         tooltip_parts.append(
-                            '<strong style="color: #2da44e;">✓ Passed (required):</strong> '
+                            f'<strong style="color: #2da44e;">{status_icon_html(status_norm="success", is_required=False)} Passed (required):</strong> '
                             + ", ".join(sorted(html_module.escape(n) for n in passed_required_jobs))
                         )
                     if passed_optional_jobs:
                         tooltip_parts.append(
-                            '<strong style="color: #2da44e;">✓ Passed (optional):</strong> '
+                            f'<strong style="color: #2da44e;">{status_icon_html(status_norm="success", is_required=False)} Passed (optional):</strong> '
                             + ", ".join(sorted(html_module.escape(n) for n in passed_optional_jobs))
                         )
                     if failed_required_jobs:
@@ -1488,6 +1411,21 @@ class PRStatusNode(BranchNode):
 
         return lines
 
+    def to_tree_vm(self) -> TreeNodeVM:
+        # Default expansion: only when something needs attention in the CI subtree.
+        default_expanded = any(
+            (not isinstance(c, CIJobTreeNode)) or CIJobTreeNode._subtree_needs_attention(c)
+            for c in (self.children or [])
+        )
+        return TreeNodeVM(
+            node_key=f"PRStatus:{getattr(self.pr, 'number', '')}",
+            label_html=self._format_html_content(),
+            children=[c.to_tree_vm() for c in (self.children or []) if isinstance(c, BranchNode)],
+            collapsible=True,
+            default_expanded=bool(default_expanded),
+            triangle_tooltip="CI hierarchy (derived from .github/workflows/*.yml)",
+        )
+
 
 @dataclass
 class BlockedMessageNode(BranchNode):
@@ -1537,8 +1475,9 @@ class RerunLinkNode(BranchNode):
 class LocalRepoScanner:
     """Scanner for local repository branches"""
 
-    def __init__(self, token: Optional[str] = None):
+    def __init__(self, token: Optional[str] = None, refresh_closed_prs: bool = False):
         self.github_api = GitHubAPIClient(token=token)
+        self.refresh_closed_prs = bool(refresh_closed_prs)
 
     @staticmethod
     def _is_world_readable_executable_dir(p: Path) -> bool:
@@ -1594,7 +1533,7 @@ class LocalRepoScanner:
         # Scan each repository in parallel
         with ThreadPoolExecutor(max_workers=4) as executor:
             future_to_dir = {
-                executor.submit(self._scan_repository, repo_dir): repo_dir
+                executor.submit(self._scan_repository, repo_dir, base_dir): repo_dir
                 for repo_dir in repo_dirs
             }
 
@@ -1608,7 +1547,7 @@ class LocalRepoScanner:
 
         return root
 
-    def _scan_repository(self, repo_dir: Path) -> Optional[RepoNode]:
+    def _scan_repository(self, repo_dir: Path, page_root_dir: Path) -> Optional[RepoNode]:
         """Scan a single repository"""
         repo_name = f"{repo_dir.name}/"
         repo_node = RepoNode(label=repo_name, path=repo_dir)
@@ -1730,24 +1669,25 @@ class LocalRepoScanner:
         # Fetch PR information in parallel
         if branches_with_prs and is_dynamo_repo:
             pr_section = SectionNode(label="Branches with PRs")
+            # NOTE: Avoid per-branch GitHub API calls. We list open PRs once per repo (cached),
+            # then match PRs to branch names locally.
+            try:
+                pr_infos_by_branch = self.github_api.get_pr_info_for_branches(
+                    DYNAMO_OWNER,
+                    DYNAMO_REPO,
+                    branches_with_prs.keys(),
+                    include_closed=True,
+                    refresh_closed=self.refresh_closed_prs,
+                )
+            except Exception as e:
+                print(f"Error fetching PR info: {e}", file=sys.stderr)
+                pr_infos_by_branch = {}
 
-            with ThreadPoolExecutor(max_workers=4) as executor:
-                future_to_branch = {
-                    executor.submit(
-                        self.github_api.get_pr_info,
-                        DYNAMO_OWNER,
-                        DYNAMO_REPO,
-                        branch_name
-                    ): (branch_name, info)
-                    for branch_name, info in branches_with_prs.items()
-                }
-
-                branch_results = []
-                for future in as_completed(future_to_branch):
-                    branch_name, info = future_to_branch[future]
-                    prs = future.result()
-                    if prs:
-                        branch_results.append((branch_name, info, prs))
+            branch_results = []
+            for branch_name, info in branches_with_prs.items():
+                prs = pr_infos_by_branch.get(branch_name) or []
+                if prs:
+                    branch_results.append((branch_name, info, prs))
 
             # Build branch nodes
             for branch_name, info, prs in sorted(branch_results):
@@ -1770,8 +1710,21 @@ class LocalRepoScanner:
                     url_node = PRURLNode(label="", url=pr.url)
                     pr_node.add_child(url_node)
 
-                    # Add status node
-                    status_node = PRStatusNode(label="", pr=pr, github_api=self.github_api)
+                    pr_state_lc = (getattr(pr, "state", "") or "").lower()
+                    # Prefer the branch head commit time for "last push" heuristic.
+                    branch_dt = info.get("commit_dt")
+                    checks_ttl_s = GitHubAPIClient.compute_checks_cache_ttl_s(
+                        branch_dt,
+                        refresh=bool(self.refresh_closed_prs),
+                    )
+
+                    status_node = PRStatusNode(
+                        label="",
+                        pr=pr,
+                        github_api=self.github_api,
+                        refresh_checks=bool(self.refresh_closed_prs),
+                        branch_commit_dt=branch_dt,
+                    )
                     pr_node.add_child(status_node)
 
                     # If CI failed, show "Restart failed jobs" immediately after the FAIL line.
@@ -1784,12 +1737,30 @@ class LocalRepoScanner:
                         if rerun_url and github_run_id:
                             pr_node.add_child(RerunLinkNode(label="", url=rerun_url, run_id=github_run_id))
 
-                    # Add CI hierarchy as children of the PASS/FAIL status line.
+                    # Add CI hierarchy as children of the PR status line (cached; long TTL when no recent pushes).
                     try:
-                        for ci_node in _build_ci_hierarchy_nodes(repo_dir, pr, github_api=self.github_api):
+                        for ci_node in _build_ci_hierarchy_nodes(
+                            repo_dir,
+                            pr,
+                            github_api=self.github_api,
+                            page_root_dir=page_root_dir,
+                            checks_ttl_s=int(checks_ttl_s),
+                        ):
                             status_node.add_child(ci_node)
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        # Don't silently drop the tree UI; surface the error so it's actionable.
+                        try:
+                            status_node.add_child(
+                                BranchNode(
+                                    label=f'<span style="color: #d73a49;">⚠ CI hierarchy error: {html.escape(str(e))}</span>'
+                                )
+                            )
+                        except Exception:
+                            pass
+                        try:
+                            print(f"[show_dynamo_branches] CI hierarchy error for PR #{getattr(pr, 'number', '?')}: {e}", file=sys.stderr)
+                        except Exception:
+                            pass
 
                     # Add conflict warning if applicable
                     if pr.conflict_message:
@@ -1807,6 +1778,30 @@ class LocalRepoScanner:
 
             if pr_section.children:
                 repo_node.add_child(pr_section)
+
+            # Also show tracked branches that do NOT have an open PR.
+            #
+            # This is important for clones like dynamo3/ where you may have many remote-tracking
+            # branches locally, but only a subset has active PRs at any given time.
+            branches_section = SectionNode(label="Branches")
+            for branch_name, info in sorted(branches_with_prs.items(), key=lambda kv: kv[0]):
+                prs = pr_infos_by_branch.get(branch_name) or []
+                if prs:
+                    continue
+                commit_url = f"https://github.com/{DYNAMO_REPO_SLUG}/commit/{info['sha']}" if info.get("sha") else None
+                branches_section.add_child(
+                    BranchInfoNode(
+                        label=branch_name,
+                        sha=info.get("sha"),
+                        is_current=bool(info.get("is_current", False)),
+                        commit_url=commit_url,
+                        commit_time_pt=info.get("commit_time_pt"),
+                        commit_datetime=info.get("commit_dt"),
+                    )
+                )
+
+            if branches_section.children:
+                repo_node.add_child(branches_section)
 
         # For non-dynamo repos: show branches but skip PR/CI lookup (treat as "any other repo").
         if not is_dynamo_repo:
@@ -1839,8 +1834,7 @@ class LocalRepoScanner:
             if all_branches_section.children:
                 repo_node.add_child(all_branches_section)
 
-        # Add local-only branches (only meaningful for ai-dynamo/dynamo because "Branches with PRs"
-        # already covers tracked branches there).
+        # Add local-only branches (branches without any matching remote/tracking ref).
         if local_only_branches and is_dynamo_repo:
             local_section = SectionNode(label="Local-only branches")
 
@@ -1891,12 +1885,11 @@ def generate_html(root: BranchNode) -> str:
     utc_str = now_utc.strftime('%Y-%m-%d %H:%M:%S UTC')
     pdt_str = now_pdt.strftime('%Y-%m-%d %H:%M:%S %Z')
 
-    # Render all children (skip root) into a single <pre> block payload.
+    # Render all children (skip root) into a single <pre> block payload, via the shared renderer.
     rendered_lines: list[str] = []
     for i, child in enumerate(root.children):
         is_last = i == len(root.children) - 1
-        rendered_lines.extend(child.render_html(prefix="", is_last=is_last, is_root=True))
-        # Add a single blank line between top-level git directories (repo nodes) for readability.
+        rendered_lines.extend(render_tree_pre_lines([child.to_tree_vm()]))
         if not is_last:
             rendered_lines.append("")
     tree_html = "\n".join(rendered_lines).rstrip() + "\n"
@@ -1920,6 +1913,7 @@ def generate_html(root: BranchNode) -> str:
         generated_time=pdt_str,
         gh_status_tooltip_css=GH_STATUS_TOOLTIP_CSS,
         gh_status_tooltip_js=GH_STATUS_TOOLTIP_JS,
+        tree_toggle_js=TREE_TOGGLE_JS,
         copy_icon_svg=_COPY_ICON_SVG,
         tree_html=tree_html,
     )
@@ -1939,16 +1933,28 @@ def main():
     parser = argparse.ArgumentParser(
         description='Show dynamo branches with PR information (node-based version)'
     )
+    # Keep backward compatibility with the historical positional `base_dir`, but prefer --repo-path.
     parser.add_argument(
         'base_dir',
         type=Path,
         nargs='?',
-        default=Path.cwd(),
-        help='Base directory to search for git repos (direct children only) (default: current directory)'
+        default=None,
+        help='[deprecated] Base directory to search for git repos (direct children only). Prefer --repo-path.'
+    )
+    parser.add_argument(
+        '--repo-path',
+        type=Path,
+        default=None,
+        help='Path to the base directory to scan (direct children only) (default: current directory)'
     )
     parser.add_argument(
         '--token',
-        help='GitHub personal access token (or set GITHUB_TOKEN env var)'
+        help='GitHub personal access token (or set GH_TOKEN/GITHUB_TOKEN env var)'
+    )
+    parser.add_argument(
+        '--refresh-closed-prs',
+        action='store_true',
+        help='Refresh cached closed/merged PR mappings (more GitHub API calls)'
     )
     parser.add_argument(
         '--html',
@@ -1958,27 +1964,78 @@ def main():
     parser.add_argument(
         '--output',
         type=Path,
-        help='Output file path (default: stdout)'
+        help='Output file path (default: <base_dir>/index.html when --html, else stdout)'
     )
     args = parser.parse_args()
 
-    base_dir = args.base_dir
+    base_dir = (args.repo_path or args.base_dir or Path.cwd()).resolve()
 
-    base_dir = base_dir.resolve()
+    # Prune locally-served raw logs to avoid unbounded growth.
+    # We only render `[raw log]` links when the local file exists (or was materialized),
+    # so pruning won't produce dead links on a freshly generated page.
+    try:
+        _ = prune_dashboard_raw_logs(page_root_dir=base_dir, max_age_days=30)
+    except Exception:
+        pass
 
     # Scan repositories
-    scanner = LocalRepoScanner(token=args.token)
-    root = scanner.scan_repositories(base_dir)
+    scanner = LocalRepoScanner(token=args.token, refresh_closed_prs=bool(args.refresh_closed_prs))
+    # Report GitHub REST quota before/after the run (and fail fast if exhausted).
+    before = scanner.github_api.get_core_rate_limit_info() if scanner.github_api else None
+    if before:
+        rem_b = before.get("remaining")
+        lim_b = before.get("limit")
+        reset_pt = before.get("reset_pt")
+        secs = int(before.get("seconds_until_reset") or 0)
+        print(
+            f"GitHub API core quota (before): remaining={rem_b}"
+            + (f"/{lim_b}" if lim_b is not None else "")
+            + (f", resets at {reset_pt} (in {GitHubAPIClient._format_seconds_delta(secs)})" if reset_pt else "")
+        )
+
+    try:
+        scanner.github_api.check_core_rate_limit_or_raise()
+    except Exception as e:
+        print(str(e), file=sys.stderr)
+        raise SystemExit(2)
+
+    root = None
+    try:
+        root = scanner.scan_repositories(base_dir)
+    finally:
+        after = scanner.github_api.get_core_rate_limit_info() if scanner.github_api else None
+        if before and after and before.get("remaining") is not None and after.get("remaining") is not None:
+            try:
+                used = int(before.get("remaining")) - int(after.get("remaining"))
+            except Exception:
+                used = None
+        else:
+            used = None
+        if after:
+            rem_a = after.get("remaining")
+            lim_a = after.get("limit")
+            reset_pt = after.get("reset_pt")
+            secs = int(after.get("seconds_until_reset") or 0)
+            msg = (
+                f"GitHub API core quota (after): remaining={rem_a}"
+                + (f"/{lim_a}" if lim_a is not None else "")
+                + (f", resets at {reset_pt} (in {GitHubAPIClient._format_seconds_delta(secs)})" if reset_pt else "")
+            )
+            if used is not None:
+                msg += f" | used={used}"
+            print(msg)
 
     # Output
     if args.html:
+        assert root is not None
         html_output = generate_html(root)
-        if args.output:
-            args.output.parent.mkdir(parents=True, exist_ok=True)
-            args.output.write_text(html_output)
-        else:
-            print(html_output)
+        out_path = args.output
+        if out_path is None:
+            out_path = base_dir / "index.html"
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(html_output)
     else:
+        assert root is not None
         for child in root.children:
             child.print_tree()
             print()

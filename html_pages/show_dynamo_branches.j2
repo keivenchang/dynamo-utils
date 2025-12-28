@@ -1,42 +1,13 @@
-<!DOCTYPE html>
-<html>
-<head>
-  <meta charset="UTF-8">
-  <meta http-equiv="refresh" content="300">
-  <title>Dynamo Branch Status</title>
-  <link rel="icon" type="image/svg+xml" href="favicon.svg">
-  <style>
-    body {
-      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif;
-      margin: 10px;
-      line-height: 1.3;
-      background-color: #f6f8fa;
-      font-size: 13px;
-      color: #24292f;
-    }
-    .header {
-      background-color: #24292f;
-      color: white;
-      padding: 10px 15px;
-      border-radius: 4px;
-      margin-bottom: 10px;
-    }
-    .header h1 {
-      margin: 0;
-      font-size: 18px;
-    }
-    .header a {
-      color: #ffffff;
-      text-decoration: none;
-    }
-    .header a:hover {
-      text-decoration: underline;
-    }
-    .timestamp {
-      margin: 5px 0 0 0;
-      opacity: 0.9;
-      font-size: 12px;
-    }
+{% extends "base_dashboard.j2" %}
+{% set refresh_seconds = 300 %}
+
+{% block title %}Dynamo Branch Status{% endblock %}
+{% block favicon %}<link rel="icon" type="image/svg+xml" href="favicon.svg">{% endblock %}
+
+{% block css %}
+    .header a { color: #ffffff; text-decoration: none; }
+    .header a:hover { text-decoration: underline; }
+    .timestamp { margin: 5px 0 0 0; opacity: 0.9; font-size: 12px; }
     pre {
       background-color: #ffffff;
       border: 1px solid #d0d7de;
@@ -70,60 +41,12 @@
       letter-spacing: 0.3px;
       border: 1px solid transparent;
     }
-    .status-success {
-      background-color: #2da44e;
-      border-color: #1f7a37;
-    }
-    .status-failed {
-      background-color: #d73a49;
-      border-color: #b62d3b;
-    }
+    .status-success { background-color: #2da44e; border-color: #1f7a37; }
+    .status-failed { background-color: #d73a49; border-color: #b62d3b; }
+{% endblock %}
 
-    /* Shared tooltip styling (single source of truth in html_ui.py) */
-    {{ gh_status_tooltip_css | safe }}
-  </style>
+{% block head_script %}
   <script>
-    function copyFromClipboardAttr(button) {
-      var text = button.getAttribute('data-clipboard-text');
-      if (!text) return;
-
-      // Fallback for non-HTTPS contexts (file:// protocol)
-      var textArea = document.createElement('textarea');
-      textArea.value = text;
-      textArea.style.position = 'fixed';
-      textArea.style.left = '-999999px';
-      textArea.style.top = '-999999px';
-      document.body.appendChild(textArea);
-      textArea.focus();
-      textArea.select();
-
-      try {
-        var successful = document.execCommand('copy');
-        document.body.removeChild(textArea);
-
-        if (successful) {
-          var originalHTML = button.innerHTML;
-          button.innerHTML = '{{ copy_icon_svg | safe }}<span style="margin-left: 6px;">Copied!</span>';
-          setTimeout(function() {
-            button.innerHTML = originalHTML;
-          }, 2000);
-        }
-      } catch (err) {
-        document.body.removeChild(textArea);
-      }
-    }
-
-    // Expand/collapse CI hierarchy nodes (used inside <pre>)
-    function toggleCiChildren(childrenId, toggleEl) {
-      var el = document.getElementById(childrenId);
-      if (!el) return;
-      var hidden = (el.style.display === 'none' || el.style.display === '');
-      el.style.display = hidden ? 'inline' : 'none';
-      if (toggleEl) {
-        toggleEl.textContent = hidden ? '▼' : '▶';
-      }
-    }
-
     function toggleCiError(errorId, toggleEl) {
       var el = document.getElementById(errorId);
       if (!el) return;
@@ -133,51 +56,11 @@
         toggleEl.textContent = hidden ? '▼ Hide error' : '▶ Show error';
       }
     }
-
-    {{ gh_status_tooltip_js | safe }}
-
-    // Calculate and display page age (same behavior as show_commit_history)
-    (function() {
-      const timeStr = '{{ generated_time }}';
-      const timeStrFixed = timeStr.replace(' PST', '-08:00').replace(' PDT', '-07:00');
-      const generatedTime = new Date(timeStrFixed);
-
-      function updatePageAge() {
-        const ageEl = document.getElementById('page-age');
-        if (!ageEl) return;
-        if (isNaN(generatedTime.getTime())) {
-          ageEl.textContent = '(invalid date)';
-          return;
-        }
-        const now = new Date();
-        const ageMs = now - generatedTime;
-        const seconds = Math.floor(ageMs / 1000);
-        const minutes = Math.floor(seconds / 60);
-        const hours = Math.floor(minutes / 60);
-        const days = Math.floor(hours / 24);
-
-        let ageText = '';
-        if (days > 0) {
-          ageText = `(${days} day${days > 1 ? 's' : ''} ${hours % 24} hour${(hours % 24) !== 1 ? 's' : ''} old)`;
-        } else if (hours > 0) {
-          ageText = `(${hours} hour${hours > 1 ? 's' : ''} ${minutes % 60} min old)`;
-        } else if (minutes > 0) {
-          ageText = `(${minutes} minute${minutes > 1 ? 's' : ''} old)`;
-        } else {
-          ageText = `(${seconds} second${seconds !== 1 ? 's' : ''} old)`;
-        }
-
-        ageEl.textContent = ageText;
-      }
-
-      updatePageAge();
-      setInterval(updatePageAge, 3000);
-    })();
   </script>
-</head>
-<body>
-  <div class="header">
-    <h1>Dynamo Branch Status</h1>
+{% endblock %}
+
+{% block header_title %}Dynamo Branch Status{% endblock %}
+{% block header_subtitle %}
     <p class="timestamp">
       <span style="opacity: 0.92;">
         <a href="https://github.com/ai-dynamo/dynamo" target="_blank" title="Open ai-dynamo/dynamo on GitHub" style="display: inline-flex; align-items: center; gap: 6px;">
@@ -190,11 +73,8 @@
       <span style="opacity: 0.6;">&nbsp;|&nbsp;</span>
       Page generated: {{ generated_time }} <span id="page-age" style="color: #ffa657;"></span>
     </p>
-  </div>
+{% endblock %}
 
+{% block content %}
   <pre>{{ tree_html | safe }}</pre>
-</body>
-</html>
-
-
-
+{% endblock %}
