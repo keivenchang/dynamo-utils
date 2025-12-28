@@ -21,7 +21,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 from zoneinfo import ZoneInfo
 
 # Global logger for the module
@@ -1263,6 +1263,141 @@ class GHPRCheckRow:
         if s in {"cancelled", "canceled"}:
             return "cancelled"
         return "unknown"
+
+
+@dataclass(frozen=True)
+class GitHubChecksSummary:
+    """Bucketed GitHub checks summary (shared by multiple HTML generators).
+
+    This is intentionally a thin, presentation-agnostic data object:
+    callers can render counts/icons/tooltips however they want.
+
+    Buckets:
+      - success_required / success_optional
+      - failure_required / failure_optional
+      - in_progress_required / in_progress_optional
+      - pending
+      - cancelled
+      - other
+      - total
+    """
+
+    counts: Dict[str, int]
+    names: Dict[str, List[str]]
+
+
+def summarize_pr_check_rows(rows: Iterable[GHPRCheckRow]) -> GitHubChecksSummary:
+    """Summarize `gh pr checks` rows into bucketed counts + name lists.
+
+    Args:
+        rows: Iterable of `GHPRCheckRow`
+
+    Returns:
+        GitHubChecksSummary where `names[...]` holds raw check names for tooltips.
+    """
+    counts: Dict[str, int] = {
+        "success_required": 0,
+        "success_optional": 0,
+        "failure_required": 0,
+        "failure_optional": 0,
+        "in_progress_required": 0,
+        "in_progress_optional": 0,
+        "pending": 0,
+        "cancelled": 0,
+        "other": 0,
+        "total": 0,
+    }
+    names: Dict[str, List[str]] = {k: [] for k in counts.keys()}
+
+    for r in rows:
+        try:
+            name = str(getattr(r, "name", "") or "")
+            status = str(getattr(r, "status_norm", "") or "unknown")
+            is_req = bool(getattr(r, "is_required", False))
+        except Exception:
+            continue
+
+        if status == "success":
+            key = "success_required" if is_req else "success_optional"
+        elif status == "failure":
+            key = "failure_required" if is_req else "failure_optional"
+        elif status == "in_progress":
+            key = "in_progress_required" if is_req else "in_progress_optional"
+        elif status == "pending":
+            key = "pending"
+        elif status == "cancelled":
+            key = "cancelled"
+        else:
+            key = "other"
+
+        counts[key] += 1
+        if name:
+            names[key].append(name)
+
+    counts["total"] = sum(v for k, v in counts.items() if k != "total")
+    return GitHubChecksSummary(counts=counts, names=names)
+
+
+def summarize_check_runs(check_runs: Iterable[Dict[str, Any]]) -> GitHubChecksSummary:
+    """Summarize commit check-runs (GitHub REST `.../check-runs`) into buckets.
+
+    Input shape (examples):
+      - check_runs entry:
+        {
+          "name": "build-test-amd64",
+          "status": "completed"|"in_progress"|"queued",
+          "conclusion": "success"|"failure"|"cancelled"|"skipped"|None,
+          "html_url": "https://..."
+          "is_required": true|false,   # optional; callers can pre-annotate
+        }
+
+    Returns:
+        GitHubChecksSummary with the same bucket keys as `summarize_pr_check_rows`.
+    """
+    counts: Dict[str, int] = {
+        "success_required": 0,
+        "success_optional": 0,
+        "failure_required": 0,
+        "failure_optional": 0,
+        "in_progress_required": 0,
+        "in_progress_optional": 0,
+        "pending": 0,
+        "cancelled": 0,
+        "other": 0,
+        "total": 0,
+    }
+    names: Dict[str, List[str]] = {k: [] for k in counts.keys()}
+
+    for cr in check_runs or []:
+        try:
+            name = str(cr.get("name", "") or "")
+            status_raw = str(cr.get("status", "") or "").strip().lower()
+            concl_raw = cr.get("conclusion", None)
+            conclusion = str(concl_raw or "").strip().lower()
+            is_req = bool(cr.get("is_required", False))
+        except Exception:
+            continue
+
+        # Normalize check-run states into the same buckets we use for `gh pr checks`.
+        if conclusion in {"success", "neutral", "skipped"}:
+            key = "success_required" if is_req else "success_optional"
+        elif conclusion in {"failure", "timed_out", "action_required"}:
+            key = "failure_required" if is_req else "failure_optional"
+        elif conclusion in {"cancelled", "canceled"}:
+            key = "cancelled"
+        elif status_raw in {"in_progress"}:
+            key = "in_progress_required" if is_req else "in_progress_optional"
+        elif status_raw in {"queued", "pending"}:
+            key = "pending"
+        else:
+            key = "other"
+
+        counts[key] += 1
+        if name:
+            names[key].append(name)
+
+    counts["total"] = sum(v for k, v in counts.items() if k != "total")
+    return GitHubChecksSummary(counts=counts, names=names)
 
 
 class GitHubAPIClient:

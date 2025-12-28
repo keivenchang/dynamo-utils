@@ -48,7 +48,7 @@ except Exception:  # pragma: no cover
     select_autoescape = None  # type: ignore[assignment]
 
 # Import GitHub utilities from common module
-from common import FailedCheck, GHPRCheckRow, GitHubAPIClient, PRInfo
+from common import FailedCheck, GHPRCheckRow, GitHubAPIClient, PRInfo, summarize_pr_check_rows
 
 #
 # Repo constants (avoid scattering hardcoded strings)
@@ -1210,6 +1210,32 @@ class PRStatusNode(BranchNode):
                         except Exception:
                             required_set = set()
 
+                    # Shared summary (common.py) so show_commit_history + show_dynamo_branches stay consistent.
+                    summary = summarize_pr_check_rows(rows)
+
+                    # Map summary buckets into the local display buckets.
+                    counts["success_required"] = int(summary.counts.get("success_required", 0) or 0)
+                    counts["success_optional"] = int(summary.counts.get("success_optional", 0) or 0)
+                    counts["failure_required"] = int(summary.counts.get("failure_required", 0) or 0)
+                    counts["failure_optional"] = int(summary.counts.get("failure_optional", 0) or 0)
+                    counts["in_progress"] = int(summary.counts.get("in_progress_required", 0) or 0) + int(
+                        summary.counts.get("in_progress_optional", 0) or 0
+                    )
+                    counts["pending"] = int(summary.counts.get("pending", 0) or 0)
+                    counts["cancelled"] = int(summary.counts.get("cancelled", 0) or 0)
+                    counts["other"] = int(summary.counts.get("other", 0) or 0)
+
+                    passed_required_jobs = list(summary.names.get("success_required", []) or [])
+                    passed_optional_jobs = list(summary.names.get("success_optional", []) or [])
+                    failed_required_jobs = list(summary.names.get("failure_required", []) or [])
+                    failed_optional_jobs = list(summary.names.get("failure_optional", []) or [])
+                    progress_required_jobs = list(summary.names.get("in_progress_required", []) or [])
+                    progress_optional_jobs = list(summary.names.get("in_progress_optional", []) or [])
+                    pending_jobs = list(summary.names.get("pending", []) or [])
+                    cancelled_jobs = list(summary.names.get("cancelled", []) or [])
+                    other_jobs = list(summary.names.get("other", []) or [])
+
+                    # Still build the detailed per-check table (this is presentation-specific).
                     for row in rows:
                         name_raw = row.name
                         name = html_module.escape(name_raw)
@@ -1227,42 +1253,6 @@ class PRStatusNode(BranchNode):
                         status_lc = status_raw.lower()
                         status_color = '#059669' if status_lc in ('pass', 'success') else '#dc2626' if status_lc in ('fail', 'failure') else '#6b7280'
                         status_html = f'<span style="color: {status_color}; font-weight: bold;">{status}</span>'
-
-                        # Update compact summary counts
-                        is_required = row.is_required or (name_raw in required_set)
-                        if status_lc in ('pass', 'success'):
-                            if is_required:
-                                counts["success_required"] += 1
-                                passed_required_jobs.append(name_raw)
-                            else:
-                                counts["success_optional"] += 1
-                                passed_optional_jobs.append(name_raw)
-                        elif status_lc in ('fail', 'failure'):
-                            if is_required:
-                                counts["failure_required"] += 1
-                                failed_required_jobs.append(name_raw)
-                            else:
-                                counts["failure_optional"] += 1
-                                failed_optional_jobs.append(name_raw)
-                        elif status_lc in ('in_progress', 'in progress', 'running'):
-                            counts["in_progress"] += 1
-                            if is_required:
-                                progress_required_jobs.append(name_raw)
-                            else:
-                                progress_optional_jobs.append(name_raw)
-                        elif status_lc in ('queued', 'pending'):
-                            counts["pending"] += 1
-                            pending_jobs.append(name_raw)
-                        elif status_lc in ('skipping', 'skipped'):
-                            # Show as paused (same bucket as pending) for readability.
-                            counts["pending"] += 1
-                            pending_jobs.append(name_raw)
-                        elif status_lc in ('cancelled', 'canceled'):
-                            counts["cancelled"] += 1
-                            cancelled_jobs.append(name_raw)
-                        else:
-                            counts["other"] += 1
-                            other_jobs.append(name_raw)
 
                         # Make URL clickable if present
                         if url and url.strip():

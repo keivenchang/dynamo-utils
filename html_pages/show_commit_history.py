@@ -47,6 +47,7 @@ from common import (
     MARKER_PASSED,
     MARKER_FAILED,
     MARKER_KILLED,
+    summarize_check_runs,
 )
 
 # Import Jinja2 for HTML template rendering
@@ -949,45 +950,19 @@ class CommitHistoryGenerator:
                 }
                 continue
 
+            summary = summarize_check_runs(gha_status.get('check_runs', []) or [])
             stats = {
-                'success_required': 0,
-                'success_optional': 0,
-                'failure_required': 0,
-                'failure_optional': 0,
-                'in_progress_required': 0,
-                'in_progress_optional': 0,
-                'pending': 0,
-                'cancelled': 0,
-                'other': 0,
+                'success_required': int(summary.counts.get('success_required', 0) or 0),
+                'success_optional': int(summary.counts.get('success_optional', 0) or 0),
+                'failure_required': int(summary.counts.get('failure_required', 0) or 0),
+                'failure_optional': int(summary.counts.get('failure_optional', 0) or 0),
+                'in_progress_required': int(summary.counts.get('in_progress_required', 0) or 0),
+                'in_progress_optional': int(summary.counts.get('in_progress_optional', 0) or 0),
+                'pending': int(summary.counts.get('pending', 0) or 0),
+                'cancelled': int(summary.counts.get('cancelled', 0) or 0),
+                'other': int(summary.counts.get('other', 0) or 0),
+                'total': int(summary.counts.get('total', 0) or 0),
             }
-            for check in gha_status.get('check_runs', []):
-                conclusion = check.get('conclusion')
-                status = check.get('status')
-                is_required = bool(check.get('is_required', False))
-
-                if conclusion == 'success':
-                    if is_required:
-                        stats['success_required'] += 1
-                    else:
-                        stats['success_optional'] += 1
-                elif conclusion in ('failure', 'timed_out', 'action_required'):
-                    if is_required:
-                        stats['failure_required'] += 1
-                    else:
-                        stats['failure_optional'] += 1
-                elif status == 'in_progress':
-                    if is_required:
-                        stats['in_progress_required'] += 1
-                    else:
-                        stats['in_progress_optional'] += 1
-                elif status in ('queued', 'pending'):
-                    stats['pending'] += 1
-                elif conclusion == 'cancelled':
-                    stats['cancelled'] += 1
-                else:
-                    stats['other'] += 1
-
-            stats['total'] = sum(stats.values())
             gha_per_commit_stats[sha_full] = stats
 
         # Render template
