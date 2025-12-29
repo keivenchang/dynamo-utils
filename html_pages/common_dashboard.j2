@@ -1,0 +1,220 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <meta http-equiv="refresh" content="{{ refresh_seconds | default(300) }}">
+  <title>{% block title %}{% endblock %}</title>
+  {% block favicon %}{% endblock %}
+  <style>
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif;
+      margin: 10px;
+      line-height: 1.3;
+      background-color: #f6f8fa;
+      font-size: 13px;
+      color: #24292f;
+    }
+    .header {
+      background-color: #24292f;
+      color: white;
+      padding: 10px 15px;
+      border-radius: 4px;
+      margin-bottom: 10px;
+    }
+    .header h1 {
+      margin: 0;
+      font-size: 18px;
+    }
+
+    {% block css %}{% endblock %}
+
+    /* GitHub checks tooltip styling (static; shared across dashboards) */
+    .gh-status-tooltip {
+      position: relative;
+      display: inline-block;
+    }
+    .gh-status-tooltip .tooltiptext {
+      visibility: hidden;
+      max-width: calc(100vw - 40px);
+      background-color: #24292f;
+      color: #ffffff;
+      text-align: left;
+      border-radius: 6px;
+      padding: 8px 12px;
+      position: fixed;
+      z-index: 1000;
+      left: 20px;
+      right: 20px;
+      width: auto;
+      opacity: 0;
+      transition: opacity 0.3s, visibility 0s 1s;
+      font-size: 12px;
+      line-height: 1.5;
+      box-shadow: 0 4px 6px rgba(0, 0, 0, 0.3);
+      white-space: normal;
+      word-wrap: break-word;
+      overflow-wrap: break-word;
+    }
+    .gh-status-tooltip .tooltiptext::after {
+      content: "";
+      position: absolute;
+      top: 100%;
+      left: 20px;
+      margin-left: -5px;
+      border-width: 5px;
+      border-style: solid;
+      border-color: #24292f transparent transparent transparent;
+    }
+    .gh-status-tooltip:hover .tooltiptext {
+      visibility: visible;
+      opacity: 1;
+      transition-delay: 1s;
+    }
+  </style>
+
+  {% block head_script %}{% endblock %}
+</head>
+<body>
+  <div class="header">
+    <h1>{% block header_title %}{% endblock %}</h1>
+    {% block header_subtitle %}{% endblock %}
+  </div>
+
+  {% block content %}{% endblock %}
+
+  <script>
+  // Position tooltips dynamically (static; shared)
+  document.addEventListener('DOMContentLoaded', function() {
+    var tooltips = document.querySelectorAll('.gh-status-tooltip');
+    tooltips.forEach(function(tooltip) {
+      tooltip.addEventListener('mouseenter', function() {
+        var tooltipText = this.querySelector('.tooltiptext');
+        if (!tooltipText) return;
+        var rect = this.getBoundingClientRect();
+        // Position tooltip above the element
+        tooltipText.style.top = (rect.top - tooltipText.offsetHeight - 10) + 'px';
+      });
+    });
+  });
+
+  // Shared tree toggle JS (static; used by <pre>-tree output)
+  function toggleTreeChildren(childrenId, toggleEl) {
+    var el = document.getElementById(childrenId);
+    if (!el) return;
+    var hidden = (el.style.display === 'none' || el.style.display === '');
+    el.style.display = hidden ? 'inline' : 'none';
+    if (toggleEl) {
+      toggleEl.textContent = hidden ? '▼' : '▶';
+    }
+
+    // When expanding, auto-expand the first level beneath this node (direct children only),
+    // regardless of pass/fail. This is especially useful for showing top-level workflow roots.
+    if (hidden) {
+      try {
+        var selector = '[data-parent-children-id=\"' + childrenId + '\"][data-children-id]';
+        var childToggles = el.querySelectorAll(selector);
+        childToggles.forEach(function(t) {
+          var cid = t.getAttribute('data-children-id');
+          if (!cid) return;
+          var childSpan = document.getElementById(cid);
+          if (!childSpan) return;
+          var chHidden = (childSpan.style.display === 'none' || childSpan.style.display === '');
+          if (chHidden) {
+            childSpan.style.display = 'inline';
+            t.textContent = '▼';
+          }
+        });
+      } catch (e) {
+        // Best-effort only.
+      }
+    }
+  }
+
+  // Shared "Snippet" toggle (used by [raw log] leaves)
+  function toggleErrorSnippet(errorId, toggleEl) {
+    var el = document.getElementById(errorId);
+    if (!el) return;
+    var hidden = (el.style.display === 'none' || el.style.display === '');
+    el.style.display = hidden ? 'inline' : 'none';
+    if (toggleEl) {
+      toggleEl.textContent = hidden ? '▼ Hide snippet' : '▶ Snippet';
+    }
+  }
+
+  // Shared copy-to-clipboard helpers
+  function copyToClipboard(text, button) {
+    if (!text) return;
+    var textArea = document.createElement('textarea');
+    textArea.value = text;
+    textArea.style.position = 'fixed';
+    textArea.style.left = '-999999px';
+    textArea.style.top = '-999999px';
+    document.body.appendChild(textArea);
+    textArea.focus();
+    textArea.select();
+
+    try {
+      var successful = document.execCommand('copy');
+      document.body.removeChild(textArea);
+      if (successful && button) {
+        var originalHTML = button.innerHTML;
+        var icon = '{{ copy_icon_svg | default("", true) | safe }}';
+        button.innerHTML = (icon ? icon : '') + '<span style="margin-left: 6px;">Copied!</span>';
+        setTimeout(function() { button.innerHTML = originalHTML; }, 2000);
+      }
+    } catch (err) {
+      document.body.removeChild(textArea);
+    }
+  }
+
+  function copyFromClipboardAttr(button) {
+    if (!button) return;
+    var text = button.getAttribute('data-clipboard-text');
+    if (!text) return;
+    copyToClipboard(text, button);
+  }
+
+  // Calculate and display page age (shared)
+  (function() {
+    var el = document.getElementById('page-age');
+    if (!el) return;
+    const timeStr = '{{ generated_time | default("") }}';
+    const timeStrFixed = timeStr.replace(' PST', '-08:00').replace(' PDT', '-07:00');
+    const generatedTime = new Date(timeStrFixed);
+
+    function updatePageAge() {
+      if (isNaN(generatedTime.getTime())) {
+        el.textContent = '(invalid date)';
+        return;
+      }
+      const now = new Date();
+      const ageMs = now - generatedTime;
+      const seconds = Math.floor(ageMs / 1000);
+      const minutes = Math.floor(seconds / 60);
+      const hours = Math.floor(minutes / 60);
+      const days = Math.floor(hours / 24);
+
+      let ageText = '';
+      if (days > 0) {
+        ageText = `(${days} day${days > 1 ? 's' : ''} ${hours % 24} hour${(hours % 24) !== 1 ? 's' : ''} old)`;
+      } else if (hours > 0) {
+        ageText = `(${hours} hour${hours > 1 ? 's' : ''} ${minutes % 60} min old)`;
+      } else if (minutes > 0) {
+        ageText = `(${minutes} minute${minutes > 1 ? 's' : ''} old)`;
+      } else {
+        ageText = `(${seconds} second${seconds !== 1 ? 's' : ''} old)`;
+      }
+
+      el.textContent = ageText;
+    }
+
+    updatePageAge();
+    setInterval(updatePageAge, 3000);
+  })();
+  </script>
+
+  {% block tail_script %}{% endblock %}
+</body>
+</html>
+
+

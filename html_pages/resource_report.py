@@ -4,7 +4,7 @@ Generate a fancy HTML resource report from the SQLite DB produced by `resource_m
 
 Features:
 - Interactive charts (zoom/pan/range buttons) via Plotly.js (loaded from CDN)
-- Last N days view (default: 7d) with quick zoom buttons (1d/12h/6h/1h)
+- Last N days view (max: 2d; default: 2d) with quick zoom buttons (1d/12h/6h/1h)
 - GPU + CPU + memory + IO graphs
 - "Spike" annotations for top-process CPU spikes (best-effort: uses stored offenders)
 """
@@ -143,9 +143,76 @@ class SampleRow:
 
 
 def _connect(db_path: Path) -> sqlite3.Connection:
-    con = sqlite3.connect(str(db_path))
+    # Keep timeout low: this script is often run from cron and should fail fast if the DB is locked.
+    con = sqlite3.connect(str(db_path), timeout=2.0)
     con.row_factory = sqlite3.Row
     return con
+
+
+def _wal_checkpoint_truncate(con: sqlite3.Connection) -> List[Tuple[int, int, int]]:
+    """
+    Attempt to checkpoint and truncate the WAL file.
+
+    Returns SQLite's result rows for PRAGMA wal_checkpoint(TRUNCATE):
+      [(busy, log, checkpointed)]
+    """
+    try:
+        rows = con.execute("PRAGMA wal_checkpoint(TRUNCATE);").fetchall()
+        out: List[Tuple[int, int, int]] = []
+        for r in rows:
+            try:
+                out.append((int(r[0]), int(r[1]), int(r[2])))
+            except Exception:
+                continue
+        return out
+    except Exception:
+        return []
+
+
+def _vacuum_best_effort(db_path: Path) -> bool:
+    """
+    Best-effort VACUUM to reclaim disk space (shrinks the main .sqlite file).
+
+    VACUUM requires an exclusive lock; if the monitor is running, this will likely fail quickly.
+    """
+    try:
+        con = sqlite3.connect(str(db_path), timeout=2.0)
+        try:
+            con.execute("PRAGMA foreign_keys=ON;")
+            con.execute("VACUUM;")
+            return True
+        finally:
+            con.close()
+    except Exception:
+        return False
+
+
+def _prune_db_samples_older_than(
+    con: sqlite3.Connection,
+    *,
+    cutoff_ts_unix: float,
+) -> int:
+    """
+    Delete samples older than cutoff_ts_unix.
+
+    `resource_monitor.py` schema uses ON DELETE CASCADE for child tables, but SQLite only enforces
+    that when PRAGMA foreign_keys=ON for the current connection.
+    """
+    try:
+        con.execute("PRAGMA foreign_keys=ON;")
+    except Exception:
+        pass
+    cur = con.cursor()
+    try:
+        n = cur.execute(
+            "SELECT COUNT(*) AS n FROM samples WHERE ts_unix < ?", (float(cutoff_ts_unix),)
+        ).fetchone()["n"]
+        to_delete = int(n or 0)
+    except Exception:
+        to_delete = 0
+    cur.execute("DELETE FROM samples WHERE ts_unix < ?", (float(cutoff_ts_unix),))
+    con.commit()
+    return to_delete
 
 
 def _get_time_window(con: sqlite3.Connection, *, days: float) -> Tuple[float, float]:
@@ -1332,7 +1399,7 @@ def _build_html(payload: Dict[str, Any]) -> str:
           {payload.get("title","Resource Report")}
         </h1>
         <div class="small" style="margin-top:6px;">
-          Interactive charts: zoom / pan / range buttons. Use the x-axis range selector to jump to <span class="k">1d</span> or <span class="k">7d</span>.
+          Interactive charts: zoom / pan / range buttons. Use the x-axis range selector to jump to <span class="k">1d</span> or <span class="k">2d</span>.
         </div>
       </div>
       <div class="meta">
@@ -1880,7 +1947,7 @@ def _build_html(payload: Dict[str, Any]) -> str:
             {{count: 6, label: '6h', step: 'hour', stepmode: 'backward'}},
             {{count: 12, label: '12h', step: 'hour', stepmode: 'backward'}},
             {{count: 1, label: '1d', step: 'day', stepmode: 'backward'}},
-            {{count: 7, label: '7d', step: 'day', stepmode: 'backward'}},
+            {{count: 2, label: '2d', step: 'day', stepmode: 'backward'}},
             {{step: 'all', label: 'all'}}
           ],
         }},
@@ -2804,12 +2871,30 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Generate an HTML resource report from resource_monitor.sqlite")
     p.add_argument("--db-path", type=Path, default=_default_db_path(), help="SQLite DB path")
     p.add_argument("--output", type=Path, required=True, help="Output HTML file path")
-    p.add_argument("--days", type=float, default=7.0, help="How many days to include (default: 7)")
+    p.add_argument("--days", type=float, default=2.0, help="How many days to include (max: 2, default: 2)")
     p.add_argument("--title", default="keivenc-linux Resource Report", help="HTML title")
     p.add_argument(
         "--gh-rate-limit-resources",
         default="core,search,graphql",
         help="Comma-separated GitHub rate-limit resources to chart (default: core,search,graphql)",
+    )
+
+    p.add_argument(
+        "--prune-db-days",
+        type=float,
+        default=None,
+        help="If set, delete DB samples older than this many days (based on latest sample timestamp). "
+        "Example: --prune-db-days 2",
+    )
+    p.add_argument(
+        "--db-checkpoint-truncate",
+        action="store_true",
+        help="Run PRAGMA wal_checkpoint(TRUNCATE) to keep the -wal file small (safe for cron).",
+    )
+    p.add_argument(
+        "--db-vacuum",
+        action="store_true",
+        help="Best-effort VACUUM to reclaim disk space (may fail if DB is in use).",
     )
 
     p.add_argument("--min-cpu-spike", type=float, default=50.0, help="Minimum top-process cpu%% for a spike")
@@ -2845,7 +2930,35 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     con = _connect(db_path)
     try:
-        start_ts, end_ts = _get_time_window(con, days=float(args.days))
+        days = float(args.days)
+        if days > 2.0:
+            raise SystemExit("--days is capped at 2 (use 2 or less).")
+        if days <= 0.0:
+            raise SystemExit("--days must be > 0.")
+
+        # Optional DB prune (keeps resource_monitor.sqlite tidy).
+        prune_days = getattr(args, "prune_db_days", None)
+        if prune_days is not None:
+            pd = float(prune_days)
+            if pd <= 0.0:
+                raise SystemExit("--prune-db-days must be > 0 (or omit the flag).")
+            cur = con.cursor()
+            max_ts = cur.execute("SELECT MAX(ts_unix) AS t FROM samples").fetchone()["t"]
+            if max_ts:
+                end_ts_tmp = float(max_ts)
+                cutoff = end_ts_tmp - pd * 86400.0
+                deleted = _prune_db_samples_older_than(con, cutoff_ts_unix=cutoff)
+                if deleted:
+                    print(f"Pruned {deleted} samples older than {pd:g} days.")
+
+        if bool(getattr(args, "db_checkpoint_truncate", False)):
+            rows = _wal_checkpoint_truncate(con)
+            if rows:
+                # (busy, log, checkpointed)
+                b, l, c = rows[0]
+                print(f"wal_checkpoint(TRUNCATE): busy={b} log={l} checkpointed={c}")
+
+        start_ts, end_ts = _get_time_window(con, days=days)
 
         gh_resources = [
             s.strip()
@@ -2998,7 +3111,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             "db_path": str(db_path),
             "gh_rate_limit": gh_rate_limit,
             "gh_rate_limit_latest": gh_rate_limit_latest,
-            "window": f"{datetime.fromtimestamp(start_ts)} → {datetime.fromtimestamp(end_ts)} (localtime) | last {args.days:g} days",
+            "window": f"{datetime.fromtimestamp(start_ts)} → {datetime.fromtimestamp(end_ts)} (localtime) | last {days:g} days",
             "window_end": _ts_to_iso(end_ts),
             "sample_count": len(samples),
             "avg_interval_s": avg_interval,
@@ -3043,6 +3156,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
         out_path.write_text(_build_html(payload), encoding="utf-8")
         print(f"Wrote: {out_path}")
+
+        if bool(getattr(args, "db_vacuum", False)):
+            # Run VACUUM after writing output so we don't lock ourselves out while generating.
+            # Best-effort only: skip if another process holds the DB.
+            ok = _vacuum_best_effort(db_path)
+            print(f"VACUUM: {'ok' if ok else 'skipped (db busy)'}")
         return 0
     finally:
         try:

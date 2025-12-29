@@ -15,6 +15,7 @@ try:
 except Exception:  # pragma: no cover
     git = None  # type: ignore[assignment]
 import glob
+import html
 import json
 import logging
 import os
@@ -33,14 +34,35 @@ if str(_UTILS_DIR) not in sys.path:
 if str(_THIS_DIR) not in sys.path:
     sys.path.insert(0, str(_THIS_DIR))
 
-# Shared UI snippets (keep styling consistent with show_dynamo_branches.py)
-from html_ui import GH_STATUS_TOOLTIP_CSS, GH_STATUS_TOOLTIP_JS, PASS_PLUS_STYLE
+# Shared dashboard helpers (UI + workflow graph)
+from common_dashboard_lib import (
+    PASS_PLUS_STYLE,
+    TreeNodeVM,
+    build_check_name_matchers,
+    check_line_html,
+    load_workflow_specs,
+    render_tree_pre_lines,
+    required_badge_html,
+    status_icon_html,
+)
+
+# Dashboard runtime (HTML-only) helpers
+from common_dashboard_runtime import (
+    materialize_job_raw_log_text_local_link,
+    prune_dashboard_raw_logs,
+    prune_partial_raw_log_caches,
+)
+
+# Log/snippet helpers
+from common_log_errors import extract_error_snippet_from_log_file
 
 # Import utilities from common module
+import common
 from common import (
     DynamoRepositoryUtils,
     GitLabAPIClient,
     GitHubAPIClient,
+    format_gh_check_run_duration,
     get_terminal_width,
     dynamo_utils_cache_dir,
     MARKER_RUNNING,
@@ -48,6 +70,9 @@ from common import (
     MARKER_FAILED,
     MARKER_KILLED,
     summarize_check_runs,
+    select_shas_for_network_fetch,
+    normalize_check_name,
+    is_required_check_name,
 )
 
 # Import Jinja2 for HTML template rendering
@@ -74,42 +99,20 @@ STATUS_SUCCESS = 'success'
 STATUS_FAILED = 'failed'
 STATUS_BUILDING = 'building'
 
-def _normalize_check_name(name: str) -> str:
-    """Normalize check names for robust comparison."""
-    return re.sub(r"\s+", " ", (name or "").strip().lower())
-
-
-def _is_required_check_name(check_name: str, required_names_normalized: Set[str]) -> bool:
-    """Classify whether a check run is required (blocking) vs optional (informational).
-
-    Primary source of truth: branch-protection required checks from `gh pr checks --required`,
-    passed in via `required_names_normalized`.
-
-    Fallback/overrides: hard-coded patterns for known blocking checks (user-provided).
-    """
-    name_norm = _normalize_check_name(check_name)
-    if not name_norm:
-        return False
-    if name_norm in required_names_normalized:
-        return True
-
-    # Fallback patterns (case-insensitive via normalized string).
-    # These cover common "must pass" checks even when we can't resolve PR required checks.
-    mandatory_patterns = [
-        r"^build and test - dynamo$",
-        r"check for broken markdown links",
-        r"docs link",  # e.g. "Docs Link check"
-        r"\blychee\b",
-        r"\b(vllm|sglang|trtllm)\s*\(amd64\)\b",
-        r"rust[- ]pre[- ]merge",
-    ]
-    return any(re.search(pat, name_norm) for pat in mandatory_patterns)
-
+_normalize_check_name = normalize_check_name
+_is_required_check_name = is_required_check_name
 
 class CommitHistoryGenerator:
     """Generate commit history with Composite Docker SHAs (CDS) and Docker images"""
 
-    def __init__(self, repo_path: Path, verbose: bool = False, debug: bool = False, skip_gitlab_fetch: bool = False):
+    def __init__(
+        self,
+        repo_path: Path,
+        verbose: bool = False,
+        debug: bool = False,
+        skip_gitlab_fetch: bool = False,
+        github_token: Optional[str] = None,
+    ):
         """
         Initialize the commit history generator
 
@@ -127,7 +130,10 @@ class CommitHistoryGenerator:
         # Cache files live in ~/.cache/dynamo-utils to avoid polluting the repo checkout
         self.cache_file = dynamo_utils_cache_dir() / "commit_history.json"
         self.gitlab_client = GitLabAPIClient()  # Single instance for all GitLab operations
-        self.github_client = GitHubAPIClient()  # Single instance for all GitHub operations
+        self.github_client = GitHubAPIClient(token=github_token, debug_rest=bool(debug))  # Single instance for all GitHub operations
+        # GitHub network fetching is governed by cache TTLs in `common.py`.
+        # We allow fetches when entries are missing or stale so the dashboard self-heals and
+        # raw logs can be materialized whenever they are needed.
 
     def _setup_logger(self) -> logging.Logger:
         """Setup logging configuration"""
@@ -162,6 +168,17 @@ class CommitHistoryGenerator:
             common_logger.setLevel(logging.WARNING)
         if not common_logger.handlers:
             common_logger.addHandler(handler)
+
+        # GitHub REST debug logging (GitHubAPIClient uses logger name == class name).
+        gh_logger = logging.getLogger('GitHubAPIClient')
+        if self.debug:
+            gh_logger.setLevel(logging.DEBUG)
+        elif self.verbose:
+            gh_logger.setLevel(logging.INFO)
+        else:
+            gh_logger.setLevel(logging.WARNING)
+        if not gh_logger.handlers:
+            gh_logger.addHandler(handler)
         
         return logger
 
@@ -187,7 +204,11 @@ class CommitHistoryGenerator:
         # Initialize repo utils for this operation
         repo_utils = DynamoRepositoryUtils(self.repo_path, dry_run=False, verbose=self.verbose)
 
-        # Load cache (.cache/commit_history.json in repo_path)
+        # Cache stats (printed at end in verbose/debug mode; avoids needing to pipe output).
+        cache_stats: Dict[str, dict] = {}
+        meta_stats: Dict[str, int] = {"full_hit": 0, "legacy_hit": 0, "miss": 0}
+
+        # Load cache (commit_history.json in dynamo-utils cache dir)
         # Format (new): {
         #   "<full_commit_sha>": {
         #     "composite_docker_sha": "746bc31d05b3",
@@ -261,7 +282,8 @@ class CommitHistoryGenerator:
                     self.logger.info(f"Fetching merge dates for {len(pr_numbers)} PRs...")
                     pr_to_merge_date = self.github_client.get_cached_pr_merge_dates(
                         pr_numbers,
-                        cache_file="github_pr_merge_dates.json"
+                        cache_file="github_pr_merge_dates.json",
+                        stats=cache_stats,
                     )
                     self.logger.info(f"Got merge dates for {sum(1 for v in pr_to_merge_date.values() if v)} PRs")
 
@@ -320,6 +342,7 @@ class CommitHistoryGenerator:
                     merge_date = None  # Initialize merge_date
 
                     if cached_entry and isinstance(cached_entry, dict):
+                        meta_stats["full_hit"] += 1
                         # New format: Full metadata cached
                         composite_sha = cached_entry['composite_docker_sha']
                         date_str = cached_entry['date']
@@ -365,10 +388,12 @@ class CommitHistoryGenerator:
 
                         # Check if we have old-format composite SHA cached
                         if cached_entry and isinstance(cached_entry, str):
+                            meta_stats["legacy_hit"] += 1
                             composite_sha = cached_entry
                             self.logger.debug(f"Cache hit (old format) for {sha_short}: {composite_sha}")
                             need_checkout = False
                         else:
+                            meta_stats["miss"] += 1
                             # Need to calculate composite SHA
                             need_checkout = True
                             try:
@@ -518,9 +543,22 @@ class CommitHistoryGenerator:
                         logs_dir = self.repo_path / "logs"
                 # Determine output path first
                 if output_path is None:
-                    # Auto-detect: Write to logs directory within the repo (or current directory if logs doesn't exist)
+                    # Auto-detect output path.
+                    #
+                    # Policy: prefer writing to the web-served dashboard location:
+                    #   <repo_path>/../dynamo_latest/index.html
+                    # This keeps manual runs consistent with update_html_pages.sh.
+                    #
+                    # If that directory doesn't exist, fall back to <repo_path>/logs/commit-history.html
+                    # (or ./commit-history.html as a last resort).
+                    repo_abs_path = self.repo_path.resolve()
+                    nvidia_home = repo_abs_path.parent
+                    dynamo_latest_dir = nvidia_home / "dynamo_latest"
                     logs_dir_temp = self.repo_path / "logs"
-                    if logs_dir_temp.exists():
+
+                    if dynamo_latest_dir.exists():
+                        output_path = dynamo_latest_dir / "index.html"
+                    elif logs_dir_temp.exists():
                         output_path = logs_dir_temp / "commit-history.html"
                     else:
                         output_path = Path("commit-history.html")
@@ -531,12 +569,57 @@ class CommitHistoryGenerator:
                     output_path,
                     sha_to_pr_number=sha_to_pr_number,
                     pr_to_required_checks=pr_to_required_checks,
+                    cache_stats=cache_stats,
                 )
                 output_path.parent.mkdir(parents=True, exist_ok=True)
                 output_path.write_text(html_content)
                 print(f"\nHTML report generated: {output_path}")
                 if original_ref is not None:
                     print(f"Restored HEAD to {original_ref}")
+
+                # Cache miss summary
+                if self.verbose or self.debug:
+                    try:
+                        self.logger.info(
+                            "Cache stats: commit_metadata full_hit=%s legacy_hit=%s miss=%s",
+                            meta_stats.get("full_hit", 0),
+                            meta_stats.get("legacy_hit", 0),
+                            meta_stats.get("miss", 0),
+                        )
+                        md = cache_stats.get("merge_dates_cache") or {}
+                        if md:
+                            self.logger.info(
+                                "Cache stats: merge_dates hits=%s misses=%s reason=%s sample_misses=%s",
+                                md.get("hits"),
+                                md.get("misses"),
+                                md.get("miss_reason"),
+                                md.get("miss_prs_sample"),
+                            )
+                        rc = cache_stats.get("required_checks_cache") or {}
+                        if rc:
+                            self.logger.info(
+                                "Cache stats: required_checks hits=%s misses=%s reason=%s skip_fetch=%s sample_misses=%s",
+                                rc.get("hits"),
+                                rc.get("misses"),
+                                rc.get("miss_reason"),
+                                rc.get("skip_fetch"),
+                                rc.get("miss_prs_sample"),
+                            )
+                        gha = cache_stats.get("github_actions_status_cache") or {}
+                        if gha:
+                            self.logger.info(
+                                "Cache stats: github_actions_status total=%s fetched=%s hit_fresh=%s stale_refresh=%s miss_fetch=%s miss_no_fetch=%s",
+                                gha.get("total_shas"),
+                                gha.get("fetched_shas"),
+                                gha.get("cache_hit_fresh"),
+                                gha.get("cache_stale_refresh"),
+                                gha.get("cache_miss_fetch"),
+                                gha.get("cache_miss_no_fetch"),
+                            )
+                            if self.debug:
+                                self.logger.debug("Cache stats: github_actions_status details=%s", gha)
+                    except Exception:
+                        pass
 
             # Save cache if updated
             if cache_updated:
@@ -568,6 +651,7 @@ class CommitHistoryGenerator:
         output_path: Path,
         sha_to_pr_number: Optional[Dict[str, int]] = None,
         pr_to_required_checks: Optional[Dict[int, List[str]]] = None,
+        cache_stats: Optional[Dict[str, dict]] = None,
     ) -> str:
         """Generate HTML report for commit history with Docker image detection
 
@@ -616,13 +700,61 @@ class CommitHistoryGenerator:
         if pipeline_ids:
             pipeline_job_counts = self._get_gitlab_pipeline_job_counts(pipeline_ids)
 
-        # Get GitHub Actions check status for commits
+        # Prime required-checks metadata (GitHub) in a capped way:
+        # - always read cache for all PRs (no API calls)
+        # - only allow network fetch for PRs associated with allow_fetch_shas
+        try:
+            pr_to_required_checks = self.github_client.get_cached_required_checks(
+                pr_numbers,
+                cache_file="github_required_checks.json",
+                skip_fetch=True,
+                stats=cache_stats,
+            )
+        except Exception:
+            pr_to_required_checks = {}
+
+        try:
+            pr_numbers_allow = sorted({p for p in (sha_to_pr_number.get(sha) for sha in sha_full_list) if p})
+            if pr_numbers_allow:
+                fetched_required = self.github_client.get_cached_required_checks(
+                    pr_numbers_allow,
+                    cache_file="github_required_checks.json",
+                    skip_fetch=False,
+                    stats=cache_stats,
+                )
+                pr_to_required_checks.update(fetched_required or {})
+        except Exception:
+            pass
+
+        # Get GitHub Actions check status for commits:
+        # - allow network fetch for any SHA that is cache-missing/stale (TTL policy lives in `common.py`).
+        #
+        # NOTE: We do *not* age-gate fetch here anymore. The cache TTL policy already ensures
+        # old commits refresh very rarely (DEFAULT_STABLE_TTL_S), but we still need to fetch
+        # at least once to populate the cache; otherwise some SHAs show no GitHub dropdown.
+        sha_full_list = [c['sha_full'] for c in commit_data]
+        sha_to_dt = {c['sha_full']: c.get('committed_datetime') for c in commit_data}
+
+        # Raw-log policy:
+        # - We cache raw log *content* on disk for later parsing.
+        # - The dashboard links `[raw log]` to a *repo-local* stable file under:
+        #     <repo-path>/.cache/dynamo-utils/raw-log-text/<job_id>.log
+        #   (never to ephemeral GitHub signed URLs).
+        # - We allow network fetch of missing raw logs for any SHA; `common.py` enforces:
+        #   - only cache when job status is completed
+        #   - size caps and other safeguards
+
         github_actions_status = self.github_client.get_github_actions_status(
             owner='ai-dynamo',
             repo='dynamo',
-            sha_list=[c['sha_full'] for c in commit_data],
+            sha_list=sha_full_list,
             cache_file="github_actions_status.json",
-            skip_fetch=self.skip_gitlab_fetch  # Reuse the skip_fetch flag
+            # Do NOT tie GitHub fetch behavior to --skip-gitlab-fetch.
+            # GitHub fetching is already capped via fetch_allowlist + TTL policy.
+            skip_fetch=False,
+            fetch_allowlist=set(sha_full_list),
+            sha_to_datetime=sha_to_dt,          # age-based cache policy (>8h => stable TTL)
+            stats=cache_stats,
         )
 
         # Annotate GitHub check runs with "is_required" using PR required-checks + fallback patterns.
@@ -952,18 +1084,511 @@ class CommitHistoryGenerator:
 
             summary = summarize_check_runs(gha_status.get('check_runs', []) or [])
             stats = {
-                'success_required': int(summary.counts.get('success_required', 0) or 0),
-                'success_optional': int(summary.counts.get('success_optional', 0) or 0),
-                'failure_required': int(summary.counts.get('failure_required', 0) or 0),
-                'failure_optional': int(summary.counts.get('failure_optional', 0) or 0),
-                'in_progress_required': int(summary.counts.get('in_progress_required', 0) or 0),
-                'in_progress_optional': int(summary.counts.get('in_progress_optional', 0) or 0),
-                'pending': int(summary.counts.get('pending', 0) or 0),
-                'cancelled': int(summary.counts.get('cancelled', 0) or 0),
-                'other': int(summary.counts.get('other', 0) or 0),
-                'total': int(summary.counts.get('total', 0) or 0),
+                'success_required': int(summary.counts.success_required),
+                'success_optional': int(summary.counts.success_optional),
+                'failure_required': int(summary.counts.failure_required),
+                'failure_optional': int(summary.counts.failure_optional),
+                'in_progress_required': int(summary.counts.in_progress_required),
+                'in_progress_optional': int(summary.counts.in_progress_optional),
+                'pending': int(summary.counts.pending),
+                'cancelled': int(summary.counts.cancelled),
+                'other': int(summary.counts.other),
+                'total': int(summary.counts.total),
             }
             gha_per_commit_stats[sha_full] = stats
+
+        # (Check line HTML is rendered via the shared dashboard UI helper `check_line_html`)
+
+        def _status_norm_for_check_run(*, status: str, conclusion: str) -> str:
+            s = (status or "").strip().lower()
+            c = (conclusion or "").strip().lower()
+            if c in ("success", "neutral", "skipped"):
+                return "success"
+            if c in ("failure", "timed_out", "action_required"):
+                return "failure"
+            if c in ("cancelled", "canceled"):
+                return "cancelled"
+            if s in ("in_progress", "in progress"):
+                return "in_progress"
+            if s in ("queued", "pending"):
+                return "pending"
+            return "unknown"
+
+        def _subtree_needs_attention(node: TreeNodeVM, rollup_status: str, has_required_failure: bool) -> bool:
+            # Same policy as branches page: expand for required failures and non-completed states.
+            if has_required_failure:
+                return True
+            if rollup_status in ("in_progress", "pending", "cancelled", "unknown", "failure"):
+                return True
+            return False
+
+        def _build_github_checks_tree_html(*, repo_path: Path, sha_full: str) -> str:
+            gha = github_actions_status.get(sha_full) if github_actions_status else None
+            check_runs = (gha.get("check_runs") if isinstance(gha, dict) else None) or []
+            if not check_runs:
+                # Always render a stable placeholder so every commit row can show the dropdown.
+                root = TreeNodeVM(
+                    node_key=f"gha-root:{sha_full}",
+                    label_html=(
+                        f'<span style="font-weight: 600;">GitHub checks</span> '
+                        f'<a href="https://github.com/ai-dynamo/dynamo/commit/{html.escape(sha_full)}/checks" '
+                        f'target="_blank" style="color: #0969da; font-size: 11px; text-decoration: none;">[checks]</a>'
+                    ),
+                    children=[
+                        TreeNodeVM(
+                            node_key=f"gha-empty:{sha_full}",
+                            label_html='<span style="color: #57606a; font-size: 12px;">(no check data cached/fetched for this SHA)</span>',
+                            children=[],
+                            collapsible=True,
+                            default_expanded=False,
+                        )
+                    ],
+                    collapsible=True,
+                    default_expanded=True,
+                    triangle_tooltip="GitHub checks (derived from .github/workflows/*.yml)",
+                )
+                return ("\n".join(render_tree_pre_lines([root])).rstrip() + "\n")
+            # Always allow raw-log fetch when missing (subject to `common.py` rules: only cache when
+            # job status is completed; size caps; etc).
+            allow_raw_logs = True
+            raw_log_prefetch_budget = {"n": 10**12}
+
+            specs = load_workflow_specs(repo_path)
+            matchers = build_check_name_matchers(specs)
+
+            # Map check runs into workflow job_ids (or synthetic check:: nodes)
+            grouped: Dict[str, List[dict]] = {}
+            for cr in check_runs:
+                name = str(cr.get("name", "") or "")
+                mapped: Optional[str] = None
+                for job_id, rx in matchers:
+                    if rx.match(name):
+                        mapped = job_id
+                        break
+                if not mapped:
+                    mapped = f"check::{name}"
+                grouped.setdefault(mapped, []).append(cr)
+
+            important_ids: Set[str] = set(grouped.keys())
+
+            # Build needs map for workflow jobs we can resolve
+            needs_map: Dict[str, List[str]] = {}
+            for job_id, spec in specs.items():
+                if job_id in important_ids and job_id in grouped:
+                    needs_map[job_id] = [d for d in spec.needs if (d in important_ids and d in grouped)]
+
+            needed: Set[str] = set()
+            for deps in needs_map.values():
+                needed.update(deps)
+            workflow_roots = sorted([jid for jid in needs_map.keys() if jid not in needed])
+            synthetic_roots = sorted([jid for jid in important_ids if jid.startswith("check::")])
+
+            # Build VM nodes with rollups
+            def rollup_for_runs(runs: List[dict]) -> tuple[str, bool]:
+                # worst-first
+                priority = ["failure", "in_progress", "pending", "cancelled", "unknown", "success"]
+                statuses = []
+                has_required_failure = False
+                for cr in runs:
+                    st = _status_norm_for_check_run(status=str(cr.get("status", "") or ""), conclusion=str(cr.get("conclusion", "") or ""))
+                    statuses.append(st)
+                    if bool(cr.get("is_required", False)) and st == "failure":
+                        has_required_failure = True
+                for p in priority:
+                    if p in statuses:
+                        return p, has_required_failure
+                return "unknown", has_required_failure
+
+            memo: Dict[str, TreeNodeVM] = {}
+            snippet_cache: Dict[str, str] = {}
+
+            def snippet_for_raw_href(raw_href: str) -> str:
+                if not raw_href:
+                    return ""
+                if raw_href in snippet_cache:
+                    return snippet_cache[raw_href]
+                try:
+                    snippet = extract_error_snippet_from_log_file(Path(self.repo_path) / raw_href)
+                except Exception:
+                    snippet = ""
+                snippet_cache[raw_href] = snippet
+                return snippet
+
+            def build_node(job_id: str) -> TreeNodeVM:
+                if job_id in memo:
+                    return memo[job_id]
+
+                runs = grouped.get(job_id, [])
+                # Leaf-ish synthetic check group
+                if job_id.startswith("check::"):
+                    check_name = job_id.split("check::", 1)[1]
+                    roll_status, has_req_fail = rollup_for_runs(runs)
+                    any_req = any(bool(cr.get("is_required", False)) for cr in runs)
+                    children: List[TreeNodeVM] = []
+                    for cr in sorted(runs, key=lambda x: str(x.get("name", "") or "")):
+                        name = str(cr.get("name", "") or "")
+                        st = _status_norm_for_check_run(status=str(cr.get("status", "") or ""), conclusion=str(cr.get("conclusion", "") or ""))
+                        is_req = bool(cr.get("is_required", False))
+                        url = str(cr.get("html_url", "") or cr.get("details_url", "") or "")
+                        dur = format_gh_check_run_duration(cr)
+                        raw_href = ""
+                        if (
+                            st == "failure"
+                            and str(cr.get("status", "") or "").lower() == "completed"
+                            and "/job/" in url
+                        ):
+                            # Materialize a stable local file under <repo-path>/logs/... and link to it.
+                            # Important: we still show `[raw log]` for older commits if the local file already exists.
+                            # `allow_raw_logs` only gates *network fetch*, not linking.
+                            allow_fetch = bool(allow_raw_logs) and int(raw_log_prefetch_budget.get("n", 0) or 0) > 0
+                            try:
+                                raw_href = (
+                                    materialize_job_raw_log_text_local_link(
+                                        self.github_client,
+                                        job_url=url,
+                                        owner="ai-dynamo",
+                                        repo="dynamo",
+                                        page_root_dir=Path(self.repo_path),
+                                        allow_fetch=bool(allow_fetch),
+                                        assume_completed=True,
+                                    )
+                                    or ""
+                                )
+                            except Exception:
+                                raw_href = ""
+                            if allow_fetch:
+                                raw_log_prefetch_budget["n"] = int(raw_log_prefetch_budget.get("n", 0) or 0) - 1
+                        raw_size = 0
+                        if raw_href:
+                            try:
+                                raw_size = int((Path(self.repo_path) / raw_href).stat().st_size)
+                            except Exception:
+                                raw_size = 0
+                        snippet = snippet_for_raw_href(raw_href) if raw_href else ""
+
+                        children.append(
+                            TreeNodeVM(
+                                node_key=f"gha:{sha_full}:{name}",
+                                label_html=check_line_html(
+                                    job_id=name,
+                                    display_name="",
+                                    status_norm=st,
+                                    is_required=is_req,
+                                    duration=dur,
+                                    log_url=url,
+                                    raw_log_href=raw_href,
+                                    raw_log_size_bytes=int(raw_size or 0),
+                                    error_snippet_text=snippet,
+                                ),
+                                children=[],
+                                collapsible=True,
+                                default_expanded=False,
+                            )
+                        )
+
+                    node = TreeNodeVM(
+                        node_key=f"gha-group:{sha_full}:{check_name}",
+                        label_html=check_line_html(
+                            job_id=check_name,
+                            display_name="",
+                            status_norm=roll_status,
+                            is_required=any_req,
+                            duration="",
+                            log_url="",
+                            required_failure=has_req_fail,
+                        ),
+                        children=children,
+                        collapsible=True,
+                        default_expanded=_subtree_needs_attention(node=None, rollup_status=roll_status, has_required_failure=has_req_fail),  # type: ignore[arg-type]
+                    )
+                    memo[job_id] = node
+                    return node
+
+                # Workflow job node (may represent 1 run, many runs, or just be a parent for needs)
+                spec = specs.get(job_id)
+                display = (spec.display_name if spec else "") or job_id
+
+                any_req = any(bool(cr.get("is_required", False)) for cr in runs)
+
+                # If there is exactly one run for this workflow job, show duration + [log]
+                # directly on the job line (otherwise the job looks “linkless”).
+                single_run_log_url = ""
+                single_run_dur = ""
+                single_run_status = ""
+                single_run_is_req = False
+                if len(runs) == 1:
+                    cr0 = runs[0]
+                    st0 = _status_norm_for_check_run(
+                        status=str(cr0.get("status", "") or ""),
+                        conclusion=str(cr0.get("conclusion", "") or ""),
+                    )
+                    url0 = str(cr0.get("html_url", "") or cr0.get("details_url", "") or "")
+                    single_run_status = st0
+                    single_run_is_req = bool(cr0.get("is_required", False))
+                    single_run_log_url = url0
+                    single_run_dur = format_gh_check_run_duration(cr0)
+                    single_run_raw_href = ""
+                    if (
+                        st0 == "failure"
+                        and str(cr0.get("status", "") or "").lower() == "completed"
+                        and "/job/" in url0
+                    ):
+                        allow_fetch = bool(allow_raw_logs) and int(raw_log_prefetch_budget.get("n", 0) or 0) > 0
+                        try:
+                            single_run_raw_href = (
+                                materialize_job_raw_log_text_local_link(
+                                    self.github_client,
+                                    job_url=url0,
+                                    owner="ai-dynamo",
+                                    repo="dynamo",
+                                    page_root_dir=Path(self.repo_path),
+                                    allow_fetch=bool(allow_fetch),
+                                    assume_completed=True,
+                                )
+                                or ""
+                            )
+                        except Exception:
+                            single_run_raw_href = ""
+                        if allow_fetch:
+                            raw_log_prefetch_budget["n"] = int(raw_log_prefetch_budget.get("n", 0) or 0) - 1
+
+                    single_run_raw_size = 0
+                    if single_run_raw_href:
+                        try:
+                            single_run_raw_size = int((Path(self.repo_path) / single_run_raw_href).stat().st_size)
+                        except Exception:
+                            single_run_raw_size = 0
+                    single_run_snippet = snippet_for_raw_href(single_run_raw_href) if single_run_raw_href else ""
+
+                # Create children for mapped runs (if multiple, list them)
+                run_children: List[TreeNodeVM] = []
+                if len(runs) > 1:
+                    for cr in sorted(runs, key=lambda x: str(x.get("name", "") or "")):
+                        name = str(cr.get("name", "") or "")
+                        st = _status_norm_for_check_run(status=str(cr.get("status", "") or ""), conclusion=str(cr.get("conclusion", "") or ""))
+                        is_req = bool(cr.get("is_required", False))
+                        url = str(cr.get("html_url", "") or cr.get("details_url", "") or "")
+                        dur = format_gh_check_run_duration(cr)
+                        raw_href = ""
+                        if (
+                            st == "failure"
+                            and str(cr.get("status", "") or "").lower() == "completed"
+                            and "/job/" in url
+                        ):
+                            allow_fetch = bool(allow_raw_logs) and int(raw_log_prefetch_budget.get("n", 0) or 0) > 0
+                            try:
+                                raw_href = (
+                                    materialize_job_raw_log_text_local_link(
+                                        self.github_client,
+                                        job_url=url,
+                                        owner="ai-dynamo",
+                                        repo="dynamo",
+                                        page_root_dir=Path(self.repo_path),
+                                        allow_fetch=bool(allow_fetch),
+                                        assume_completed=True,
+                                    )
+                                    or ""
+                                )
+                            except Exception:
+                                raw_href = ""
+                            if allow_fetch:
+                                raw_log_prefetch_budget["n"] = int(raw_log_prefetch_budget.get("n", 0) or 0) - 1
+                        raw_size = 0
+                        if raw_href:
+                            try:
+                                raw_size = int((Path(self.repo_path) / raw_href).stat().st_size)
+                            except Exception:
+                                raw_size = 0
+                        snippet = snippet_for_raw_href(raw_href) if raw_href else ""
+                        run_children.append(
+                            TreeNodeVM(
+                                node_key=f"gha:{sha_full}:{name}",
+                                label_html=check_line_html(
+                                    job_id=name,
+                                    display_name="",
+                                    status_norm=st,
+                                    is_required=is_req,
+                                    duration=dur,
+                                    log_url=url,
+                                    raw_log_href=raw_href,
+                                    raw_log_size_bytes=int(raw_size or 0),
+                                    error_snippet_text=snippet,
+                                ),
+                                children=[],
+                                collapsible=True,
+                                default_expanded=False,
+                            )
+                        )
+
+                # Needs children (workflow graph)
+                dep_children = [build_node(dep) for dep in needs_map.get(job_id, [])]
+
+                # Rollup from runs + deps
+                roll_status, has_req_fail = rollup_for_runs(runs) if runs else ("unknown", False)
+                dep_statuses = []
+                dep_req_fail = False
+                for d in dep_children:
+                    # Approx: infer from icon html; better: carry status in VM later.
+                    _ = d
+                # If no direct runs, treat rollup as unknown and let deps dominate by expansion policy.
+                # (We still want parents to show attention if deps need it.)
+
+                children = run_children + dep_children
+                if children:
+                    # Derive rollup worst from children icons by re-walking check_runs where possible.
+                    # Simpler: if any required failure found in descendants, treat as required failure.
+                    # We'll use needs attention on default_expanded even if icon is neutral.
+                    if any("✗" in (c.label_html or "") for c in children):
+                        has_req_fail = True
+                        roll_status = "failure"
+
+                node = TreeNodeVM(
+                    node_key=f"gha-job:{sha_full}:{job_id}",
+                    label_html=(
+                        check_line_html(
+                            job_id=job_id,
+                            display_name=(display if display != job_id else ""),
+                            status_norm=(single_run_status or roll_status),
+                            is_required=(single_run_is_req if len(runs) == 1 else any_req),
+                            duration=(single_run_dur if len(runs) == 1 else ""),
+                            log_url=(single_run_log_url if len(runs) == 1 else ""),
+                            raw_log_href=(single_run_raw_href if len(runs) == 1 else ""),
+                            raw_log_size_bytes=(int(single_run_raw_size or 0) if len(runs) == 1 else 0),
+                            error_snippet_text=(single_run_snippet if len(runs) == 1 else ""),
+                            required_failure=has_req_fail,
+                        )
+                    ),
+                    children=children,
+                    collapsible=True,
+                    default_expanded=_subtree_needs_attention(node=None, rollup_status=roll_status, has_required_failure=has_req_fail),  # type: ignore[arg-type]
+                    triangle_tooltip=None,
+                )
+                memo[job_id] = node
+                return node
+
+            forest = [build_node(r) for r in workflow_roots] + [build_node(r) for r in synthetic_roots]
+            root = TreeNodeVM(
+                node_key=f"gha-root:{sha_full}",
+                label_html=(
+                    f'<span style="font-weight: 600;">GitHub checks</span> '
+                    f'<span style="color: #57606a; font-size: 12px;">(derived from .github/workflows/*.yml)</span> '
+                    f'<a href="https://github.com/ai-dynamo/dynamo/commit/{html.escape(sha_full)}/checks" '
+                    f'target="_blank" style="color: #0969da; font-size: 11px; text-decoration: none;">[checks]</a>'
+                ),
+                children=forest,
+                collapsible=True,
+                # UX: always expand the root so users immediately see the first-level workflow roots.
+                default_expanded=True,
+                triangle_tooltip="CI hierarchy (derived from .github/workflows/*.yml)",
+            )
+            return ("\n".join(render_tree_pre_lines([root])).rstrip() + "\n")
+
+        def _build_gitlab_checks_tree_html(*, sha_full: str, sha_short: str) -> str:
+            nodes: List[TreeNodeVM] = []
+
+            pr_num = sha_to_pr_number.get(sha_full) if sha_to_pr_number else None
+            pipeline = gitlab_pipelines.get(sha_full) if gitlab_pipelines else None
+            if (not pipeline) and pr_num and mr_pipelines:
+                pipeline = mr_pipelines.get(int(pr_num))
+
+            if pipeline and isinstance(pipeline, dict):
+                pid = pipeline.get("id")
+                web_url = str(pipeline.get("web_url", "") or "")
+                status = str(pipeline.get("status", "") or "")
+
+                job_data = pipeline_job_counts.get(pid) if (pipeline_job_counts and pid is not None) else None
+                jobs = []
+                if isinstance(job_data, dict) and "counts" in job_data:
+                    jobs = job_data.get("jobs") or []
+
+                children: List[TreeNodeVM] = []
+                for j in sorted(jobs, key=lambda x: (str(x.get("stage", "") or ""), str(x.get("name", "") or ""))):
+                    j_stage = str(j.get("stage", "") or "unknown")
+                    j_name = str(j.get("name", "") or "")
+                    j_status = str(j.get("status", "") or "")
+                    label_stage = ".pre" if j_stage == "pre" else j_stage
+                    job_label = f"{label_stage}.{j_name}"
+                    is_mandatory = (
+                        j_name.startswith(".pre")
+                        or (".pre" in job_label)
+                        or (label_stage in ("pre", ".pre"))
+                        or j_name.startswith("build")
+                        or j_name.startswith("test")
+                    )
+                    icon = status_icon_html(
+                        status_norm=(
+                            "in_progress"
+                            if j_status == "running"
+                            else (
+                                "pending"
+                                if j_status in ("pending", "created", "waiting_for_resource")
+                                else ("cancelled" if j_status in ("canceled", "cancelled") else ("success" if j_status == "success" else ("failure" if j_status == "failed" else "unknown")))
+                            )
+                        ),
+                        is_required=is_mandatory,
+                    )
+                    badge = ' <span style="color: #57606a; font-weight: 400;">[MANDATORY]</span>' if is_mandatory else ""
+                    children.append(
+                        TreeNodeVM(
+                            node_key=f"gl:{sha_short}:{job_label}",
+                            label_html=(
+                                f'{icon} <span style="font-family: SFMono-Regular, Consolas, Liberation Mono, Menlo, monospace; font-size: 12px;">'
+                                f"{html.escape(job_label)}</span>{badge}"
+                            ),
+                            children=[],
+                            collapsible=True,
+                            default_expanded=False,
+                        )
+                    )
+
+                root = TreeNodeVM(
+                    node_key=f"gl-root:{sha_full}",
+                    label_html=(
+                        f'<span style="font-weight: 600;">GitLab pipeline</span> '
+                        f'<a href="{html.escape(web_url, quote=True)}" target="_blank" style="color: #0969da; font-size: 11px; text-decoration: none;">[pipeline]</a> '
+                        f'<span style="color: #57606a; font-size: 12px;">({html.escape(status)})</span>'
+                    ),
+                    children=children,
+                    collapsible=True,
+                    default_expanded=status.lower() not in ("success",),
+                    triangle_tooltip="GitLab pipeline jobs",
+                )
+                return ("\n".join(render_tree_pre_lines([root])).rstrip() + "\n")
+
+            # Always return a placeholder tree so the GitLab dropdown doesn't disappear.
+            root = TreeNodeVM(
+                node_key=f"gl-root:{sha_full}",
+                label_html=(
+                    f'<span style="font-weight: 600;">GitLab pipeline</span> '
+                    f'<a href="https://gitlab-master.nvidia.com/dl/ai-dynamo/dynamo/-/commit/{html.escape(sha_full)}" '
+                    f'target="_blank" style="color: #0969da; font-size: 11px; text-decoration: none;">[commit]</a>'
+                ),
+                children=[
+                    TreeNodeVM(
+                        node_key=f"gl-empty:{sha_full}",
+                        label_html='<span style="color: #57606a; font-size: 12px;">(no pipeline/job data found or cached for this SHA)</span>',
+                        children=[],
+                        collapsible=True,
+                        default_expanded=False,
+                    )
+                ],
+                collapsible=True,
+                default_expanded=True,
+                triangle_tooltip="GitLab pipeline (if available)",
+            )
+            return ("\n".join(render_tree_pre_lines([root])).rstrip() + "\n")
+
+        # Attach per-commit trees to commit dictionaries for the template to embed (split GH vs GL).
+        for c in commit_data:
+            try:
+                sha_full = str(c.get("sha_full", "") or "")
+                sha_short = str(c.get("sha_short", "") or "")
+                c["github_checks_tree_html"] = _build_github_checks_tree_html(repo_path=self.repo_path, sha_full=sha_full)
+                c["gitlab_checks_tree_html"] = _build_gitlab_checks_tree_html(sha_full=sha_full, sha_short=sha_short)
+            except Exception:
+                # Never drop the toggles; keep stable placeholders even on errors.
+                c["github_checks_tree_html"] = _build_github_checks_tree_html(repo_path=self.repo_path, sha_full=str(c.get("sha_full", "") or ""))
+                c["gitlab_checks_tree_html"] = _build_gitlab_checks_tree_html(sha_full=str(c.get("sha_full", "") or ""), sha_short=str(c.get("sha_short", "") or ""))
 
         # Render template
         template_dir = Path(__file__).parent
@@ -990,9 +1615,13 @@ class CommitHistoryGenerator:
             gha_in_progress_count=gha_in_progress_count,
             gha_other_count=gha_other_count,
             gha_per_commit_stats=gha_per_commit_stats,
-            # Shared UI snippets
-            gh_status_tooltip_css=GH_STATUS_TOOLTIP_CSS,
-            gh_status_tooltip_js=GH_STATUS_TOOLTIP_JS,
+            # Icons (shared look; keep templates free of raw unicode status glyphs)
+            success_icon_html=status_icon_html(status_norm="success", is_required=False),
+            failure_required_icon_html=status_icon_html(status_norm="failure", is_required=True),
+            failure_optional_icon_html=status_icon_html(status_norm="failure", is_required=False),
+            in_progress_icon_html=status_icon_html(status_norm="in_progress", is_required=False),
+            pending_icon_html=status_icon_html(status_norm="pending", is_required=False),
+            cancelled_icon_html=status_icon_html(status_norm="cancelled", is_required=False),
             pass_plus_style=PASS_PLUS_STYLE,
         )
 
@@ -1264,6 +1893,12 @@ Examples:
         action='store_true',
         help='Skip fetching GitLab registry data, use cached data only (much faster)'
     )
+    # NOTE: Removed --max-github-fetch-commits.
+    # GitHub fetch behavior is now governed by cache TTLs in `common.py`.
+    parser.add_argument(
+        '--token',
+        help='GitHub personal access token (or set GH_TOKEN/GITHUB_TOKEN env var)'
+    )
 
     parser.add_argument(
         '--logs-dir',
@@ -1288,21 +1923,104 @@ Examples:
         print(f"Error: Not a git repository: {args.repo_path}")
         return 1
 
+    # Prune locally-served raw logs to avoid unbounded growth and delete any partial/unverified artifacts.
+    # We only render `[raw log]` links when the local file exists (or was materialized),
+    # so pruning won't produce dead links on a freshly generated page.
+    try:
+        _ = prune_dashboard_raw_logs(page_root_dir=args.repo_path, max_age_days=30)
+        # Also remove any partial/unverified raw logs (legacy cache artifacts, missing completed=true, etc).
+        _ = prune_partial_raw_log_caches(page_root_dirs=[args.repo_path])
+    except Exception:
+        pass
+
     # Create generator and run
     generator = CommitHistoryGenerator(
         repo_path=args.repo_path,
         verbose=args.verbose,
         debug=args.debug,
-        skip_gitlab_fetch=args.skip_gitlab_fetch
+        skip_gitlab_fetch=args.skip_gitlab_fetch,
+        github_token=args.token,
     )
+    # Report GitHub REST quota before/after the run (and fail fast if exhausted).
+    before = generator.github_client.get_core_rate_limit_info() or {}
+    if before:
+        rem_b = before.get("remaining")
+        lim_b = before.get("limit")
+        reset_pt = before.get("reset_pt")
+        secs = int(before.get("seconds_until_reset") or 0)
+        print(
+            f"GitHub API core quota (before): remaining={rem_b}"
+            + (f"/{lim_b}" if lim_b is not None else "")
+            + (f", resets at {reset_pt} (in {GitHubAPIClient._format_seconds_delta(secs)})" if reset_pt else "")
+        )
+    try:
+        generator.github_client.check_core_rate_limit_or_raise()
+    except Exception as e:
+        print(str(e), file=sys.stderr)
+        raise SystemExit(2)
 
-    return generator.show_commit_history(
+    rc = 1
+    try:
+        rc = generator.show_commit_history(
         max_commits=args.max_commits,
         html_output=args.html,
         output_path=args.output,
         logs_dir=args.logs_dir,
         export_pipeline_pr_csv=args.export_pipeline_pr_csv,
     )
+        return rc
+    finally:
+        after = generator.github_client.get_core_rate_limit_info() or {}
+        used = None
+        reset_changed = False
+        try:
+            b_rem = before.get("remaining")
+            a_rem = after.get("remaining")
+            b_reset = before.get("reset_epoch")
+            a_reset = after.get("reset_epoch")
+            if b_reset is not None and a_reset is not None and int(b_reset) != int(a_reset):
+                reset_changed = True
+            if not reset_changed and b_rem is not None and a_rem is not None:
+                used = int(b_rem) - int(a_rem)
+                if used < 0:
+                    # Be defensive: if remaining increased, treat as reset during run.
+                    used = None
+                    reset_changed = True
+        except Exception:
+            used = None
+            reset_changed = False
+
+        if after:
+            rem_a = after.get("remaining")
+            lim_a = after.get("limit")
+            reset_pt = after.get("reset_pt")
+            secs = int(after.get("seconds_until_reset") or 0)
+            msg = (
+                f"GitHub API core quota (after): remaining={rem_a}"
+                + (f"/{lim_a}" if lim_a is not None else "")
+                + (f", resets at {reset_pt} (in {GitHubAPIClient._format_seconds_delta(secs)})" if reset_pt else "")
+            )
+            # Prefer per-run request accounting; quota deltas can be misleading if reset occurs mid-run.
+            stats = generator.github_client.get_rest_call_stats()
+            try:
+                msg += f" | rest_calls={int(stats.get('total') or 0)}"
+            except Exception:
+                pass
+            if reset_changed:
+                msg += " | (rate limit window reset during run)"
+            elif used is not None:
+                msg += f" | used={used}"
+            print(msg)
+            if bool(args.debug):
+                try:
+                    by_label = stats.get("by_label") or {}
+                    if isinstance(by_label, dict) and by_label:
+                        top = list(by_label.items())[:20]
+                        print("GitHub REST calls by endpoint (top 20):")
+                        for k, v in top:
+                            print(f"  - {k}: {v}")
+                except Exception:
+                    pass
 
 
 if __name__ == '__main__':

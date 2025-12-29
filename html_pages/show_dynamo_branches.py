@@ -10,13 +10,16 @@ Supports parallel data gathering for improved performance.
 import argparse
 import hashlib
 import html
+import json
+import os
 import re
 import stat
 import subprocess
 import sys
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Set, Tuple
 from zoneinfo import ZoneInfo
@@ -35,11 +38,8 @@ except Exception:  # pragma: no cover
     git = None  # type: ignore[assignment]
 
 # Shared dashboard helpers (UI + workflow graph)
-from dashboard_lib import (
-    GH_STATUS_TOOLTIP_CSS,
-    GH_STATUS_TOOLTIP_JS,
+from common_dashboard_lib import (
     PASS_PLUS_STYLE,
-    TREE_TOGGLE_JS,
     TreeNodeVM,
     build_check_name_matchers,
     check_line_html,
@@ -48,6 +48,16 @@ from dashboard_lib import (
     required_badge_html,
     status_icon_html,
 )
+
+# Dashboard runtime (HTML-only) helpers
+from common_dashboard_runtime import (
+    materialize_job_raw_log_text_local_link,
+    prune_dashboard_raw_logs,
+    prune_partial_raw_log_caches,
+)
+
+# Log/snippet helpers
+from common_log_errors import extract_error_snippet_from_log_file
 
 # Jinja2 is optional (keep CLI usable in minimal envs).
 try:
@@ -60,13 +70,14 @@ except Exception:  # pragma: no cover
     select_autoescape = None  # type: ignore[assignment]
 
 # Import GitHub utilities from common module
+import common
 from common import (
     FailedCheck,
     GHPRCheckRow,
     GitHubAPIClient,
     PRInfo,
+    dynamo_utils_cache_dir,
     summarize_pr_check_rows,
-    prune_dashboard_raw_logs,
 )
 
 #
@@ -95,6 +106,142 @@ _COPY_BTN_STYLE = (
     "border: 1px solid #d0d7de; border-radius: 5px; cursor: pointer; display: inline-flex; "
     "align-items: center; vertical-align: baseline; margin-right: 4px;"
 )
+
+
+def _format_epoch_pt(epoch_s: Optional[int]) -> Optional[str]:
+    """Format an epoch as 'YYYY-mm-dd HH:MM:SS PT'."""
+    if epoch_s is None:
+        return None
+    try:
+        dt = datetime.fromtimestamp(int(epoch_s), tz=timezone.utc).astimezone(ZoneInfo("America/Los_Angeles"))
+        return dt.strftime("%Y-%m-%d %H:%M:%S %Z")
+    except Exception:
+        return None
+
+
+def _format_seconds_delta_short(seconds: Optional[int]) -> Optional[str]:
+    if seconds is None:
+        return None
+    try:
+        return GitHubAPIClient._format_seconds_delta(int(seconds))
+    except Exception:
+        return None
+
+
+def _parse_rate_limit_resources(rate_limit_payload: Dict[str, object]) -> Dict[str, Dict[str, object]]:
+    """Parse /rate_limit payload into a stable dict: {resource_name: {limit, remaining, used, reset_epoch,...}}."""
+    out: Dict[str, Dict[str, object]] = {}
+    resources = (rate_limit_payload or {}).get("resources")  # type: ignore[assignment]
+    if not isinstance(resources, dict):
+        return out
+    now = int(time.time())
+    for name, info in resources.items():
+        if not isinstance(name, str) or not isinstance(info, dict):
+            continue
+        try:
+            limit = info.get("limit")
+            remaining = info.get("remaining")
+            used = info.get("used")
+            reset_epoch = info.get("reset")
+            limit_i = int(limit) if limit is not None else None
+            remaining_i = int(remaining) if remaining is not None else None
+            used_i = int(used) if used is not None else None
+            reset_i = int(reset_epoch) if reset_epoch is not None else None
+        except Exception:
+            continue
+        seconds_until = (reset_i - now) if reset_i is not None else None
+        out[name] = {
+            "limit": limit_i,
+            "remaining": remaining_i,
+            "used": used_i,
+            "reset_epoch": reset_i,
+            "reset_pt": _format_epoch_pt(reset_i),
+            "seconds_until_reset": seconds_until,
+            "until_reset": _format_seconds_delta_short(seconds_until),
+        }
+    return out
+
+
+def _rate_limit_history_path() -> Path:
+    # Keep this under the shared dynamo-utils cache dir so it persists across runs (host/container).
+    return dynamo_utils_cache_dir() / "dashboards" / "show_dynamo_branches" / "gh_rate_limit_history.jsonl"
+
+
+def _load_rate_limit_history(path: Path, *, max_points: int = 288) -> List[Dict[str, object]]:
+    """Load jsonl history (best-effort). Keeps at most max_points newest entries."""
+    try:
+        if not path.exists():
+            return []
+        lines = path.read_text().splitlines()
+        out: List[Dict[str, object]] = []
+        for line in lines[-max_points:]:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                obj = json.loads(line)
+                if isinstance(obj, dict):
+                    out.append(obj)
+            except Exception:
+                continue
+        return out[-max_points:]
+    except Exception:
+        return []
+
+
+def _append_rate_limit_history(path: Path, sample: Dict[str, object], *, max_points: int = 288) -> List[Dict[str, object]]:
+    """Append a single sample to history and compact to max_points (best-effort). Returns updated history."""
+    hist = _load_rate_limit_history(path, max_points=max_points)
+    hist.append(sample)
+    hist = hist[-max_points:]
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = str(path) + ".tmp"
+        with open(tmp, "w") as f:
+            for row in hist:
+                f.write(json.dumps(row, sort_keys=True) + "\n")
+        os.replace(tmp, path)
+    except Exception:
+        pass
+    return hist
+
+
+def _sparkline_svg_for_percent(points: List[float], *, width: int = 180, height: int = 34) -> str:
+    """Render a tiny inline SVG sparkline for a [0..1] percent series."""
+    if not points:
+        return ""
+    # Clamp + keep only finite-ish.
+    series = []
+    for p in points:
+        try:
+            v = float(p)
+            if v != v:  # NaN
+                continue
+            series.append(max(0.0, min(1.0, v)))
+        except Exception:
+            continue
+    if len(series) < 2:
+        return ""
+
+    pad = 2
+    w = max(int(width), 60)
+    h = max(int(height), 20)
+    x_step = (w - 2 * pad) / float(max(1, len(series) - 1))
+
+    pts = []
+    for i, v in enumerate(series):
+        x = pad + i * x_step
+        # invert y (1.0 at top)
+        y = pad + (1.0 - v) * (h - 2 * pad)
+        pts.append(f"{x:.2f},{y:.2f}")
+    pts_str = " ".join(pts)
+    return (
+        f'<svg width="{w}" height="{h}" viewBox="0 0 {w} {h}" '
+        f'xmlns="http://www.w3.org/2000/svg" style="vertical-align: middle;">'
+        f'<rect x="0" y="0" width="{w}" height="{h}" rx="4" fill="#ffffff" stroke="#d0d7de" />'
+        f'<polyline fill="none" stroke="#0969da" stroke-width="1.5" points="{pts_str}" />'
+        f"</svg>"
+    )
 
 
 def _html_copy_button(*, clipboard_text: str, title: str) -> str:
@@ -166,31 +313,6 @@ def _aggregate_status(statuses: Iterable[str]) -> str:
             best_p = p
             best = s
     return best
-
-
-_ERROR_HIGHLIGHT_RE = re.compile(
-    r"(?:"
-    r"\b(?:error|failed|failure|exception|traceback|fatal)\b"
-    r"|\b(?:time\s*out|timeout|timed\s*out)\b"
-    r"|\b[A-Za-z_][A-Za-z0-9_]*(?:Error|Exception)\b"
-    r"|\b(?:no\s+module\s+named|unable\s+to\s+find)\b"
-    r"|\b(?:broken\s+links?|dead\s+links?|link\s+checks?|permission\s+denied|no\s+such\s+file\s+or\s+directory|command\s+not\s+found|connection\s+(?:refused|reset))\b"
-    r"|\b(?:segmentation\s+fault|core\s+dumped|panic|out\s+of\s+memory|oom|sigsegv|sigkill|sigabrt|sigterm)\b"
-    r")",
-    re.IGNORECASE,
-)
-
-
-def _highlight_error_keywords(text: str) -> str:
-    """HTML-escape error text and highlight common failure keywords in red (case-insensitive)."""
-    escaped = html.escape(text or "")
-    if not escaped:
-        return ""
-
-    def repl(m: re.Match) -> str:
-        return f'<span style="color: #d73a49; font-weight: 700;">{m.group(0)}</span>'
-
-    return _ERROR_HIGHLIGHT_RE.sub(repl, escaped)
 
 
 @dataclass
@@ -301,6 +423,9 @@ class CIJobTreeNode(BranchNode):
     duration: str = ""
     url: str = ""
     raw_log_href: str = ""
+    raw_log_size_bytes: int = 0
+    # Extracted from the local raw log file when available (highlighting handled in the shared dashboard UI helpers).
+    error_snippet_text: str = ""
     is_required: bool = False
     failed_check: Optional[FailedCheck] = None
 
@@ -430,6 +555,8 @@ class CIJobTreeNode(BranchNode):
             duration=self.duration,
             log_url=job_url,
             raw_log_href=self.raw_log_href,
+            raw_log_size_bytes=int(self.raw_log_size_bytes or 0),
+            error_snippet_text=(self.error_snippet_text or ""),
             required_failure=bool(effective_required_failure),
         )
 
@@ -470,31 +597,8 @@ class CIJobTreeNode(BranchNode):
         else:
             triangle = '<span style="display: inline-block; width: 12px; margin-right: 2px;"></span>'
 
-        # Error toggle (only when we have an error summary from FailedCheck)
-        err_id = ""
-        err_toggle_html = ""
-        err_body_html = ""
-        if self.failed_check is not None and getattr(self.failed_check, "error_summary", None):
-            dom_hash_err = hashlib.sha1((prefix + "|ERR|" + self.job_id + "|" + (self.url or "")).encode("utf-8")).hexdigest()[:10]
-            err_id = f"ci_err_{dom_hash_err}"
-            err_toggle_html = (
-                f' <span style="cursor: pointer; color: #0969da; font-weight: 500;" '
-                f'onclick="toggleCiError(\'{err_id}\', this)">▶ Show error</span>'
-            )
-            escaped_error = _highlight_error_keywords(str(getattr(self.failed_check, "error_summary", "")))
-            # Inline span includes a <br> so it appears as a child line only when shown.
-            err_body_html = (
-                f'<span id="{err_id}" style="display: none;">'
-                # Start the error box at column 0 (no tree indentation).
-                f"<br>"
-                f'<span style="display: inline-block; border: 1px solid #d0d7de; background: #f6f8fa; '
-                f'border-radius: 6px; padding: 6px 8px; white-space: pre-wrap; color: #24292f;">'
-                f'<span style="color: #d73a49; font-weight: 700;">error:</span> {escaped_error}'
-                f'</span>'
-                f'</span>'
-            )
-
-        line_content = self._format_html_content() + err_toggle_html + err_body_html
+        # Error snippet toggle is rendered by shared `check_line_html()` when a local [raw log] exists.
+        line_content = self._format_html_content()
         if line_content.strip():
             lines.append(current_prefix + triangle + line_content)
 
@@ -527,30 +631,9 @@ class CIJobTreeNode(BranchNode):
         has_children = bool(self.children)
         default_expanded = self._subtree_needs_attention(self) if has_children else False
 
-        # Error toggle (only when we have an error summary from FailedCheck)
-        err_toggle_html = ""
-        err_body_html = ""
-        if self.failed_check is not None and getattr(self.failed_check, "error_summary", None):
-            dom_hash_err = hashlib.sha1((self.job_id + "|ERR|" + (self.url or "")).encode("utf-8")).hexdigest()[:10]
-            err_id = f"ci_err_{dom_hash_err}"
-            err_toggle_html = (
-                f' <span style="cursor: pointer; color: #0969da; font-weight: 500;" '
-                f'onclick="toggleCiError(\'{err_id}\', this)">▶ Show error</span>'
-            )
-            escaped_error = _highlight_error_keywords(str(getattr(self.failed_check, "error_summary", "")))
-            err_body_html = (
-                f'<span id="{err_id}" style="display: none;">'
-                f"<br>"
-                f'<span style="display: inline-block; border: 1px solid #d0d7de; background: #f6f8fa; '
-                f'border-radius: 6px; padding: 6px 8px; white-space: pre-wrap; color: #24292f;">'
-                f'<span style="color: #d73a49; font-weight: 700;">error:</span> {escaped_error}'
-                f"</span>"
-                f"</span>"
-            )
-
         return TreeNodeVM(
             node_key=f"CI:{self.job_id}:{self.url}",
-            label_html=self._format_html_content() + err_toggle_html + err_body_html,
+            label_html=self._format_html_content(),
             children=[c.to_tree_vm() for c in (self.children or []) if isinstance(c, BranchNode)],
             collapsible=True,  # show triangle placeholder for alignment, even on leaves
             default_expanded=bool(default_expanded),
@@ -565,6 +648,7 @@ def _build_ci_hierarchy_nodes(
     *,
     page_root_dir: Optional[Path] = None,
     checks_ttl_s: int = 300,
+    skip_fetch: bool = False,
 ) -> List[CIJobTreeNode]:
     """Build a workflow-needs hierarchy annotated with actual PR check status."""
     if not pr or not getattr(pr, "number", None) or not github_api:
@@ -576,6 +660,7 @@ def _build_ci_hierarchy_nodes(
         int(pr.number),
         required_checks=required_set,
         ttl_s=int(checks_ttl_s),
+        skip_fetch=bool(skip_fetch),
     )
     if not rows:
         return []
@@ -637,6 +722,19 @@ def _build_ci_hierarchy_nodes(
     # trigger an unbounded number of downloads.
     raw_log_prefetch_budget = {"n": 15}
     page_root_dir = Path(page_root_dir) if page_root_dir is not None else repo_path
+    snippet_cache: Dict[str, str] = {}
+
+    def snippet_for_raw_href(raw_href: str) -> str:
+        if not raw_href:
+            return ""
+        if raw_href in snippet_cache:
+            return snippet_cache[raw_href]
+        try:
+            snippet = extract_error_snippet_from_log_file(page_root_dir / raw_href)
+        except Exception:
+            snippet = ""
+        snippet_cache[raw_href] = snippet
+        return snippet
 
     def build_node(job_id: str) -> CIJobTreeNode:
         if job_id in memo:
@@ -649,6 +747,7 @@ def _build_ci_hierarchy_nodes(
             for b in bucket:
                 # Cache raw log content for failures (best-effort).
                 raw_href = ""
+                raw_size = 0
                 if (
                     github_api
                     and b.status_norm == "failure"
@@ -657,7 +756,8 @@ def _build_ci_hierarchy_nodes(
                     allow_fetch = int(raw_log_prefetch_budget.get("n", 0) or 0) > 0
                     try:
                         raw_href = (
-                            github_api.materialize_job_raw_log_text_local_link(
+                            materialize_job_raw_log_text_local_link(
+                                github_api,
                                 job_url=b.url or "",
                                 owner=DYNAMO_OWNER,
                                 repo=DYNAMO_REPO,
@@ -670,6 +770,12 @@ def _build_ci_hierarchy_nodes(
                         raw_href = ""
                     if allow_fetch:
                         raw_log_prefetch_budget["n"] = int(raw_log_prefetch_budget.get("n", 0) or 0) - 1
+                if raw_href:
+                    try:
+                        raw_size = int((page_root_dir / raw_href).stat().st_size)
+                    except Exception:
+                        raw_size = 0
+                snippet = snippet_for_raw_href(raw_href) if raw_href else ""
                 node.children.append(
                     CIJobTreeNode(
                         label="",
@@ -678,6 +784,8 @@ def _build_ci_hierarchy_nodes(
                         duration=b.duration,
                         url=b.url,
                         raw_log_href=raw_href,
+                        raw_log_size_bytes=int(raw_size or 0),
+                        error_snippet_text=snippet,
                         is_required=b.is_required,
                     )
                 )
@@ -691,6 +799,7 @@ def _build_ci_hierarchy_nodes(
         if len(bucket) == 1:
             b = bucket[0]
             raw_href = ""
+            raw_size = 0
             if (
                 github_api
                 and b.status_norm == "failure"
@@ -699,7 +808,8 @@ def _build_ci_hierarchy_nodes(
                 allow_fetch = int(raw_log_prefetch_budget.get("n", 0) or 0) > 0
                 try:
                     raw_href = (
-                        github_api.materialize_job_raw_log_text_local_link(
+                        materialize_job_raw_log_text_local_link(
+                            github_api,
                             job_url=b.url or "",
                             owner=DYNAMO_OWNER,
                             repo=DYNAMO_REPO,
@@ -712,6 +822,12 @@ def _build_ci_hierarchy_nodes(
                     raw_href = ""
                 if allow_fetch:
                     raw_log_prefetch_budget["n"] = int(raw_log_prefetch_budget.get("n", 0) or 0) - 1
+            if raw_href:
+                try:
+                    raw_size = int((page_root_dir / raw_href).stat().st_size)
+                except Exception:
+                    raw_size = 0
+            snippet = snippet_for_raw_href(raw_href) if raw_href else ""
             node = CIJobTreeNode(
                 label="",
                 job_id=job_id,
@@ -720,6 +836,8 @@ def _build_ci_hierarchy_nodes(
                 duration=b.duration,
                 url=b.url,
                 raw_log_href=raw_href,
+                raw_log_size_bytes=int(raw_size or 0),
+                error_snippet_text=snippet,
                 is_required=b.is_required,
                 failed_check=failed_by_name.get(b.name),
             )
@@ -733,6 +851,7 @@ def _build_ci_hierarchy_nodes(
             )
             for b in sorted(bucket, key=lambda x: x.name):
                 raw_href = ""
+                raw_size = 0
                 if (
                     github_api
                     and b.status_norm == "failure"
@@ -741,7 +860,8 @@ def _build_ci_hierarchy_nodes(
                     allow_fetch = int(raw_log_prefetch_budget.get("n", 0) or 0) > 0
                     try:
                         raw_href = (
-                            github_api.materialize_job_raw_log_text_local_link(
+                            materialize_job_raw_log_text_local_link(
+                                github_api,
                                 job_url=b.url or "",
                                 owner=DYNAMO_OWNER,
                                 repo=DYNAMO_REPO,
@@ -754,6 +874,12 @@ def _build_ci_hierarchy_nodes(
                         raw_href = ""
                     if allow_fetch:
                         raw_log_prefetch_budget["n"] = int(raw_log_prefetch_budget.get("n", 0) or 0) - 1
+                if raw_href:
+                    try:
+                        raw_size = int((page_root_dir / raw_href).stat().st_size)
+                    except Exception:
+                        raw_size = 0
+                snippet = snippet_for_raw_href(raw_href) if raw_href else ""
                 node.children.append(
                     CIJobTreeNode(
                         label="",
@@ -762,6 +888,8 @@ def _build_ci_hierarchy_nodes(
                         duration=b.duration,
                         url=b.url,
                         raw_log_href=raw_href,
+                        raw_log_size_bytes=int(raw_size or 0),
+                        error_snippet_text=snippet,
                         is_required=b.is_required,
                         failed_check=failed_by_name.get(b.name),
                     )
@@ -1020,6 +1148,7 @@ class PRStatusNode(BranchNode):
     github_api: Optional[GitHubAPIClient] = None
     refresh_checks: bool = False
     branch_commit_dt: Optional[datetime] = None
+    allow_fetch_checks: bool = True
 
     def _format_content(self) -> str:
         if not self.pr:
@@ -1083,6 +1212,7 @@ class PRStatusNode(BranchNode):
                         int(self.pr.number),
                         required_checks=required_set,
                         ttl_s=ttl_s,
+                        skip_fetch=(not bool(self.allow_fetch_checks)),
                     )
                     if self.github_api
                     else []
@@ -1475,9 +1605,18 @@ class RerunLinkNode(BranchNode):
 class LocalRepoScanner:
     """Scanner for local repository branches"""
 
-    def __init__(self, token: Optional[str] = None, refresh_closed_prs: bool = False):
+    def __init__(
+        self,
+        token: Optional[str] = None,
+        refresh_closed_prs: bool = False,
+        *,
+        max_branches: Optional[int] = None,
+        max_checks_fetch: Optional[int] = None,
+    ):
         self.github_api = GitHubAPIClient(token=token)
         self.refresh_closed_prs = bool(refresh_closed_prs)
+        self.max_branches = int(max_branches) if max_branches is not None else None
+        self.max_checks_fetch = int(max_checks_fetch) if max_checks_fetch is not None else None
 
     @staticmethod
     def _is_world_readable_executable_dir(p: Path) -> bool:
@@ -1689,8 +1828,29 @@ class LocalRepoScanner:
                 if prs:
                     branch_results.append((branch_name, info, prs))
 
-            # Build branch nodes
-            for branch_name, info, prs in sorted(branch_results):
+            # Small-mode caps:
+            # - Display at most N branches with PRs (choose most-recent by commit_dt).
+            # - Only allow network fetch of checks/CI hierarchy for the top K (most recent) branches.
+            #
+            # This keeps the page fast and keeps GitHub/gh calls bounded.
+            branch_results_sorted = sorted(
+                branch_results,
+                key=lambda t: (
+                    (t[1].get("commit_dt") or datetime.min.replace(tzinfo=ZoneInfo("UTC"))),
+                    str(t[0] or ""),
+                ),
+                reverse=True,
+            )
+
+            if self.max_branches is not None and self.max_branches > 0:
+                branch_results_sorted = branch_results_sorted[: int(self.max_branches)]
+
+            allow_fetch_branch_names: Set[str] = set()
+            if self.max_checks_fetch is not None and self.max_checks_fetch > 0:
+                allow_fetch_branch_names = {bn for (bn, _info, _prs) in branch_results_sorted[: int(self.max_checks_fetch)]}
+
+            # Build branch nodes (newest first)
+            for branch_name, info, prs in branch_results_sorted:
                 commit_url = f"https://github.com/{DYNAMO_REPO_SLUG}/commit/{info['sha']}" if info['sha'] else None
                 branch_node = BranchInfoNode(
                     label=branch_name,
@@ -1703,6 +1863,7 @@ class LocalRepoScanner:
 
                 # Add PR nodes
                 for pr in prs:
+                    allow_fetch_checks = (branch_name in allow_fetch_branch_names) if allow_fetch_branch_names else True
                     pr_node = PRNode(label="", pr=pr)
                     branch_node.add_child(pr_node)
 
@@ -1724,6 +1885,7 @@ class LocalRepoScanner:
                         github_api=self.github_api,
                         refresh_checks=bool(self.refresh_closed_prs),
                         branch_commit_dt=branch_dt,
+                        allow_fetch_checks=bool(allow_fetch_checks),
                     )
                     pr_node.add_child(status_node)
 
@@ -1745,6 +1907,7 @@ class LocalRepoScanner:
                             github_api=self.github_api,
                             page_root_dir=page_root_dir,
                             checks_ttl_s=int(checks_ttl_s),
+                            skip_fetch=(not bool(allow_fetch_checks)),
                         ):
                             status_node.add_child(ci_node)
                     except Exception as e:
@@ -1911,9 +2074,6 @@ def generate_html(root: BranchNode) -> str:
     template = env.get_template("show_dynamo_branches.j2")
     return template.render(
         generated_time=pdt_str,
-        gh_status_tooltip_css=GH_STATUS_TOOLTIP_CSS,
-        gh_status_tooltip_js=GH_STATUS_TOOLTIP_JS,
-        tree_toggle_js=TREE_TOGGLE_JS,
         copy_icon_svg=_COPY_ICON_SVG,
         tree_html=tree_html,
     )
@@ -1966,20 +2126,38 @@ def main():
         type=Path,
         help='Output file path (default: <base_dir>/index.html when --html, else stdout)'
     )
+    parser.add_argument(
+        '--max-branches',
+        type=int,
+        default=None,
+        help='If set, cap the number of branches-with-PRs shown per repo (newest first)'
+    )
+    parser.add_argument(
+        '--max-checks-fetch',
+        type=int,
+        default=None,
+        help='If set, only allow network fetch of checks/CI hierarchy for the top N newest branches-with-PRs (others are cache-only)'
+    )
     args = parser.parse_args()
 
     base_dir = (args.repo_path or args.base_dir or Path.cwd()).resolve()
 
-    # Prune locally-served raw logs to avoid unbounded growth.
+    # Prune locally-served raw logs to avoid unbounded growth and delete any partial/unverified artifacts.
     # We only render `[raw log]` links when the local file exists (or was materialized),
     # so pruning won't produce dead links on a freshly generated page.
     try:
         _ = prune_dashboard_raw_logs(page_root_dir=base_dir, max_age_days=30)
+        _ = prune_partial_raw_log_caches(page_root_dirs=[base_dir])
     except Exception:
         pass
 
     # Scan repositories
-    scanner = LocalRepoScanner(token=args.token, refresh_closed_prs=bool(args.refresh_closed_prs))
+    scanner = LocalRepoScanner(
+        token=args.token,
+        refresh_closed_prs=bool(args.refresh_closed_prs),
+        max_branches=args.max_branches,
+        max_checks_fetch=args.max_checks_fetch,
+    )
     # Report GitHub REST quota before/after the run (and fail fast if exhausted).
     before = scanner.github_api.get_core_rate_limit_info() if scanner.github_api else None
     if before:
@@ -2004,13 +2182,23 @@ def main():
         root = scanner.scan_repositories(base_dir)
     finally:
         after = scanner.github_api.get_core_rate_limit_info() if scanner.github_api else None
-        if before and after and before.get("remaining") is not None and after.get("remaining") is not None:
-            try:
-                used = int(before.get("remaining")) - int(after.get("remaining"))
-            except Exception:
-                used = None
-        else:
+        used = None
+        reset_changed = False
+        try:
+            b_rem = (before or {}).get("remaining")
+            a_rem = (after or {}).get("remaining")
+            b_reset = (before or {}).get("reset_epoch")
+            a_reset = (after or {}).get("reset_epoch")
+            if b_reset is not None and a_reset is not None and int(b_reset) != int(a_reset):
+                reset_changed = True
+            if not reset_changed and b_rem is not None and a_rem is not None:
+                used = int(b_rem) - int(a_rem)
+                if used < 0:
+                    used = None
+                    reset_changed = True
+        except Exception:
             used = None
+            reset_changed = False
         if after:
             rem_a = after.get("remaining")
             lim_a = after.get("limit")
@@ -2021,7 +2209,15 @@ def main():
                 + (f"/{lim_a}" if lim_a is not None else "")
                 + (f", resets at {reset_pt} (in {GitHubAPIClient._format_seconds_delta(secs)})" if reset_pt else "")
             )
-            if used is not None:
+            # Prefer per-run request accounting; quota deltas can be misleading if reset occurs mid-run.
+            try:
+                stats = scanner.github_api.get_rest_call_stats() if scanner.github_api else {}
+                msg += f" | rest_calls={int(stats.get('total') or 0)}"
+            except Exception:
+                pass
+            if reset_changed:
+                msg += " | (rate limit window reset during run)"
+            elif used is not None:
                 msg += f" | used={used}"
             print(msg)
 

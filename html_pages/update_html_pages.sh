@@ -7,7 +7,9 @@
 #
 # Environment Variables (optional):
 #   NVIDIA_HOME         - Base directory for logs and output files (default: parent of script dir)
-#   SKIP_GITLAB_FETCH   - If set, skip fetching from GitLab API, use cached data only (faster)
+#   SKIP_GITLAB_FETCH   - If set, skip fetching from GitLab API, use cached data only (faster).
+#                        Note: GitHub fetching is independently capped/cached by the Python scripts.
+#   REFRESH_CLOSED_PRS  - If set, refresh cached closed/merged PR mappings (more GitHub API calls)
 #
 # Cron Example:
 #   # Full fetch once per hour
@@ -23,9 +25,17 @@ UTILS_DIR="$(dirname "$SCRIPT_DIR")"
 NVIDIA_HOME="${NVIDIA_HOME:-$(dirname "$UTILS_DIR")}"
 
 LOGS_DIR="$NVIDIA_HOME/logs"
-LOG_FILE="$LOGS_DIR/cron.log"
 BRANCHES_OUTPUT_FILE="$NVIDIA_HOME/index.html"
 BRANCHES_TEMP_FILE="$NVIDIA_HOME/.index.html.tmp"
+
+# Prevent concurrent runs (cron can overlap if a run takes longer than its interval).
+# Use a per-user lock in /tmp.
+LOCK_FILE="/tmp/dynamo-utils.update_html_pages.${USER}.lock"
+exec 9>"$LOCK_FILE"
+if ! flock -n 9; then
+    # Another instance is running; exit quietly to avoid piling up GitHub/GitLab calls.
+    exit 0
+fi
 
 #
 # Timing reference (rough, from one interactive run on keivenc-linux, 2025-12-25):
@@ -39,6 +49,24 @@ BRANCHES_TEMP_FILE="$NVIDIA_HOME/.index.html.tmp"
 
 # Create logs directory if it doesn't exist
 mkdir -p "$LOGS_DIR"
+
+# Write all logs into a dated directory (YYYY-MM-DD) so cleanup_old_logs can prune old days.
+TODAY="$(date +%Y-%m-%d)"
+DAY_LOG_DIR="$LOGS_DIR/$TODAY"
+mkdir -p "$DAY_LOG_DIR"
+
+# Keep backward-compatible pointers for humans/tools:
+# - logs/latest -> logs/YYYY-MM-DD
+# - logs/cron.log -> logs/YYYY-MM-DD/cron.log
+ln -sfn "$DAY_LOG_DIR" "$LOGS_DIR/latest" 2>/dev/null || true
+LOG_FILE="$DAY_LOG_DIR/cron.log"
+ln -sfn "$LOG_FILE" "$LOGS_DIR/cron.log" 2>/dev/null || true
+
+# Per-component logs (append-only, rotated by day directory)
+BRANCHES_LOG="$DAY_LOG_DIR/show_dynamo_branches.log"
+GIT_UPDATE_LOG="$DAY_LOG_DIR/dynamo_latest_git_update.log"
+COMMIT_HISTORY_LOG="$DAY_LOG_DIR/show_commit_history.log"
+RESOURCE_REPORT_LOG="$DAY_LOG_DIR/resource_report.log"
 
 # Cleanup old log directories - keep only last 10 non-empty dated directories
 cleanup_old_logs() {
@@ -79,7 +107,9 @@ cleanup_old_logs "$LOGS_DIR"
 
 # Update branch status HTML
 cd "$NVIDIA_HOME" || exit 1
-if python3 "$SCRIPT_DIR/show_dynamo_branches.py" "$NVIDIA_HOME" --html --output "$BRANCHES_TEMP_FILE" 2>> "$LOG_FILE"; then
+REFRESH_CLOSED_FLAG="${REFRESH_CLOSED_PRS:+--refresh-closed-prs}"
+echo "$(date '+%Y-%m-%d %H:%M:%S') - Generating branches dashboard" >> "$LOG_FILE"
+if python3 "$SCRIPT_DIR/show_dynamo_branches.py" --repo-path "$NVIDIA_HOME" --html --output "$BRANCHES_TEMP_FILE" $REFRESH_CLOSED_FLAG >> "$BRANCHES_LOG" 2>&1; then
     # Atomic move - only replace if generation succeeded
     mv "$BRANCHES_TEMP_FILE" "$BRANCHES_OUTPUT_FILE"
     echo "$(date '+%Y-%m-%d %H:%M:%S') - Updated $BRANCHES_OUTPUT_FILE" >> "$LOG_FILE"
@@ -110,7 +140,7 @@ cd "$DYNAMO_REPO" || exit 1
 
 # Checkout main and pull latest
 echo "$(date '+%Y-%m-%d %H:%M:%S') - Updating $DYNAMO_REPO to latest main" >> "$LOG_FILE"
-if git checkout main >> "$LOG_FILE" 2>&1 && git pull origin main >> "$LOG_FILE" 2>&1; then
+if git checkout main >> "$GIT_UPDATE_LOG" 2>&1 && git pull origin main >> "$GIT_UPDATE_LOG" 2>&1; then
     echo "$(date '+%Y-%m-%d %H:%M:%S') - Successfully updated to latest main" >> "$LOG_FILE"
 else
     echo "$(date '+%Y-%m-%d %H:%M:%S') - WARNING: Failed to update git repository" >> "$LOG_FILE"
@@ -121,25 +151,29 @@ fi
 # Set flag based on environment variable
 SKIP_FLAG="${SKIP_GITLAB_FETCH:+--skip-gitlab-fetch}"
 
-if python3 "$SCRIPT_DIR/show_commit_history.py" --repo-path . --html --max-commits 500 --output "$COMMIT_HISTORY_HTML" $SKIP_FLAG 2>> "$LOG_FILE"; then
+echo "$(date '+%Y-%m-%d %H:%M:%S') - Generating commit history dashboard" >> "$LOG_FILE"
+if python3 "$SCRIPT_DIR/show_commit_history.py" --repo-path . --html --max-commits 100 --output "$COMMIT_HISTORY_HTML" $SKIP_FLAG >> "$COMMIT_HISTORY_LOG" 2>&1; then
     echo "$(date '+%Y-%m-%d %H:%M:%S') - Updated $COMMIT_HISTORY_HTML" >> "$LOG_FILE"
 else
     echo "$(date '+%Y-%m-%d %H:%M:%S') - ERROR: Failed to update commit-history.html" >> "$LOG_FILE"
     exit 1
 fi
 
-# Generate 1-day resource report HTML (best-effort; do not fail the entire cron if DB is missing)
+# Generate resource report HTML (max 2 days) and prune older DB rows (best-effort; do not fail the entire cron if DB is missing)
 RESOURCE_DB="${RESOURCE_DB:-$HOME/.cache/dynamo-utils/resource_monitor.sqlite}"
 # Output to the top-level nvidia directory so nginx can serve it at /
 RESOURCE_REPORT_HTML="$NVIDIA_HOME/resource_report.html"
 RESOURCE_REPORT_TMP="$NVIDIA_HOME/.resource_report.html.tmp"
 
 if [ -f "$RESOURCE_DB" ]; then
+    echo "$(date '+%Y-%m-%d %H:%M:%S') - Generating resource report" >> "$LOG_FILE"
     if python3 "$SCRIPT_DIR/resource_report.py" \
         --db-path "$RESOURCE_DB" \
         --output "$RESOURCE_REPORT_TMP" \
-        --days 1 \
-        --title "keivenc-linux Resource Report" >> "$LOG_FILE" 2>&1; then
+        --days 2 \
+        --prune-db-days 2 \
+        --db-checkpoint-truncate \
+        --title "keivenc-linux Resource Report" >> "$RESOURCE_REPORT_LOG" 2>&1; then
         mv "$RESOURCE_REPORT_TMP" "$RESOURCE_REPORT_HTML"
         echo "$(date '+%Y-%m-%d %H:%M:%S') - Updated $RESOURCE_REPORT_HTML" >> "$LOG_FILE"
     else

@@ -1,4 +1,4 @@
-{% extends "base_dashboard.j2" %}
+{% extends "common_dashboard.j2" %}
 {% set refresh_seconds = 300 %}
 
 {% block title %}Dynamo Branch Status{% endblock %}
@@ -45,19 +45,7 @@
     .status-failed { background-color: #d73a49; border-color: #b62d3b; }
 {% endblock %}
 
-{% block head_script %}
-  <script>
-    function toggleCiError(errorId, toggleEl) {
-      var el = document.getElementById(errorId);
-      if (!el) return;
-      var hidden = (el.style.display === 'none' || el.style.display === '');
-      el.style.display = hidden ? 'inline' : 'none';
-      if (toggleEl) {
-        toggleEl.textContent = hidden ? '▼ Hide error' : '▶ Show error';
-      }
-    }
-  </script>
-{% endblock %}
+{# Error snippet toggle JS is shared in common_dashboard.j2 #}
 
 {% block header_title %}Dynamo Branch Status{% endblock %}
 {% block header_subtitle %}
