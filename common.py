@@ -27,6 +27,8 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 from zoneinfo import ZoneInfo
 
+# Log/snippet detection lives in `common_log_errors.py`.
+
 # Global logger for the module
 _logger = logging.getLogger(__name__)
 
@@ -37,103 +39,41 @@ _logger = logging.getLogger(__name__)
 # literals (8h / 5min / 30d / etc) across scripts.
 #
 DEFAULT_STABLE_AFTER_HOURS: int = 8
-DEFAULT_SHORT_TTL_S: int = 300                  # 5 minutes
-DEFAULT_STABLE_TTL_S: int = 30 * 24 * 3600      # 30 days
-DEFAULT_OPEN_PRS_TTL_S: int = 300               # 5 minutes (requested)
-DEFAULT_CLOSED_PRS_TTL_S: int = 14 * 24 * 3600  # 14 days
-DEFAULT_NO_PR_TTL_S: int = 24 * 3600            # 24 hours (negative cache)
-DEFAULT_RAW_LOG_URL_TTL_S: int = 3600           # URLs are time-limited (~1 hour)
-DEFAULT_RAW_LOG_TEXT_TTL_S: int = 30 * 24 * 3600  # keep downloaded logs for 30d by default
-DEFAULT_RAW_LOG_TEXT_MAX_BYTES: int = 0           # 0 => no cap (cache full job logs)
-
-# ======================================================================================
-# Local dashboard log retention (served under <repo-path>/logs/...)
-# ======================================================================================
-
-def remove_old_cached_logs(
-    *,
-    root_dir: Path,
-    max_age_days: int = 30,
-    glob_pattern: str = "*.log",
-) -> int:
-    """Delete files older than max_age_days under root_dir (non-recursive) and return #deleted."""
-    try:
-        root = Path(root_dir)
-    except Exception:
-        return 0
-
-    try:
-        if not root.exists() or not root.is_dir():
-            return 0
-    except Exception:
-        return 0
-
-    now = time.time()
-    cutoff_s = float(max(0, int(max_age_days))) * 24.0 * 3600.0
-    deleted = 0
-
-    try:
-        for p in root.glob(glob_pattern):
-            try:
-                if not p.is_file():
-                    continue
-                age_s = now - float(p.stat().st_mtime)
-                if cutoff_s and age_s > cutoff_s:
-                    p.unlink()
-                    deleted += 1
-            except Exception:
-                continue
-    except Exception:
-        return deleted
-
-    return deleted
-
-
-def prune_dashboard_raw_logs(
-    *,
-    page_root_dir: Path,
-    rel_logs_dir: str = "logs/github-actions",
-    max_age_days: int = 30,
-) -> int:
-    """Prune locally-served raw logs under <page_root_dir>/<rel_logs_dir>.
-
-    Safety: only delete files that look like GitHub Actions job logs:
-      - filename must be digits only + ".log" (e.g., "58906138553.log")
-    """
-    try:
-        rel_dir = str(rel_logs_dir or "").strip().strip("/")
-        if not rel_dir:
-            rel_dir = "logs/github-actions"
-        root = Path(page_root_dir) / rel_dir
-
-        # Extra safety: only prune within the expected logs dir.
-        deleted = 0
-        now = time.time()
-        cutoff_s = float(max(0, int(max_age_days))) * 24.0 * 3600.0
-
-        try:
-            if not root.exists() or not root.is_dir():
-                return 0
-        except Exception:
-            return 0
-
-        for p in root.glob("*.log"):
-            try:
-                if not p.is_file():
-                    continue
-                # Prevent accidental deletion of arbitrary .log files.
-                if not re.fullmatch(r"[0-9]+\.log", p.name or ""):
-                    continue
-                age_s = now - float(p.stat().st_mtime)
-                if cutoff_s and age_s > cutoff_s:
-                    p.unlink()
-                    deleted += 1
-            except Exception:
-                continue
-
-        return deleted
-    except Exception:
-        return 0
+# ^ Age threshold (hours) that flips certain caches from "fast refresh" to "stable refresh".
+#   Used primarily for per-commit CI status caches (e.g., GitHub Actions check-runs):
+#   - If a commit is newer than this threshold (e.g., 2 hours old), we use `DEFAULT_UNSTABLE_TTL_S`
+#     so the dashboard updates quickly while CI is still settling.
+#   - If a commit is older than this threshold (e.g., 3 days old), we use `DEFAULT_STABLE_TTL_S`
+#     so we don’t keep re-checking historical commits over and over.
+DEFAULT_UNSTABLE_TTL_S: int = 300
+# ^ "Fast refresh" TTL (seconds) for things that change quickly.
+#   Example: for a commit from ~5 minutes ago, we may re-check GitHub Actions status every 5 minutes.
+DEFAULT_STABLE_TTL_S: int = 30 * 24 * 3600
+# ^ "Stable" TTL (seconds) for older/less-changing data.
+#   Example: for a commit from last week, we only refresh its GitHub Actions status about once per 30 days
+#   (because it is past `DEFAULT_STABLE_AFTER_HOURS`).
+DEFAULT_OPEN_PRS_TTL_S: int = 300
+# ^ TTL (seconds) for caches keyed by *open* PRs (expected to change often).
+#   Example: required-checks / PR metadata for an open PR can be refreshed every 5 minutes.
+DEFAULT_CLOSED_PRS_TTL_S: int = 14 * 24 * 3600
+# ^ TTL (seconds) for caches keyed by *closed/merged* PRs (mostly stable).
+#   Example: merge-date for a merged PR is basically immutable, but we still allow a refresh every ~14 days.
+DEFAULT_NO_PR_TTL_S: int = 24 * 3600
+# ^ TTL (seconds) for "negative cache" entries (when we *didn't* find something).
+#   Example: if SHA→PR mapping wasn't found, we remember that for 24 hours so we don't re-query constantly,
+#   but we retry later in case the mapping appears.
+DEFAULT_RAW_LOG_URL_TTL_S: int = 3600
+# ^ TTL (seconds) for GitHub job raw-log *redirect URLs* (signed + short-lived).
+#   Example: a `Location:` URL returned by `/actions/jobs/{id}/logs` can expire in ~1 hour.
+DEFAULT_RAW_LOG_TEXT_TTL_S: int = 30 * 24 * 3600
+# ^ TTL (seconds) for cached raw log *content* (the downloaded text we parse/snippet locally).
+#   Example: once we download job `59030780729`, keep its `.log` for ~30 days to avoid re-downloading.
+DEFAULT_RAW_LOG_TEXT_MAX_BYTES: int = 0
+# ^ Max bytes to download when caching raw log content.
+#   Example: set to `10*1024*1024` to cap downloads at 10MB; `0` means "no cap".
+DEFAULT_RAW_LOG_ERROR_SNIPPET_TAIL_BYTES: int = 512 * 1024
+# ^ When extracting error snippets, only read the tail of very large log files (bytes).
+#   Example: for a 50MB log, only read the last 512KB to find failures quickly.
 
 
 # ======================================================================================
@@ -229,7 +169,7 @@ MARKER_FAILED = 'FAILED'
 MARKER_KILLED = 'KILLED'
 
 def normalize_framework(framework: str) -> str:
-    """Normalize framework name to canonical lowercase form. DEPRECATED: V1/retag only."""
+    """Normalize framework name (e.g. engine name like "vllm") to canonical lowercase form. DEPRECATED: V1/retag only."""
     return framework.lower()
 
 def get_framework_display_name(framework: str) -> str:
@@ -1702,7 +1642,7 @@ class GitHubAPIClient:
             pass
         return None
 
-    def __init__(self, token: Optional[str] = None):
+    def __init__(self, token: Optional[str] = None, *, debug_rest: bool = False):
         """Initialize GitHub API client.
 
         Args:
@@ -1722,10 +1662,19 @@ class GitHubAPIClient:
         self.base_url = "https://api.github.com"
         self.headers = {'Accept': 'application/vnd.github.v3+json'}
         self.logger = logging.getLogger(self.__class__.__name__)
+        self._debug_rest = bool(debug_rest)
 
         if self.token:
             self.headers['Authorization'] = f'token {self.token}'
 
+        # Per-run REST call accounting (helps debug "why so many API calls?").
+        # Counts only requests made via this client (not `gh` CLI subprocess calls).
+        self._rest_calls_total: int = 0
+        self._rest_calls_by_label: Dict[str, int] = {}
+
+        # ----------------------------
+        # Persistent caches (disk + memory)
+        # ----------------------------
         # Cache for job logs (two-tier: memory + disk)
         # - memory: { "53317461976": "Failed unit tests: ..." }
         # - disk:   ~/.cache/dynamo-utils/job-logs/job_logs_cache.json:
@@ -1737,58 +1686,136 @@ class GitHubAPIClient:
         self._cache_dir = dynamo_utils_cache_dir() / "job-logs"
 
         # Cache for gh pr checks rows (two-tier: memory + disk, short TTL because status changes).
-        #
-        # Memory example:
-        #   {
-        #     "ai-dynamo/dynamo#5050": {
-        #       "ts": 1766790000,
-        #       "rows": [{"name": "build-test", "status_raw": "pass", "duration": "35m", "url": "...", "description": "", "is_required": true}]
-        #     }
-        #   }
-        #
-        # Disk example (pr_checks_cache.json):
-        #   {
-        #     "ai-dynamo/dynamo#5050": {"ts": 1766790000, "rows": [ ... same row dicts ... ] }
-        #   }
         self._pr_checks_mem_cache: Dict[str, Dict[str, Any]] = {}
         self._pr_checks_cache_dir = dynamo_utils_cache_dir() / "pr-checks"
 
         # Cache for repo-wide pull request listing (short TTL; used to avoid per-branch API calls).
-        # Disk example (pulls_open_cache.json):
-        #   {
-        #     "ai-dynamo/dynamo:open": {"ts": 1766790000, "items": [ ... PR dicts from /pulls ... ] }
-        #   }
         self._pulls_list_mem_cache: Dict[str, Dict[str, Any]] = {}
         self._pulls_list_cache_dir = dynamo_utils_cache_dir() / "pulls"
 
         # Cache for "closed/merged PRs per branch" lookups (long TTL; these don't change often).
-        # This prevents repeated /pulls?head=...&state=all calls for branches without an open PR.
-        #
-        # Disk example (pr_branch_cache.json):
-        #   {
-        #     "ai-dynamo/dynamo:keivenchang/ops-2193__foo": {"ts": 1766790000, "prs": [ { ... minimal PRInfo ... } ]},
-        #     "ai-dynamo/dynamo:some-branch-no-pr": {"ts": 1766790001, "prs": []}
-        #   }
         self._pr_branch_mem_cache: Dict[str, Dict[str, Any]] = {}
         self._pr_branch_cache_dir = dynamo_utils_cache_dir() / "pr-branches"
 
         # Cache for resolved Actions job raw-log redirect URLs (short TTL; URLs are time-limited).
-        # Memory example:
-        #   {
-        #     "https://github.com/ai-dynamo/dynamo/actions/runs/123/job/456": {"ts": 1766790000, "url": "https://...job-logs.txt?..."},
-        #     "https://github.com/ai-dynamo/dynamo/actions/runs/999/job/888": {"ts": 1766790001, "url": null}
-        #   }
         self._raw_log_url_mem_cache: Dict[str, Dict[str, Any]] = {}
         self._raw_log_url_cache_dir = dynamo_utils_cache_dir() / "raw-log-urls"
 
         # Cache for downloaded raw log text (two-tier: memory + disk).
-        # Disk layout:
-        #   ~/.cache/dynamo-utils/raw-log-text/
-        #     index.json                    # { "58838154435": {"ts": 1766790000, "bytes": 12345} }
-        #     58838154435.log               # extracted text content (utf-8)
         self._raw_log_text_mem_cache: Dict[str, Dict[str, Any]] = {}
         self._raw_log_text_cache_dir = dynamo_utils_cache_dir() / "raw-log-text"
         self._raw_log_text_index_file = self._raw_log_text_cache_dir / "index.json"
+
+        # Cache for Actions job status lookups (short TTL; prevents caching partial logs).
+        self._actions_job_status_mem_cache: Dict[str, Dict[str, Any]] = {}
+
+    def _rest_label_for_url(self, url: str) -> str:
+        """Coarse label for a REST request URL (keeps job ids / SHAs from exploding cardinality)."""
+        try:
+            u = str(url or "")
+            if "/rate_limit" in u:
+                return "rate_limit"
+            # Actions jobs
+            if re.search(r"/repos/[^/]+/[^/]+/actions/jobs/\\d+/logs\\b", u):
+                return "actions_job_logs_zip"
+            if re.search(r"/repos/[^/]+/[^/]+/actions/jobs/\\d+\\b", u):
+                return "actions_job_status"
+            # Check-runs
+            if "/check-runs" in u:
+                return "check_runs"
+            # PR / pulls
+            if re.search(r"/repos/[^/]+/[^/]+/pulls\\b", u):
+                return "pulls_list"
+            if re.search(r"/repos/[^/]+/[^/]+/pulls/\\d+\\b", u):
+                return "pull_request"
+            # Default: bucket by first few path segments
+            m = re.search(r"https?://api\\.github\\.com(/[^?]*)", u)
+            path = m.group(1) if m else u
+            parts = [p for p in path.split("/") if p]
+            return "/".join(parts[:4]) if parts else "unknown"
+        except Exception:
+            return "unknown"
+
+    def _rest_get(self, url: str, *, timeout: int = 10, allow_redirects: bool = True, stream: bool = False, params: Optional[Dict[str, Any]] = None):
+        """requests.get wrapper that increments per-run counters."""
+        assert requests is not None
+        label = self._rest_label_for_url(url)
+        try:
+            self._rest_calls_total += 1
+            self._rest_calls_by_label[label] = int(self._rest_calls_by_label.get(label, 0) or 0) + 1
+        except Exception:
+            pass
+        if self._debug_rest:
+            try:
+                self.logger.debug("GH REST GET [%s] %s", label, url)
+            except Exception:
+                pass
+        resp = requests.get(url, headers=self.headers, params=params, timeout=timeout, allow_redirects=allow_redirects, stream=stream)
+        if self._debug_rest:
+            try:
+                rem = resp.headers.get("X-RateLimit-Remaining")
+                code = getattr(resp, "status_code", None)
+                self.logger.debug("GH REST RESP [%s] status=%s remaining=%s", label, str(code), str(rem))
+            except Exception:
+                pass
+        return resp
+
+    def get_rest_call_stats(self) -> Dict[str, Any]:
+        """Return per-run REST call stats for debugging."""
+        try:
+            return {
+                "total": int(self._rest_calls_total),
+                "by_label": dict(sorted(self._rest_calls_by_label.items(), key=lambda kv: (-kv[1], kv[0]))),
+            }
+        except Exception:
+            return {"total": 0, "by_label": {}}
+
+    def get_actions_job_status(self, *, owner: str, repo: str, job_id: str, ttl_s: int = 120) -> Optional[str]:
+        """Return GitHub Actions job status ("completed", "in_progress", ...) with a short memory cache."""
+        if not HAS_REQUESTS:
+            return None
+        assert requests is not None
+
+        try:
+            job_id_s = str(job_id or "").strip()
+            if not job_id_s:
+                return None
+        except Exception:
+            return None
+
+        now = int(time.time())
+        try:
+            ent = self._actions_job_status_mem_cache.get(job_id_s)
+            if ent and int(ent.get("ts", 0) or 0) + int(ttl_s) > now:
+                st = ent.get("status")
+                return str(st) if st is not None else None
+        except Exception:
+            pass
+
+        url = f"{self.base_url}/repos/{owner}/{repo}/actions/jobs/{job_id_s}"
+        try:
+            resp = self._rest_get(url, timeout=10)
+        except Exception:
+            return None
+
+        # 404 can happen if job id is invalid / perm issue; just treat as unknown.
+        if resp.status_code < 200 or resp.status_code >= 300:
+            return None
+
+        try:
+            data = resp.json() or {}
+            status = data.get("status")
+            if status is None:
+                return None
+            status_s = str(status)
+        except Exception:
+            return None
+
+        try:
+            self._actions_job_status_mem_cache[job_id_s] = {"ts": now, "status": status_s}
+        except Exception:
+            pass
+        return status_s
 
     @staticmethod
     def _format_seconds_delta(seconds: int) -> str:
@@ -1813,7 +1840,7 @@ class GitHubAPIClient:
         *,
         refresh: bool = False,
         stable_after_hours: int = DEFAULT_STABLE_AFTER_HOURS,
-        short_ttl_s: int = DEFAULT_SHORT_TTL_S,
+        short_ttl_s: int = DEFAULT_UNSTABLE_TTL_S,
         stable_ttl_s: int = DEFAULT_STABLE_TTL_S,
     ) -> int:
         """Compute an appropriate cache TTL for CI/checks based on "how recently things changed".
@@ -1848,7 +1875,7 @@ class GitHubAPIClient:
         assert requests is not None
         url = f"{self.base_url}/rate_limit"
         try:
-            resp = requests.get(url, headers=self.headers, timeout=10)
+            resp = self._rest_get(url, timeout=10)
         except Exception as e:
             raise RuntimeError(f"Failed to query GitHub rate limit: {e}") from e
 
@@ -1918,7 +1945,7 @@ class GitHubAPIClient:
         assert requests is not None
         url = f"{self.base_url}/rate_limit"
         try:
-            resp = requests.get(url, headers=self.headers, timeout=10)
+            resp = self._rest_get(url, timeout=10)
         except Exception:
             return None
 
@@ -2576,7 +2603,7 @@ class GitHubAPIClient:
 
         try:
             assert requests is not None
-            response = requests.get(url, headers=self.headers, params=params, timeout=timeout)
+            response = self._rest_get(url, timeout=timeout, params=params)
 
             if response.status_code == 403:
                 # Check if it's a rate limit error
@@ -2967,6 +2994,7 @@ class GitHubAPIClient:
         repo: str = "dynamo",
         cache_file: str = "github_required_checks.json",
         skip_fetch: bool = False,
+        stats: Optional[Dict[str, Any]] = None,
     ) -> Dict[int, List[str]]:
         """Get required check names for a list of PRs, with a persistent cache.
 
@@ -3051,6 +3079,21 @@ class GitHubAPIClient:
                 cache_path.write_text(json.dumps(cache, indent=2))
             except Exception:
                 pass
+
+        # Stats (best-effort): why did we call `gh` vs use cache?
+        try:
+            if isinstance(stats, dict):
+                stats["required_checks_cache"] = {
+                    "total_prs": len(pr_numbers_unique),
+                    "hits": len(pr_numbers_unique) - len(prs_to_fetch),
+                    "misses": len(prs_to_fetch),
+                    "skip_fetch": bool(skip_fetch),
+                    "cache_file": str(cache_path),
+                    "miss_reason": "not_in_cache" if prs_to_fetch else "",
+                    "miss_prs_sample": [int(x) for x in prs_to_fetch[:10]],
+                }
+        except Exception:
+            pass
 
         return result
 
@@ -3269,7 +3312,7 @@ class GitHubAPIClient:
             assert requests is not None
 
             url = f"{self.base_url}/repos/{owner}/{repo}/actions/jobs/{job_id}/logs"
-            resp = requests.get(url, headers=self.headers, timeout=timeout, allow_redirects=False)
+            resp = self._rest_get(url, timeout=timeout, allow_redirects=False)
             if resp.status_code in (301, 302, 303, 307, 308):
                 return resp.headers.get("Location")
             return None
@@ -3356,6 +3399,7 @@ class GitHubAPIClient:
         ttl_s: int = DEFAULT_RAW_LOG_TEXT_TTL_S,
         timeout: int = 30,
         max_bytes: int = DEFAULT_RAW_LOG_TEXT_MAX_BYTES,
+        assume_completed: bool = False,
     ) -> Optional[str]:
         """Download and cache the *text* content of a GitHub Actions job log.
 
@@ -3371,6 +3415,19 @@ class GitHubAPIClient:
                 return None
         except Exception:
             return None
+
+        # IMPORTANT: never cache logs for jobs that are not done.
+        # The /actions/jobs/{id}/logs endpoint can return partial logs while a job is running.
+        # If the caller already proved completion (e.g., via check-runs), it can set assume_completed=True
+        # to avoid an extra REST call to /actions/jobs/{id}.
+        if not bool(assume_completed):
+            try:
+                st = str(self.get_actions_job_status(owner=owner, repo=repo, job_id=job_id) or "").lower()
+                if not st or st != "completed":
+                    return None
+            except Exception:
+                # Conservative: if we can't confirm the job is completed, don't cache.
+                return None
 
         now = int(datetime.now(timezone.utc).timestamp())
 
@@ -3400,7 +3457,9 @@ class GitHubAPIClient:
             chosen_path = txt_path if txt_path.exists() else legacy_txt_path
             if chosen_path.exists() and isinstance(ent, dict):
                 ts = int(ent.get("ts", 0) or 0)
-                if ts and (now - ts) <= max(0, int(ttl_s)):
+                # Only trust cache entries that were recorded as completed.
+                # (Older caches may have been populated while the job was in-progress, yielding partial logs.)
+                if bool(ent.get("completed", False)) and ts and (now - ts) <= max(0, int(ttl_s)):
                     text = chosen_path.read_text(encoding="utf-8", errors="replace")
                     self._raw_log_text_mem_cache[job_id] = {"ts": ts, "text": text}
                     # Best-effort migrate legacy .txt -> .log for future runs.
@@ -3412,6 +3471,16 @@ class GitHubAPIClient:
                         except Exception:
                             pass
                     return text
+                # If entry exists but isn't trusted, remove the stale local file so callers can refetch.
+                if chosen_path.exists() and not bool(ent.get("completed", False)):
+                    try:
+                        if chosen_path == legacy_txt_path and txt_path.exists():
+                            # keep preferred .log if it exists
+                            pass
+                        else:
+                            chosen_path.unlink()
+                    except Exception:
+                        pass
         except Exception:
             pass
 
@@ -3423,7 +3492,7 @@ class GitHubAPIClient:
         tmp_zip_path: Optional[Path] = None
         try:
             api_url = f"{self.base_url}/repos/{owner}/{repo}/actions/jobs/{job_id}/logs"
-            resp = requests.get(api_url, headers=self.headers, timeout=timeout, allow_redirects=True, stream=True)
+            resp = self._rest_get(api_url, timeout=timeout, allow_redirects=True, stream=True)
             resp.raise_for_status()
 
             # Download the ZIP to disk to avoid buffering large logs in memory.
@@ -3487,7 +3556,7 @@ class GitHubAPIClient:
                     size_b = int(txt_path.stat().st_size)
                 except Exception:
                     size_b = 0
-                meta[job_id] = {"ts": now, "bytes": size_b}
+                meta[job_id] = {"ts": now, "bytes": size_b, "completed": True}
                 tmp_meta = str(self._raw_log_text_index_file) + ".tmp"
                 Path(tmp_meta).write_text(json.dumps(meta))
                 os.replace(tmp_meta, self._raw_log_text_index_file)
@@ -3508,98 +3577,6 @@ class GitHubAPIClient:
                     tmp_zip_path.unlink(missing_ok=True)  # type: ignore[arg-type]
             except Exception:
                 pass
-
-    def materialize_job_raw_log_text_local_link(
-        self,
-        *,
-        job_url: str,
-        owner: str,
-        repo: str,
-        page_root_dir: Path,
-        rel_logs_dir: str = "logs/github-actions",
-        allow_fetch: bool = True,
-        ttl_s: int = DEFAULT_RAW_LOG_TEXT_TTL_S,
-    ) -> Optional[str]:
-        """Ensure a stable local raw log file exists under the HTML page root and return a relative link.
-
-        We do NOT use GitHub's ephemeral signed redirect URL. Instead we cache the raw log *content*
-        via the stable API endpoint and link to a local file:
-
-        Example returned href:
-          "logs/github-actions/1234567890.log"
-        """
-        try:
-            if "/job/" not in (job_url or ""):
-                return None
-            job_id = str(job_url.split("/job/")[1].split("?")[0] or "").strip()
-            if not job_id:
-                return None
-        except Exception:
-            return None
-
-        try:
-            page_root_dir = Path(page_root_dir)
-        except Exception:
-            return None
-
-        # Destination path (served alongside the dashboard HTML)
-        try:
-            rel_dir = str(rel_logs_dir or "").strip().strip("/")
-            if not rel_dir:
-                rel_dir = "logs/github-actions"
-            dest_dir = page_root_dir / rel_dir
-            dest_dir.mkdir(parents=True, exist_ok=True)
-            dest_path = dest_dir / f"{job_id}.log"
-            href = f"{rel_dir}/{job_id}.log"
-        except Exception:
-            return None
-
-        # If already materialized, return immediately (no IO / network).
-        try:
-            if dest_path.exists():
-                return href
-        except Exception:
-            pass
-
-        # If we already have the global cached file, just copy it into page_root_dir.
-        try:
-            global_txt = self._raw_log_text_cache_dir / f"{job_id}.log"
-            legacy_txt = self._raw_log_text_cache_dir / f"{job_id}.txt"
-            src = global_txt if global_txt.exists() else (legacy_txt if legacy_txt.exists() else None)
-            if src is not None:
-                tmp = str(dest_path) + ".tmp"
-                shutil.copyfile(str(src), tmp)
-                os.replace(tmp, dest_path)
-                return href
-        except Exception:
-            pass
-
-        if not allow_fetch:
-            return None
-
-        # Fetch (or refresh) the cached text, then copy it into page_root_dir.
-        try:
-            _ = self.get_job_raw_log_text_cached(
-                job_url=job_url,
-                owner=owner,
-                repo=repo,
-                ttl_s=int(ttl_s),
-            )
-        except Exception:
-            return None
-
-        try:
-            global_txt = self._raw_log_text_cache_dir / f"{job_id}.log"
-            legacy_txt = self._raw_log_text_cache_dir / f"{job_id}.txt"
-            src = global_txt if global_txt.exists() else (legacy_txt if legacy_txt.exists() else None)
-            if src is None:
-                return None
-            tmp = str(dest_path) + ".tmp"
-            shutil.copyfile(str(src), tmp)
-            os.replace(tmp, dest_path)
-            return href
-        except Exception:
-            return None
 
     def get_failed_checks(self, owner: str, repo: str, sha: str, required_checks: set, pr_number: Optional[int] = None,
                          checks_data: Optional[dict] = None) -> Tuple[List[FailedCheck], Optional[str]]:
@@ -3980,7 +3957,8 @@ class GitHubAPIClient:
     def get_cached_pr_merge_dates(self, pr_numbers: List[int],
                                   owner: str = "ai-dynamo",
                                   repo: str = "dynamo",
-                                  cache_file: str = '.github_pr_merge_dates_cache.json') -> Dict[int, Optional[str]]:
+                                  cache_file: str = '.github_pr_merge_dates_cache.json',
+                                  stats: Optional[Dict[str, Any]] = None) -> Dict[int, Optional[str]]:
         """Get merge dates for pull requests with caching.
 
         Merge dates are cached permanently since they don't change once a PR is merged.
@@ -4025,7 +4003,19 @@ class GitHubAPIClient:
 
         # First pass: collect cached results and PRs to fetch
         prs_to_fetch = []
+        pr_numbers_unique = []
+        seen = set()
         for pr_num in pr_numbers:
+            try:
+                pr_i = int(pr_num)
+            except Exception:
+                continue
+            if pr_i in seen:
+                continue
+            seen.add(pr_i)
+            pr_numbers_unique.append(pr_i)
+
+        for pr_num in pr_numbers_unique:
             if pr_num in cache:
                 result[pr_num] = cache[pr_num]
             else:
@@ -4078,6 +4068,20 @@ class GitHubAPIClient:
             except Exception:
                 pass
 
+        # Stats (best-effort): merge dates are immutable, so misses mean "not cached yet".
+        try:
+            if isinstance(stats, dict):
+                stats["merge_dates_cache"] = {
+                    "total_prs": len(pr_numbers_unique),
+                    "hits": len(pr_numbers_unique) - len(prs_to_fetch),
+                    "misses": len(prs_to_fetch),
+                    "cache_file": str(pr_cache_path),
+                    "miss_reason": "not_in_cache" if prs_to_fetch else "",
+                    "miss_prs_sample": [int(x) for x in prs_to_fetch[:10]],
+                }
+        except Exception:
+            pass
+
         return result
 
     def get_github_actions_status(
@@ -4088,12 +4092,13 @@ class GitHubAPIClient:
         cache_file=None,
         skip_fetch=False,
         *,
-        ttl_s: int = DEFAULT_SHORT_TTL_S,
+        ttl_s: int = DEFAULT_UNSTABLE_TTL_S,
         fetch_allowlist: Optional[set] = None,
         sha_to_datetime: Optional[Dict[str, datetime]] = None,
         stable_after_hours: int = DEFAULT_STABLE_AFTER_HOURS,
         stable_ttl_s: int = DEFAULT_STABLE_TTL_S,
         flush_every: int = 10,
+        stats: Optional[Dict[str, Any]] = None,
     ):
         """Get GitHub Actions check status for commits.
 
@@ -4182,8 +4187,22 @@ class GitHubAPIClient:
 
         shas_to_fetch: List[str] = []
         result: Dict[str, Any] = {}
+        # Stats (best-effort)
+        _stats = {
+            "total_shas": 0,
+            "cache_hit_fresh": 0,
+            "cache_hit_stale_no_fetch": 0,
+            "cache_stale_refresh": 0,
+            "cache_miss_fetch": 0,
+            "cache_miss_no_fetch": 0,
+            "skip_fetch": bool(skip_fetch),
+            "allowlist_size": int(len(fetch_allowlist)) if isinstance(fetch_allowlist, set) else None,
+            "cache_file": str(cache_file),
+            "miss_reason_samples": {},  # reason -> [sha_short,...]
+        }
 
         for sha in sha_list:
+            _stats["total_shas"] += 1
             ent = cache.get(sha) if isinstance(cache, dict) else None
             ts, data = _unpack(ent)
 
@@ -4208,11 +4227,22 @@ class GitHubAPIClient:
                     stale = True
                 if stale and _allow_fetch(sha):
                     shas_to_fetch.append(sha)
+                    _stats["cache_stale_refresh"] += 1
+                elif stale and not _allow_fetch(sha):
+                    _stats["cache_hit_stale_no_fetch"] += 1
+                else:
+                    _stats["cache_hit_fresh"] += 1
             else:
                 if _allow_fetch(sha):
                     shas_to_fetch.append(sha)
+                    _stats["cache_miss_fetch"] += 1
                 else:
                     result[sha] = None
+                    _stats["cache_miss_no_fetch"] += 1
+                    try:
+                        _stats["miss_reason_samples"].setdefault("blocked_by_allowlist_or_skip_fetch", []).append(str(sha)[:9])
+                    except Exception:
+                        pass
 
         def _flush_cache_to_disk() -> None:
             try:
@@ -4299,7 +4329,18 @@ class GitHubAPIClient:
         if cache_updated:
             _flush_cache_to_disk()
 
+        # Expose stats to caller
+        try:
+            if isinstance(stats, dict):
+                # Also report how many SHAs we actually fetched this run.
+                _stats["fetched_shas"] = int(len(shas_to_fetch))
+                stats["github_actions_status_cache"] = _stats
+        except Exception:
+            pass
+
         return result
+
+        # unreachable
 
 
 def select_shas_for_network_fetch(
