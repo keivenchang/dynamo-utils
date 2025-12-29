@@ -44,7 +44,6 @@ dynamo-utils/
 │   ├── show_commit_history.py        # Commit history with CI status and Docker images
 │   ├── show_dynamo_branches.py       # Branch status checker
 │   ├── show_dynamo_branches.j2       # HTML template for branch status
-│   ├── html_ui.py                   # Shared HTML/CSS/JS snippets (keep styles in sync)
 │   └── update_html_pages.sh          # HTML page update cron script
 └── container/                    # Docker-related scripts
     ├── build_images.py               # Automated Docker build/test pipeline
