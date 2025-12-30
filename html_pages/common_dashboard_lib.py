@@ -259,8 +259,8 @@ def _small_link_html(*, url: str, label: str) -> str:
     )
 
 
-from common_log_errors import format_snippet_html as _format_snippet_html  # shared implementation
-from common_log_errors import snippet_categories as _snippet_categories
+from common_log_errors import render_error_snippet_html as _format_snippet_html  # shared implementation
+from common_log_errors import categorize_error_snippet_text as _snippet_categories
 
 
 def _tag_pill_html(*, text: str, monospace: bool = False, kind: str = "category") -> str:
@@ -415,9 +415,7 @@ def check_line_html(
         size_s = _format_bytes_short(raw_log_size_bytes)
         label = f"[raw log {size_s}]" if size_s else "[raw log]"
         links += _small_link_html(url=raw_log_href, label=label)
-        # Snippet toggle should come immediately after [raw log] so it's easy to spot.
-        links += _error_snippet_toggle_html(dom_id_seed=f"{job_id}|{raw_log_href}", snippet_text=error_snippet_text)
-        # Inline tags (same line) after the Snippet toggle: categories + first detected command.
+        # Inline tags (same line) after [raw log]: categories + first detected command.
         if (error_snippet_text or "").strip():
             cats = _snippet_categories(error_snippet_text or "")
             for c in cats[:3]:
@@ -425,6 +423,9 @@ def check_line_html(
             cmd = _snippet_first_command(error_snippet_text or "")
             if cmd:
                 links += _tag_pill_html(text=cmd, monospace=True, kind="command")
+        # Snippet toggle should come after the error markers (e.g. "python-error") so the row reads:
+        #   ... [log] [raw log] build-error python-error ▶ Snippet
+        links += _error_snippet_toggle_html(dom_id_seed=f"{job_id}|{raw_log_href}", snippet_text=error_snippet_text)
 
     return f"{icon} {id_html}{req_html}{name_html}{dur_html}{links}"
 
