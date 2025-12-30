@@ -18,6 +18,34 @@ from pathlib import Path
 from typing import Iterable, List, Optional, Pattern, Sequence
 
 #
+# Shared helpers (keep dependency-light)
+# =============================================================================
+#
+
+# GitHub Actions log lines often start with a timestamp prefix like:
+#   2025-12-25T06:54:51.4973999Z <payload>
+_TS_PREFIX_RE: Pattern[str] = re.compile(r"^\d{4}-\d{2}-\d{2}T[0-9:.]+Z\s+")
+
+# Common ANSI escape sequences (colors, etc).
+_ANSI_ESCAPE_RE: Pattern[str] = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def _strip_ts_prefix(s: str) -> str:
+    """Remove the leading ISO timestamp prefix (if present)."""
+    return _TS_PREFIX_RE.sub("", s or "")
+
+
+def _strip_ansi(s: str) -> str:
+    """Remove ANSI color escape sequences (if present)."""
+    return _ANSI_ESCAPE_RE.sub("", s or "")
+
+
+def _strip_ts_and_ansi(s: str) -> str:
+    """Common normalization used across categorization/snippet extraction."""
+    return _strip_ansi(_strip_ts_prefix(s or ""))
+
+
+#
 # Error snippet selection (text-only)
 # =============================================================================
 #
@@ -30,11 +58,9 @@ ERROR_SNIPPET_LINE_RE: Pattern[str] = re.compile(
     # Pytest failures (the exact failing test id line is the most useful snippet anchor).
     # Example: "FAILED tests/x.py::test_name[param]"
     r"|(?:^|\s)FAILED(?:\s+|$).*::"
-    # Avoid matching dependency strings like "pytest-timeout==2.4.0" or "timeout-2.4.0".
-    r"|\b(?:time\s*out|timed\s*out)\b"
-    # "timeout" is often a benign parameter (e.g. "--timeout 20", "timeout=120s"); don't treat those
-    # as snippet anchors. Still keep real "timed out"/"time out" above, and allow other failure tokens.
-    r"|(?<!-)\btimeout\b(?!\s*[=:]\s*\d)(?!\s+\d+(?:\.\d+)?\s*(?:ms|s|sec|secs|second|seconds|m|min|mins|minute|minutes|h|hr|hrs|hour|hours|d|day|days)?\b)"
+    # Timeout: keep this very conservative to avoid false positives from dependency strings like
+    # "pytest-timeout==2.4.0" / "timeout-2.4.0" and from prose like "individual test timeouts".
+    r"|\b(?:timed\s*out|timedout)\b"
     r"|\b[A-Za-z_][A-Za-z0-9_]*(?:Error|Exception)\b"
     r"|\b(?:broken\s+links?|broken\s+link|dead\s+links?)\b"
     r"|\b(?:network\s+error|connection\s+failed)\b"
@@ -71,10 +97,7 @@ def _backend_failure_engines_from_lines(lines: Sequence[str]) -> set[str]:
     try:
         current: Optional[str] = None
         for raw in (lines or []):
-            s = str(raw or "")
-            # Strip common timestamp prefixes and ANSI escapes.
-            s = re.sub(r"^\d{4}-\d{2}-\d{2}T[0-9:.]+Z\s+", "", s)
-            s = re.sub(r"\x1b\[[0-9;]*m", "", s)
+            s = _strip_ts_and_ansi(str(raw or ""))
 
             m = _BACKEND_BLOCK_START_RE.search(s)
             if m:
@@ -106,17 +129,50 @@ def categorize_log_text(lines: Sequence[str]) -> List[str]:
             if name and name not in cats:
                 cats.append(name)
 
+        # Precompiled-ish patterns for readability (search against lowercase `t`).
+        _PYTEST_DETECT_RE = re.compile(
+            r"(?:"
+            r"===+\s*short test summary info\s*===+"
+            r"|(?:^|\s)failed(?:\s+|$).*::"
+            r"|(?:^|\s)e\s+\w+(?:error|exception)\b"
+            r"|\berror\s+collecting\b"
+            r")"
+        )
+        _PYTHON_EXCEPTION_DETECT_RE = re.compile(r"\b(traceback|exception|assertionerror)\b")
+        _DOWNLOAD_ERROR_RE = re.compile(r"\bcaused by:\s*failed to download\b|\bfailed to download\b|\bdownload error\b")
+        _BUILD_ERROR_RE = re.compile(r"\berror:\s*failed\s+to\s+build\b|\bfailed\s+to\s+solve\b")
+        _CUDA_ERROR_RE = re.compile(
+            r"(?:"
+            r"unsupported\s+cuda\s+version\s+for\s+vllm\s+installation"
+            r"|\bcuda\b[^\n]{0,120}\bunsupported\b"
+            r"|\bimporterror:\s*libcuda\.so\.1:\s*cannot\s+open\s+shared\s+object\s+file\b"
+            r")"
+        )
+        _HTTP_TIMEOUT_RE = re.compile(
+            r"awaiting\s+response\.\.\.\s*(?:504|503|502)\b|gateway\s+time-?out|\bhttp\s+(?:504|503|502)\b"
+        )
+        _NETWORK_ERROR_RE = re.compile(
+            r"\bnetwork\s+error:\s*connection\s+failed\b|\bconnection\s+failed\.\s*check\s+network\s+connectivity\b|\bfirewall\s+settings\b"
+        )
+        _ETCD_ERROR_RE = re.compile(
+            r"\bunable\s+to\s+create\s+lease\b|\bcheck\s+etcd\s+server\s+status\b|\betcd[^\n]{0,80}\blease\b|\blease\b[^\n]{0,80}\betcd\b"
+        )
+        _DOCKER_INFRA_ERROR_RE = re.compile(
+            r"(?:"
+            r"cannot\s+connect\s+to\s+the\s+docker\s+daemon"
+            r"|error\s+response\s+from\s+daemon:(?!.*no\s+such\s+container)"
+            r"|\bdocker:\s+.*\berror\b"
+            r")"
+        )
+        _BROKEN_LINKS_RE = re.compile(r"\bbroken\s+links?\b|\bdead\s+links?\b")
+        _TIMED_OUT_RE = re.compile(r"\b(?:timed\s*out|timedout)\b")
+
         # Pytest / Python
         # Only tag "pytest" when the log looks like an actual pytest run failure,
         # not when it merely mentions pytest packages/versions (e.g., "pytest==9.0.2").
-        if (
-            re.search(r"===+\s*short test summary info\s*===+", t)
-            or re.search(r"(?:^|\s)FAILED(?:\s+|$).*::", t, re.IGNORECASE)
-            or re.search(r"(?:^|\s)E\s+\w+(?:Error|Exception)\b", t, re.IGNORECASE)
-            or re.search(r"\berror\s+collecting\b", t, re.IGNORECASE)
-        ):
+        if _PYTEST_DETECT_RE.search(t):
             add("pytest")
-        if re.search(r"\b(traceback|exception|assertionerror)\b", t):
+        if _PYTHON_EXCEPTION_DETECT_RE.search(t):
             add("python-exception")
 
         # Git / GitHub LFS
@@ -126,38 +182,29 @@ def categorize_log_text(lines: Sequence[str]) -> List[str]:
             add("git-fetch")
 
         # Downloads (Rust/cargo, pip, curl, etc.)
-        if re.search(r"\bcaused by:\s*failed to download\b|\bfailed to download\b|\bdownload error\b", t):
+        if _DOWNLOAD_ERROR_RE.search(t):
             add("download-error")
 
         # Build failures (Docker/buildkit/etc.)
-        if re.search(r"\berror:\s*failed\s+to\s+build\b|\bfailed\s+to\s+solve\b", t):
+        if _BUILD_ERROR_RE.search(t):
             add("build-error")
 
         # CUDA / GPU toolchain
-        if re.search(
-            r"(?:"
-            r"unsupported\s+cuda\s+version\s+for\s+vllm\s+installation"
-            r"|\bcuda\b[^\n]{0,120}\bunsupported\b"
-            r")",
-            t,
-        ):
+        if _CUDA_ERROR_RE.search(t):
             add("cuda-error")
 
         # HTTP timeouts / gateway errors (wget/curl/HTTP clients)
-        if re.search(r"awaiting\s+response\.\.\.\s*(?:504|503|502)\b|gateway\s+time-?out|\bhttp\s+(?:504|503|502)\b", t):
+        if _HTTP_TIMEOUT_RE.search(t):
             add("http-timeout")
 
         # Network connectivity
-        if re.search(r"\bnetwork\s+error:\s*connection\s+failed\b|\bconnection\s+failed\.\s*check\s+network\s+connectivity\b|\bfirewall\s+settings\b", t):
+        if _NETWORK_ERROR_RE.search(t):
             add("network-error")
 
         # Etcd / lease
         # Avoid tagging `etcd-error` just because the word "etcd" appears (it often shows up in benign logs).
         # Require a lease/status failure signature.
-        if re.search(
-            r"\bunable\s+to\s+create\s+lease\b|\bcheck\s+etcd\s+server\s+status\b|\betcd[^\n]{0,80}\blease\b|\blease\b[^\n]{0,80}\betcd\b",
-            t,
-        ):
+        if _ETCD_ERROR_RE.search(t):
             add("etcd-error")
 
         # Docker
@@ -166,16 +213,7 @@ def categorize_log_text(lines: Sequence[str]) -> List[str]:
         #
         # IMPORTANT: BuildKit "failed to solve"/"ERROR: failed to build" are almost always *build* failures
         # (often due to CUDA/Python deps/etc) and should not be attributed to "docker".
-        if re.search(
-            r"(?:"
-            r"cannot\s+connect\s+to\s+the\s+docker\s+daemon"
-            # Don't tag docker for the common post-failure noise:
-            #   "Error response from daemon: No such container: ..."
-            r"|error\s+response\s+from\s+daemon:(?!.*no\s+such\s+container)"
-            r"|\bdocker:\s+.*\berror\b"
-            r")",
-            t,
-        ):
+        if _DOCKER_INFRA_ERROR_RE.search(t):
             add("docker")
 
         # Backend result JSON-ish blocks (vllm/sglang/trtllm): multi-line aware.
@@ -186,12 +224,18 @@ def categorize_log_text(lines: Sequence[str]) -> List[str]:
                 add(f"{e}-error")
 
         # Broken links
-        if re.search(r"\bbroken\s+links?\b|\bdead\s+links?\b", t):
+        if _BROKEN_LINKS_RE.search(t):
             add("broken-links")
 
         # Timeout / infra flake
-        if re.search(r"\b(time\s*out|timed\s*out|timeout)\b", t):
+        #
+        # Keep this very conservative to avoid false positives.
+        if _TIMED_OUT_RE.search(t):
             add("timeout")
+
+        # Docker image not found (registry manifest unknown)
+        if DOCKER_IMAGE_NOT_FOUND_RE.search(t):
+            add("docker-image-error")
 
         # OOM / kill
         if re.search(r"\bout\s+of\s+memory\b|\boom\b|killed\s+process", t):
@@ -211,10 +255,8 @@ ERROR_HIGHLIGHT_RE: Pattern[str] = re.compile(
     r"(?:"
     r"\b(?:error|failed|failure|exception|traceback|fatal)\b"
     r"|\bno\s+module\s+named\b"
-    r"|\b(?:time\s*out|timed\s*out)\b"
-    # "timeout" can be either an error token OR a benign parameter like "--timeout 20" / "timeout=120s".
-    # Treat as error only when it doesn't look like an option/assignment/explicit duration.
-    r"|(?<!-)\btimeout\b(?!\s*[=:]\s*\d)(?!\s+\d+(?:\.\d+)?\s*(?:ms|s|sec|secs|second|seconds|m|min|mins|minute|minutes|h|hr|hrs|hour|hours|d|day|days)?\b)"
+    # Timeout: keep conservative to avoid false positives like "timeout-2.4.0" (pytest plugin) or prose.
+    r"|\b(?:timed\s*out|timedout)\b"
     r"|\b(?:gateway\s+time-?out)\b"
     r"|\b(?:http\s*)?(?:502|503|504)\b"
     r"|\b(?:network\s+error|connection\s+failed|check\s+network\s+connectivity|firewall\s+settings)\b"
@@ -259,6 +301,28 @@ FAILED_TO_BUILD_RE: Pattern[str] = re.compile(
     re.IGNORECASE,
 )
 
+# CUDA runtime library import failures (common on runners missing NVIDIA driver libs).
+CUDA_LIBCUDA_IMPORT_ERROR_RE: Pattern[str] = re.compile(
+    r"\bImportError:\s*libcuda\.so\.1:\s*cannot\s+open\s+shared\s+object\s+file\b",
+    re.IGNORECASE,
+)
+
+# Pytest often prints file-level error markers like:
+#   ERROR components/src/dynamo/trtllm/tests/test_trtllm_unit.py
+PYTEST_ERROR_FILE_LINE_RE: Pattern[str] = re.compile(
+    r"(?:^|\s)\bERROR\s+components/src/dynamo/trtllm/tests/test_trtllm_[^\s]+\.py\b",
+    re.IGNORECASE,
+)
+
+# Capture the effective pytest command line for debugging.
+PYTEST_CMD_LINE_RE: Pattern[str] = re.compile(r"\bPYTEST_CMD\s*=", re.IGNORECASE)
+
+# Docker image pull/tag errors (registry manifest missing).
+DOCKER_IMAGE_NOT_FOUND_RE: Pattern[str] = re.compile(
+    r"\bnot\s+found:\s*manifest\s+unknown:\s*requested\s+image\s+not\s+found\b",
+    re.IGNORECASE,
+)
+
 # Backend status JSON-ish summary lines (multi-line blocks).
 BACKEND_RESULT_FAILURE_LINE_RE: Pattern[str] = re.compile(
     r"\"result\"\s*:\s*\"failure\"",
@@ -294,6 +358,8 @@ FULL_LINE_ERROR_REDS_RE: List[Pattern[str]] = [
     re.compile(r"\bmirror sync failed or timed out\b", re.IGNORECASE),
     # CUDA / vLLM install errors.
     UNSUPPORTED_CUDA_VLLM_RE,
+    # CUDA runtime missing on runner.
+    CUDA_LIBCUDA_IMPORT_ERROR_RE,
     # Python import errors are high-signal; make the entire line red.
     re.compile(r"\bModuleNotFoundError:\s*No\s+module\s+named\b", re.IGNORECASE),
     # CI sentinel variables indicating test failure. Example:
@@ -303,8 +369,12 @@ FULL_LINE_ERROR_REDS_RE: List[Pattern[str]] = [
     # Example:
     #   ________________ ERROR collecting tests/... _________________
     re.compile(r"\berror\s+collecting\b", re.IGNORECASE),
+    # Pytest file-level ERROR markers (helps identify the failing suite quickly).
+    PYTEST_ERROR_FILE_LINE_RE,
     # Multi-line backend result blocks: full-line highlight the failure field.
     re.compile(r"\"result\"\s*:\s*\"failure\"", re.IGNORECASE),
+    # Docker registry manifest missing.
+    DOCKER_IMAGE_NOT_FOUND_RE,
     # Pytest failure block lines (high-signal).
     PYTEST_FAILURES_HEADER_RE,
     PYTEST_UNDERSCORE_TITLE_RE,
@@ -332,7 +402,8 @@ SNIPPET_CATEGORY_RULES: list[tuple[str, Pattern[str]]] = [
     ("etcd-error", re.compile(r"unable\s+to\s+create\s+lease|check\s+etcd\s+server\s+status|\betcd[^\n]{0,80}\blease\b|\blease\b[^\n]{0,80}\betcd\b", re.IGNORECASE)),
     ("git-fetch", re.compile(r"failed to fetch some objects from|RPC failed|early EOF|remote end hung up|fetch-pack", re.IGNORECASE)),
     ("github-api", re.compile(r"Failed to query GitHub API|secondary rate limit|API rate limit exceeded|HTTP 403|HTTP 429", re.IGNORECASE)),
-    ("timeout", re.compile(r"\b(time\s*out|timed\s*out|timeout)\b", re.IGNORECASE)),
+    # Avoid tagging timeout just because pytest plugins list "timeout-<ver>" or prose mentions "timeouts".
+    ("timeout", re.compile(r"\b(?:timed\s*out|timedout)\b", re.IGNORECASE)),
     ("oom", re.compile(r"\b(out of memory|CUDA out of memory|Killed process|oom)\b", re.IGNORECASE)),
     (
         "docker",
@@ -343,6 +414,7 @@ SNIPPET_CATEGORY_RULES: list[tuple[str, Pattern[str]]] = [
             re.IGNORECASE,
         ),
     ),
+    ("docker-image-error", DOCKER_IMAGE_NOT_FOUND_RE),
     ("k8s", re.compile(r"\bkubectl\b|\bkubernetes\b|CrashLoopBackOff|ImagePullBackOff|ErrImagePull", re.IGNORECASE)),
     ("python-exception", re.compile(r"Traceback \(most recent call last\)|\b(AssertionError|ValueError|TypeError)\b", re.IGNORECASE)),
     ("broken-links", re.compile(r"\bbroken\s+links?\b|\bdead\s+links?\b|\blychee\b", re.IGNORECASE)),
@@ -450,16 +522,6 @@ def extract_error_snippet_from_text(
         if not all_lines:
             return ""
 
-        def strip_prefix(line: str) -> str:
-            # Drop common timestamp prefixes like: "2025-12-25T06:54:51.4973999Z "
-            try:
-                s = re.sub(r"^\d{4}-\d{2}-\d{2}T[0-9:.]+Z\s+", "", line)
-                # Strip common ANSI color sequences.
-                s = re.sub(r"\x1b\[[0-9;]*m", "", s)
-                return s
-            except Exception:
-                return line
-
         def extract_commands(lines: List[str]) -> List[str]:
             """Best-effort extraction of interesting commands (pytest/docker/run.sh/build.sh)."""
             # Capture multi-line commands like:
@@ -474,7 +536,7 @@ def extract_error_snippet_from_text(
             ]
 
             def normalize_cmd_line(raw: str) -> str:
-                s = strip_prefix(raw).strip()
+                s = _strip_ts_and_ansi(raw).strip()
                 if not s:
                     return ""
                 # Common shell prefixes
@@ -554,11 +616,13 @@ def extract_error_snippet_from_text(
         # Pick a single best anchor so we don't drown out the important line when there are many matches.
         # Priority:
         #   1) the *last* pytest "FAILED ...::..." line
-        #   2) CUDA/vLLM "Unsupported CUDA version ..." (this is typically the real root cause)
-        #   3) "ERROR: failed to build" (high-level build summary)
-        #   4) backend status JSON block failure (`"result": "failure"`) — keeps the engine block visible
-        #   5) the *last* docker daemon error ("Error response from daemon: ...")
-        #   6) the *last* generic error line match
+        #   2) CUDA runner missing libcuda (ImportError: libcuda.so.1 ...) (very high-signal root cause)
+        #   3) pytest file-level ERROR marker (points to the failing suite quickly)
+        #   4) CUDA/vLLM "Unsupported CUDA version ..." (this is typically the real root cause)
+        #   5) "ERROR: failed to build" (high-level build summary)
+        #   6) backend status JSON block failure (`"result": "failure"`) — keeps the engine block visible
+        #   7) the *last* docker daemon error ("Error response from daemon: ...")
+        #   8) the *last* generic error line match
         anchor_idx: Optional[int] = None
         last_generic: Optional[int] = None
         last_pytest_failed: Optional[int] = None
@@ -567,6 +631,9 @@ def extract_error_snippet_from_text(
         last_failed_to_build: Optional[int] = None
         last_network_err: Optional[int] = None
         last_backend_result_failure: Optional[int] = None
+        last_libcuda_import_err: Optional[int] = None
+        last_pytest_error_file: Optional[int] = None
+        last_pytest_cmd: Optional[int] = None
 
         for i, line in enumerate(all_lines):
             if not line or not line.strip():
@@ -575,10 +642,16 @@ def extract_error_snippet_from_text(
                 continue
             if PYTEST_FAILED_LINE_RE.search(line):
                 last_pytest_failed = i
+            if PYTEST_ERROR_FILE_LINE_RE.search(line):
+                last_pytest_error_file = i
+            if PYTEST_CMD_LINE_RE.search(line):
+                last_pytest_cmd = i
             if DOCKER_DAEMON_ERROR_LINE_RE.search(line):
                 last_docker_daemon_err = i
             if UNSUPPORTED_CUDA_VLLM_RE.search(line):
                 last_cuda_err = i
+            if CUDA_LIBCUDA_IMPORT_ERROR_RE.search(line):
+                last_libcuda_import_err = i
             if FAILED_TO_BUILD_RE.search(line):
                 last_failed_to_build = i
             if NETWORK_ERROR_LINE_RE.search(line):
@@ -592,15 +665,23 @@ def extract_error_snippet_from_text(
             last_pytest_failed
             if last_pytest_failed is not None
             else (
-                last_cuda_err
-                if last_cuda_err is not None
+                last_libcuda_import_err
+                if last_libcuda_import_err is not None
                 else (
-                    last_failed_to_build
-                    if last_failed_to_build is not None
+                    last_pytest_error_file
+                    if last_pytest_error_file is not None
                     else (
-                        last_backend_result_failure
-                        if last_backend_result_failure is not None
-                        else (last_docker_daemon_err if last_docker_daemon_err is not None else last_generic)
+                        last_cuda_err
+                        if last_cuda_err is not None
+                        else (
+                            last_failed_to_build
+                            if last_failed_to_build is not None
+                            else (
+                                last_backend_result_failure
+                                if last_backend_result_failure is not None
+                                else (last_docker_daemon_err if last_docker_daemon_err is not None else last_generic)
+                            )
+                        )
                     )
                 )
             )
@@ -651,6 +732,24 @@ def extract_error_snippet_from_text(
             docker_line = all_lines[last_docker_daemon_err]
             if docker_line and docker_line.strip() and docker_line not in snippet_lines:
                 snippet_lines.append(docker_line)
+
+        # Ensure we include the last PYTEST_CMD line if present (requested; critical for debugging).
+        if last_pytest_cmd is not None:
+            cmd_line = all_lines[last_pytest_cmd]
+            if cmd_line and cmd_line.strip() and cmd_line not in snippet_lines:
+                snippet_lines.append(cmd_line)
+
+        # Ensure we include the libcuda ImportError line if present (often the true root cause).
+        if last_libcuda_import_err is not None:
+            lib_line = all_lines[last_libcuda_import_err]
+            if lib_line and lib_line.strip() and lib_line not in snippet_lines:
+                snippet_lines.append(lib_line)
+
+        # Ensure we include the pytest ERROR file line if present (high-signal locator).
+        if last_pytest_error_file is not None:
+            err_file_line = all_lines[last_pytest_error_file]
+            if err_file_line and err_file_line.strip() and err_file_line not in snippet_lines:
+                snippet_lines.append(err_file_line)
 
         # Ensure we include the backend failure line if present (so the engine failure block is visible).
         if last_backend_result_failure is not None:
