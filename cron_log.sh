@@ -8,7 +8,6 @@
 #   cron_log.sh <job_name> <command...>
 #
 # Notes:
-# - Keeps a stable symlink at ~/nvidia/logs/<job_name>.log pointing at today's log.
 # - Prints timestamps and exit codes for easier debugging from logs.
 
 set -euo pipefail
@@ -32,7 +31,6 @@ DAY_LOG_DIR="$LOGS_DIR/$TODAY"
 mkdir -p "$DAY_LOG_DIR"
 
 LOG_FILE="$DAY_LOG_DIR/${JOB_NAME}.log"
-ln -sfn "$LOG_FILE" "$LOGS_DIR/${JOB_NAME}.log" 2>/dev/null || true
 
 {
   echo "================================================================================"

@@ -11,7 +11,17 @@ DEFAULT_DEST_DIR="/mnt/sda/keivenc/nvidia"
 
 # Get the directory where this script lives
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-LOG_FILE="/tmp/backup.log"
+
+# Default log location (cron-friendly):
+#   $NVIDIA_HOME/logs/YYYY-MM-DD/backup.log
+# Can be overridden via LOG_FILE env var.
+UTILS_DIR="$(dirname "$SCRIPT_DIR")"
+NVIDIA_HOME="${NVIDIA_HOME:-$(dirname "$UTILS_DIR")}"
+LOGS_DIR="${LOGS_DIR:-$NVIDIA_HOME/logs}"
+TODAY="$(date +%Y-%m-%d)"
+DAY_LOG_DIR="$LOGS_DIR/$TODAY"
+mkdir -p "$DAY_LOG_DIR"
+LOG_FILE="${LOG_FILE:-$DAY_LOG_DIR/backup.log}"
 
 # Create timestamp for this backup run
 TIMESTAMP=$(date '+%Y%m%d_%H%M%S')

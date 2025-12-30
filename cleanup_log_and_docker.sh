@@ -67,7 +67,12 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 NVIDIA_HOME="${NVIDIA_HOME:-$(dirname "$SCRIPT_DIR")}"
 LOGS_DIR="${LOGS_DIR:-$NVIDIA_HOME/logs}"
 
-LOCK_FILE="/tmp/dynamo-utils.cleanup_log_and_docker.${USER}.lock"
+USER_NAME="${USER:-${LOGNAME:-}}"
+if [ -z "$USER_NAME" ]; then
+  USER_NAME="$(id -un 2>/dev/null || echo unknown)"
+fi
+
+LOCK_FILE="/tmp/dynamo-utils.cleanup_log_and_docker.${USER_NAME}.lock"
 exec 9>"$LOCK_FILE"
 if ! flock -n 9; then
   echo "Another cleanup_log_and_docker.sh is already running; exiting." >&2
