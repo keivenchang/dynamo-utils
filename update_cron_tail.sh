@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# Update cron-tail.txt with the last 100 lines of cron.log
+# Update cron-tail.txt with the last 135 lines of cron.log
 #
 # Default location:
 #   $NVIDIA_HOME/logs/YYYY-MM-DD/cron.log (created by update_html_pages.sh runs)
@@ -25,7 +25,7 @@ CRON_LOG="$DAY_LOG_DIR/cron.log"
 OUTPUT_FILE="$DAY_LOG_DIR/cron-tail.txt"
 
 if [ -f "$CRON_LOG" ]; then
-    tail -100 "$CRON_LOG" > "$OUTPUT_FILE"
+    tail -135 "$CRON_LOG" > "$OUTPUT_FILE"
 else
     echo "cron.log not found at $CRON_LOG" > "$OUTPUT_FILE"
 fi

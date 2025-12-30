@@ -14,14 +14,55 @@ Log to category examples:
 - 58097278528.log => pytest-error
 - 56700023895.log => pytest-error
 - 57521050539.log => pytest-error
-- 57521050554.log => mystery-139-error
+- 57521050554.log => exit-139-sigsegv
 - 58861726335.log => docker-build-error
 - 58818079816.log => github-LFS-error, docker-build-error
 - 58465471934.log => rust-error
 - 58745798050.log => download-error, docker-build-error
-- 58861726335.log => http-timeout, docker-build-error, !build-error
-- 58818079816.log => github-LFS-error, !git-fetch, !build-error
+- 58861726335.log => http-timeout, docker-build-error
+- 58818079816.log => github-LFS-error, !git-fetch
 - 58887254616.log => broken-links
+- 59030780729.log => build-status-check-error
+- 58912949188.log => build-status-check-error
+- 59030172010.log => helm-error
+- 57945094461.log => copyright-header-error
+- 58179788784.log => huggingface-auth-error
+- 57877945085.log => exit-127-cmd-not-found
+- 58412373114.log => oom
+- 57930747559.log => timeout
+- 56700023895.log => python-error
+- 57877945100.log => cuda-error
+- 56701494636.log => backend-failure
+- 56700029731.log => etcd-error
+- 57930774858.log => network-error
+- 58861639352.log => docker-image-error
+
+Category frequency summary (all 623 logs, sorted by occurrence):
+  1. timeout                       214/623 (34.3%) - Generic timeouts (very broad)
+  2. build-status-check-error      183/623 (29.4%) - CI gate checking upstream builds
+  3. pytest-error                  139/623 (22.3%) - Pytest test failures
+  4. python-error                  124/623 (19.9%) - Python exceptions/tracebacks
+  5. exit-127-cmd-not-found         58/623  (9.3%) - Exit code 127 (command not found / missing binary in PATH)
+  6. huggingface-auth-error         28/623  (4.5%) - HF token/gated model access
+  7. download-error                 27/623  (4.3%) - Failed downloads (pip/cargo/curl)
+  8. docker-build-error             18/623  (2.9%) - Docker/BuildKit failures
+  9. cuda-error                     17/623  (2.7%) - CUDA version/driver issues
+ 10. backend-failure                13/623  (2.1%) - vllm/sglang/trtllm failures
+ 11. github-lfs-error               12/623  (1.9%) - Git LFS fetch failures
+ 12. etcd-error                     10/623  (1.6%) - Etcd lease/connection issues
+ 13. network-error                  10/623  (1.6%) - Network connectivity failures
+ 14. docker                         10/623  (1.6%) - Docker daemon errors
+ 15. docker-image-error             10/623  (1.6%) - Missing Docker images
+ 16. oom                             9/623  (1.4%) - Out of memory
+ 17. vllm-error                      8/623  (1.3%) - VLLM backend failures
+ 18. helm-error                      7/623  (1.1%) - Helm chart failures
+ 19. trtllm-error                    6/623  (1.0%) - TensorRT-LLM failures
+ 20. broken-links                    3/623  (0.5%) - Dead links in documentation
+ 21. http-timeout                    2/623  (0.3%) - HTTP 502/503/504 gateway timeouts
+ 22. exit-139-sigsegv                1/623  (0.2%) - Exit code 139 (SIGSEGV / signal 11)
+ 23. sglang-error                    1/623  (0.2%) - SGLang backend failures
+ 24. copyright-header-error          1/623  (0.2%) - Missing copyright headers
+ 25. rust-error                      1/623  (0.2%) - Cargo test failures
 
 Golden-log workflow (IMPORTANT for future edits):
 - These example logs are treated as *golden inputs* for regression testing. Keep them read-only:
@@ -83,6 +124,12 @@ def _norm_cat(s: str) -> str:
     # Canonicalize common variants
     if x in {"github-lfs", "github-lfs"}:
         return "github-lfs-error"
+    if x in {"mystery-139-error", "mystery-139"}:
+        return "exit-139-sigsegv"
+    if x in {"exit-139-error"}:
+        return "exit-139-sigsegv"
+    if x in {"exit-127-error"}:
+        return "exit-127-cmd-not-found"
     return x
 
 
@@ -91,6 +138,7 @@ def _parse_examples_from_docstring() -> list[tuple[str, list[str], list[str]]]:
 
     Grammar:
       - `<file>.log => cat1, cat2, !forbidden1, !forbidden2`
+      - Inline comments after `#` are allowed and ignored (useful for occurrence counts).
     """
     out: list[tuple[str, list[str], list[str]]] = []
     doc = (__doc__ or "").splitlines()
@@ -102,7 +150,10 @@ def _parse_examples_from_docstring() -> list[tuple[str, list[str], list[str]]]:
             continue
         left, right = s[2:].split("=>", 1)
         log_name = left.strip()
-        tokens = [c.strip() for c in right.strip().split(",") if c.strip()]
+        # Allow inline comments like:
+        #   - 123.log => pytest-error  # occurred 5/623
+        right_no_comment = right.split("#", 1)[0].strip()
+        tokens = [c.strip() for c in right_no_comment.split(",") if c.strip()]
         expected: list[str] = []
         forbidden: list[str] = []
         for tok in tokens:
@@ -219,6 +270,12 @@ ERROR_SNIPPET_LINE_RE: Pattern[str] = re.compile(
     #   "trtllm": { ... "result": "failure", ... }
     # Anchor on the high-signal failure field so the snippet includes the surrounding block.
     r"|\"result\"\s*:\s*\"failure\""
+    # Copyright header checks
+    r"|\bInvalid/Missing\s+Header:\b"
+    r"|\binvalid/missing\s+header:\b"
+    r"|\bcopyright\s+checkers\s+detected\s+missing\s+or\s+invalid\s+copyright\s+headers\b"
+    # HuggingFace auth / missing token warnings
+    r"|\bHF_TOKEN\s+not\s+found\s+in\s+environment\b"
     r")",
     re.IGNORECASE,
 )
@@ -256,6 +313,47 @@ CUDA_ERROR_RE: Pattern[str] = re.compile(
 HTTP_TIMEOUT_RE: Pattern[str] = re.compile(
     r"awaiting\s+response\.\.\.\s*(?:504|503|502)\b|gateway\s+time-?out|\bhttp\s+(?:504|503|502)\b"
 )
+BUILD_STATUS_CHECK_ERROR_RE: Pattern[str] = re.compile(
+    r"(?:"
+    r"\bchecking\s+build\s+status\s+for\b"
+    r"|\bbuild\s+status\s+for\s+'Build\b"
+    r"|\bError:\s*Failed\s+to\s+query\s+GitHub\s+API\b"
+    r"|\bBuild\s+failed\s+or\s+did\s+not\s+complete\s+successfully\.\s*(?:Failing\s+tests|Marking\s+tests\s+as\s+failed)\b"
+    r")",
+    re.IGNORECASE,
+)
+HUGGINGFACE_AUTH_ERROR_RE: Pattern[str] = re.compile(
+    r"(?:"
+    r"\bHF_TOKEN\s+not\s+found\s+in\s+environment\b"
+    r"|\bHfHubHTTPError\b"
+    r"|\bGatedRepoError\b"
+    r"|\bRepositoryNotFoundError\b"
+    r"|\bhuggingface[_-]hub\b[^\n]{0,160}\b(unauthorized|forbidden|invalid|token)\b"
+    r"|\b401\b[^\n]{0,120}\bhuggingface\b"
+    r"|\b403\b[^\n]{0,120}\bhuggingface\b"
+    r")",
+    re.IGNORECASE,
+)
+COPYRIGHT_HEADER_ERROR_RE: Pattern[str] = re.compile(
+    r"(?:"
+    r"\bcopyright-checks\b"
+    r"|\bcopyright\s+checkers\s+detected\s+missing\s+or\s+invalid\s+copyright\s+headers\b"
+    r"|\bInvalid/Missing\s+Header:\b"
+    r"|\binvalid/missing\s+header:\b"
+    r")",
+    re.IGNORECASE,
+)
+HELM_ERROR_RE: Pattern[str] = re.compile(
+    r"(?:"
+    r"\bUPGRADE\s+FAILED\b"
+    r"|\bINSTALLATION\s+FAILED\b"
+    r"|\bKubernetes\s+cluster\s+unreachable\b"
+    r"|\bhelm\b[^\n]{0,120}\berror\b"
+    r"|\berror:\s*flag\s+needs\s+an\s+argument:\s*'n'\s+in\s+-n\b"
+    r"|\berror:\s*resource\(s\)\s+were\s+provided,\s+but\s+no\s+name\s+was\s+specified\b"
+    r")",
+    re.IGNORECASE,
+)
 NETWORK_ERROR_RE: Pattern[str] = re.compile(
     r"\bnetwork\s+error:\s*connection\s+failed\b|\bconnection\s+failed\.\s*check\s+network\s+connectivity\b|\bfirewall\s+settings\b"
 )
@@ -272,7 +370,15 @@ DOCKER_INFRA_ERROR_RE: Pattern[str] = re.compile(
 BROKEN_LINKS_RE: Pattern[str] = re.compile(r"\bbroken\s+links?\b|\bdead\s+links?\b")
 TIMED_OUT_RE: Pattern[str] = re.compile(r"\b(?:timed\s*out|timedout)\b")
 RUST_TEST_FAIL_RE: Pattern[str] = re.compile(r"^\s*failures:\s*$|test result:\s*FAILED\.", re.IGNORECASE | re.MULTILINE)
+# Exit code 139 is conventionally SIGSEGV (signal 11) in POSIX shells (\(128 + 11 = 139\)).
 EXIT_CODE_139_RE: Pattern[str] = re.compile(r"process completed with exit code 139\b|exit code:\s*139\b", re.IGNORECASE)
+
+# Exit code 127 is conventionally “command not found” in POSIX shells.
+# In CI logs this usually means a missing dependency inside the container or a PATH issue.
+EXIT_CODE_127_RE: Pattern[str] = re.compile(
+    r"process completed with exit code 127\b|exit code:\s*127\b|\bcommand not found\b",
+    re.IGNORECASE,
+)
 
 
 def _backend_failure_engines_from_lines(lines: Sequence[str]) -> set[str]:
@@ -333,9 +439,12 @@ def categorize_error_log_lines(lines: Sequence[str]) -> List[str]:
         # Rust test failures (cargo test)
         if RUST_TEST_FAIL_RE.search(text):
             add("rust-error")
-        # Mystery failures: many CI jobs just report an exit code 139 (SIGSEGV) with little context.
+        # Exit code 139 is conventionally SIGSEGV (signal 11): 128 + 11 = 139.
         if EXIT_CODE_139_RE.search(text):
-            add("mystery-139-error")
+            add("exit-139-sigsegv")
+        # Exit code 127: command not found (missing dependency / PATH issue).
+        if EXIT_CODE_127_RE.search(text):
+            add("exit-127-cmd-not-found")
 
         # Git / GitHub LFS
         #
@@ -354,6 +463,22 @@ def categorize_error_log_lines(lines: Sequence[str]) -> List[str]:
         # Build failures (Docker/buildkit/etc.)
         if DOCKER_BUILD_ERROR_RE.search(t):
             add("docker-build-error")
+
+        # Build-status-check failures (CI gate that checks upstream build job status)
+        if BUILD_STATUS_CHECK_ERROR_RE.search(text):
+            add("build-status-check-error")
+
+        # HuggingFace auth/token failures (missing/invalid HF_TOKEN or gated model access)
+        if HUGGINGFACE_AUTH_ERROR_RE.search(text):
+            add("huggingface-auth-error")
+
+        # Copyright header checks
+        if COPYRIGHT_HEADER_ERROR_RE.search(text):
+            add("copyright-header-error")
+
+        # Helm/k8s workflow failures (deploy/cleanup)
+        if HELM_ERROR_RE.search(text):
+            add("helm-error")
 
         # CUDA / GPU toolchain
         if CUDA_ERROR_RE.search(t):
@@ -466,6 +591,48 @@ UNSUPPORTED_CUDA_VLLM_RE: Pattern[str] = re.compile(
 
 FAILED_TO_BUILD_RE: Pattern[str] = re.compile(
     r"\berror:\s*failed\s+to\s+build\b",
+    re.IGNORECASE,
+)
+
+# Exit code 139 is conventionally SIGSEGV (signal 11) in POSIX shells (\(128 + 11 = 139\)).
+# Many CI jobs only report the exit code near the end.
+EXIT_CODE_139_LINE_RE: Pattern[str] = re.compile(
+    r"(?:"
+    r"\bprocess completed with exit code 139\b"
+    r"|\bexit code:\s*139\b"
+    r")",
+    re.IGNORECASE,
+)
+
+# Git LFS fetch failures inside Docker/BuildKit dependency installs (often via uv/pip).
+# Example:
+#   × Failed to download and build `aiconfigurator @
+#   │ git+https://github.com/...#lfs=true`
+#   ├─▶ Git operation failed
+#   ├─▶ failed to fetch LFS objects at ...
+#   ...
+#   error: failed to fetch some objects from '.../info/lfs'
+GIT_LFS_SNIPPET_ANCHOR_RE: Pattern[str] = re.compile(
+    r"(?:"
+    r"\bFailed\s+to\s+download\s+and\s+build\s+`"
+    r"|\bGit\s+operation\s+failed\b"
+    r"|\bfailed\s+to\s+fetch\s+LFS\s+objects\b"
+    r"|\bUse\s+`git\s+lfs\s+logs\s+last`\b"
+    r"|\bprocess\s+didn'?t\s+exit\s+successfully:.*\bgit\s+lfs\b"
+    r"|\berror:\s*failed\s+to\s+fetch\s+some\s+objects\s+from\b"
+    r")",
+    re.IGNORECASE,
+)
+
+GIT_LFS_BLOCK_START_RE: Pattern[str] = re.compile(r"\bFailed\s+to\s+download\s+and\s+build\s+`", re.IGNORECASE)
+GIT_LFS_BLOCK_END_RE: Pattern[str] = re.compile(
+    r"(?:"
+    r"\bprocess\b.*\bdid\s+not\s+complete\s+successfully\b"
+    r"|\bERROR:\s*process\b.*\bdid\s+not\s+complete\s+successfully\b"
+    r"|\bERROR:\s*failed\s+to\s+build\b"
+    r"|^------\s*$"
+    r"|##\\[error\\]"
+    r")",
     re.IGNORECASE,
 )
 
@@ -619,7 +786,12 @@ SNIPPET_CATEGORY_RULES: list[tuple[str, Pattern[str]]] = [
     ("pytest-error", re.compile(r"(?:^|\s)FAILED(?:\s+|$).*::|short test summary info|\\berror\\s+collecting\\b", re.IGNORECASE)),
     ("download-error", re.compile(r"caused by:\s*failed to download|failed to download|download error", re.IGNORECASE)),
     ("docker-build-error", re.compile(r"\berror:\s*failed\s+to\s+build\b|\bfailed\s+to\s+solve\b", re.IGNORECASE)),
-    ("cuda-error", re.compile(r"unsupported\s+cuda\s+version\s+for\s+vllm\s+installation|\bcuda\b[^\n]{0,120}\bunsupported\b", re.IGNORECASE)),
+    ("build-status-check-error", BUILD_STATUS_CHECK_ERROR_RE),
+    ("huggingface-auth-error", HUGGINGFACE_AUTH_ERROR_RE),
+    ("copyright-header-error", COPYRIGHT_HEADER_ERROR_RE),
+    ("helm-error", HELM_ERROR_RE),
+    # Use the same CUDA matcher as full-log categorization, so snippets catch libcuda ImportError too.
+    ("cuda-error", re.compile(CUDA_ERROR_RE.pattern, re.IGNORECASE)),
     (
         "http-timeout",
         re.compile(
@@ -649,7 +821,8 @@ SNIPPET_CATEGORY_RULES: list[tuple[str, Pattern[str]]] = [
     ("python-error", PYTHON_EXCEPTION_LINE_RE),
     ("broken-links", re.compile(r"\bbroken\s+links?\b|\bdead\s+links?\b|\blychee\b", re.IGNORECASE)),
     ("rust-error", re.compile(r"^\s*failures:\s*$|test result:\s*FAILED\.", re.IGNORECASE | re.MULTILINE)),
-    ("mystery-139-error", re.compile(r"process completed with exit code 139\b|exit code:\s*139\b", re.IGNORECASE)),
+    ("exit-139-sigsegv", EXIT_CODE_139_RE),
+    ("exit-127-cmd-not-found", EXIT_CODE_127_RE),
 ]
 
 
@@ -861,11 +1034,13 @@ def extract_error_snippet_from_text(
         #   5) pytest file-level ERROR marker (points to the failing suite quickly)
         #   6) CUDA/vLLM "Unsupported CUDA version ..." (often the real root cause)
         #   7) Rust "test result: FAILED." (cargo test)
-        #   8) Dockerfile context block header (BuildKit prints the snippet right after this)
-        #   9) "ERROR: failed to build" (high-level build summary)
-        #  10) backend status JSON failure (`"result": "failure"`) (engine failure block)
-        #  11) docker daemon error ("Error response from daemon: ...")
-        #  12) last generic error line match
+        #   8) Exit code 139 (SIGSEGV) (common "mystery" failure signature)
+        #   9) Dockerfile context block header (BuildKit prints the snippet right after this)
+        #  10) Git LFS dependency fetch failure block (often the root cause of build failures)
+        #  11) "ERROR: failed to build" (high-level build summary)
+        #  12) backend status JSON failure (`"result": "failure"`) (engine failure block)
+        #  13) docker daemon error ("Error response from daemon: ...")
+        #  14) last generic error line match
         anchor_idx: Optional[int] = None
         last_generic: Optional[int] = None
         last_pytest_failed: Optional[int] = None
@@ -883,6 +1058,11 @@ def extract_error_snippet_from_text(
         last_dockerfile_ctx_hdr: Optional[int] = None
         last_rust_test_result_failed: Optional[int] = None
         last_rust_failures_header: Optional[int] = None
+        last_git_lfs_anchor: Optional[int] = None
+        last_exit_code_139: Optional[int] = None
+        last_etcd_sig: Optional[int] = None
+        last_hf_auth_sig: Optional[int] = None
+        last_copyright_sig: Optional[int] = None
 
         for i, line in enumerate(all_lines):
             if not line or not line.strip():
@@ -913,6 +1093,18 @@ def extract_error_snippet_from_text(
                 last_rust_failures_header = i
             if RUST_TEST_RESULT_FAILED_RE.search(line):
                 last_rust_test_result_failed = i
+            if GIT_LFS_SNIPPET_ANCHOR_RE.search(line):
+                last_git_lfs_anchor = i
+            if EXIT_CODE_139_LINE_RE.search(line):
+                last_exit_code_139 = i
+            # Some categories are often only visible as a single high-signal line that can get
+            # pushed out of the snippet window. Track them explicitly so we can force-include.
+            if ETCD_ERROR_RE.search(line.lower()):
+                last_etcd_sig = i
+            if HUGGINGFACE_AUTH_ERROR_RE.search(line):
+                last_hf_auth_sig = i
+            if COPYRIGHT_HEADER_ERROR_RE.search(line):
+                last_copyright_sig = i
             if FAILED_TO_BUILD_RE.search(line):
                 last_failed_to_build = i
             if NETWORK_ERROR_LINE_RE.search(line):
@@ -931,7 +1123,9 @@ def extract_error_snippet_from_text(
             last_pytest_error_file,
             last_cuda_err,
             last_rust_test_result_failed,
+            last_exit_code_139,
             last_dockerfile_ctx_hdr,
+            last_git_lfs_anchor,
             last_failed_to_build,
             last_backend_result_failure,
             last_docker_daemon_err,
@@ -951,9 +1145,19 @@ def extract_error_snippet_from_text(
                 line = all_lines[k]
                 if line and line.strip() and not line.startswith("#"):
                     snippet_lines.append(line)
+            # If everything in the anchor window is a GitHub Actions marker (##[...]) or similar,
+            # we still want *something* in the snippet.
+            if not snippet_lines:
+                for k in range(start, end):
+                    line = all_lines[k]
+                    if line and line.strip():
+                        snippet_lines.append(line)
         else:
             # Fallback: last lines with signal.
             snippet_lines = [ln for ln in all_lines if ln and ln.strip() and not ln.startswith("#")][-40:]
+            if not snippet_lines:
+                # As a last resort, include the last non-empty lines even if they start with "#".
+                snippet_lines = [ln for ln in all_lines if ln and ln.strip()][-40:]
 
         # If this is a pytest failure, ensure we include the core pytest failure block lines the user cares about.
         if last_pytest_failed is not None:
@@ -1047,6 +1251,72 @@ def extract_error_snippet_from_text(
             if build_line and build_line.strip() and build_line not in snippet_lines:
                 snippet_lines.append(build_line)
 
+        # Git LFS dependency fetch failures: include the whole uv/pip/LFS error block when present.
+        #
+        # These failures often occur *before* BuildKit prints its generic "ERROR: failed to build" summary,
+        # so they can be easy to miss if we anchor too late.
+        if last_git_lfs_anchor is not None:
+            # Attempt to scope to the BuildKit step number ("#52") if present.
+            step_id: Optional[str] = None
+            try:
+                m = re.search(r"\s#(\d+)\b", all_lines[last_git_lfs_anchor])
+                if m:
+                    step_id = str(m.group(1))
+            except Exception:
+                step_id = None
+
+            def same_step(ln: str) -> bool:
+                if not step_id:
+                    return True
+                try:
+                    return bool(re.search(rf"\s#{re.escape(step_id)}\b", ln))
+                except Exception:
+                    return True
+
+            # Walk backward to find a good block start.
+            start_i = last_git_lfs_anchor
+            for k in range(last_git_lfs_anchor, max(-1, last_git_lfs_anchor - 300), -1):
+                ln = all_lines[k]
+                if not (ln or "").strip():
+                    continue
+                if ln.startswith("#"):
+                    continue
+                if not same_step(ln):
+                    continue
+                if GIT_LFS_BLOCK_START_RE.search(ln):
+                    start_i = k
+                    break
+                # If we see the uv command line for this step, treat that as a good start too.
+                if "UV_GIT_LFS=1" in ln and "uv pip install" in ln:
+                    start_i = k
+                    # Keep searching for an even better start marker, but don’t go beyond this step.
+                    # (We don’t break here on purpose.)
+
+            # Walk forward to include the whole block (cap to avoid huge snippets).
+            end_i = min(len(all_lines) - 1, last_git_lfs_anchor + 140)
+            for k in range(max(start_i, last_git_lfs_anchor), min(len(all_lines), start_i + 220)):
+                ln = all_lines[k]
+                if not (ln or "").strip():
+                    continue
+                if ln.startswith("#"):
+                    continue
+                # Stop once we leave the step and we've already captured some of the block.
+                if not same_step(ln) and k > last_git_lfs_anchor:
+                    end_i = k - 1
+                    break
+                if GIT_LFS_BLOCK_END_RE.search(_strip_ts_and_ansi(ln)):
+                    end_i = k
+                    break
+
+            for k in range(start_i, end_i + 1):
+                ln = all_lines[k]
+                if not (ln or "").strip():
+                    continue
+                if ln.startswith("#"):
+                    continue
+                if ln not in snippet_lines:
+                    snippet_lines.append(ln)
+
         # Docker build context blocks: if BuildKit printed a Dockerfile snippet, include it.
         # These look like:
         #   Dockerfile.foo:190
@@ -1070,6 +1340,17 @@ def extract_error_snippet_from_text(
                 if k > hdr_i and not DOCKERFILE_CONTEXT_LINE_RE.search(ln) and not DOCKERFILE_CONTEXT_DIVIDER_RE.search(ln):
                     break
 
+        # Ensure we include one representative line for some “single-line” failure categories.
+        #
+        # These are common in CI gate checks and linters, and without forcing them in, the snippet
+        # can accidentally miss the line even though the full log clearly indicates the failure.
+        for idx in (last_etcd_sig, last_hf_auth_sig, last_copyright_sig):
+            if idx is None:
+                continue
+            ln = all_lines[idx]
+            if ln and ln.strip() and ln not in snippet_lines:
+                snippet_lines.append(ln)
+
         # Rust test failures: include the `failures:` block (failed test names) if present.
         if last_rust_failures_header is not None:
             hdr_i = last_rust_failures_header
@@ -1090,6 +1371,15 @@ def extract_error_snippet_from_text(
                     continue
                 # Stop if we leave the simple failures list.
                 break
+
+        # Ensure we include the exit code 139 line if present (it’s often the only useful clue).
+        #
+        # IMPORTANT: do this *late*, right before capping, so tail-capping doesn't accidentally drop it
+        # when we add other helpful blocks (Dockerfile/LFS/etc).
+        if last_exit_code_139 is not None:
+            ln = all_lines[last_exit_code_139]
+            if ln and ln.strip() and ln not in snippet_lines:
+                snippet_lines.append(ln)
 
         # Cap size and add explicit ellipsis markers when we cut off leading/trailing log content.
         #

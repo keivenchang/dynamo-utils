@@ -121,7 +121,7 @@ cleanup_logs() {
   today="$(date +%F)"
   cutoff_epoch="$(date -d "$today - $KEEP_DAYS days" +%s)"
 
-  local deleted=0 kept=0 skipped=0
+  local deleted=0 kept=0 skipped=0 failed=0
 
   shopt -s nullglob
   for dir in "$LOGS_DIR"/*; do
@@ -154,7 +154,15 @@ cleanup_logs() {
       if [ "$DRY_RUN" = true ]; then
         echo "+ rm -rf $dir"
       else
-        rm -rf "$dir"
+        # Best-effort deletion: don't fail the whole cleanup if some directories contain
+        # read-only/immutable files or otherwise can't be removed.
+        if rm -rf "$dir"; then
+          :
+        else
+          echo "WARNING: failed to delete old log directory: $dir (permissions/read-only files?). Skipping." >&2
+          failed=$((failed + 1))
+          continue
+        fi
       fi
       deleted=$((deleted + 1))
     else
@@ -163,7 +171,7 @@ cleanup_logs() {
   done
   shopt -u nullglob
 
-  echo "[$(date '+%Y-%m-%d %H:%M:%S')] Log cleanup summary: deleted=$deleted kept=$kept skipped=$skipped (keep-days=$KEEP_DAYS)"
+  echo "[$(date '+%Y-%m-%d %H:%M:%S')] Log cleanup summary: deleted=$deleted kept=$kept skipped=$skipped failed=$failed (keep-days=$KEEP_DAYS)"
 }
 
 cleanup_docker
