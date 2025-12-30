@@ -38,6 +38,10 @@ ERROR_SNIPPET_LINE_RE: Pattern[str] = re.compile(
     r"|\b[A-Za-z_][A-Za-z0-9_]*(?:Error|Exception)\b"
     r"|\b(?:broken\s+links?|broken\s+link|dead\s+links?)\b"
     r"|\b(?:network\s+error|connection\s+failed)\b"
+    # Multi-line backend result blocks (JSON-ish) often show:
+    #   "trtllm": { ... "result": "failure", ... }
+    # Anchor on the high-signal failure field so the snippet includes the surrounding block.
+    r"|\"result\"\s*:\s*\"failure\""
     r")",
     re.IGNORECASE,
 )
@@ -47,6 +51,45 @@ ERROR_SNIPPET_LINE_RE: Pattern[str] = re.compile(
 # Categorization (text-only)
 # =============================================================================
 #
+
+# Backend result blocks are printed as JSON-ish text in logs, e.g.:
+#   "sglang": { ... "result": "failure", ... }
+_BACKEND_BLOCK_START_RE: Pattern[str] = re.compile(r"\"(trtllm|sglang|vllm)\"\s*:\s*\{", re.IGNORECASE)
+_BACKEND_RESULT_FAILURE_RE: Pattern[str] = re.compile(r"\"result\"\s*:\s*\"failure\"", re.IGNORECASE)
+
+
+def _backend_failure_engines_from_lines(lines: Sequence[str]) -> set[str]:
+    """Detect which backend engine blocks report `"result": "failure"` (multi-line aware).
+
+    Example block (ANSI/timestamps may wrap lines):
+        "sglang": {
+          "result": "failure",
+          ...
+        },
+    """
+    engines: set[str] = set()
+    try:
+        current: Optional[str] = None
+        for raw in (lines or []):
+            s = str(raw or "")
+            # Strip common timestamp prefixes and ANSI escapes.
+            s = re.sub(r"^\d{4}-\d{2}-\d{2}T[0-9:.]+Z\s+", "", s)
+            s = re.sub(r"\x1b\[[0-9;]*m", "", s)
+
+            m = _BACKEND_BLOCK_START_RE.search(s)
+            if m:
+                current = str(m.group(1) or "").strip().lower() or None
+
+            if current and _BACKEND_RESULT_FAILURE_RE.search(s):
+                engines.add(current)
+
+            if current:
+                st = (s or "").strip()
+                if st in ("}", "},"):
+                    current = None
+    except Exception:
+        return engines
+    return engines
 
 def categorize_log_text(lines: Sequence[str]) -> List[str]:
     """Return high-level error categories found in log lines (best-effort).
@@ -70,6 +113,7 @@ def categorize_log_text(lines: Sequence[str]) -> List[str]:
             re.search(r"===+\s*short test summary info\s*===+", t)
             or re.search(r"(?:^|\s)FAILED(?:\s+|$).*::", t, re.IGNORECASE)
             or re.search(r"(?:^|\s)E\s+\w+(?:Error|Exception)\b", t, re.IGNORECASE)
+            or re.search(r"\berror\s+collecting\b", t, re.IGNORECASE)
         ):
             add("pytest")
         if re.search(r"\b(traceback|exception|assertionerror)\b", t):
@@ -134,6 +178,13 @@ def categorize_log_text(lines: Sequence[str]) -> List[str]:
         ):
             add("docker")
 
+        # Backend result JSON-ish blocks (vllm/sglang/trtllm): multi-line aware.
+        engines = _backend_failure_engines_from_lines(lines[-4000:] if lines else [])
+        if engines:
+            add("backend-failure")
+            for e in sorted(engines):
+                add(f"{e}-error")
+
         # Broken links
         if re.search(r"\bbroken\s+links?\b|\bdead\s+links?\b", t):
             add("broken-links")
@@ -159,6 +210,7 @@ def categorize_log_text(lines: Sequence[str]) -> List[str]:
 ERROR_HIGHLIGHT_RE: Pattern[str] = re.compile(
     r"(?:"
     r"\b(?:error|failed|failure|exception|traceback|fatal)\b"
+    r"|\bno\s+module\s+named\b"
     r"|\b(?:time\s*out|timed\s*out)\b"
     # "timeout" can be either an error token OR a benign parameter like "--timeout 20" / "timeout=120s".
     # Treat as error only when it doesn't look like an option/assignment/explicit duration.
@@ -207,6 +259,12 @@ FAILED_TO_BUILD_RE: Pattern[str] = re.compile(
     re.IGNORECASE,
 )
 
+# Backend status JSON-ish summary lines (multi-line blocks).
+BACKEND_RESULT_FAILURE_LINE_RE: Pattern[str] = re.compile(
+    r"\"result\"\s*:\s*\"failure\"",
+    re.IGNORECASE,
+)
+
 # Pytest block markers we want to preserve around failures.
 PYTEST_FAILURES_HEADER_RE: Pattern[str] = re.compile(r"=+\s*FAILURES\s*=+", re.IGNORECASE)
 PYTEST_PROGRESS_100_RE: Pattern[str] = re.compile(r"^.*\[100%\].*$")
@@ -232,8 +290,21 @@ FULL_LINE_ERROR_REDS_RE: List[Pattern[str]] = [
     # Don't full-line-highlight the common post-failure noise:
     #   "Error response from daemon: No such container: ..."
     re.compile(r"\berror response from daemon:(?!.*no\s+such\s+container)", re.IGNORECASE),
+    # Mirror sync infra errors (user wants the entire line red).
+    re.compile(r"\bmirror sync failed or timed out\b", re.IGNORECASE),
     # CUDA / vLLM install errors.
     UNSUPPORTED_CUDA_VLLM_RE,
+    # Python import errors are high-signal; make the entire line red.
+    re.compile(r"\bModuleNotFoundError:\s*No\s+module\s+named\b", re.IGNORECASE),
+    # CI sentinel variables indicating test failure. Example:
+    #   FAILED_TESTS=1  # Treat missing XML as failure
+    re.compile(r"\bFAILED_TESTS\s*=\s*1\b", re.IGNORECASE),
+    # Pytest collection errors are high-signal and typically the true root cause.
+    # Example:
+    #   ________________ ERROR collecting tests/... _________________
+    re.compile(r"\berror\s+collecting\b", re.IGNORECASE),
+    # Multi-line backend result blocks: full-line highlight the failure field.
+    re.compile(r"\"result\"\s*:\s*\"failure\"", re.IGNORECASE),
     # Pytest failure block lines (high-signal).
     PYTEST_FAILURES_HEADER_RE,
     PYTEST_UNDERSCORE_TITLE_RE,
@@ -246,7 +317,7 @@ FULL_LINE_ERROR_REDS_RE: List[Pattern[str]] = [
 # Snippet category rules (HTML-side, to tag a snippet without re-reading the full raw log).
 # A snippet can have multiple categories; keep these high-signal and relatively stable.
 SNIPPET_CATEGORY_RULES: list[tuple[str, Pattern[str]]] = [
-    ("pytest", re.compile(r"(?:^|\s)FAILED(?:\s+|$).*::|short test summary info", re.IGNORECASE)),
+    ("pytest", re.compile(r"(?:^|\s)FAILED(?:\s+|$).*::|short test summary info|\\berror\\s+collecting\\b", re.IGNORECASE)),
     ("download-error", re.compile(r"caused by:\s*failed to download|failed to download|download error", re.IGNORECASE)),
     ("build-error", re.compile(r"\berror:\s*failed\s+to\s+build\b|\bfailed\s+to\s+solve\b", re.IGNORECASE)),
     ("cuda-error", re.compile(r"unsupported\s+cuda\s+version\s+for\s+vllm\s+installation|\bcuda\b[^\n]{0,120}\bunsupported\b", re.IGNORECASE)),
@@ -301,24 +372,20 @@ def snippet_categories(snippet_text: str) -> List[str]:
     if not text:
         return []
 
-    # If upstream already embedded a "Categories: ..." header, trust it.
+    out: List[str] = []
+    seen: set[str] = set()
+
+    # Multi-line backend JSON-ish blocks: tag both engines when both blocks fail.
     try:
-        first = text.splitlines()[0].strip()
-        if first.lower().startswith("categories:"):
-            rest = first.split(":", 1)[1]
-            cats = [c.strip() for c in rest.split(",") if c.strip()]
-            out: List[str] = []
-            seen: set[str] = set()
-            for c in cats:
-                if c not in seen:
-                    seen.add(c)
-                    out.append(c)
-            return out
+        engines = _backend_failure_engines_from_lines((snippet_text or "").splitlines())
+        if engines:
+            for name in (["backend-failure"] + [f"{e}-error" for e in sorted(engines)]):
+                if name not in seen:
+                    seen.add(name)
+                    out.append(name)
     except Exception:
         pass
 
-    out: List[str] = []
-    seen: set[str] = set()
     for name, rx in SNIPPET_CATEGORY_RULES:
         try:
             if rx.search(text) and name not in seen:
@@ -489,8 +556,9 @@ def extract_error_snippet_from_text(
         #   1) the *last* pytest "FAILED ...::..." line
         #   2) CUDA/vLLM "Unsupported CUDA version ..." (this is typically the real root cause)
         #   3) "ERROR: failed to build" (high-level build summary)
-        #   4) the *last* docker daemon error ("Error response from daemon: ...")
-        #   5) the *last* generic error line match
+        #   4) backend status JSON block failure (`"result": "failure"`) — keeps the engine block visible
+        #   5) the *last* docker daemon error ("Error response from daemon: ...")
+        #   6) the *last* generic error line match
         anchor_idx: Optional[int] = None
         last_generic: Optional[int] = None
         last_pytest_failed: Optional[int] = None
@@ -498,6 +566,7 @@ def extract_error_snippet_from_text(
         last_cuda_err: Optional[int] = None
         last_failed_to_build: Optional[int] = None
         last_network_err: Optional[int] = None
+        last_backend_result_failure: Optional[int] = None
 
         for i, line in enumerate(all_lines):
             if not line or not line.strip():
@@ -514,6 +583,8 @@ def extract_error_snippet_from_text(
                 last_failed_to_build = i
             if NETWORK_ERROR_LINE_RE.search(line):
                 last_network_err = i
+            if BACKEND_RESULT_FAILURE_LINE_RE.search(line):
+                last_backend_result_failure = i
             if ERROR_SNIPPET_LINE_RE.search(line):
                 last_generic = i
 
@@ -526,7 +597,11 @@ def extract_error_snippet_from_text(
                 else (
                     last_failed_to_build
                     if last_failed_to_build is not None
-                    else (last_docker_daemon_err if last_docker_daemon_err is not None else last_generic)
+                    else (
+                        last_backend_result_failure
+                        if last_backend_result_failure is not None
+                        else (last_docker_daemon_err if last_docker_daemon_err is not None else last_generic)
+                    )
                 )
             )
         )
@@ -577,6 +652,12 @@ def extract_error_snippet_from_text(
             if docker_line and docker_line.strip() and docker_line not in snippet_lines:
                 snippet_lines.append(docker_line)
 
+        # Ensure we include the backend failure line if present (so the engine failure block is visible).
+        if last_backend_result_failure is not None:
+            bf_line = all_lines[last_backend_result_failure]
+            if bf_line and bf_line.strip() and bf_line not in snippet_lines:
+                snippet_lines.append(bf_line)
+
         # Ensure we include the last network error line if present (high-signal infra failure).
         if last_network_err is not None:
             net_line = all_lines[last_network_err]
@@ -595,8 +676,37 @@ def extract_error_snippet_from_text(
             if build_line and build_line.strip() and build_line not in snippet_lines:
                 snippet_lines.append(build_line)
 
-        # Cap size.
-        snippet_lines = snippet_lines[-max(1, int(max_lines)) :]
+        # Cap size and add explicit ellipsis markers when we cut off leading/trailing log content.
+        #
+        # The goal is to make it obvious when the snippet is a window into a larger log:
+        # - If there are lines before the captured window (or we drop earlier lines due to max_lines),
+        #   prepend a literal "..." line.
+        # - If there are lines after the captured window, append a literal "..." line.
+        #
+        # Note: We intentionally cap from the tail to preserve the highest-signal failure lines.
+        max_lines_i = max(1, int(max_lines))
+        omitted_before_window = False
+        omitted_after_window = False
+        if anchor_idx is not None:
+            omitted_before_window = bool(start > 0)  # type: ignore[name-defined]
+            omitted_after_window = bool(end < len(all_lines))  # type: ignore[name-defined]
+
+        # Reserve space for ellipsis lines if needed, so we never exceed max_lines.
+        omitted_before = bool(omitted_before_window)
+        omitted_after = bool(omitted_after_window)
+        for _ in range(2):
+            reserve = (1 if omitted_before else 0) + (1 if omitted_after else 0)
+            content_cap = max(1, max_lines_i - reserve)
+            omitted_before = bool(omitted_before_window) or (len(snippet_lines) > content_cap)
+
+        reserve = (1 if omitted_before else 0) + (1 if omitted_after else 0)
+        content_cap = max(1, max_lines_i - reserve)
+        content = snippet_lines[-content_cap:]
+        if omitted_before:
+            content = ["..."] + content
+        if omitted_after:
+            content = content + ["..."]
+        snippet_lines = content
 
         body = "\n".join(snippet_lines).strip()
         if not body:
