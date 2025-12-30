@@ -26,6 +26,46 @@
       font-size: 18px;
     }
 
+    .footer {
+      margin-top: 12px;
+      padding: 10px 12px;
+      border: 1px solid #d0d7de;
+      border-radius: 6px;
+      background: #ffffff;
+      color: #24292f;
+    }
+    .footer details summary {
+      cursor: pointer;
+      user-select: none;
+      font-weight: 600;
+      color: #24292f;
+    }
+    .footer details summary:hover {
+      color: #0969da;
+    }
+    .stats-table {
+      width: 100%;
+      border-collapse: collapse;
+      margin-top: 8px;
+      font-size: 12px;
+    }
+    .stats-table td {
+      padding: 6px 8px;
+      border-top: 1px solid #d8dee4;
+      vertical-align: top;
+    }
+    .stats-table td.k {
+      width: 220px;
+      color: #57606a;
+      font-weight: 600;
+      white-space: nowrap;
+    }
+    .stats-table td.v {
+      color: #24292f;
+      font-family: ui-monospace, SFMono-Regular, SF Mono, Menlo, Consolas, Liberation Mono, monospace;
+      word-break: break-word;
+    }
+
     {% block css %}{% endblock %}
 
     /* GitHub checks tooltip styling (static; shared across dashboards) */
@@ -81,6 +121,22 @@
   </div>
 
   {% block content %}{% endblock %}
+
+  {% if page_stats %}
+  <div class="footer">
+    <details>
+      <summary>Statistics</summary>
+      <table class="stats-table">
+        {% for k, v in page_stats %}
+        <tr>
+          <td class="k">{{ k }}</td>
+          <td class="v">{{ v }}</td>
+        </tr>
+        {% endfor %}
+      </table>
+    </details>
+  </div>
+  {% endif %}
 
   <script>
   // Position tooltips dynamically (static; shared)

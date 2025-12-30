@@ -203,12 +203,18 @@ def required_badge_html(*, is_required: bool, status_norm: str) -> str:
     return f' <span style="color: {color}; font-weight: {weight};">[REQUIRED]</span>'
 
 
-def status_icon_html(*, status_norm: str, is_required: bool, required_failure: bool = False) -> str:
+def status_icon_html(
+    *,
+    status_norm: str,
+    is_required: bool,
+    required_failure: bool = False,
+    warning_present: bool = False,
+) -> str:
     """Shared status icon HTML (match show_dynamo_branches)."""
     s = (status_norm or "").strip().lower()
 
     if s == "success":
-        return (
+        out = (
             '<span style="color: #2da44e; display: inline-flex; vertical-align: text-bottom;">'
             '<svg aria-hidden="true" viewBox="0 0 16 16" version="1.1" width="12" height="12" '
             'data-view-component="true" class="octicon octicon-check-circle-fill" fill="currentColor">'
@@ -216,6 +222,9 @@ def status_icon_html(*, status_norm: str, is_required: bool, required_failure: b
             'd="M8 16A8 8 0 108 0a8 8 0 000 16zm3.78-9.78a.75.75 0 00-1.06-1.06L7 9.94 5.28 8.22a.75.75 0 10-1.06 1.06l2 2a.75.75 0 001.06 0l4-4z">'
             "</path></svg></span>"
         )
+        if bool(warning_present):
+            out += '<span style="color: #f59e0b; font-size: 13px; font-weight: 900; line-height: 1; margin-left: 2px;">⚠</span>'
+        return out
     if s == "failure":
         if is_required or required_failure:
             return (
@@ -378,8 +387,14 @@ def check_line_html(
     raw_log_size_bytes: int = 0,
     error_snippet_text: str = "",
     required_failure: bool = False,
+    warning_present: bool = False,
 ) -> str:
-    icon = status_icon_html(status_norm=status_norm, is_required=is_required, required_failure=required_failure)
+    icon = status_icon_html(
+        status_norm=status_norm,
+        is_required=is_required,
+        required_failure=required_failure,
+        warning_present=warning_present,
+    )
     id_html = (
         '<span style="font-family: SFMono-Regular, Consolas, Liberation Mono, Menlo, monospace; font-size: 12px;">'
         + html.escape(job_id or "")

@@ -22,6 +22,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import List, Dict, Optional, Set
@@ -201,6 +202,8 @@ class CommitHistoryGenerator:
         Returns:
             Exit code (0 for success, 1 for failure)
         """
+        generation_t0 = time.monotonic()
+
         # Initialize repo utils for this operation
         repo_utils = DynamoRepositoryUtils(self.repo_path, dry_run=False, verbose=self.verbose)
 
@@ -570,6 +573,7 @@ class CommitHistoryGenerator:
                     sha_to_pr_number=sha_to_pr_number,
                     pr_to_required_checks=pr_to_required_checks,
                     cache_stats=cache_stats,
+                    generation_t0=generation_t0,
                 )
                 output_path.parent.mkdir(parents=True, exist_ok=True)
                 output_path.write_text(html_content)
@@ -652,6 +656,7 @@ class CommitHistoryGenerator:
         sha_to_pr_number: Optional[Dict[str, int]] = None,
         pr_to_required_checks: Optional[Dict[int, List[str]]] = None,
         cache_stats: Optional[Dict[str, dict]] = None,
+        generation_t0: Optional[float] = None,
     ) -> str:
         """Generate HTML report for commit history with Docker image detection
 
@@ -1184,20 +1189,33 @@ class CommitHistoryGenerator:
             synthetic_roots = sorted([jid for jid in important_ids if jid.startswith("check::")])
 
             # Build VM nodes with rollups
-            def rollup_for_runs(runs: List[dict]) -> tuple[str, bool]:
-                # worst-first
+            def rollup_for_runs(runs: List[dict]) -> tuple[str, bool, bool]:
+                """Roll up check-runs into a parent icon state.
+
+                Policy:
+                - Required failures => red ✗ (status="failure")
+                - Optional failures alone => green ✓ + ⚠ (status="success", warning_present=True)
+                """
                 priority = ["failure", "in_progress", "pending", "cancelled", "unknown", "success"]
-                statuses = []
+                statuses: list[str] = []
                 has_required_failure = False
+                has_optional_failure = False
                 for cr in runs:
-                    st = _status_norm_for_check_run(status=str(cr.get("status", "") or ""), conclusion=str(cr.get("conclusion", "") or ""))
-                    statuses.append(st)
-                    if bool(cr.get("is_required", False)) and st == "failure":
+                    st = _status_norm_for_check_run(
+                        status=str(cr.get("status", "") or ""),
+                        conclusion=str(cr.get("conclusion", "") or ""),
+                    )
+                    is_req = bool(cr.get("is_required", False))
+                    if st == "failure" and not is_req:
+                        has_optional_failure = True
+                        st = "success"
+                    if st == "failure" and is_req:
                         has_required_failure = True
+                    statuses.append(st)
                 for p in priority:
                     if p in statuses:
-                        return p, has_required_failure
-                return "unknown", has_required_failure
+                        return p, has_required_failure, has_optional_failure
+                return "unknown", has_required_failure, has_optional_failure
 
             memo: Dict[str, TreeNodeVM] = {}
             snippet_cache: Dict[str, str] = {}
@@ -1222,7 +1240,7 @@ class CommitHistoryGenerator:
                 # Leaf-ish synthetic check group
                 if job_id.startswith("check::"):
                     check_name = job_id.split("check::", 1)[1]
-                    roll_status, has_req_fail = rollup_for_runs(runs)
+                    roll_status, has_req_fail, has_opt_fail = rollup_for_runs(runs)
                     any_req = any(bool(cr.get("is_required", False)) for cr in runs)
                     children: List[TreeNodeVM] = []
                     for cr in sorted(runs, key=lambda x: str(x.get("name", "") or "")):
@@ -1235,7 +1253,6 @@ class CommitHistoryGenerator:
                         if (
                             st == "failure"
                             and str(cr.get("status", "") or "").lower() == "completed"
-                            and "/job/" in url
                         ):
                             # Materialize a stable local file under <repo-path>/logs/... and link to it.
                             # Important: we still show `[raw log]` for older commits if the local file already exists.
@@ -1246,6 +1263,7 @@ class CommitHistoryGenerator:
                                     materialize_job_raw_log_text_local_link(
                                         self.github_client,
                                         job_url=url,
+                                        job_name=name,
                                         owner="ai-dynamo",
                                         repo="dynamo",
                                         page_root_dir=Path(self.repo_path),
@@ -1296,6 +1314,7 @@ class CommitHistoryGenerator:
                             duration="",
                             log_url="",
                             required_failure=has_req_fail,
+                            warning_present=bool(has_opt_fail and roll_status == "success"),
                         ),
                         children=children,
                         collapsible=True,
@@ -1331,7 +1350,6 @@ class CommitHistoryGenerator:
                     if (
                         st0 == "failure"
                         and str(cr0.get("status", "") or "").lower() == "completed"
-                        and "/job/" in url0
                     ):
                         allow_fetch = bool(allow_raw_logs) and int(raw_log_prefetch_budget.get("n", 0) or 0) > 0
                         try:
@@ -1339,6 +1357,7 @@ class CommitHistoryGenerator:
                                 materialize_job_raw_log_text_local_link(
                                     self.github_client,
                                     job_url=url0,
+                                job_name=str(cr0.get("name", "") or ""),
                                     owner="ai-dynamo",
                                     repo="dynamo",
                                     page_root_dir=Path(self.repo_path),
@@ -1373,7 +1392,6 @@ class CommitHistoryGenerator:
                         if (
                             st == "failure"
                             and str(cr.get("status", "") or "").lower() == "completed"
-                            and "/job/" in url
                         ):
                             allow_fetch = bool(allow_raw_logs) and int(raw_log_prefetch_budget.get("n", 0) or 0) > 0
                             try:
@@ -1381,6 +1399,7 @@ class CommitHistoryGenerator:
                                     materialize_job_raw_log_text_local_link(
                                         self.github_client,
                                         job_url=url,
+                                        job_name=name,
                                         owner="ai-dynamo",
                                         repo="dynamo",
                                         page_root_dir=Path(self.repo_path),
@@ -1424,7 +1443,7 @@ class CommitHistoryGenerator:
                 dep_children = [build_node(dep) for dep in needs_map.get(job_id, [])]
 
                 # Rollup from runs + deps
-                roll_status, has_req_fail = rollup_for_runs(runs) if runs else ("unknown", False)
+                roll_status, has_req_fail, has_opt_fail = rollup_for_runs(runs) if runs else ("unknown", False, False)
                 dep_statuses = []
                 dep_req_fail = False
                 for d in dep_children:
@@ -1441,6 +1460,7 @@ class CommitHistoryGenerator:
                     if any("✗" in (c.label_html or "") for c in children):
                         has_req_fail = True
                         roll_status = "failure"
+                        has_opt_fail = False
 
                 node = TreeNodeVM(
                     node_key=f"gha-job:{sha_full}:{job_id}",
@@ -1456,6 +1476,7 @@ class CommitHistoryGenerator:
                             raw_log_size_bytes=(int(single_run_raw_size or 0) if len(runs) == 1 else 0),
                             error_snippet_text=(single_run_snippet if len(runs) == 1 else ""),
                             required_failure=has_req_fail,
+                            warning_present=bool(has_opt_fail and roll_status == "success" and (single_run_status or roll_status) == "success"),
                         )
                     ),
                     children=children,
@@ -1598,6 +1619,69 @@ class CommitHistoryGenerator:
         )
         template = env.get_template('show_commit_history.j2')
 
+        # Page statistics (shown in an expandable block at the bottom of the HTML).
+        elapsed_s = None
+        if generation_t0 is not None:
+            try:
+                elapsed_s = max(0.0, time.monotonic() - float(generation_t0))
+            except Exception:
+                elapsed_s = None
+
+        rest_calls = 0
+        by_label: Dict[str, int] = {}
+        try:
+            s = self.github_client.get_rest_call_stats() or {}
+            rest_calls = int(s.get("total") or 0)
+            by_label = dict(s.get("by_label") or {})
+        except Exception:
+            rest_calls = 0
+            by_label = {}
+
+        page_stats: List[tuple[str, str]] = []
+        if elapsed_s is not None:
+            page_stats.append(("Generation time", f"{elapsed_s:.2f}s"))
+        page_stats.append(("GitHub REST calls", str(rest_calls)))
+
+        # Show "APIs left" (remaining quota). Best-effort; do not fail page generation.
+        try:
+            rl = self.github_client.get_core_rate_limit_info() or {}
+            rem = rl.get("remaining")
+            lim = rl.get("limit")
+            reset_pt = rl.get("reset_pt")
+            if rem is not None and lim is not None:
+                page_stats.append(("GitHub core quota remaining", f"{rem}/{lim}"))
+            elif rem is not None:
+                page_stats.append(("GitHub core quota remaining", str(rem)))
+            if reset_pt:
+                page_stats.append(("GitHub core quota resets", str(reset_pt)))
+        except Exception:
+            pass
+
+        # Show last REST error (e.g. 403 token policy) to make missing PR/snippet causes obvious.
+        try:
+            es = self.github_client.get_rest_error_stats() or {}
+            last = es.get("last") or {}
+            if isinstance(last, dict) and last.get("status"):
+                code = last.get("status")
+                body = str(last.get("body") or "").strip()
+                if len(body) > 160:
+                    body = body[:160].rstrip() + "…"
+                page_stats.append(("GitHub REST last error", f"{code}: {body}" if body else str(code)))
+        except Exception:
+            pass
+
+        page_stats.append(("Commits shown", str(len(commit_data))))
+        page_stats.append(("skip_gitlab_fetch", "true" if self.skip_gitlab_fetch else "false"))
+
+        # Light “anything else relevant”: top endpoints (best-effort; can be empty).
+        try:
+            if isinstance(by_label, dict) and by_label:
+                top = list(by_label.items())[:5]
+                top_str = ", ".join([f"{k}={v}" for k, v in top])
+                page_stats.append(("GitHub REST top (5)", top_str))
+        except Exception:
+            pass
+
         return template.render(
             commits=commit_data,
             docker_images=docker_images,
@@ -1615,6 +1699,7 @@ class CommitHistoryGenerator:
             gha_in_progress_count=gha_in_progress_count,
             gha_other_count=gha_other_count,
             gha_per_commit_stats=gha_per_commit_stats,
+            page_stats=page_stats,
             # Icons (shared look; keep templates free of raw unicode status glyphs)
             success_icon_html=status_icon_html(status_norm="success", is_required=False),
             failure_required_icon_html=status_icon_html(status_norm="failure", is_required=True),

@@ -220,6 +220,7 @@ def materialize_job_raw_log_text_local_link(
     github: "common.GitHubAPIClient",
     *,
     job_url: str,
+    job_name: Optional[str] = None,
     owner: str,
     repo: str,
     page_root_dir: Path,
@@ -234,14 +235,79 @@ def materialize_job_raw_log_text_local_link(
     Returned href points into the repo-local served cache:
       "../.cache/dynamo-utils/raw-log-text/<job_id>.log"   (from <page_root_dir>/index.html)
     """
-    try:
-        if "/job/" not in (job_url or ""):
-            return None
-        job_id = str(job_url.split("/job/")[1].split("?")[0] or "").strip()
-        if not job_id:
-            return None
-    except Exception:
+    def _extract_job_id(u: str) -> str:
+        try:
+            if "/job/" not in (u or ""):
+                return ""
+            return str(u.split("/job/")[1].split("?")[0] or "").strip()
+        except Exception:
+            return ""
+
+    def _extract_run_id(u: str) -> str:
+        try:
+            s = str(u or "")
+            if "/actions/runs/" not in s:
+                return ""
+            rest = s.split("/actions/runs/", 1)[1]
+            run_id = rest.split("/", 1)[0].split("?", 1)[0].strip()
+            return run_id if run_id.isdigit() else ""
+        except Exception:
+            return ""
+
+    def _norm_name(s: str) -> str:
+        try:
+            x = (s or "").strip().lower()
+            x = x.replace("—", "-").replace("–", "-")
+            x = re.sub(r"[^a-z0-9]+", " ", x)
+            x = re.sub(r"\\s+", " ", x).strip()
+            return x
+        except Exception:
+            return ""
+
+    job_url = str(job_url or "")
+    job_id = _extract_job_id(job_url)
+    run_id = _extract_run_id(job_url)
+
+    # If we only have a run URL, try to resolve job_id using the Actions "list jobs for a workflow run" API.
+    if not job_id and run_id and job_name and allow_fetch:
+        try:
+            data = github.get(
+                f"/repos/{owner}/{repo}/actions/runs/{run_id}/jobs",
+                params={"per_page": 100},
+                timeout=15,
+            )
+            jobs = data.get("jobs") if isinstance(data, dict) else None
+            want = _norm_name(str(job_name or ""))
+            best = ""
+            if isinstance(jobs, list) and want:
+                for j in jobs:
+                    try:
+                        jid = str(j.get("id", "") or "").strip()
+                        nm = _norm_name(str(j.get("name", "") or ""))
+                        if not jid or not jid.isdigit() or not nm:
+                            continue
+                        if nm == want:
+                            best = jid
+                            break
+                        if want in nm or nm in want:
+                            best = jid
+                    except Exception:
+                        continue
+            job_id = best
+        except Exception:
+            job_id = ""
+
+    if not job_id:
         return None
+
+    # Ensure we use a canonical /job/<id> URL for fetch APIs that require it.
+    job_url_for_fetch = job_url
+    if "/job/" not in job_url_for_fetch:
+        if run_id:
+            job_url_for_fetch = f"https://github.com/{owner}/{repo}/actions/runs/{run_id}/job/{job_id}"
+        else:
+            # Best-effort fallback (no run_id): still build a canonical URL; it should work for log download.
+            job_url_for_fetch = f"https://github.com/{owner}/{repo}/actions/job/{job_id}"
 
     try:
         page_root_dir = Path(page_root_dir)
@@ -327,7 +393,7 @@ def materialize_job_raw_log_text_local_link(
     # Fetch (or refresh) the cached text, then copy it into page_root_dir.
     try:
         _ = github.get_job_raw_log_text_cached(
-            job_url=job_url,
+            job_url=job_url_for_fetch,
             owner=owner,
             repo=repo,
             ttl_s=int(ttl_s),

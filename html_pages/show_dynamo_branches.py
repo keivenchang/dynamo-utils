@@ -433,6 +433,7 @@ class CIJobTreeNode(BranchNode):
     class _Rollup:
         status: str
         has_required_failure: bool
+        has_optional_failure: bool
 
     @staticmethod
     def _is_success_like(node: "CIJobTreeNode") -> bool:
@@ -454,16 +455,25 @@ class CIJobTreeNode(BranchNode):
         """Compute a 'worst descendant' status for icon rendering."""
         # Success-like entire subtree => success rollup.
         if CIJobTreeNode._subtree_all_success(node):
-            return CIJobTreeNode._Rollup(status="success", has_required_failure=False)
+            return CIJobTreeNode._Rollup(status="success", has_required_failure=False, has_optional_failure=False)
 
         has_required_failure = False
+        has_optional_failure = False
         statuses: List[str] = []
 
         def walk(n: "CIJobTreeNode") -> None:
-            nonlocal has_required_failure
-            statuses.append(getattr(n, "status", "unknown") or "unknown")
-            if getattr(n, "status", "unknown") == "failure" and bool(getattr(n, "is_required", False)):
+            nonlocal has_required_failure, has_optional_failure
+            st = getattr(n, "status", "unknown") or "unknown"
+            is_req = bool(getattr(n, "is_required", False))
+            if st == "failure" and is_req:
                 has_required_failure = True
+                statuses.append("failure")
+            elif st == "failure" and not is_req:
+                # Optional failures should not turn the parent red; record them separately.
+                has_optional_failure = True
+                statuses.append("success")
+            else:
+                statuses.append(st)
             for ch in (getattr(n, "children", None) or []):
                 if isinstance(ch, CIJobTreeNode):
                     walk(ch)
@@ -474,8 +484,12 @@ class CIJobTreeNode(BranchNode):
         priority = ["failure", "in_progress", "pending", "cancelled", "unknown", "success"]
         for s in priority:
             if s in statuses:
-                return CIJobTreeNode._Rollup(status=s, has_required_failure=has_required_failure)
-        return CIJobTreeNode._Rollup(status="unknown", has_required_failure=has_required_failure)
+                return CIJobTreeNode._Rollup(
+                    status=s,
+                    has_required_failure=has_required_failure,
+                    has_optional_failure=has_optional_failure,
+                )
+        return CIJobTreeNode._Rollup(status="unknown", has_required_failure=has_required_failure, has_optional_failure=has_optional_failure)
 
     @staticmethod
     def _subtree_needs_attention(node: "CIJobTreeNode") -> bool:
@@ -545,6 +559,7 @@ class CIJobTreeNode(BranchNode):
         roll = self._subtree_rollup(self) if self.children else None
         effective_status = (roll.status if roll is not None else self.status)
         effective_required_failure = (roll.has_required_failure if roll is not None else False)
+        effective_optional_failure = (roll.has_optional_failure if roll is not None else False)
 
         # Error toggle is appended in to_tree_vm() so it can inject a newline safely in <pre>.
         return check_line_html(
@@ -558,6 +573,7 @@ class CIJobTreeNode(BranchNode):
             raw_log_size_bytes=int(self.raw_log_size_bytes or 0),
             error_snippet_text=(self.error_snippet_text or ""),
             required_failure=bool(effective_required_failure),
+            warning_present=bool(effective_optional_failure and effective_status == "success"),
         )
 
     def render_html(self, prefix: str = "", is_last: bool = True, is_root: bool = True) -> List[str]:
@@ -751,7 +767,6 @@ def _build_ci_hierarchy_nodes(
                 if (
                     github_api
                     and b.status_norm == "failure"
-                    and "/job/" in (b.url or "")
                 ):
                     allow_fetch = int(raw_log_prefetch_budget.get("n", 0) or 0) > 0
                     try:
@@ -759,6 +774,7 @@ def _build_ci_hierarchy_nodes(
                             materialize_job_raw_log_text_local_link(
                                 github_api,
                                 job_url=b.url or "",
+                                job_name=b.name,
                                 owner=DYNAMO_OWNER,
                                 repo=DYNAMO_REPO,
                                 page_root_dir=page_root_dir,
@@ -803,7 +819,6 @@ def _build_ci_hierarchy_nodes(
             if (
                 github_api
                 and b.status_norm == "failure"
-                and "/job/" in (b.url or "")
             ):
                 allow_fetch = int(raw_log_prefetch_budget.get("n", 0) or 0) > 0
                 try:
@@ -811,6 +826,7 @@ def _build_ci_hierarchy_nodes(
                         materialize_job_raw_log_text_local_link(
                             github_api,
                             job_url=b.url or "",
+                            job_name=b.name,
                             owner=DYNAMO_OWNER,
                             repo=DYNAMO_REPO,
                             page_root_dir=page_root_dir,
@@ -855,7 +871,6 @@ def _build_ci_hierarchy_nodes(
                 if (
                     github_api
                     and b.status_norm == "failure"
-                    and "/job/" in (b.url or "")
                 ):
                     allow_fetch = int(raw_log_prefetch_budget.get("n", 0) or 0) > 0
                     try:
@@ -863,6 +878,7 @@ def _build_ci_hierarchy_nodes(
                             materialize_job_raw_log_text_local_link(
                                 github_api,
                                 job_url=b.url or "",
+                                job_name=b.name,
                                 owner=DYNAMO_OWNER,
                                 repo=DYNAMO_REPO,
                                 page_root_dir=page_root_dir,
@@ -2038,7 +2054,7 @@ class LocalRepoScanner:
         return repo_node
 
 
-def generate_html(root: BranchNode) -> str:
+def generate_html(root: BranchNode, *, page_stats: Optional[List[tuple[str, str]]] = None) -> str:
     """Generate HTML output from tree"""
     # Get current time in both UTC and PDT
     now_utc = datetime.now(ZoneInfo('UTC'))
@@ -2076,6 +2092,7 @@ def generate_html(root: BranchNode) -> str:
         generated_time=pdt_str,
         copy_icon_svg=_COPY_ICON_SVG,
         tree_html=tree_html,
+        page_stats=page_stats,
     )
 
 
@@ -2177,6 +2194,7 @@ def main():
         print(str(e), file=sys.stderr)
         raise SystemExit(2)
 
+    generation_t0 = time.monotonic()
     root = None
     try:
         root = scanner.scan_repositories(base_dir)
@@ -2224,7 +2242,78 @@ def main():
     # Output
     if args.html:
         assert root is not None
-        html_output = generate_html(root)
+        # Page statistics (shown in an expandable block at the bottom of the HTML).
+        elapsed_s = max(0.0, time.monotonic() - generation_t0)
+        rest_calls = 0
+        try:
+            stats = scanner.github_api.get_rest_call_stats() if scanner.github_api else {}
+            rest_calls = int(stats.get("total") or 0)
+        except Exception:
+            rest_calls = 0
+
+        pr_count = 0
+        try:
+            def _count_prs(node: BranchNode) -> int:
+                n = 0
+                if isinstance(node, PRNode) and getattr(node, "pr", None) is not None:
+                    n += 1
+                for ch in (getattr(node, "children", None) or []):
+                    n += _count_prs(ch)
+                return n
+            pr_count = _count_prs(root)
+        except Exception:
+            pr_count = 0
+
+        page_stats: List[tuple[str, str]] = [
+            ("Generation time", f"{elapsed_s:.2f}s"),
+            ("GitHub REST calls", str(rest_calls)),
+            # "APIs left" (remaining quota). Best-effort; do not fail page generation.
+            ("GitHub core quota remaining", ""),
+            ("Repos scanned", str(len(getattr(root, 'children', []) or []))),
+            ("PRs shown", str(pr_count)),
+        ]
+
+        # Show last REST error (e.g. 403 token policy) to make missing PR/snippet causes obvious.
+        try:
+            es = scanner.github_api.get_rest_error_stats() if scanner.github_api else {}
+            last = (es or {}).get("last") or {}
+            if isinstance(last, dict) and last.get("status"):
+                code = last.get("status")
+                body = str(last.get("body") or "").strip()
+                if len(body) > 160:
+                    body = body[:160].rstrip() + "…"
+                page_stats.append(("GitHub REST last error", f"{code}: {body}" if body else str(code)))
+        except Exception:
+            pass
+
+        # Fill in GitHub quota (remaining/limit + reset time) if available.
+        try:
+            rl = scanner.github_api.get_core_rate_limit_info() if scanner.github_api else None
+            if rl:
+                rem = rl.get("remaining")
+                lim = rl.get("limit")
+                reset_pt = rl.get("reset_pt")
+                if rem is not None and lim is not None:
+                    page_stats[2] = ("GitHub core quota remaining", f"{rem}/{lim}")
+                elif rem is not None:
+                    page_stats[2] = ("GitHub core quota remaining", str(rem))
+                else:
+                    page_stats[2] = ("GitHub core quota remaining", "(unknown)")
+                if reset_pt:
+                    page_stats.append(("GitHub core quota resets", str(reset_pt)))
+        except Exception:
+            # Keep the row but avoid breaking HTML generation.
+            page_stats[2] = ("GitHub core quota remaining", "(unknown)")
+
+        # Include relevant knobs if set (helps explain “why so many API calls?”).
+        if args.max_branches is not None:
+            page_stats.append(("max_branches", str(args.max_branches)))
+        if args.max_checks_fetch is not None:
+            page_stats.append(("max_checks_fetch", str(args.max_checks_fetch)))
+        if bool(args.refresh_closed_prs):
+            page_stats.append(("refresh_closed_prs", "true"))
+
+        html_output = generate_html(root, page_stats=page_stats)
         out_path = args.output
         if out_path is None:
             out_path = base_dir / "index.html"

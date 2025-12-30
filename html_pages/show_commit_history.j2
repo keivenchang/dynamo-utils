@@ -402,7 +402,13 @@ Legend & Help
 {%- elif status == 'unknown' -%}
 <span class="status-indicator status-unknown" title="No build status available">----</span>
 {%- endif -%}
-<span style="background-color: {{ composite_bg_color }}; color: {{ commit.composite_text_color | default('#24292f') }}; padding: 2px 6px; border-radius: 3px; margin-left: 4px;">CDS:{{ composite_sha[:6] }}</span>{# Show history icon if multiple builds exist #}{%- if log_paths_list|length > 1 -%}<a href="#" onclick="toggleBuildHistory(event, '{{ sha_short }}'); return false;" style="text-decoration: none; margin-left: 2px; font-size: 11px; color: #656d76;" title="Show build history ({{ log_paths_list|length }} builds)">📋</a><div id="build-history-{{ sha_short }}" style="display: none; position: absolute; background: #fff; border: 1px solid #d0d7de; border-radius: 6px; padding: 8px; margin-top: 4px; z-index: 1000; box-shadow: 0 8px 24px rgba(140, 149, 159, 0.2);"><div style="font-weight: 600; font-size: 12px; margin-bottom: 6px; color: #24292f;">Build History</div>{%- for date, path in log_paths_list|reverse -%}<div style="padding: 4px 0;"><a href="{{ path }}" target="_blank" style="color: #0969da; text-decoration: none; font-size: 12px;">{{ date }}</a>{%- if loop.first -%} <span style="color: #656d76; font-size: 11px;">(latest)</span>{%- endif -%}</div>{%- endfor -%}</div>{%- endif -%}{%- if has_docker_images or has_gitlab -%}<a href="#" class="composite-sha-link" onclick="toggleDockerImages(event, this); return false;" style="text-decoration: none; margin-left: 4px;" title="Show Docker images">▶</a>{%- endif -%}
+{%- set has_composite_toggle = has_docker_images or has_gitlab -%}
+{%- if has_composite_toggle -%}
+<a href="#" class="composite-sha-link" onclick="toggleDockerImages(event, this); return false;" style="text-decoration: none; display: inline-block; width: 1em; text-align: center; margin-left: 4px; margin-right: 2px; color: #0969da; user-select: none;" title="Show Docker images">▶</a>
+{%- else -%}
+<span class="composite-sha-link-placeholder" style="display: inline-block; width: 1em; text-align: center; margin-left: 4px; margin-right: 2px; visibility: hidden;">▶</span>
+{%- endif -%}
+<span style="background-color: {{ composite_bg_color }}; color: {{ commit.composite_text_color | default('#24292f') }}; padding: 2px 6px; border-radius: 3px;">CDS:{{ composite_sha[:6] }}</span>{# Show history icon if multiple builds exist #}{%- if log_paths_list|length > 1 -%}<a href="#" onclick="toggleBuildHistory(event, '{{ sha_short }}'); return false;" style="text-decoration: none; margin-left: 2px; font-size: 11px; color: #656d76;" title="Show build history ({{ log_paths_list|length }} builds)">📋</a><div id="build-history-{{ sha_short }}" style="display: none; position: absolute; background: #fff; border: 1px solid #d0d7de; border-radius: 6px; padding: 8px; margin-top: 4px; z-index: 1000; box-shadow: 0 8px 24px rgba(140, 149, 159, 0.2);"><div style="font-weight: 600; font-size: 12px; margin-bottom: 6px; color: #24292f;">Build History</div>{%- for date, path in log_paths_list|reverse -%}<div style="padding: 4px 0;"><a href="{{ path }}" target="_blank" style="color: #0969da; text-decoration: none; font-size: 12px;">{{ date }}</a>{%- if loop.first -%} <span style="color: #656d76; font-size: 11px;">(latest)</span>{%- endif -%}</div>{%- endfor -%}</div>{%- endif -%}
 {%- else -%}
 {# No build logs - show non-clickable status indicators #}
 {%- if status == 'success' -%}
@@ -414,7 +420,13 @@ Legend & Help
 {%- elif status == 'unknown' -%}
 <span class="status-indicator status-unknown" title="No build status available">----</span>
 {%- endif -%}
-<span style="background-color: {{ composite_bg_color }}; color: {{ commit.composite_text_color | default('#24292f') }}; padding: 2px 6px; border-radius: 3px; margin-left: 4px;">CDS:{{ composite_sha[:6] }}</span>{%- if has_docker_images or has_gitlab -%}<a href="#" class="composite-sha-link" onclick="toggleDockerImages(event, this); return false;" style="text-decoration: none; margin-left: 4px;" title="Show Docker images">▶</a>{%- endif -%}
+{%- set has_composite_toggle = has_docker_images or has_gitlab -%}
+{%- if has_composite_toggle -%}
+<a href="#" class="composite-sha-link" onclick="toggleDockerImages(event, this); return false;" style="text-decoration: none; display: inline-block; width: 1em; text-align: center; margin-left: 4px; margin-right: 2px; color: #0969da; user-select: none;" title="Show Docker images">▶</a>
+{%- else -%}
+<span class="composite-sha-link-placeholder" style="display: inline-block; width: 1em; text-align: center; margin-left: 4px; margin-right: 2px; visibility: hidden;">▶</span>
+{%- endif -%}
+<span style="background-color: {{ composite_bg_color }}; color: {{ commit.composite_text_color | default('#24292f') }}; padding: 2px 6px; border-radius: 3px;">CDS:{{ composite_sha[:6] }}</span>
 {%- endif -%}
 </td>
 <td class="sha">
@@ -525,7 +537,7 @@ Legend & Help
 <a href="{{ gitlab_commit_link }}" target="_blank" class="icon-link{%- if not effective_pipeline -%} icon-muted{%- endif -%}" style="color: #fc6d26; font-weight: 600;" title="View commit in GitLab">🦊</a>
 
 {# Registry search icon (whale). Always linked; gray out if no pipeline context. #}
-<a href="https://gitlab-master.nvidia.com/dl/ai-dynamo/dynamo/container_registry/85325?orderBy=PUBLISHED_AT&sort=desc&search%5B%5D={{ sha_full }}" target="_blank" class="icon-link{%- if not effective_pipeline -%} icon-muted{%- endif -%}" style="color: #2496ed; font-weight: 600;" title="{%- if effective_pipeline -%}Search GitLab Docker registry for this SHA{%- else -%}No GitLab pipeline context (search registry anyway){%- endif -%}">🐳</a>
+<a href="https://gitlab-master.nvidia.com/dl/ai-dynamo/dynamo/container_registry/85325?orderBy=PUBLISHED_AT&sort=desc&search%5B%5D={{ sha_full }}" target="_blank" class="icon-link{% if not effective_pipeline %} icon-muted{% endif %}" style="color: {% if effective_pipeline %}#2496ed{% else %}#8c959f{% endif %}; font-weight: 600;" title="{% if effective_pipeline %}Search GitLab Docker registry for this SHA{% else %}No GitLab pipeline context (search registry anyway){% endif %}">🐳</a>
 
 {# Pipeline icon (build link). Uses SHA pipeline if present, else MR pipeline as fallback. #}
 {%- if effective_pipeline and effective_pipeline.web_url -%}
@@ -534,7 +546,7 @@ Legend & Help
 <span class="icon-link icon-muted" title="No pipeline found for this commit/PR">🛠️</span>
 {%- endif -%}
 {%- if commit.gitlab_checks_tree_html -%}
-<a href="#" onclick="toggleCommitGitLabTree(event, '{{ sha_short }}'); return false;" style="text-decoration: none; margin-left: 4px; font-size: 11px; color: #0969da;" title="Show GitLab pipeline jobs tree">
+<a href="#" onclick="toggleCommitGitLabTree(event, '{{ sha_short }}'); return false;" class="icon-link{% if not effective_pipeline %} icon-muted{% endif %}" style="text-decoration: none; margin-left: 4px; font-size: 11px; color: {% if effective_pipeline %}#0969da{% else %}#8c959f{% endif %};" title="{% if effective_pipeline %}Show GitLab pipeline jobs tree{% else %}No pipeline found (tree is likely empty){% endif %}">
   <span id="gitlab-tree-toggle-{{ sha_short }}">▶</span>
 </a>
 {%- endif -%}
