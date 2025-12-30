@@ -23,6 +23,16 @@ This repository contains essential development tools, build scripts, and configu
 
 ---
 
+## Development Environment Notes (host vs dev container)
+
+- **Host venv**: On the host machine, activate your local venv before running Python tooling (pre-commit, linters, etc.). On the keivenc setup this is typically `~/nvidia/venv/bin/activate`.
+- **Dev container**: Inside the dev container, the environment is typically pre-configured/activated.
+- **Path mapping (common setup)**:
+  - Host: `~/nvidia/dynamo-utils`
+  - Dev container: `/workspace/_`
+
+---
+
 ## Directory Structure
 
 ```
@@ -46,6 +56,7 @@ dynamo-utils/
 │   ├── show_dynamo_branches.j2       # HTML template for branch status
 │   └── update_html_pages.sh          # HTML page update cron script
 └── container/                    # Docker-related scripts
+    ├── build_all_targets_and_verify.sh # Build runtime/dev/local-dev targets (run from a dynamo repo root)
     ├── build_images.py               # Automated Docker build/test pipeline
     ├── build_images_report.html.j2   # HTML report template
     ├── cleanup_old_images.sh         # Cleanup old Docker images
@@ -416,34 +427,41 @@ python3 gitlab_pipeline_pr_map.py 40743226 https://gitlab-master.nvidia.com/dl/a
 - Reduces backup churn from frequently-changing git files
 
 **Logging:**
-- Log file: `/tmp/backup.log`
+- Log file: `$NVIDIA_HOME/logs/YYYY-MM-DD/backup.log`
 - Captures all backup operations
 
 #### Cron Setup
 
 ```bash
 # Backup every 6 minutes
-*/6 * * * * $HOME/nvidia/dynamo-utils/backup.sh --input-path $HOME/nvidia --output-path /mnt/sda/keivenc/nvidia >> /tmp/backup.log 2>&1
+*/6 * * * * NVIDIA_HOME=$HOME/nvidia $HOME/nvidia/dynamo-utils/cron_log.sh backup $HOME/nvidia/dynamo-utils/backup.sh --input-path $HOME/nvidia --output-path /mnt/sda/keivenc/nvidia
 ```
 
 ---
 
 ### html_pages/update_html_pages.sh
 
-**Overview**: Automated cron script that updates HTML pages every 15 minutes.
+**Overview**: Automated cron script that updates the HTML dashboards and resource report.
 
 #### Schedule
 
 ```cron
-*/15 * * * * $HOME/nvidia/dynamo-utils/html_pages/update_html_pages.sh
+# Dashboards:
+# - Full run every 30 minutes (minute 0 and 30)
+0,30 * * * * NVIDIA_HOME=$HOME/nvidia $HOME/nvidia/dynamo-utils/cron_log.sh update_html_pages_full $HOME/nvidia/dynamo-utils/html_pages/update_html_pages.sh --run-show-dynamo-branches --run-show-commit-history
+# - Cache-only between full runs
+8-59/4 * * * * NVIDIA_HOME=$HOME/nvidia SKIP_GITLAB_FETCH=1 $HOME/nvidia/dynamo-utils/cron_log.sh update_html_pages_cached $HOME/nvidia/dynamo-utils/html_pages/update_html_pages.sh --run-show-dynamo-branches --run-show-commit-history
+
+# Resource report:
+# - Every minute
+* * * * * NVIDIA_HOME=$HOME/nvidia $HOME/nvidia/dynamo-utils/cron_log.sh resource_report $HOME/nvidia/dynamo-utils/html_pages/update_html_pages.sh --run-resource-report
 ```
 
 #### Tasks Performed
 
-1. **Cleanup old logs** (runs first)
-   - Keeps only the last 10 non-empty dated directories in `$LOGS_DIR`
-   - Deletes older directories to save disk space
-   - Logs all cleanup actions
+1. **Updates branch status HTML**
+   - Location: `$NVIDIA_HOME/index.html`
+   - Uses atomic file replacement
 
 2. **Updates commit history HTML**
    - Location: `$DYNAMO_REPO/index.html` (default: `$NVIDIA_HOME/dynamo_latest`)
@@ -451,12 +469,41 @@ python3 gitlab_pipeline_pr_map.py 40743226 https://gitlab-master.nvidia.com/dl/a
    - Leverages caching for fast updates (~34 seconds)
    - Uses `--skip-gitlab-fetch` for cache-only mode when appropriate
 
-3. **Updates branch status HTML** (optional)
-   - Location: `$NVIDIA_HOME/index.html`
-   - Shows status of all dynamo branches
-   - Uses atomic file replacement
+3. **Updates resource report HTML** (optional / often run as a separate minutely cron)
+   - Location: `$NVIDIA_HOME/resource_report.html`
+   - Intended to be fast and safe to run frequently
 
-**Log file:** `$LOGS_DIR/cron.log` (default: `$NVIDIA_HOME/logs`)
+**Log files:** `$NVIDIA_HOME/logs/YYYY-MM-DD/*.log` (via `dynamo-utils/cron_log.sh`)
+
+#### Dashboards + log parsing learnings (tidbits)
+
+These are the patterns that have mattered most in practice when maintaining the HTML dashboards and log snippet extraction:
+
+- **Shared UI / templates**:
+  - Keep shared rendering logic in one place (`html_pages/common_dashboard_lib.py`, `html_pages/common_dashboard.j2`) so pages don’t drift.
+- **Categorization**:
+  - Categorize failures by *specific failure signatures* (full phrases / structured patterns), not single keywords.
+  - Add explicit suppressions for known-benign lines to avoid false positives (especially around Docker cleanup / incidental mentions).
+- **Snippet extraction**:
+  - Prefer anchor/priority-based extraction (highest-signal last failure beats generic “error”).
+  - Preserve the tail when trimming; the final failure line is usually the most actionable.
+  - For pytest timeouts/failures, ensure the snippet includes the key lines (e.g. `[100%]`, `FAILURES` header, test title, `E Failed: Timeout`, final `FAILED ...::...`).
+  - For `backend-status-check` logs, prefer anchoring on JSON-ish backend summaries (e.g. `"sglang": { ... "result": "failure" ... }`) over generic tail noise like `exit code 1`, so the snippet actually includes the failing backend(s).
+- **Backend engine failures**:
+  - Many CI failures summarize backend status as a multi-line JSON-ish block:
+    - `"sglang": { ... "result": "failure", ... }`
+    - `"trtllm": { ... "result": "failure", ... }`
+    - `"vllm": { ... "result": "failure", ... }`
+  - Treat these as structured signals: categorize as `backend-failure` plus engine-specific tags like `sglang-error` / `trtllm-error` / `vllm-error`.
+  - Quick local debug:
+    - `python3 common_log_errors.py ~/nvidia/raw-log-text/<job_id>.log`
+    - The first line prints `Categories: ...` and the snippet should include the multi-line backend block.
+- **Raw logs**:
+  - Store raw logs under `~/.cache/dynamo-utils/...` and serve them through a per-dashboard `raw-log-text/...` symlink for stable links and no duplicated storage.
+- **Debuggability**:
+  - If a module is a core diagnostic tool (e.g. `common_log_errors.py`), keep a runnable CLI entrypoint so you can test it directly on a log file.
+- **Generated outputs**:
+  - Treat generated HTML (e.g. `~/nvidia/index.html`, `~/nvidia/dynamo_latest/index.html`) as build artifacts; don’t commit them unless explicitly requested.
 
 ---
 
@@ -506,6 +553,58 @@ python3 container/build_images.py --repo-path ~/nvidia/dynamo_ci --parallel --fo
 - Not sent in dry-run mode
 
 ---
+
+### Cron (recommended ordering)
+
+This is a **single crontab template** that:
+- Sends **all logs** to `~/nvidia/logs/YYYY-MM-DD/` (via `dynamo-utils/cron_log.sh`)
+- Places `update_html_pages.sh` **right after** the `build_images.py` block
+- Groups **backup / cleanup / monitoring / misc** at the **bottom**
+
+```cron
+# NOTE on variables:
+# Cron does not behave like your interactive shell. In particular, avoid relying on
+# nested variable expansion in crontab assignments (e.g. DYNAMO_UTILS=$NVIDIA_HOME/...).
+# Prefer absolute paths for these vars.
+NVIDIA_HOME=/home/<user>/nvidia
+DYNAMO_UTILS=/home/<user>/nvidia/dynamo-utils
+HTML_PAGES=/home/<user>/nvidia/dynamo-utils/html_pages
+
+# =============================================================================
+# Dynamo CI / build_images.py (top)
+# =============================================================================
+# Example schedule (tune as desired):
+# - Build/test images every 30 minutes
+*/30 * * * * $DYNAMO_UTILS/cron_log.sh build_images python3 $DYNAMO_UTILS/container/build_images.py --repo-path $NVIDIA_HOME/dynamo_ci --parallel --force-run
+
+# =============================================================================
+# HTML dashboards (right after build_images.py)
+# =============================================================================
+# Full update every 30 minutes (minute 0 and 30)
+0,30 * * * * $DYNAMO_UTILS/cron_log.sh update_html_pages_full $HTML_PAGES/update_html_pages.sh --run-show-dynamo-branches --run-show-commit-history
+# Cache-only update between full runs (skip GitLab fetch)
+8-59/4 * * * * SKIP_GITLAB_FETCH=1 $DYNAMO_UTILS/cron_log.sh update_html_pages_cached $HTML_PAGES/update_html_pages.sh --run-show-dynamo-branches --run-show-commit-history
+
+# Resource report every minute
+* * * * * $DYNAMO_UTILS/cron_log.sh resource_report $HTML_PAGES/update_html_pages.sh --run-resource-report
+
+# =============================================================================
+# Housekeeping (bottom)
+# =============================================================================
+# Backup every 6 minutes
+*/6 * * * * $DYNAMO_UTILS/cron_log.sh backup $DYNAMO_UTILS/backup.sh --input-path $NVIDIA_HOME --output-path /mnt/sda/keivenc/nvidia
+
+# GPU container monitor (example: every 2 minutes)
+*/2 * * * * $DYNAMO_UTILS/cron_log.sh gpu_monitor $DYNAMO_UTILS/container/restart_gpu_containers.sh
+
+# Docker + log cleanup (example: daily at 02:00)
+# - Prunes old Docker images/build cache
+# - Deletes $NVIDIA_HOME/logs/YYYY-MM-DD directories older than 30 days
+0 2 * * * $DYNAMO_UTILS/cron_log.sh cleanup_log_and_docker $DYNAMO_UTILS/cleanup_log_and_docker.sh --keep-days 30 --retain-images 3
+
+# Keep a small tail file for quick viewing (example: every 5 minutes)
+*/5 * * * * $DYNAMO_UTILS/cron_log.sh cron_tail $DYNAMO_UTILS/update_cron_tail.sh
+```
 
 ### resource_monitor.py / html_pages/resource_report.py
 
