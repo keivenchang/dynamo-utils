@@ -1603,7 +1603,7 @@ class GitHubAPIClient:
     """GitHub API client with automatic token detection and rate limit handling.
 
     Features:
-    - Automatic token detection (--token arg > GITHUB_TOKEN env > GitHub CLI config)
+    - Automatic token detection (--token arg > GH_TOKEN env > GITHUB_TOKEN env > GitHub CLI config)
     - Request/response handling with proper error messages
     - Support for parallel API calls with ThreadPoolExecutor
 
@@ -1647,8 +1647,9 @@ class GitHubAPIClient:
 
         Args:
             token: GitHub personal access token. If not provided, will try:
-                   1. GITHUB_TOKEN environment variable
-                   2. GitHub CLI config (~/.config/gh/hosts.yml)
+                   1. GH_TOKEN environment variable
+                   2. GITHUB_TOKEN environment variable
+                   3. GitHub CLI config (~/.config/gh/hosts.yml)
         """
         if not HAS_REQUESTS:
             raise ImportError("requests package required for GitHub API client. Install with: pip install requests")
@@ -1671,6 +1672,10 @@ class GitHubAPIClient:
         # Counts only requests made via this client (not `gh` CLI subprocess calls).
         self._rest_calls_total: int = 0
         self._rest_calls_by_label: Dict[str, int] = {}
+        # Per-run REST error accounting (helps debug auth/policy issues like 403).
+        self._rest_errors_total: int = 0
+        self._rest_errors_by_status: Dict[int, int] = {}
+        self._rest_last_error: Dict[str, Any] = {}
 
         # ----------------------------
         # Persistent caches (disk + memory)
@@ -1737,7 +1742,15 @@ class GitHubAPIClient:
             return "unknown"
 
     def _rest_get(self, url: str, *, timeout: int = 10, allow_redirects: bool = True, stream: bool = False, params: Optional[Dict[str, Any]] = None):
-        """requests.get wrapper that increments per-run counters."""
+        """requests.get wrapper that increments per-run counters.
+
+        Note:
+            We sometimes run on machines where a stale/non-compliant GitHub token is present in the
+            environment (classic PAT > 366 day lifetime, fine-grained token not granted repo access, etc).
+            In those cases, GitHub returns 403 for requests that would otherwise succeed anonymously
+            (especially for public repos). To make dashboards resilient, we do a best-effort retry of
+            *GET* requests without Authorization on a narrow class of known token-related 403s.
+        """
         assert requests is not None
         label = self._rest_label_for_url(url)
         try:
@@ -1750,7 +1763,65 @@ class GitHubAPIClient:
                 self.logger.debug("GH REST GET [%s] %s", label, url)
             except Exception:
                 pass
-        resp = requests.get(url, headers=self.headers, params=params, timeout=timeout, allow_redirects=allow_redirects, stream=stream)
+        headers = dict(self.headers or {})
+        resp = requests.get(url, headers=headers, params=params, timeout=timeout, allow_redirects=allow_redirects, stream=stream)
+
+        # Best-effort retry without Authorization for a narrow class of token-related 403s.
+        try:
+            if int(getattr(resp, "status_code", 0) or 0) == 403 and ("Authorization" in headers):
+                body_txt = ""
+                try:
+                    body_txt = (resp.text or "")
+                except Exception:
+                    body_txt = ""
+                body_lc = body_txt.lower()
+                token_related = (
+                    ("enterprise forbids access via" in body_lc)
+                    or ("forbids access via a personal access tokens" in body_lc)
+                    or ("forbids access via a fine-grained personal access tokens" in body_lc)
+                    or ("resource not accessible by personal access token" in body_lc)
+                )
+                if token_related:
+                    headers_no_auth = dict(headers)
+                    headers_no_auth.pop("Authorization", None)
+                    # Count this retry as a REST call too (it is).
+                    try:
+                        self._rest_calls_total += 1
+                        self._rest_calls_by_label[label] = int(self._rest_calls_by_label.get(label, 0) or 0) + 1
+                    except Exception:
+                        pass
+                    if self._debug_rest:
+                        try:
+                            self.logger.debug("GH REST GET [%s] retrying without Authorization (token-related 403)", label)
+                        except Exception:
+                            pass
+                    resp2 = requests.get(url, headers=headers_no_auth, params=params, timeout=timeout, allow_redirects=allow_redirects, stream=stream)
+                    # Prefer the retry if it succeeded (or at least changed the failure mode).
+                    if int(getattr(resp2, "status_code", 0) or 0) < 400:
+                        resp = resp2
+                    else:
+                        # If the retry still fails, keep the original response (it likely contains the most useful policy message).
+                        pass
+        except Exception:
+            pass
+        try:
+            code = int(getattr(resp, "status_code", 0) or 0)
+            if code >= 400:
+                self._rest_errors_total += 1
+                self._rest_errors_by_status[code] = int(self._rest_errors_by_status.get(code, 0) or 0) + 1
+                # Keep last error small (HTML stats should not explode).
+                body = ""
+                try:
+                    body = (resp.text or "")[:300]
+                except Exception:
+                    body = ""
+                self._rest_last_error = {
+                    "status": code,
+                    "url": str(url or ""),
+                    "body": body,
+                }
+        except Exception:
+            pass
         if self._debug_rest:
             try:
                 rem = resp.headers.get("X-RateLimit-Remaining")
@@ -1759,6 +1830,17 @@ class GitHubAPIClient:
             except Exception:
                 pass
         return resp
+
+    def get_rest_error_stats(self) -> Dict[str, Any]:
+        """Return best-effort per-run REST error stats for displaying in dashboards."""
+        try:
+            return {
+                "total": int(self._rest_errors_total),
+                "by_status": dict(sorted(self._rest_errors_by_status.items(), key=lambda kv: (-kv[1], kv[0]))),
+                "last": dict(self._rest_last_error or {}),
+            }
+        except Exception:
+            return {"total": 0, "by_status": {}, "last": {}}
 
     def get_rest_call_stats(self) -> Dict[str, Any]:
         """Return per-run REST call stats for debugging."""
@@ -2198,17 +2280,44 @@ class GitHubAPIClient:
         if not branch_set:
             return {}
 
-        # Build head.ref -> list[pr_data]
+        # Build head.ref/head.label -> list[pr_data]
+        #
+        # IMPORTANT: local branch names may be stored in different formats:
+        # - Typical: "<branch_ref>" (matches GitHub PR head.ref directly)
+        # - Fork-tracking convention: "<fork_owner>/<branch_ref>"
+        #   In that case, GitHub PR head.label is "<fork_owner>:<branch_ref>" and head.ref is "<branch_ref>".
+        #   We match both so fork branches still show their PRs.
         pr_datas = self.list_pull_requests(owner, repo, state="open")
+        label_to_branch: Dict[str, str] = {}
+        for b in branch_set:
+            try:
+                if "/" in b:
+                    pre, rest = b.split("/", 1)
+                    pre = (pre or "").strip()
+                    rest = (rest or "").strip()
+                    if pre and rest:
+                        label_to_branch[f"{pre}:{rest}"] = b
+            except Exception:
+                continue
         head_to_prs: Dict[str, List[Dict[str, Any]]] = {}
         for pr_data in pr_datas:
             try:
-                head_ref = (pr_data.get("head") or {}).get("ref")
+                head = (pr_data.get("head") or {})
+                head_ref = head.get("ref")
+                head_label = head.get("label")
             except Exception:
                 head_ref = None
-            if not head_ref or head_ref not in branch_set:
+                head_label = None
+
+            branch_name: Optional[str] = None
+            if head_ref and head_ref in branch_set:
+                branch_name = str(head_ref)
+            elif head_label and str(head_label) in label_to_branch:
+                branch_name = label_to_branch[str(head_label)]
+
+            if not branch_name:
                 continue
-            head_to_prs.setdefault(head_ref, []).append(pr_data)
+            head_to_prs.setdefault(branch_name, []).append(pr_data)
 
         result: Dict[str, List[PRInfo]] = {b: [] for b in branch_set}
 
@@ -2286,8 +2395,17 @@ class GitHubAPIClient:
 
         def fetch_branch(branch_name: str) -> Tuple[str, List[Dict[str, Any]]]:
             endpoint = f"/repos/{owner}/{repo}/pulls"
-            params = {"head": f"{owner}:{branch_name}", "state": "all", "per_page": 30}
-            prs_data = self.get(endpoint, params=params)
+            # Try the normal "same-repo" head first, then fall back to fork-style "owner/branch" naming.
+            prs_data = self.get(endpoint, params={"head": f"{owner}:{branch_name}", "state": "all", "per_page": 30})
+            if (not prs_data) and "/" in (branch_name or ""):
+                try:
+                    pre, rest = branch_name.split("/", 1)
+                    pre = (pre or "").strip()
+                    rest = (rest or "").strip()
+                    if pre and rest:
+                        prs_data = self.get(endpoint, params={"head": f"{pre}:{rest}", "state": "all", "per_page": 30})
+                except Exception:
+                    pass
             out_prs: List[Dict[str, Any]] = []
             if isinstance(prs_data, list):
                 for pr_data in prs_data:
@@ -2497,6 +2615,11 @@ class GitHubAPIClient:
             return []
 
         # 3) fetch via gh
+        #
+        # NOTE:
+        # `gh pr checks` is convenient but can fail in environments where GitHub auth is poisoned
+        # (enterprise token lifetime policy, fine-grained token not granted repo access, etc).
+        # When it fails/returns empty, fall back to GitHub REST check-runs for the PR head SHA.
         try:
             result = subprocess.run(
                 ["gh", "pr", "checks", str(int(pr_number)), "--repo", f"{owner}/{repo}"],
@@ -2505,33 +2628,156 @@ class GitHubAPIClient:
                 timeout=15,
             )
             stdout = (result.stdout or "").strip()
-            if not stdout:
+            if stdout:
+                rows_dicts: List[Dict[str, Any]] = []
+                out: List[GHPRCheckRow] = []
+                for line in stdout.split("\n"):
+                    if not line.strip():
+                        continue
+                    parts = line.split("\t")
+                    if len(parts) < 2:
+                        continue
+                    name = (parts[0] or "").strip()
+                    status_raw = (parts[1] or "").strip()
+                    duration = (parts[2] or "").strip() if len(parts) > 2 else ""
+                    url = (parts[3] or "").strip() if len(parts) > 3 else ""
+                    description = (parts[4] or "").strip() if len(parts) > 4 else ""
+                    is_req = name in required_checks
+                    out.append(
+                        GHPRCheckRow(
+                            name=name,
+                            status_raw=status_raw,
+                            duration=duration,
+                            url=url,
+                            description=description,
+                            is_required=is_req,
+                        )
+                    )
+                    rows_dicts.append(
+                        {
+                            "name": name,
+                            "status_raw": status_raw,
+                            "duration": duration,
+                            "url": url,
+                            "description": description,
+                            "is_required": is_req,
+                        }
+                    )
+
+                # persist caches
+                try:
+                    self._pr_checks_mem_cache[key] = {"ts": now, "rows": rows_dicts}
+                    disk = self._load_pr_checks_disk_cache()
+                    if not isinstance(disk, dict):
+                        disk = {}
+                    disk[key] = {"ts": now, "rows": rows_dicts}
+                    self._save_pr_checks_disk_cache(disk)
+                except Exception:
+                    pass
+
+                return out
+
+        except Exception:
+            # Fall through to REST fallback below.
+            pass
+
+        # 4) fallback: REST check-runs for PR head SHA (best-effort; works for public repos without auth)
+        try:
+            pr = self.get(f"/repos/{owner}/{repo}/pulls/{int(pr_number)}", timeout=10) or {}
+            head_sha = (((pr.get("head") or {}) if isinstance(pr, dict) else {}) or {}).get("sha")
+            head_sha = str(head_sha or "").strip()
+            if not head_sha:
                 return []
 
-            rows_dicts: List[Dict[str, Any]] = []
-            out: List[GHPRCheckRow] = []
-            for line in stdout.split("\n"):
-                if not line.strip():
+            data = self.get(f"/repos/{owner}/{repo}/commits/{head_sha}/check-runs", params={"per_page": 100}, timeout=10) or {}
+            check_runs = data.get("check_runs") if isinstance(data, dict) else None
+            if not isinstance(check_runs, list) or not check_runs:
+                return []
+
+            def _parse_iso(s: str) -> Optional[datetime]:
+                try:
+                    ss = str(s or "").strip()
+                    if not ss:
+                        return None
+                    # GitHub timestamps look like "2025-12-29T10:52:07Z"
+                    if ss.endswith("Z"):
+                        ss = ss[:-1] + "+00:00"
+                    return datetime.fromisoformat(ss)
+                except Exception:
+                    return None
+
+            def _format_dur(start_iso: Optional[str], end_iso: Optional[str]) -> str:
+                try:
+                    st = _parse_iso(start_iso or "")
+                    en = _parse_iso(end_iso or "")
+                    if not st or not en:
+                        return ""
+                    sec = int((en - st).total_seconds())
+                    if sec < 0:
+                        return ""
+                    m, s2 = divmod(sec, 60)
+                    h, m = divmod(m, 60)
+                    if h:
+                        return f"{h}h {m}m"
+                    if m:
+                        return f"{m}m {s2}s"
+                    return f"{s2}s"
+                except Exception:
+                    return ""
+
+            rows_dicts = []
+            out = []
+            for cr in check_runs:
+                if not isinstance(cr, dict):
                     continue
-                parts = line.split("\t")
-                if len(parts) < 2:
-                    continue
-                name = (parts[0] or "").strip()
-                status_raw = (parts[1] or "").strip()
-                duration = (parts[2] or "").strip() if len(parts) > 2 else ""
-                url = (parts[3] or "").strip() if len(parts) > 3 else ""
-                description = (parts[4] or "").strip() if len(parts) > 4 else ""
-                is_req = name in required_checks
-                out.append(
-                    GHPRCheckRow(
-                        name=name,
-                        status_raw=status_raw,
-                        duration=duration,
-                        url=url,
-                        description=description,
-                        is_required=is_req,
-                    )
+                name = str(cr.get("name", "") or "").strip()
+                status = str(cr.get("status", "") or "").strip().lower()
+                conclusion = str(cr.get("conclusion", "") or "").strip().lower()
+
+                # Map REST check-run (status+conclusion) into a gh-like status_raw.
+                status_raw = ""
+                if status and status != "completed":
+                    # in_progress / queued
+                    status_raw = status
+                else:
+                    # completed; use conclusion
+                    if conclusion in {"success"}:
+                        status_raw = "pass"
+                    elif conclusion in {"failure"}:
+                        status_raw = "fail"
+                    elif conclusion in {"cancelled", "canceled"}:
+                        status_raw = "cancelled"
+                    elif conclusion in {"skipped"}:
+                        status_raw = "skipped"
+                    elif conclusion in {"neutral"}:
+                        status_raw = "neutral"
+                    elif conclusion in {"timed_out"}:
+                        status_raw = "timed_out"
+                    elif conclusion in {"action_required"}:
+                        status_raw = "action_required"
+                    else:
+                        status_raw = "unknown"
+
+                duration = _format_dur(cr.get("started_at"), cr.get("completed_at"))
+                url = str(cr.get("html_url", "") or "").strip()
+                description = ""
+                try:
+                    out_obj = cr.get("output") or {}
+                    if isinstance(out_obj, dict):
+                        description = str(out_obj.get("title", "") or "").strip()
+                except Exception:
+                    description = ""
+
+                is_req = bool(name and (name in required_checks))
+                row = GHPRCheckRow(
+                    name=name,
+                    status_raw=status_raw,
+                    duration=duration,
+                    url=url,
+                    description=description,
+                    is_required=is_req,
                 )
+                out.append(row)
                 rows_dicts.append(
                     {
                         "name": name,
@@ -2543,7 +2789,10 @@ class GitHubAPIClient:
                     }
                 )
 
-            # persist caches
+            if not out:
+                return []
+
+            # persist caches (same shape as gh output cache)
             try:
                 self._pr_checks_mem_cache[key] = {"ts": now, "rows": rows_dicts}
                 disk = self._load_pr_checks_disk_cache()
