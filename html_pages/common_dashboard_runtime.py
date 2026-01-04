@@ -149,7 +149,7 @@ def prune_partial_raw_log_caches(*, page_root_dirs: List[Path]) -> Dict[str, int
     Policy:
     - Global cache: delete all legacy `raw-log-text/*.txt` (they predate completed-only metadata).
     - Global cache: delete any `raw-log-text/*.log` whose index entry is missing `completed=true`.
-    - Dashboard-served logs: delete any `<repo>/.cache/dynamo-utils/raw-log-text/*.log` whose job_id
+    - Dashboard-served logs: delete any `<page_root_dir>/raw-log-text/*.log` whose job_id
       is not present in the global index with `completed=true`.
     """
     stats: Dict[str, int] = {
@@ -250,8 +250,8 @@ def materialize_job_raw_log_text_local_link(
 
     The dashboard never links to ephemeral GitHub signed URLs.
 
-    Returned href points into the repo-local served cache:
-      "../.cache/dynamo-utils/raw-log-text/<job_id>.log"   (from <page_root_dir>/index.html)
+    Returned href points into the page-root served cache:
+      "raw-log-text/<job_id>.log"   (from <page_root_dir>/index.html)
     """
     def _extract_job_id(u: str) -> str:
         try:

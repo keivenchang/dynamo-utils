@@ -49,11 +49,11 @@ dynamo-utils/
 ├── inference.sh                  # Launch Dynamo inference services
 ├── resource_monitor.py           # Periodic system + GPU sampler -> SQLite
 ├── html_pages/                   # HTML generators + shared UI snippets
-│   ├── resource_report.py            # Fancy interactive HTML charts from resource_monitor.sqlite
+│   ├── show_local_resources.py       # Fancy interactive HTML charts from resource_monitor.sqlite
 │   ├── show_commit_history.j2        # HTML template for commit history
 │   ├── show_commit_history.py        # Commit history with CI status and Docker images
-│   ├── show_dynamo_branches.py       # Branch status checker
-│   ├── show_dynamo_branches.j2       # HTML template for branch status
+│   ├── show_local_branches.py        # Branch status checker
+│   ├── show_local_branches.j2        # HTML template for branch status
 │   └── update_html_pages.sh          # HTML page update cron script
 └── container/                    # Docker-related scripts
     ├── build_all_targets_and_verify.sh # Build runtime/dev/local-dev targets (run from a dynamo repo root)
@@ -168,7 +168,7 @@ All HTML dashboard generation docs live in:
 
 That README covers:
 
-- `show_dynamo_branches.py`
+- `show_local_branches.py`
 - `show_commit_history.py`
 - `update_html_pages.sh`
 - caching and API budgets

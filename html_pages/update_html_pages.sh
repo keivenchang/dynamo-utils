@@ -13,11 +13,19 @@
 #   MAX_GITHUB_API_CALLS - If set, pass --max-github-api-calls to the Python generators
 #                         (useful to keep cron runs predictable; defaults remain script-side).
 #   DYNAMO_UTILS_TRACE  - If set (non-empty), enable shell tracing (set -x). Off by default to avoid noisy logs / secrets.
+#   DYNAMO_UTILS_TESTING - (deprecated) If set, behave like --fast-test (write index2.html and fewer commits).
 #
 # Args (optional; can be combined):
-#   --run-show-dynamo-branches  Update the branches dashboard ($NVIDIA_HOME/index.html)
-#   --run-show-commit-history   Update the commit history dashboard ($NVIDIA_HOME/dynamo_latest/index.html)
-#   --run-resource-report   Update resource_report.html
+#   --show-local-branches   Update the branches dashboard ($NVIDIA_HOME/index.html)
+#   --show-commit-history   Update the commit history dashboard ($NVIDIA_HOME/dynamo_latest/index.html)
+#   --show-local-resources  Update resource_report.html
+#   --fast-test             Write index2.html outputs and run a smaller/faster commit history (10 commits)
+#   --fast                  Alias for --fast-test
+#
+# Back-compat aliases (deprecated; kept for existing cron):
+#   --run-show-dynamo-branches  (alias for --show-local-branches)
+#   --run-show-commit-history   (alias for --show-commit-history)
+#   --run-resource-report       (alias for --show-local-resources)
 #
 # Behavior:
 # - If no args are provided, ALL tasks run (branches + commit-history + resource-report).
@@ -28,7 +36,7 @@
 #   # Cache-only between full runs (every 4 minutes from minute 8..56)
 #   8-59/4 * * * * NVIDIA_HOME=$HOME/nvidia SKIP_GITLAB_FETCH=1 /path/to/update_html_pages.sh
 #   # Resource report every minute
-#   * * * * * NVIDIA_HOME=$HOME/nvidia /path/to/update_html_pages.sh --run-resource-report
+#   * * * * * NVIDIA_HOME=$HOME/nvidia /path/to/update_html_pages.sh --show-local-resources
 
 set -euo pipefail
 if [ -n "${DYNAMO_UTILS_TRACE:-}" ]; then
@@ -43,11 +51,15 @@ UTILS_DIR="$(dirname "$SCRIPT_DIR")"
 NVIDIA_HOME="${NVIDIA_HOME:-$(dirname "$UTILS_DIR")}"
 
 LOGS_DIR="$NVIDIA_HOME/logs"
-BRANCHES_OUTPUT_FILE="$NVIDIA_HOME/index.html"
+FAST_TEST="${FAST_TEST:-false}"
+# Back-compat: treat env var like --fast-test/--fast.
+if [ -n "${DYNAMO_UTILS_TESTING:-}" ]; then
+    FAST_TEST=true
+fi
 
 usage() {
     cat <<'EOF' >&2
-Usage: update_html_pages.sh [--run-show-dynamo-branches] [--run-show-commit-history] [--run-resource-report]
+Usage: update_html_pages.sh [--show-local-branches] [--show-commit-history] [--show-local-resources] [--fast-test|--fast]
 
 If no args are provided, ALL tasks run.
 EOF
@@ -65,6 +77,18 @@ fi
 
 while [ "$#" -gt 0 ]; do
     case "$1" in
+        --show-local-branches)
+            RUN_SHOW_DYNAMO_BRANCHES=true; ANY_FLAG=true; shift ;;
+        --show-commit-history)
+            RUN_SHOW_COMMIT_HISTORY=true; ANY_FLAG=true; shift ;;
+        --show-local-resources)
+            RUN_RESOURCE_REPORT=true; ANY_FLAG=true; shift ;;
+        --fast-test)
+            FAST_TEST=true; shift ;;
+        --fast)
+            FAST_TEST=true; shift ;;
+
+        # Back-compat aliases (deprecated)
         --run-show-dynamo-branches)
             RUN_SHOW_DYNAMO_BRANCHES=true; ANY_FLAG=true; shift ;;
         --run-show-commit-history)
@@ -86,6 +110,13 @@ if [ "$ANY_FLAG" = false ]; then
     RUN_RESOURCE_REPORT=true
 fi
 
+# Compute branches output path after parsing flags so `--fast/--fast-test` is honored.
+BRANCHES_BASENAME="${BRANCHES_BASENAME:-index.html}"
+if [ "$FAST_TEST" = true ]; then
+    BRANCHES_BASENAME="index2.html"
+fi
+BRANCHES_OUTPUT_FILE="$NVIDIA_HOME/$BRANCHES_BASENAME"
+
 # Prevent concurrent runs (cron can overlap if a run takes longer than its interval).
 # Use a per-user lock in /tmp.
 LOCK_FILE="/tmp/dynamo-utils.update_html_pages.${USER_NAME}.lock"
@@ -102,9 +133,9 @@ fi
 
 #
 # Timing reference (rough, from one interactive run on keivenc-linux, 2025-12-25):
-# - show_dynamo_branches.py: ~15.6s (often the longest)
+# - show_local_branches.py: ~15.6s (often the longest)
 # - git checkout+pull dynamo_latest: ~1.4s
-# - resource_report.py (1 day): ~0.6s
+# - show_local_resources.py (1 day): ~0.6s
 # - mv operations + cleanup: ~0-2ms each
 # Notes:
 # - show_commit_history.py can dominate if it fetches from GitLab (use SKIP_GITLAB_FETCH=1 for faster runs).
@@ -122,7 +153,7 @@ mkdir -p "$DAY_LOG_DIR"
 LOG_FILE="$DAY_LOG_DIR/cron.log"
 
 # Per-component logs (append-only, rotated by day directory)
-BRANCHES_LOG="$DAY_LOG_DIR/show_dynamo_branches.log"
+BRANCHES_LOG="$DAY_LOG_DIR/show_local_branches.log"
 GIT_UPDATE_LOG="$DAY_LOG_DIR/dynamo_latest_git_update.log"
 COMMIT_HISTORY_LOG="$DAY_LOG_DIR/show_commit_history.log"
 RESOURCE_REPORT_LOG="$DAY_LOG_DIR/resource_report.log"
@@ -138,7 +169,7 @@ run_resource_report() {
 
     if [ -f "$RESOURCE_DB" ]; then
         echo "$(date '+%Y-%m-%d %H:%M:%S') - Generating resource report" >> "$LOG_FILE"
-        if python3 "$SCRIPT_DIR/resource_report.py" \
+        if python3 "$SCRIPT_DIR/show_local_resources.py" \
             --db-path "$RESOURCE_DB" \
             --output "$RESOURCE_REPORT_HTML" \
             --days 1 \
@@ -155,7 +186,7 @@ run_resource_report() {
     fi
 }
 
-run_show_dynamo_branches() {
+run_show_local_branches() {
     cd "$NVIDIA_HOME" || exit 1
     REFRESH_CLOSED_FLAG="${REFRESH_CLOSED_PRS:+--refresh-closed-prs}"
     MAX_GH_FLAG=""
@@ -163,7 +194,7 @@ run_show_dynamo_branches() {
         MAX_GH_FLAG="--max-github-api-calls ${MAX_GITHUB_API_CALLS}"
     fi
     echo "$(date '+%Y-%m-%d %H:%M:%S') - Generating branches dashboard" >> "$LOG_FILE"
-    if python3 "$SCRIPT_DIR/show_dynamo_branches.py" --repo-path "$NVIDIA_HOME" --html --output "$BRANCHES_OUTPUT_FILE" $REFRESH_CLOSED_FLAG $MAX_GH_FLAG >> "$BRANCHES_LOG" 2>&1; then
+    if python3 "$SCRIPT_DIR/show_local_branches.py" --repo-path "$NVIDIA_HOME" --output "$BRANCHES_OUTPUT_FILE" $REFRESH_CLOSED_FLAG $MAX_GH_FLAG >> "$BRANCHES_LOG" 2>&1; then
         echo "$(date '+%Y-%m-%d %H:%M:%S') - Updated $BRANCHES_OUTPUT_FILE" >> "$LOG_FILE"
     else
         echo "$(date '+%Y-%m-%d %H:%M:%S') - ERROR: Failed to update $BRANCHES_OUTPUT_FILE" >> "$LOG_FILE"
@@ -173,11 +204,8 @@ run_show_dynamo_branches() {
 
 run_show_commit_history() {
     DYNAMO_REPO="$NVIDIA_HOME/dynamo_latest"
-    # When testing, avoid overwriting the main dashboard
-    # Usage:
-    #   DYNAMO_UTILS_TESTING=1 NVIDIA_HOME=$HOME/nvidia /path/to/update_html_pages.sh
     COMMIT_HISTORY_BASENAME="${COMMIT_HISTORY_BASENAME:-index.html}"
-    if [ -n "${DYNAMO_UTILS_TESTING:-}" ]; then
+    if [ "$FAST_TEST" = true ]; then
         COMMIT_HISTORY_BASENAME="index2.html"
     fi
     COMMIT_HISTORY_HTML="$DYNAMO_REPO/$COMMIT_HISTORY_BASENAME"
@@ -206,8 +234,13 @@ run_show_commit_history() {
         MAX_GH_FLAG="--max-github-api-calls ${MAX_GITHUB_API_CALLS}"
     fi
 
-    echo "$(date '+%Y-%m-%d %H:%M:%S') - Generating commit history dashboard" >> "$LOG_FILE"
-    if python3 "$SCRIPT_DIR/show_commit_history.py" --repo-path . --html --max-commits 100 --output "$COMMIT_HISTORY_HTML" $SKIP_FLAG $MAX_GH_FLAG >> "$COMMIT_HISTORY_LOG" 2>&1; then
+    MAX_COMMITS="${MAX_COMMITS:-100}"
+    if [ "$FAST_TEST" = true ]; then
+        MAX_COMMITS=10
+    fi
+
+    echo "$(date '+%Y-%m-%d %H:%M:%S') - Generating commit history dashboard (max_commits=$MAX_COMMITS)" >> "$LOG_FILE"
+    if python3 "$SCRIPT_DIR/show_commit_history.py" --repo-path . --max-commits "$MAX_COMMITS" --output "$COMMIT_HISTORY_HTML" $SKIP_FLAG $MAX_GH_FLAG >> "$COMMIT_HISTORY_LOG" 2>&1; then
         echo "$(date '+%Y-%m-%d %H:%M:%S') - Updated $COMMIT_HISTORY_HTML" >> "$LOG_FILE"
     else
         echo "$(date '+%Y-%m-%d %H:%M:%S') - ERROR: Failed to update commit-history.html" >> "$LOG_FILE"
@@ -216,7 +249,7 @@ run_show_commit_history() {
 }
 
 if [ "$RUN_SHOW_DYNAMO_BRANCHES" = true ]; then
-    run_show_dynamo_branches
+    run_show_local_branches
 fi
 if [ "$RUN_SHOW_COMMIT_HISTORY" = true ]; then
     run_show_commit_history

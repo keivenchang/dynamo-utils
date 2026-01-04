@@ -42,13 +42,11 @@ except Exception:  # pragma: no cover
 from common_dashboard_lib import (
     PASS_PLUS_STYLE,
     TreeNodeVM,
-    build_and_test_dynamo_phases_from_actions_job,
     check_line_html,
-     ci_should_expand_by_default,
+    ci_should_expand_by_default,
     disambiguate_check_run_name,
     extract_actions_job_id_from_url,
-     sort_pr_check_rows_by_name,
-    parse_build_and_test_dynamo_phase_timings,
+    sort_pr_check_rows_by_name,
     render_tree_pre_lines,
     required_badge_html,
     status_icon_html,
@@ -176,7 +174,7 @@ def _parse_rate_limit_resources(rate_limit_payload: Dict[str, object]) -> Dict[s
 
 def _rate_limit_history_path() -> Path:
     # Keep this under the shared dynamo-utils cache dir so it persists across runs (host/container).
-    return dynamo_utils_cache_dir() / "dashboards" / "show_dynamo_branches" / "gh_rate_limit_history.jsonl"
+    return dynamo_utils_cache_dir() / "dashboards" / "show_local_branches" / "gh_rate_limit_history.jsonl"
 
 
 def _load_rate_limit_history(path: Path, *, max_points: int = 288) -> List[Dict[str, object]]:
@@ -427,11 +425,6 @@ class BranchNode:
             default_expanded=True,
         )
 
-    def print_tree(self) -> None:
-        """Print the tree to console"""
-        for line in self.render():
-            print(line)
-
     def _format_content(self) -> str:
         """Format the node content for text output (override in subclasses)"""
         return self.label
@@ -497,7 +490,7 @@ class CIJobTreeNode(BranchNode):
                 has_required_failure = True
                 statuses.append("failure")
             elif st == "failure" and not is_req:
-                # Optional failures should not turn the parent red (FAIL), but they SHOULD be visible as ⚠.
+                # Optional failures should not turn the parent red (FAIL), but they SHOULD be visible.
                 has_optional_failure = True
                 statuses.append("failure")
             elif st == "skipped":
@@ -809,7 +802,7 @@ def _build_ci_hierarchy_nodes(
         )
 
         # Shared subsections:
-        # - Build and Test - dynamo: phases (steps API first; raw log fallback)
+        # - Build and Test - dynamo: phases (a special-case subsection; steps API)
         # - other long-running Actions jobs: long steps (>= 30s)
         try:
             from common_dashboard_lib import ci_subsection_tuples_for_job  # local import
@@ -904,6 +897,27 @@ def _build_ci_hierarchy_nodes(
         raise RawLogValidationError(
             f"Missing [cached raw log] for {len(missing_failed_raw_logs)} failed GitHub Actions job(s): {examples}"
         )
+
+    # Second pass: best-effort grouping by workflow `jobs.*.needs` (YAML).
+    try:
+        from common_github_workflow import group_ci_nodes_by_workflow_needs  # local import
+
+        out = list(
+            group_ci_nodes_by_workflow_needs(
+                repo_root=Path(repo_path),
+                items=[
+                    (
+                        re.sub(r"^[a-z]+:\\s+", "", str(getattr(n, "display_name", "") or getattr(n, "job_id", "") or ""), flags=re.IGNORECASE),
+                        n,
+                    )
+                    for n in (out or [])
+                ],
+            )
+            or []
+        )
+    except Exception:
+        pass
+
     return out
 @dataclass
 class RepoNode(BranchNode):
@@ -1267,7 +1281,7 @@ class PRStatusNode(BranchNode):
                     # Compact CI summary counts (styled to match show_commit_history.j2):
                     #   - green:  REQ+OPT✓  (passed; required count bold)
                     #   - red:    N✗   (required failures, rendered as a red badge)
-                    #   - amber:  N⚠   (optional failures)
+                    #   - red:    N✗   (optional failures)
                     #   - amber:  N⏳   (in progress)
                     #   - grey:   N⏸   (pending/queued/skipping)
                     #   - grey:   N✖️  (cancelled)
@@ -1306,7 +1320,7 @@ class PRStatusNode(BranchNode):
                         except Exception:
                             required_set = set()
 
-                    # Shared summary (common.py) so show_commit_history + show_dynamo_branches stay consistent.
+                    # Shared summary (common.py) so show_commit_history + show_local_branches stay consistent.
                     summary = summarize_pr_check_rows(rows)
 
                     # Map summary buckets into the local display buckets.
@@ -1358,7 +1372,7 @@ class PRStatusNode(BranchNode):
                     if counts["failure_optional"] > 0:
                         ci_parts.append(
                             f'<span style="color: #f59e0b;" title="Optional failures">'
-                            f'{counts["failure_optional"]}<span style="font-size: 13px; font-weight: 900; line-height: 1; margin-left: 2px;">⚠</span>'
+                            f'{counts["failure_optional"]}<span style="color: #d73a49; font-size: 13px; font-weight: 900; line-height: 1; margin-left: 2px;">✗</span>'
                             f'</span>'
                         )
                     if counts["in_progress"] > 0:
@@ -1387,7 +1401,7 @@ class PRStatusNode(BranchNode):
                         )
                     if failed_optional_jobs:
                         tooltip_parts.append(
-                            '<strong style="color: #f59e0b;">⚠ Failed (optional):</strong> '
+                            f'<strong style="color: #d73a49;">{status_icon_html(status_norm="failure", is_required=False)} Failed (optional):</strong> '
                             + ", ".join(sorted(html_module.escape(n) for n in failed_optional_jobs))
                         )
                     if progress_required_jobs:
@@ -1837,7 +1851,7 @@ class LocalRepoScanner:
                     refresh_closed=self.refresh_closed_prs,
                 )
             except Exception as e:
-                print(f"Error fetching PR info: {e}", file=sys.stderr)
+                self.logger.warning("Error fetching PR info: %s", e)
                 pr_infos_by_branch = {}
 
             branch_results = []
@@ -1946,7 +1960,11 @@ class LocalRepoScanner:
                         except Exception:
                             pass
                         try:
-                            print(f"[show_dynamo_branches] CI hierarchy error for PR #{getattr(pr, 'number', '?')}: {e}", file=sys.stderr)
+                            self.logger.warning(
+                                "[show_local_branches] CI hierarchy error for PR #%s: %s",
+                                getattr(pr, "number", "?"),
+                                e,
+                            )
                         except Exception:
                             pass
 
@@ -2084,7 +2102,7 @@ def generate_html(root: BranchNode, *, page_stats: Optional[List[tuple[str, str]
 
     if not HAS_JINJA2:
         raise RuntimeError(
-            "Jinja2 is required for --html output. Install with: pip install jinja2"
+            "Jinja2 is required for HTML output. Install with: pip install jinja2"
         )
 
     # Help type-checkers: these are set only when HAS_JINJA2 is True.
@@ -2096,7 +2114,7 @@ def generate_html(root: BranchNode, *, page_stats: Optional[List[tuple[str, str]
         loader=FileSystemLoader(str(_THIS_DIR)),
         autoescape=select_autoescape(["html", "xml"]),
     )
-    template = env.get_template("show_dynamo_branches.j2")
+    template = env.get_template("show_local_branches.j2")
     return template.render(
         generated_time=pdt_str,
         copy_icon_svg=_COPY_ICON_SVG,
@@ -2111,23 +2129,11 @@ def generate_html(root: BranchNode, *, page_stats: Optional[List[tuple[str, str]
         cancelled_icon_html=status_icon_html(status_norm="cancelled", is_required=False),
         skipped_icon_html=status_icon_html(status_norm="skipped", is_required=False),
     )
-
-
-def compute_state_hash(root: BranchNode) -> str:
-    """Compute hash of current state for change detection"""
-    # Render the tree and hash it
-    lines = []
-    for child in root.children:
-        lines.extend(child.render())
-    content = "\n".join(lines)
-    return hashlib.sha256(content.encode()).hexdigest()
-
-
 def main():
     phase_t = PhaseTimer()
 
     parser = argparse.ArgumentParser(
-        description='Show dynamo branches with PR information (node-based version)'
+        description='Show local branches with PR information (HTML-only)'
     )
     # Keep backward compatibility with the historical positional `base_dir`, but prefer --repo-path.
     parser.add_argument(
@@ -2158,14 +2164,9 @@ def main():
         help='Refresh cached closed/merged PR mappings (more GitHub API calls)'
     )
     parser.add_argument(
-        '--html',
-        action='store_true',
-        help='Output in HTML format'
-    )
-    parser.add_argument(
         '--output',
         type=Path,
-        help='Output file path (default: <base_dir>/index.html when --html, else stdout)'
+        help='Output HTML file path (default: <repo-path>/index.html)'
     )
     parser.add_argument(
         '--max-branches',
@@ -2209,8 +2210,6 @@ def main():
         max_github_api_calls=int(args.max_github_api_calls),
     )
     # Cache-only fallback if exhausted.
-    before = scanner.github_api.get_core_rate_limit_info() if scanner.github_api else None
-
     try:
         scanner.github_api.check_core_rate_limit_or_raise()
     except Exception as e:
@@ -2232,70 +2231,72 @@ def main():
     with phase_t.phase("scan"):
         root = scanner.scan_repositories(base_dir)
 
-    # Output
-    if args.html:
-        assert root is not None
-        # Page statistics (shown in an expandable block at the bottom of the HTML).
-        #
-        # Note: we want the HTML page to show a *breakdown* (timing.prune/scan/render/write/total).
-        # That means we need to measure render/write first, then re-render once so the stats reflect
-        # those timings. This is intentionally low-tech and stable.
-        elapsed_s = max(0.0, time.monotonic() - generation_t0)
+    # Output (HTML-only)
+    assert root is not None
+    # Page statistics (shown in an expandable block at the bottom of the HTML).
+    #
+    # Note: we want the HTML page to show a *breakdown* (timing.prune/scan/render/write/total).
+    # That means we need to measure render/write first, then re-render once so the stats reflect
+    # those timings. This is intentionally low-tech and stable.
+    elapsed_s = max(0.0, time.monotonic() - generation_t0)
+    rest_calls = 0
+    rest_ok = 0
+    rest_err = 0
+    rest_err_by_status_s = ""
+    try:
+        stats = scanner.github_api.get_rest_call_stats() if scanner.github_api else {}
+        rest_calls = int(stats.get("total") or 0)
+        rest_ok = int(stats.get("success_total") or 0)
+        rest_err = int(stats.get("error_total") or 0)
+    except Exception:
         rest_calls = 0
         rest_ok = 0
         rest_err = 0
+        stats = {}
+
+    try:
+        es = scanner.github_api.get_rest_error_stats() if scanner.github_api else {}
+        by_status = (es or {}).get("by_status") if isinstance(es, dict) else {}
+        if isinstance(by_status, dict) and by_status:
+            items = list(by_status.items())[:8]
+            rest_err_by_status_s = ", ".join([f"{k}={v}" for k, v in items])
+    except Exception:
         rest_err_by_status_s = ""
-        try:
-            stats = scanner.github_api.get_rest_call_stats() if scanner.github_api else {}
-            rest_calls = int(stats.get("total") or 0)
-            rest_ok = int(stats.get("success_total") or 0)
-            rest_err = int(stats.get("error_total") or 0)
-        except Exception:
-            rest_calls = 0
-            rest_ok = 0
-            rest_err = 0
-            stats = {}
 
-        try:
-            es = scanner.github_api.get_rest_error_stats() if scanner.github_api else {}
-            by_status = (es or {}).get("by_status") if isinstance(es, dict) else {}
-            if isinstance(by_status, dict) and by_status:
-                items = list(by_status.items())[:8]
-                rest_err_by_status_s = ", ".join([f"{k}={v}" for k, v in items])
-        except Exception:
-            rest_err_by_status_s = ""
+    pr_count = 0
+    try:
+        def _count_prs(node: BranchNode) -> int:
+            n = 0
+            if isinstance(node, PRNode) and getattr(node, "pr", None) is not None:
+                n += 1
+            for ch in (getattr(node, "children", None) or []):
+                n += _count_prs(ch)
+            return n
 
+        pr_count = _count_prs(root)
+    except Exception:
         pr_count = 0
-        try:
-            def _count_prs(node: BranchNode) -> int:
-                n = 0
-                if isinstance(node, PRNode) and getattr(node, "pr", None) is not None:
-                    n += 1
-                for ch in (getattr(node, "children", None) or []):
-                    n += _count_prs(ch)
-                return n
-            pr_count = _count_prs(root)
-        except Exception:
-            pr_count = 0
 
-        page_stats: List[tuple[str, str]] = [
-            ("Generation time", f"{elapsed_s:.2f}s"),
-            ("GitHub mode", "cache-only" if bool(getattr(scanner, "cache_only_github", False)) else "normal"),
-            ("GitHub mode reason", cache_only_reason if cache_only_reason else ""),
-            ("max_github_api_calls", str(int(args.max_github_api_calls))),
-            ("GitHub REST budget max", str(stats.get("budget_max")) if isinstance(stats, dict) and stats.get("budget_max") is not None else ""),
-            ("GitHub REST budget exhausted", "true" if bool((stats or {}).get("budget_exhausted")) else "false"),
-            ("GitHub REST calls", str(rest_calls)),
-            ("GitHub REST ok", str(rest_ok)),
-            ("GitHub REST errors", str(rest_err)),
-            ("GitHub REST errors by status", rest_err_by_status_s or "(none)"),
-            ("GitHub REST time", f"{float(stats.get('time_total_s') or 0.0):.2f}s"),
-            # "APIs left" (remaining quota). Best-effort; do not fail page generation.
-            ("GitHub core quota remaining", ""),
-            ("Repos scanned", str(len(getattr(root, 'children', []) or []))),
-            ("PRs shown", str(pr_count)),
-        ]
+    page_stats: List[tuple[str, str]] = [
+        ("Generation time", f"{elapsed_s:.2f}s"),
+        ("GitHub mode", "cache-only" if bool(getattr(scanner, "cache_only_github", False)) else "normal"),
+        ("GitHub mode reason", cache_only_reason if cache_only_reason else ""),
+        ("max_github_api_calls", str(int(args.max_github_api_calls))),
+        ("GitHub REST budget max", str(stats.get("budget_max")) if isinstance(stats, dict) and stats.get("budget_max") is not None else ""),
+        ("GitHub REST budget exhausted", "true" if bool((stats or {}).get("budget_exhausted")) else "false"),
+        ("GitHub REST calls", str(rest_calls)),
+        ("GitHub REST ok", str(rest_ok)),
+        ("GitHub REST errors", str(rest_err)),
+        ("GitHub REST errors by status", rest_err_by_status_s or "(none)"),
+        ("GitHub REST time", f"{float(stats.get('time_total_s') or 0.0):.2f}s"),
+        # "APIs left" (remaining quota). Best-effort; do not fail page generation.
+        ("GitHub core quota remaining", ""),
+        ("Repos scanned", str(len(getattr(root, 'children', []) or []))),
+        ("PRs shown", str(pr_count)),
+    ]
 
+    # Keep all page-stats augmentation in one scope block.
+    if True:
         def _upsert_stat(k: str, v: str) -> None:
             try:
                 for i, (kk, _vv) in enumerate(page_stats):
@@ -2480,12 +2481,6 @@ def main():
             html_output2 = generate_html(root, page_stats=page_stats)
         with phase_t.phase("write"):
             atomic_write_text(out_path, html_output2, encoding="utf-8")
-    else:
-        assert root is not None
-        with phase_t.phase("print"):
-            for child in root.children:
-                child.print_tree()
-                print()
 
     # No stdout/stderr run-stats; the HTML Statistics section contains the breakdowns.
 

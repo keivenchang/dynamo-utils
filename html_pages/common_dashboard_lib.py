@@ -9,7 +9,7 @@ This file intentionally groups previously-split helper modules into one place to
 - avoid UI drift between dashboards
 - reduce small-module sprawl
 - keep <pre>-safe tree rendering + check-line rendering consistent
-- centralize workflow-graph parsing (derived from .github/workflows/*.yml)
+- keep workflow parsing separate (see common_github_workflow.py)
 """
 
 from __future__ import annotations
@@ -27,6 +27,7 @@ from common import GitHubAPIClient, classify_ci_kind
 # ======================================================================================
 # Shared ordering + default-expand policies
 # ======================================================================================
+
 
 def sort_github_check_runs_by_name(check_runs: List[Dict[str, object]]) -> List[Dict[str, object]]:
     """Return check runs sorted by job name (stable), then job id/url for disambiguation."""
@@ -315,144 +316,6 @@ def _format_duration_short(seconds: float) -> str:
     return f"{sec}s"
 
 
-def parse_build_and_test_dynamo_phase_timings(*, raw_log_path: Path) -> List[Tuple[str, str]]:
-    """Best-effort parse of 'Build and Test - dynamo' raw log into phase timing rows.
-
-    Returns a list of (phase_name, duration_str), in execution order.
-    """
-    try:
-        p = Path(raw_log_path)
-        if not p.exists() or not p.is_file():
-            return []
-        txt = p.read_text(errors="replace")
-    except Exception:
-        return []
-
-    lines = (txt or "").splitlines()
-    # Collect timestamped lines for quick scanning.
-    ts_lines: List[Tuple[datetime, str]] = []
-    for ln in lines:
-        ts = _parse_utc_ts_prefix(ln)
-        if ts is None:
-            continue
-        ts_lines.append((ts, ln))
-    if not ts_lines:
-        return []
-
-    # Helper to find first/last timestamp for patterns within a window.
-    def _first_ts(pred) -> Optional[datetime]:
-        for ts, ln in ts_lines:
-            if pred(ln):
-                return ts
-        return None
-
-    def _last_ts(pred, *, after: Optional[datetime] = None, before: Optional[datetime] = None) -> Optional[datetime]:
-        out: Optional[datetime] = None
-        for ts, ln in ts_lines:
-            if after is not None and ts < after:
-                continue
-            if before is not None and ts > before:
-                continue
-            if pred(ln):
-                out = ts
-        return out
-
-    # Phase 1: Build image
-    #
-    # The log format varies:
-    # - old: "+ docker build ... --tag dynamo:latest"
-    # - current: "Run ./container/build.sh --tag dynamo:latest ..." + buildkit "#N [..]" lines
-    # We key off the earliest stable "build started" marker we can find.
-    build_start = _first_ts(
-        lambda ln: (
-            ("Building Dynamo Image:" in ln and "dynamo:latest" in ln)
-            or ("##[group]Run ./container/build.sh" in ln and "--tag" in ln and "dynamo:latest" in ln)
-            or ("./container/build.sh" in ln and "--tag" in ln and "dynamo:latest" in ln)
-            or ("+ docker build" in ln and "--tag dynamo:latest" in ln)
-            or ("/usr/bin/docker buildx" in ln and " build " in ln and "dynamo:latest" in ln)
-        )
-    )
-    build_end = None
-    if build_start is not None:
-        # Prefer buildkit export markers near the end of the build.
-        build_end = _last_ts(
-            lambda ln: (
-                ("exporting config sha256:" in ln)
-                or ("exporting manifest sha256:" in ln)
-                or ("exporting layers" in ln and " done" in ln)
-                or ("exporting to docker image format" in ln and " done" in ln)
-                or ("writing image sha" in ln)
-                or (" naming to " in ln and "dynamo:latest" in ln)
-            ),
-            after=build_start,
-        )
-
-    # Phase 2: Rust checks (docker run ... rust_checks -> just before pytest-parallel starts)
-    rust_start = _first_ts(lambda ln: ("_rust_checks" in ln) or ("cargo fmt -- --check" in ln))
-
-    # Phase 3a: Pytest "serial" (best-effort). Not always present in logs.
-    pytest_serial_start = _first_ts(
-        lambda ln: (
-            ("bash -c \"pytest" in ln and "pytest_test_report.xml" in ln)
-            or ("--junitxml=pytest_test_report.xml" in ln)
-            or ("--name" in ln and "build-test_dynamo_pytest" in ln and "pytest_parallel" not in ln)
-        )
-    )
-
-    pytest_parallel_start = _first_ts(lambda ln: ("pytest-parallel" in ln) or ("_pytest_parallel" in ln) or ("PYTEST_MARKS:" in ln and "parallel" in ln))
-    # Prefer the explicit pytest command line if present.
-    if pytest_parallel_start is None:
-        pytest_parallel_start = _first_ts(lambda ln: ("pytest --basetemp=/tmp/pytest-parallel" in ln) or ("pre_merge and parallel" in ln and "pytest" in ln))
-
-    rust_end = None
-    if rust_start is not None:
-        # End at the last timestamp before pytest parallel starts (or end-of-file).
-        before = pytest_parallel_start
-        rust_end = _last_ts(lambda _ln: True, after=rust_start, before=before) if before else _last_ts(lambda _ln: True, after=rust_start)
-
-    # Phase 3b: Pytest parallel (pytest cmd -> generated xml / docker cp)
-    pytest_par_end = None
-    if pytest_parallel_start is not None:
-        pytest_par_end = _last_ts(lambda ln: ("generated xml file:" in ln and "pytest_parallel.xml" in ln), after=pytest_parallel_start)
-        if pytest_par_end is None:
-            pytest_par_end = _first_ts(lambda ln: ("docker cp" in ln and "pytest_parallel.xml" in ln))
-        if pytest_par_end is None:
-            pytest_par_end = _last_ts(lambda _ln: True, after=pytest_parallel_start)
-
-    # End marker for "serial" pytest: docker cp / path line for pytest_test_report.xml.
-    pytest_serial_end = None
-    if pytest_serial_start is not None:
-        pytest_serial_end = _last_ts(lambda ln: ("docker cp" in ln and "pytest_test_report.xml" in ln), after=pytest_serial_start)
-        if pytest_serial_end is None:
-            pytest_serial_end = _last_ts(lambda ln: (" path: " in ln and "pytest_test_report.xml" in ln), after=pytest_serial_start)
-        if pytest_serial_end is None:
-            pytest_serial_end = _last_ts(lambda _ln: True, after=pytest_serial_start, before=pytest_parallel_start)
-
-    out: List[Tuple[str, str]] = []
-    try:
-        if build_start and build_end and build_end > build_start:
-            out.append(("Build Image", _format_duration_short((build_end - build_start).total_seconds())))
-    except Exception:
-        pass
-    try:
-        if rust_start and rust_end and rust_end > rust_start:
-            out.append(("Rust checks", _format_duration_short((rust_end - rust_start).total_seconds())))
-    except Exception:
-        pass
-    try:
-        if pytest_serial_start and pytest_serial_end and pytest_serial_end > pytest_serial_start:
-            out.append(("pytest (serial)", _format_duration_short((pytest_serial_end - pytest_serial_start).total_seconds())))
-    except Exception:
-        pass
-    try:
-        if pytest_parallel_start and pytest_par_end and pytest_par_end > pytest_parallel_start:
-            out.append(("pytest (parallel)", _format_duration_short((pytest_par_end - pytest_parallel_start).total_seconds())))
-    except Exception:
-        pass
-
-    return out
-
-
 def _parse_iso_utc(s: str) -> Optional[datetime]:
     try:
         x = str(s or "").strip()
@@ -642,9 +505,14 @@ def ci_subsection_tuples_for_job(
     long_job_threshold_s: float = 10.0 * 60.0,
     step_min_s: float = 30.0,
 ) -> List[Tuple[str, str, str]]:
-    """Shared rule: return child tuples for phase/step subsections.
+    """Shared rule: return child tuples for CI subsections.
 
-    - Build and Test - dynamo: return the dedicated phases (status+duration) (steps API first; raw log fallback).
+    Terminology (official):
+    - "subsections" is the umbrella term for child rows under a job/check.
+    - "phases" are a *special-case* kind of subsection for `Build and Test - dynamo`
+      (we keep the name "phases" in code where it’s specific to that job).
+
+    - Build and Test - dynamo: return the dedicated phases (status+duration) from Actions job `steps[]`.
     - Other long-running Actions jobs: return job steps >= step_min_s.
     """
     nm = str(job_name or "").strip()
@@ -658,11 +526,33 @@ def ci_subsection_tuples_for_job(
                 raw_log_path=raw_log_path,
                 is_required=bool(is_required),
             )
-            # Also include steps (like other Actions jobs).
-            # Policy for REQUIRED jobs: show all failing steps + steps >= 30s; ignore the rest.
-            steps = actions_job_step_tuples(github_api=github_api, job_url=str(job_url or ""), min_seconds=float(step_min_s))
+            # Also include *non-phase* steps so we can surface useful failures like
+            # "Copy test report..." without duplicating the phase rows.
+            #
+            # Policy for REQUIRED jobs: show all failing steps + steps >= threshold; ignore the rest.
+            steps = actions_job_step_tuples(
+                github_api=github_api,
+                job_url=str(job_url or ""),
+                min_seconds=float(step_min_s),
+            )
+
+            def _covered_by_phase(step_name: str) -> bool:
+                s = str(step_name or "").strip().lower()
+                if not s:
+                    return True
+                # Phase-like steps (already represented by `phases`).
+                if "build image" in s:
+                    return True
+                if ("rust" in s) and ("check" in s):
+                    return True
+                if "pytest" in s:
+                    return True
+                return False
+
+            extra_steps = [(n, d, st) for (n, d, st) in (steps or []) if not _covered_by_phase(n)]
+
             out = [(p[0], p[1], p[2]) for p in (phases or [])]
-            out.extend([(s[0], s[1], s[2]) for s in (steps or [])])
+            out.extend([(s[0], s[1], s[2]) for s in extra_steps])
             return out
         except Exception:
             return []
@@ -792,7 +682,7 @@ def status_icon_html(
     required_failure: bool = False,
     warning_present: bool = False,
 ) -> str:
-    """Shared status icon HTML (match show_dynamo_branches)."""
+    """Shared status icon HTML (match show_local_branches)."""
     s = (status_norm or "").strip().lower()
 
     if s == "success":
@@ -810,7 +700,8 @@ def status_icon_html(
         else:
             out = '<span style="color: #2da44e; font-weight: 900;">✓</span>'
         if bool(warning_present):
-            out += '<span style="color: #f59e0b; font-size: 13px; font-weight: 900; line-height: 1; margin-left: 2px;">⚠</span>'
+            # Optional failures: show a red X (no circle) appended to the success icon.
+            out += '<span style="color: #d73a49; font-size: 13px; font-weight: 900; line-height: 1; margin-left: 2px;">✗</span>'
         return out
     if s in {"skipped", "neutral"}:
         # GitHub-like "skipped": grey circle with a slash.
@@ -829,7 +720,8 @@ def status_icon_html(
                 'width: 12px; height: 12px; border-radius: 999px; background-color: #d73a49; '
                 'color: #ffffff; font-size: 10px; font-weight: 900; line-height: 1;">✗</span>'
             )
-        return '<span style="color: #f59e0b; font-weight: 900;">⚠</span>'
+        # Optional failures: red X, no circle.
+        return '<span style="color: #d73a49; font-weight: 900;">✗</span>'
     if s == "in_progress":
         return '<span style="color: #dbab09;">⏳</span>'
     if s == "pending":
@@ -1076,13 +968,6 @@ def build_and_test_dynamo_phase_tuples(
                 phases3 = build_and_test_dynamo_phases_from_actions_job(job) or []
     except Exception:
         phases3 = []
-
-    if not phases3 and raw_log_path is not None:
-        try:
-            phases2 = parse_build_and_test_dynamo_phase_timings(raw_log_path=raw_log_path)
-            phases3 = [(n, d, "unknown") for (n, d) in phases2]
-        except Exception:
-            phases3 = []
 
     return [(str(n), str(d), str(s)) for (n, d, s) in (phases3 or [])]
 

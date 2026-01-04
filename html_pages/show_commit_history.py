@@ -6,7 +6,7 @@ SPDX-License-Identifier: Apache-2.0
 Dynamo Commit History Generator - Standalone Tool
 
 Generates commit history with Composite Docker SHAs (CDS) and Docker image detection.
-Can output to terminal or HTML format.
+HTML-only dashboard generator.
 """
 
 import argparse
@@ -26,6 +26,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 from typing import List, Dict, Optional, Set, Tuple
+from zoneinfo import ZoneInfo
 
 # Ensure we can import sibling utilities (common.py) from the parent dynamo-utils directory
 _THIS_DIR = Path(__file__).resolve().parent
@@ -44,7 +45,6 @@ from common_dashboard_lib import (
     ci_should_expand_by_default,
     disambiguate_check_run_name,
     extract_actions_job_id_from_url,
-    parse_build_and_test_dynamo_phase_timings,
     render_tree_pre_lines,
     sort_github_check_runs_by_name,
     required_badge_html,
@@ -72,7 +72,6 @@ from common import (
     PhaseTimer,
     classify_ci_kind,
     format_gh_check_run_duration,
-    get_terminal_width,
     dynamo_utils_cache_dir,
     MARKER_RUNNING,
     MARKER_PASSED,
@@ -93,14 +92,6 @@ except ImportError:
     Environment = None  # type: ignore[assignment]
     FileSystemLoader = None  # type: ignore[assignment]
     select_autoescape = None  # type: ignore[assignment]
-
-# Try to import pytz, but make it optional
-try:
-    import pytz
-    HAS_PYTZ = True
-except ImportError:
-    HAS_PYTZ = False
-    pytz = None  # type: ignore[assignment]
 
 # Constants for build status values
 STATUS_UNKNOWN = 'unknown'
@@ -205,7 +196,6 @@ class CommitHistoryGenerator:
     def show_commit_history(
         self,
         max_commits: int = 50,
-        html_output: bool = False,
         output_path: Optional[Path] = None,
         logs_dir: Optional[Path] = None,
         export_pipeline_pr_csv: Optional[Path] = None,
@@ -214,7 +204,6 @@ class CommitHistoryGenerator:
 
         Args:
             max_commits: Maximum number of commits to show
-            html_output: Generate HTML output instead of terminal output
             output_path: Path for HTML output file (optional, auto-detected if not provided)
             logs_dir: Path to logs directory for build reports (optional, defaults to repo_path/logs)
 
@@ -229,10 +218,10 @@ class CommitHistoryGenerator:
 
         # Cache stats (printed at end in verbose/debug mode; avoids needing to pipe output).
         cache_stats: Dict[str, dict] = {}
-        meta_stats: Dict[str, int] = {"full_hit": 0, "legacy_hit": 0, "miss": 0}
+        meta_stats: Dict[str, int] = {"full_hit": 0, "miss": 0}
 
         # Load cache (commit_history.json in dynamo-utils cache dir)
-        # Format (new): {
+        # Format: {
         #   "<full_commit_sha>": {
         #     "composite_docker_sha": "746bc31d05b3",
         #     "author": "John Doe",
@@ -243,10 +232,6 @@ class CommitHistoryGenerator:
         #     "stats": {"files": 5, "insertions": 100, "deletions": 50},
         #     "changed_files": ["path/to/file1.py", "path/to/file2.py"]
         #   },
-        #   ...
-        # }
-        # Format (old, backward compatible): {
-        #   "<full_commit_sha>": "<composite_docker_sha>",
         #   ...
         # }
         # Fields:
@@ -303,206 +288,141 @@ class CommitHistoryGenerator:
                     pr_numbers.append(pr_num)
                     sha_to_pr_number[commit.hexsha] = pr_num
 
-            if html_output:
-                cache_only_github = bool(getattr(self.github_client, "cache_only_mode", False))
-                if pr_numbers and (not self.skip_gitlab_fetch) and (not cache_only_github):
-                    # Batch fetch merge dates for all PRs (GitHub)
-                    self.logger.info(f"Fetching merge dates for {len(pr_numbers)} PRs...")
-                    t0 = phase_t.start()
-                    pr_to_merge_date = self.github_client.get_cached_pr_merge_dates(
-                        pr_numbers,
-                        cache_file="github_pr_merge_dates.json",
-                        stats=cache_stats,
-                    )
-                    phase_t.stop("github_merge_dates", t0)
-                    self.logger.info(f"Got merge dates for {sum(1 for v in pr_to_merge_date.values() if v)} PRs")
+            cache_only_github = bool(getattr(self.github_client, "cache_only_mode", False))
+            if pr_numbers and (not self.skip_gitlab_fetch) and (not cache_only_github):
+                # Batch fetch merge dates for all PRs (GitHub)
+                self.logger.info(f"Fetching merge dates for {len(pr_numbers)} PRs...")
+                t0 = phase_t.start()
+                pr_to_merge_date = self.github_client.get_cached_pr_merge_dates(
+                    pr_numbers,
+                    cache_file="github_pr_merge_dates.json",
+                    stats=cache_stats,
+                )
+                phase_t.stop("github_merge_dates", t0)
+                self.logger.info(
+                    f"Got merge dates for {sum(1 for v in pr_to_merge_date.values() if v)} PRs"
+                )
 
                 if pr_numbers:
                     # Batch fetch required checks for all PRs (branch protection required checks).
                     # If skip_gitlab_fetch=True, we still read from cache (skip_fetch=True).
                     self.logger.info(f"Fetching required checks for {len(pr_numbers)} PRs...")
-                    t0 = phase_t.start()
-                    pr_to_required_checks = self.github_client.get_cached_required_checks(
-                        pr_numbers,
-                        owner="ai-dynamo",
-                        repo="dynamo",
-                        cache_file="github_required_checks.json",
-                        skip_fetch=bool(self.skip_gitlab_fetch) or bool(cache_only_github),
-                    )
-                    phase_t.stop("github_required_checks", t0)
-                    self.logger.info("Got required-checks metadata for "
-                                     f"{sum(1 for v in pr_to_required_checks.values() if v)}/{len(set(pr_numbers))} PRs")
+                t0 = phase_t.start()
+                pr_to_required_checks = self.github_client.get_cached_required_checks(
+                    pr_numbers,
+                    owner="ai-dynamo",
+                    repo="dynamo",
+                    cache_file="github_required_checks.json",
+                    skip_fetch=bool(self.skip_gitlab_fetch) or bool(cache_only_github),
+                )
+                phase_t.stop("github_required_checks", t0)
+                self.logger.info(
+                    "Got required-checks metadata for "
+                    f"{sum(1 for v in pr_to_required_checks.values() if v)}/{len(set(pr_numbers))} PRs"
+                )
 
             # Collect commit data
             commit_data = []
             cache_updated = False
             sha_to_message_first_line: Dict[str, str] = {}
 
-            # Terminal width settings (initialize unconditionally so static analyzers don't complain)
-            term_width = get_terminal_width(padding=2, default=118)
-            sha_width = 10
-            composite_width = 13
-            date_width = 20
-            author_width = 20
-            separator_width = 3
-            fixed_width = sha_width + composite_width + date_width + author_width + separator_width
-            message_width = max(30, term_width - fixed_width)
-
-            if not html_output:
-                # Terminal output mode
-
-                print(f"\nCommit History with Composite Docker SHAs")
-                print(f"Repository: {self.repo_path}")
-                print(f"Showing {len(commits)} most recent commits:\n")
-                print(f"{'Commit SHA':<{sha_width}} {'Composite Docker SHA':<{composite_width}} {'Date':<{date_width}} {'Author':<{author_width}} Message")
-                print("-" * term_width)
-
+            # HTML-only: no terminal formatting / printing
             try:
                 t0 = phase_t.start()
                 for i, commit in enumerate(commits):
                     sha_short = commit.hexsha[:9]
                     sha_full = commit.hexsha
 
-                    # Defaults to keep static analyzers happy (only used in HTML mode)
+                    # Defaults
                     full_message = ""
                     files_changed = 0
                     insertions = 0
                     deletions = 0
                     changed_files: List[str] = []
 
-                    # Check cache first - handle both old format (string) and new format (dict)
                     cached_entry = cache.get(sha_full)
-                    merge_date = None  # Initialize merge_date
+                    merge_date = None
 
                     if cached_entry and isinstance(cached_entry, dict):
                         meta_stats["full_hit"] += 1
-                        # New format: Full metadata cached
                         composite_sha = cached_entry['composite_docker_sha']
                         date_str = cached_entry['date']
                         author_name = cached_entry['author']
                         message_first_line = cached_entry['message']
-                        merge_date = cached_entry.get('merge_date')  # May be None if not in cache
+                        merge_date = cached_entry.get('merge_date')
+                        full_message = cached_entry['full_message']
+                        files_changed = cached_entry['stats']['files']
+                        insertions = cached_entry['stats']['insertions']
+                        deletions = cached_entry['stats']['deletions']
+                        changed_files = cached_entry['changed_files']
 
-                        if html_output:
-                            full_message = cached_entry['full_message']
-                            files_changed = cached_entry['stats']['files']
-                            insertions = cached_entry['stats']['insertions']
-                            deletions = cached_entry['stats']['deletions']
-                            changed_files = cached_entry['changed_files']
-
-                        self.logger.debug(f"Cache hit (full metadata) for {sha_short}: {composite_sha}")
-
-                        # Update merge_date from batch fetch if not in cache
-                        if merge_date is None and html_output:
+                        # Backfill merge_date if missing and available.
+                        if merge_date is None:
                             pr_number = GitLabAPIClient.parse_mr_number_from_message(message_first_line)
                             if pr_number and pr_number in pr_to_merge_date:
                                 merge_date = pr_to_merge_date[pr_number]
                                 if merge_date:
-                                    self.logger.debug(f"Got merge date for PR {pr_number}: {merge_date}")
-                                    # Update cache with merge_date
                                     cached_entry['merge_date'] = merge_date
                                     cache_updated = True
                     else:
-                        # Old format or cache miss: Need to fetch from git
-                        # Convert commit time from UTC to Pacific time
-                        from zoneinfo import ZoneInfo
-                        commit_dt_pacific = commit.committed_datetime.astimezone(ZoneInfo('America/Los_Angeles'))
-                        date_str = commit_dt_pacific.strftime('%Y-%m-%d %H:%M:%S')
+                        # Cache miss: compute from git
+                        commit_dt_pt = commit.committed_datetime.astimezone(ZoneInfo('America/Los_Angeles'))
+                        date_str = commit_dt_pt.strftime('%Y-%m-%d %H:%M:%S')
                         author_name = commit.author.name
-                        message_first_line = commit.message.strip().split('\n')[0]
+                        message_first_line = commit.message.strip().split('\\n')[0]
 
-                        # Get merge_date from batch fetch if HTML mode
-                        if html_output:
-                            pr_number = GitLabAPIClient.parse_mr_number_from_message(message_first_line)
-                            if pr_number and pr_number in pr_to_merge_date:
-                                merge_date = pr_to_merge_date[pr_number]
-                                if merge_date:
-                                    self.logger.debug(f"Got merge date for PR {pr_number}: {merge_date}")
+                        pr_number = GitLabAPIClient.parse_mr_number_from_message(message_first_line)
+                        if pr_number and pr_number in pr_to_merge_date:
+                            merge_date = pr_to_merge_date[pr_number]
 
-                        # Check if we have old-format composite SHA cached
-                        if cached_entry and isinstance(cached_entry, str):
-                            meta_stats["legacy_hit"] += 1
-                            composite_sha = cached_entry
-                            self.logger.debug(f"Cache hit (old format) for {sha_short}: {composite_sha}")
-                            need_checkout = False
-                        else:
-                            meta_stats["miss"] += 1
-                            # Need to calculate composite SHA
-                            need_checkout = True
-                            try:
-                                repo.git.checkout(commit.hexsha)
-                                composite_sha = repo_utils.generate_composite_sha()
-                                self.logger.debug(f"Calculated {sha_short}: {composite_sha}")
-                            except Exception as e:
-                                composite_sha = "ERROR"
-                                self.logger.error(f"Failed to calculate composite SHA for {sha_short}: {e}")
+                        meta_stats["miss"] += 1
+                        try:
+                            repo.git.checkout(commit.hexsha)
+                            composite_sha = repo_utils.generate_composite_sha()
+                        except Exception as e:
+                            composite_sha = "ERROR"
+                            self.logger.error(f"Failed to calculate composite SHA for {sha_short}: {e}")
 
-                        if html_output:
-                            # Get commit stats (expensive operation)
-                            stats = commit.stats.total
-                            files_changed = stats['files']
-                            insertions = stats['insertions']
-                            deletions = stats['deletions']
+                        stats = commit.stats.total
+                        files_changed = stats['files']
+                        insertions = stats['insertions']
+                        deletions = stats['deletions']
+                        full_message = commit.message.strip()
+                        changed_files = list(commit.stats.files.keys())
 
-                            # Get full commit message
-                            full_message = commit.message.strip()
-
-                            # Get list of changed files
-                            changed_files = list(commit.stats.files.keys())
-
-                            # Update cache with full metadata (new format)
-                            cache[sha_full] = {
-                                'composite_docker_sha': composite_sha,
-                                'author': author_name,
-                                'date': date_str,
-                                'merge_date': merge_date,  # May be None if not found
-                                'message': message_first_line,
-                                'full_message': full_message,
-                                'stats': {
-                                    'files': files_changed,
-                                    'insertions': insertions,
-                                    'deletions': deletions
-                                },
-                                'changed_files': changed_files
-                            }
-                            cache_updated = True
-                        else:
-                            # Terminal mode: Only cache composite SHA if calculated
-                            if need_checkout:
-                                cache[sha_full] = composite_sha
-                                cache_updated = True
-
-                    if not html_output:
-                        # Terminal: show progress or final result
-                        author_str = author_name[:author_width-1]
-                        message_str = message_first_line[:message_width]
-                        if i == 0 or cached_entry:
-                            # First commit or cached: show immediately
-                            print(f"{sha_short:<{sha_width}} {composite_sha:<{composite_width}} {date_str:<{date_width}} {author_str:<{author_width}} {message_str}")
-                        else:
-                            # Calculating: show placeholder then overwrite
-                            print(f"\r{sha_short:<{sha_width}} {composite_sha:<{composite_width}} {date_str:<{date_width}} {author_str:<{author_width}} {message_str}")
-
-                    if html_output:
-                        # Collect data for HTML generation
-                        commit_data.append({
-                            'sha_short': sha_short,
-                            'sha_full': sha_full,
-                            'composite_sha': composite_sha,
-                            'date': date_str,
-                            'merge_date': merge_date,  # May be None if not found
-                            'committed_datetime': commit.committed_datetime,  # Store datetime object for time-based filtering
+                        cache[sha_full] = {
+                            'composite_docker_sha': composite_sha,
                             'author': author_name,
+                            'date': date_str,
+                            'merge_date': merge_date,
                             'message': message_first_line,
                             'full_message': full_message,
-                            'files_changed': files_changed,
-                            'insertions': insertions,
-                            'deletions': deletions,
-                            'changed_files': changed_files
-                        })
-                        self.logger.debug(f"Processed commit {i+1}/{len(commits)}: {sha_short}")
+                            'stats': {
+                                'files': files_changed,
+                                'insertions': insertions,
+                                'deletions': deletions,
+                            },
+                            'changed_files': changed_files,
+                        }
+                        cache_updated = True
 
-                    # Always keep a minimal per-SHA message map (used for exports)
+                    commit_data.append({
+                        'sha_short': sha_short,
+                        'sha_full': sha_full,
+                        'composite_sha': composite_sha,
+                        'date': date_str,
+                        'merge_date': merge_date,
+                        'committed_datetime': commit.committed_datetime,
+                        'author': author_name,
+                        'message': message_first_line,
+                        'full_message': full_message,
+                        'files_changed': files_changed,
+                        'insertions': insertions,
+                        'deletions': deletions,
+                        'changed_files': changed_files,
+                    })
+                    self.logger.debug(f"Processed commit {i+1}/{len(commits)}: {sha_short}")
+
                     sha_to_message_first_line[sha_full] = message_first_line
 
             finally:
@@ -510,8 +430,6 @@ class CommitHistoryGenerator:
                 if repo is not None and original_ref is not None:
                     try:
                         repo.git.checkout(original_ref)
-                        if not html_output:
-                            print(f"\nRestored HEAD to {original_ref}")
                     except Exception:
                         pass
 
@@ -560,14 +478,13 @@ class CommitHistoryGenerator:
                                     "commit_message": sha_to_message_first_line.get(sha, ""),
                                 }
                             )
-                    print(f"\nExported pipeline→PR mapping: {export_pipeline_pr_csv}")
                 except Exception as e:
                     self.logger.warning(f"Failed to export pipeline→PR CSV: {e}")
 
             phase_t.stop("process_commits", t0)
 
-            # Generate HTML if requested
-            if html_output:
+            # Generate HTML (HTML-only)
+            if True:
                 # Set default logs_dir if not provided
                 if logs_dir is None:
                     # For dynamo_latest, default to ../dynamo_ci/logs for build logs
@@ -621,17 +538,12 @@ class CommitHistoryGenerator:
                 t0 = phase_t.start()
                 atomic_write_text(output_path, html_content, encoding="utf-8")
                 phase_t.stop("write_output", t0)
-                print(f"\nHTML report generated: {output_path}")
-                if original_ref is not None:
-                    print(f"Restored HEAD to {original_ref}")
-
                 # Cache miss summary
                 if self.verbose or self.debug:
                     try:
                         self.logger.info(
-                            "Cache stats: commit_metadata full_hit=%s legacy_hit=%s miss=%s",
+                            "Cache stats: commit_metadata full_hit=%s miss=%s",
                             meta_stats.get("full_hit", 0),
-                            meta_stats.get("legacy_hit", 0),
                             meta_stats.get("miss", 0),
                         )
                         md = cache_stats.get("merge_dates_cache") or {}
@@ -688,7 +600,7 @@ class CommitHistoryGenerator:
 
             return 0
         except KeyboardInterrupt:
-            print("\n\nOperation interrupted by user")
+            self.logger.warning("Operation interrupted by user")
             # Try to restore HEAD
             try:
                 if repo is not None and original_ref is not None:
@@ -795,7 +707,8 @@ class CommitHistoryGenerator:
         # Raw-log policy:
         # - We cache raw log *content* on disk for later parsing.
         # - The dashboard links `[raw log]` to a *repo-local* stable file under:
-        #     <repo-path>/.cache/dynamo-utils/raw-log-text/<job_id>.log
+        # Raw logs are stored under the global cache dir (~/.cache/dynamo-utils/raw-log-text),
+        # and dashboards link to them under the page root via `raw-log-text/<job_id>.log`.
         #   (never to ephemeral GitHub signed URLs).
         # - We allow network fetch of missing raw logs for any SHA; `common.py` enforces:
         #   - only cache when job status is completed
@@ -869,16 +782,13 @@ class CommitHistoryGenerator:
                 else:
                     size_display = "N/A"
                 
-                # Format created timestamp (ISO 8601 to readable, convert to PDT)
+                # Format created timestamp (ISO 8601 to readable, convert to PT)
                 created_display = "N/A"
                 if created_at:
                     try:
                         # Parse UTC timestamp
                         dt = datetime.fromisoformat(created_at.replace('Z', '+00:00'))
-                        # Convert to PDT if pytz is available
-                        if HAS_PYTZ and pytz is not None:
-                            pdt = pytz.timezone('America/Los_Angeles')
-                            dt = dt.astimezone(pdt)
+                        dt = dt.astimezone(ZoneInfo('America/Los_Angeles'))
                         created_display = dt.strftime('%Y-%m-%d %H:%M')
                     except:
                         created_display = created_at[:16] if len(created_at) >= 16 else created_at
@@ -1095,15 +1005,8 @@ class CommitHistoryGenerator:
             # The status indicator reflects LOCAL builds only (.PASS/.FAIL/.RUNNING markers)
             # GitHub Actions and GitLab pipeline status are shown separately in their own columns
         
-        # Generate timestamp
-        if HAS_PYTZ:
-            if HAS_PYTZ and pytz is not None:
-                pdt = pytz.timezone('America/Los_Angeles')
-                generated_time = datetime.now(pdt).strftime('%Y-%m-%d %H:%M:%S %Z')
-            else:
-                generated_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        else:
-            generated_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        # Generate timestamp (PT)
+        generated_time = datetime.now(ZoneInfo('America/Los_Angeles')).strftime('%Y-%m-%d %H:%M:%S %Z')
         
         # Calculate GitHub Actions status counts (overall summary)
         gha_success_count = 0
@@ -1223,7 +1126,8 @@ class CommitHistoryGenerator:
                     default_expanded=True,
                     triangle_tooltip="GitHub checks",
                 )
-                return ("\n".join(render_tree_pre_lines([root])).rstrip() + "\n")
+                # Add a trailing blank line to visually separate the expanded block from the next row's SHA.
+                return ("\n".join(render_tree_pre_lines([root])).rstrip() + "\n\n")
             # Always allow raw-log fetch when missing (subject to `common.py` rules: only cache when
             # job status is completed; size caps; etc).
             allow_raw_logs = True
@@ -1253,7 +1157,7 @@ class CommitHistoryGenerator:
                 except Exception:
                     pass
 
-            children: List[TreeNodeVM] = []
+            node_items: List[Tuple[str, TreeNodeVM]] = []
             for cr in check_runs:
                 if not isinstance(cr, dict):
                     continue
@@ -1295,7 +1199,7 @@ class CommitHistoryGenerator:
                         raw_size = 0
                 snippet = snippet_for_raw_href(raw_href) if raw_href else ""
 
-                # Optional failures: keep the leaf status as "failure" (renders as ⚠),
+                # Optional failures: keep the leaf status as "failure",
                 # but do not treat it as a required failure for rollups.
                 required_failure = bool(is_req and st == "failure")
                 warning_present = False
@@ -1305,7 +1209,7 @@ class CommitHistoryGenerator:
                 job_id = f"{kind}: {name}" if kind and kind != "check" else name
 
                 # Shared subsections:
-                # - Build and Test - dynamo: phases (steps API first; raw log fallback)
+                # - Build and Test - dynamo: phases (a special-case subsection; steps API)
                 # - other long-running Actions jobs: long steps (>= 30s)
                 subsection_children: List[TreeNodeVM] = []
                 try:
@@ -1374,8 +1278,7 @@ class CommitHistoryGenerator:
                     subsection_children = []
 
                 leaf_name = disambiguate_check_run_name(name, url, name_counts=name_counts)
-                children.append(
-                    TreeNodeVM(
+                node = TreeNodeVM(
                         node_key=f"gha:{sha_full}:{leaf_name}:{extract_actions_job_id_from_url(url) or url}",
                         label_html=check_line_html(
                             job_id=job_id if leaf_name == name else f"{job_id} [{leaf_name}]",
@@ -1394,7 +1297,22 @@ class CommitHistoryGenerator:
                         collapsible=True,
                         default_expanded=_subtree_needs_attention(node=None, rollup_status=st, has_required_failure=required_failure),  # type: ignore[arg-type]
                     )
+                node_items.append((name, node))
+
+            # Second pass: best-effort grouping by workflow `jobs.*.needs` (YAML).
+            children: List[TreeNodeVM]
+            try:
+                from common_github_workflow import group_ci_nodes_by_workflow_needs  # local import
+
+                children = list(
+                    group_ci_nodes_by_workflow_needs(
+                        repo_root=Path(repo_path),
+                        items=[(nm, n) for (nm, n) in (node_items or [])],
+                    )
+                    or []
                 )
+            except Exception:
+                children = [n for (_nm, n) in (node_items or [])]
 
             root = TreeNodeVM(
                 node_key=f"gha-root:{sha_full}",
@@ -1408,683 +1326,8 @@ class CommitHistoryGenerator:
                 default_expanded=True,
                 triangle_tooltip="GitHub checks",
             )
-            return ("\n".join(render_tree_pre_lines([root])).rstrip() + "\n")
-
-            """Legacy YAML/workflow + run-class hierarchy code (removed).
-
-            This block used to parse workflow YAML (`jobs.*.needs`) and bucket checks by run-class.
-            The dashboards now render a flat list (matching the Details view) and do not depend on YAML.
-            
-                if job_id.startswith("check::"):
-                    rest = job_id.split("check::", 1)[1]
-                    rc_from_key, check_name = ("others", rest)
-                    try:
-                        if "::" in rest:
-                            rc_from_key, check_name = rest.split("::", 1)
-                    except Exception:
-                        rc_from_key, check_name = ("others", rest)
-                    rc_from_key = _normalize_run_class(rc_from_key)
-                    kind = classify_ci_kind(check_name)
-                    check_name_with_kind = f"{kind}: {check_name}" if kind and kind != "check" else check_name
-                    roll_status, has_req_fail, has_opt_fail = rollup_for_runs(runs)
-                    any_req = any(bool(cr.get("is_required", False)) for cr in runs)
-                    children: List[TreeNodeVM] = []
-                    # Promote representative duration/log link (so the group line isn't blank).
-                    rep_url = ""
-                    rep_dur = ""
-                    try:
-                        # Prefer a failing run for the parent link; otherwise longest duration.
-                        failures = [cr for cr in (runs or []) if _status_norm_for_check_run(status=str(cr.get("status", "") or ""), conclusion=str(cr.get("conclusion", "") or "")) == "failure"]
-                        rep_cr = failures[0] if failures else None
-                        if rep_cr is None:
-                            rep_cr = max((runs or []), key=lambda cr: _duration_str_to_seconds(format_gh_check_run_duration(cr)))
-                        if rep_cr:
-                            rep_url = str(rep_cr.get("html_url", "") or rep_cr.get("details_url", "") or "")
-                            rep_dur = format_gh_check_run_duration(rep_cr)
-                    except Exception:
-                        rep_url = ""
-                        rep_dur = ""
-                    # Collapse single-run buckets to avoid a redundant parent node.
-                    # Special-case: "Build and Test - dynamo" should still be a *single* node (like branches),
-                    # but with phase breakdown children (no redundant "parent -> identical child" nesting).
-                    if isinstance(runs, list) and len(runs) == 1 and isinstance(runs[0], dict) and str(check_name) == "Build and Test - dynamo":
-                        cr = runs[0]
-                        name = str(cr.get("name", "") or check_name)
-                        st = _status_norm_for_check_run(status=str(cr.get("status", "") or ""), conclusion=str(cr.get("conclusion", "") or ""))
-                        is_req = bool(cr.get("is_required", False))
-                        url = str(cr.get("html_url", "") or cr.get("details_url", "") or "")
-                        dur = format_gh_check_run_duration(cr)
-
-                        raw_href = ""
-                        if (
-                            st == "failure"
-                            and str(cr.get("status", "") or "").lower() == "completed"
-                        ):
-                            allow_fetch = bool(allow_raw_logs) and int(raw_log_prefetch_budget.get("n", 0) or 0) > 0
-                            try:
-                                raw_href = (
-                                    materialize_job_raw_log_text_local_link(
-                                        self.github_client,
-                                        job_url=url,
-                                        job_name=name,
-                                        owner="ai-dynamo",
-                                        repo="dynamo",
-                                        page_root_dir=Path(self.repo_path),
-                                        allow_fetch=bool(allow_fetch),
-                                        assume_completed=True,
-                                    )
-                                    or ""
-                                )
-                            except Exception:
-                                raw_href = ""
-                            if allow_fetch:
-                                raw_log_prefetch_budget["n"] = int(raw_log_prefetch_budget.get("n", 0) or 0) - 1
-                        raw_size = 0
-                        if raw_href:
-                            try:
-                                raw_size = int((Path(self.repo_path) / raw_href).stat().st_size)
-                            except Exception:
-                                raw_size = 0
-                        snippet = snippet_for_raw_href(raw_href) if raw_href else ""
-
-                        # Phase breakdown: prefer job steps API; fallback to raw log parse.
-                        phase_children: List[TreeNodeVM] = []
-                        try:
-                            phases3: List[Tuple[str, str, str]] = []
-                            if url and self.github_client:
-                                jid = extract_actions_job_id_from_url(url)
-                                if jid:
-                                    job = self.github_client.get_actions_job_details_cached(owner="ai-dynamo", repo="dynamo", job_id=jid, ttl_s=600) or {}
-                                    if isinstance(job, dict):
-                                        phases3 = build_and_test_dynamo_phases_from_actions_job(job) or []
-                            if not phases3 and raw_href:
-                                phases2 = parse_build_and_test_dynamo_phase_timings(raw_log_path=(Path(self.repo_path) / raw_href))
-                                phases3 = [(n, d, st) for (n, d) in phases2]
-                            for (ph_name, ph_dur, ph_status) in phases3:
-                                kind2 = classify_ci_kind(str(ph_name))
-                                ph_id = f"{kind2}: {ph_name}" if kind2 and kind2 != "check" else str(ph_name)
-                                phase_children.append(
-                                    TreeNodeVM(
-                                        node_key=f"gha-bt-phase:{sha_full}:{ph_name}",
-                                        label_html=check_line_html(
-                                            job_id=ph_id,
-                                            display_name="",
-                                            status_norm=str(ph_status or "unknown"),
-                                            is_required=is_req,
-                                            duration=str(ph_dur),
-                                            log_url="",
-                                        ),
-                                        children=[],
-                                        collapsible=True,
-                                        default_expanded=False,
-                                    )
-                                )
-                        except Exception:
-                            phase_children = []
-
-                        node = TreeNodeVM(
-                            node_key=f"gha-bt:{sha_full}:{check_name}",
-                            label_html=check_line_html(
-                                job_id=check_name_with_kind,
-                                display_name="",
-                                status_norm=st,
-                                is_required=is_req,
-                                duration=dur,
-                                log_url=url,
-                                raw_log_href=raw_href,
-                                raw_log_size_bytes=int(raw_size or 0),
-                                error_snippet_text=snippet,
-                                required_failure=bool(has_req_fail),
-                                warning_present=bool(has_opt_fail and st == "success"),
-                            ),
-                            children=phase_children,
-                            collapsible=True,
-                            default_expanded=_subtree_needs_attention(node=None, rollup_status=st, has_required_failure=bool(is_req and st == "failure")),  # type: ignore[arg-type]
-                        )
-                        memo[job_id] = node
-                        return node
-
-                    if isinstance(runs, list) and len(runs) == 1 and isinstance(runs[0], dict) and str(check_name) != "Build and Test - dynamo":
-                        cr = runs[0]
-                        name = str(cr.get("name", "") or check_name)
-                        st = _status_norm_for_check_run(status=str(cr.get("status", "") or ""), conclusion=str(cr.get("conclusion", "") or ""))
-                        is_req = bool(cr.get("is_required", False))
-                        url = str(cr.get("html_url", "") or cr.get("details_url", "") or "")
-                        dur = format_gh_check_run_duration(cr)
-                        raw_href = ""
-                        if (
-                            st == "failure"
-                            and str(cr.get("status", "") or "").lower() == "completed"
-                        ):
-                            allow_fetch = bool(allow_raw_logs) and int(raw_log_prefetch_budget.get("n", 0) or 0) > 0
-                            try:
-                                raw_href = (
-                                    materialize_job_raw_log_text_local_link(
-                                        self.github_client,
-                                        job_url=url,
-                                        job_name=name,
-                                        owner="ai-dynamo",
-                                        repo="dynamo",
-                                        page_root_dir=Path(self.repo_path),
-                                        allow_fetch=bool(allow_fetch),
-                                        assume_completed=True,
-                                    )
-                                    or ""
-                                )
-                            except Exception:
-                                raw_href = ""
-                            if allow_fetch:
-                                raw_log_prefetch_budget["n"] = int(raw_log_prefetch_budget.get("n", 0) or 0) - 1
-                        raw_size = 0
-                        if raw_href:
-                            try:
-                                raw_size = int((Path(self.repo_path) / raw_href).stat().st_size)
-                            except Exception:
-                                raw_size = 0
-                        snippet = snippet_for_raw_href(raw_href) if raw_href else ""
-
-                        node = TreeNodeVM(
-                            node_key=f"gha-leaf:{sha_full}:{check_name}",
-                            label_html=check_line_html(
-                                job_id=check_name_with_kind,
-                                display_name="",
-                                status_norm=st,
-                                is_required=is_req,
-                                duration=dur,
-                                log_url=url,
-                                raw_log_href=raw_href,
-                                raw_log_size_bytes=int(raw_size or 0),
-                                error_snippet_text=snippet,
-                                required_failure=bool(has_req_fail),
-                                warning_present=bool(has_opt_fail and st == "success"),
-                            ),
-                            children=[],
-                            collapsible=True,
-                            default_expanded=False,
-                        )
-                        memo[job_id] = node
-                        return node
-                    name_counts: Dict[str, int] = {}
-                    for _cr in runs:
-                        nm0 = str(_cr.get("name", "") or "")
-                        name_counts[nm0] = int(name_counts.get(nm0, 0) or 0) + 1
-
-                    for cr in sorted(runs, key=lambda x: str(x.get("name", "") or "")):
-                        name = str(cr.get("name", "") or "")
-                        st = _status_norm_for_check_run(status=str(cr.get("status", "") or ""), conclusion=str(cr.get("conclusion", "") or ""))
-                        is_req = bool(cr.get("is_required", False))
-                        url = str(cr.get("html_url", "") or cr.get("details_url", "") or "")
-                        leaf_name = disambiguate_check_run_name(name, url, name_counts=name_counts)
-                        dur = format_gh_check_run_duration(cr)
-                        raw_href = ""
-                        if (
-                            st == "failure"
-                            and str(cr.get("status", "") or "").lower() == "completed"
-                        ):
-                            # Materialize a stable local file under <repo-path>/logs/... and link to it.
-                            # Important: we still show `[raw log]` for older commits if the local file already exists.
-                            # `allow_raw_logs` only gates *network fetch*, not linking.
-                            allow_fetch = bool(allow_raw_logs) and int(raw_log_prefetch_budget.get("n", 0) or 0) > 0
-                            try:
-                                raw_href = (
-                                    materialize_job_raw_log_text_local_link(
-                                        self.github_client,
-                                        job_url=url,
-                                        job_name=name,
-                                        owner="ai-dynamo",
-                                        repo="dynamo",
-                                        page_root_dir=Path(self.repo_path),
-                                        allow_fetch=bool(allow_fetch),
-                                        assume_completed=True,
-                                    )
-                                    or ""
-                                )
-                            except Exception:
-                                raw_href = ""
-                            if allow_fetch:
-                                raw_log_prefetch_budget["n"] = int(raw_log_prefetch_budget.get("n", 0) or 0) - 1
-                        raw_size = 0
-                        if raw_href:
-                            try:
-                                raw_size = int((Path(self.repo_path) / raw_href).stat().st_size)
-                            except Exception:
-                                raw_size = 0
-                        snippet = snippet_for_raw_href(raw_href) if raw_href else ""
-
-                        # For Build-and-Test, attach phase breakdown under the run node.
-                        phase_children: List[TreeNodeVM] = []
-                        if str(check_name) == "Build and Test - dynamo":
-                            try:
-                                phases3: List[Tuple[str, str, str]] = []
-                                if url and self.github_client:
-                                    jid = extract_actions_job_id_from_url(url)
-                                    if jid:
-                                        job = self.github_client.get_actions_job_details_cached(owner="ai-dynamo", repo="dynamo", job_id=jid, ttl_s=600) or {}
-                                        if isinstance(job, dict):
-                                            phases3 = build_and_test_dynamo_phases_from_actions_job(job) or []
-                                if not phases3 and raw_href:
-                                    phases2 = parse_build_and_test_dynamo_phase_timings(raw_log_path=(Path(self.repo_path) / raw_href))
-                                    phases3 = [(n, d, st) for (n, d) in phases2]
-                                for (ph_name, ph_dur, ph_status) in phases3:
-                                    kind2 = classify_ci_kind(str(ph_name))
-                                    ph_id = f"{kind2}: {ph_name}" if kind2 and kind2 != "check" else str(ph_name)
-                                    phase_children.append(
-                                        TreeNodeVM(
-                                            node_key=f"gha-bt-phase:{sha_full}:{name}:{ph_name}",
-                                            label_html=check_line_html(
-                                                job_id=ph_id,
-                                                display_name="",
-                                                status_norm=str(ph_status or "unknown"),
-                                                is_required=is_req,
-                                                duration=str(ph_dur),
-                                                log_url="",
-                                            ),
-                                            children=[],
-                                            collapsible=True,
-                                            default_expanded=False,
-                                        )
-                                    )
-                            except Exception:
-                                phase_children = []
-
-                        kind_leaf = classify_ci_kind(name)
-                        leaf_job_id = f"{kind_leaf}: {leaf_name}" if kind_leaf and kind_leaf != "check" else leaf_name
-                        children.append(
-                            TreeNodeVM(
-                                node_key=f"gha:{sha_full}:{name}:{extract_actions_job_id_from_url(url) or url}",
-                                label_html=check_line_html(
-                                    job_id=leaf_job_id,
-                                    display_name="",
-                                    status_norm=st,
-                                    is_required=is_req,
-                                    duration=dur,
-                                    log_url=url,
-                                    raw_log_href=raw_href,
-                                    raw_log_size_bytes=int(raw_size or 0),
-                                    error_snippet_text=snippet,
-                                ),
-                                children=phase_children,
-                                collapsible=True,
-                                default_expanded=False,
-                            )
-                        )
-
-                    node = TreeNodeVM(
-                        node_key=f"gha-group:{sha_full}:{check_name}",
-                        label_html=check_line_html(
-                            job_id=check_name_with_kind,
-                            display_name="",
-                            status_norm=roll_status,
-                            is_required=any_req,
-                            duration=rep_dur,
-                            log_url=rep_url,
-                            required_failure=has_req_fail,
-                            warning_present=bool(has_opt_fail and roll_status == "success"),
-                        ),
-                        children=children,
-                        collapsible=True,
-                        default_expanded=_subtree_needs_attention(node=None, rollup_status=roll_status, has_required_failure=has_req_fail),  # type: ignore[arg-type]
-                    )
-                    memo[job_id] = node
-                    return node
-
-                # Workflow job node (may represent 1 run, many runs, or just be a parent for needs)
-                spec = specs.get(job_id)
-                wf_rc = ""
-                wf_job_id = ""
-                if str(job_id or "").startswith("wf::"):
-                    try:
-                        rest = str(job_id).split("wf::", 1)[1]
-                        parts = rest.split("::")
-                        # wf::<rc>::<run_id>::<job_id>
-                        wf_rc = parts[0] if len(parts) >= 1 else ""
-                        wf_job_id = parts[2] if len(parts) >= 3 else (parts[1] if len(parts) >= 2 else "")
-                    except Exception:
-                        wf_rc, wf_job_id = ("", "")
-
-                display = (getattr(spec, "display_name", "") if spec else "") or (wf_job_id or job_id)
-                label_job_id = wf_job_id or job_id
-                display_name0 = display if (display and display != label_job_id) else ""
-                try:
-                    ro = list(getattr(spec, "reads_outputs_from", ()) or []) if spec else []
-                except Exception:
-                    ro = []
-                if ro:
-                    suffix = " (reads outputs: " + ", ".join([str(x) for x in ro if str(x)]) + ")"
-                    display_name0 = (display_name0 or "") + suffix
-
-                any_req = any(bool(cr.get("is_required", False)) for cr in runs)
-
-                # If there is exactly one run for this workflow job, show duration + [log]
-                # directly on the job line (otherwise the job looks “linkless”).
-                single_run_log_url = ""
-                single_run_dur = ""
-                single_run_status = ""
-                single_run_is_req = False
-                phase_children_single: List[TreeNodeVM] = []
-                if len(runs) == 1:
-                    cr0 = runs[0]
-                    st0 = _status_norm_for_check_run(
-                        status=str(cr0.get("status", "") or ""),
-                        conclusion=str(cr0.get("conclusion", "") or ""),
-                    )
-                    url0 = str(cr0.get("html_url", "") or cr0.get("details_url", "") or "")
-                    single_run_status = st0
-                    single_run_is_req = bool(cr0.get("is_required", False))
-                    single_run_log_url = url0
-                    single_run_dur = format_gh_check_run_duration(cr0)
-                    single_run_raw_href = ""
-                    if (
-                        st0 == "failure"
-                        and str(cr0.get("status", "") or "").lower() == "completed"
-                    ):
-                        allow_fetch = bool(allow_raw_logs) and int(raw_log_prefetch_budget.get("n", 0) or 0) > 0
-                        try:
-                            single_run_raw_href = (
-                                materialize_job_raw_log_text_local_link(
-                                    self.github_client,
-                                    job_url=url0,
-                                job_name=str(cr0.get("name", "") or ""),
-                                    owner="ai-dynamo",
-                                    repo="dynamo",
-                                    page_root_dir=Path(self.repo_path),
-                                    allow_fetch=bool(allow_fetch),
-                                    assume_completed=True,
-                                )
-                                or ""
-                            )
-                        except Exception:
-                            single_run_raw_href = ""
-                        if allow_fetch:
-                            raw_log_prefetch_budget["n"] = int(raw_log_prefetch_budget.get("n", 0) or 0) - 1
-
-                    single_run_raw_size = 0
-                    if single_run_raw_href:
-                        try:
-                            single_run_raw_size = int((Path(self.repo_path) / single_run_raw_href).stat().st_size)
-                        except Exception:
-                            single_run_raw_size = 0
-                    single_run_snippet = snippet_for_raw_href(single_run_raw_href) if single_run_raw_href else ""
-
-                    # If this workflow job maps to "Build and Test - dynamo", attach phase breakdown
-                    # directly under the workflow node (since we promote the single run to the parent line).
-                    try:
-                        cr0_name = str(cr0.get("name", "") or "")
-                        # Special-case: the canonical workflow job id for this is "build-test".
-                        # Prefer the workflow id over display name heuristics.
-                        if str(wf_job_id or "") == "build-test" or cr0_name == "Build and Test - dynamo":
-                            phases3: List[Tuple[str, str, str]] = []
-                            try:
-                                jid = extract_actions_job_id_from_url(url0)
-                                if jid:
-                                    job = self.github_client.get_actions_job_details_cached(owner="ai-dynamo", repo="dynamo", job_id=jid, ttl_s=600) or {}
-                                    if isinstance(job, dict):
-                                        phases3 = build_and_test_dynamo_phases_from_actions_job(job) or []
-                            except Exception:
-                                phases3 = []
-                            if not phases3 and single_run_raw_href:
-                                try:
-                                    phases2 = parse_build_and_test_dynamo_phase_timings(raw_log_path=(Path(self.repo_path) / single_run_raw_href))
-                                    phases3 = [(n, d, st0) for (n, d) in phases2]
-                                except Exception:
-                                    phases3 = []
-                            for (ph_name, ph_dur, ph_status) in phases3:
-                                kind2 = classify_ci_kind(str(ph_name))
-                                ph_id = f"{kind2}: {ph_name}" if kind2 and kind2 != "check" else str(ph_name)
-                                phase_children_single.append(
-                                    TreeNodeVM(
-                                        node_key=f"gha-bt-phase:{sha_full}:{cr0_name}:{ph_name}",
-                                        label_html=check_line_html(
-                                            job_id=ph_id,
-                                            display_name="",
-                                            status_norm=str(ph_status or "unknown"),
-                                            is_required=bool(single_run_is_req),
-                                            duration=str(ph_dur),
-                                            log_url="",
-                                        ),
-                                        children=[],
-                                        collapsible=True,
-                                        default_expanded=False,
-                                    )
-                                )
-                    except Exception:
-                        phase_children_single = []
-
-                # Create children for mapped runs (if multiple, list them)
-                run_children: List[TreeNodeVM] = []
-                if len(runs) > 1:
-                    name_counts2: Dict[str, int] = {}
-                    for _cr in runs:
-                        nm0 = str(_cr.get("name", "") or "")
-                        name_counts2[nm0] = int(name_counts2.get(nm0, 0) or 0) + 1
-                    for cr in sorted(runs, key=lambda x: str(x.get("name", "") or "")):
-                        name = str(cr.get("name", "") or "")
-                        st = _status_norm_for_check_run(status=str(cr.get("status", "") or ""), conclusion=str(cr.get("conclusion", "") or ""))
-                        is_req = bool(cr.get("is_required", False))
-                        url = str(cr.get("html_url", "") or cr.get("details_url", "") or "")
-                        leaf_name = disambiguate_check_run_name(name, url, name_counts=name_counts2)
-                        dur = format_gh_check_run_duration(cr)
-                        raw_href = ""
-                        if (
-                            st == "failure"
-                            and str(cr.get("status", "") or "").lower() == "completed"
-                        ):
-                            allow_fetch = bool(allow_raw_logs) and int(raw_log_prefetch_budget.get("n", 0) or 0) > 0
-                            try:
-                                raw_href = (
-                                    materialize_job_raw_log_text_local_link(
-                                        self.github_client,
-                                        job_url=url,
-                                        job_name=name,
-                                        owner="ai-dynamo",
-                                        repo="dynamo",
-                                        page_root_dir=Path(self.repo_path),
-                                        allow_fetch=bool(allow_fetch),
-                                        assume_completed=True,
-                                    )
-                                    or ""
-                                )
-                            except Exception:
-                                raw_href = ""
-                            if allow_fetch:
-                                raw_log_prefetch_budget["n"] = int(raw_log_prefetch_budget.get("n", 0) or 0) - 1
-                        raw_size = 0
-                        if raw_href:
-                            try:
-                                raw_size = int((Path(self.repo_path) / raw_href).stat().st_size)
-                            except Exception:
-                                raw_size = 0
-                        snippet = snippet_for_raw_href(raw_href) if raw_href else ""
-                        run_children.append(
-                            TreeNodeVM(
-                                node_key=f"gha:{sha_full}:{name}:{extract_actions_job_id_from_url(url) or url}",
-                                label_html=check_line_html(
-                                    job_id=leaf_name,
-                                    display_name="",
-                                    status_norm=st,
-                                    is_required=is_req,
-                                    duration=dur,
-                                    log_url=url,
-                                    raw_log_href=raw_href,
-                                    raw_log_size_bytes=int(raw_size or 0),
-                                    error_snippet_text=snippet,
-                                ),
-                                children=[],
-                                collapsible=True,
-                                default_expanded=False,
-                            )
-                        )
-
-                # Needs children (workflow graph)
-                dep_children = [build_node(dep) for dep in needs_map.get(job_id, [])]
-
-                # Rollup from runs + deps
-                roll_status, has_req_fail, has_opt_fail = rollup_for_runs(runs) if runs else ("unknown", False, False)
-                dep_statuses = []
-                dep_req_fail = False
-                for d in dep_children:
-                    # Approx: infer from icon html; better: carry status in VM later.
-                    _ = d
-                # If no direct runs, treat rollup as unknown and let deps dominate by expansion policy.
-                # (We still want parents to show attention if deps need it.)
-
-                # Display internal phase breakdown (if any) before downstream workflow deps.
-                children = phase_children_single + run_children + dep_children
-                if children:
-                    # Derive rollup worst from children icons by re-walking check_runs where possible.
-                    # Simpler: if any required failure found in descendants, treat as required failure.
-                    # We'll use needs attention on default_expanded even if icon is neutral.
-                    if any("✗" in (c.label_html or "") for c in children):
-                        has_req_fail = True
-                        roll_status = "failure"
-                        has_opt_fail = False
-
-                node = TreeNodeVM(
-                    node_key=f"gha-job:{sha_full}:{job_id}",
-                    label_html=(
-                        check_line_html(
-                            job_id=str(label_job_id or ""),
-                            display_name=str(display_name0 or ""),
-                            status_norm=(single_run_status or roll_status),
-                            is_required=(single_run_is_req if len(runs) == 1 else any_req),
-                            duration=(single_run_dur if len(runs) == 1 else ""),
-                            log_url=(single_run_log_url if len(runs) == 1 else ""),
-                            raw_log_href=(single_run_raw_href if len(runs) == 1 else ""),
-                            raw_log_size_bytes=(int(single_run_raw_size or 0) if len(runs) == 1 else 0),
-                            error_snippet_text=(single_run_snippet if len(runs) == 1 else ""),
-                            required_failure=has_req_fail,
-                            warning_present=bool(has_opt_fail and roll_status == "success" and (single_run_status or roll_status) == "success"),
-                        )
-                    ),
-                    children=children,
-                    collapsible=True,
-                    default_expanded=_subtree_needs_attention(node=None, rollup_status=roll_status, has_required_failure=has_req_fail),  # type: ignore[arg-type]
-                    triangle_tooltip=None,
-                )
-                memo[job_id] = node
-                return node
-
-            # Build roots and group them by run_class (parent), matching the branches dashboard behavior.
-            roots_job_ids = list(workflow_roots) + list(synthetic_roots)
-            roots = [build_node(r) for r in roots_job_ids]
-
-            def _root_meta_for(job_id: str) -> tuple[str, str]:
-                # In commit-history we encode run-class into the synthetic root key:
-                #   check::<run_class>::<check_name>
-                if job_id.startswith("check::"):
-                    rest = job_id.split("check::", 1)[1]
-                    rc = "others"
-                    nm = rest
-                    try:
-                        if "::" in rest:
-                            rc, nm = rest.split("::", 1)
-                    except Exception:
-                        rc, nm = ("others", rest)
-                    rc = _normalize_run_class(rc)
-                    return rc, classify_ci_kind(nm)
-                if job_id.startswith("wf::"):
-                    rest = job_id.split("wf::", 1)[1]
-                    rc = "others"
-                    nm = rest
-                    try:
-                        parts = rest.split("::")
-                        if len(parts) >= 3:
-                            rc, nm = parts[0], parts[2]
-                        elif len(parts) >= 2:
-                            rc, nm = parts[0], parts[1]
-                    except Exception:
-                        rc, nm = ("others", rest)
-                    rc = _normalize_run_class(rc)
-                    return rc, classify_ci_kind(nm)
-                # Fallback: unknown/non-check nodes.
-                return "others", classify_ci_kind(str(job_id))
-
-            by_class: Dict[str, List[tuple[str, TreeNodeVM]]] = {}
-            for job_id, node in zip(roots_job_ids, roots):
-                rc, rk = _root_meta_for(job_id)
-                by_class.setdefault(rc, []).append((rk, node))
-
-            class_order = {"pre-merge": 0, "post-merge": 1, "push": 2, "manual": 3, "nightly": 4, "others": 8, "unknown": 9}
-            kind_order = {"build": 0, "test": 1, "lint": 2, "docs": 3, "deploy": 4, "check": 9}
-
-            forest: List[TreeNodeVM] = []
-            for rc, items in sorted(
-                by_class.items(),
-                key=lambda kv: (
-                    class_order.get((kv[0] or "others").strip(), 5),
-                    (kv[0] or "others"),
-                ),
-            ):
-                rc_eff = (rc or "").strip() or "unclassified"
-                if rc_eff in {"unknown", "other"}:
-                    rc_eff = "others"
-
-                # Sort roots within a run-class by kind, then stable key.
-                nodes_sorted = [
-                    n for (_rk, n) in sorted(
-                        items,
-                        key=lambda x: (
-                            kind_order.get((x[0] or "check").strip(), 5),
-                            str(getattr(x[1], "node_key", "") or ""),
-                        ),
-                    )
-                ]
-
-                # Inherit icon/required-fail/warning from underlying check runs for this run-class.
-                all_runs: List[dict] = []
-                try:
-                    for job_id in roots_job_ids:
-                        rck, _rkk = _root_meta_for(job_id)
-                        if str(rck) == str(rc):
-                            rs = grouped.get(job_id, []) or []
-                            if isinstance(rs, list):
-                                all_runs.extend([x for x in rs if isinstance(x, dict)])
-                except Exception:
-                    all_runs = []
-                roll_status, has_req_fail, has_opt_fail = rollup_for_runs(all_runs) if all_runs else ("unknown", False, False)
-
-                n = len(nodes_sorted)
-                label_html = (
-                    check_line_html(
-                        job_id=rc_eff,
-                        display_name="",
-                        status_norm=roll_status,
-                        is_required=False,
-                        duration="",
-                        log_url="",
-                        required_failure=bool(has_req_fail),
-                        warning_present=bool(has_opt_fail and roll_status == "success"),
-                    )
-                    + (f' <span style="color: #57606a; font-size: 12px;">({n})</span>' if n else "")
-                )
-                forest.append(
-                    TreeNodeVM(
-                        node_key=f"gha-class:{sha_full}:{rc_eff}",
-                        label_html=label_html,
-                        children=nodes_sorted,
-                        collapsible=True,
-                        # UX: expand run-class buckets by default so users immediately see post-merge (and siblings)
-                        # without extra clicks. Deeper workflow/job nodes remain collapsed unless explicitly expanded.
-                        default_expanded=True,
-                        triangle_tooltip="Run class",
-                    )
-                )
-            root = TreeNodeVM(
-                node_key=f"gha-root:{sha_full}",
-                label_html=(
-                    f'<span style="font-weight: 600;">GitHub checks</span> '
-                    f'<span style="color: #57606a; font-size: 12px;">(run-class from Actions API)</span> '
-                    f'<a href="https://github.com/ai-dynamo/dynamo/commit/{html.escape(sha_full)}/checks" '
-                    f'target="_blank" style="color: #0969da; font-size: 11px; text-decoration: none;">[checks]</a>'
-                ),
-                children=forest,
-                collapsible=True,
-                # UX: always expand the root so users immediately see the first-level workflow roots.
-                default_expanded=True,
-                triangle_tooltip="CI hierarchy (run-class from Actions API)",
-            )
-            return ("\n".join(render_tree_pre_lines([root])).rstrip() + "\n")
-            """
+            # Add a trailing blank line to visually separate the expanded block from the next row's SHA.
+            return ("\n".join(render_tree_pre_lines([root])).rstrip() + "\n\n")
 
         def _build_gitlab_checks_tree_html(*, sha_full: str, sha_short: str) -> str:
             nodes: List[TreeNodeVM] = []
@@ -2570,7 +1813,7 @@ class CommitHistoryGenerator:
     def _get_gitlab_pipeline_statuses(self, sha_full_list: List[str]) -> dict:
         """Get GitLab CI pipeline status for commits using the centralized cache.
 
-        Cache file format (.cache/gitlab_pipeline_status.json):
+        Cache file format (gitlab_pipeline_status.json; stored under ~/.cache/dynamo-utils via resolve_cache_path()):
             {
                 "<full_commit_sha>": {
                     "status": "failed",
@@ -2744,17 +1987,14 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Show last 50 commits in terminal
+  # Show last 50 commits (HTML-only)
   %(prog)s
 
-  # Show last 20 commits with verbose output
+  # Show last 20 commits with verbose output (HTML-only)
   %(prog)s --max-commits 20 --verbose
 
-  # Generate HTML report
-  %(prog)s --html
-
   # Use custom repository path
-  %(prog)s --repo-path /path/to/dynamo_ci --html
+  %(prog)s --repo-path /path/to/dynamo_ci
         """
     )
 
@@ -2782,12 +2022,6 @@ Examples:
         '--debug',
         action='store_true',
         help='Enable debug output (DEBUG level logging, shows all API calls)'
-    )
-
-    parser.add_argument(
-        '--html',
-        action='store_true',
-        help='Generate HTML output instead of terminal output'
     )
 
     parser.add_argument(
@@ -2835,11 +2069,11 @@ Examples:
 
     # Validate repository path
     if not args.repo_path.exists():
-        print(f"Error: Repository path does not exist: {args.repo_path}")
+        sys.stderr.write(f"Error: Repository path does not exist: {args.repo_path}\n")
         return 1
 
     if not (args.repo_path / '.git').exists():
-        print(f"Error: Not a git repository: {args.repo_path}")
+        sys.stderr.write(f"Error: Not a git repository: {args.repo_path}\n")
         return 1
 
     # Prune locally-served raw logs to avoid unbounded growth and delete any partial/unverified artifacts.
@@ -2863,7 +2097,6 @@ Examples:
         max_github_api_calls=int(args.max_github_api_calls),
     )
     # Fail fast if exhausted; detailed stats are rendered into the HTML Statistics section.
-    before = generator.github_client.get_core_rate_limit_info() or {}
     cache_only_reason = ""
     try:
         generator.github_client.check_core_rate_limit_or_raise()
@@ -2879,7 +2112,6 @@ Examples:
     try:
         rc = generator.show_commit_history(
         max_commits=args.max_commits,
-        html_output=args.html,
         output_path=args.output,
         logs_dir=args.logs_dir,
         export_pipeline_pr_csv=args.export_pipeline_pr_csv,

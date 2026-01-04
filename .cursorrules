@@ -467,13 +467,29 @@ Notes:
 - Follow PEP 8
 - Put imports at top of file (not inside functions)
 - Check indentation carefully (must be perfect)
+- **Indentation/continuation-indent MUST be mechanically verified after edits (don’t rely on eyeballing):**
+  - **Hard gate (catches IndentationError/SyntaxError immediately):**
+    - `python3 -tt -m py_compile <touched_py_files>`
+      - Example: `python3 -tt -m py_compile dynamo-utils/html_pages/common_dashboard_lib.py`
+    - If you touched many files/dirs: `python3 -m compileall -q <touched_dirs_or_files>`
+  - **Detect mixed tabs/spaces (optional but useful when “indent looks fine”):**
+    - `python3 -m tabnanny -v <touched_dirs_or_files>`
+    - **Escalation rule:** If you (the AI) keep introducing indentation errors (IndentationError, TabError, unexpected indent, mismatched continuation indent), start running `tabnanny` **more frequently**:
+      - Run `python3 -m tabnanny -v <touched_file_or_parent_dir>` after each meaningful edit chunk (or after each file edit) until the errors stop.
+      - Pair it with `python3 -tt -m py_compile <touched_py_files>` so you catch failures immediately.
+  - **Auto-fix formatting + indentation (preferred):**
+    - `ruff format <touched_paths>`
+  - **Lint (and auto-fix what it can):**
+    - `ruff check --fix <touched_paths>`
+  - If `.pre-commit-config.yaml` exists in the repo you’re working in, prefer:
+    - `pre-commit run --files <touched_files>` (or `pre-commit run --all-files` for broad changes)
 - Use dataclass for dicts with >4 elements (better type inference)
 - Use simple regex for multi-line string manipulations
 - snake_case for variables/functions
 - PascalCase for classes
 - Add type hints where beneficial
 - Use docstrings for functions/classes
-- Before commit: run mypy and precommit ruff
+- Before commit: run mypy and ruff (or pre-commit ruff, if configured)
 - 3+ print statements: use triple quotes """ ... """
 - Outside Docker: source ~/bin/$(uname).$(uname -m)/venv.3.*/bin/activate
 

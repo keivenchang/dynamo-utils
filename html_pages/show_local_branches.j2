@@ -1,7 +1,7 @@
 {% extends "common_dashboard.j2" %}
 {% set refresh_seconds = 300 %}
 
-{% block title %}Dynamo Branch Status{% endblock %}
+{% block title %}Local Branch Info{% endblock %}
 {% block favicon %}<link rel="icon" type="image/svg+xml" href="favicon.svg">{% endblock %}
 
 {% block css %}
@@ -13,7 +13,11 @@
       border: 1px solid #d0d7de;
       border-radius: 4px;
       padding: 12px;
-      overflow: auto;
+      /* Avoid nested scrollbars when expanding triangles; let the page scroll instead. */
+      overflow: visible;
+      /* Wrap long lines so we don't introduce horizontal scrollbars on expansion. */
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
       font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
       font-size: 13px;
       line-height: 1;
@@ -50,7 +54,7 @@
 
 {# Error snippet toggle JS is shared in common_dashboard.j2 #}
 
-{% block header_title %}Dynamo Branch Status{% endblock %}
+{% block header_title %}Local Branch Info{% endblock %}
 {% block header_subtitle %}
     <p class="timestamp">
       <span style="opacity: 0.92;">
@@ -79,7 +83,8 @@
           <ul style="margin: 4px 0; padding-left: 20px;">
             <li>{{ success_required_icon_html|safe }} - Passed (required)</li>
             <li>{{ success_icon_html|safe }} - Passed (optional)</li>
-            <li>{{ failure_required_icon_html|safe }} / {{ failure_optional_icon_html|safe }} - Failed (required / optional)</li>
+            <li>{{ failure_required_icon_html|safe }} - Failed (required)</li>
+            <li>{{ failure_optional_icon_html|safe }} - Failed (optional)</li>
             <li>{{ in_progress_icon_html|safe }} - In progress</li>
             <li>{{ pending_icon_html|safe }} - Pending</li>
             <li>{{ cancelled_icon_html|safe }} - Canceled</li>
@@ -89,7 +94,7 @@
             Notes:
             <ul style="margin: 4px 0; padding-left: 20px;">
               <li><strong>Skipped</strong> shows as a grey circle-slash.</li>
-              <li><strong>Optional failures</strong> show as ⚠ and do not force the top PASS/FAIL pill to FAIL.</li>
+              <li><strong>Optional failures</strong> show as a red ✗ (no circle) and do not force the top PASS/FAIL pill to FAIL.</li>
             </ul>
           </div>
         </div>

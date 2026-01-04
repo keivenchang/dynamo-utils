@@ -2,15 +2,15 @@
 
 This directory contains the **HTML dashboard generators** and shared dashboard UI utilities.
 
-- **Branches dashboard**: `show_dynamo_branches.py` → writes `index.html` under your “nvidia” workspace root
-- **Commit history dashboard**: `show_commit_history.py` → writes `index.html` under a Dynamo repo clone (e.g. `dynamo_latest/`)
-- **Resource report**: `resource_report.py` (generated from `resource_monitor.sqlite`)
+- **Branches dashboard**: `show_local_branches.py` → **HTML-only**; writes `index.html` under your “nvidia” workspace root
+- **Commit history dashboard**: `show_commit_history.py` → **HTML-only**; writes `index.html` under a Dynamo repo clone (e.g. `dynamo_latest/`)
+- **Resource report**: `show_local_resources.py` (generated from `resource_monitor.sqlite`)
 - **Cron wrapper**: `update_html_pages.sh` (runs the generators and updates outputs atomically)
 
 ### Prerequisites
 
 - **Python**: 3.10+
-- **Jinja2**: required for `--html` mode (`pip install jinja2`)
+- **Jinja2**: required (`pip install jinja2`)
 - **requests**: required for GitHub API usage (`pip install requests`)
 - **GitHub token** (recommended): use `~/.config/github-token` (or `~/.config/gh/hosts.yml`) to avoid anonymous rate limits.
 
@@ -24,7 +24,7 @@ These are **build artifacts**; don’t commit them unless you explicitly intend 
 
 ---
 
-## show_dynamo_branches.py (branches dashboard)
+## show_local_branches.py (branches dashboard)
 
 ### What it shows
 
@@ -79,7 +79,7 @@ where the time went:
 
 - **Preferred source**: GitHub Actions **job details** (`GET /repos/{owner}/{repo}/actions/jobs/{job_id}`),
   using the job’s `steps[]` to compute per-phase **duration** and **✓/✗**.
-- **Fallback**: parse the locally cached raw log text (best-effort timing extraction) if steps aren’t available.
+- If steps aren’t available, we simply omit the phase breakdown (no raw-log parsing fallback).
 
 ### Long-running job subsections (steps)
 
@@ -106,9 +106,8 @@ The script enforces a hard cap on GitHub REST calls:
 ### Example
 
 ```bash
-python3 html_pages/show_dynamo_branches.py \
+python3 html_pages/show_local_branches.py \
   --repo-path ~/nvidia \
-  --html \
   --output ~/nvidia/index.html \
   --max-github-api-calls 100
 ```
@@ -158,17 +157,15 @@ python3 html_pages/show_dynamo_branches.py \
 # HTML output (typical)
 python3 html_pages/show_commit_history.py \
   --repo-path ~/nvidia/dynamo_latest \
-  --max-commits 50 \
-  --html \
+  --max-commits 100 \
   --output ~/nvidia/dynamo_latest/index.html \
   --max-github-api-calls 100
 
 # Cache-only style run (skip GitLab network)
 python3 html_pages/show_commit_history.py \
   --repo-path ~/nvidia/dynamo_latest \
-  --max-commits 50 \
+  --max-commits 100 \
   --skip-gitlab-fetch \
-  --html \
   --output ~/nvidia/dynamo_latest/index.html
 ```
 
@@ -178,18 +175,23 @@ python3 html_pages/show_commit_history.py \
 
 This script runs one or more generators and writes outputs via atomic replacement.
 
+### Logs
+
+- `update_html_pages.sh` writes per-run logs under `~/nvidia/logs/YYYY-MM-DD/` (when run with `NVIDIA_HOME=~/nvidia`).
+- `dynamo-utils/cron_log.sh` captures stdout/stderr for a job into `~/nvidia/logs/YYYY-MM-DD/<job>.log`.
+
 ### Typical cron schedule
 
 ```cron
 # Dashboards:
 # - Full update every 30 minutes
-0,30 * * * * NVIDIA_HOME=$HOME/nvidia $HOME/nvidia/dynamo-utils/cron_log.sh update_html_pages_full $HOME/nvidia/dynamo-utils/html_pages/update_html_pages.sh --run-show-dynamo-branches --run-show-commit-history
+0,30 * * * * NVIDIA_HOME=$HOME/nvidia $HOME/nvidia/dynamo-utils/cron_log.sh update_html_pages_full $HOME/nvidia/dynamo-utils/html_pages/update_html_pages.sh --show-local-branches --show-commit-history
 
 # - Cache-heavy runs between full updates
-8-59/4 * * * * NVIDIA_HOME=$HOME/nvidia SKIP_GITLAB_FETCH=1 $HOME/nvidia/dynamo-utils/cron_log.sh update_html_pages_cached $HOME/nvidia/dynamo-utils/html_pages/update_html_pages.sh --run-show-dynamo-branches --run-show-commit-history
+8-59/4 * * * * NVIDIA_HOME=$HOME/nvidia SKIP_GITLAB_FETCH=1 $HOME/nvidia/dynamo-utils/cron_log.sh update_html_pages_cached $HOME/nvidia/dynamo-utils/html_pages/update_html_pages.sh --show-local-branches --show-commit-history
 
 # Resource report:
-* * * * * NVIDIA_HOME=$HOME/nvidia $HOME/nvidia/dynamo-utils/cron_log.sh resource_report $HOME/nvidia/dynamo-utils/html_pages/update_html_pages.sh --run-resource-report
+* * * * * NVIDIA_HOME=$HOME/nvidia $HOME/nvidia/dynamo-utils/cron_log.sh resource_report $HOME/nvidia/dynamo-utils/html_pages/update_html_pages.sh --show-local-resources
 ```
 
 ---
@@ -214,7 +216,7 @@ Key caches used by the dashboards:
 
 ### PRInfo “0 API” reuse for unchanged PRs
 
-For `show_dynamo_branches.py`, the biggest win is skipping per-PR enrichment when a PR hasn’t changed.
+For `show_local_branches.py`, the biggest win is skipping per-PR enrichment when a PR hasn’t changed.
 
 We do this by:
 

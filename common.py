@@ -2522,21 +2522,8 @@ class GitHubAPIClient:
         except Exception:
             return None
         if resp.status_code < 200 or resp.status_code >= 300:
-            # Do NOT clobber a previously-good disk cache entry with `None` when we are rate-limited,
-            # out of budget, or otherwise temporarily unable to fetch.
-            #
-            # Only negative-cache permanent misses (404). For other errors, keep a short-lived
-            # in-memory negative cache to avoid hot-looping, but don't persist it.
-            try:
-                self._actions_job_details_mem_cache[key] = {"ts": now, "val": None}
-            except Exception:
-                pass
-            try:
-                if int(resp.status_code) == 404 and isinstance(disk, dict):
-                    disk[key] = {"ts": now, "val": None}
-                    self._save_actions_job_disk_cache(disk)
-            except Exception:
-                pass
+            # Do NOT negative-cache failures (None). If the API temporarily fails (budget, rate limit,
+            # permission, etc), we want a later attempt to succeed without waiting for a negative TTL.
             return None
 
         try:
