@@ -2280,20 +2280,8 @@ def main():
     except Exception:
         pr_count = 0
 
-    page_stats: List[tuple[str, str]] = [
+    page_stats: List[tuple[str, Optional[str]]] = [
         ("Generation time", f"{elapsed_s:.2f}s"),
-        ("GitHub mode", "cache-only" if bool(getattr(scanner, "cache_only_github", False)) else "normal"),
-        ("GitHub mode reason", cache_only_reason if cache_only_reason else ""),
-        ("max_github_api_calls", str(int(args.max_github_api_calls))),
-        ("GitHub REST budget max", str(stats.get("budget_max")) if isinstance(stats, dict) and stats.get("budget_max") is not None else ""),
-        ("GitHub REST budget exhausted", "true" if bool((stats or {}).get("budget_exhausted")) else "false"),
-        ("GitHub REST calls", str(rest_calls)),
-        ("GitHub REST ok", str(rest_ok)),
-        ("GitHub REST errors", str(rest_err)),
-        ("GitHub REST errors by status", rest_err_by_status_s or "(none)"),
-        ("GitHub REST time", f"{float(stats.get('time_total_s') or 0.0):.2f}s"),
-        # "APIs left" (remaining quota). Best-effort; do not fail page generation.
-        ("GitHub core quota remaining", ""),
         ("Repos scanned", str(len(getattr(root, 'children', []) or []))),
         ("PRs shown", str(pr_count)),
     ]
@@ -2311,143 +2299,32 @@ def main():
             page_stats.append((k, v))
 
         def _sort_stats() -> None:
+            # Keep logical order for human scanning; only sort timing.* rows.
             try:
-                gen = [(k, v) for (k, v) in page_stats if k == "Generation time"]
-                timing = sorted([(k, v) for (k, v) in page_stats if str(k).startswith("timing.")], key=lambda kv: kv[0])
-                other = sorted([(k, v) for (k, v) in page_stats if k != "Generation time" and not str(k).startswith("timing.")], key=lambda kv: kv[0])
-                page_stats[:] = gen + other + timing
+                timing = sorted(
+                    [(k, v) for (k, v) in page_stats if str(k).startswith("timing.")],
+                    key=lambda kv: kv[0],
+                )
+                other = [(k, v) for (k, v) in page_stats if not str(k).startswith("timing.")]
+                page_stats[:] = other + timing
             except Exception:
                 pass
 
-        # Top endpoints by count/time (helps identify where API calls go).
+        # GitHub API stats (structured; rendered with <pre> blocks in Statistics).
         try:
-            by_label = stats.get("by_label") if isinstance(stats, dict) else None
-            if isinstance(by_label, dict) and by_label:
-                top = list(by_label.items())[:10]
-                page_stats.append(("GitHub REST top (10)", ", ".join([f"{k}={int(v)}" for k, v in top])))
-                # Full category counts (capped) for debugging "why so many API calls?"
-                cap = 30
-                items = list(by_label.items())
-                shown = items[:cap]
-                more = max(0, len(items) - len(shown))
-                s = ", ".join([f"{k}={int(v)}" for k, v in shown])
-                if more:
-                    s = s + f", (+{more} more)"
-                _upsert_stat("GitHub REST by category (count)", s)
-        except Exception:
-            pass
-        try:
-            by_time = stats.get("time_by_label_s") if isinstance(stats, dict) else None
-            if isinstance(by_time, dict) and by_time:
-                top = list(by_time.items())[:10]
-                page_stats.append(("GitHub REST time top (10)", ", ".join([f"{k}={float(v):.2f}s" for k, v in top])))
-                cap = 30
-                items = list(by_time.items())
-                shown = items[:cap]
-                more = max(0, len(items) - len(shown))
-                s = ", ".join([f"{k}={float(v):.2f}s" for k, v in shown])
-                if more:
-                    s = s + f", (+{more} more)"
-                _upsert_stat("GitHub REST by category (time)", s)
-        except Exception:
-            pass
+            from common_dashboard_lib import github_api_stats_rows  # local import
 
-        # Show last REST error (e.g. 403 token policy) to make missing PR/snippet causes obvious.
-        try:
-            es = scanner.github_api.get_rest_error_stats() if scanner.github_api else {}
-            last = (es or {}).get("last") or {}
-            last_label = (es or {}).get("last_label") or ""
-            if isinstance(last, dict) and last.get("status"):
-                code = last.get("status")
-                body = str(last.get("body") or "").strip()
-                if len(body) > 160:
-                    body = body[:160].rstrip() + "…"
-                page_stats.append(("GitHub REST last error", f"{code}: {body}" if body else str(code)))
-                if last_label:
-                    page_stats.append(("GitHub REST last error label", str(last_label)))
-                # Surface the URL so we can see which repo/query triggered the error (especially for search/issues 422).
-                try:
-                    url = str(last.get("url") or "").strip()
-                    if url:
-                        page_stats.append(("GitHub REST last error url", url))
-                        if str(last_label) == "search_issues" and int(code or 0) == 422:
-                            q = ""
-                            try:
-                                q = (urllib.parse.parse_qs(urllib.parse.urlparse(url).query).get("q") or [""])[0]
-                            except Exception:
-                                q = ""
-                            if q:
-                                repos = sorted(set(re.findall(r"\brepo:([^\s]+)", q)))
-                                orgs = sorted(set(re.findall(r"\borg:([^\s]+)", q)))
-                                users = sorted(set(re.findall(r"\buser:([^\s]+)", q)))
-                                if repos:
-                                    page_stats.append(("GitHub search/issues repo qualifiers", ", ".join(repos)))
-                                if orgs:
-                                    page_stats.append(("GitHub search/issues org qualifiers", ", ".join(orgs)))
-                                if users:
-                                    page_stats.append(("GitHub search/issues user qualifiers", ", ".join(users)))
-                except Exception:
-                    pass
+            mode = "cache-only" if bool(getattr(scanner, "cache_only_github", False)) else "normal"
+            api_rows = github_api_stats_rows(
+                github_api=scanner.github_api,
+                max_github_api_calls=int(args.max_github_api_calls),
+                mode=mode,
+                mode_reason=cache_only_reason or "",
+                top_n=15,
+            )
+            page_stats.extend(list(api_rows or []))
         except Exception:
             pass
-
-        # REST errors by category+status (pinpoint which API(s) are producing 4xx/5xx).
-        try:
-            es = scanner.github_api.get_rest_error_stats() if scanner.github_api else {}
-            bls = (es or {}).get("by_label_status") if isinstance(es, dict) else None
-            if isinstance(bls, dict) and bls:
-                parts = []
-                for lbl, m in bls.items():
-                    if not isinstance(m, dict) or not m:
-                        continue
-                    inner = ",".join([f"{int(code)}={int(cnt)}" for code, cnt in m.items()])
-                    parts.append(f"{lbl}:{{{inner}}}")
-                if parts:
-                    page_stats.append(("GitHub REST errors by category+status", "; ".join(parts)))
-        except Exception:
-            pass
-
-        # Cache hit/miss stats (so we can tell when we’re reusing cached results vs refetching).
-        try:
-            cs = scanner.github_api.get_cache_stats() if scanner.github_api else {}
-            if isinstance(cs, dict):
-                page_stats.append(("GitHub cache hits", str(int(cs.get("hits_total", 0) or 0))))
-                page_stats.append(("GitHub cache misses", str(int(cs.get("misses_total", 0) or 0))))
-                page_stats.append(("GitHub cache writes (ops)", str(int(cs.get("writes_ops_total", 0) or 0))))
-                page_stats.append(("GitHub cache writes (entries)", str(int(cs.get("writes_entries_total", 0) or 0))))
-                hits_by = cs.get("hits_by") or {}
-                if isinstance(hits_by, dict) and hits_by:
-                    page_stats.append(("GitHub cache hits (by cache)", ", ".join([f"{k}={int(v)}" for k, v in hits_by.items()])))
-                misses_by = cs.get("misses_by") or {}
-                if isinstance(misses_by, dict) and misses_by:
-                    page_stats.append(("GitHub cache misses (by cache)", ", ".join([f"{k}={int(v)}" for k, v in misses_by.items()])))
-                wops_by = cs.get("writes_ops_by") or {}
-                if isinstance(wops_by, dict) and wops_by:
-                    page_stats.append(("GitHub cache writes (ops, by cache)", ", ".join([f"{k}={int(v)}" for k, v in wops_by.items()])))
-                went_by = cs.get("writes_entries_by") or {}
-                if isinstance(went_by, dict) and went_by:
-                    page_stats.append(("GitHub cache writes (entries, by cache)", ", ".join([f"{k}={int(v)}" for k, v in went_by.items()])))
-        except Exception:
-            pass
-
-        # Fill in GitHub quota (remaining/limit + reset time) if available.
-        try:
-            rl = scanner.github_api.get_core_rate_limit_info() if scanner.github_api else None
-            if rl:
-                rem = rl.get("remaining")
-                lim = rl.get("limit")
-                reset_pt = rl.get("reset_pt")
-                if rem is not None and lim is not None:
-                    _upsert_stat("GitHub core quota remaining", f"{rem}/{lim}")
-                elif rem is not None:
-                    _upsert_stat("GitHub core quota remaining", str(rem))
-                else:
-                    _upsert_stat("GitHub core quota remaining", "(unknown)")
-                if reset_pt:
-                    page_stats.append(("GitHub core quota resets", str(reset_pt)))
-        except Exception:
-            # Keep the row but avoid breaking HTML generation.
-            _upsert_stat("GitHub core quota remaining", "(unknown)")
 
         # Include relevant knobs if set (helps explain “why so many API calls?”).
         if args.max_branches is not None:

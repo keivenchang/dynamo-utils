@@ -19,7 +19,7 @@ import html
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 from datetime import datetime, timezone
 
 from common import GitHubAPIClient, classify_ci_kind
@@ -841,6 +841,187 @@ def _small_link_html(*, url: str, label: str) -> str:
 
 from common_log_errors import render_error_snippet_html as _format_snippet_html  # shared implementation
 from common_log_errors import categorize_error_snippet_text as _snippet_categories
+
+
+def github_api_stats_rows(
+    *,
+    github_api: Optional["GitHubAPIClient"],
+    max_github_api_calls: Optional[int] = None,
+    mode: str = "",
+    mode_reason: str = "",
+    extra_cache_stats: Optional[Dict[str, Any]] = None,
+    top_n: int = 15,
+) -> List[Tuple[str, Optional[str]]]:
+    """Build human-readable GitHub API statistics rows for the footer.
+
+    Returns rows suitable for `page_stats`, including section headers ("## ...") and multiline values.
+    """
+    rows: List[Tuple[str, Optional[str]]] = []
+    if github_api is None:
+        return rows
+
+    def _fmt_kv(d: Dict[str, Any]) -> str:
+        parts = []
+        for k, v in d.items():
+            if v is None or v == "":
+                continue
+            parts.append(f"{k}: {v}")
+        return "\n".join(parts)
+
+    def _fmt_top_counts_and_time(
+        *,
+        by_label: Dict[str, int],
+        time_by_label_s: Dict[str, float],
+        n: int,
+    ) -> str:
+        labels = sorted(set(list(by_label.keys()) + list(time_by_label_s.keys())))
+        if not labels:
+            return "(none)"
+        # Sort by count desc then time desc.
+        labels.sort(key=lambda k: (-int(by_label.get(k, 0) or 0), -float(time_by_label_s.get(k, 0.0) or 0.0), k))
+        labels = labels[: max(0, int(n))]
+        w = max(10, max(len(x) for x in labels))
+        out_lines = [f"{'category':<{w}}  calls   time"]
+        for k in labels:
+            c = int(by_label.get(k, 0) or 0)
+            t = float(time_by_label_s.get(k, 0.0) or 0.0)
+            out_lines.append(f"{k:<{w}}  {c:>5d}  {t:>6.2f}s")
+        return "\n".join(out_lines)
+
+    def _fmt_error_by_label_status(bls: Dict[str, Dict[int, int]], *, n: int) -> str:
+        if not bls:
+            return "(none)"
+        items: List[Tuple[str, str, int]] = []
+        for lbl, m in bls.items():
+            if not isinstance(m, dict) or not m:
+                continue
+            total = int(sum(int(v or 0) for v in m.values()))
+            inner = ", ".join([f"{int(code)}={int(cnt)}" for code, cnt in m.items()])
+            items.append((str(lbl), inner, total))
+        items.sort(key=lambda t: (-int(t[2]), t[0]))
+        out = []
+        for (lbl, inner, _tot) in items[: max(0, int(n))]:
+            out.append(f"{lbl}: {inner}")
+        more = max(0, len(items) - len(out))
+        if more:
+            out.append(f"(+{more} more)")
+        return "\n".join(out) if out else "(none)"
+
+    # Pull stats (best-effort).
+    rest = github_api.get_rest_call_stats() or {}
+    errs = github_api.get_rest_error_stats() or {}
+    cache = github_api.get_cache_stats() or {}
+
+    by_label = dict(rest.get("by_label") or {}) if isinstance(rest, dict) else {}
+    time_by_label_s = dict(rest.get("time_by_label_s") or {}) if isinstance(rest, dict) else {}
+
+    # Budget + mode
+    budget: Dict[str, Any] = {}
+    if mode:
+        budget["mode"] = mode
+    if mode_reason:
+        budget["reason"] = mode_reason
+    if max_github_api_calls is not None:
+        budget["max_github_api_calls"] = int(max_github_api_calls)
+    if isinstance(rest, dict):
+        if rest.get("budget_max") is not None:
+            budget["budget_max"] = rest.get("budget_max")
+        budget["budget_exhausted"] = "true" if bool(rest.get("budget_exhausted")) else "false"
+    try:
+        rl = github_api.get_core_rate_limit_info() or {}
+        rem = rl.get("remaining")
+        lim = rl.get("limit")
+        reset_pt = rl.get("reset_pt")
+        if rem is not None and lim is not None:
+            budget["core_remaining"] = f"{rem}/{lim}"
+        elif rem is not None:
+            budget["core_remaining"] = str(rem)
+        if reset_pt:
+            budget["core_resets"] = str(reset_pt)
+    except Exception:
+        pass
+
+    rows.append(("## GitHub API", None))
+    rows.append(("Budget & mode", _fmt_kv(budget) or "(none)"))
+
+    # REST summary
+    try:
+        rest_summary = {
+            "calls": int(rest.get("total") or 0),
+            "ok": int(rest.get("success_total") or 0),
+            "errors": int(rest.get("error_total") or 0),
+            "time_total": f"{float(rest.get('time_total_s') or 0.0):.2f}s",
+        }
+    except Exception:
+        rest_summary = {"calls": 0, "ok": 0, "errors": 0, "time_total": "0.00s"}
+    rows.append(("REST summary", _fmt_kv(rest_summary)))
+
+    rows.append(
+        (
+            f"REST by category (top {int(top_n)})",
+            _fmt_top_counts_and_time(by_label=by_label, time_by_label_s=time_by_label_s, n=int(top_n)),
+        )
+    )
+
+    # Errors
+    by_status = (errs or {}).get("by_status") if isinstance(errs, dict) else {}
+    if isinstance(by_status, dict) and by_status:
+        items = list(by_status.items())[:8]
+        rows.append(("REST errors by status", ", ".join([f"{k}={v}" for k, v in items])))
+    else:
+        rows.append(("REST errors by status", "(none)"))
+
+    bls = (errs or {}).get("by_label_status") if isinstance(errs, dict) else {}
+    rows.append(("REST errors by category+status", _fmt_error_by_label_status(bls if isinstance(bls, dict) else {}, n=int(top_n))))
+
+    try:
+        last = (errs or {}).get("last") if isinstance(errs, dict) else None
+        last_label = (errs or {}).get("last_label") if isinstance(errs, dict) else ""
+        if isinstance(last, dict) and last.get("status"):
+            code = last.get("status")
+            body = str(last.get("body") or "").strip()
+            if len(body) > 160:
+                body = body[:160].rstrip() + "…"
+            url = str(last.get("url") or "").strip()
+            s = f"{code}: {body}" if body else str(code)
+            if last_label:
+                s += f"\nlabel: {last_label}"
+            if url:
+                s += f"\nurl: {url}"
+            rows.append(("Last REST error", s))
+    except Exception:
+        pass
+
+    # Cache summary (keep small; details are already available in README if needed)
+    try:
+        cache_summary = {
+            "hits": int(cache.get("hits_total") or 0),
+            "misses": int(cache.get("misses_total") or 0),
+            "writes_ops": int(cache.get("writes_ops_total") or 0),
+            "writes_entries": int(cache.get("writes_entries_total") or 0),
+        }
+    except Exception:
+        cache_summary = {"hits": 0, "misses": 0, "writes_ops": 0, "writes_entries": 0}
+    rows.append(("Cache summary", _fmt_kv(cache_summary)))
+
+    # Include the commit-history-only github_actions_status_cache (if provided).
+    if isinstance(extra_cache_stats, dict) and extra_cache_stats:
+        try:
+            gha = extra_cache_stats.get("github_actions_status_cache") or {}
+            if isinstance(gha, dict) and gha:
+                d = {
+                    "total_shas": int(gha.get("total_shas", 0) or 0),
+                    "fetched_shas": int(gha.get("fetched_shas", 0) or 0),
+                    "hit_fresh": int(gha.get("cache_hit_fresh", 0) or 0),
+                    "stale_refresh": int(gha.get("cache_stale_refresh", 0) or 0),
+                    "miss_fetch": int(gha.get("cache_miss_fetch", 0) or 0),
+                    "miss_no_fetch": int(gha.get("cache_miss_no_fetch", 0) or 0),
+                }
+                rows.append(("Actions-status cache (this run)", _fmt_kv(d)))
+        except Exception:
+            pass
+
+    return rows
 
 
 def _tag_pill_html(*, text: str, monospace: bool = False, kind: str = "category") -> str:

@@ -1495,181 +1495,25 @@ class CommitHistoryGenerator:
             except Exception:
                 elapsed_s = None
 
-        rest_calls = 0
-        by_label: Dict[str, int] = {}
-        rest_ok = 0
-        rest_err = 0
-        rest_err_by_status_s = ""
-        try:
-            s = self.github_client.get_rest_call_stats() or {}
-            rest_calls = int(s.get("total") or 0)
-            by_label = dict(s.get("by_label") or {})
-            rest_ok = int(s.get("success_total") or 0)
-            rest_err = int(s.get("error_total") or 0)
-        except Exception:
-            rest_calls = 0
-            by_label = {}
-            rest_ok = 0
-            rest_err = 0
-
-        try:
-            es = self.github_client.get_rest_error_stats() or {}
-            by_status = es.get("by_status") if isinstance(es, dict) else {}
-            if isinstance(by_status, dict) and by_status:
-                items = list(by_status.items())[:8]
-                rest_err_by_status_s = ", ".join([f"{k}={v}" for k, v in items])
-        except Exception:
-            rest_err_by_status_s = ""
-
-        page_stats: List[tuple[str, str]] = []
+        page_stats: List[tuple[str, Optional[str]]] = []
         if elapsed_s is not None:
             page_stats.append(("Generation time", f"{elapsed_s:.2f}s"))
             # Keep a consistent "timing.total" row for dashboards.
             page_stats.append(("timing.total", f"{elapsed_s:.2f}s"))
-        page_stats.append(("GitHub REST calls", str(rest_calls)))
-        page_stats.append(("GitHub REST ok", str(rest_ok)))
-        page_stats.append(("GitHub REST errors", str(rest_err)))
-        page_stats.append(("GitHub REST errors by status", rest_err_by_status_s or "(none)"))
-        page_stats.append(("GitHub mode", "cache-only" if bool(getattr(self.github_client, "cache_only_mode", False)) else "normal"))
-        # Budget (best-effort).
+        # GitHub API stats (structured; rendered with <pre> blocks in Statistics).
         try:
-            budget_max = s.get("budget_max") if isinstance(s, dict) else None
-            budget_exh = bool((s or {}).get("budget_exhausted")) if isinstance(s, dict) else False
-            if budget_max is not None:
-                page_stats.append(("GitHub REST budget max", str(budget_max)))
-            page_stats.append(("GitHub REST budget exhausted", "true" if budget_exh else "false"))
-        except Exception:
-            pass
-        # GitHub REST timing (best-effort).
-        try:
-            rest_time_s = float(s.get("time_total_s") or 0.0) if isinstance(s, dict) else 0.0
-            page_stats.append(("GitHub REST time", f"{rest_time_s:.2f}s"))
-            tbl = (s.get("time_by_label_s") or {}) if isinstance(s, dict) else {}
-            if isinstance(tbl, dict) and tbl:
-                top = list(tbl.items())[:5]
-                top_str = ", ".join([f"{k}={float(v):.2f}s" for k, v in top])
-                page_stats.append(("GitHub REST time top (5)", top_str))
-                cap = 30
-                items = list(tbl.items())
-                shown = items[:cap]
-                more = max(0, len(items) - len(shown))
-                s2 = ", ".join([f"{k}={float(v):.2f}s" for k, v in shown])
-                if more:
-                    s2 = s2 + f", (+{more} more)"
-                page_stats.append(("GitHub REST by category (time)", s2))
-        except Exception:
-            pass
-        # GitHub REST top endpoints by count (best-effort).
-        try:
-            if isinstance(by_label, dict) and by_label:
-                top = list(by_label.items())[:10]
-                top_str = ", ".join([f"{k}={int(v)}" for k, v in top])
-                page_stats.append(("GitHub REST top (10)", top_str))
-                cap = 30
-                items = list(by_label.items())
-                shown = items[:cap]
-                more = max(0, len(items) - len(shown))
-                s2 = ", ".join([f"{k}={int(v)}" for k, v in shown])
-                if more:
-                    s2 = s2 + f", (+{more} more)"
-                page_stats.append(("GitHub REST by category (count)", s2))
-        except Exception:
-            pass
-        # Show "APIs left" (remaining quota). Best-effort; do not fail page generation.
-        try:
-            rl = self.github_client.get_core_rate_limit_info() or {}
-            rem = rl.get("remaining")
-            lim = rl.get("limit")
-            reset_pt = rl.get("reset_pt")
-            if rem is not None and lim is not None:
-                page_stats.append(("GitHub core quota remaining", f"{rem}/{lim}"))
-            elif rem is not None:
-                page_stats.append(("GitHub core quota remaining", str(rem)))
-            if reset_pt:
-                page_stats.append(("GitHub core quota resets", str(reset_pt)))
-        except Exception:
-            pass
+            from common_dashboard_lib import github_api_stats_rows  # local import
 
-        # Show last REST error (e.g. 403 token policy) to make missing PR/snippet causes obvious.
-        try:
-            es = self.github_client.get_rest_error_stats() or {}
-            last = es.get("last") or {}
-            last_label = es.get("last_label") if isinstance(es, dict) else ""
-            if isinstance(last, dict) and last.get("status"):
-                code = last.get("status")
-                body = str(last.get("body") or "").strip()
-                if len(body) > 160:
-                    body = body[:160].rstrip() + "…"
-                page_stats.append(("GitHub REST last error", f"{code}: {body}" if body else str(code)))
-                if last_label:
-                    page_stats.append(("GitHub REST last error label", str(last_label)))
-                # Include URL so we can see the failing query (useful for search/issues 422).
-                try:
-                    url = str(last.get("url") or "").strip()
-                    if url:
-                        page_stats.append(("GitHub REST last error url", url))
-                except Exception:
-                    pass
-        except Exception:
-            pass
-
-        # REST errors by category+status (pinpoint which API(s) are producing 4xx/5xx).
-        try:
-            es = self.github_client.get_rest_error_stats() or {}
-            bls = es.get("by_label_status") if isinstance(es, dict) else None
-            if isinstance(bls, dict) and bls:
-                parts = []
-                for lbl, m in bls.items():
-                    if not isinstance(m, dict) or not m:
-                        continue
-                    inner = ",".join([f"{int(code)}={int(cnt)}" for code, cnt in m.items()])
-                    parts.append(f"{lbl}:{{{inner}}}")
-                if parts:
-                    page_stats.append(("GitHub REST errors by category+status", "; ".join(parts)))
-        except Exception:
-            pass
-
-        # Cache hit/miss stats
-        try:
-            cs = self.github_client.get_cache_stats() if self.github_client else {}
-            if isinstance(cs, dict):
-                page_stats.append(("GitHub cache hits", str(int(cs.get("hits_total", 0) or 0))))
-                page_stats.append(("GitHub cache misses", str(int(cs.get("misses_total", 0) or 0))))
-                page_stats.append(("GitHub cache writes (ops)", str(int(cs.get("writes_ops_total", 0) or 0))))
-                page_stats.append(("GitHub cache writes (entries)", str(int(cs.get("writes_entries_total", 0) or 0))))
-                hits_by = cs.get("hits_by") or {}
-                if isinstance(hits_by, dict) and hits_by:
-                    page_stats.append(("GitHub cache hits (by cache)", ", ".join([f"{k}={int(v)}" for k, v in hits_by.items()])))
-                misses_by = cs.get("misses_by") or {}
-                if isinstance(misses_by, dict) and misses_by:
-                    page_stats.append(("GitHub cache misses (by cache)", ", ".join([f"{k}={int(v)}" for k, v in misses_by.items()])))
-                wops_by = cs.get("writes_ops_by") or {}
-                if isinstance(wops_by, dict) and wops_by:
-                    page_stats.append(("GitHub cache writes (ops, by cache)", ", ".join([f"{k}={int(v)}" for k, v in wops_by.items()])))
-                went_by = cs.get("writes_entries_by") or {}
-                if isinstance(went_by, dict) and went_by:
-                    page_stats.append(("GitHub cache writes (entries, by cache)", ", ".join([f"{k}={int(v)}" for k, v in went_by.items()])))
-        except Exception:
-            pass
-
-        # Show the commit-history-specific cache stats (this is the main “warmth” signal).
-        # NOTE: this is separate from GitHubAPIClient hit/miss counters.
-        try:
-            gha = (cache_stats or {}).get("github_actions_status_cache") if isinstance(cache_stats, dict) else None
-            if isinstance(gha, dict) and gha:
-                page_stats.append(
-                    (
-                        "GitHub actions status cache (this run)",
-                        "total_shas={total} fetched_shas={fetched} hit_fresh={hit_fresh} stale_refresh={stale_refresh} miss_fetch={miss_fetch} miss_no_fetch={miss_no_fetch}".format(
-                            total=int(gha.get("total_shas", 0) or 0),
-                            fetched=int(gha.get("fetched_shas", 0) or 0),
-                            hit_fresh=int(gha.get("cache_hit_fresh", 0) or 0),
-                            stale_refresh=int(gha.get("cache_stale_refresh", 0) or 0),
-                            miss_fetch=int(gha.get("cache_miss_fetch", 0) or 0),
-                            miss_no_fetch=int(gha.get("cache_miss_no_fetch", 0) or 0),
-                        ),
-                    )
-                )
+            mode = "cache-only" if bool(getattr(self.github_client, "cache_only_mode", False)) else "normal"
+            api_rows = github_api_stats_rows(
+                github_api=self.github_client,
+                max_github_api_calls=None,
+                mode=mode,
+                mode_reason="",
+                extra_cache_stats=cache_stats if isinstance(cache_stats, dict) else None,
+                top_n=15,
+            )
+            page_stats.extend(list(api_rows or []))
         except Exception:
             pass
 
@@ -1685,15 +1529,6 @@ class CommitHistoryGenerator:
                 for k in ["cache_load", "git_iter_commits", "github_merge_dates", "github_required_checks", "process_commits", "cache_save"]:
                     if k in t:
                         page_stats.append((f"timing.{k}", f"{float(t[k]):.2f}s"))
-        except Exception:
-            pass
-
-        # Light “anything else relevant”: top endpoints (best-effort; can be empty).
-        try:
-            if isinstance(by_label, dict) and by_label:
-                top = list(by_label.items())[:5]
-                top_str = ", ".join([f"{k}={v}" for k, v in top])
-                page_stats.append(("GitHub REST top (5)", top_str))
         except Exception:
             pass
 
