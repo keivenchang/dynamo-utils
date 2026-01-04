@@ -1,7 +1,12 @@
 CLAUDE.md - NVIDIA Dynamo Projects (Operational Procedures)
 
 Operational playbooks and environment conventions for the `~/nvidia` workspace.
-For coding conventions, style guidelines, and development practices, refer to `dynamo-utils/.cursorrules`.
+For coding conventions, style guidelines, and in-container development practices, refer to `dynamo-utils/.cursorrules`.
+
+Scope / intent:
+- This file (`CLAUDE.md`) is for **host-side operations**: Docker commands, process management, CI log triage, and GitHub operations.
+- Keep it short and executable: prefer checklists + commands over long narratives or huge pasted graphs.
+- Avoid duplicating `.cursorrules` content; link to it when the topic is coding/formatting/linting inside the container.
 
 =============================================================================
 TABLE OF CONTENTS
@@ -147,9 +152,14 @@ Wait for: `All requests completed successfully.`
 docker exec <container_name> bash -c "curl -s localhost:8081/metrics > /workspace/_/notes/metrics-<framework>.log"
 ```
 
-Example for VLLM:
+Tip: Find the container name with:
 ```bash
-# Find container name
+docker ps --format "table {{.Names}}\t{{.Image}}" | grep dynamo
+```
+
+Example for VLLM (copy/paste template):
+```bash
+# Find container name (adjust grep to the repo you’re using: dynamo1/dynamo2/dynamo_ci/...)
 docker ps --format "table {{.Names}}\t{{.Image}}" | grep dynamo1
 
 # Start inference
@@ -196,7 +206,7 @@ docker exec <container_name> bash -c "ss -tlnp | grep -E '(8000|8081)' || echo '
 
 **Correct** ✅:
 ```bash
-docker exec -u root <container> bash -c "export WORKSPACE_DIR=~/dynamo && cd ~/dynamo && pytest -xvs tests/serve/test_vllm.py::test_serve_deployment -k aggregated --basetemp=/tmp/pytest_test"
+docker exec -u root <container> bash -c "export WORKSPACE_DIR=~/dynamo && cd ~/dynamo && pytest -xvs tests/serve/test_vllm.py::test_serve_deployment -k aggregated --basetemp=/tmp/pytest_temp"
 ```
 
 **Incorrect** ❌:
@@ -268,10 +278,7 @@ This runs golangci-lint which includes:
 
 Test Sphinx documentation build (same as CI) to verify no warnings/errors.
 
-**IMPORTANT**: Since Docker commands cannot be run inside Cursor, you must:
-1. Tell the user to run the docker build command in their external terminal
-2. Wait for the user to report back the results
-3. If build fails, analyze the error and fix the documentation files
+**IMPORTANT**: Run this on the host (outside the dev container). If Docker isn’t available, have the user run it and paste the failing log snippet.
 
 **Tell user to run** (in external terminal):
 ```bash
@@ -457,98 +464,18 @@ Two common patterns:
 - **Execution dependency (`needs:`)**: the job can’t start until the `needs` jobs finish. GitHub also exposes `needs.<job>.result`.
 - **Aggregator / gating job (`needs:`)**: depends on multiple upstream jobs and fails based on their results (often named `*-status-check`).
 
-Below is a tree view of the **pure `needs:` job dependency graph** in `dynamo_latest/.github/workflows/*` (guards/`if:` conditions omitted):
+Practical workflow:
+- If an aggregator job fails (often named `*-status-check`), immediately jump to its upstream jobs listed in `needs:`; the aggregator usually just reports their results.
+- Open the failing workflow file under `.github/workflows/`, find the job, and inspect `needs:` + any `if:` guards.
 
-### `dynamo_latest/.github/workflows/container-validation-dynamo.yml`
+Quick commands:
+```bash
+# Find where a job is defined
+grep -n "^[[:space:]]\\{0,2\\}<job_name>:" .github/workflows/*.yml
 
+# Find needs blocks in a workflow
+grep -n "needs:" .github/workflows/<workflow>.yml
 ```
-dynamo-status-check
-└── build-test — "Build and Test - dynamo"
-    └── changed-files
-```
-
-### `dynamo_latest/.github/workflows/container-validation-backends.yml`
-
-```
-backend-status-check
-├── operator — "operator (${{ matrix.platform.arch }})"
-│   └── changed-files
-├── vllm — "vllm (${{ matrix.platform.arch }})"
-│   └── changed-files
-├── sglang — "sglang (${{ matrix.platform.arch }})"
-│   └── changed-files
-└── trtllm — "trtllm (${{ matrix.platform.arch }})"
-    └── changed-files
-
-deploy-operator
-├── changed-files
-├── operator
-├── vllm
-├── sglang
-└── trtllm
-
-deploy-test-vllm — "deploy-test-vllm (${{ matrix.profile }})"
-├── changed-files
-├── deploy-operator
-└── vllm
-
-deploy-test-sglang — "deploy-test-sglang (${{ matrix.profile }})"
-├── changed-files
-├── deploy-operator
-└── sglang
-
-deploy-test-trtllm — "deploy-test-trtllm (${{ matrix.profile }})"
-├── changed-files
-├── deploy-operator
-└── trtllm
-
-cleanup
-├── changed-files
-├── deploy-operator
-├── deploy-test-trtllm
-├── deploy-test-sglang
-├── deploy-test-vllm
-└── deploy-test-vllm-disagg-router
-```
-
-### `dynamo_latest/.github/workflows/nightly-ci.yml`
-
-```
-notify-slack — "Notify Slack"
-└── results-summary — "Results Summary"
-    ├── build-amd64 — "Build ${{ matrix.framework }} (amd64)"
-    ├── build-arm64 — "Build ${{ matrix.framework }} (arm64)"
-    ├── unit-tests — "${{ matrix.framework }}-${{ matrix.arch.arch }}-unit"
-    │   ├── build-amd64
-    │   └── build-arm64
-    ├── integration-tests — "${{ matrix.framework }}-${{ matrix.arch.arch }}-integ"
-    │   ├── build-amd64
-    │   └── build-arm64
-    ├── e2e-single-gpu-tests — "${{ matrix.framework }}-${{ matrix.arch.arch }}-1gpu-e2e"
-    │   ├── build-amd64
-    │   └── build-arm64
-    ├── e2e-multi-gpu-tests — "${{ matrix.framework }}-${{ matrix.arch.arch }}-2gpu-e2e"
-    │   ├── build-amd64
-    │   └── build-arm64
-    └── fault-tolerance-tests — "${{ matrix.framework.name }}-amd64-ft"
-        └── build-amd64
-```
-
-### `dynamo_latest/.github/workflows/generate-docs.yml`
-
-```
-publish-s3 — "Publish docs to S3 and flush Akamai"
-└── build-docs — "Build Documentation"
-```
-
-### `dynamo_latest/.github/workflows/trigger_ci.yml`
-
-```
-trigger-ci — "Trigger CI Pipeline"
-└── mirror_repo — "Mirror Repository to GitLab"
-```
-
-**Debugging tip**: If an aggregator job fails (e.g., `backend-status-check`), go straight to its upstream jobs listed in `needs:`; the aggregator is typically just reporting their results.
 
 =============================================================================
 5. GITHUB OPERATIONS
@@ -558,12 +485,14 @@ trigger-ci — "Trigger CI Pipeline"
 
 **GitHub credentials location**: `~/.config/gh/hosts.yml`
 
-**Environment variable**: `GITHUB_TOKEN` is set in `~/.bashrc` and automatically loaded on login.
+**Environment variables**:
+- Prefer `GH_TOKEN` for host-side GitHub access (matches GitHub CLI conventions).
+- Some scripts still use `GITHUB_TOKEN` as a fallback name (common in GitHub Actions).
 
 To use GitHub API with curl:
 ```bash
 # Using environment variable (preferred)
-curl -H "Authorization: token $GITHUB_TOKEN" https://api.github.com/user
+curl -H "Authorization: token ${GH_TOKEN:-$GITHUB_TOKEN}" https://api.github.com/user
 
 # Or read from config file
 TOKEN=$(grep oauth_token ~/.config/gh/hosts.yml | head -1 | awk '{print $2}')
@@ -572,8 +501,9 @@ curl -H "Authorization: token $TOKEN" https://api.github.com/repos/ai-dynamo/dyn
 
 For Python scripts, use `GitHubAPIClient` from `common.py` which automatically reads credentials from:
 1. Provided token argument
-2. `GITHUB_TOKEN` environment variable (set in ~/.bashrc)
-3. `~/.config/gh/hosts.yml` (GitHub CLI config)
+2. `GH_TOKEN` environment variable (preferred)
+3. `GITHUB_TOKEN` environment variable (fallback)
+4. `~/.config/gh/hosts.yml` (GitHub CLI config)
 
 ## 5.2 Re-running Failed GitHub Actions
 
@@ -588,39 +518,6 @@ gh run rerun <RUN_ID> --repo ai-dynamo/dynamo --failed
 
 # Step 3: Verify the re-run started
 gh run view <RUN_ID> --repo ai-dynamo/dynamo --json status,conclusion,url
-```
-
-**Example workflow**:
-```bash
-# For PR #3688
-gh pr checks 3688 --repo ai-dynamo/dynamo
-# Output shows: https://github.com/ai-dynamo/dynamo/actions/runs/18690241847/...
-# Extract run ID: 18690241847
-
-gh run rerun 18690241847 --repo ai-dynamo/dynamo --failed
-# ✅ Successfully triggered re-run
-
-gh run view 18690241847 --repo ai-dynamo/dynamo --json status,conclusion,url
-# Shows: {"conclusion":"","status":"queued",...}
-```
-
-**Alternative: Using Python API**:
-
-```python
-import sys
-sys.path.insert(0, 'nvidia/dynamo-utils')
-from common import GitHubAPIClient
-import requests
-
-client = GitHubAPIClient()
-
-# Re-run failed jobs for a specific workflow run
-run_id = 18672015489  # Get from workflow URL or API
-rerun_url = f"{client.base_url}/repos/ai-dynamo/dynamo/actions/runs/{run_id}/rerun-failed-jobs"
-
-response = requests.post(rerun_url, headers=client.headers)
-if response.status_code == 201:
-    print("✅ Successfully triggered re-run of failed jobs")
 ```
 
 **When to use**:
@@ -648,4 +545,4 @@ if response.status_code == 201:
 ## 6.2 Additional Documentation
 For detailed information about Python utilities and scripts in this directory, see:
 - `README.md`: comprehensive documentation for scripts/tools
-- `.cursorrules`: coding conventions, style guidelines, and development practices
+- `.cursorrules`: in-container coding conventions, style guidelines, and development practices
