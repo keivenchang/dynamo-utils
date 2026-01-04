@@ -17,6 +17,7 @@ from __future__ import annotations
 import hashlib
 import html
 import re
+from enum import Enum
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -97,6 +98,19 @@ def ci_should_expand_by_default(*, rollup_status: str, has_required_failure: boo
 
 # Style for the optional pass count in the "REQ+OPT✓" compact CI summary.
 PASS_PLUS_STYLE = "font-size: 10px; font-weight: 600; opacity: 0.9;"
+
+
+class CIStatus(str, Enum):
+    """Canonical normalized status strings used across dashboards."""
+
+    SUCCESS = "success"
+    FAILURE = "failure"
+    IN_PROGRESS = "in_progress"
+    PENDING = "pending"
+    CANCELLED = "cancelled"
+    SKIPPED = "skipped"
+    NEUTRAL = "neutral"
+    UNKNOWN = "unknown"
 
 
 # ======================================================================================
@@ -412,21 +426,21 @@ def _parse_iso_utc(s: str) -> Optional[datetime]:
 def _status_norm_from_actions_step(status: str, conclusion: str) -> str:
     s = (status or "").strip().lower()
     c = (conclusion or "").strip().lower()
-    if c in ("success", "neutral", "skipped"):
-        return "success"
+    if c in (CIStatus.SUCCESS, CIStatus.NEUTRAL, CIStatus.SKIPPED):
+        return CIStatus.SUCCESS
     if c in ("failure", "timed_out", "action_required"):
-        return "failure"
-    if c in ("cancelled", "canceled"):
-        return "cancelled"
+        return CIStatus.FAILURE
+    if c in (CIStatus.CANCELLED, "canceled"):
+        return CIStatus.CANCELLED
     # Some API responses omit `conclusion` even for completed successful steps.
     # Treat "completed + empty conclusion" as success so we don't auto-expand clean trees.
     if s == "completed" and c in ("", "null", "none"):
-        return "success"
-    if s in ("in_progress", "in progress"):
-        return "in_progress"
-    if s in ("queued", "pending"):
-        return "pending"
-    return "unknown"
+        return CIStatus.SUCCESS
+    if s in (CIStatus.IN_PROGRESS, "in progress"):
+        return CIStatus.IN_PROGRESS
+    if s in ("queued", CIStatus.PENDING):
+        return CIStatus.PENDING
+    return CIStatus.UNKNOWN
 
 
 def build_and_test_dynamo_phases_from_actions_job(job: Dict[str, object]) -> List[Tuple[str, str, str]]:
@@ -724,10 +738,10 @@ def required_badge_html(*, is_required: bool, status_norm: str) -> str:
         return ""
 
     s = (status_norm or "").strip().lower()
-    if s == "failure":
+    if s == CIStatus.FAILURE:
         color = "#d73a49"
         weight = "700"
-    elif s == "success":
+    elif s == CIStatus.SUCCESS:
         color = "#2da44e"
         weight = "400"
     else:
@@ -743,10 +757,10 @@ def mandatory_badge_html(*, is_mandatory: bool, status_norm: str) -> str:
         return ""
 
     s = (status_norm or "").strip().lower()
-    if s == "failure":
+    if s == CIStatus.FAILURE:
         color = "#d73a49"
         weight = "700"
-    elif s == "success":
+    elif s == CIStatus.SUCCESS:
         color = "#2da44e"
         weight = "400"
     else:
@@ -766,7 +780,7 @@ def status_icon_html(
     """Shared status icon HTML (match show_local_branches)."""
     s = (status_norm or "").strip().lower()
 
-    if s == "success":
+    if s == CIStatus.SUCCESS:
         # UX: required successes use the green circle-check (like GitHub's required checks),
         # optional successes use a simpler green check (no circle).
         if bool(is_required):
@@ -794,7 +808,7 @@ def status_icon_html(
             else:
                 out += '<span style="color: #d73a49; font-size: 13px; font-weight: 900; line-height: 1; margin-left: 2px;">✗</span>'
         return out
-    if s in {"skipped", "neutral"}:
+    if s in {CIStatus.SKIPPED, CIStatus.NEUTRAL}:
         # GitHub-like "skipped": grey circle with a slash.
         return (
             '<span style="color: #8c959f; display: inline-flex; vertical-align: text-bottom;">'
@@ -804,7 +818,7 @@ def status_icon_html(
             'd="M8 16A8 8 0 108 0a8 8 0 000 16ZM1.5 8a6.5 6.5 0 0110.364-5.083l-8.947 8.947A6.473 6.473 0 011.5 8Zm3.136 5.083 8.947-8.947A6.5 6.5 0 014.636 13.083Z">'
             "</path></svg></span>"
         )
-    if s == "failure":
+    if s == CIStatus.FAILURE:
         if is_required or required_failure:
             return (
                 '<span style="display: inline-flex; align-items: center; justify-content: center; '
@@ -813,15 +827,15 @@ def status_icon_html(
             )
         # Optional failures: red X, no circle.
         return '<span style="color: #d73a49; font-weight: 900;">✗</span>'
-    if s == "in_progress":
+    if s == CIStatus.IN_PROGRESS:
         return '<span style="color: #dbab09;">⏳</span>'
-    if s == "pending":
+    if s == CIStatus.PENDING:
         return (
             '<span style="display: inline-flex; align-items: center; justify-content: center; '
             'width: 12px; height: 12px; border-radius: 999px; background-color: #8c959f; '
             'color: #ffffff; font-size: 10px; font-weight: 900; line-height: 1;">•</span>'
         )
-    if s == "cancelled":
+    if s == CIStatus.CANCELLED:
         return (
             '<span style="display: inline-flex; align-items: center; justify-content: center; '
             'width: 12px; height: 12px; border-radius: 999px; background-color: #8c959f; '

@@ -40,6 +40,7 @@ except Exception:  # pragma: no cover
 
 # Shared dashboard helpers (UI + workflow graph)
 from common_dashboard_lib import (
+    CIStatus,
     PASS_PLUS_STYLE,
     TreeNodeVM,
     check_line_html,
@@ -464,9 +465,9 @@ class CIJobTreeNode(BranchNode):
         and they often show a duration of 0. We consider these "success-like" so fully
         green/skipped subtrees collapse by default.
         """
-        if node.status in {"success", "skipped"}:
+        if node.status in {CIStatus.SUCCESS, CIStatus.SKIPPED}:
             return True
-        if node.status != "unknown":
+        if node.status != CIStatus.UNKNOWN:
             return False
         dur = (node.duration or "").strip().lower()
         return dur in {"0", "0s", "0m", "0m0s", "0h", "0h0m", "0h0m0s"}
@@ -476,7 +477,7 @@ class CIJobTreeNode(BranchNode):
         """Compute a 'worst descendant' status for icon rendering."""
         # Success-like entire subtree => success rollup.
         if CIJobTreeNode._subtree_all_success(node):
-            return CIJobTreeNode._Rollup(status="success", has_required_failure=False, has_optional_failure=False)
+            return CIJobTreeNode._Rollup(status=str(CIStatus.SUCCESS), has_required_failure=False, has_optional_failure=False)
 
         has_required_failure = False
         has_optional_failure = False
@@ -484,20 +485,20 @@ class CIJobTreeNode(BranchNode):
 
         def walk(n: "CIJobTreeNode") -> None:
             nonlocal has_required_failure, has_optional_failure
-            st = getattr(n, "status", "unknown") or "unknown"
+            st = getattr(n, "status", CIStatus.UNKNOWN) or CIStatus.UNKNOWN
             is_req = bool(getattr(n, "is_required", False))
-            if st == "failure" and is_req:
+            if st == CIStatus.FAILURE and is_req:
                 has_required_failure = True
-                statuses.append("failure")
-            elif st == "failure" and not is_req:
+                statuses.append(str(CIStatus.FAILURE))
+            elif st == CIStatus.FAILURE and not is_req:
                 # Optional failures should not turn the parent red (FAIL), but they SHOULD be visible.
                 has_optional_failure = True
-                statuses.append("failure")
-            elif st == "skipped":
+                statuses.append(str(CIStatus.FAILURE))
+            elif st == CIStatus.SKIPPED:
                 # Skipped is success-like for rollup purposes (do not make parents look "worse").
-                statuses.append("success")
+                statuses.append(str(CIStatus.SUCCESS))
             else:
-                statuses.append(st)
+                statuses.append(str(st))
             for ch in (getattr(n, "children", None) or []):
                 if isinstance(ch, CIJobTreeNode):
                     walk(ch)
@@ -505,7 +506,14 @@ class CIJobTreeNode(BranchNode):
         walk(node)
 
         # Worst-first priority for status rollup.
-        priority = ["failure", "in_progress", "pending", "cancelled", "unknown", "success"]
+        priority = [
+            str(CIStatus.FAILURE),
+            str(CIStatus.IN_PROGRESS),
+            str(CIStatus.PENDING),
+            str(CIStatus.CANCELLED),
+            str(CIStatus.UNKNOWN),
+            str(CIStatus.SUCCESS),
+        ]
         for s in priority:
             if s in statuses:
                 return CIJobTreeNode._Rollup(
@@ -529,7 +537,7 @@ class CIJobTreeNode(BranchNode):
 
         # Optional failures (warnings) alone should not force expansion.
         # We therefore expand only if we see a required failure.
-        if getattr(node, "status", "unknown") == "failure" and bool(getattr(node, "is_required", False)):
+        if getattr(node, "status", CIStatus.UNKNOWN) == CIStatus.FAILURE and bool(getattr(node, "is_required", False)):
             return True
 
         # Shared rule: expand only for required failures or non-completed states.
@@ -548,7 +556,7 @@ class CIJobTreeNode(BranchNode):
         as success-like for *default expand/collapse* purposes.
         """
         # Any non-success/unknown state should be visible by default.
-        if node.status not in {"success", "skipped", "unknown"}:
+        if node.status not in {CIStatus.SUCCESS, CIStatus.SKIPPED, CIStatus.UNKNOWN}:
             return False
         if node.children:
             # Only collapse if every descendant is success-like.
@@ -599,7 +607,7 @@ class CIJobTreeNode(BranchNode):
             error_snippet_text=(self.error_snippet_text or ""),
             # For success nodes, this will control the suffix style (required vs optional failure).
             required_failure=bool(desc_required_failure),
-            warning_present=bool(effective_status == "success" and (desc_required_failure or desc_optional_failure)),
+        warning_present=bool(effective_status == CIStatus.SUCCESS and (desc_required_failure or desc_optional_failure)),
         )
 
     def render_html(self, prefix: str = "", is_last: bool = True, is_root: bool = True) -> List[str]:

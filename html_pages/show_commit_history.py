@@ -38,6 +38,7 @@ if str(_THIS_DIR) not in sys.path:
 
 # Shared dashboard helpers (UI + workflow graph)
 from common_dashboard_lib import (
+    CIStatus,
     PASS_PLUS_STYLE,
     TreeNodeVM,
     build_and_test_dynamo_phases_from_actions_job,
@@ -1064,17 +1065,17 @@ class CommitHistoryGenerator:
         def _status_norm_for_check_run(*, status: str, conclusion: str) -> str:
             s = (status or "").strip().lower()
             c = (conclusion or "").strip().lower()
-            if c in ("success", "neutral", "skipped"):
-                return "success"
+            if c in (CIStatus.SUCCESS, CIStatus.NEUTRAL, CIStatus.SKIPPED):
+                return CIStatus.SUCCESS
             if c in ("failure", "timed_out", "action_required"):
-                return "failure"
-            if c in ("cancelled", "canceled"):
-                return "cancelled"
-            if s in ("in_progress", "in progress"):
-                return "in_progress"
-            if s in ("queued", "pending"):
-                return "pending"
-            return "unknown"
+                return CIStatus.FAILURE
+            if c in (CIStatus.CANCELLED, "canceled"):
+                return CIStatus.CANCELLED
+            if s in (CIStatus.IN_PROGRESS, "in progress"):
+                return CIStatus.IN_PROGRESS
+            if s in ("queued", CIStatus.PENDING):
+                return CIStatus.PENDING
+            return CIStatus.UNKNOWN
 
         def _duration_str_to_seconds(s: str) -> float:
             """Best-effort parse of durations like '43m 33s', '30m33s', '2s', '1h 4m'."""
