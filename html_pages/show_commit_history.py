@@ -1202,7 +1202,6 @@ class CommitHistoryGenerator:
                 # Optional failures: keep the leaf status as "failure",
                 # but do not treat it as a required failure for rollups.
                 required_failure = bool(is_req and st == "failure")
-                warning_present = False
                 st_eff = st
 
                 kind = classify_ci_kind(name)
@@ -1291,7 +1290,7 @@ class CommitHistoryGenerator:
                             raw_log_size_bytes=int(raw_size or 0),
                             error_snippet_text=snippet,
                             required_failure=required_failure,
-                            warning_present=bool(warning_present),
+                            warning_present=False,
                         ),
                         children=subsection_children,
                         collapsible=True,
@@ -1303,6 +1302,7 @@ class CommitHistoryGenerator:
             children: List[TreeNodeVM]
             try:
                 from common_github_workflow import group_ci_nodes_by_workflow_needs  # local import
+                from common_dashboard_lib import mark_success_with_descendant_failures  # local import
 
                 children = list(
                     group_ci_nodes_by_workflow_needs(
@@ -1311,6 +1311,7 @@ class CommitHistoryGenerator:
                     )
                     or []
                 )
+                children = mark_success_with_descendant_failures(list(children or []))
             except Exception:
                 children = [n for (_nm, n) in (node_items or [])]
 

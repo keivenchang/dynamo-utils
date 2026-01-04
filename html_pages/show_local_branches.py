@@ -575,11 +575,13 @@ class CIJobTreeNode(BranchNode):
             job_url = str(getattr(self.failed_check, "job_url", "") or "")
         if not job_url:
             job_url = self.url or ""
-        # Icon: show the *worst descendant status* so it’s obvious why a parent expanded.
+        # Icon policy:
+        # - show this node's *own* status
+        # - if the node is successful but any descendant failed, append a failure marker (✓/✗)
         roll = self._subtree_rollup(self) if self.children else None
-        effective_status = (roll.status if roll is not None else self.status)
-        effective_required_failure = (roll.has_required_failure if roll is not None else False)
-        effective_optional_failure = (roll.has_optional_failure if roll is not None else False)
+        desc_required_failure = bool(roll.has_required_failure) if roll is not None else False
+        desc_optional_failure = bool(roll.has_optional_failure) if roll is not None else False
+        effective_status = self.status
 
         jid = self.job_id
         display_name_eff = self.display_name
@@ -595,8 +597,9 @@ class CIJobTreeNode(BranchNode):
             raw_log_href=self.raw_log_href,
             raw_log_size_bytes=int(self.raw_log_size_bytes or 0),
             error_snippet_text=(self.error_snippet_text or ""),
-            required_failure=bool(effective_required_failure),
-            warning_present=bool(effective_optional_failure and effective_status == "success"),
+            # For success nodes, this will control the suffix style (required vs optional failure).
+            required_failure=bool(desc_required_failure),
+            warning_present=bool(effective_status == "success" and (desc_required_failure or desc_optional_failure)),
         )
 
     def render_html(self, prefix: str = "", is_last: bool = True, is_root: bool = True) -> List[str]:
@@ -1173,7 +1176,7 @@ class PRURLNode(BranchNode):
     url: Optional[str] = None
 
     def _format_content(self) -> str:
-        # Don't show URL separately in terminal - it's already visible in the PR title line
+        # (HTML-only) URL is already visible in the PR title line.
         # Matches v1 behavior where URL is shown as a separate line
         if not self.url:
             return ""

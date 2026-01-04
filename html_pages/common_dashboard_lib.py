@@ -123,6 +123,87 @@ class TreeNodeVM:
     triangle_tooltip: Optional[str] = None
 
 
+def mark_success_with_descendant_failures(nodes: List[TreeNodeVM]) -> List[TreeNodeVM]:
+    """If a node is successful but any descendant failed, render it as ✓/✗.
+
+    Policy: only show the suffix icon when a descendant is in a failure state.
+    """
+
+    # Use the canonical icon HTML (via status_icon_html) to avoid brittle substring heuristics.
+    _ICON_SUCCESS_REQ = status_icon_html(status_norm="success", is_required=True)
+    _ICON_SUCCESS_OPT = status_icon_html(status_norm="success", is_required=False)
+    _ICON_FAIL_REQ = status_icon_html(status_norm="failure", is_required=True)
+    _ICON_FAIL_OPT = status_icon_html(status_norm="failure", is_required=False)
+
+    def _own_success_kind(label_html: str) -> Optional[bool]:
+        # True => required-success, False => optional-success, None => not success-like.
+        h = str(label_html or "")
+        if _ICON_SUCCESS_REQ in h:
+            return True
+        if _ICON_SUCCESS_OPT in h:
+            return False
+        return None
+
+    def _own_failure_kind(label_html: str) -> Optional[bool]:
+        # True => required-failure, False => optional-failure, None => not failure.
+        h = str(label_html or "")
+        if _ICON_FAIL_REQ in h:
+            return True
+        if _ICON_FAIL_OPT in h:
+            return False
+        return None
+
+    def walk(n: TreeNodeVM) -> Tuple[TreeNodeVM, bool, bool]:
+        # returns: (new_node, has_required_failure_in_subtree, has_optional_failure_in_subtree)
+        new_children: List[TreeNodeVM] = []
+        child_req = False
+        child_opt = False
+        for ch in (n.children or []):
+            ch2, r, o = walk(ch)
+            new_children.append(ch2)
+            child_req = child_req or r
+            child_opt = child_opt or o
+
+        own_fail = _own_failure_kind(n.label_html)
+        own_req_fail = bool(own_fail is True)
+        own_opt_fail = bool(own_fail is False)
+
+        own_success = _own_success_kind(n.label_html)
+        new_label = n.label_html
+
+        # Only add the suffix for success nodes, and only when descendants failed.
+        if own_success is not None and (child_req or child_opt):
+            is_req_success = bool(own_success)
+            old_icon = status_icon_html(status_norm="success", is_required=is_req_success)
+            new_icon = status_icon_html(
+                status_norm="success",
+                is_required=is_req_success,
+                required_failure=bool(child_req),
+                warning_present=True,
+            )
+            try:
+                new_label = str(new_label).replace(str(old_icon), str(new_icon), 1)
+            except Exception:
+                new_label = n.label_html
+
+        new_node = TreeNodeVM(
+            node_key=n.node_key,
+            label_html=new_label,
+            children=new_children,
+            collapsible=bool(n.collapsible),
+            default_expanded=bool(n.default_expanded),
+            triangle_tooltip=n.triangle_tooltip,
+        )
+
+        return new_node, (own_req_fail or child_req), (own_opt_fail or child_opt)
+
+    out: List[TreeNodeVM] = []
+    for x in (nodes or []):
+        x2, _r, _o = walk(x)
+        out.append(x2)
+    return out
+
+
 def _hash10(s: str) -> str:
     return hashlib.sha1(s.encode("utf-8")).hexdigest()[:10]
 
@@ -700,8 +781,18 @@ def status_icon_html(
         else:
             out = '<span style="color: #2da44e; font-weight: 900;">✓</span>'
         if bool(warning_present):
-            # Optional failures: show a red X (no circle) appended to the success icon.
-            out += '<span style="color: #d73a49; font-size: 13px; font-weight: 900; line-height: 1; margin-left: 2px;">✗</span>'
+            # Descendant failures: show a red X appended to the success icon.
+            # - required_failure=True => show the required-failure circle-X
+            # - required_failure=False => show the optional-failure bare X
+            out += '<span style="color: #57606a; font-size: 11px; margin: 0 2px;">/</span>'
+            if bool(required_failure):
+                out += (
+                    '<span style="display: inline-flex; align-items: center; justify-content: center; '
+                    'width: 12px; height: 12px; margin-left: 2px; border-radius: 999px; background-color: #d73a49; '
+                    'color: #ffffff; font-size: 10px; font-weight: 900; line-height: 1;">✗</span>'
+                )
+            else:
+                out += '<span style="color: #d73a49; font-size: 13px; font-weight: 900; line-height: 1; margin-left: 2px;">✗</span>'
         return out
     if s in {"skipped", "neutral"}:
         # GitHub-like "skipped": grey circle with a slash.

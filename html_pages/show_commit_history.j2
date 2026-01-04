@@ -339,10 +339,8 @@ Legend & Help
 <div style="margin-bottom: 12px;">
 <div style="font-weight: 600; margin-bottom: 6px; color: #24292f;">CI Status Symbols (GitHub & NVIDIA GitLab):</div>
 <ul style="margin: 4px 0; padding-left: 20px;">
-<li>{{ success_required_icon_html|safe }} - Passed (required)</li>
-<li>{{ success_icon_html|safe }} - Passed (optional)</li>
-<li>{{ failure_required_icon_html|safe }} - Checks/jobs failed (required)</li>
-<li>{{ failure_optional_icon_html|safe }} - Checks/jobs failed (optional)</li>
+<li>{{ success_required_icon_html|safe }} / {{ success_icon_html|safe }} - Passed (required/optional)</li>
+<li>{{ failure_required_icon_html|safe }} / {{ failure_optional_icon_html|safe }} - Checks/jobs failed (required/optional)</li>
 <li>{{ in_progress_icon_html|safe }} - Checks/jobs in progress or running</li>
 <li>{{ pending_icon_html|safe }} - Checks/jobs pending (not started yet)</li>
 <li>{{ cancelled_icon_html|safe }} - Checks/jobs canceled</li>
