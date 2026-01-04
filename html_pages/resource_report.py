@@ -22,6 +22,9 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
+# Shared dashboard runtime helper (atomic output writes)
+from common_dashboard_runtime import atomic_write_text
+
 
 def _json(obj: Any) -> str:
     return json.dumps(obj, ensure_ascii=False, separators=(",", ":"), default=str)
@@ -3154,7 +3157,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             "cpu_leaderboard": leaderboard,
         }
 
-        out_path.write_text(_build_html(payload), encoding="utf-8")
+        atomic_write_text(out_path, _build_html(payload), encoding="utf-8")
         print(f"Wrote: {out_path}")
 
         if bool(getattr(args, "db_vacuum", False)):

@@ -307,7 +307,9 @@ document.addEventListener('click', function(event) {
 {% block content %}
 
 <!-- Key/Help Section -->
-<div class="container" style="margin-bottom: 20px; padding: 12px; background-color: #f6f8fa;">
+<!-- NOTE: Do NOT use `.container` here; `.container` has a border and looks "boxed".
+     Match the branches dashboard legend style (no border/box). -->
+<div style="margin-bottom: 0px; padding: 12px; background-color: #f6f8fa;">
 <details>
 <summary style="cursor: pointer; font-weight: 600; font-size: 14px; color: #24292f; user-select: none;">
 Legend & Help
@@ -333,16 +335,35 @@ Legend & Help
 <li><strong>▶</strong> - Expand to see Docker images and commit details</li>
 </ul>
 </div>
+
 <div style="margin-bottom: 12px;">
 <div style="font-weight: 600; margin-bottom: 6px; color: #24292f;">CI Status Symbols (GitHub & NVIDIA GitLab):</div>
 <ul style="margin: 4px 0; padding-left: 20px;">
-<li>{{ success_icon_html|safe }} - Checks/jobs passed or succeeded</li>
+<li>{{ success_required_icon_html|safe }} - Passed (required)</li>
+<li>{{ success_icon_html|safe }} - Passed (optional)</li>
 <li>{{ failure_required_icon_html|safe }} / {{ failure_optional_icon_html|safe }} - Checks/jobs failed (required / optional)</li>
 <li>{{ in_progress_icon_html|safe }} - Checks/jobs in progress or running</li>
 <li>{{ pending_icon_html|safe }} - Checks/jobs pending (not started yet)</li>
 <li>{{ cancelled_icon_html|safe }} - Checks/jobs canceled</li>
+<li>{{ skipped_icon_html|safe }} - Checks/jobs skipped</li>
 </ul>
 <p style="margin: 4px 0; color: #57606a; font-size: 12px;">Example: <span style="color: #2da44e;">21</span>{{ success_icon_html|safe }} <span style="color: #d73a49;">1</span>{{ failure_required_icon_html|safe }} <span style="color: #dbab09;">1</span>{{ in_progress_icon_html|safe }} <span style="color: #8c959f;">3</span>{{ pending_icon_html|safe }} <span style="color: #8c959f;">1</span>{{ cancelled_icon_html|safe }} means 21 passed, 1 failed, 1 in progress, 3 pending, 1 canceled.</p>
+<div style="margin-top: 6px; color: #57606a; font-size: 12px;">
+Notes:
+<ul style="margin: 4px 0; padding-left: 20px;">
+<li><strong>Skipped</strong> shows as a grey circle-slash.</li>
+<li><strong>Optional failures</strong> show as ⚠ and do not force the PR merge-box status to FAIL.</li>
+</ul>
+</div>
+</div>
+
+<div style="margin-bottom: 12px;">
+<div style="font-weight: 600; margin-bottom: 6px; color: #24292f;">Subsections:</div>
+<ul style="margin: 4px 0; padding-left: 20px;">
+<li><strong>Build and Test - dynamo</strong>: shows phase breakdown (Build Image / Rust checks / pytest...) when available.</li>
+<li><strong>Long-running Actions jobs</strong> (e.g. <code>sglang (arm64)</code>, <code>trtllm (amd64)</code>): shows job steps with duration ≥ 30s.</li>
+<li>Step timing comes from the GitHub Actions job steps API and is cached; we only display steps ≥ 30s.</li>
+</ul>
 </div>
 </div>
 </details>
@@ -389,6 +410,13 @@ Legend & Help
 {%- set status_info = build_status.get(sha_short, {}) -%}
 {%- set status = status_info.get('status', 'unknown') -%}
 {%- set inherited = status_info.get('inherited', False) -%}
+{%- set has_composite_toggle = has_docker_images or has_gitlab -%}
+{# Expand/collapse triangle MUST be the first element in the cell (greyed out if nothing to expand). #}
+{%- if has_composite_toggle -%}
+<a href="#" class="composite-sha-link" onclick="toggleDockerImages(event, this); return false;" style="text-decoration: none; display: inline-block; width: 1em; text-align: center; margin-right: 4px; color: #0969da; user-select: none;" title="Show Docker images">▶</a>
+{%- else -%}
+<span class="composite-sha-link-placeholder" style="display: inline-block; width: 1em; text-align: center; margin-right: 4px; color: #8c959f; opacity: 0.55; user-select: none;" title="No Docker images">▶</span>
+{%- endif -%}
 {# Local build status indicator before CDS #}
 {%- if log_paths_list -%}
 {# Most recent build (last in list) #}
@@ -402,12 +430,6 @@ Legend & Help
 {%- elif status == 'unknown' -%}
 <span class="status-indicator status-unknown" title="No build status available">----</span>
 {%- endif -%}
-{%- set has_composite_toggle = has_docker_images or has_gitlab -%}
-{%- if has_composite_toggle -%}
-<a href="#" class="composite-sha-link" onclick="toggleDockerImages(event, this); return false;" style="text-decoration: none; display: inline-block; width: 1em; text-align: center; margin-left: 4px; margin-right: 2px; color: #0969da; user-select: none;" title="Show Docker images">▶</a>
-{%- else -%}
-<span class="composite-sha-link-placeholder" style="display: inline-block; width: 1em; text-align: center; margin-left: 4px; margin-right: 2px; visibility: hidden;">▶</span>
-{%- endif -%}
 <span style="background-color: {{ composite_bg_color }}; color: {{ commit.composite_text_color | default('#24292f') }}; padding: 2px 6px; border-radius: 3px;">CDS:{{ composite_sha[:6] }}</span>{# Show history icon if multiple builds exist #}{%- if log_paths_list|length > 1 -%}<a href="#" onclick="toggleBuildHistory(event, '{{ sha_short }}'); return false;" style="text-decoration: none; margin-left: 2px; font-size: 11px; color: #656d76;" title="Show build history ({{ log_paths_list|length }} builds)">📋</a><div id="build-history-{{ sha_short }}" style="display: none; position: absolute; background: #fff; border: 1px solid #d0d7de; border-radius: 6px; padding: 8px; margin-top: 4px; z-index: 1000; box-shadow: 0 8px 24px rgba(140, 149, 159, 0.2);"><div style="font-weight: 600; font-size: 12px; margin-bottom: 6px; color: #24292f;">Build History</div>{%- for date, path in log_paths_list|reverse -%}<div style="padding: 4px 0;"><a href="{{ path }}" target="_blank" style="color: #0969da; text-decoration: none; font-size: 12px;">{{ date }}</a>{%- if loop.first -%} <span style="color: #656d76; font-size: 11px;">(latest)</span>{%- endif -%}</div>{%- endfor -%}</div>{%- endif -%}
 {%- else -%}
 {# No build logs - show non-clickable status indicators #}
@@ -419,12 +441,6 @@ Legend & Help
 <span class="status-indicator status-building{%- if inherited -%}-inherited{%- endif -%}" title="{%- if inherited -%}Inherited: {%- endif -%}Build in progress">BUILD</span>
 {%- elif status == 'unknown' -%}
 <span class="status-indicator status-unknown" title="No build status available">----</span>
-{%- endif -%}
-{%- set has_composite_toggle = has_docker_images or has_gitlab -%}
-{%- if has_composite_toggle -%}
-<a href="#" class="composite-sha-link" onclick="toggleDockerImages(event, this); return false;" style="text-decoration: none; display: inline-block; width: 1em; text-align: center; margin-left: 4px; margin-right: 2px; color: #0969da; user-select: none;" title="Show Docker images">▶</a>
-{%- else -%}
-<span class="composite-sha-link-placeholder" style="display: inline-block; width: 1em; text-align: center; margin-left: 4px; margin-right: 2px; visibility: hidden;">▶</span>
 {%- endif -%}
 <span style="background-color: {{ composite_bg_color }}; color: {{ commit.composite_text_color | default('#24292f') }}; padding: 2px 6px; border-radius: 3px;">CDS:{{ composite_sha[:6] }}</span>
 {%- endif -%}
@@ -449,13 +465,13 @@ Legend & Help
 {%- set gha_title = 'GitHub Actions: No checks' -%}
 {%- endif -%}
 {# GitHub section #}
-<a href="https://github.com/ai-dynamo/dynamo/commit/{{ sha_full }}/checks" target="_blank" style="text-decoration: none; color: #24292f; font-weight: 600;" title="{{ gha_title }}"><svg height="14" width="14" viewBox="0 0 16 16" fill="currentColor" style="display: inline-block; vertical-align: middle;"><path fill-rule="evenodd" clip-rule="evenodd" d="M8 0C3.58 0 0 3.58 0 8C0 11.54 2.29 14.53 5.47 15.59C5.87 15.66 6.02 15.42 6.02 15.21C6.02 15.02 6.01 14.39 6.01 13.72C4 14.09 3.48 13.23 3.32 12.78C3.23 12.55 2.84 11.84 2.5 11.65C2.22 11.5 1.82 11.13 2.49 11.12C3.12 11.11 3.57 11.7 3.72 11.94C4.44 13.15 5.59 12.81 6.05 12.6C6.12 12.08 6.33 11.73 6.56 11.53C4.78 11.33 2.92 10.64 2.92 7.58C2.92 6.71 3.23 5.99 3.74 5.43C3.66 5.23 3.38 4.41 3.82 3.31C3.82 3.31 4.49 3.1 6.02 4.13C6.66 3.95 7.34 3.86 8.02 3.86C8.7 3.86 9.38 3.95 10.02 4.13C11.55 3.09 12.22 3.31 12.22 3.31C12.66 4.41 12.38 5.23 12.3 5.43C12.81 5.99 13.12 6.7 13.12 7.58C13.12 10.65 11.25 11.33 9.47 11.53C9.76 11.78 10.01 12.26 10.01 13.01C10.01 14.08 10 14.94 10 15.21C10 15.42 10.15 15.67 10.55 15.59C13.71 14.53 16 11.53 16 8C16 3.58 12.42 0 8 0Z"></path></svg></a>
-{# Expandable per-commit checks tree (GitHub + GitLab) #}
 {%- if commit.github_checks_tree_html -%}
-<a href="#" onclick="toggleCommitGitHubTree(event, '{{ sha_short }}'); return false;" style="text-decoration: none; margin-left: 4px; font-size: 11px; color: #0969da;" title="Show GitHub checks tree">
+<a href="#" onclick="toggleCommitGitHubTree(event, '{{ sha_short }}'); return false;" style="text-decoration: none; margin-right: 4px; font-size: 11px; color: #0969da;" title="Show GitHub checks tree">
   <span id="github-tree-toggle-{{ sha_short }}">▶</span>
 </a>
 {%- endif -%}
+<a href="https://github.com/ai-dynamo/dynamo/commit/{{ sha_full }}/checks" target="_blank" style="text-decoration: none; color: #24292f; font-weight: 600;" title="{{ gha_title }}"><svg height="14" width="14" viewBox="0 0 16 16" fill="currentColor" style="display: inline-block; vertical-align: middle;"><path fill-rule="evenodd" clip-rule="evenodd" d="M8 0C3.58 0 0 3.58 0 8C0 11.54 2.29 14.53 5.47 15.59C5.87 15.66 6.02 15.42 6.02 15.21C6.02 15.02 6.01 14.39 6.01 13.72C4 14.09 3.48 13.23 3.32 12.78C3.23 12.55 2.84 11.84 2.5 11.65C2.22 11.5 1.82 11.13 2.49 11.12C3.12 11.11 3.57 11.7 3.72 11.94C4.44 13.15 5.59 12.81 6.05 12.6C6.12 12.08 6.33 11.73 6.56 11.53C4.78 11.33 2.92 10.64 2.92 7.58C2.92 6.71 3.23 5.99 3.74 5.43C3.66 5.23 3.38 4.41 3.82 3.31C3.82 3.31 4.49 3.1 6.02 4.13C6.66 3.95 7.34 3.86 8.02 3.86C8.7 3.86 9.38 3.95 10.02 4.13C11.55 3.09 12.22 3.31 12.22 3.31C12.66 4.41 12.38 5.23 12.3 5.43C12.81 5.99 13.12 6.7 13.12 7.58C13.12 10.65 11.25 11.33 9.47 11.53C9.76 11.78 10.01 12.26 10.01 13.01C10.01 14.08 10 14.94 10 15.21C10 15.42 10.15 15.67 10.55 15.59C13.71 14.53 16 11.53 16 8C16 3.58 12.42 0 8 0Z"></path></svg></a>
+{# Expandable per-commit checks tree (GitHub + GitLab) #}
 {# Per-commit GH checks status (split required vs optional failures, plus pending vs cancelled) #}
 {%- set commit_stats = gha_per_commit_stats.get(sha_full, {'success_required': 0, 'success_optional': 0, 'failure_required': 0, 'failure_optional': 0, 'in_progress_required': 0, 'in_progress_optional': 0, 'pending': 0, 'cancelled': 0, 'other': 0, 'total': 0}) -%}
 {%- if commit_stats.total > 0 -%}
@@ -500,7 +516,7 @@ Legend & Help
 {%- endfor -%}
 {%- endif -%}
 {%- set tooltip_html_parts = [] -%}
-{%- if passed_required_jobs -%}{%- set _ = tooltip_html_parts.append('<strong style="color: #2da44e;">' ~ success_icon_html ~ ' Passed (required):</strong> ' ~ ((passed_required_jobs|sort)|join(', '))) -%}{%- endif -%}
+{%- if passed_required_jobs -%}{%- set _ = tooltip_html_parts.append('<strong style="color: #2da44e;">' ~ success_required_icon_html ~ ' Passed (required):</strong> ' ~ ((passed_required_jobs|sort)|join(', '))) -%}{%- endif -%}
 {%- if passed_optional_jobs -%}{%- set _ = tooltip_html_parts.append('<strong style="color: #2da44e;">' ~ success_icon_html ~ ' Passed (optional):</strong> ' ~ ((passed_optional_jobs|sort)|join(', '))) -%}{%- endif -%}
 {%- if failed_required_jobs -%}{%- set _ = tooltip_html_parts.append('<strong style="color: #d73a49;"><span style="display: inline-flex; align-items: center; justify-content: center; width: 14px; height: 14px; margin-right: 6px; border-radius: 999px; background-color: #d73a49; color: #ffffff; font-size: 11px; font-weight: 900; line-height: 1;">✗</span>Failed (required):</strong> ' + (failed_required_jobs|sort)|join(', ')) -%}{%- endif -%}
 {%- if failed_optional_jobs -%}{%- set _ = tooltip_html_parts.append('<strong style="color: #f59e0b;">⚠ Failed (optional):</strong> ' + (failed_optional_jobs|sort)|join(', ')) -%}{%- endif -%}
@@ -515,8 +531,8 @@ Legend & Help
 {%- set success_total = (commit_stats.success_required | int) + (commit_stats.success_optional | int) -%}
 {%- if (commit_stats.success_required | int) > 0 or (commit_stats.success_optional | int) > 0 -%}
 <span style="color: #2da44e;">
-  <strong>{{ commit_stats.success_required }}</strong>
-  {%- if (commit_stats.success_optional | int) > 0 -%}<span style="{{ pass_plus_style }}">+{{ commit_stats.success_optional }}</span>{%- endif -%}{{ success_icon_html|safe }}
+  <strong>{{ commit_stats.success_required }}</strong>{{ success_required_icon_html|safe }}
+  {%- if (commit_stats.success_optional | int) > 0 -%}<span style="{{ pass_plus_style }}">+{{ commit_stats.success_optional }}</span>{{ success_icon_html|safe }}{%- endif -%}
 </span>
 {%- endif -%}
 {%- if commit_stats.failure_required > 0 -%}{%- if success_total > 0 %} {% endif -%}<span style="color: #d73a49; font-weight: 800; font-size: 12px;" title="Required failures">{{ commit_stats.failure_required }}</span>{{ failure_required_icon_html|safe }}{%- endif -%}
@@ -533,6 +549,11 @@ Legend & Help
 <td class="sha">
 {# GitLab section #}
 <span class="gitlab-icons">
+{%- if commit.gitlab_checks_tree_html -%}
+<a href="#" onclick="toggleCommitGitLabTree(event, '{{ sha_short }}'); return false;" class="icon-link{% if not effective_pipeline %} icon-muted{% endif %}" style="text-decoration: none; margin-right: 4px; font-size: 11px; color: {% if effective_pipeline %}#0969da{% else %}#8c959f{% endif %};" title="{% if effective_pipeline %}Show GitLab pipeline jobs tree{% else %}No pipeline found (tree is likely empty){% endif %}">
+  <span id="gitlab-tree-toggle-{{ sha_short }}">▶</span>
+</a>
+{%- endif -%}
 {# Always show GitLab commit link (fox). Gray it out if we don't have pipeline context. #}
 <a href="{{ gitlab_commit_link }}" target="_blank" class="icon-link{%- if not effective_pipeline -%} icon-muted{%- endif -%}" style="color: #fc6d26; font-weight: 600;" title="View commit in GitLab">🦊</a>
 
@@ -544,11 +565,6 @@ Legend & Help
 <a href="{{ effective_pipeline.web_url }}" target="_blank" class="icon-link" style="color: #0969da;" title="View build pipeline in GitLab">🛠️</a>
 {%- else -%}
 <span class="icon-link icon-muted" title="No pipeline found for this commit/PR">🛠️</span>
-{%- endif -%}
-{%- if commit.gitlab_checks_tree_html -%}
-<a href="#" onclick="toggleCommitGitLabTree(event, '{{ sha_short }}'); return false;" class="icon-link{% if not effective_pipeline %} icon-muted{% endif %}" style="text-decoration: none; margin-left: 4px; font-size: 11px; color: {% if effective_pipeline %}#0969da{% else %}#8c959f{% endif %};" title="{% if effective_pipeline %}Show GitLab pipeline jobs tree{% else %}No pipeline found (tree is likely empty){% endif %}">
-  <span id="gitlab-tree-toggle-{{ sha_short }}">▶</span>
-</a>
 {%- endif -%}
  </span>
 
@@ -659,9 +675,9 @@ Legend & Help
 {# GitHub checks tree row (hidden by default) #}
 {%- if commit.github_checks_tree_html -%}
 <tr id="github-tree-row-{{ sha_short }}" style="display: none;">
-<td colspan="7" style="padding: 0; background-color: #f6f8fa;">
-<div style="padding: 8px 12px; border-top: 1px solid #d0d7de;">
-<pre style="margin: 0; padding: 10px 12px; background: #ffffff; border: 1px solid #d0d7de; border-radius: 6px; overflow: auto; font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace; font-size: 12px; line-height: 1;">{{ commit.github_checks_tree_html | safe }}</pre>
+<td colspan="7" style="padding: 0; background-color: #ffffff;">
+<div style="padding: 0; border-top: 0;">
+<pre style="margin: 0; padding: 0; background: transparent; border: 0; border-radius: 0; overflow: auto; font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace; font-size: 12px; line-height: 1;">{{ commit.github_checks_tree_html | safe }}</pre>
 </div>
 </td>
 </tr>
@@ -670,9 +686,9 @@ Legend & Help
 {# GitLab checks tree row (hidden by default) #}
 {%- if commit.gitlab_checks_tree_html -%}
 <tr id="gitlab-tree-row-{{ sha_short }}" style="display: none;">
-<td colspan="7" style="padding: 0; background-color: #f6f8fa;">
-<div style="padding: 8px 12px; border-top: 1px solid #d0d7de;">
-<pre style="margin: 0; padding: 10px 12px; background: #ffffff; border: 1px solid #d0d7de; border-radius: 6px; overflow: auto; font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace; font-size: 12px; line-height: 1;">{{ commit.gitlab_checks_tree_html | safe }}</pre>
+<td colspan="7" style="padding: 0; background-color: #ffffff;">
+<div style="padding: 0; border-top: 0;">
+<pre style="margin: 0; padding: 0; background: transparent; border: 0; border-radius: 0; overflow: auto; font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace; font-size: 12px; line-height: 1;">{{ commit.gitlab_checks_tree_html | safe }}</pre>
 </div>
 </td>
 </tr>

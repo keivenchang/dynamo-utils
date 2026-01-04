@@ -6,18 +6,18 @@ This module is intentionally dependency-light so it can be shared by:
 - `dynamo-utils/common.py` (log/snippet extraction, cache logic)
 - `dynamo-utils/html_pages/common_dashboard_lib.py` (HTML rendering for snippets/tags)
 
-Log to category examples:
+Log to category training examples:
 - 56701494636.log => trtllm-error
 - 58864425410.log => trtllm-error
 - 57524186105.log => trtllm-error, sglang-error
 - 58471383691.log => vllm-error
-- 58097278528.log => pytest-error
-- 56700023895.log => pytest-error
-- 57521050539.log => pytest-error
-- 57521050554.log => exit-139-sigsegv
+- 58097278528.log => pytest-error, !huggingface-auth-error
+- 56700023895.log => pytest-error, !huggingface-auth-error
+- 57521050539.log => pytest-error, !huggingface-auth-error
+- 57521050554.log => exit-139-sigsegv, !huggingface-auth-error
 - 58861726335.log => docker-build-error
 - 58818079816.log => github-LFS-error, docker-build-error
-- 58465471934.log => rust-error
+- 58465471934.log => rust-error, !huggingface-auth-error
 - 58745798050.log => download-error, docker-build-error
 - 58861726335.log => http-timeout, docker-build-error
 - 58818079816.log => github-LFS-error, !git-fetch
@@ -26,11 +26,12 @@ Log to category examples:
 - 58912949188.log => build-status-check-error
 - 59030172010.log => helm-error
 - 57945094461.log => copyright-header-error
-- 58179788784.log => huggingface-auth-error
+- 58179788784.log => pytest-error, !huggingface-auth-error
+- 58906141961.log => !pytest-error  # success run (passed/skipped), should not be tagged as pytest-error
 - 57877945085.log => exit-127-cmd-not-found
 - 58412373114.log => oom
 - 57930747559.log => timeout
-- 56700023895.log => python-error
+- 56700023895.log => python-error, !huggingface-auth-error
 - 57877945100.log => cuda-error
 - 56701494636.log => backend-failure
 - 56700029731.log => etcd-error
@@ -97,6 +98,14 @@ _TS_PREFIX_RE: Pattern[str] = re.compile(r"^\d{4}-\d{2}-\d{2}T[0-9:.]+Z\s+")
 # Common ANSI escape sequences (colors, etc).
 _ANSI_ESCAPE_RE: Pattern[str] = re.compile(r"\x1b\[[0-9;]*m")
 
+# Some logs include an *additional* inner ISO timestamp prefix after the Actions prefix,
+# e.g. Rust tracing output:
+#   2025-11-29T21:22:52.2708052Z 2025-11-29T21:22:52.270138Z  WARN dynamo_llm::hub: ...
+_ISO_TS_PREFIX_LOOSE_RE: Pattern[str] = re.compile(r"^\d{4}-\d{2}-\d{2}T[0-9:.]+Z?\s+")
+
+# Common log-level tokens (we only trust these when they appear near the start of a line).
+_LOG_LEVEL_TOKEN_RE: Pattern[str] = re.compile(r"\b(TRACE|DEBUG|INFO|WARN|WARNING|ERROR|FATAL)\b")
+
 
 def _strip_ts_prefix(s: str) -> str:
     """Remove the leading ISO timestamp prefix (if present)."""
@@ -111,6 +120,91 @@ def _strip_ansi(s: str) -> str:
 def _strip_ts_and_ansi(s: str) -> str:
     """Common normalization used across categorization/snippet extraction."""
     return _strip_ansi(_strip_ts_prefix(s or ""))
+
+
+def _extract_log_level(line: str) -> Optional[str]:
+    """Best-effort extraction of log level for a single log line.
+
+    Returns one of: TRACE/DEBUG/INFO/WARN/WARNING/ERROR/FATAL or None if unknown.
+    """
+    try:
+        s = _strip_ts_and_ansi(line or "")
+        # Strip nested timestamp prefixes (common in Rust tracing / structured logs).
+        for _ in range(3):
+            s2 = _ISO_TS_PREFIX_LOOSE_RE.sub("", s)
+            if s2 == s:
+                break
+            s = s2
+        # Only trust tokens that show up early; avoid matching message text like "warning: ...".
+        m = _LOG_LEVEL_TOKEN_RE.search((s or "")[:96])
+        if not m:
+            return None
+        return str(m.group(1) or "").upper() or None
+    except Exception:
+        return None
+
+
+def _line_is_warn_or_lower(line: str) -> bool:
+    """True if the line clearly indicates WARN/INFO/DEBUG/TRACE (i.e. not an error)."""
+    lvl = _extract_log_level(line)
+    return bool(lvl in {"TRACE", "DEBUG", "INFO", "WARN", "WARNING"})
+
+
+def _has_huggingface_auth_error_signal(lines: Sequence[str]) -> bool:
+    """Line-based HuggingFace auth detection with WARN filtering.
+
+    We only tag `huggingface-auth-error` when the auth signature appears on a line that is not
+    clearly a WARN/INFO/DEBUG/TRACE log line.
+
+    This prevents false positives from benign warnings like:
+      'WARN ... ModelExpress download failed ... (401 Unauthorized) ... huggingface.co/...'
+    """
+    try:
+        for raw in (lines or []):
+            s = _strip_ts_and_ansi(str(raw or ""))
+            if not s:
+                continue
+            if not HUGGINGFACE_AUTH_ERROR_RE.search(s):
+                continue
+            # If the line is explicitly WARN/INFO/etc, treat it as a warning, not a root-cause error tag.
+            if _line_is_warn_or_lower(str(raw or "")):
+                continue
+            return True
+    except Exception:
+        return False
+    return False
+
+
+_PYTEST_NONZERO_FAIL_OR_ERROR_COUNT_RE: Pattern[str] = re.compile(
+    r"\b([1-9]\d*)\s+failed\b|\b([1-9]\d*)\s+errors?\b", re.IGNORECASE
+)
+
+
+def _has_pytest_failure_signal(lines: Sequence[str]) -> bool:
+    """True if a log looks like pytest had failures/errors (not just a successful run summary)."""
+    try:
+        for raw in (lines or []):
+            s = _strip_ts_and_ansi(str(raw or ""))
+            if not s:
+                continue
+            # Explicit failing test id lines.
+            if PYTEST_FAILED_LINE_RE.search(s):
+                return True
+            # Pytest's per-file error marker.
+            if PYTEST_ERROR_FILE_LINE_RE.search(s):
+                return True
+            # Summary-style output: only treat non-zero failures/errors as a failure signal.
+            if _PYTEST_NONZERO_FAIL_OR_ERROR_COUNT_RE.search(s):
+                return True
+            # Collection errors are always failures.
+            if re.search(r"\berror[ \t]+collecting\b", s, flags=re.IGNORECASE):
+                return True
+            # Traditional section headers.
+            if re.search(r"==+\s*(FAILURES|ERRORS)\s*==+", s, flags=re.IGNORECASE):
+                return True
+    except Exception:
+        return False
+    return False
 
 
 def _norm_cat(s: str) -> str:
@@ -294,9 +388,10 @@ _BACKEND_RESULT_FAILURE_RE: Pattern[str] = re.compile(r"\"result\"\s*:\s*\"failu
 # Categorization patterns (full log)
 PYTEST_DETECT_RE: Pattern[str] = re.compile(
     r"(?:"
-    r"===+[ \t]*short test summary info[ \t]*===+"
     # Restrict to pytest-style failing test ids: "FAILED path/to/test_foo.py::test_name[...]"
-    r"|(?:^|[ \t])FAILED(?:[ \t]+|$)[^\\n]*\\.py::"
+    r"(?:^|[ \t])FAILED(?:[ \t]+|$)[^\\n]*\\.py::"
+    r"|==+\\s*FAILURES\\s*==+"
+    r"|==+\\s*ERRORS\\s*==+"
     r"|\berror[ \t]+collecting\b"
     r")",
     re.IGNORECASE | re.MULTILINE,
@@ -432,7 +527,7 @@ def categorize_error_log_lines(lines: Sequence[str]) -> List[str]:
         # Pytest / Python
         # Only tag "pytest" when the log looks like an actual pytest run failure,
         # not when it merely mentions pytest packages/versions (e.g., "pytest==9.0.2").
-        if PYTEST_DETECT_RE.search(t):
+        if _has_pytest_failure_signal(lines[-4000:] if lines else []):
             add("pytest-error")
         if _PYTHON_ERROR_DETECT_RE.search(t):
             add("python-error")
@@ -468,8 +563,10 @@ def categorize_error_log_lines(lines: Sequence[str]) -> List[str]:
         if BUILD_STATUS_CHECK_ERROR_RE.search(text):
             add("build-status-check-error")
 
-        # HuggingFace auth/token failures (missing/invalid HF_TOKEN or gated model access)
-        if HUGGINGFACE_AUTH_ERROR_RE.search(text):
+        # HuggingFace auth/token failures (missing/invalid HF_TOKEN or gated model access).
+        #
+        # IMPORTANT: filter out WARN-level lines so we don't mis-tag benign warnings as errors.
+        if _has_huggingface_auth_error_signal(lines[-4000:] if lines else []):
             add("huggingface-auth-error")
 
         # Copyright header checks
@@ -853,6 +950,24 @@ def categorize_error_snippet_text(snippet_text: str) -> List[str]:
     seen: set[str] = set()
     text_l = text.lower()
 
+    # If the snippet already contains a synthesized "Categories: ..." header line (generated from
+    # full-log categorization), seed the snippet categories from it. This keeps the snippet view
+    # self-consistent even when the snippet window doesn't include the original root-cause lines.
+    try:
+        for ln in (snippet_text or "").splitlines()[:5]:
+            s = (ln or "").strip()
+            if not s:
+                continue
+            if s.lower().startswith("categories:"):
+                payload = s.split(":", 1)[1] if ":" in s else ""
+                for tok in [x.strip() for x in payload.split(",") if x.strip()]:
+                    if tok not in seen:
+                        seen.add(tok)
+                        out.append(tok)
+                break
+    except Exception:
+        pass
+
     # Multi-line backend JSON-ish blocks: tag both engines when both blocks fail.
     try:
         engines = _backend_failure_engines_from_lines((snippet_text or "").splitlines())
@@ -870,6 +985,10 @@ def categorize_error_snippet_text(snippet_text: str) -> List[str]:
             # these as mutually exclusive for this class of failure).
             if name == "git-fetch":
                 if "github-lfs-error" in seen or "/info/lfs" in text_l or "git lfs" in text_l:
+                    continue
+            # HuggingFace auth: ignore WARN-level-only hits (common benign warnings).
+            if name == "huggingface-auth-error":
+                if not _has_huggingface_auth_error_signal((snippet_text or "").splitlines()):
                     continue
             if rx.search(text) and name not in seen:
                 seen.add(name)
@@ -1069,49 +1188,50 @@ def extract_error_snippet_from_text(
                 continue
             if line.startswith("#"):
                 continue
-            if PYTEST_FAILED_LINE_RE.search(line):
+            s_norm = _strip_ts_and_ansi(line)
+            if PYTEST_FAILED_LINE_RE.search(s_norm):
                 last_pytest_failed = i
-            if PYTEST_SHORT_TEST_SUMMARY_RE.search(line):
+            if PYTEST_SHORT_TEST_SUMMARY_RE.search(s_norm):
                 last_pytest_short_summary = i
-            if PYTEST_ERROR_FILE_LINE_RE.search(line):
+            if PYTEST_ERROR_FILE_LINE_RE.search(s_norm):
                 last_pytest_error_file = i
-            if PYTEST_CMD_LINE_RE.search(line):
+            if PYTEST_CMD_LINE_RE.search(s_norm):
                 last_pytest_cmd = i
-            if DOCKER_DAEMON_ERROR_LINE_RE.search(line):
+            if DOCKER_DAEMON_ERROR_LINE_RE.search(s_norm):
                 last_docker_daemon_err = i
-            if UNSUPPORTED_CUDA_VLLM_RE.search(line):
+            if UNSUPPORTED_CUDA_VLLM_RE.search(s_norm):
                 last_cuda_err = i
-            if CUDA_LIBCUDA_IMPORT_ERROR_RE.search(line):
+            if CUDA_LIBCUDA_IMPORT_ERROR_RE.search(s_norm):
                 last_libcuda_import_err = i
-            if PYTHON_MODULE_NOT_FOUND_RE.search(line):
+            if PYTHON_MODULE_NOT_FOUND_RE.search(s_norm):
                 last_module_not_found = i
-            if PYTHON_EXCEPTION_LINE_RE.search(line):
+            if PYTHON_EXCEPTION_LINE_RE.search(s_norm):
                 last_python_exception_line = i
-            if DOCKERFILE_CONTEXT_HEADER_RE.search(line):
+            if DOCKERFILE_CONTEXT_HEADER_RE.search(s_norm):
                 last_dockerfile_ctx_hdr = i
             if RUST_TEST_FAILURES_HEADER_RE.search(_strip_ts_and_ansi(line)):
                 last_rust_failures_header = i
-            if RUST_TEST_RESULT_FAILED_RE.search(line):
+            if RUST_TEST_RESULT_FAILED_RE.search(s_norm):
                 last_rust_test_result_failed = i
-            if GIT_LFS_SNIPPET_ANCHOR_RE.search(line):
+            if GIT_LFS_SNIPPET_ANCHOR_RE.search(s_norm):
                 last_git_lfs_anchor = i
-            if EXIT_CODE_139_LINE_RE.search(line):
+            if EXIT_CODE_139_LINE_RE.search(s_norm):
                 last_exit_code_139 = i
             # Some categories are often only visible as a single high-signal line that can get
             # pushed out of the snippet window. Track them explicitly so we can force-include.
             if ETCD_ERROR_RE.search(line.lower()):
                 last_etcd_sig = i
-            if HUGGINGFACE_AUTH_ERROR_RE.search(line):
+            if HUGGINGFACE_AUTH_ERROR_RE.search(_strip_ts_and_ansi(line)) and not _line_is_warn_or_lower(line):
                 last_hf_auth_sig = i
             if COPYRIGHT_HEADER_ERROR_RE.search(line):
                 last_copyright_sig = i
-            if FAILED_TO_BUILD_RE.search(line):
+            if FAILED_TO_BUILD_RE.search(s_norm):
                 last_failed_to_build = i
-            if NETWORK_ERROR_LINE_RE.search(line):
+            if NETWORK_ERROR_LINE_RE.search(s_norm):
                 last_network_err = i
-            if BACKEND_RESULT_FAILURE_LINE_RE.search(line):
+            if BACKEND_RESULT_FAILURE_LINE_RE.search(s_norm):
                 last_backend_result_failure = i
-            if ERROR_SNIPPET_LINE_RE.search(line):
+            if ERROR_SNIPPET_LINE_RE.search(s_norm):
                 last_generic = i
 
         # Choose anchor by priority (first non-None index wins).

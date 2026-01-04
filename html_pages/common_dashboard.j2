@@ -162,28 +162,6 @@
     if (toggleEl) {
       toggleEl.textContent = hidden ? '▼' : '▶';
     }
-
-    // When expanding, auto-expand the first level beneath this node (direct children only),
-    // regardless of pass/fail. This is especially useful for showing top-level workflow roots.
-    if (hidden) {
-      try {
-        var selector = '[data-parent-children-id=\"' + childrenId + '\"][data-children-id]';
-        var childToggles = el.querySelectorAll(selector);
-        childToggles.forEach(function(t) {
-          var cid = t.getAttribute('data-children-id');
-          if (!cid) return;
-          var childSpan = document.getElementById(cid);
-          if (!childSpan) return;
-          var chHidden = (childSpan.style.display === 'none' || childSpan.style.display === '');
-          if (chHidden) {
-            childSpan.style.display = 'inline';
-            t.textContent = '▼';
-          }
-        });
-      } catch (e) {
-        // Best-effort only.
-      }
-    }
   }
 
   // Shared "Snippet" toggle (used by [raw log] leaves)

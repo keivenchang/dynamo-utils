@@ -21,6 +21,7 @@ import urllib.parse
 import urllib.request
 import zipfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -29,8 +30,198 @@ from zoneinfo import ZoneInfo
 
 # Log/snippet detection lives in `common_log_errors.py`.
 
+# ======================================================================================
+# API inventory (where the dashboard data comes from)
+#
+# The dashboards in this repo are built from a mix of:
+# - Local git metadata (branch/commit subject/SHA/time) from GitPython
+# - GitHub REST v3 (https://api.github.com) for PRs, check-runs, Actions job logs
+# - GitLab REST v4 (https://gitlab-master.nvidia.com) for pipeline status lines
+#
+# GitHub REST endpoints used (core):
+# - PR lookup / branch→PR mapping:
+#   - GET /repos/{owner}/{repo}/pulls                       (paged; open PR list)
+#   - GET /repos/{owner}/{repo}/pulls/{pr_number}           (head sha, base ref, mergeable_state, etc.)
+#   - GET /repos/{owner}/{repo}/commits/{sha}/pulls         (best-effort: find PR number from commit SHA)
+#
+# - Checks / CI rows (used to render the "Details" tree):
+#   - GET /repos/{owner}/{repo}/commits/{sha}/check-runs     (status+conclusion+timestamps+URLs per check)
+#   - GET /repos/{owner}/{repo}/commits/{sha}/status         (legacy fallback; coarse success/failure/pending)
+#
+# - "raw log" links + snippet inputs (GitHub Actions jobs):
+#   - GET /repos/{owner}/{repo}/actions/jobs/{job_id}/logs
+#       - when called with redirects disabled: capture Location header → direct "[raw log]" link (short-lived)
+#       - when downloaded: returns a ZIP of log files → extract text → cache for snippet parsing
+#
+# - PR comments (very rough "unresolved conversations" approximation):
+#   - GET /repos/{owner}/{repo}/pulls/{pr_number}/comments
+#
+# Optional / best-effort (may require elevated permissions):
+# - Required status checks (branch protection):
+#   - GET /repos/{owner}/{repo}/branches/{base_ref}/protection/required_status_checks
+#     (often 403 unless token has admin permissions; if unavailable we simply don't mark "required")
+#
+# GitLab REST endpoints used (see `gitlab_pipeline_pr_map.py`):
+# - GET /api/v4/projects/{project}/pipelines/{pipeline_id}
+# - GET /api/v4/projects/{project}/repository/commits/{sha}/merge_requests
+# ======================================================================================
+
 # Global logger for the module
 _logger = logging.getLogger(__name__)
+
+def parse_actions_run_id_from_url(url: str) -> str:
+    """Extract a GitHub Actions run_id from a typical Actions/check URL.
+
+    Examples:
+      - https://github.com/owner/repo/actions/runs/18697156351
+      - https://github.com/owner/repo/actions/runs/18697156351/job/53317461976
+    """
+    try:
+        s = str(url or "")
+        if "/actions/runs/" not in s:
+            return ""
+        rest = s.split("/actions/runs/", 1)[1]
+        run_id = rest.split("/", 1)[0].split("?", 1)[0].strip()
+        return run_id if run_id.isdigit() else ""
+    except Exception:
+        return ""
+
+
+def _safe_int(x: Any, default: int = 0) -> int:
+    try:
+        return int(x)
+    except Exception:
+        return int(default)
+
+
+def classify_ci_kind(name: str) -> str:
+    """Coarse 'kind' classification for checks/jobs (repo-specific heuristics)."""
+    s = str(name or "").lower()
+    if re.search(r"\b(build|docker|image|container|package|wheel|compile)\b", s):
+        return "build"
+    if re.search(r"\b(test|pytest|unit|integration|e2e|smoke|status-check)\b", s):
+        return "test"
+    # Treat Rust style/tooling checks as "lint" so they get a consistent prefix in dashboards.
+    if re.search(r"\b(rust|cargo|clippy|rustfmt|fmt)\b", s):
+        return "lint"
+    if re.search(r"\b(lint|format|black|ruff|flake|mypy|type|pre-commit)\b", s):
+        return "lint"
+    if re.search(r"\b(docs?|doc-build|sphinx)\b", s):
+        return "docs"
+    if re.search(r"\b(release|publish|deploy|helm)\b", s):
+        return "deploy"
+    return "check"
+
+class PhaseTimer:
+    """Tiny timing helper for coarse "where is time going?" instrumentation.
+
+    Intended usage:
+      t = PhaseTimer()
+      with t.phase("scan"):
+          ...
+      with t.phase("render"):
+          ...
+      print(t.format_one_line())
+    """
+
+    def __init__(self) -> None:
+        self._t0 = time.monotonic()
+        self._t_last = self._t0
+        self._dur_s: Dict[str, float] = {}
+
+    @contextmanager
+    def phase(self, name: str):
+        t0 = time.monotonic()
+        try:
+            yield
+        finally:
+            try:
+                self._dur_s[str(name)] = float(self._dur_s.get(str(name), 0.0)) + max(0.0, time.monotonic() - t0)
+            except Exception:
+                pass
+
+    def mark(self, name: str) -> None:
+        """Record time since the last mark into `name`, and advance the 'last' cursor."""
+        try:
+            now = time.monotonic()
+            self._dur_s[str(name)] = float(self._dur_s.get(str(name), 0.0)) + max(0.0, now - self._t_last)
+            self._t_last = now
+        except Exception:
+            pass
+
+    def start(self) -> float:
+        """Return a monotonic timestamp suitable for passing to `stop()`."""
+        try:
+            return float(time.monotonic())
+        except Exception:
+            return 0.0
+
+    def stop(self, name: str, started_at: float) -> None:
+        """Accumulate elapsed seconds since `started_at` into `name`."""
+        try:
+            dt = max(0.0, float(time.monotonic()) - float(started_at))
+        except Exception:
+            return
+        try:
+            self._dur_s[str(name)] = float(self._dur_s.get(str(name), 0.0)) + dt
+        except Exception:
+            pass
+
+    def time_call(self, name: str, fn, *args, **kwargs):
+        """Time a callable and return its result (best-effort)."""
+        t0 = self.start()
+        try:
+            return fn(*args, **kwargs)
+        finally:
+            self.stop(str(name), t0)
+
+    def total_s(self) -> float:
+        try:
+            return max(0.0, time.monotonic() - self._t0)
+        except Exception:
+            return 0.0
+
+    def as_dict(self, *, include_total: bool = True) -> Dict[str, float]:
+        d = dict(self._dur_s)
+        if include_total:
+            d["total"] = self.total_s()
+        return d
+
+    @staticmethod
+    def format_seconds(s: float) -> str:
+        try:
+            return f"{float(s):.2f}s"
+        except Exception:
+            return "?"
+
+    def format_one_line(self, *, keys: Optional[List[str]] = None) -> str:
+        d = self.as_dict(include_total=True)
+        if keys:
+            parts = [f"{k}={self.format_seconds(d.get(k, 0.0))}" for k in keys]
+        else:
+            # Deterministic-ish order: total last; others alphabetically.
+            ks = sorted([k for k in d.keys() if k != "total"])
+            parts = [f"{k}={self.format_seconds(d[k])}" for k in ks]
+            parts.append(f"total={self.format_seconds(d.get('total', 0.0))}")
+        return ", ".join(parts)
+
+    @staticmethod
+    def format_one_line_dict(d: Dict[str, Any], *, keys: Optional[List[str]] = None) -> str:
+        """Format a dict of {phase: seconds} similarly to `format_one_line()`."""
+        try:
+            dd: Dict[str, float] = {str(k): float(v) for k, v in (d or {}).items() if v is not None}
+        except Exception:
+            dd = {}
+        if keys:
+            parts = []
+            for k in keys:
+                parts.append(f"{k}={PhaseTimer.format_seconds(dd.get(k, 0.0))}")
+            return ", ".join(parts)
+        ks = sorted([k for k in dd.keys() if k != "total"])
+        parts = [f"{k}={PhaseTimer.format_seconds(dd.get(k, 0.0))}" for k in ks]
+        if "total" in dd:
+            parts.append(f"total={PhaseTimer.format_seconds(dd.get('total', 0.0))}")
+        return ", ".join(parts)
 
 #
 # Cache policy constants (single source of truth)
@@ -52,7 +243,7 @@ DEFAULT_STABLE_TTL_S: int = 30 * 24 * 3600
 # ^ "Stable" TTL (seconds) for older/less-changing data.
 #   Example: for a commit from last week, we only refresh its GitHub Actions status about once per 30 days
 #   (because it is past `DEFAULT_STABLE_AFTER_HOURS`).
-DEFAULT_OPEN_PRS_TTL_S: int = 300
+DEFAULT_OPEN_PRS_TTL_S: int = 60
 # ^ TTL (seconds) for caches keyed by *open* PRs (expected to change often).
 #   Example: required-checks / PR metadata for an open PR can be refreshed every 5 minutes.
 DEFAULT_CLOSED_PRS_TTL_S: int = 14 * 24 * 3600
@@ -1285,7 +1476,7 @@ class PRInfo:
 
 @dataclass(frozen=True)
 class GHPRCheckRow:
-    """A single row from `gh pr checks` (tab-separated output)."""
+    """A single PR check row (derived from GitHub REST check-runs)."""
 
     name: str
     status_raw: str
@@ -1297,7 +1488,8 @@ class GHPRCheckRow:
     @property
     def status_norm(self) -> str:
         s = (self.status_raw or "").strip().lower()
-        # gh pr checks typically uses: pass, fail, skipped, cancelled, pending, in_progress, queued, neutral
+        # We normalize GitHub check-run states into gh-like buckets:
+        # pass, fail, skipped, cancelled, pending, in_progress, queued, neutral, timed_out, action_required, unknown
         if s in {"pass", "success"}:
             return "success"
         # Treat "skipped"/"neutral" as success-like for UI aggregation.
@@ -1359,7 +1551,7 @@ class GitHubChecksSummary:
 
 
 def summarize_pr_check_rows(rows: Iterable[GHPRCheckRow]) -> GitHubChecksSummary:
-    """Summarize `gh pr checks` rows into bucketed counts + name lists.
+    """Summarize PR check rows into bucketed counts + name lists.
 
     Args:
         rows: Iterable of `GHPRCheckRow`
@@ -1520,7 +1712,7 @@ def summarize_check_runs(check_runs: Iterable[Dict[str, Any]]) -> GitHubChecksSu
         except Exception:
             continue
 
-        # Normalize check-run states into the same buckets we use for `gh pr checks`.
+        # Normalize check-run states into the buckets used by `GHPRCheckRow.status_norm`.
         if conclusion in {"success", "neutral", "skipped"}:
             if is_req:
                 success_required += 1
@@ -1603,7 +1795,7 @@ class GitHubAPIClient:
     """GitHub API client with automatic token detection and rate limit handling.
 
     Features:
-    - Automatic token detection (--token arg > GH_TOKEN env > GITHUB_TOKEN env > GitHub CLI config)
+    - Automatic token detection (--token arg > GitHub CLI config file)
     - Request/response handling with proper error messages
     - Support for parallel API calls with ThreadPoolExecutor
 
@@ -1611,6 +1803,28 @@ class GitHubAPIClient:
         client = GitHubAPIClient()
         pr_data = client.get("/repos/owner/repo/pulls/123")
     """
+
+    @staticmethod
+    def get_github_token_from_file() -> Optional[str]:
+        """Get GitHub token from a local config file (preferred).
+
+        We intentionally do NOT read GH_TOKEN/GITHUB_TOKEN env vars in this repo anymore.
+
+        Currently supported locations (first match wins):
+        - ~/.config/github-token   (single line token)
+        - ~/.config/gh/hosts.yml   (GitHub CLI login; oauth_token)
+        """
+        # 1) Simple token file (if present)
+        try:
+            token_file = Path.home() / ".config" / "github-token"
+            if token_file.exists():
+                tok = (token_file.read_text() or "").strip()
+                if tok:
+                    return tok
+        except Exception:
+            pass
+        # 2) GitHub CLI config
+        return GitHubAPIClient.get_github_token_from_cli()
 
     @staticmethod
     def get_github_token_from_cli() -> Optional[str]:
@@ -1642,14 +1856,24 @@ class GitHubAPIClient:
             pass
         return None
 
-    def __init__(self, token: Optional[str] = None, *, debug_rest: bool = False):
+    def __init__(
+        self,
+        token: Optional[str] = None,
+        *,
+        debug_rest: bool = False,
+        require_auth: bool = False,
+        allow_anonymous_fallback: bool = True,
+        max_rest_calls: Optional[int] = None,
+    ):
         """Initialize GitHub API client.
 
         Args:
             token: GitHub personal access token. If not provided, will try:
-                   1. GH_TOKEN environment variable
-                   2. GITHUB_TOKEN environment variable
-                   3. GitHub CLI config (~/.config/gh/hosts.yml)
+                   1. ~/.config/github-token (if present)
+                   2. GitHub CLI config (~/.config/gh/hosts.yml)
+            require_auth: If True, raise an error if we cannot find a token.
+            allow_anonymous_fallback: If True, allow a best-effort retry of GET requests without
+                                      Authorization on certain 401/403 auth failures (public-repo resiliency).
         """
         if not HAS_REQUESTS:
             raise ImportError("requests package required for GitHub API client. Install with: pip install requests")
@@ -1657,13 +1881,32 @@ class GitHubAPIClient:
 
         # Token priority:
         # 1) explicit arg
-        # 2) env var (prefer GH_TOKEN for compatibility with `gh`, then GITHUB_TOKEN)
-        # 3) GitHub CLI config (~/.config/gh/hosts.yml)
-        self.token = token or os.environ.get('GH_TOKEN') or os.environ.get('GITHUB_TOKEN') or self.get_github_token_from_cli()
+        # 2) token file / gh CLI config
+        self.token = token or self.get_github_token_from_file()
+        self.require_auth = bool(require_auth)
+        self.allow_anonymous_fallback = bool(allow_anonymous_fallback)
         self.base_url = "https://api.github.com"
         self.headers = {'Accept': 'application/vnd.github.v3+json'}
         self.logger = logging.getLogger(self.__class__.__name__)
         self._debug_rest = bool(debug_rest)
+
+        # Per-invocation API budget: hard cap on *network* REST calls for this client instance.
+        # Cached reads do not consume budget; each HTTP request (including retries) does.
+        # When the budget is exhausted, we switch to cache-only mode instead of failing hard.
+        try:
+            self._rest_budget_max: Optional[int] = int(max_rest_calls) if max_rest_calls is not None else None
+            if self._rest_budget_max is not None and self._rest_budget_max <= 0:
+                self._rest_budget_max = 0
+        except Exception:
+            self._rest_budget_max = None
+        self._rest_budget_exhausted: bool = False
+        self._rest_budget_exhausted_reason: str = ""
+
+        if self.require_auth and not self.token:
+            raise RuntimeError(
+                "GitHub API authentication is required but no token was found. "
+                "Pass --token, or login with gh so ~/.config/gh/hosts.yml exists."
+            )
 
         if self.token:
             self.headers['Authorization'] = f'token {self.token}'
@@ -1672,10 +1915,30 @@ class GitHubAPIClient:
         # Counts only requests made via this client (not `gh` CLI subprocess calls).
         self._rest_calls_total: int = 0
         self._rest_calls_by_label: Dict[str, int] = {}
-        # Per-run REST error accounting (helps debug auth/policy issues like 403).
+        # Per-run REST success/error accounting (counts each HTTP response we receive, including retries).
+        self._rest_success_total: int = 0
+        self._rest_success_by_label: Dict[str, int] = {}
+        # Per-run REST error accounting (helps debug auth/policy issues like 401/403).
         self._rest_errors_total: int = 0
         self._rest_errors_by_status: Dict[int, int] = {}
+        # Per-run REST error accounting by label+status (pinpoints which API types are failing).
+        # Shape: {label: {status_code: count}}
+        self._rest_errors_by_label_status: Dict[str, Dict[int, int]] = {}
         self._rest_last_error: Dict[str, Any] = {}
+        self._rest_last_error_label: str = ""
+        # Per-run REST timing (seconds; counts actual network time, including retries).
+        self._rest_time_total_s: float = 0.0
+        self._rest_time_by_label_s: Dict[str, float] = {}
+
+        # Per-run cache hit/miss accounting (helps debug "why so many API calls?").
+        # Shape: {cache_name: count}. Cache names are stable, low-cardinality strings.
+        self._cache_hits: Dict[str, int] = {}
+        self._cache_misses: Dict[str, int] = {}
+        # Per-run cache write accounting (disk persistence).
+        # - ops: number of times we wrote a cache file
+        # - entries: best-effort count of logical entries we wrote/updated
+        self._cache_writes_ops: Dict[str, int] = {}
+        self._cache_writes_entries: Dict[str, int] = {}
 
         # ----------------------------
         # Persistent caches (disk + memory)
@@ -1690,7 +1953,7 @@ class GitHubAPIClient:
         self._job_log_cache: Dict[str, Optional[str]] = {}
         self._cache_dir = dynamo_utils_cache_dir() / "job-logs"
 
-        # Cache for gh pr checks rows (two-tier: memory + disk, short TTL because status changes).
+        # Cache for PR check rows (two-tier: memory + disk, short TTL because status changes).
         self._pr_checks_mem_cache: Dict[str, Dict[str, Any]] = {}
         self._pr_checks_cache_dir = dynamo_utils_cache_dir() / "pr-checks"
 
@@ -1713,33 +1976,229 @@ class GitHubAPIClient:
 
         # Cache for Actions job status lookups (short TTL; prevents caching partial logs).
         self._actions_job_status_mem_cache: Dict[str, Dict[str, Any]] = {}
+        # Cache for Actions job details (steps, timestamps) (two-tier: memory + disk, short TTL).
+        self._actions_job_details_mem_cache: Dict[str, Dict[str, Any]] = {}
+        self._actions_job_cache_dir = dynamo_utils_cache_dir() / "actions-jobs"
+        # When True, avoid any network fetches and rely on caches only (best-effort).
+        self.cache_only_mode: bool = False
+
+        # Cache for Actions workflow metadata (name/path), used to render "suite / job" labels
+        # similar to GitHub's Checks UI.
+        self._actions_workflow_mem_cache: Dict[str, Dict[str, Any]] = {}
+        self._actions_workflow_cache_dir = dynamo_utils_cache_dir() / "actions-workflows"
+
+        # Cache for required status checks (branch protection). This changes rarely and is safe to cache
+        # for a long time. Keyed by (owner, repo, base_ref).
+        self._required_checks_mem_cache: Dict[str, Dict[str, Any]] = {}
+        self._required_checks_cache_dir = dynamo_utils_cache_dir() / "required-checks"
+
+        # Cache for enriched PRInfo objects keyed by (owner/repo, pr_number, updated_at).
+        # This is the main knob that allows "0 API calls" for stable PRs: if the PR wasn't updated,
+        # we reuse the cached enrichment (ci_status, failed checks, etc).
+        self._pr_info_mem_cache: Dict[str, Dict[str, Any]] = {}
+        self._pr_info_cache_dir = dynamo_utils_cache_dir() / "pr-info"
+
+        # Cache for search/issues results used to probe updated_at for a list of PRs.
+        self._search_issues_mem_cache: Dict[str, Dict[str, Any]] = {}
+        self._search_issues_cache_dir = dynamo_utils_cache_dir() / "search-issues"
+        # If search/issues is returning 422 for a repo (common with certain tokens), disable it temporarily
+        # so dashboards don't spam errors for an optimization-only call.
+        self._search_issues_disabled_mem_cache: Dict[str, Dict[str, Any]] = {}
+
+    def set_cache_only_mode(self, on: bool = True) -> None:
+        """Enable/disable cache-only mode (best-effort)."""
+        try:
+            self.cache_only_mode = bool(on)
+        except Exception:
+            self.cache_only_mode = bool(on)
+
+    def _budget_maybe_consume_or_raise(self) -> None:
+        """Consume one unit of REST budget, or raise when exhausted."""
+        # Unlimited budget
+        if self._rest_budget_max is None:
+            return
+        # Already exhausted
+        if bool(self._rest_budget_exhausted):
+            raise RuntimeError(self._rest_budget_exhausted_reason or "GitHub REST call budget exhausted")
+        # Consume (note: retries are counted separately by callers that also invoke _rest_get)
+        try:
+            remaining = int(self._rest_budget_max) - int(self._rest_calls_total)
+        except Exception:
+            remaining = -1
+        if remaining <= 0:
+            self._rest_budget_exhausted = True
+            self._rest_budget_exhausted_reason = (
+                f"GitHub REST call budget exhausted (max_rest_calls={self._rest_budget_max})"
+            )
+            raise RuntimeError(self._rest_budget_exhausted_reason)
+
+    def _json_load_text(self, txt: str) -> Dict[str, Any]:
+        """Parse JSON text (best-effort)."""
+        return json.loads(txt or "{}") or {}
+
+    def _json_dump_text(self, obj: Any, *, indent: Optional[int] = None) -> str:
+        """Serialize JSON text (best-effort)."""
+        return json.dumps(obj, indent=indent)
 
     def _rest_label_for_url(self, url: str) -> str:
         """Coarse label for a REST request URL (keeps job ids / SHAs from exploding cardinality)."""
         try:
             u = str(url or "")
-            if "/rate_limit" in u:
+            # Normalize to a path-only string (avoid scheme/host leaking into labels).
+            try:
+                path = urllib.parse.urlparse(u).path or ""
+            except Exception:
+                path = ""
+            s = path or u
+
+            if "/rate_limit" in s:
                 return "rate_limit"
+
+            if s.startswith("/search/issues"):
+                return "search_issues"
+
             # Actions jobs
-            if re.search(r"/repos/[^/]+/[^/]+/actions/jobs/\\d+/logs\\b", u):
+            if re.search(r"/repos/[^/]+/[^/]+/actions/jobs/\d+/logs\b", s):
                 return "actions_job_logs_zip"
-            if re.search(r"/repos/[^/]+/[^/]+/actions/jobs/\\d+\\b", u):
+            if re.search(r"/repos/[^/]+/[^/]+/actions/jobs/\d+\b", s):
                 return "actions_job_status"
-            # Check-runs
-            if "/check-runs" in u:
+
+            # Actions runs
+            if re.search(r"/repos/[^/]+/[^/]+/actions/runs/\d+/jobs\b", s):
+                return "actions_run_jobs"
+            if re.search(r"/repos/[^/]+/[^/]+/actions/runs/\d+\b", s):
+                return "actions_run"
+
+            # Check-runs (per commit)
+            if "/check-runs" in s:
                 return "check_runs"
+
             # PR / pulls
-            if re.search(r"/repos/[^/]+/[^/]+/pulls\\b", u):
+            if re.search(r"/repos/[^/]+/[^/]+/pulls/\d+/comments\b", s):
+                return "pr_review_comments"
+            if re.search(r"/repos/[^/]+/[^/]+/pulls\b", s):
                 return "pulls_list"
-            if re.search(r"/repos/[^/]+/[^/]+/pulls/\\d+\\b", u):
+            if re.search(r"/repos/[^/]+/[^/]+/pulls/\d+\b", s):
                 return "pull_request"
+
+            # Commit -> PR mapping (best-effort)
+            if re.search(r"/repos/[^/]+/[^/]+/commits/[0-9a-f]{7,40}/pulls\b", s, flags=re.IGNORECASE):
+                return "commit_pulls"
+
+            # Branch protection required checks (best-effort; often 403)
+            if re.search(r"/repos/[^/]+/[^/]+/branches/[^/]+/protection/required_status_checks\b", s):
+                return "required_status_checks"
+
             # Default: bucket by first few path segments
-            m = re.search(r"https?://api\\.github\\.com(/[^?]*)", u)
-            path = m.group(1) if m else u
-            parts = [p for p in path.split("/") if p]
-            return "/".join(parts[:4]) if parts else "unknown"
+            parts = [p for p in (path or "").split("/") if p]
+            # If it is a /repos/<owner>/<repo>/... path, bucket by the resource segment after repo.
+            if len(parts) >= 4 and parts[0] == "repos":
+                res = parts[3]
+                # Keep res stable (don’t include SHAs/IDs).
+                return f"repos_{res}"
+            # Otherwise, fall back to a short prefix of the path.
+            return "/".join(parts[:3]) if parts else "unknown"
         except Exception:
             return "unknown"
+
+    def _inflight_lock(self, key: str) -> "threading.Lock":
+        """Return a per-key lock to dedupe concurrent network fetches across threads."""
+        k = str(key or "")
+        if not k:
+            # Fallback: single shared lock
+            k = "__default__"
+        try:
+            mu = getattr(self, "_inflight_locks_mu", None)
+            locks = getattr(self, "_inflight_locks", None)
+            if not isinstance(mu, threading.Lock) or not isinstance(locks, dict):
+                raise Exception("missing inflight lock state")
+        except Exception:
+            # Initialize lazily (safe because Python GIL + best-effort semantics).
+            try:
+                self._inflight_locks_mu = threading.Lock()
+                self._inflight_locks = {}
+            except Exception:
+                pass
+        try:
+            mu = self._inflight_locks_mu  # type: ignore[attr-defined]
+            locks = self._inflight_locks  # type: ignore[attr-defined]
+            assert isinstance(locks, dict)
+            with mu:
+                lk = locks.get(k)
+                if lk is None:
+                    lk = threading.Lock()
+                    locks[k] = lk
+                return lk
+        except Exception:
+            return threading.Lock()
+
+    def _cache_hit(self, name: str) -> None:
+        try:
+            k = str(name or "").strip() or "unknown"
+            self._cache_hits[k] = int(self._cache_hits.get(k, 0) or 0) + 1
+        except Exception:
+            pass
+
+    def _cache_miss(self, name: str) -> None:
+        try:
+            k = str(name or "").strip() or "unknown"
+            self._cache_misses[k] = int(self._cache_misses.get(k, 0) or 0) + 1
+        except Exception:
+            pass
+
+    def _cache_write(self, name: str, *, entries: int = 0) -> None:
+        try:
+            k = str(name or "").strip() or "unknown"
+            self._cache_writes_ops[k] = int(self._cache_writes_ops.get(k, 0) or 0) + 1
+            if int(entries or 0) > 0:
+                self._cache_writes_entries[k] = int(self._cache_writes_entries.get(k, 0) or 0) + int(entries or 0)
+        except Exception:
+            pass
+
+    def get_cache_stats(self) -> Dict[str, Any]:
+        """Return best-effort per-run cache hit/miss stats for displaying in dashboards."""
+        try:
+            hits_total = int(sum(int(v) for v in (self._cache_hits or {}).values()))
+        except Exception:
+            hits_total = 0
+        try:
+            misses_total = int(sum(int(v) for v in (self._cache_misses or {}).values()))
+        except Exception:
+            misses_total = 0
+        try:
+            hits_by = dict(sorted((self._cache_hits or {}).items(), key=lambda kv: (-int(kv[1] or 0), str(kv[0]))))
+        except Exception:
+            hits_by = {}
+        try:
+            misses_by = dict(sorted((self._cache_misses or {}).items(), key=lambda kv: (-int(kv[1] or 0), str(kv[0]))))
+        except Exception:
+            misses_by = {}
+        try:
+            writes_ops_total = int(sum(int(v) for v in (self._cache_writes_ops or {}).values()))
+        except Exception:
+            writes_ops_total = 0
+        try:
+            writes_ops_by = dict(sorted((self._cache_writes_ops or {}).items(), key=lambda kv: (-int(kv[1] or 0), str(kv[0]))))
+        except Exception:
+            writes_ops_by = {}
+        try:
+            writes_entries_total = int(sum(int(v) for v in (self._cache_writes_entries or {}).values()))
+        except Exception:
+            writes_entries_total = 0
+        try:
+            writes_entries_by = dict(sorted((self._cache_writes_entries or {}).items(), key=lambda kv: (-int(kv[1] or 0), str(kv[0]))))
+        except Exception:
+            writes_entries_by = {}
+        return {
+            "hits_total": hits_total,
+            "misses_total": misses_total,
+            "writes_ops_total": writes_ops_total,
+            "writes_entries_total": writes_entries_total,
+            "hits_by": hits_by,
+            "misses_by": misses_by,
+            "writes_ops_by": writes_ops_by,
+            "writes_entries_by": writes_entries_by,
+        }
 
     def _rest_get(self, url: str, *, timeout: int = 10, allow_redirects: bool = True, stream: bool = False, params: Optional[Dict[str, Any]] = None):
         """requests.get wrapper that increments per-run counters.
@@ -1753,6 +2212,14 @@ class GitHubAPIClient:
         """
         assert requests is not None
         label = self._rest_label_for_url(url)
+
+        # Cache-only mode: do not perform any network operations.
+        if bool(getattr(self, "cache_only_mode", False)):
+            raise RuntimeError("cache_only_mode enabled; refusing network request")
+
+        # Enforce per-invocation budget.
+        self._budget_maybe_consume_or_raise()
+
         try:
             self._rest_calls_total += 1
             self._rest_calls_by_label[label] = int(self._rest_calls_by_label.get(label, 0) or 0) + 1
@@ -1764,26 +2231,90 @@ class GitHubAPIClient:
             except Exception:
                 pass
         headers = dict(self.headers or {})
+        t0_req = time.monotonic()
         resp = requests.get(url, headers=headers, params=params, timeout=timeout, allow_redirects=allow_redirects, stream=stream)
-
-        # Best-effort retry without Authorization for a narrow class of token-related 403s.
         try:
-            if int(getattr(resp, "status_code", 0) or 0) == 403 and ("Authorization" in headers):
+            dt = max(0.0, time.monotonic() - t0_req)
+            self._rest_time_total_s += float(dt)
+            self._rest_time_by_label_s[label] = float(self._rest_time_by_label_s.get(label, 0.0)) + float(dt)
+        except Exception:
+            pass
+
+        def _record_response(r) -> None:
+            """Record success/error stats for a single HTTP response."""
+            try:
+                code = int(getattr(r, "status_code", 0) or 0)
+            except Exception:
+                code = 0
+            try:
+                if code and code < 400:
+                    self._rest_success_total += 1
+                    self._rest_success_by_label[label] = int(self._rest_success_by_label.get(label, 0) or 0) + 1
+                else:
+                    self._rest_errors_total += 1
+                    if code:
+                        self._rest_errors_by_status[code] = int(self._rest_errors_by_status.get(code, 0) or 0) + 1
+                        # label+status breakdown
+                        try:
+                            d = self._rest_errors_by_label_status.get(label)
+                            if not isinstance(d, dict):
+                                d = {}
+                                self._rest_errors_by_label_status[label] = d
+                            d[int(code)] = int(d.get(int(code), 0) or 0) + 1
+                        except Exception:
+                            pass
+                    # Keep last error small (HTML stats should not explode).
+                    body = ""
+                    try:
+                        body = (r.text or "")[:300]
+                    except Exception:
+                        body = ""
+                    # Prefer the response URL (includes query string) so we can diagnose failures like search/issues 422.
+                    url_full = ""
+                    try:
+                        url_full = str(getattr(r, "url", "") or str(url or "")).strip()
+                    except Exception:
+                        url_full = str(url or "")
+                    self._rest_last_error = {
+                        "status": code,
+                        "url": url_full,
+                        "body": body,
+                    }
+                    self._rest_last_error_label = str(label or "")
+            except Exception:
+                pass
+
+        # Record the first response (even if we later retry).
+        _record_response(resp)
+
+        # Best-effort retry without Authorization for a narrow class of token-related auth failures.
+        try:
+            if not self.allow_anonymous_fallback:
+                return resp
+            code0 = int(getattr(resp, "status_code", 0) or 0)
+            if code0 in (401, 403) and ("Authorization" in headers):
                 body_txt = ""
                 try:
                     body_txt = (resp.text or "")
                 except Exception:
                     body_txt = ""
                 body_lc = body_txt.lower()
-                token_related = (
+                token_related_403 = (
                     ("enterprise forbids access via" in body_lc)
                     or ("forbids access via a personal access tokens" in body_lc)
                     or ("forbids access via a fine-grained personal access tokens" in body_lc)
                     or ("resource not accessible by personal access token" in body_lc)
                 )
-                if token_related:
+                bad_credentials_401 = (code0 == 401) and ("bad credentials" in body_lc)
+
+                # Retry conditions:
+                # - 403: only for known policy errors where anonymous access would have worked
+                # - 401: invalid token ("Bad credentials") can break public-repo dashboards; retry anonymously
+                if (code0 == 403 and token_related_403) or (code0 == 401 and bad_credentials_401):
                     headers_no_auth = dict(headers)
                     headers_no_auth.pop("Authorization", None)
+                    # Budget: retries consume budget too.
+                    self._budget_maybe_consume_or_raise()
                     # Count this retry as a REST call too (it is).
                     try:
                         self._rest_calls_total += 1
@@ -1792,34 +2323,24 @@ class GitHubAPIClient:
                         pass
                     if self._debug_rest:
                         try:
-                            self.logger.debug("GH REST GET [%s] retrying without Authorization (token-related 403)", label)
+                            self.logger.debug("GH REST GET [%s] retrying without Authorization (auth failure; public access may still work)", label)
                         except Exception:
                             pass
+                    t0_req2 = time.monotonic()
                     resp2 = requests.get(url, headers=headers_no_auth, params=params, timeout=timeout, allow_redirects=allow_redirects, stream=stream)
+                    try:
+                        dt2 = max(0.0, time.monotonic() - t0_req2)
+                        self._rest_time_total_s += float(dt2)
+                        self._rest_time_by_label_s[label] = float(self._rest_time_by_label_s.get(label, 0.0)) + float(dt2)
+                    except Exception:
+                        pass
+                    _record_response(resp2)
                     # Prefer the retry if it succeeded (or at least changed the failure mode).
                     if int(getattr(resp2, "status_code", 0) or 0) < 400:
                         resp = resp2
                     else:
                         # If the retry still fails, keep the original response (it likely contains the most useful policy message).
                         pass
-        except Exception:
-            pass
-        try:
-            code = int(getattr(resp, "status_code", 0) or 0)
-            if code >= 400:
-                self._rest_errors_total += 1
-                self._rest_errors_by_status[code] = int(self._rest_errors_by_status.get(code, 0) or 0) + 1
-                # Keep last error small (HTML stats should not explode).
-                body = ""
-                try:
-                    body = (resp.text or "")[:300]
-                except Exception:
-                    body = ""
-                self._rest_last_error = {
-                    "status": code,
-                    "url": str(url or ""),
-                    "body": body,
-                }
         except Exception:
             pass
         if self._debug_rest:
@@ -1837,20 +2358,43 @@ class GitHubAPIClient:
             return {
                 "total": int(self._rest_errors_total),
                 "by_status": dict(sorted(self._rest_errors_by_status.items(), key=lambda kv: (-kv[1], kv[0]))),
+                "by_label_status": {
+                    str(lbl): dict(sorted({int(k): int(v) for k, v in (m or {}).items() if int(v or 0) > 0}.items(), key=lambda kv: (-kv[1], kv[0])))
+                    for (lbl, m) in dict(sorted((self._rest_errors_by_label_status or {}).items(), key=lambda kv: str(kv[0]))).items()
+                    if isinstance(m, dict)
+                },
+                "last_label": str(self._rest_last_error_label or ""),
                 "last": dict(self._rest_last_error or {}),
             }
         except Exception:
-            return {"total": 0, "by_status": {}, "last": {}}
+            return {"total": 0, "by_status": {}, "by_label_status": {}, "last_label": "", "last": {}}
 
     def get_rest_call_stats(self) -> Dict[str, Any]:
         """Return per-run REST call stats for debugging."""
         try:
             return {
                 "total": int(self._rest_calls_total),
+                "budget_max": int(self._rest_budget_max) if self._rest_budget_max is not None else None,
+                "budget_exhausted": bool(self._rest_budget_exhausted),
                 "by_label": dict(sorted(self._rest_calls_by_label.items(), key=lambda kv: (-kv[1], kv[0]))),
+                "success_total": int(self._rest_success_total),
+                "success_by_label": dict(sorted(self._rest_success_by_label.items(), key=lambda kv: (-kv[1], kv[0]))),
+                "error_total": int(self._rest_errors_total),
+                "time_total_s": float(self._rest_time_total_s),
+                "time_by_label_s": dict(sorted(self._rest_time_by_label_s.items(), key=lambda kv: (-kv[1], kv[0]))),
             }
         except Exception:
-            return {"total": 0, "by_label": {}}
+            return {
+                "total": 0,
+                "budget_max": None,
+                "budget_exhausted": False,
+                "by_label": {},
+                "success_total": 0,
+                "success_by_label": {},
+                "error_total": 0,
+                "time_total_s": 0.0,
+                "time_by_label_s": {},
+            }
 
     def get_actions_job_status(self, *, owner: str, repo: str, job_id: str, ttl_s: int = 120) -> Optional[str]:
         """Return GitHub Actions job status ("completed", "in_progress", ...) with a short memory cache."""
@@ -1890,6 +2434,241 @@ class GitHubAPIClient:
             if status is None:
                 return None
             status_s = str(status)
+        except Exception:
+            return None
+
+        # Populate short-lived memory cache and return.
+        try:
+            self._actions_job_status_mem_cache[job_id_s] = {"ts": int(now), "status": status_s}
+        except Exception:
+            pass
+        return status_s
+
+    def _load_actions_job_disk_cache(self) -> Dict[str, Any]:
+        try:
+            self._actions_job_cache_dir.mkdir(parents=True, exist_ok=True)
+            p = self._actions_job_cache_dir / "actions_jobs.json"
+            if not p.exists():
+                return {}
+            return self._json_load_text(p.read_text() or "{}")
+        except Exception:
+            return {}
+
+    def _save_actions_job_disk_cache(self, data: Dict[str, Any]) -> None:
+        try:
+            self._actions_job_cache_dir.mkdir(parents=True, exist_ok=True)
+            p = self._actions_job_cache_dir / "actions_jobs.json"
+            tmp = str(p) + ".tmp"
+            Path(tmp).write_text(self._json_dump_text(data, indent=None))
+            os.replace(tmp, p)
+        except Exception:
+            pass
+
+    def get_actions_job_details_cached(
+        self,
+        *,
+        owner: str,
+        repo: str,
+        job_id: str,
+        ttl_s: int = 600,
+        timeout: int = 15,
+    ) -> Optional[Dict[str, Any]]:
+        """Return Actions job details (including `steps`) with a persistent cache.
+
+        Uses:
+          GET /repos/{owner}/{repo}/actions/jobs/{job_id}
+        """
+        job_id_s = str(job_id or "").strip()
+        if not job_id_s.isdigit():
+            return None
+        key = f"{owner}/{repo}:job:{job_id_s}"
+        now = int(time.time())
+
+        # Memory cache
+        try:
+            ent = self._actions_job_details_mem_cache.get(key)
+            if isinstance(ent, dict):
+                ts = int(ent.get("ts", 0) or 0)
+                if ts and (now - ts) <= int(ttl_s):
+                    val = ent.get("val")
+                    return val if isinstance(val, dict) else None
+        except Exception:
+            pass
+
+        # Disk cache
+        disk = self._load_actions_job_disk_cache()
+        ent = disk.get(key) if isinstance(disk, dict) else None
+        if isinstance(ent, dict):
+            ts = int(ent.get("ts", 0) or 0)
+            if ts and (now - ts) <= int(ttl_s):
+                val = ent.get("val")
+                if isinstance(val, dict):
+                    self._actions_job_details_mem_cache[key] = {"ts": ts, "val": val}
+                    return val
+            # Cache-only mode: allow stale disk cache.
+            if bool(getattr(self, "cache_only_mode", False)):
+                val = ent.get("val")
+                if isinstance(val, dict):
+                    self._actions_job_details_mem_cache[key] = {"ts": ts, "val": val}
+                    return val
+
+        # Cache-only mode: do not fetch.
+        if bool(getattr(self, "cache_only_mode", False)):
+            return None
+
+        url = f"{self.base_url}/repos/{owner}/{repo}/actions/jobs/{job_id_s}"
+        try:
+            resp = self._rest_get(url, timeout=int(timeout))
+        except Exception:
+            return None
+        if resp.status_code < 200 or resp.status_code >= 300:
+            # Do NOT clobber a previously-good disk cache entry with `None` when we are rate-limited,
+            # out of budget, or otherwise temporarily unable to fetch.
+            #
+            # Only negative-cache permanent misses (404). For other errors, keep a short-lived
+            # in-memory negative cache to avoid hot-looping, but don't persist it.
+            try:
+                self._actions_job_details_mem_cache[key] = {"ts": now, "val": None}
+            except Exception:
+                pass
+            try:
+                if int(resp.status_code) == 404 and isinstance(disk, dict):
+                    disk[key] = {"ts": now, "val": None}
+                    self._save_actions_job_disk_cache(disk)
+            except Exception:
+                pass
+            return None
+
+        try:
+            data = resp.json() or {}
+        except Exception:
+            data = {}
+        if not isinstance(data, dict):
+            return None
+
+        # Keep only the fields we need (keep cache small + stable).
+        try:
+            steps_in = data.get("steps") if isinstance(data.get("steps"), list) else []
+            steps: List[Dict[str, Any]] = []
+            for st in (steps_in or []):
+                if not isinstance(st, dict):
+                    continue
+                steps.append(
+                    {
+                        "number": st.get("number"),
+                        "name": st.get("name"),
+                        "status": st.get("status"),
+                        "conclusion": st.get("conclusion"),
+                        "started_at": st.get("started_at"),
+                        "completed_at": st.get("completed_at"),
+                    }
+                )
+            val = {
+                "id": data.get("id"),
+                "run_id": data.get("run_id"),
+                "name": data.get("name"),
+                "status": data.get("status"),
+                "conclusion": data.get("conclusion"),
+                "started_at": data.get("started_at"),
+                "completed_at": data.get("completed_at"),
+                "html_url": data.get("html_url"),
+                "steps": steps,
+            }
+        except Exception:
+            return None
+
+        try:
+            self._actions_job_details_mem_cache[key] = {"ts": now, "val": val}
+            if isinstance(disk, dict):
+                disk[key] = {"ts": now, "val": val}
+                self._save_actions_job_disk_cache(disk)
+        except Exception:
+            pass
+        return val
+
+    def _load_actions_workflow_disk_cache(self) -> Dict[str, Any]:
+        try:
+            self._actions_workflow_cache_dir.mkdir(parents=True, exist_ok=True)
+            p = self._actions_workflow_cache_dir / "actions_workflows.json"
+            if p.exists():
+                with open(p, "r") as f:
+                    return json.load(f)
+        except Exception:
+            return {}
+        return {}
+
+    def _save_actions_workflow_disk_cache(self, data: Dict[str, Any]) -> None:
+        try:
+            self._actions_workflow_cache_dir.mkdir(parents=True, exist_ok=True)
+            p = self._actions_workflow_cache_dir / "actions_workflows.json"
+            with open(p, "w") as f:
+                json.dump(data, f, indent=2)
+        except Exception:
+            pass
+
+    def get_actions_workflow_metadata_cached(
+        self,
+        *,
+        owner: str,
+        repo: str,
+        workflow_id: str,
+        ttl_s: int = 180 * 24 * 3600,
+        timeout: int = 10,
+    ) -> Optional[Dict[str, Any]]:
+        """Fetch and cache Actions workflow metadata (name/path) by workflow_id."""
+        wid = str(workflow_id or "").strip()
+        if not wid:
+            return None
+        key = f"{owner}/{repo}:{wid}"
+        now = int(datetime.now(timezone.utc).timestamp())
+
+        # memory cache
+        try:
+            ent = self._actions_workflow_mem_cache.get(key)
+            if ent and isinstance(ent, dict):
+                ts = int(ent.get("ts", 0) or 0)
+                if ts and (now - ts) <= int(ttl_s):
+                    val = ent.get("val")
+                    return val if isinstance(val, dict) else None
+        except Exception:
+            pass
+
+        # disk cache
+        disk = self._load_actions_workflow_disk_cache()
+        ent = disk.get(key) if isinstance(disk, dict) else None
+        if ent and isinstance(ent, dict):
+            ts = int(ent.get("ts", 0) or 0)
+            if ts and ((now - ts) <= int(ttl_s) or bool(getattr(self, "cache_only_mode", False))):
+                val = ent.get("val")
+                if isinstance(val, dict):
+                    self._actions_workflow_mem_cache[key] = {"ts": ts, "val": val}
+                    return val
+
+        # Cache-only mode
+        if bool(getattr(self, "cache_only_mode", False)):
+            return None
+
+        # fetch
+        try:
+            data = self.get(f"/repos/{owner}/{repo}/actions/workflows/{wid}", timeout=timeout) or {}
+            if not isinstance(data, dict):
+                data = {}
+            val = {
+                "id": data.get("id"),
+                "name": data.get("name"),
+                "path": data.get("path"),
+                "state": data.get("state"),
+                "html_url": data.get("html_url"),
+            }
+            self._actions_workflow_mem_cache[key] = {"ts": now, "val": val}
+            try:
+                if not isinstance(disk, dict):
+                    disk = {}
+                disk[key] = {"ts": now, "val": val}
+                self._save_actions_workflow_disk_cache(disk)
+            except Exception:
+                pass
+            return val
         except Exception:
             return None
 
@@ -2160,6 +2939,127 @@ class GitHubAPIClient:
         except Exception:
             return None
 
+    @staticmethod
+    def _failed_check_to_dict(fc: "FailedCheck") -> Dict[str, Any]:
+        try:
+            return {
+                "name": str(getattr(fc, "name", "") or ""),
+                "job_url": str(getattr(fc, "job_url", "") or ""),
+                "run_id": str(getattr(fc, "run_id", "") or ""),
+                "duration": str(getattr(fc, "duration", "") or ""),
+                "raw_log_url": getattr(fc, "raw_log_url", None),
+                "is_required": bool(getattr(fc, "is_required", False)),
+                "error_summary": getattr(fc, "error_summary", None),
+            }
+        except Exception:
+            return {}
+
+    @staticmethod
+    def _failed_check_from_dict(d: Dict[str, Any]) -> Optional["FailedCheck"]:
+        try:
+            return FailedCheck(
+                name=str(d.get("name") or ""),
+                job_url=str(d.get("job_url") or ""),
+                run_id=str(d.get("run_id") or ""),
+                duration=str(d.get("duration") or ""),
+                raw_log_url=d.get("raw_log_url"),
+                is_required=bool(d.get("is_required", False)),
+                error_summary=d.get("error_summary"),
+            )
+        except Exception:
+            return None
+
+    @staticmethod
+    def _running_check_to_dict(rc: "RunningCheck") -> Dict[str, Any]:
+        try:
+            return {
+                "name": str(getattr(rc, "name", "") or ""),
+                "check_url": str(getattr(rc, "check_url", "") or ""),
+                "is_required": bool(getattr(rc, "is_required", False)),
+                "elapsed_time": getattr(rc, "elapsed_time", None),
+            }
+        except Exception:
+            return {}
+
+    @staticmethod
+    def _running_check_from_dict(d: Dict[str, Any]) -> Optional["RunningCheck"]:
+        try:
+            return RunningCheck(
+                name=str(d.get("name") or ""),
+                check_url=str(d.get("check_url") or ""),
+                is_required=bool(d.get("is_required", False)),
+                elapsed_time=d.get("elapsed_time"),
+            )
+        except Exception:
+            return None
+
+    @staticmethod
+    def _pr_info_full_to_dict(pr: "PRInfo") -> Dict[str, Any]:
+        """Serialize a PRInfo including enrichment fields so it can be reused when PR is unchanged."""
+        try:
+            return {
+                "number": int(pr.number),
+                "title": pr.title,
+                "url": pr.url,
+                "state": pr.state,
+                "is_merged": bool(pr.is_merged),
+                "review_decision": pr.review_decision,
+                "mergeable_state": pr.mergeable_state,
+                "unresolved_conversations": int(pr.unresolved_conversations or 0),
+                "ci_status": pr.ci_status,
+                "head_sha": pr.head_sha,
+                "base_ref": pr.base_ref,
+                "created_at": pr.created_at,
+                "has_conflicts": bool(pr.has_conflicts),
+                "conflict_message": pr.conflict_message,
+                "blocking_message": pr.blocking_message,
+                "required_checks": list(pr.required_checks or []),
+                "failed_checks": [GitHubAPIClient._failed_check_to_dict(fc) for fc in (pr.failed_checks or [])],
+                "running_checks": [GitHubAPIClient._running_check_to_dict(rc) for rc in (pr.running_checks or [])],
+                "rerun_url": pr.rerun_url,
+            }
+        except Exception:
+            return GitHubAPIClient._pr_info_min_to_dict(pr)
+
+    @staticmethod
+    def _pr_info_full_from_dict(d: Dict[str, Any]) -> Optional["PRInfo"]:
+        try:
+            failed = []
+            for x in (d.get("failed_checks") or []):
+                if isinstance(x, dict):
+                    fc = GitHubAPIClient._failed_check_from_dict(x)
+                    if fc is not None:
+                        failed.append(fc)
+            running = []
+            for x in (d.get("running_checks") or []):
+                if isinstance(x, dict):
+                    rc = GitHubAPIClient._running_check_from_dict(x)
+                    if rc is not None:
+                        running.append(rc)
+            return PRInfo(
+                number=int(d.get("number") or 0),
+                title=str(d.get("title") or ""),
+                url=str(d.get("url") or ""),
+                state=str(d.get("state") or ""),
+                is_merged=bool(d.get("is_merged", False)),
+                review_decision=d.get("review_decision"),
+                mergeable_state=str(d.get("mergeable_state") or "unknown"),
+                unresolved_conversations=int(d.get("unresolved_conversations") or 0),
+                ci_status=d.get("ci_status"),
+                head_sha=d.get("head_sha"),
+                base_ref=d.get("base_ref"),
+                created_at=d.get("created_at"),
+                has_conflicts=bool(d.get("has_conflicts", False)),
+                conflict_message=d.get("conflict_message"),
+                blocking_message=d.get("blocking_message"),
+                required_checks=list(d.get("required_checks") or []),
+                failed_checks=failed,
+                running_checks=running,
+                rerun_url=d.get("rerun_url"),
+            )
+        except Exception:
+            return None
+
     def _load_pulls_list_disk_cache(self) -> Dict[str, Any]:
         cache_file = self._pulls_list_cache_dir / "pulls_open_cache.json"
         if cache_file.exists():
@@ -2179,6 +3079,7 @@ class GitHubAPIClient:
             with open(tmp, "w") as f:
                 json.dump(data, f)
             os.replace(tmp, cache_file)
+            self._cache_write("pulls_list.disk_write", entries=len(data) if isinstance(data, dict) else 0)
         except Exception:
             # Best-effort only.
             pass
@@ -2209,6 +3110,7 @@ class GitHubAPIClient:
             if (now - ts) <= int(ttl_s):
                 items = mem.get("items")
                 if isinstance(items, list):
+                    self._cache_hit("pulls_list.mem")
                     return items  # type: ignore[return-value]
 
         # Disk cache
@@ -2220,42 +3122,87 @@ class GitHubAPIClient:
                 items = entry.get("items")
                 if isinstance(items, list):
                     self._pulls_list_mem_cache[cache_key] = {"ts": ts, "items": items}
+                    self._cache_hit("pulls_list.disk")
+                    return items  # type: ignore[return-value]
+            # Cache-only mode: return stale disk cache if present.
+            if bool(getattr(self, "cache_only_mode", False)):
+                items = entry.get("items")
+                if isinstance(items, list):
+                    self._pulls_list_mem_cache[cache_key] = {"ts": ts, "items": items}
+                    self._cache_hit("pulls_list.disk_stale_cache_only")
                     return items  # type: ignore[return-value]
 
-        # Fetch from API (paginate)
-        endpoint = f"/repos/{owner}/{repo}/pulls"
-        items: List[Dict[str, Any]] = []
-        try:
-            page = 1
-            while True:
-                params = {"state": state, "per_page": 100, "page": page}
-                chunk = self.get(endpoint, params=params)
-                if not chunk:
-                    break
-                if isinstance(chunk, list):
-                    items.extend(chunk)
-                else:
-                    break
-                if len(chunk) < 100:
-                    break
-                page += 1
-        except Exception as e:
-            # Best-effort: if we can't list PRs (rate limit, network, auth), just return empty.
-            # Also negative-cache the failure for a short window to avoid spamming retries when
-            # scanning multiple clones of the same repo in one run.
-            print(f"Error listing PRs for {owner}/{repo}: {e}", file=sys.stderr)
-            self._pulls_list_mem_cache[cache_key] = {"ts": now, "items": []}
-            if isinstance(disk, dict):
-                disk[cache_key] = {"ts": now, "items": []}
-                self._save_pulls_list_disk_cache(disk)
+        # Cache-only mode: return stale memory cache if present, else empty (no network).
+        if bool(getattr(self, "cache_only_mode", False)):
+            try:
+                mem = self._pulls_list_mem_cache.get(cache_key)
+                if isinstance(mem, dict) and isinstance(mem.get("items"), list):
+                    self._cache_hit("pulls_list.mem_stale_cache_only")
+                    return mem.get("items")  # type: ignore[return-value]
+            except Exception:
+                pass
+            self._cache_miss("pulls_list.cache_only_empty")
             return []
 
-        # Save caches
-        self._pulls_list_mem_cache[cache_key] = {"ts": now, "items": items}
-        if isinstance(disk, dict):
-            disk[cache_key] = {"ts": now, "items": items}
-            self._save_pulls_list_disk_cache(disk)
-        return items
+        # Fetch from API (paginate), but dedupe concurrent fetches across threads.
+        lock = self._inflight_lock(f"pulls_list:{cache_key}")
+        with lock:
+            # Re-check memory cache (another thread may have populated it).
+            mem = self._pulls_list_mem_cache.get(cache_key)
+            if mem and isinstance(mem, dict):
+                ts = int(mem.get("ts") or 0)
+                if (now - ts) <= int(ttl_s):
+                    items = mem.get("items")
+                    if isinstance(items, list):
+                        self._cache_hit("pulls_list.mem")
+                        return items  # type: ignore[return-value]
+
+            # Re-check disk cache too (cheap, avoids extra network when threads race).
+            disk = self._load_pulls_list_disk_cache()
+            entry = disk.get(cache_key) if isinstance(disk, dict) else None
+            if isinstance(entry, dict):
+                ts = int(entry.get("ts") or 0)
+                if (now - ts) <= int(ttl_s):
+                    items = entry.get("items")
+                    if isinstance(items, list):
+                        self._pulls_list_mem_cache[cache_key] = {"ts": ts, "items": items}
+                        self._cache_hit("pulls_list.disk")
+                        return items  # type: ignore[return-value]
+
+            self._cache_miss("pulls_list.network")
+            endpoint = f"/repos/{owner}/{repo}/pulls"
+            items = []
+            try:
+                page = 1
+                while True:
+                    params = {"state": state, "per_page": 100, "page": page}
+                    chunk = self.get(endpoint, params=params)
+                    if not chunk:
+                        break
+                    if isinstance(chunk, list):
+                        items.extend(chunk)
+                    else:
+                        break
+                    if len(chunk) < 100:
+                        break
+                    page += 1
+            except Exception as e:
+                # Best-effort: if we can't list PRs (rate limit, network, auth), just return empty.
+                # Also negative-cache the failure for a short window to avoid spamming retries when
+                # scanning multiple clones of the same repo in one run.
+                print(f"Error listing PRs for {owner}/{repo}: {e}", file=sys.stderr)
+                self._pulls_list_mem_cache[cache_key] = {"ts": now, "items": []}
+                if isinstance(disk, dict):
+                    disk[cache_key] = {"ts": now, "items": []}
+                    self._save_pulls_list_disk_cache(disk)
+                return []
+
+            # Save caches
+            self._pulls_list_mem_cache[cache_key] = {"ts": now, "items": items}
+            if isinstance(disk, dict):
+                disk[cache_key] = {"ts": now, "items": items}
+                self._save_pulls_list_disk_cache(disk)
+            return items
 
     def get_pr_info_for_branches(
         self,
@@ -2321,23 +3268,98 @@ class GitHubAPIClient:
 
         result: Dict[str, List[PRInfo]] = {b: [] for b in branch_set}
 
-        # Per-PR enrichment can be parallelized (bounded).
-        with ThreadPoolExecutor(max_workers=8) as executor:
-            futures: List[Tuple[str, Dict[str, Any], Any]] = []
+        # Cache-only mode: avoid per-PR enrichment fetches; populate a minimal PRInfo from pr_data.
+        if bool(getattr(self, "cache_only_mode", False)):
             for branch_name, prs in head_to_prs.items():
                 for pr_data in prs:
-                    futures.append((branch_name, pr_data, executor.submit(self._pr_info_from_pr_data, owner, repo, pr_data)))
+                    try:
+                        pr_info = self._pr_info_min_from_dict(
+                            {
+                                "number": pr_data.get("number"),
+                                "title": pr_data.get("title") or "",
+                                "url": pr_data.get("html_url") or "",
+                                "state": pr_data.get("state") or "",
+                                "is_merged": pr_data.get("merged_at") is not None,
+                                "mergeable_state": pr_data.get("mergeable_state") or "unknown",
+                                "head_sha": (pr_data.get("head") or {}).get("sha"),
+                                "base_ref": (pr_data.get("base") or {}).get("ref", "main"),
+                                "created_at": pr_data.get("created_at"),
+                            }
+                        )
+                        if pr_info is not None:
+                            result.setdefault(branch_name, []).append(pr_info)
+                    except Exception:
+                        continue
+        else:
+            # Per-PR enrichment can be parallelized (bounded).
+            #
+            # Optimization: if a PR has not changed (by `updated_at`), reuse a cached PRInfo and do
+            # *zero* per-PR network calls. We probe updated_at for the target PR list using a single
+            # search/issues call (batched).
+            pr_nums: List[int] = []
+            pr_data_by_num: Dict[int, Dict[str, Any]] = {}
+            for _branch_name, prs in head_to_prs.items():
+                for pr_data in prs:
+                    try:
+                        n = int(pr_data.get("number") or 0)
+                    except Exception:
+                        continue
+                    if n > 0 and n not in pr_data_by_num:
+                        pr_nums.append(n)
+                        pr_data_by_num[n] = pr_data
 
-            for branch_name, _pr_data, fut in futures:
+            updated_map: Dict[int, str] = {}
+            try:
+                updated_map = self.get_pr_updated_at_via_search_issues(owner=owner, repo=repo, pr_numbers=pr_nums) or {}
+            except Exception:
+                updated_map = {}
+
+            def enrich_one(pr_data: Dict[str, Any]) -> Optional[PRInfo]:
                 try:
-                    pr_info = fut.result()
-                    if pr_info is not None:
-                        result.setdefault(branch_name, []).append(pr_info)
+                    n = int(pr_data.get("number") or 0)
                 except Exception:
-                    # Best-effort: skip broken PRs.
-                    continue
+                    n = 0
+                upd = str(updated_map.get(n) or pr_data.get("updated_at") or "").strip()
+                # If we have a cached PRInfo for this updated_at, return it without network.
+                if n and upd:
+                    cached = self._get_cached_pr_info_if_unchanged(owner=owner, repo=repo, pr_number=n, updated_at=upd)
+                    if cached is not None:
+                        return cached
+                # Cache-only mode: don't attempt enrichment fetches.
+                if bool(getattr(self, "cache_only_mode", False)):
+                    return self._pr_info_min_from_dict(
+                        {
+                            "number": pr_data.get("number"),
+                            "title": pr_data.get("title") or "",
+                            "url": pr_data.get("html_url") or "",
+                            "state": pr_data.get("state") or "",
+                            "is_merged": pr_data.get("merged_at") is not None,
+                            "mergeable_state": pr_data.get("mergeable_state") or "unknown",
+                            "head_sha": (pr_data.get("head") or {}).get("sha"),
+                            "base_ref": (pr_data.get("base") or {}).get("ref", "main"),
+                            "created_at": pr_data.get("created_at"),
+                        }
+                    )
+                pr = self._pr_info_from_pr_data(owner, repo, pr_data)
+                if pr is not None and n and upd:
+                    self._save_pr_info_cache(owner=owner, repo=repo, pr_number=n, updated_at=upd, pr=pr)
+                return pr
 
-        if not include_closed:
+            with ThreadPoolExecutor(max_workers=8) as executor:
+                futures2: List[Tuple[str, Dict[str, Any], Any]] = []
+                for branch_name, prs in head_to_prs.items():
+                    for pr_data in prs:
+                        futures2.append((branch_name, pr_data, executor.submit(enrich_one, pr_data)))
+
+                for branch_name, _pr_data, fut in futures2:
+                    try:
+                        pr_info = fut.result()
+                        if pr_info is not None:
+                            result.setdefault(branch_name, []).append(pr_info)
+                    except Exception:
+                        continue
+
+        if (not include_closed) or bool(getattr(self, "cache_only_mode", False)):
             return result
 
         # Resolve closed/merged PRs for branches with no OPEN PR match.
@@ -2461,12 +3483,31 @@ class GitHubAPIClient:
         except Exception:
             return None
 
-        # Fetch PR checks data once (consolidates 2 of the 3 'gh pr checks' calls)
+        base_branch = (pr_data.get("base") or {}).get("ref", "main")
+        base_branch = str(base_branch or "main")
+
+        # Fetch PR checks data once (REST check-runs; reused by multiple methods)
         checks_data = self._fetch_pr_checks_data(owner, repo, pr_number)
 
         # Required checks + unresolved conversations are API/gh lookups; do them sequentially here
         # (we parallelize at a higher level across PRs).
-        required_checks = self.get_required_checks(owner, repo, pr_number)
+        required_checks = set(self.get_required_checks_for_base_ref(owner=owner, repo=repo, base_ref=base_branch))
+        # Fallback: branch protection required-status-checks is often 403 (no admin perms).
+        # In that case, revive the older behavior: read required checks from the cached PR-level
+        # file (populated by `gh`) if present.
+        if not required_checks:
+            try:
+                rc_map = self.get_cached_required_checks(
+                    [int(pr_number)],
+                    owner=owner,
+                    repo=repo,
+                    cache_file="github_required_checks.json",
+                    skip_fetch=False,
+                )
+                if isinstance(rc_map, dict):
+                    required_checks = set(rc_map.get(int(pr_number), []) or [])
+            except Exception:
+                required_checks = set()
         unresolved_count = self.count_unresolved_conversations(owner, repo, pr_number)
 
         # Now process checks data synchronously (no need to parallelize since data is already fetched)
@@ -2478,8 +3519,6 @@ class GitHubAPIClient:
         mergeable = None  # list endpoint doesn't include this, but we can use mergeable_state when present
         mergeable_state = pr_data.get("mergeable_state", "unknown")
         has_conflicts = (mergeable is False) or (mergeable_state == "dirty")
-
-        base_branch = (pr_data.get("base") or {}).get("ref", "main")
 
         conflict_message = None
         if has_conflicts:
@@ -2516,6 +3555,101 @@ class GitHubAPIClient:
             rerun_url=rerun_url,
         )
 
+    def _get_cached_pr_info_if_unchanged(
+        self,
+        *,
+        owner: str,
+        repo: str,
+        pr_number: int,
+        updated_at: str,
+    ) -> Optional["PRInfo"]:
+        """Return cached PRInfo if we have an entry for this PR with the same updated_at."""
+        key = self._pr_info_cache_key(owner, repo, pr_number)
+        upd = str(updated_at or "").strip()
+        if not upd:
+            return None
+        # memory
+        try:
+            ent = self._pr_info_mem_cache.get(key)
+            if isinstance(ent, dict) and str(ent.get("updated_at") or "").strip() == upd:
+                prd = ent.get("pr")
+                if isinstance(prd, dict):
+                    pr = self._pr_info_full_from_dict(prd)
+                    # Required checks are effectively configuration and may be missing in older cache entries.
+                    # Refresh them opportunistically without forcing a full PR re-enrichment.
+                    if pr is not None and not (getattr(pr, "required_checks", None) or []):
+                        try:
+                            req = sorted(list(self.get_required_checks(owner, repo, int(pr_number)) or set()))
+                        except Exception:
+                            req = []
+                        if req:
+                            try:
+                                pr.required_checks = list(req)
+                                prd["required_checks"] = list(req)
+                                ent["pr"] = prd
+                                self._pr_info_mem_cache[key] = ent
+                            except Exception:
+                                pass
+                    return pr
+        except Exception:
+            pass
+        # disk
+        disk = self._load_pr_info_disk_cache()
+        ent = disk.get(key) if isinstance(disk, dict) else None
+        if isinstance(ent, dict) and str(ent.get("updated_at") or "").strip() == upd:
+            prd = ent.get("pr")
+            if isinstance(prd, dict):
+                pr = self._pr_info_full_from_dict(prd)
+                if pr is not None:
+                    if not (getattr(pr, "required_checks", None) or []):
+                        try:
+                            req = sorted(list(self.get_required_checks(owner, repo, int(pr_number)) or set()))
+                        except Exception:
+                            req = []
+                        if req:
+                            try:
+                                pr.required_checks = list(req)
+                                prd["required_checks"] = list(req)
+                                ent["pr"] = prd
+                                if isinstance(disk, dict):
+                                    disk[key] = ent
+                                    self._save_pr_info_disk_cache(disk)
+                            except Exception:
+                                pass
+                    try:
+                        self._pr_info_mem_cache[key] = {"updated_at": upd, "pr": prd}
+                    except Exception:
+                        pass
+                    return pr
+        return None
+
+    def _save_pr_info_cache(
+        self,
+        *,
+        owner: str,
+        repo: str,
+        pr_number: int,
+        updated_at: str,
+        pr: "PRInfo",
+    ) -> None:
+        key = self._pr_info_cache_key(owner, repo, pr_number)
+        upd = str(updated_at or "").strip()
+        if not upd:
+            return
+        prd = self._pr_info_full_to_dict(pr)
+        try:
+            self._pr_info_mem_cache[key] = {"updated_at": upd, "pr": prd}
+        except Exception:
+            pass
+        try:
+            disk = self._load_pr_info_disk_cache()
+            if not isinstance(disk, dict):
+                disk = {}
+            disk[key] = {"updated_at": upd, "pr": prd}
+            self._save_pr_info_disk_cache(disk)
+        except Exception:
+            pass
+
     def _load_pr_checks_disk_cache(self) -> Dict[str, Any]:
         cache_file = self._pr_checks_cache_dir / "pr_checks_cache.json"
         if cache_file.exists():
@@ -2532,6 +3666,7 @@ class GitHubAPIClient:
             cache_file = self._pr_checks_cache_dir / "pr_checks_cache.json"
             with open(cache_file, "w") as f:
                 json.dump(cache, f, indent=2)
+            self._cache_write("pr_checks_rows.disk_write", entries=len(cache) if isinstance(cache, dict) else 0)
         except Exception:
             pass
 
@@ -2545,7 +3680,7 @@ class GitHubAPIClient:
         ttl_s: int = 300,
         skip_fetch: bool = False,
     ) -> List[GHPRCheckRow]:
-        """Get structured rows from `gh pr checks`, with a short-lived persistent cache.
+        """Get structured PR check rows (GitHub REST check-runs), with a short-lived persistent cache.
 
         Note: the raw-log links are time-limited, but the checks rows themselves are cheap to cache
         for a short TTL to speed repeated HTML generation.
@@ -2553,13 +3688,22 @@ class GitHubAPIClient:
         required_checks = required_checks or set()
         key = self._pr_checks_cache_key(owner, repo, pr_number)
         now = int(datetime.now(timezone.utc).timestamp())
+        # Cache schema version. Bump this when the serialized shape/semantics change.
+        # v2 adds status-context checks (GET /commits/<sha>/status) in addition to check-runs.
+        CACHE_VER = 2
 
         # 1) memory cache
         try:
             ent = self._pr_checks_mem_cache.get(key)
             if ent and isinstance(ent, dict):
                 ts = int(ent.get("ts", 0) or 0)
+                ver = int(ent.get("ver", 0) or 0)
                 if ts and (now - ts) <= max(0, int(ttl_s)):
+                    if ver >= CACHE_VER:
+                        self._cache_hit("pr_checks_rows.mem")
+                    else:
+                        # Old cache entry; ignore so we can refetch and include status contexts.
+                        raise RuntimeError("stale pr_checks_rows cache schema")
                     rows = ent.get("rows") or []
                     out: List[GHPRCheckRow] = []
                     for r in rows:
@@ -2587,7 +3731,16 @@ class GitHubAPIClient:
             ent = disk.get(key) if isinstance(disk, dict) else None
             if ent and isinstance(ent, dict):
                 ts = int(ent.get("ts", 0) or 0)
-                if ts and (now - ts) <= max(0, int(ttl_s)):
+                ver = int(ent.get("ver", 0) or 0)
+                if ts and ((now - ts) <= max(0, int(ttl_s)) or bool(getattr(self, "cache_only_mode", False))):
+                    if ver >= CACHE_VER:
+                        if (now - ts) <= max(0, int(ttl_s)):
+                            self._cache_hit("pr_checks_rows.disk")
+                        else:
+                            self._cache_hit("pr_checks_rows.disk_stale_cache_only")
+                    else:
+                        # Old cache entry; ignore so we can refetch and include status contexts.
+                        raise RuntimeError("stale pr_checks_rows cache schema")
                     rows = ent.get("rows") or []
                     out: List[GHPRCheckRow] = []
                     for r in rows:
@@ -2606,82 +3759,21 @@ class GitHubAPIClient:
                         except Exception:
                             continue
                     # promote to memory
-                    self._pr_checks_mem_cache[key] = {"ts": ts, "rows": rows}
+                    self._pr_checks_mem_cache[key] = {"ts": ts, "ver": ver, "rows": rows}
                     return out
         except Exception:
             pass
 
+        # Cache-only mode: do not fetch network; return empty if no cached entry was usable.
+        if bool(getattr(self, "cache_only_mode", False)):
+            self._cache_miss("pr_checks_rows.cache_only_empty")
+            return []
+
         if skip_fetch:
             return []
 
-        # 3) fetch via gh
-        #
-        # NOTE:
-        # `gh pr checks` is convenient but can fail in environments where GitHub auth is poisoned
-        # (enterprise token lifetime policy, fine-grained token not granted repo access, etc).
-        # When it fails/returns empty, fall back to GitHub REST check-runs for the PR head SHA.
-        try:
-            result = subprocess.run(
-                ["gh", "pr", "checks", str(int(pr_number)), "--repo", f"{owner}/{repo}"],
-                capture_output=True,
-                text=True,
-                timeout=15,
-            )
-            stdout = (result.stdout or "").strip()
-            if stdout:
-                rows_dicts: List[Dict[str, Any]] = []
-                out: List[GHPRCheckRow] = []
-                for line in stdout.split("\n"):
-                    if not line.strip():
-                        continue
-                    parts = line.split("\t")
-                    if len(parts) < 2:
-                        continue
-                    name = (parts[0] or "").strip()
-                    status_raw = (parts[1] or "").strip()
-                    duration = (parts[2] or "").strip() if len(parts) > 2 else ""
-                    url = (parts[3] or "").strip() if len(parts) > 3 else ""
-                    description = (parts[4] or "").strip() if len(parts) > 4 else ""
-                    is_req = name in required_checks
-                    out.append(
-                        GHPRCheckRow(
-                            name=name,
-                            status_raw=status_raw,
-                            duration=duration,
-                            url=url,
-                            description=description,
-                            is_required=is_req,
-                        )
-                    )
-                    rows_dicts.append(
-                        {
-                            "name": name,
-                            "status_raw": status_raw,
-                            "duration": duration,
-                            "url": url,
-                            "description": description,
-                            "is_required": is_req,
-                        }
-                    )
-
-                # persist caches
-                try:
-                    self._pr_checks_mem_cache[key] = {"ts": now, "rows": rows_dicts}
-                    disk = self._load_pr_checks_disk_cache()
-                    if not isinstance(disk, dict):
-                        disk = {}
-                    disk[key] = {"ts": now, "rows": rows_dicts}
-                    self._save_pr_checks_disk_cache(disk)
-                except Exception:
-                    pass
-
-                return out
-
-        except Exception:
-            # Fall through to REST fallback below.
-            pass
-
-        # 4) fallback: REST check-runs for PR head SHA (best-effort; works for public repos without auth)
+        # 3) REST check-runs for PR head SHA (best-effort; works for public repos without auth)
+        self._cache_miss("pr_checks_rows.network")
         try:
             pr = self.get(f"/repos/{owner}/{repo}/pulls/{int(pr_number)}", timeout=10) or {}
             head_sha = (((pr.get("head") or {}) if isinstance(pr, dict) else {}) or {}).get("sha")
@@ -2692,7 +3784,20 @@ class GitHubAPIClient:
             data = self.get(f"/repos/{owner}/{repo}/commits/{head_sha}/check-runs", params={"per_page": 100}, timeout=10) or {}
             check_runs = data.get("check_runs") if isinstance(data, dict) else None
             if not isinstance(check_runs, list) or not check_runs:
-                return []
+                check_runs = []
+
+            # Also fetch "status contexts" (aka classic commit statuses).
+            #
+            # GitHub's PR Checks UI mixes:
+            # - check-runs (Actions, some apps)
+            # - status contexts (many GitHub Apps / integrations)
+            #
+            # Some checks (e.g. CodeRabbit "Review skipped") may only show up as status contexts,
+            # not as check-runs. If we only fetch /check-runs, those appear "missing" in dashboards.
+            statuses_data = self.get(f"/repos/{owner}/{repo}/commits/{head_sha}/status", timeout=10) or {}
+            statuses = statuses_data.get("statuses") if isinstance(statuses_data, dict) else None
+            if not isinstance(statuses, list):
+                statuses = []
 
             def _parse_iso(s: str) -> Optional[datetime]:
                 try:
@@ -2727,6 +3832,7 @@ class GitHubAPIClient:
 
             rows_dicts = []
             out = []
+            seen: set[tuple[str, str]] = set()
             for cr in check_runs:
                 if not isinstance(cr, dict):
                     continue
@@ -2759,7 +3865,7 @@ class GitHubAPIClient:
                         status_raw = "unknown"
 
                 duration = _format_dur(cr.get("started_at"), cr.get("completed_at"))
-                url = str(cr.get("html_url", "") or "").strip()
+                url = str(cr.get("details_url") or cr.get("html_url") or "").strip()
                 description = ""
                 try:
                     out_obj = cr.get("output") or {}
@@ -2769,6 +3875,11 @@ class GitHubAPIClient:
                     description = ""
 
                 is_req = bool(name and (name in required_checks))
+                key2 = (name, url)
+                if name and key2 in seen:
+                    continue
+                if name:
+                    seen.add(key2)
                 row = GHPRCheckRow(
                     name=name,
                     status_raw=status_raw,
@@ -2789,16 +3900,67 @@ class GitHubAPIClient:
                     }
                 )
 
+            # Merge in status contexts (best-effort).
+            # These don't have step timings; duration remains empty.
+            for st in statuses:
+                if not isinstance(st, dict):
+                    continue
+                name = str(st.get("context", "") or "").strip()
+                if not name:
+                    continue
+                state = str(st.get("state", "") or "").strip().lower()
+                desc = str(st.get("description", "") or "").strip()
+                target = str(st.get("target_url", "") or "").strip()
+
+                # Map status API states into our status_raw.
+                # Note: status contexts don't have a "skipped" state, but some integrations
+                # encode it in the description.
+                status_raw = "unknown"
+                if state in {"success"}:
+                    status_raw = "pass"
+                elif state in {"failure", "error"}:
+                    status_raw = "fail"
+                elif state in {"pending"}:
+                    status_raw = "pending"
+                if desc and ("skipped" in desc.lower() or "skip" in desc.lower()):
+                    status_raw = "skipped"
+
+                is_req = bool(name and (name in required_checks))
+                key2 = (name, target)
+                if key2 in seen:
+                    continue
+                seen.add(key2)
+                out.append(
+                    GHPRCheckRow(
+                        name=name,
+                        status_raw=status_raw,
+                        duration="",
+                        url=target,
+                        description=desc,
+                        is_required=is_req,
+                    )
+                )
+                rows_dicts.append(
+                    {
+                        "name": name,
+                        "status_raw": status_raw,
+                        "duration": "",
+                        "url": target,
+                        "description": desc,
+                        "is_required": is_req,
+                    }
+                )
+
             if not out:
                 return []
 
             # persist caches (same shape as gh output cache)
             try:
-                self._pr_checks_mem_cache[key] = {"ts": now, "rows": rows_dicts}
+                self._pr_checks_mem_cache[key] = {"ts": now, "ver": CACHE_VER, "rows": rows_dicts}
                 disk = self._load_pr_checks_disk_cache()
                 if not isinstance(disk, dict):
                     disk = {}
-                disk[key] = {"ts": now, "rows": rows_dicts}
+                disk[key] = {"ts": now, "ver": CACHE_VER, "rows": rows_dicts}
                 self._save_pr_checks_disk_cache(disk)
             except Exception:
                 pass
@@ -2852,13 +4014,25 @@ class GitHubAPIClient:
 
         try:
             assert requests is not None
-            response = self._rest_get(url, timeout=timeout, params=params)
+            try:
+                response = self._rest_get(url, timeout=timeout, params=params)
+            except Exception as e:
+                # Budget exhaustion / cache-only mode / rate-limited fallback should not hard-fail dashboards.
+                # Best-effort: switch to cache-only mode and return None.
+                try:
+                    self.set_cache_only_mode(True)
+                except Exception:
+                    pass
+                return None
+            if response is None:
+                # _rest_get can return None in best-effort modes; treat as a soft failure.
+                return None
 
             if response.status_code == 403:
                 # Check if it's a rate limit error
                 if 'X-RateLimit-Remaining' in response.headers and response.headers['X-RateLimit-Remaining'] == '0':
                     raise Exception(
-                        "GitHub API rate limit exceeded. Use --token argument or set GH_TOKEN/GITHUB_TOKEN environment variable."
+                        "GitHub API rate limit exceeded. Provide --token (or login with gh so ~/.config/gh/hosts.yml exists)."
                     )
                 else:
                     raise Exception(f"GitHub API returned 403 Forbidden: {response.text}")
@@ -2874,59 +4048,70 @@ class GitHubAPIClient:
         return self.token is not None
 
     def _fetch_pr_checks_data(self, owner: str, repo: str, pr_number: int) -> Optional[dict]:
-        """Fetch PR checks data once and parse for reuse by multiple methods.
+        """Fetch PR checks data once (via GitHub REST) and parse for reuse by multiple methods.
 
-        This method consolidates the subprocess call to 'gh pr checks' to avoid
-        calling it multiple times for the same PR.
-
-        Args:
-            owner: Repository owner
-            repo: Repository name
-            pr_number: Pull request number
-
-        Returns:
-            Parsed dict (example shape):
-                {
-                  "stdout": "build-test\tpass\t35m\thttps://...\n...",
-                  "checks": [
-                    {"name": "build-test", "status": "pass", "duration": "35m", "url": "https://..."},
-                    {"name": "backend-status-check", "status": "fail", "duration": "2s", "url": "https://..."}
-                  ]
-                }
-            Returns None if the subprocess call fails.
+        We intentionally do NOT shell out to `gh` here. Everything is derived from:
+          - GET /repos/{owner}/{repo}/pulls/{pr_number}         (to find head sha)
+          - GET /repos/{owner}/{repo}/commits/{head_sha}/check-runs?per_page=100
         """
         try:
-            result = subprocess.run(
-                ['gh', 'pr', 'checks', str(pr_number), '--repo', f'{owner}/{repo}'],
-                capture_output=True,
-                text=True,
-                timeout=10
-            )
-
-            # Parse output even if return code is non-zero (failed checks)
-            if not result.stdout:
+            pr = self.get(f"/repos/{owner}/{repo}/pulls/{int(pr_number)}", timeout=10) or {}
+            head_sha = (((pr.get("head") or {}) if isinstance(pr, dict) else {}) or {}).get("sha")
+            head_sha = str(head_sha or "").strip()
+            if not head_sha:
                 return None
 
-            # Parse tab-separated output: check_name\tstatus\tduration\turl
-            checks = []
-            for line in result.stdout.strip().split('\n'):
-                if not line.strip():
+            data = self.get(f"/repos/{owner}/{repo}/commits/{head_sha}/check-runs", params={"per_page": 100}, timeout=10) or {}
+            check_runs = data.get("check_runs") if isinstance(data, dict) else None
+            if not isinstance(check_runs, list) or not check_runs:
+                return {"stdout": "", "checks": []}
+
+            def _status_raw(status: str, conclusion: str) -> str:
+                s = (status or "").strip().lower()
+                c = (conclusion or "").strip().lower()
+                if s and s != "completed":
+                    return s  # queued / in_progress
+                if c in {"success"}:
+                    return "pass"
+                if c in {"failure"}:
+                    return "fail"
+                if c in {"cancelled", "canceled"}:
+                    return "cancelled"
+                if c in {"skipped"}:
+                    return "skipped"
+                if c in {"neutral"}:
+                    return "neutral"
+                if c in {"timed_out"}:
+                    return "timed_out"
+                if c in {"action_required"}:
+                    return "action_required"
+                # completed with unknown conclusion
+                return "unknown"
+
+            checks: List[Dict[str, Any]] = []
+            for cr in check_runs:
+                if not isinstance(cr, dict):
                     continue
+                name = str(cr.get("name", "") or "").strip()
+                if not name:
+                    continue
+                status = str(cr.get("status", "") or "")
+                conclusion = str(cr.get("conclusion", "") or "")
+                url = str(cr.get("details_url") or cr.get("html_url") or "").strip()
+                duration = format_gh_check_run_duration(cr)
+                checks.append(
+                    {
+                        "name": name,
+                        "status": _status_raw(status, conclusion),
+                        "duration": duration,
+                        "url": url,
+                    }
+                )
 
-                parts = line.split('\t')
-                if len(parts) >= 2:
-                    checks.append({
-                        'name': parts[0].strip(),
-                        'status': parts[1].strip(),
-                        'duration': parts[2].strip() if len(parts) > 2 else '',
-                        'url': parts[3].strip() if len(parts) > 3 else ''
-                    })
-
-            return {
-                'stdout': result.stdout,
-                'checks': checks
-            }
-
+            stdout = "\n".join(
+                [f"{c.get('name','')}\t{c.get('status','')}\t{c.get('duration','')}\t{c.get('url','')}" for c in checks]
+            )
+            return {"stdout": stdout, "checks": checks}
         except Exception:
             return None
 
@@ -2985,32 +4170,19 @@ class GitHubAPIClient:
             except Exception:
                 return None
 
-        # Use gh CLI to get check status (most reliable)
+        # Use GitHub REST check-runs (no gh dependency)
         try:
-            result = subprocess.run(
-                ['gh', 'pr', 'checks', str(pr_number), '--repo', f'{owner}/{repo}'],
-                capture_output=True,
-                text=True,
-                timeout=10
-            )
-
-            # gh pr checks returns non-zero if there are failures or pending checks
-            # We still want to parse the output even if return code is non-zero
-            if not result.stdout:
+            cd = self._fetch_pr_checks_data(owner, repo, int(pr_number)) if pr_number else None
+            checks = (cd or {}).get("checks", []) if isinstance(cd, dict) else []
+            if not checks:
                 return None
-
-            # Parse output - count pass/fail/pending
-            lines = result.stdout.lower().split('\n')
-            has_fail = any('fail' in line for line in lines)
-            has_pending = any('pending' in line for line in lines)
-
+            has_fail = any(str(c.get("status", "") or "").lower() == "fail" for c in checks)
+            has_pending = any(str(c.get("status", "") or "").lower() in ("pending", "queued", "in_progress") for c in checks)
             if has_fail:
-                return 'failed'
-            elif has_pending:
-                return 'running'
-            else:
-                return 'passed'
-
+                return "failed"
+            if has_pending:
+                return "running"
+            return "passed"
         except Exception:
             return None
 
@@ -3194,47 +4366,457 @@ class GitHubAPIClient:
             pass  # Fail silently if we can't save cache
 
     def get_required_checks(self, owner: str, repo: str, pr_number: int) -> set:
-        """Get the list of required check names for a PR using gh CLI.
+        """Return the set of required check names for a PR (best-effort).
 
-        Args:
-            owner: Repository owner
-            repo: Repository name
-            pr_number: PR number
+        We intentionally derive this from GitHub's merge-box required-ness:
+        GraphQL `statusCheckRollup.contexts.nodes[].isRequired(pullRequestId: ...)`.
 
-        Returns:
-            Set of required check names
+        Rationale:
+        - Branch protection endpoints often require admin perms and can return 403.
+        - We want REQUIRED to keep working even when our internal REST budget is exhausted:
+          this uses `gh` subprocess calls (separate from this client's REST budget).
         """
         try:
-            # Use gh CLI to get required checks (more reliable than API)
-            result = subprocess.run(
-                ['gh', 'pr', 'checks', str(pr_number), '--repo', f'{owner}/{repo}', '--required'],
-                capture_output=True,
-                text=True,
-                timeout=10
-            )
+            prn = int(pr_number)
+        except Exception:
+            return set()
 
-            # Note: gh returns exit code 1 if there are failed checks, but still outputs the data
-            # So we check stderr for actual errors, not return code
-            if result.stderr and 'error' in result.stderr.lower():
+        try:
+            # Fetch PR node_id via gh (avoids consuming this client's REST budget).
+            pr_node_id = ""
+            try:
+                res0 = subprocess.run(
+                    ["gh", "api", f"repos/{owner}/{repo}/pulls/{prn}", "--jq", ".node_id"],
+                    capture_output=True,
+                    text=True,
+                    timeout=15,
+                    check=False,
+                )
+                if res0.returncode == 0:
+                    pr_node_id = str(res0.stdout or "").strip()
+            except Exception:
+                pr_node_id = ""
+            if not pr_node_id:
                 return set()
 
-            # Parse output to extract check names
-            # Format: "check_name\tstatus\tduration\turl"
-            required_checks = set()
-            for line in result.stdout.strip().split('\n'):
-                if line.strip():
-                    # Split on tabs, get first column (check name)
-                    parts = line.split('\t')
-                    if parts:
-                        check_name = parts[0].strip()
-                        if check_name:
-                            required_checks.add(check_name)
+            # Keep this readable (and correct) rather than trying to hand-balance braces in one line.
+            # NOTE: `isRequired` needs an explicit `pullRequestId`, otherwise GitHub errors.
+            query = """\
+query($owner:String!,$name:String!,$number:Int!,$prid:ID!) {
+  repository(owner: $owner, name: $name) {
+    pullRequest(number: $number) {
+      commits(last: 1) {
+        nodes {
+          commit {
+            statusCheckRollup {
+              contexts(first: 100) {
+                nodes {
+                  __typename
+                  ... on CheckRun { name isRequired(pullRequestId: $prid) }
+                  ... on StatusContext { context isRequired(pullRequestId: $prid) }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
+"""
 
-            return required_checks
-
+            try:
+                # NOTE: we intentionally use `gh` here because it handles GraphQL auth and
+                # enterprise oddities; required-ness is not reliably available via REST without
+                # admin branch-protection permissions.
+                res = subprocess.run(
+                    [
+                        "gh",
+                        "api",
+                        "graphql",
+                        "-f",
+                        f"query={query}",
+                        "-f",
+                        f"owner={owner}",
+                        "-f",
+                        f"name={repo}",
+                        "-F",
+                        f"number={int(prn)}",
+                        "-f",
+                        f"prid={pr_node_id}",
+                    ],
+                    capture_output=True,
+                    text=True,
+                    timeout=15,
+                    check=False,
+                )
+                if res.returncode != 0:
+                    return set()
+                data = {}
+                try:
+                    data = json.loads(res.stdout or "{}") or {}
+                except Exception:
+                    data = {}
+                nodes = (
+                    (((((data.get("data") or {}).get("repository") or {}).get("pullRequest") or {}).get("commits") or {}).get("nodes") or [])
+                )
+                if not (isinstance(nodes, list) and nodes):
+                    return set()
+                commit0 = nodes[0].get("commit") if isinstance(nodes[0], dict) else None
+                scr = commit0.get("statusCheckRollup") if isinstance(commit0, dict) else None
+                ctxs = (scr.get("contexts") or {}) if isinstance(scr, dict) else {}
+                ctx_nodes = ctxs.get("nodes") if isinstance(ctxs, dict) else None
+                if not isinstance(ctx_nodes, list):
+                    return set()
+                out: set = set()
+                for n in ctx_nodes:
+                    if not isinstance(n, dict):
+                        continue
+                    if n.get("isRequired") is not True:
+                        continue
+                    nm = str(n.get("name") or n.get("context") or "").strip()
+                    if nm:
+                        out.add(nm)
+                return out
+            except Exception:
+                return set()
         except Exception:
-            # If we can't get required checks, return empty set
             return set()
+
+    def _required_checks_cache_key(self, owner: str, repo: str, base_ref: str) -> str:
+        return f"{owner}/{repo}:required_checks:{str(base_ref or '').strip()}"
+
+    def _load_required_checks_disk_cache(self) -> Dict[str, Any]:
+        try:
+            p = self._required_checks_cache_dir / "required_checks.json"
+            if not p.exists():
+                return {}
+            return self._json_load_text(p.read_text() or "{}")
+        except Exception:
+            return {}
+
+    def _save_required_checks_disk_cache(self, data: Dict[str, Any]) -> None:
+        try:
+            self._required_checks_cache_dir.mkdir(parents=True, exist_ok=True)
+            p = self._required_checks_cache_dir / "required_checks.json"
+            tmp = str(p) + ".tmp"
+            Path(tmp).write_text(self._json_dump_text(data, indent=2))
+            os.replace(tmp, p)
+            self._cache_write("required_checks.disk_write", entries=len(data) if isinstance(data, dict) else 0)
+        except Exception:
+            pass
+
+    def get_required_checks_for_base_ref(
+        self,
+        *,
+        owner: str,
+        repo: str,
+        base_ref: str,
+        ttl_s: int = 90 * 24 * 3600,
+        timeout: int = 10,
+    ) -> List[str]:
+        """Best-effort required status check names for a base branch (branch protection).
+
+        This is effectively configuration and changes rarely, so we cache it for a long TTL.
+
+        Endpoint:
+          - GET /repos/{owner}/{repo}/branches/{base_ref}/protection/required_status_checks
+        """
+        base_ref = str(base_ref or "").strip()
+        if not base_ref:
+            return []
+        key = self._required_checks_cache_key(owner, repo, base_ref)
+        now = int(time.time())
+
+        # 1) Memory cache
+        try:
+            ent = self._required_checks_mem_cache.get(key)
+            if isinstance(ent, dict):
+                ts = int(ent.get("ts", 0) or 0)
+                val = ent.get("val")
+                if isinstance(val, list) and ts and ((now - ts) <= int(ttl_s) or bool(getattr(self, "cache_only_mode", False))):
+                    return [str(x) for x in val if str(x).strip()]
+        except Exception:
+            pass
+
+        # 2) Disk cache
+        disk = self._load_required_checks_disk_cache()
+        ent = disk.get(key) if isinstance(disk, dict) else None
+        if isinstance(ent, dict):
+            ts = int(ent.get("ts", 0) or 0)
+            val = ent.get("val")
+            if isinstance(val, list) and ts and ((now - ts) <= int(ttl_s) or bool(getattr(self, "cache_only_mode", False))):
+                out = [str(x) for x in val if str(x).strip()]
+                self._required_checks_mem_cache[key] = {"ts": ts, "val": out}
+                return out
+
+        # Cache-only mode: do not fetch network; return empty if we have nothing.
+        if bool(getattr(self, "cache_only_mode", False)):
+            return []
+
+        # 3) Network fetch
+        ep = f"/repos/{owner}/{repo}/branches/{urllib.parse.quote(base_ref, safe='')}/protection/required_status_checks"
+        try:
+            data = self.get(ep, timeout=int(timeout)) or {}
+        except Exception:
+            # Best-effort: branch protection often requires elevated permissions; treat as "unknown/none".
+            data = {}
+
+        required: List[str] = []
+        try:
+            if isinstance(data, dict):
+                ctx = data.get("contexts")
+                if isinstance(ctx, list):
+                    for c in ctx:
+                        s = str(c or "").strip()
+                        if s:
+                            required.append(s)
+                checks = data.get("checks")
+                if isinstance(checks, list):
+                    for ch in checks:
+                        if not isinstance(ch, dict):
+                            continue
+                        s = str(ch.get("context") or "").strip()
+                        if s:
+                            required.append(s)
+        except Exception:
+            required = []
+        # Stable ordering / uniqueness
+        required_sorted = sorted({s for s in required if str(s).strip()})
+
+        try:
+            self._required_checks_mem_cache[key] = {"ts": now, "val": required_sorted}
+            if not isinstance(disk, dict):
+                disk = {}
+            disk[key] = {"ts": now, "val": required_sorted}
+            self._save_required_checks_disk_cache(disk)
+        except Exception:
+            pass
+        return required_sorted
+
+    def _pr_info_cache_key(self, owner: str, repo: str, pr_number: int) -> str:
+        return f"{owner}/{repo}#pr:{int(pr_number)}"
+
+    def _load_pr_info_disk_cache(self) -> Dict[str, Any]:
+        try:
+            self._pr_info_cache_dir.mkdir(parents=True, exist_ok=True)
+            p = self._pr_info_cache_dir / "pr_info.json"
+            if not p.exists():
+                return {}
+            return self._json_load_text(p.read_text() or "{}")
+        except Exception:
+            return {}
+
+    def _save_pr_info_disk_cache(self, data: Dict[str, Any]) -> None:
+        try:
+            self._pr_info_cache_dir.mkdir(parents=True, exist_ok=True)
+            p = self._pr_info_cache_dir / "pr_info.json"
+            tmp = str(p) + ".tmp"
+            Path(tmp).write_text(self._json_dump_text(data, indent=2))
+            os.replace(tmp, p)
+            self._cache_write("pr_info.disk_write", entries=len(data) if isinstance(data, dict) else 0)
+        except Exception:
+            pass
+
+    def _search_issues_cache_key(self, owner: str, repo: str, pr_numbers: List[int]) -> str:
+        ns = sorted({_safe_int(x, 0) for x in (pr_numbers or []) if _safe_int(x, 0) > 0})
+        return f"{owner}/{repo}:search_issues:" + ",".join([str(n) for n in ns])
+
+    def _load_search_issues_disk_cache(self) -> Dict[str, Any]:
+        try:
+            self._search_issues_cache_dir.mkdir(parents=True, exist_ok=True)
+            p = self._search_issues_cache_dir / "search_issues.json"
+            if not p.exists():
+                return {}
+            return self._json_load_text(p.read_text() or "{}")
+        except Exception:
+            return {}
+
+    def _save_search_issues_disk_cache(self, data: Dict[str, Any]) -> None:
+        try:
+            self._search_issues_cache_dir.mkdir(parents=True, exist_ok=True)
+            p = self._search_issues_cache_dir / "search_issues.json"
+            tmp = str(p) + ".tmp"
+            Path(tmp).write_text(self._json_dump_text(data, indent=2))
+            os.replace(tmp, p)
+            self._cache_write("search_issues.disk_write", entries=len(data) if isinstance(data, dict) else 0)
+        except Exception:
+            pass
+
+    def get_pr_updated_at_via_search_issues(
+        self,
+        *,
+        owner: str,
+        repo: str,
+        pr_numbers: List[int],
+        ttl_s: int = 60,
+        timeout: int = 15,
+    ) -> Dict[int, str]:
+        """Return {pr_number: updated_at} for the given PR numbers using GitHub search/issues.
+
+        Endpoint:
+          GET /search/issues?q=repo:OWNER/REPO type:pr number:123 number:456 ...
+        """
+        nums = sorted({_safe_int(x, 0) for x in (pr_numbers or []) if _safe_int(x, 0) > 0})
+        if not nums:
+            return {}
+
+        # If search/issues is known-broken for this repo, skip (this is only an optimization).
+        disabled_key = f"{owner}/{repo}:search_issues_disabled"
+        disable_ttl_s = 6 * 3600
+        now = int(time.time())
+        try:
+            ent = self._search_issues_disabled_mem_cache.get(disabled_key)
+            if isinstance(ent, dict):
+                ts = int(ent.get("ts", 0) or 0)
+                if ts and (now - ts) <= int(disable_ttl_s):
+                    self._cache_hit("search_issues.disabled_mem")
+                    return {}
+        except Exception:
+            pass
+
+        key = self._search_issues_cache_key(owner, repo, nums)
+
+        # 1) memory
+        try:
+            ent = self._search_issues_mem_cache.get(key)
+            if isinstance(ent, dict):
+                ts = int(ent.get("ts", 0) or 0)
+                val = ent.get("val")
+                if isinstance(val, dict) and ts and ((now - ts) <= int(ttl_s) or bool(getattr(self, "cache_only_mode", False))):
+                    if (now - ts) <= int(ttl_s):
+                        self._cache_hit("search_issues.mem")
+                    else:
+                        self._cache_hit("search_issues.mem_stale_cache_only")
+                    return {int(k): str(v) for k, v in val.items() if str(k).isdigit() and str(v).strip()}
+        except Exception:
+            pass
+
+        # 2) disk
+        disk = self._load_search_issues_disk_cache()
+        try:
+            dis = disk.get(disabled_key) if isinstance(disk, dict) else None
+            if isinstance(dis, dict):
+                ts = int(dis.get("ts", 0) or 0)
+                if ts and (now - ts) <= int(disable_ttl_s):
+                    self._cache_hit("search_issues.disabled_disk")
+                    self._search_issues_disabled_mem_cache[disabled_key] = {"ts": ts, "val": True}
+                    return {}
+        except Exception:
+            pass
+        ent = disk.get(key) if isinstance(disk, dict) else None
+        if isinstance(ent, dict):
+            ts = int(ent.get("ts", 0) or 0)
+            val = ent.get("val")
+            if isinstance(val, dict) and ts and ((now - ts) <= int(ttl_s) or bool(getattr(self, "cache_only_mode", False))):
+                if (now - ts) <= int(ttl_s):
+                    self._cache_hit("search_issues.disk")
+                else:
+                    self._cache_hit("search_issues.disk_stale_cache_only")
+                out = {int(k): str(v) for k, v in val.items() if str(k).isdigit() and str(v).strip()}
+                self._search_issues_mem_cache[key] = {"ts": ts, "val": dict(out)}
+                return out
+
+        # cache-only: no network
+        if bool(getattr(self, "cache_only_mode", False)):
+            self._cache_miss("search_issues.cache_only_empty")
+            return {}
+
+        # 3) network (chunk to avoid overly long query strings), but dedupe concurrent fetches across threads.
+        lock = self._inflight_lock(f"search_issues:{key}")
+        with lock:
+            # Re-check memory cache (another thread may have populated it).
+            try:
+                ent = self._search_issues_mem_cache.get(key)
+                if isinstance(ent, dict):
+                    ts = int(ent.get("ts", 0) or 0)
+                    val = ent.get("val")
+                    if isinstance(val, dict) and ts and ((now - ts) <= int(ttl_s) or bool(getattr(self, "cache_only_mode", False))):
+                        if (now - ts) <= int(ttl_s):
+                            self._cache_hit("search_issues.mem")
+                        else:
+                            self._cache_hit("search_issues.mem_stale_cache_only")
+                        return {int(k): str(v) for k, v in val.items() if str(k).isdigit() and str(v).strip()}
+            except Exception:
+                pass
+
+            # Re-check disk cache too.
+            disk = self._load_search_issues_disk_cache()
+            ent = disk.get(key) if isinstance(disk, dict) else None
+            if isinstance(ent, dict):
+                ts = int(ent.get("ts", 0) or 0)
+                val = ent.get("val")
+                if isinstance(val, dict) and ts and ((now - ts) <= int(ttl_s) or bool(getattr(self, "cache_only_mode", False))):
+                    if (now - ts) <= int(ttl_s):
+                        self._cache_hit("search_issues.disk")
+                    else:
+                        self._cache_hit("search_issues.disk_stale_cache_only")
+                    out = {int(k): str(v) for k, v in val.items() if str(k).isdigit() and str(v).strip()}
+                    self._search_issues_mem_cache[key] = {"ts": ts, "val": dict(out)}
+                    return out
+
+            self._cache_miss("search_issues.network")
+            out: Dict[int, str] = {}
+            try:
+                chunks: List[List[int]] = []
+                cur: List[int] = []
+                # conservative chunk size
+                for n in nums:
+                    cur.append(n)
+                    if len(cur) >= 25:
+                        chunks.append(cur)
+                        cur = []
+                if cur:
+                    chunks.append(cur)
+
+                for ch in chunks:
+                    q = f"repo:{owner}/{repo} type:pr " + " ".join([f"number:{n}" for n in ch])
+                    # Use _rest_get so we can handle 422 without throwing (this is an optimization call).
+                    url = f"{self.base_url}/search/issues"
+                    resp = self._rest_get(url, timeout=int(timeout), params={"q": q, "per_page": 100})
+                    if int(resp.status_code) == 422:
+                        # Disable search/issues temporarily for this repo; caller will fall back to PR payload updated_at.
+                        try:
+                            self._search_issues_disabled_mem_cache[disabled_key] = {"ts": now, "val": True}
+                            if not isinstance(disk, dict):
+                                disk = {}
+                            disk[disabled_key] = {"ts": now, "val": True, "code": 422}
+                            self._save_search_issues_disk_cache(disk)
+                        except Exception:
+                            pass
+                        return {}
+                    if resp.status_code < 200 or resp.status_code >= 300:
+                        continue
+                    try:
+                        data = resp.json() or {}
+                    except Exception:
+                        data = {}
+                    items = data.get("items") if isinstance(data, dict) else None
+                    if not isinstance(items, list):
+                        continue
+                    for it in items:
+                        if not isinstance(it, dict):
+                            continue
+                        num = it.get("number")
+                        upd = it.get("updated_at")
+                        if num is None or upd is None:
+                            continue
+                        try:
+                            out[int(num)] = str(upd)
+                        except Exception:
+                            continue
+            except Exception:
+                out = {}
+
+        try:
+            self._search_issues_mem_cache[key] = {"ts": now, "val": dict(out)}
+            if not isinstance(disk, dict):
+                disk = {}
+            disk[key] = {"ts": now, "val": dict(out)}
+            self._save_search_issues_disk_cache(disk)
+        except Exception:
+            pass
+        return out
 
     def get_cached_required_checks(
         self,
@@ -3247,7 +4829,7 @@ class GitHubAPIClient:
     ) -> Dict[int, List[str]]:
         """Get required check names for a list of PRs, with a persistent cache.
 
-        Uses `gh pr checks --required` which reflects branch protection "required status checks".
+        Uses GitHub branch protection required-status-checks when available.
 
         Cache file format (in dynamo-utils cache dir):
             {
@@ -3272,7 +4854,7 @@ class GitHubAPIClient:
         cache: Dict[str, List[str]] = {}
         if cache_path.exists():
             try:
-                cache = json.loads(cache_path.read_text()) or {}
+                cache = self._json_load_text(cache_path.read_text())
             except Exception:
                 cache = {}
 
@@ -3325,7 +4907,7 @@ class GitHubAPIClient:
         if cache_updated:
             try:
                 cache_path.parent.mkdir(parents=True, exist_ok=True)
-                cache_path.write_text(json.dumps(cache, indent=2))
+                cache_path.write_text(self._json_dump_text(cache, indent=2))
             except Exception:
                 pass
 
@@ -3414,7 +4996,7 @@ class GitHubAPIClient:
             return None
 
     def get_job_error_summary(self, run_id: str, job_url: str, owner: str, repo: str) -> Optional[str]:
-        """Get error summary by fetching job logs via gh CLI (with disk + memory caching).
+        """Get a small error summary for a GitHub Actions job (cached).
 
         Args:
             run_id: Workflow run ID
@@ -3445,24 +5027,26 @@ class GitHubAPIClient:
                 self._job_log_cache[job_id] = disk_cache[job_id]
                 return disk_cache[job_id]
 
-            # Fetch job logs via gh api (more reliable than gh run view)
-            result = subprocess.run(
-                ['gh', 'api', f'/repos/{owner}/{repo}/actions/jobs/{job_id}/logs'],
-                capture_output=True,
-                text=True,
-                timeout=15
-            )
+            # Download raw log text via REST (ZIP), then extract a high-signal snippet.
+            txt = self.get_job_raw_log_text_cached(job_url=job_url, owner=owner, repo=repo, assume_completed=True)
+            if not txt:
+                return None
 
-            if result.returncode != 0 or not result.stdout:
-                # If logs aren't available, return placeholder
-                error_msg = result.stderr if result.stderr else "Unknown error"
-                error_summary = f"Could not fetch job logs: {error_msg}\n\nView full logs at:\n{job_url}"
-                self._job_log_cache[job_id] = error_summary
-                self._save_to_disk_cache(job_id, error_summary)
-                return error_summary
+            # Prefer the purpose-built snippet extractor (lazily imported to avoid heavy deps at import time).
+            try:
+                from common_log_errors import extract_error_snippet_from_text  # type: ignore
 
-            # Get all log lines
-            all_lines = result.stdout.strip().split('\n')
+                snippet = extract_error_snippet_from_text(txt)
+                snippet = (snippet or "").strip()
+                if snippet:
+                    self._job_log_cache[job_id] = snippet
+                    self._save_to_disk_cache(job_id, snippet)
+                    return snippet
+            except Exception:
+                pass
+
+            # Fallback: keep last ~40 meaningful lines
+            all_lines = [ln for ln in str(txt).splitlines() if (ln or "").strip()]
 
             # First, try to extract pytest short test summary (most useful for test failures)
             pytest_summary = self._extract_pytest_summary(all_lines)
@@ -3526,12 +5110,6 @@ class GitHubAPIClient:
                 return summary
 
             error_summary = f"No error details found in logs.\n\nView full logs at:\n{job_url}"
-            self._job_log_cache[job_id] = error_summary
-            self._save_to_disk_cache(job_id, error_summary)
-            return error_summary
-
-        except subprocess.TimeoutExpired:
-            error_summary = f"Log fetch timed out.\n\nView full logs at:\n{job_url}"
             self._job_log_cache[job_id] = error_summary
             self._save_to_disk_cache(job_id, error_summary)
             return error_summary
@@ -3829,14 +5407,14 @@ class GitHubAPIClient:
 
     def get_failed_checks(self, owner: str, repo: str, sha: str, required_checks: set, pr_number: Optional[int] = None,
                          checks_data: Optional[dict] = None) -> Tuple[List[FailedCheck], Optional[str]]:
-        """Get failed CI checks for a commit using gh CLI.
+        """Get failed CI checks for a commit (GitHub REST check-runs; no gh dependency).
 
         Args:
             owner: Repository owner
             repo: Repository name
             sha: Commit SHA (unused, kept for compatibility)
             required_checks: Set of required check names
-            pr_number: PR number (optional, if available use gh pr checks)
+            pr_number: PR number (used to fetch PR head sha for check-runs when available)
             checks_data: Optional pre-fetched checks data from _fetch_pr_checks_data()
 
         Returns:
@@ -3916,142 +5494,72 @@ class GitHubAPIClient:
 
                 return failed_checks, rerun_url
 
-            # Use gh pr checks if PR number is available (more reliable)
-            if pr_number:
-                result = subprocess.run(
-                    ['gh', 'pr', 'checks', str(pr_number), '--repo', f'{owner}/{repo}'],
-                    capture_output=True,
-                    text=True,
-                    timeout=10
-                )
+            # If checks_data is not provided, derive it from REST check-runs.
+            checks: List[Dict[str, Any]] = []
+            if checks_data and isinstance(checks_data, dict):
+                checks = checks_data.get("checks", []) or []
+            if not checks and pr_number:
+                cd = self._fetch_pr_checks_data(owner, repo, int(pr_number))
+                checks = (cd or {}).get("checks", []) if isinstance(cd, dict) else []
 
-                # gh pr checks returns non-zero when there are failed checks
-                # We only care if the command itself failed (no output)
-                # So just check if we got output
+            # If we still don't have checks (no PR number), fall back to commit check-runs.
+            if not checks:
+                data = self.get(f"/repos/{owner}/{repo}/commits/{sha}/check-runs", params={"per_page": 100})
+                crs = data.get("check_runs") if isinstance(data, dict) else None
+                if isinstance(crs, list):
+                    for cr in crs:
+                        if not isinstance(cr, dict):
+                            continue
+                        checks.append(
+                            {
+                                "name": str(cr.get("name", "") or ""),
+                                "status": "fail" if str(cr.get("conclusion", "") or "").lower() == "failure" else "pass",
+                                "duration": format_gh_check_run_duration(cr),
+                                "url": str(cr.get("details_url") or cr.get("html_url") or ""),
+                            }
+                        )
 
-                if not result.stdout.strip():
-                    return [], None
+            failed_checks: List[FailedCheck] = []
+            rerun_run_id: Optional[str] = None
 
-                failed_checks = []
-                rerun_run_id = None  # Track run_id for rerun command
-
-                # Parse tab-separated output
-                for line in result.stdout.strip().split('\n'):
-                    if not line.strip():
+            for check in checks:
+                try:
+                    status = str(check.get("status", "") or "").lower()
+                    if status != "fail":
                         continue
+                    check_name = str(check.get("name", "") or "")
+                    url = str(check.get("url", "") or "")
+                    duration = str(check.get("duration", "") or "")
 
-                    parts = line.split('\t')
-                    if len(parts) < 2:
-                        continue
+                    run_id = ""
+                    if "/runs/" in url:
+                        run_id = url.split("/runs/")[1].split("/")[0]
+                        if not rerun_run_id and run_id:
+                            rerun_run_id = run_id
 
-                    check_name = parts[0]
-                    status = parts[1]
+                    is_required = check_name in (required_checks or set())
 
-                    # Only process failed checks
-                    if status != 'fail':
-                        continue
-
-                    duration = parts[2] if len(parts) > 2 else ''
-                    html_url = parts[3] if len(parts) > 3 else ''
-
-                    # Extract run ID from html_url
-                    check_run_id = ''
-                    if '/runs/' in html_url:
-                        check_run_id = html_url.split('/runs/')[1].split('/')[0]
-                        # Save the first valid run_id we find for the rerun command
-                        if not rerun_run_id and check_run_id:
-                            rerun_run_id = check_run_id
-
-                    # Check if this is a required check
-                    is_required = check_name in required_checks
-
-                    # Get error summary from job logs
                     error_summary = None
-                    if check_run_id and html_url:
-                        error_summary = self.get_job_error_summary(check_run_id, html_url, owner, repo)
+                    if run_id and url:
+                        error_summary = self.get_job_error_summary(run_id, url, owner, repo)
 
-                    failed_check = FailedCheck(
-                        name=check_name,
-                        job_url=html_url,
-                        raw_log_url=None,
-                        run_id=check_run_id,
-                        duration=duration,
-                        is_required=is_required,
-                        error_summary=error_summary
+                    failed_checks.append(
+                        FailedCheck(
+                            name=check_name,
+                            job_url=url,
+                            raw_log_url=None,
+                            run_id=run_id,
+                            duration=duration,
+                            is_required=is_required,
+                            error_summary=error_summary,
+                        )
                     )
-                    failed_checks.append(failed_check)
+                except Exception:
+                    continue
 
-                # Sort: required checks first, then by name
-                failed_checks.sort(key=lambda x: (not x.is_required, x.name))
-
-                # Generate rerun URL if we have a run_id
-                rerun_url = None
-                if rerun_run_id:
-                    rerun_url = f"https://github.com/{owner}/{repo}/actions/runs/{rerun_run_id}"
-
-                return failed_checks, rerun_url
-
-            # Fallback to GitHub API if no PR number
-            endpoint = f"/repos/{owner}/{repo}/commits/{sha}/check-runs"
-            data = self.get(endpoint)
-            if not data or 'check_runs' not in data:
-                return [], None
-
-            failed_checks = []
-            run_id = None
-
-            for check in data['check_runs']:
-                if check.get('conclusion') == 'failure':
-                    check_name = check['name']
-
-                    # Extract run ID from html_url
-                    html_url = check.get('html_url', '')
-                    if '/runs/' in html_url:
-                        run_id = html_url.split('/runs/')[1].split('/')[0]
-
-                    # Format duration
-                    started = check.get('started_at', '')
-                    completed = check.get('completed_at', '')
-                    duration = ''
-                    if started and completed:
-                        try:
-                            start_time = datetime.fromisoformat(started.replace('Z', '+00:00'))
-                            end_time = datetime.fromisoformat(completed.replace('Z', '+00:00'))
-                            duration_sec = int((end_time - start_time).total_seconds())
-                            if duration_sec >= 60:
-                                duration = f"{duration_sec // 60}m{duration_sec % 60}s"
-                            else:
-                                duration = f"{duration_sec}s"
-                        except Exception:
-                            duration = "unknown"
-
-                    # Check if this is a required check
-                    is_required = check_name in required_checks
-
-                    # Get error summary from job logs
-                    error_summary = None
-                    if run_id and html_url:
-                        error_summary = self.get_job_error_summary(run_id, html_url, owner, repo)
-
-                    failed_check = FailedCheck(
-                        name=check_name,
-                        job_url=html_url,
-                        raw_log_url=None,
-                        run_id=run_id or '',
-                        duration=duration,
-                        is_required=is_required,
-                        error_summary=error_summary
-                    )
-                    failed_checks.append(failed_check)
-
-            # Sort: required checks first, then by name
             failed_checks.sort(key=lambda x: (not x.is_required, x.name))
 
-            # Generate rerun URL if we have a run_id
-            rerun_url = None
-            if run_id:
-                rerun_url = f"https://github.com/{owner}/{repo}/actions/runs/{run_id}"
-
+            rerun_url = f"https://github.com/{owner}/{repo}/actions/runs/{rerun_run_id}" if rerun_run_id else None
             return failed_checks, rerun_url
 
         except Exception as e:
@@ -4080,13 +5588,13 @@ class GitHubAPIClient:
 
                 for check in checks:
                     status = check['status'].lower()
-                    # Check if it's running (gh pr checks returns: pending, queued, in_progress)
+                    # Check if it's running (REST check-run status: queued, in_progress)
                     if status in ('pending', 'queued', 'in_progress'):
                         name = check['name']
                         check_url = check['url']
                         is_required = name in required_checks
 
-                        # Use duration from gh pr checks (already formatted like "1m30s")
+                        # Use the duration string we computed from timestamps (or fall back to "queued")
                         elapsed_time = check['duration'] if check['duration'] else 'queued'
 
                         running_check = RunningCheck(
@@ -4101,61 +5609,34 @@ class GitHubAPIClient:
                 running_checks.sort(key=lambda x: (not x.is_required, x.name))
                 return running_checks
 
-            # Fallback: use gh pr view if checks_data not provided
-            result = subprocess.run(
-                ['gh', 'pr', 'view', str(pr_number), '--repo', f'{owner}/{repo}', '--json', 'statusCheckRollup'],
-                capture_output=True,
-                text=True,
-                timeout=10
-            )
-
-            if result.returncode != 0 or not result.stdout:
+            # Fallback (no checks_data): derive from REST check-runs for PR head SHA.
+            pr = self.get(f"/repos/{owner}/{repo}/pulls/{int(pr_number)}", timeout=10) or {}
+            head_sha = (((pr.get("head") or {}) if isinstance(pr, dict) else {}) or {}).get("sha")
+            head_sha = str(head_sha or "").strip()
+            if not head_sha:
                 return []
 
-            data = json.loads(result.stdout)
-            checks = data.get('statusCheckRollup', [])
+            data = self.get(f"/repos/{owner}/{repo}/commits/{head_sha}/check-runs", params={"per_page": 100}, timeout=10) or {}
+            check_runs = data.get("check_runs") if isinstance(data, dict) else None
+            if not isinstance(check_runs, list):
+                return []
 
-            running_checks = []
-            for check in checks:
-                status = check.get('status', '').upper()
-                # Check if it's running
-                if status in ('IN_PROGRESS', 'QUEUED', 'PENDING'):
-                    name = check.get('name', '')
-                    check_url = check.get('detailsUrl', '')
-                    is_required = check.get('isRequired', False) or (name in required_checks)
+            running_checks: List[RunningCheck] = []
+            for cr in check_runs:
+                if not isinstance(cr, dict):
+                    continue
+                status = str(cr.get("status", "") or "").strip().lower()
+                if status == "completed":
+                    continue
+                name = str(cr.get("name", "") or "").strip()
+                if not name:
+                    continue
+                url = str(cr.get("details_url") or cr.get("html_url") or "").strip()
+                is_required = name in (required_checks or set())
+                elapsed_time = format_gh_check_run_duration(cr) or status
+                running_checks.append(RunningCheck(name=name, check_url=url, is_required=is_required, elapsed_time=elapsed_time))
 
-                    # Calculate elapsed time
-                    elapsed_time = None
-                    started_at = check.get('startedAt')
-                    if started_at and started_at != '0001-01-01T00:00:00Z':
-                        try:
-                            start_time = datetime.fromisoformat(started_at.replace('Z', '+00:00'))
-                            now = datetime.now(timezone.utc)
-                            elapsed = now - start_time
-                            total_seconds = int(elapsed.total_seconds())
-
-                            if total_seconds < 60:
-                                elapsed_time = f'{total_seconds}s'
-                            else:
-                                minutes = total_seconds // 60
-                                seconds = total_seconds % 60
-                                elapsed_time = f'{minutes}m{seconds}s'
-                        except Exception:
-                            elapsed_time = None
-                    elif status == 'QUEUED':
-                        elapsed_time = 'queued'
-
-                    running_check = RunningCheck(
-                        name=name,
-                        check_url=check_url,
-                        is_required=is_required,
-                        elapsed_time=elapsed_time
-                    )
-                    running_checks.append(running_check)
-
-            # Sort: required checks first, then by name
             running_checks.sort(key=lambda x: (not x.is_required, x.name))
-
             return running_checks
 
         except Exception as e:
@@ -4474,11 +5955,13 @@ class GitHubAPIClient:
                         stale = False
                 except Exception:
                     stale = True
-                if stale and _allow_fetch(sha):
-                    shas_to_fetch.append(sha)
-                    _stats["cache_stale_refresh"] += 1
-                elif stale and not _allow_fetch(sha):
-                    _stats["cache_hit_stale_no_fetch"] += 1
+
+                if stale:
+                    if _allow_fetch(sha):
+                        shas_to_fetch.append(sha)
+                        _stats["cache_stale_refresh"] += 1
+                    else:
+                        _stats["cache_hit_stale_no_fetch"] += 1
                 else:
                     _stats["cache_hit_fresh"] += 1
             else:
@@ -4499,6 +5982,8 @@ class GitHubAPIClient:
                 tmp = str(cache_file) + ".tmp"
                 Path(tmp).write_text(json.dumps(cache, indent=2))
                 os.replace(tmp, cache_file)
+                # Best-effort entry count: number of SHAs we fetched/updated this invocation.
+                self._cache_write("github_actions_status.disk_write", entries=int(len(shas_to_fetch or [])))
             except Exception:
                 pass
 
@@ -4508,54 +5993,55 @@ class GitHubAPIClient:
             def fetch_check_status(sha):
                 """Helper to fetch check status for a single commit"""
                 try:
-                    # Use GitHub API to get check runs
-                    result = subprocess.run(
-                        ['gh', 'api', f'/repos/{owner}/{repo}/commits/{sha}/check-runs',
-                         '--jq', '.'],
-                        capture_output=True,
-                        text=True,
-                        timeout=30
-                    )
+                    # Use GitHub REST to get check runs (no gh dependency)
+                    data = self.get(f"/repos/{owner}/{repo}/commits/{sha}/check-runs", params={"per_page": 100}, timeout=30) or {}
+                    check_runs = data.get("check_runs", []) if isinstance(data, dict) else []
+                    total_count = data.get("total_count", 0) if isinstance(data, dict) else 0
 
-                    if result.returncode == 0 and result.stdout.strip():
-                        data = json.loads(result.stdout)
-                        check_runs = data.get('check_runs', [])
-                        total_count = data.get('total_count', 0)
-
-                        # Determine overall status
-                        if total_count == 0:
-                            status = 'null'
-                            conclusion = 'null'
-                        else:
-                            # Check for any failures
-                            has_failure = any(cr.get('conclusion') in ['failure', 'timed_out', 'action_required']
-                                            for cr in check_runs)
-                            has_pending = any(cr.get('status') in ['queued', 'in_progress']
-                                            for cr in check_runs)
-                            has_cancelled = any(cr.get('conclusion') == 'cancelled' for cr in check_runs)
-
-                            if has_failure:
-                                status = 'completed'
-                                conclusion = 'failure'
-                            elif has_pending:
-                                status = 'in_progress'
-                                conclusion = 'null'
-                            elif has_cancelled:
-                                status = 'completed'
-                                conclusion = 'cancelled'
-                            else:
-                                # All succeeded or skipped
-                                status = 'completed'
-                                conclusion = 'success'
-
-                        return (sha, {
-                            'status': status,
-                            'conclusion': conclusion,
-                            'total_count': total_count,
-                            'check_runs': check_runs
-                        })
+                    # Determine overall status
+                    if int(total_count or 0) == 0:
+                        status = "null"
+                        conclusion = "null"
                     else:
-                        return (sha, None)
+                        has_failure = any(
+                            str((cr or {}).get("conclusion") or "") in ["failure", "timed_out", "action_required"]
+                            for cr in (check_runs or [])
+                            if isinstance(cr, dict)
+                        )
+                        has_pending = any(
+                            str((cr or {}).get("status") or "") in ["queued", "in_progress"]
+                            for cr in (check_runs or [])
+                            if isinstance(cr, dict)
+                        )
+                        has_cancelled = any(
+                            str((cr or {}).get("conclusion") or "") == "cancelled"
+                            for cr in (check_runs or [])
+                            if isinstance(cr, dict)
+                        )
+
+                        if has_failure:
+                            status = "completed"
+                            conclusion = "failure"
+                        elif has_pending:
+                            status = "in_progress"
+                            conclusion = "null"
+                        elif has_cancelled:
+                            status = "completed"
+                            conclusion = "cancelled"
+                        else:
+                            # All succeeded or skipped
+                            status = "completed"
+                            conclusion = "success"
+
+                    return (
+                        sha,
+                        {
+                            "status": status,
+                            "conclusion": conclusion,
+                            "total_count": total_count,
+                            "check_runs": check_runs,
+                        },
+                    )
                 except Exception as e:
                     _logger.debug(f"Failed to fetch check status for {sha[:8]}: {e}")
                     return (sha, None)
@@ -4566,6 +6052,12 @@ class GitHubAPIClient:
                 flushed = 0
                 for future in futures:
                     sha, status_info = future.result()
+                    # If we failed to fetch this SHA (rate limit, auth, network, etc), do NOT overwrite
+                    # an existing cache entry with `None`. This prevents the cache from degrading when
+                    # we run out of API calls.
+                    if status_info is None:
+                        result[sha] = result.get(sha)
+                        continue
                     cache[sha] = _pack(int(time.time()), status_info)
                     result[sha] = status_info
                     cache_updated = True
@@ -5462,7 +6954,7 @@ class GitLabAPIClient:
             # showing stale status. We intentionally treat them as *not fresh* regardless of age.
             if is_completed(entry_norm):
                 return True
-            return False
+                return False
 
         # NOTE: We intentionally refetch active pipelines on every run, so we no longer
         # use a time-based "freshness" threshold here.

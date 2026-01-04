@@ -43,6 +43,9 @@
     }
     .status-success { background-color: #2da44e; border-color: #1f7a37; }
     .status-failed { background-color: #d73a49; border-color: #b62d3b; }
+    .status-warning { background-color: #dbab09; border-color: #b88f05; }
+    .status-building { background-color: #dbab09; border-color: #b88f05; }
+    .status-unknown { background-color: #8c959f; border-color: #6e7781; }
 {% endblock %}
 
 {# Error snippet toggle JS is shared in common_dashboard.j2 #}
@@ -64,5 +67,53 @@
 {% endblock %}
 
 {% block content %}
+  <!-- Legend/Help Section (keep consistent with commit history) -->
+  <div class="container" style="margin-bottom: 0px; padding: 12px; background-color: #f6f8fa;">
+    <details>
+      <summary style="cursor: pointer; font-weight: 600; font-size: 14px; color: #24292f; user-select: none;">
+        Legend & Help
+      </summary>
+      <div style="margin-top: 12px; font-size: 13px; line-height: 1.6;">
+        <div style="margin-bottom: 12px;">
+          <div style="font-weight: 600; margin-bottom: 6px; color: #24292f;">CI Status Symbols (GitHub):</div>
+          <ul style="margin: 4px 0; padding-left: 20px;">
+            <li>{{ success_required_icon_html|safe }} - Passed (required)</li>
+            <li>{{ success_icon_html|safe }} - Passed (optional)</li>
+            <li>{{ failure_required_icon_html|safe }} / {{ failure_optional_icon_html|safe }} - Failed (required / optional)</li>
+            <li>{{ in_progress_icon_html|safe }} - In progress</li>
+            <li>{{ pending_icon_html|safe }} - Pending</li>
+            <li>{{ cancelled_icon_html|safe }} - Canceled</li>
+            <li>{{ skipped_icon_html|safe }} - Skipped</li>
+          </ul>
+          <div style="margin-top: 6px; color: #57606a; font-size: 12px;">
+            Notes:
+            <ul style="margin: 4px 0; padding-left: 20px;">
+              <li><strong>Skipped</strong> shows as a grey circle-slash.</li>
+              <li><strong>Optional failures</strong> show as ⚠ and do not force the top PASS/FAIL pill to FAIL.</li>
+            </ul>
+          </div>
+        </div>
+
+        <div style="margin-bottom: 12px;">
+          <div style="font-weight: 600; margin-bottom: 6px; color: #24292f;">Subsections:</div>
+          <ul style="margin: 4px 0; padding-left: 20px;">
+            <li><strong>Build and Test - dynamo</strong>: shows phase breakdown (Build Image / Rust checks / pytest...) when available.</li>
+            <li><strong>Long-running Actions jobs</strong> (e.g. <code>sglang (arm64)</code>, <code>trtllm (amd64)</code>): shows job steps with duration ≥ 30s.</li>
+            <li>Step timing comes from the GitHub Actions job steps API and is cached; we only display steps ≥ 30s.</li>
+          </ul>
+        </div>
+
+        <div style="margin-bottom: 6px;">
+          <div style="font-weight: 600; margin-bottom: 6px; color: #24292f;">Links:</div>
+          <ul style="margin: 4px 0; padding-left: 20px;">
+            <li><strong>[log]</strong> opens the GitHub Actions job page.</li>
+            <li><strong>“View”</strong> in Details points to the same URL as the tree’s <strong>[log]</strong> link.</li>
+            <li><strong>[cached raw log]</strong> is a locally cached copy of the job log for failures (used for snippets/tags).</li>
+          </ul>
+        </div>
+      </div>
+    </details>
+  </div>
+
   <pre>{{ tree_html | safe }}</pre>
 {% endblock %}

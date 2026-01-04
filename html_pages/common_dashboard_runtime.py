@@ -25,6 +25,24 @@ if str(_UTILS_DIR) not in sys.path:
 import common
 
 
+def atomic_write_text(path: Path, content: str, *, encoding: str = "utf-8") -> None:
+    """Atomically write text to `path` by writing a temp file in the same directory and os.replace().
+
+    This prevents partially-written HTML from being observed by readers (e.g. nginx) during refresh.
+    """
+    p = Path(path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    tmp = p.with_name(f".{p.name}.tmp.{os.getpid()}")
+    # Best-effort cleanup of stale tmp from prior crashes.
+    try:
+        if tmp.exists():
+            tmp.unlink()
+    except Exception:
+        pass
+    tmp.write_text(content, encoding=encoding)
+    os.replace(str(tmp), str(p))
+
+
 def dashboard_served_raw_log_repo_cache_dir(*, page_root_dir: Path) -> Path:
     """Return the directory used to *serve* raw logs for dashboards.
 

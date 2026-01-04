@@ -17,6 +17,7 @@ import stat
 import subprocess
 import sys
 import time
+import urllib.parse
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -41,9 +42,13 @@ except Exception:  # pragma: no cover
 from common_dashboard_lib import (
     PASS_PLUS_STYLE,
     TreeNodeVM,
-    build_check_name_matchers,
+    build_and_test_dynamo_phases_from_actions_job,
     check_line_html,
-    load_workflow_specs,
+     ci_should_expand_by_default,
+    disambiguate_check_run_name,
+    extract_actions_job_id_from_url,
+     sort_pr_check_rows_by_name,
+    parse_build_and_test_dynamo_phase_timings,
     render_tree_pre_lines,
     required_badge_html,
     status_icon_html,
@@ -51,6 +56,7 @@ from common_dashboard_lib import (
 
 # Dashboard runtime (HTML-only) helpers
 from common_dashboard_runtime import (
+    atomic_write_text,
     materialize_job_raw_log_text_local_link,
     prune_dashboard_raw_logs,
     prune_partial_raw_log_caches,
@@ -75,7 +81,9 @@ from common import (
     FailedCheck,
     GHPRCheckRow,
     GitHubAPIClient,
+    PhaseTimer,
     PRInfo,
+    classify_ci_kind,
     dynamo_utils_cache_dir,
     summarize_pr_check_rows,
 )
@@ -87,6 +95,10 @@ from common import (
 DYNAMO_OWNER = "ai-dynamo"
 DYNAMO_REPO = "dynamo"
 DYNAMO_REPO_SLUG = f"{DYNAMO_OWNER}/{DYNAMO_REPO}"
+
+
+class RawLogValidationError(RuntimeError):
+    """Raised when we expect a local `[raw log]` for a failed Actions job but cannot produce one."""
 
 
 #
@@ -259,24 +271,6 @@ def _html_copy_button(*, clipboard_text: str, title: str) -> str:
     )
 
 
-def _html_toggle_span(*, target_id: str, show_text: str, hide_text: str) -> str:
-    """Return a small inline toggle span that flips ▶/▼ and toggles display of target div."""
-    # Note: keep JS and quoting simple because this is emitted inside an HTML attribute.
-    target_id_escaped = html.escape(target_id, quote=True)
-    show_escaped = html.escape(show_text, quote=True)
-    hide_escaped = html.escape(hide_text, quote=True)
-    return (
-        f'<span style="cursor: pointer; color: #0969da; margin-left: 10px; font-weight: 500;" '
-        f'onclick="var el=document.getElementById(\'{target_id_escaped}\');'
-        f'var isHidden=(el.style.display===\'none\'||el.style.display===\'\');'
-        # Use inline for <span>-based containers (avoids whitespace quirks inside <pre>).
-        # For block-like content (tables), the container itself can carry its own margins.
-        f'el.style.display=isHidden?\'inline\':\'none\';'
-        f'this.textContent=isHidden?\'{hide_escaped}\':\'{show_escaped}\';"'
-        f">{show_escaped}</span>"
-    )
-
-
 def _html_small_link(*, url: str, label: str) -> str:
     url_escaped = html.escape(url, quote=True)
     label_escaped = html.escape(label)
@@ -313,6 +307,40 @@ def _aggregate_status(statuses: Iterable[str]) -> str:
             best_p = p
             best = s
     return best
+
+
+def _duration_str_to_seconds(s: str) -> float:
+    """Best-effort parse of durations like '43m 33s', '30m33s', '2s', '1h 4m'."""
+    try:
+        total = 0.0
+        for m in re.finditer(r"([0-9]+)\s*([hms])", str(s or "").lower()):
+            v = float(m.group(1))
+            u = m.group(2)
+            if u == "h":
+                total += v * 3600.0
+            elif u == "m":
+                total += v * 60.0
+            elif u == "s":
+                total += v
+        return total
+    except Exception:
+        return 0.0
+
+
+def _assume_completed_for_check_row(r: "GHPRCheckRow") -> bool:
+    """Infer completion from the PR check row itself (avoid extra per-job API calls).
+
+    `GHPRCheckRow.status_raw` comes from the REST check-run status+conclusion:
+    - non-completed: queued/pending/in_progress
+    - completed: pass/fail/skipped/cancelled/neutral/timed_out/action_required
+    """
+    try:
+        s = str(getattr(r, "status_raw", "") or "").strip().lower()
+        if not s:
+            return False
+        return s not in {"in_progress", "pending", "queued", "running", "unknown"}
+    except Exception:
+        return False
 
 
 @dataclass
@@ -443,7 +471,7 @@ class CIJobTreeNode(BranchNode):
         and they often show a duration of 0. We consider these "success-like" so fully
         green/skipped subtrees collapse by default.
         """
-        if node.status == "success":
+        if node.status in {"success", "skipped"}:
             return True
         if node.status != "unknown":
             return False
@@ -469,8 +497,11 @@ class CIJobTreeNode(BranchNode):
                 has_required_failure = True
                 statuses.append("failure")
             elif st == "failure" and not is_req:
-                # Optional failures should not turn the parent red; record them separately.
+                # Optional failures should not turn the parent red (FAIL), but they SHOULD be visible as ⚠.
                 has_optional_failure = True
+                statuses.append("failure")
+            elif st == "skipped":
+                # Skipped is success-like for rollup purposes (do not make parents look "worse").
                 statuses.append("success")
             else:
                 statuses.append(st)
@@ -496,28 +527,23 @@ class CIJobTreeNode(BranchNode):
         """Return True if this subtree should be expanded by default.
 
         Policy (per UX request):
-        - expand for required failures (red ✗) and non-completed states (pending/running/cancelled/unknown)
-        - do NOT auto-expand for optional failures (⚠) or all-green subtrees
+        - expand for required failures (red ✗)
+        - do NOT auto-expand long/step-heavy jobs (like sglang/trtllm/vllm) by default
         """
         # All-success-like subtree: no need to expand.
         if CIJobTreeNode._subtree_all_success(node):
             return False
 
         # Optional failures (warnings) alone should not force expansion.
-        # We therefore expand only if we see a required failure or a non-completed state.
+        # We therefore expand only if we see a required failure.
         if getattr(node, "status", "unknown") == "failure" and bool(getattr(node, "is_required", False)):
             return True
-        if getattr(node, "status", "unknown") in {"in_progress", "pending", "cancelled"}:
+
+        # Shared rule: expand only for required failures or non-completed states.
+        roll = CIJobTreeNode._subtree_rollup(node)
+        if ci_should_expand_by_default(rollup_status=str(roll.status or ""), has_required_failure=bool(roll.has_required_failure)):
             return True
-
-        # Unknown leaf nodes that aren't treated as success-like should be visible.
-        if not getattr(node, "children", None) and getattr(node, "status", "unknown") == "unknown":
-            return True
-
-        for ch in (getattr(node, "children", None) or []):
-            if isinstance(ch, CIJobTreeNode) and CIJobTreeNode._subtree_needs_attention(ch):
-                return True
-
+        # Otherwise, no auto-expand (even if some leaf steps are "unknown").
         return False
 
     @staticmethod
@@ -529,7 +555,7 @@ class CIJobTreeNode(BranchNode):
         as success-like for *default expand/collapse* purposes.
         """
         # Any non-success/unknown state should be visible by default.
-        if node.status not in {"success", "unknown"}:
+        if node.status not in {"success", "skipped", "unknown"}:
             return False
         if node.children:
             # Only collapse if every descendant is success-like.
@@ -544,9 +570,10 @@ class CIJobTreeNode(BranchNode):
         return CIJobTreeNode._is_success_like(node)
 
     def _format_content(self) -> str:
+        jid = self.job_id
         name_part = f" — {self.display_name}" if (self.display_name and self.display_name != self.job_id) else ""
         dur_part = f" ({self.duration})" if self.duration else ""
-        return f"{self.job_id}{name_part}{dur_part}"
+        return f"{jid}{name_part}{dur_part}"
 
     def _format_html_content(self) -> str:
         # Prefer FailedCheck URLs when available (they include raw log + error summary)
@@ -561,10 +588,13 @@ class CIJobTreeNode(BranchNode):
         effective_required_failure = (roll.has_required_failure if roll is not None else False)
         effective_optional_failure = (roll.has_optional_failure if roll is not None else False)
 
+        jid = self.job_id
+        display_name_eff = self.display_name
+
         # Error toggle is appended in to_tree_vm() so it can inject a newline safely in <pre>.
         return check_line_html(
-            job_id=self.job_id,
-            display_name=self.display_name,
+            job_id=jid,
+            display_name=display_name_eff,
             status_norm=effective_status,
             is_required=bool(self.is_required),
             duration=self.duration,
@@ -665,11 +695,19 @@ def _build_ci_hierarchy_nodes(
     page_root_dir: Optional[Path] = None,
     checks_ttl_s: int = 300,
     skip_fetch: bool = False,
-) -> List[CIJobTreeNode]:
-    """Build a workflow-needs hierarchy annotated with actual PR check status."""
+    validate_raw_logs: bool = True,
+) -> List[BranchNode]:
+    """Build a flat CI list that matches the PR "Details" table 1:1."""
     if not pr or not getattr(pr, "number", None) or not github_api:
         return []
+    # Ensure required-ness is correct even if PRInfo cache is stale.
+    # This uses `gh` (GraphQL statusCheckRollup isRequired), not our REST budget.
     required_set: Set[str] = set(getattr(pr, "required_checks", []) or [])
+    if not required_set:
+        try:
+            required_set = set(github_api.get_required_checks(DYNAMO_OWNER, DYNAMO_REPO, int(pr.number)) or set())
+        except Exception:
+            required_set = set()
     rows = github_api.get_pr_checks_rows(
         DYNAMO_OWNER,
         DYNAMO_REPO,
@@ -681,253 +719,192 @@ def _build_ci_hierarchy_nodes(
     if not rows:
         return []
 
-    failed_by_name: Dict[str, FailedCheck] = {}
-    try:
-        for fc in (list(getattr(pr, "failed_checks", []) or [])):
-            if getattr(fc, "name", None):
-                failed_by_name[str(fc.name)] = fc
-    except Exception:
-        failed_by_name = {}
+    # Sort by job name for stable/scan-friendly output (same order as Details list).
+    rows = sort_pr_check_rows_by_name(list(rows))
 
-    specs = load_workflow_specs(repo_path)
-    matchers = build_check_name_matchers(specs)
-
-    grouped: Dict[str, List[GHPRCheckRow]] = {}
+    # CI view: the expanded tree under the PR status line shows the check list and optional subsections.
+    out: List[BranchNode] = []
+    missing_failed_raw_logs: List[Tuple[str, str]] = []
     for r in rows:
-        mapped: Optional[str] = None
-        for job_id, rx in matchers:
-            if rx.match(r.name):
-                mapped = job_id
-                break
-        if not mapped:
-            mapped = f"check::{r.name}"
-        grouped.setdefault(mapped, []).append(r)
+        nm = str(getattr(r, "name", "") or "").strip()
+        raw = str(getattr(r, "status_raw", "") or "").strip().lower()
+        if raw in {"skipped", "skip", "neutral"}:
+            st = "skipped"
+        elif raw in {"pass", "success"}:
+            st = "success"
+        elif raw in {"fail", "failure", "timed_out", "action_required"}:
+            st = "failure"
+        elif raw in {"in_progress", "in progress", "running"}:
+            st = "in_progress"
+        elif raw in {"queued", "pending"}:
+            st = "pending"
+        elif raw in {"cancelled", "canceled"}:
+            st = "cancelled"
+        else:
+            st = str(getattr(r, "status_norm", "") or "unknown")
 
-    # Hierarchy inclusion policy:
-    # Always include *all* check rows (whether green/warn/red/etc). Expand/collapse is a separate concern.
-    # This makes the hierarchy list stable/consistent across branches and PR base refs.
-    #
-    # (We still render the workflow-needs graph: checks are mapped into job_ids when possible.)
-    important_ids: Set[str] = set(grouped.keys())
+        job_url = str(getattr(r, "url", "") or "").strip()
+        base_dir = (Path(page_root_dir) if page_root_dir is not None else repo_path)
+        raw_href = ""
+        raw_size = 0
+        snippet = ""
 
-    def add_needs(job_id: str) -> None:
-        spec = specs.get(job_id)
-        if not spec:
-            return
-        for dep in spec.needs:
-            if dep in grouped and dep not in important_ids:
-                important_ids.add(dep)
-                add_needs(dep)
+        # For failed GitHub Actions jobs, always materialize a local raw log so the tree shows `[raw log]`.
+        # This is intentionally strict to avoid recurring regressions where errors have no raw logs.
+        if st == "failure" and (not skip_fetch):
+            try:
+                from common_dashboard_lib import extract_actions_job_id_from_url  # local import
+                from common_dashboard_runtime import materialize_job_raw_log_text_local_link  # local import
 
-    for jid in list(important_ids):
-        add_needs(jid)
-
-    needs_map: Dict[str, List[str]] = {}
-    for job_id, spec in specs.items():
-        if job_id in grouped and job_id in important_ids:
-            needs_map[job_id] = [d for d in spec.needs if d in grouped and d in important_ids]
-
-    needed: Set[str] = set()
-    for deps in needs_map.values():
-        needed.update(deps)
-    workflow_roots = sorted([jid for jid in needs_map.keys() if jid not in needed])
-    synthetic_roots = sorted([jid for jid in important_ids if jid.startswith("check::")])
-
-    memo: Dict[str, CIJobTreeNode] = {}
-    # Cache raw log *content* (not URL) for failed jobs. Keep a small cap so a single PR doesn't
-    # trigger an unbounded number of downloads.
-    raw_log_prefetch_budget = {"n": 15}
-    page_root_dir = Path(page_root_dir) if page_root_dir is not None else repo_path
-    snippet_cache: Dict[str, str] = {}
-
-    def snippet_for_raw_href(raw_href: str) -> str:
-        if not raw_href:
-            return ""
-        if raw_href in snippet_cache:
-            return snippet_cache[raw_href]
-        try:
-            snippet = extract_error_snippet_from_log_file(page_root_dir / raw_href)
-        except Exception:
-            snippet = ""
-        snippet_cache[raw_href] = snippet
-        return snippet
-
-    def build_node(job_id: str) -> CIJobTreeNode:
-        if job_id in memo:
-            return memo[job_id]
-
-        if job_id.startswith("check::"):
-            check_name = job_id.split("check::", 1)[1]
-            bucket = grouped.get(job_id, [])
-            node = CIJobTreeNode(label="", job_id=check_name, status=_aggregate_status([b.status_norm for b in bucket]))
-            for b in bucket:
-                # Cache raw log content for failures (best-effort).
-                raw_href = ""
-                raw_size = 0
-                if (
-                    github_api
-                    and b.status_norm == "failure"
-                ):
-                    allow_fetch = int(raw_log_prefetch_budget.get("n", 0) or 0) > 0
-                    try:
-                        raw_href = (
-                            materialize_job_raw_log_text_local_link(
-                                github_api,
-                                job_url=b.url or "",
-                                job_name=b.name,
-                                owner=DYNAMO_OWNER,
-                                repo=DYNAMO_REPO,
-                                page_root_dir=page_root_dir,
-                                allow_fetch=bool(allow_fetch),
-                            )
-                            or ""
-                        )
-                    except Exception:
-                        raw_href = ""
-                    if allow_fetch:
-                        raw_log_prefetch_budget["n"] = int(raw_log_prefetch_budget.get("n", 0) or 0) - 1
-                if raw_href:
-                    try:
-                        raw_size = int((page_root_dir / raw_href).stat().st_size)
-                    except Exception:
-                        raw_size = 0
-                snippet = snippet_for_raw_href(raw_href) if raw_href else ""
-                node.children.append(
-                    CIJobTreeNode(
-                        label="",
-                        job_id=b.name,
-                        status=b.status_norm,
-                        duration=b.duration,
-                        url=b.url,
-                        raw_log_href=raw_href,
-                        raw_log_size_bytes=int(raw_size or 0),
-                        error_snippet_text=snippet,
-                        is_required=b.is_required,
-                    )
-                )
-            memo[job_id] = node
-            return node
-
-        spec = specs.get(job_id)
-        bucket = grouped.get(job_id, [])
-        display_name = spec.display_name if spec else ""
-
-        if len(bucket) == 1:
-            b = bucket[0]
-            raw_href = ""
-            raw_size = 0
-            if (
-                github_api
-                and b.status_norm == "failure"
-            ):
-                allow_fetch = int(raw_log_prefetch_budget.get("n", 0) or 0) > 0
-                try:
+                if extract_actions_job_id_from_url(job_url):
                     raw_href = (
                         materialize_job_raw_log_text_local_link(
                             github_api,
-                            job_url=b.url or "",
-                            job_name=b.name,
+                            job_url=job_url,
+                            job_name=nm,
                             owner=DYNAMO_OWNER,
                             repo=DYNAMO_REPO,
-                            page_root_dir=page_root_dir,
-                            allow_fetch=bool(allow_fetch),
+                            page_root_dir=base_dir,
+                            allow_fetch=True,
+                            assume_completed=_assume_completed_for_check_row(r),
+                        )
+                        or ""
+                    )
+            except Exception:
+                raw_href = ""
+
+        if raw_href:
+            try:
+                raw_size = int((base_dir / raw_href).stat().st_size)
+            except Exception:
+                raw_size = 0
+            try:
+                snippet = extract_error_snippet_from_log_file(base_dir / raw_href)
+            except Exception:
+                snippet = ""
+        elif st == "failure":
+            # Only validate failures that correspond to GitHub Actions jobs (others like DCO have no raw log).
+            try:
+                from common_dashboard_lib import extract_actions_job_id_from_url  # local import
+
+                if extract_actions_job_id_from_url(job_url):
+                    missing_failed_raw_logs.append((nm, job_url))
+            except Exception:
+                pass
+
+        node = CIJobTreeNode(
+            label="",
+            job_id=nm,
+            display_name="",
+            status=str(st or "unknown"),
+            duration=str(getattr(r, "duration", "") or ""),
+            url=job_url,
+            raw_log_href=str(raw_href or ""),
+            raw_log_size_bytes=int(raw_size or 0),
+            # If we can attribute the failure to a specific step, we suppress the parent-level
+            # error tags/snippet to avoid duplication (the failing step will carry it).
+            error_snippet_text=str(snippet or ""),
+            is_required=bool(getattr(r, "is_required", False)),
+            children=[],
+        )
+
+        # Shared subsections:
+        # - Build and Test - dynamo: phases (steps API first; raw log fallback)
+        # - other long-running Actions jobs: long steps (>= 30s)
+        try:
+            from common_dashboard_lib import ci_subsection_tuples_for_job  # local import
+            from common_dashboard_runtime import materialize_job_raw_log_text_local_link  # local import
+
+            dur_s = _duration_str_to_seconds(str(getattr(r, "duration", "") or ""))
+
+            # For Build-and-Test, allow raw-log fetch even on success so fallback parsing can work.
+            raw_href_for_sub = raw_href
+            if nm == "Build and Test - dynamo" and (not raw_href_for_sub) and (not skip_fetch):
+                try:
+                    raw_href_for_sub = (
+                        materialize_job_raw_log_text_local_link(
+                            github_api,
+                            job_url=job_url,
+                            job_name=nm,
+                            owner=DYNAMO_OWNER,
+                            repo=DYNAMO_REPO,
+                            page_root_dir=base_dir,
+                            allow_fetch=True,
+                            assume_completed=_assume_completed_for_check_row(r),
                         )
                         or ""
                     )
                 except Exception:
-                    raw_href = ""
-                if allow_fetch:
-                    raw_log_prefetch_budget["n"] = int(raw_log_prefetch_budget.get("n", 0) or 0) - 1
-            if raw_href:
+                    raw_href_for_sub = raw_href_for_sub or ""
+
+            raw_path_for_sub = (base_dir / raw_href_for_sub) if raw_href_for_sub else None
+
+            sub3 = ci_subsection_tuples_for_job(
+                github_api=github_api,
+                job_name=nm,
+                job_url=job_url,
+                raw_log_path=raw_path_for_sub,
+                duration_seconds=float(dur_s or 0.0),
+                is_required=bool(getattr(r, "is_required", False)),
+                long_job_threshold_s=10.0 * 60.0,
+                step_min_s=30.0,
+            )
+            for (sub_name, sub_dur, sub_status) in (sub3 or []):
+                if nm == "Build and Test - dynamo":
+                    kind2 = classify_ci_kind(str(sub_name))
+                    sub_id = f"{kind2}: {sub_name}" if kind2 and kind2 != "check" else str(sub_name)
+                else:
+                    sub_id = str(sub_name)
+                # If this is a failing step, try to scope the snippet to the step window.
+                step_snip = ""
                 try:
-                    raw_size = int((page_root_dir / raw_href).stat().st_size)
-                except Exception:
-                    raw_size = 0
-            snippet = snippet_for_raw_href(raw_href) if raw_href else ""
-            node = CIJobTreeNode(
-                label="",
-                job_id=job_id,
-                display_name=display_name,
-                status=b.status_norm,
-                duration=b.duration,
-                url=b.url,
-                raw_log_href=raw_href,
-                raw_log_size_bytes=int(raw_size or 0),
-                error_snippet_text=snippet,
-                is_required=b.is_required,
-                failed_check=failed_by_name.get(b.name),
-            )
-        else:
-            node = CIJobTreeNode(
-                label="",
-                job_id=job_id,
-                display_name=display_name,
-                status=_aggregate_status([b.status_norm for b in bucket]),
-                is_required=any(b.is_required for b in bucket),
-            )
-            for b in sorted(bucket, key=lambda x: x.name):
-                raw_href = ""
-                raw_size = 0
-                if (
-                    github_api
-                    and b.status_norm == "failure"
-                ):
-                    allow_fetch = int(raw_log_prefetch_budget.get("n", 0) or 0) > 0
-                    try:
-                        raw_href = (
-                            materialize_job_raw_log_text_local_link(
-                                github_api,
-                                job_url=b.url or "",
-                                job_name=b.name,
-                                owner=DYNAMO_OWNER,
-                                repo=DYNAMO_REPO,
-                                page_root_dir=page_root_dir,
-                                allow_fetch=bool(allow_fetch),
-                            )
-                            or ""
+                    if sub_id.startswith("step:") and str(sub_status or "") == "failure" and raw_path_for_sub:
+                        from common_dashboard_lib import step_window_snippet_from_cached_raw_log  # local import
+                        from common_dashboard_lib import extract_actions_job_id_from_url  # local import
+
+                        jid = extract_actions_job_id_from_url(job_url)
+                        job_det = (
+                            github_api.get_actions_job_details_cached(owner=DYNAMO_OWNER, repo=DYNAMO_REPO, job_id=jid, ttl_s=7 * 24 * 3600)
+                            if (github_api and jid)
+                            else None
                         )
-                    except Exception:
-                        raw_href = ""
-                    if allow_fetch:
-                        raw_log_prefetch_budget["n"] = int(raw_log_prefetch_budget.get("n", 0) or 0) - 1
-                if raw_href:
-                    try:
-                        raw_size = int((page_root_dir / raw_href).stat().st_size)
-                    except Exception:
-                        raw_size = 0
-                snippet = snippet_for_raw_href(raw_href) if raw_href else ""
+                        if isinstance(job_det, dict):
+                            step_snip = step_window_snippet_from_cached_raw_log(
+                                job=job_det, step_name=str(sub_name), raw_log_path=raw_path_for_sub
+                            )
+                except Exception:
+                    step_snip = ""
+                # If we successfully attributed a snippet to a failing step, avoid duplicating it on the parent.
+                if (step_snip or "").strip():
+                    node.error_snippet_text = ""
                 node.children.append(
                     CIJobTreeNode(
                         label="",
-                        job_id=b.name,
-                        status=b.status_norm,
-                        duration=b.duration,
-                        url=b.url,
-                        raw_log_href=raw_href,
-                        raw_log_size_bytes=int(raw_size or 0),
-                        error_snippet_text=snippet,
-                        is_required=b.is_required,
-                        failed_check=failed_by_name.get(b.name),
+                        job_id=sub_id,
+                        display_name="",
+                        status=str(sub_status or "unknown"),
+                        duration=str(sub_dur or ""),
+                        url=job_url,
+                        raw_log_href="",
+                        raw_log_size_bytes=0,
+                        error_snippet_text=str(step_snip or ""),
+                        is_required=bool(getattr(r, "is_required", False)),
+                        children=[],
                     )
                 )
+        except Exception:
+            pass
 
-        for dep in needs_map.get(job_id, []):
-            node.children.append(build_node(dep))
+        out.append(node)
 
-        if not bucket and node.children:
-            node.status = _aggregate_status([getattr(c, "status", "unknown") for c in node.children])
-
-        memo[job_id] = node
-        return node
-
-    forest: List[CIJobTreeNode] = []
-    for r in workflow_roots:
-        forest.append(build_node(r))
-    for r in synthetic_roots:
-        forest.append(build_node(r))
-    return forest
-
-
+    # Validation gate: if a failed GitHub Actions job has no local raw log, fail generation
+    # (unless the caller explicitly disables it).
+    if validate_raw_logs and (not skip_fetch) and missing_failed_raw_logs:
+        examples = "; ".join([f"{n} -> {u}" for (n, u) in missing_failed_raw_logs[:8]])
+        raise RawLogValidationError(
+            f"Missing [cached raw log] for {len(missing_failed_raw_logs)} failed GitHub Actions job(s): {examples}"
+        )
+    return out
 @dataclass
 class RepoNode(BranchNode):
     """Repository node"""
@@ -1097,7 +1074,8 @@ class PRNode(BranchNode):
         elif state_lc == 'open':
             emoji = '📖'
         else:
-            emoji = '❌'
+            # Closed/unavailable PR: don't prepend a failure icon on the PR title line.
+            emoji = ''
 
         # Truncate title at 80 characters
         title = self.pr.title[:80] + '...' if len(self.pr.title) > 80 else self.pr.title
@@ -1113,13 +1091,28 @@ class PRNode(BranchNode):
     def _format_html_content(self) -> str:
         if not self.pr:
             return ""
+        pr_url = str(self.pr.url or "").strip()
+        gh_icon = ""
+        if pr_url:
+            # Match the GitHub icon used in show_commit_history.j2
+            gh_icon = (
+                f'<a href="{html.escape(pr_url, quote=True)}" target="_blank" '
+                f'style="text-decoration: none; color: #24292f; margin-right: 4px;" '
+                f'title="Open on GitHub">'
+                f'<svg height="14" width="14" viewBox="0 0 16 16" fill="currentColor" '
+                f'style="display: inline-block; vertical-align: middle;">'
+                f'<path fill-rule="evenodd" clip-rule="evenodd" '
+                f'd="M8 0C3.58 0 0 3.58 0 8C0 11.54 2.29 14.53 5.47 15.59C5.87 15.66 6.02 15.42 6.02 15.21C6.02 15.02 6.01 14.39 6.01 13.72C4 14.09 3.48 13.23 3.32 12.78C3.23 12.55 2.84 11.84 2.5 11.65C2.22 11.5 1.82 11.13 2.49 11.12C3.12 11.11 3.57 11.7 3.72 11.94C4.44 13.15 5.59 12.81 6.05 12.6C6.12 12.08 6.33 11.73 6.56 11.53C4.78 11.33 2.92 10.64 2.92 7.58C2.92 6.71 3.23 5.99 3.74 5.43C3.66 5.23 3.38 4.41 3.82 3.31C3.82 3.31 4.49 3.1 6.02 4.13C6.66 3.95 7.34 3.86 8.02 3.86C8.7 3.86 9.38 3.95 10.02 4.13C11.55 3.09 12.22 3.31 12.22 3.31C12.66 4.41 12.38 5.23 12.3 5.43C12.81 5.99 13.12 6.7 13.12 7.58C13.12 10.65 11.25 11.33 9.47 11.53C9.76 11.78 10.01 12.26 10.01 13.01C10.01 14.08 10 14.94 10 15.21C10 15.42 10.15 15.67 10.55 15.59C13.71 14.53 16 11.53 16 8C16 3.58 12.42 0 8 0Z"></path>'
+                f'</svg></a>'
+            )
         state_lc = (self.pr.state or "").lower()
         if self.pr.is_merged:
             emoji = '🔀'
         elif state_lc == 'open':
-            emoji = '📖'
+            emoji = ''
         else:
-            emoji = '❌'
+            # Closed/unavailable PR: don't prepend a failure icon on the PR title line.
+            emoji = ''
 
         # Truncate title at 80 characters
         title = self.pr.title[:80] + '...' if len(self.pr.title) > 80 else self.pr.title
@@ -1133,11 +1126,31 @@ class PRNode(BranchNode):
         if pr_suffix not in title:
             title = f"{title} {pr_suffix}"
 
+        # Make the "(#1234)" part a link to the PR (in addition to the GitHub icon).
+        title_html: str
+        if pr_url and self.pr.number:
+            pr_url_esc = html.escape(pr_url, quote=True)
+            suffix_html = (
+                f'(<a href="{pr_url_esc}" target="_blank" '
+                f'style="color: #0969da; text-decoration: none;" '
+                f'title="Open PR #{int(self.pr.number)}">#{int(self.pr.number)}</a>)'
+            )
+            try:
+                before, after = str(title).rsplit(pr_suffix, 1)
+                title_html = f"{html.escape(before)}{suffix_html}{html.escape(after)}"
+            except Exception:
+                title_html = html.escape(title).replace(html.escape(pr_suffix), suffix_html)
+        else:
+            title_html = html.escape(title)
+
         # Gray out merged PRs
         if self.pr.is_merged:
-            return f'<span style="color: #999;">{emoji} <a href="{self.pr.url}" target="_blank" style="color: #999;">{title}</a>{base_html}</span>'
+            # For merged PRs: keep grey style; link is still the GitHub icon.
+            return f'<span style="color: #999;">{emoji} {gh_icon}{title_html}{base_html}</span>'
         else:
-            return f'{emoji} <a href="{self.pr.url}" target="_blank">{title}</a>{base_html}'
+            # For open PRs: title is plain text; GitHub icon is the link.
+            prefix = f"{emoji} " if emoji else ""
+            return f'{prefix}{gh_icon}{title_html}{base_html}'
 
 
 @dataclass
@@ -1221,6 +1234,15 @@ class PRStatusNode(BranchNode):
                 # For closed/merged PRs, default stable TTL (30d) is already long; no need to override here.
 
                 required_set = set(getattr(self.pr, "required_checks", []) or [])
+                # Refresh required checks directly so FAIL/PASS is correct even when PRInfo cache is stale
+                # or we are in "no REST budget" mode. This call uses `gh` GraphQL and is cached on disk.
+                if self.github_api and (not required_set):
+                    try:
+                        required_set = set(
+                            self.github_api.get_required_checks(DYNAMO_OWNER, DYNAMO_REPO, int(self.pr.number)) or set()
+                        )
+                    except Exception:
+                        required_set = required_set
                 rows = (
                     self.github_api.get_pr_checks_rows(
                         DYNAMO_OWNER,
@@ -1236,6 +1258,12 @@ class PRStatusNode(BranchNode):
 
                 # Display checks output if available
                 if rows:
+                    # Details list should mirror the PR's check rows as returned by GitHub (no extra
+                    # workflow/run metadata fetches, and no YAML parsing).
+                    rows = list(rows)
+                    # Sort by job name for stable/scan-friendly output.
+                    rows = sort_pr_check_rows_by_name(list(rows))
+
                     # Compact CI summary counts (styled to match show_commit_history.j2):
                     #   - green:  REQ+OPT✓  (passed; required count bold)
                     #   - red:    N✗   (required failures, rendered as a red badge)
@@ -1265,9 +1293,6 @@ class PRStatusNode(BranchNode):
                     pending_jobs: list[str] = []
                     cancelled_jobs: list[str] = []
                     other_jobs: list[str] = []
-
-                    table_html = '<table style="border-collapse: collapse; font-size: 11px; margin-top: 5px;">'
-                    table_html += '<tr style="background-color: #e8eaed;"><th style="text-align: left; padding: 4px 8px; border: 1px solid #d0d0d0;">Check Name</th><th style="text-align: left; padding: 4px 8px; border: 1px solid #d0d0d0;">Status</th><th style="text-align: left; padding: 4px 8px; border: 1px solid #d0d0d0;">Duration</th><th style="text-align: left; padding: 4px 8px; border: 1px solid #d0d0d0;">Details</th></tr>'
 
                     # Determine which checks are required (branch protection).
                     # Prefer the full required_checks list from PRInfo; fall back to "is_required" flags on known checks.
@@ -1304,40 +1329,6 @@ class PRStatusNode(BranchNode):
                     cancelled_jobs = list(summary.names.cancelled)
                     other_jobs = list(summary.names.other)
 
-                    # Still build the detailed per-check table (this is presentation-specific).
-                    for row in rows:
-                        name_raw = row.name
-                        name = html_module.escape(name_raw)
-                        status_raw = (row.status_raw or "").strip()
-                        status = html_module.escape(status_raw)
-                        duration = html_module.escape(row.duration or "")
-                        url = row.url or ""
-                        description = html_module.escape(row.description or "")
-
-                        # Mark required checks (branch protection) inline.
-                        if row.is_required or (name_raw in required_set):
-                            name += ' <span style="color: #d73a49; font-weight: 700;">[REQUIRED]</span>'
-
-                        # Color code the status
-                        status_lc = status_raw.lower()
-                        status_color = '#059669' if status_lc in ('pass', 'success') else '#dc2626' if status_lc in ('fail', 'failure') else '#6b7280'
-                        status_html = f'<span style="color: {status_color}; font-weight: bold;">{status}</span>'
-
-                        # Make URL clickable if present
-                        if url and url.strip():
-                            url_escaped = html_module.escape(url.strip())
-                            details = f'<a href="{url_escaped}" target="_blank" style="color: #0969da; text-decoration: none;">View</a>'
-                            if description:
-                                details += f' - {description}'
-                        elif description:
-                            details = description
-                        else:
-                            details = ''
-
-                        table_html += f'<tr><td style="padding: 4px 8px; border: 1px solid #d0d0d0;">{name}</td><td style="padding: 4px 8px; border: 1px solid #d0d0d0;">{status_html}</td><td style="padding: 4px 8px; border: 1px solid #d0d0d0;">{duration}</td><td style="padding: 4px 8px; border: 1px solid #d0d0d0;">{details}</td></tr>'
-
-                    table_html += '</table>'
-
                     # Rebuild the "Status:" line for HTML so CI uses the compact colored counts.
                     ci_parts = []
                     success_req = counts["success_required"]
@@ -1354,7 +1345,7 @@ class PRStatusNode(BranchNode):
                         else:
                             ci_parts.append(
                                 f'<span style="color: #2da44e;">'
-                                f'<strong>{success_req}</strong>{status_icon_html(status_norm="success", is_required=False)}'
+                                f'<strong>{success_req}</strong>{status_icon_html(status_norm="success", is_required=True)}'
                                 f'</span>'
                             )
                     if counts["failure_required"] > 0:
@@ -1381,7 +1372,7 @@ class PRStatusNode(BranchNode):
                     tooltip_parts: list[str] = []
                     if passed_required_jobs:
                         tooltip_parts.append(
-                            f'<strong style="color: #2da44e;">{status_icon_html(status_norm="success", is_required=False)} Passed (required):</strong> '
+                            f'<strong style="color: #2da44e;">{status_icon_html(status_norm="success", is_required=True)} Passed (required):</strong> '
                             + ", ".join(sorted(html_module.escape(n) for n in passed_required_jobs))
                         )
                     if passed_optional_jobs:
@@ -1436,12 +1427,29 @@ class PRStatusNode(BranchNode):
                                 f'<span class="tooltiptext">{tooltip_html}</span>'
                                 '</span>'
                             )
-                        # If there are no required failures (red ✗ badge), call it PASS even if there are optional ⚠.
-                        ci_label = (
-                            '<span class="status-indicator status-success">PASS</span>'
-                            if counts["failure_required"] == 0
-                            else '<span class="status-indicator status-failed">FAIL</span>'
-                        )
+                        # Roll up the top-level PR status:
+                        # - FAIL iff a REQUIRED check failed
+                        # - WARN if only non-required checks failed
+                        # - BUILD if anything is in progress
+                        # - ---- if pending/queued only (no pass/fail yet)
+                        # - PASS otherwise
+                        #
+                        # IMPORTANT: determining "required" purely from branch protection can be unreliable
+                        # (branch protection is often not accessible). Use PRInfo.failed_checks' `is_required`
+                        # flags for the FAIL decision.
+                        # Top-level pill should reflect REQUIRED checks only:
+                        # - FAIL iff a required check failed
+                        # - BUILD if anything is in progress
+                        # - ---- if pending/queued only (no pass/fail yet)
+                        # - PASS otherwise (even if optional checks failed)
+                        if counts["failure_required"] > 0:
+                            ci_label = '<span class="status-indicator status-failed">FAIL</span>'
+                        elif counts["in_progress"] > 0:
+                            ci_label = '<span class="status-indicator status-building">BUILD</span>'
+                        elif counts["pending"] > 0:
+                            ci_label = '<span class="status-indicator status-unknown">----</span>'
+                        else:
+                            ci_label = '<span class="status-indicator status-success">PASS</span>'
 
                         # Replace the literal "CI:" with a clickable GitHub icon (links to commit checks page).
                         checks_link = ""
@@ -1476,21 +1484,6 @@ class PRStatusNode(BranchNode):
 
                     base_html = f"{', '.join(status_parts)}" if status_parts else ""
 
-                    # Generate unique ID for this checks div
-                    checks_id = f"checks_{uuid.uuid4().hex[:8]}"
-                    # Add expandable section with formatted table.
-                    # Match show_commit_history behavior: toggle the triangle (▶/▼) based on expanded state.
-                    base_html += (
-                        " "
-                        + _html_toggle_span(
-                            target_id=checks_id,
-                            show_text="▶ Details",
-                            hide_text="▼ Hide details",
-                        )
-                        # IMPORTANT: avoid <div> inside <pre> because it introduces line breaks / extra whitespace.
-                        # Use a <span> container and toggle it between display:none and display:block.
-                        + f'<span id="{checks_id}" style="display: none; margin-left: 20px; margin-top: 5px;">{table_html}</span>'
-                    )
             except (subprocess.TimeoutExpired, FileNotFoundError, Exception):
                 # Silently fail if gh command is not available or times out
                 pass
@@ -1525,7 +1518,7 @@ class PRStatusNode(BranchNode):
             triangle = (
                 f'<span style="display: inline-block; width: 12px; margin-right: 2px; color: #0969da; '
                 f'cursor: pointer; user-select: none;" '
-                f'title="CI hierarchy (derived from .github/workflows/*.yml)" '
+                f'title="CI tree (flat; mirrors Details)" '
                 f'onclick="toggleCiChildren(\'{children_id}\', this)">{triangle_char}</span>'
             )
         else:
@@ -1569,7 +1562,7 @@ class PRStatusNode(BranchNode):
             children=[c.to_tree_vm() for c in (self.children or []) if isinstance(c, BranchNode)],
             collapsible=True,
             default_expanded=bool(default_expanded),
-            triangle_tooltip="CI hierarchy (derived from .github/workflows/*.yml)",
+            triangle_tooltip="CI tree (flat; mirrors Details)",
         )
 
 
@@ -1628,11 +1621,20 @@ class LocalRepoScanner:
         *,
         max_branches: Optional[int] = None,
         max_checks_fetch: Optional[int] = None,
+        allow_anonymous_github: bool = False,
+        max_github_api_calls: int = 100,
     ):
-        self.github_api = GitHubAPIClient(token=token)
+        require_auth = not bool(allow_anonymous_github)
+        self.github_api = GitHubAPIClient(
+            token=token,
+            require_auth=require_auth,
+            allow_anonymous_fallback=bool(allow_anonymous_github),
+            max_rest_calls=int(max_github_api_calls),
+        )
         self.refresh_closed_prs = bool(refresh_closed_prs)
         self.max_branches = int(max_branches) if max_branches is not None else None
         self.max_checks_fetch = int(max_checks_fetch) if max_checks_fetch is not None else None
+        self.cache_only_github: bool = False
 
     @staticmethod
     def _is_world_readable_executable_dir(p: Path) -> bool:
@@ -1862,7 +1864,9 @@ class LocalRepoScanner:
                 branch_results_sorted = branch_results_sorted[: int(self.max_branches)]
 
             allow_fetch_branch_names: Set[str] = set()
-            if self.max_checks_fetch is not None and self.max_checks_fetch > 0:
+            if bool(getattr(self, "cache_only_github", False)):
+                allow_fetch_branch_names = set()
+            elif self.max_checks_fetch is not None and self.max_checks_fetch > 0:
                 allow_fetch_branch_names = {bn for (bn, _info, _prs) in branch_results_sorted[: int(self.max_checks_fetch)]}
 
             # Build branch nodes (newest first)
@@ -1880,6 +1884,8 @@ class LocalRepoScanner:
                 # Add PR nodes
                 for pr in prs:
                     allow_fetch_checks = (branch_name in allow_fetch_branch_names) if allow_fetch_branch_names else True
+                    if bool(getattr(self, "cache_only_github", False)):
+                        allow_fetch_checks = False
                     pr_node = PRNode(label="", pr=pr)
                     branch_node.add_child(pr_node)
 
@@ -1926,6 +1932,9 @@ class LocalRepoScanner:
                             skip_fetch=(not bool(allow_fetch_checks)),
                         ):
                             status_node.add_child(ci_node)
+                    except RawLogValidationError:
+                        # Hard fail: for failed Actions jobs we require `[raw log]` links.
+                        raise
                     except Exception as e:
                         # Don't silently drop the tree UI; surface the error so it's actionable.
                         try:
@@ -2093,6 +2102,14 @@ def generate_html(root: BranchNode, *, page_stats: Optional[List[tuple[str, str]
         copy_icon_svg=_COPY_ICON_SVG,
         tree_html=tree_html,
         page_stats=page_stats,
+        success_icon_html=status_icon_html(status_norm="success", is_required=False),
+        success_required_icon_html=status_icon_html(status_norm="success", is_required=True),
+        failure_required_icon_html=status_icon_html(status_norm="failure", is_required=True),
+        failure_optional_icon_html=status_icon_html(status_norm="failure", is_required=False),
+        in_progress_icon_html=status_icon_html(status_norm="in_progress", is_required=False),
+        pending_icon_html=status_icon_html(status_norm="pending", is_required=False),
+        cancelled_icon_html=status_icon_html(status_norm="cancelled", is_required=False),
+        skipped_icon_html=status_icon_html(status_norm="skipped", is_required=False),
     )
 
 
@@ -2107,6 +2124,8 @@ def compute_state_hash(root: BranchNode) -> str:
 
 
 def main():
+    phase_t = PhaseTimer()
+
     parser = argparse.ArgumentParser(
         description='Show dynamo branches with PR information (node-based version)'
     )
@@ -2127,6 +2146,11 @@ def main():
     parser.add_argument(
         '--token',
         help='GitHub personal access token (or set GH_TOKEN/GITHUB_TOKEN env var)'
+    )
+    parser.add_argument(
+        '--allow-anonymous-github',
+        action='store_true',
+        help='Allow anonymous GitHub REST calls (60/hr core rate limit). By default we require auth to avoid rate limiting.'
     )
     parser.add_argument(
         '--refresh-closed-prs',
@@ -2155,6 +2179,12 @@ def main():
         default=None,
         help='If set, only allow network fetch of checks/CI hierarchy for the top N newest branches-with-PRs (others are cache-only)'
     )
+    parser.add_argument(
+        '--max-github-api-calls',
+        type=int,
+        default=100,
+        help='Hard cap on GitHub REST API network calls per invocation (cached reads do not count). Default: 100.'
+    )
     args = parser.parse_args()
 
     base_dir = (args.repo_path or args.base_dir or Path.cwd()).resolve()
@@ -2163,8 +2193,9 @@ def main():
     # We only render `[raw log]` links when the local file exists (or was materialized),
     # so pruning won't produce dead links on a freshly generated page.
     try:
-        _ = prune_dashboard_raw_logs(page_root_dir=base_dir, max_age_days=30)
-        _ = prune_partial_raw_log_caches(page_root_dirs=[base_dir])
+        with phase_t.phase("prune"):
+            _ = prune_dashboard_raw_logs(page_root_dir=base_dir, max_age_days=30)
+            _ = prune_partial_raw_log_caches(page_root_dirs=[base_dir])
     except Exception:
         pass
 
@@ -2174,82 +2205,65 @@ def main():
         refresh_closed_prs=bool(args.refresh_closed_prs),
         max_branches=args.max_branches,
         max_checks_fetch=args.max_checks_fetch,
+        allow_anonymous_github=bool(args.allow_anonymous_github),
+        max_github_api_calls=int(args.max_github_api_calls),
     )
-    # Report GitHub REST quota before/after the run (and fail fast if exhausted).
+    # Cache-only fallback if exhausted.
     before = scanner.github_api.get_core_rate_limit_info() if scanner.github_api else None
-    if before:
-        rem_b = before.get("remaining")
-        lim_b = before.get("limit")
-        reset_pt = before.get("reset_pt")
-        secs = int(before.get("seconds_until_reset") or 0)
-        print(
-            f"GitHub API core quota (before): remaining={rem_b}"
-            + (f"/{lim_b}" if lim_b is not None else "")
-            + (f", resets at {reset_pt} (in {GitHubAPIClient._format_seconds_delta(secs)})" if reset_pt else "")
-        )
 
     try:
         scanner.github_api.check_core_rate_limit_or_raise()
     except Exception as e:
-        print(str(e), file=sys.stderr)
-        raise SystemExit(2)
+        # Switch to cache-only mode (no new network calls; use existing caches).
+        scanner.cache_only_github = True
+        try:
+            scanner.github_api.set_cache_only_mode(True)
+        except Exception:
+            pass
+        # Also disable refresh knobs in cache-only mode.
+        scanner.refresh_closed_prs = False
+        # Record reason (displayed in Statistics section).
+        cache_only_reason = str(e)
+    else:
+        cache_only_reason = ""
 
     generation_t0 = time.monotonic()
     root = None
-    try:
+    with phase_t.phase("scan"):
         root = scanner.scan_repositories(base_dir)
-    finally:
-        after = scanner.github_api.get_core_rate_limit_info() if scanner.github_api else None
-        used = None
-        reset_changed = False
-        try:
-            b_rem = (before or {}).get("remaining")
-            a_rem = (after or {}).get("remaining")
-            b_reset = (before or {}).get("reset_epoch")
-            a_reset = (after or {}).get("reset_epoch")
-            if b_reset is not None and a_reset is not None and int(b_reset) != int(a_reset):
-                reset_changed = True
-            if not reset_changed and b_rem is not None and a_rem is not None:
-                used = int(b_rem) - int(a_rem)
-                if used < 0:
-                    used = None
-                    reset_changed = True
-        except Exception:
-            used = None
-            reset_changed = False
-        if after:
-            rem_a = after.get("remaining")
-            lim_a = after.get("limit")
-            reset_pt = after.get("reset_pt")
-            secs = int(after.get("seconds_until_reset") or 0)
-            msg = (
-                f"GitHub API core quota (after): remaining={rem_a}"
-                + (f"/{lim_a}" if lim_a is not None else "")
-                + (f", resets at {reset_pt} (in {GitHubAPIClient._format_seconds_delta(secs)})" if reset_pt else "")
-            )
-            # Prefer per-run request accounting; quota deltas can be misleading if reset occurs mid-run.
-            try:
-                stats = scanner.github_api.get_rest_call_stats() if scanner.github_api else {}
-                msg += f" | rest_calls={int(stats.get('total') or 0)}"
-            except Exception:
-                pass
-            if reset_changed:
-                msg += " | (rate limit window reset during run)"
-            elif used is not None:
-                msg += f" | used={used}"
-            print(msg)
 
     # Output
     if args.html:
         assert root is not None
         # Page statistics (shown in an expandable block at the bottom of the HTML).
+        #
+        # Note: we want the HTML page to show a *breakdown* (timing.prune/scan/render/write/total).
+        # That means we need to measure render/write first, then re-render once so the stats reflect
+        # those timings. This is intentionally low-tech and stable.
         elapsed_s = max(0.0, time.monotonic() - generation_t0)
         rest_calls = 0
+        rest_ok = 0
+        rest_err = 0
+        rest_err_by_status_s = ""
         try:
             stats = scanner.github_api.get_rest_call_stats() if scanner.github_api else {}
             rest_calls = int(stats.get("total") or 0)
+            rest_ok = int(stats.get("success_total") or 0)
+            rest_err = int(stats.get("error_total") or 0)
         except Exception:
             rest_calls = 0
+            rest_ok = 0
+            rest_err = 0
+            stats = {}
+
+        try:
+            es = scanner.github_api.get_rest_error_stats() if scanner.github_api else {}
+            by_status = (es or {}).get("by_status") if isinstance(es, dict) else {}
+            if isinstance(by_status, dict) and by_status:
+                items = list(by_status.items())[:8]
+                rest_err_by_status_s = ", ".join([f"{k}={v}" for k, v in items])
+        except Exception:
+            rest_err_by_status_s = ""
 
         pr_count = 0
         try:
@@ -2266,23 +2280,149 @@ def main():
 
         page_stats: List[tuple[str, str]] = [
             ("Generation time", f"{elapsed_s:.2f}s"),
+            ("GitHub mode", "cache-only" if bool(getattr(scanner, "cache_only_github", False)) else "normal"),
+            ("GitHub mode reason", cache_only_reason if cache_only_reason else ""),
+            ("max_github_api_calls", str(int(args.max_github_api_calls))),
+            ("GitHub REST budget max", str(stats.get("budget_max")) if isinstance(stats, dict) and stats.get("budget_max") is not None else ""),
+            ("GitHub REST budget exhausted", "true" if bool((stats or {}).get("budget_exhausted")) else "false"),
             ("GitHub REST calls", str(rest_calls)),
+            ("GitHub REST ok", str(rest_ok)),
+            ("GitHub REST errors", str(rest_err)),
+            ("GitHub REST errors by status", rest_err_by_status_s or "(none)"),
+            ("GitHub REST time", f"{float(stats.get('time_total_s') or 0.0):.2f}s"),
             # "APIs left" (remaining quota). Best-effort; do not fail page generation.
             ("GitHub core quota remaining", ""),
             ("Repos scanned", str(len(getattr(root, 'children', []) or []))),
             ("PRs shown", str(pr_count)),
         ]
 
+        def _upsert_stat(k: str, v: str) -> None:
+            try:
+                for i, (kk, _vv) in enumerate(page_stats):
+                    if kk == k:
+                        page_stats[i] = (k, v)
+                        return
+            except Exception:
+                pass
+            page_stats.append((k, v))
+
+        def _sort_stats() -> None:
+            try:
+                gen = [(k, v) for (k, v) in page_stats if k == "Generation time"]
+                timing = sorted([(k, v) for (k, v) in page_stats if str(k).startswith("timing.")], key=lambda kv: kv[0])
+                other = sorted([(k, v) for (k, v) in page_stats if k != "Generation time" and not str(k).startswith("timing.")], key=lambda kv: kv[0])
+                page_stats[:] = gen + other + timing
+            except Exception:
+                pass
+
+        # Top endpoints by count/time (helps identify where API calls go).
+        try:
+            by_label = stats.get("by_label") if isinstance(stats, dict) else None
+            if isinstance(by_label, dict) and by_label:
+                top = list(by_label.items())[:10]
+                page_stats.append(("GitHub REST top (10)", ", ".join([f"{k}={int(v)}" for k, v in top])))
+                # Full category counts (capped) for debugging "why so many API calls?"
+                cap = 30
+                items = list(by_label.items())
+                shown = items[:cap]
+                more = max(0, len(items) - len(shown))
+                s = ", ".join([f"{k}={int(v)}" for k, v in shown])
+                if more:
+                    s = s + f", (+{more} more)"
+                _upsert_stat("GitHub REST by category (count)", s)
+        except Exception:
+            pass
+        try:
+            by_time = stats.get("time_by_label_s") if isinstance(stats, dict) else None
+            if isinstance(by_time, dict) and by_time:
+                top = list(by_time.items())[:10]
+                page_stats.append(("GitHub REST time top (10)", ", ".join([f"{k}={float(v):.2f}s" for k, v in top])))
+                cap = 30
+                items = list(by_time.items())
+                shown = items[:cap]
+                more = max(0, len(items) - len(shown))
+                s = ", ".join([f"{k}={float(v):.2f}s" for k, v in shown])
+                if more:
+                    s = s + f", (+{more} more)"
+                _upsert_stat("GitHub REST by category (time)", s)
+        except Exception:
+            pass
+
         # Show last REST error (e.g. 403 token policy) to make missing PR/snippet causes obvious.
         try:
             es = scanner.github_api.get_rest_error_stats() if scanner.github_api else {}
             last = (es or {}).get("last") or {}
+            last_label = (es or {}).get("last_label") or ""
             if isinstance(last, dict) and last.get("status"):
                 code = last.get("status")
                 body = str(last.get("body") or "").strip()
                 if len(body) > 160:
                     body = body[:160].rstrip() + "…"
                 page_stats.append(("GitHub REST last error", f"{code}: {body}" if body else str(code)))
+                if last_label:
+                    page_stats.append(("GitHub REST last error label", str(last_label)))
+                # Surface the URL so we can see which repo/query triggered the error (especially for search/issues 422).
+                try:
+                    url = str(last.get("url") or "").strip()
+                    if url:
+                        page_stats.append(("GitHub REST last error url", url))
+                        if str(last_label) == "search_issues" and int(code or 0) == 422:
+                            q = ""
+                            try:
+                                q = (urllib.parse.parse_qs(urllib.parse.urlparse(url).query).get("q") or [""])[0]
+                            except Exception:
+                                q = ""
+                            if q:
+                                repos = sorted(set(re.findall(r"\brepo:([^\s]+)", q)))
+                                orgs = sorted(set(re.findall(r"\borg:([^\s]+)", q)))
+                                users = sorted(set(re.findall(r"\buser:([^\s]+)", q)))
+                                if repos:
+                                    page_stats.append(("GitHub search/issues repo qualifiers", ", ".join(repos)))
+                                if orgs:
+                                    page_stats.append(("GitHub search/issues org qualifiers", ", ".join(orgs)))
+                                if users:
+                                    page_stats.append(("GitHub search/issues user qualifiers", ", ".join(users)))
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+        # REST errors by category+status (pinpoint which API(s) are producing 4xx/5xx).
+        try:
+            es = scanner.github_api.get_rest_error_stats() if scanner.github_api else {}
+            bls = (es or {}).get("by_label_status") if isinstance(es, dict) else None
+            if isinstance(bls, dict) and bls:
+                parts = []
+                for lbl, m in bls.items():
+                    if not isinstance(m, dict) or not m:
+                        continue
+                    inner = ",".join([f"{int(code)}={int(cnt)}" for code, cnt in m.items()])
+                    parts.append(f"{lbl}:{{{inner}}}")
+                if parts:
+                    page_stats.append(("GitHub REST errors by category+status", "; ".join(parts)))
+        except Exception:
+            pass
+
+        # Cache hit/miss stats (so we can tell when we’re reusing cached results vs refetching).
+        try:
+            cs = scanner.github_api.get_cache_stats() if scanner.github_api else {}
+            if isinstance(cs, dict):
+                page_stats.append(("GitHub cache hits", str(int(cs.get("hits_total", 0) or 0))))
+                page_stats.append(("GitHub cache misses", str(int(cs.get("misses_total", 0) or 0))))
+                page_stats.append(("GitHub cache writes (ops)", str(int(cs.get("writes_ops_total", 0) or 0))))
+                page_stats.append(("GitHub cache writes (entries)", str(int(cs.get("writes_entries_total", 0) or 0))))
+                hits_by = cs.get("hits_by") or {}
+                if isinstance(hits_by, dict) and hits_by:
+                    page_stats.append(("GitHub cache hits (by cache)", ", ".join([f"{k}={int(v)}" for k, v in hits_by.items()])))
+                misses_by = cs.get("misses_by") or {}
+                if isinstance(misses_by, dict) and misses_by:
+                    page_stats.append(("GitHub cache misses (by cache)", ", ".join([f"{k}={int(v)}" for k, v in misses_by.items()])))
+                wops_by = cs.get("writes_ops_by") or {}
+                if isinstance(wops_by, dict) and wops_by:
+                    page_stats.append(("GitHub cache writes (ops, by cache)", ", ".join([f"{k}={int(v)}" for k, v in wops_by.items()])))
+                went_by = cs.get("writes_entries_by") or {}
+                if isinstance(went_by, dict) and went_by:
+                    page_stats.append(("GitHub cache writes (entries, by cache)", ", ".join([f"{k}={int(v)}" for k, v in went_by.items()])))
         except Exception:
             pass
 
@@ -2294,16 +2434,16 @@ def main():
                 lim = rl.get("limit")
                 reset_pt = rl.get("reset_pt")
                 if rem is not None and lim is not None:
-                    page_stats[2] = ("GitHub core quota remaining", f"{rem}/{lim}")
+                    _upsert_stat("GitHub core quota remaining", f"{rem}/{lim}")
                 elif rem is not None:
-                    page_stats[2] = ("GitHub core quota remaining", str(rem))
+                    _upsert_stat("GitHub core quota remaining", str(rem))
                 else:
-                    page_stats[2] = ("GitHub core quota remaining", "(unknown)")
+                    _upsert_stat("GitHub core quota remaining", "(unknown)")
                 if reset_pt:
                     page_stats.append(("GitHub core quota resets", str(reset_pt)))
         except Exception:
             # Keep the row but avoid breaking HTML generation.
-            page_stats[2] = ("GitHub core quota remaining", "(unknown)")
+            _upsert_stat("GitHub core quota remaining", "(unknown)")
 
         # Include relevant knobs if set (helps explain “why so many API calls?”).
         if args.max_branches is not None:
@@ -2313,17 +2453,41 @@ def main():
         if bool(args.refresh_closed_prs):
             page_stats.append(("refresh_closed_prs", "true"))
 
-        html_output = generate_html(root, page_stats=page_stats)
+        _sort_stats()
+
+        # Render once to measure render time.
+        with phase_t.phase("render"):
+            _ = generate_html(root, page_stats=page_stats)
+
+        # Update the page stats with the timing breakdown before producing the final HTML.
+        try:
+            tdict = phase_t.as_dict(include_total=True)
+            # Make "Generation time" reflect total wall time so it matches the timing breakdown.
+            elapsed_total = float(tdict.get("total") or 0.0)
+            _upsert_stat("Generation time", f"{elapsed_total:.2f}s")
+            for k in ["prune", "scan", "render", "write", "total"]:
+                if k in tdict:
+                    _upsert_stat(f"timing.{k}", f"{float(tdict.get(k) or 0.0):.2f}s")
+        except Exception:
+            pass
+        _sort_stats()
+
+        # Final render + atomic write to destination (single visible update).
         out_path = args.output
         if out_path is None:
             out_path = base_dir / "index.html"
-        out_path.parent.mkdir(parents=True, exist_ok=True)
-        out_path.write_text(html_output)
+        with phase_t.phase("render_final"):
+            html_output2 = generate_html(root, page_stats=page_stats)
+        with phase_t.phase("write"):
+            atomic_write_text(out_path, html_output2, encoding="utf-8")
     else:
         assert root is not None
-        for child in root.children:
-            child.print_tree()
-            print()
+        with phase_t.phase("print"):
+            for child in root.children:
+                child.print_tree()
+                print()
+
+    # No stdout/stderr run-stats; the HTML Statistics section contains the breakdowns.
 
 
 if __name__ == '__main__':

@@ -10,6 +10,8 @@
 #   SKIP_GITLAB_FETCH   - If set, skip fetching from GitLab API, use cached data only (faster).
 #                        Note: GitHub fetching is independently capped/cached by the Python scripts.
 #   REFRESH_CLOSED_PRS  - If set, refresh cached closed/merged PR mappings (more GitHub API calls)
+#   MAX_GITHUB_API_CALLS - If set, pass --max-github-api-calls to the Python generators
+#                         (useful to keep cron runs predictable; defaults remain script-side).
 #   DYNAMO_UTILS_TRACE  - If set (non-empty), enable shell tracing (set -x). Off by default to avoid noisy logs / secrets.
 #
 # Args (optional; can be combined):
@@ -42,7 +44,6 @@ NVIDIA_HOME="${NVIDIA_HOME:-$(dirname "$UTILS_DIR")}"
 
 LOGS_DIR="$NVIDIA_HOME/logs"
 BRANCHES_OUTPUT_FILE="$NVIDIA_HOME/index.html"
-BRANCHES_TEMP_FILE="$NVIDIA_HOME/.index.html.tmp"
 
 usage() {
     cat <<'EOF' >&2
@@ -134,21 +135,18 @@ run_resource_report() {
     RESOURCE_DB="${RESOURCE_DB:-$HOME/.cache/dynamo-utils/resource_monitor.sqlite}"
     # Output to the top-level nvidia directory so nginx can serve it at /
     RESOURCE_REPORT_HTML="${RESOURCE_REPORT_HTML:-$NVIDIA_HOME/resource_report.html}"
-    RESOURCE_REPORT_TMP="$NVIDIA_HOME/.resource_report.html.tmp"
 
     if [ -f "$RESOURCE_DB" ]; then
         echo "$(date '+%Y-%m-%d %H:%M:%S') - Generating resource report" >> "$LOG_FILE"
         if python3 "$SCRIPT_DIR/resource_report.py" \
             --db-path "$RESOURCE_DB" \
-            --output "$RESOURCE_REPORT_TMP" \
+            --output "$RESOURCE_REPORT_HTML" \
             --days 1 \
             --prune-db-days 4 \
             --db-checkpoint-truncate \
             --title "keivenc-linux Resource Report" >> "$RESOURCE_REPORT_LOG" 2>&1; then
-            mv "$RESOURCE_REPORT_TMP" "$RESOURCE_REPORT_HTML"
             echo "$(date '+%Y-%m-%d %H:%M:%S') - Updated $RESOURCE_REPORT_HTML" >> "$LOG_FILE"
         else
-            rm -f "$RESOURCE_REPORT_TMP"
             echo "$(date '+%Y-%m-%d %H:%M:%S') - WARNING: Failed to update $RESOURCE_REPORT_HTML" >> "$LOG_FILE"
             exit 1
         fi
@@ -160,14 +158,14 @@ run_resource_report() {
 run_show_dynamo_branches() {
     cd "$NVIDIA_HOME" || exit 1
     REFRESH_CLOSED_FLAG="${REFRESH_CLOSED_PRS:+--refresh-closed-prs}"
+    MAX_GH_FLAG=""
+    if [ -n "${MAX_GITHUB_API_CALLS:-}" ]; then
+        MAX_GH_FLAG="--max-github-api-calls ${MAX_GITHUB_API_CALLS}"
+    fi
     echo "$(date '+%Y-%m-%d %H:%M:%S') - Generating branches dashboard" >> "$LOG_FILE"
-    if python3 "$SCRIPT_DIR/show_dynamo_branches.py" --repo-path "$NVIDIA_HOME" --html --output "$BRANCHES_TEMP_FILE" $REFRESH_CLOSED_FLAG >> "$BRANCHES_LOG" 2>&1; then
-        # Atomic move - only replace if generation succeeded
-        mv "$BRANCHES_TEMP_FILE" "$BRANCHES_OUTPUT_FILE"
+    if python3 "$SCRIPT_DIR/show_dynamo_branches.py" --repo-path "$NVIDIA_HOME" --html --output "$BRANCHES_OUTPUT_FILE" $REFRESH_CLOSED_FLAG $MAX_GH_FLAG >> "$BRANCHES_LOG" 2>&1; then
         echo "$(date '+%Y-%m-%d %H:%M:%S') - Updated $BRANCHES_OUTPUT_FILE" >> "$LOG_FILE"
     else
-        # Script failed - remove temp file and log error
-        rm -f "$BRANCHES_TEMP_FILE"
         echo "$(date '+%Y-%m-%d %H:%M:%S') - ERROR: Failed to update $BRANCHES_OUTPUT_FILE" >> "$LOG_FILE"
         exit 1
     fi
@@ -203,9 +201,13 @@ run_show_commit_history() {
     # Note: --logs-dir defaults to ../dynamo_ci/logs for dynamo_latest repo
     # Set flag based on environment variable
     SKIP_FLAG="${SKIP_GITLAB_FETCH:+--skip-gitlab-fetch}"
+    MAX_GH_FLAG=""
+    if [ -n "${MAX_GITHUB_API_CALLS:-}" ]; then
+        MAX_GH_FLAG="--max-github-api-calls ${MAX_GITHUB_API_CALLS}"
+    fi
 
     echo "$(date '+%Y-%m-%d %H:%M:%S') - Generating commit history dashboard" >> "$LOG_FILE"
-    if python3 "$SCRIPT_DIR/show_commit_history.py" --repo-path . --html --max-commits 100 --output "$COMMIT_HISTORY_HTML" $SKIP_FLAG >> "$COMMIT_HISTORY_LOG" 2>&1; then
+    if python3 "$SCRIPT_DIR/show_commit_history.py" --repo-path . --html --max-commits 100 --output "$COMMIT_HISTORY_HTML" $SKIP_FLAG $MAX_GH_FLAG >> "$COMMIT_HISTORY_LOG" 2>&1; then
         echo "$(date '+%Y-%m-%d %H:%M:%S') - Updated $COMMIT_HISTORY_HTML" >> "$LOG_FILE"
     else
         echo "$(date '+%Y-%m-%d %H:%M:%S') - ERROR: Failed to update commit-history.html" >> "$LOG_FILE"
