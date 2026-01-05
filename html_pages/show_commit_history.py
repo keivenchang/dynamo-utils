@@ -44,6 +44,7 @@ from common_dashboard_lib import (
     build_and_test_dynamo_phases_from_actions_job,
     check_line_html,
     ci_should_expand_by_default,
+    compact_ci_summary_html,
     disambiguate_check_run_name,
     extract_actions_job_id_from_url,
     render_tree_pre_lines,
@@ -1065,17 +1066,17 @@ class CommitHistoryGenerator:
         def _status_norm_for_check_run(*, status: str, conclusion: str) -> str:
             s = (status or "").strip().lower()
             c = (conclusion or "").strip().lower()
-            if c in (CIStatus.SUCCESS, CIStatus.NEUTRAL, CIStatus.SKIPPED):
-                return CIStatus.SUCCESS
+            if c in (CIStatus.SUCCESS.value, CIStatus.NEUTRAL.value, CIStatus.SKIPPED.value):
+                return CIStatus.SUCCESS.value
             if c in ("failure", "timed_out", "action_required"):
-                return CIStatus.FAILURE
-            if c in (CIStatus.CANCELLED, "canceled"):
-                return CIStatus.CANCELLED
-            if s in (CIStatus.IN_PROGRESS, "in progress"):
-                return CIStatus.IN_PROGRESS
-            if s in ("queued", CIStatus.PENDING):
-                return CIStatus.PENDING
-            return CIStatus.UNKNOWN
+                return CIStatus.FAILURE.value
+            if c in (CIStatus.CANCELLED.value, "canceled"):
+                return CIStatus.CANCELLED.value
+            if s in (CIStatus.IN_PROGRESS.value, "in progress"):
+                return CIStatus.IN_PROGRESS.value
+            if s in ("queued", CIStatus.PENDING.value):
+                return CIStatus.PENDING.value
+            return CIStatus.UNKNOWN.value
 
         def _duration_str_to_seconds(s: str) -> float:
             """Best-effort parse of durations like '43m 33s', '30m33s', '2s', '1h 4m'."""
@@ -1486,6 +1487,8 @@ class CommitHistoryGenerator:
             loader=FileSystemLoader(template_dir),
             autoescape=select_autoescape(['html', 'xml'])
         )
+        # Expose shared formatters to the template so the GitHub column summary matches other dashboards.
+        env.globals["compact_ci_summary_html"] = compact_ci_summary_html
         template = env.get_template('show_commit_history.j2')
 
         # Page statistics (shown in an expandable block at the bottom of the HTML).

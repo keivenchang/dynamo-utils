@@ -113,6 +113,70 @@ class CIStatus(str, Enum):
     UNKNOWN = "unknown"
 
 
+def compact_ci_summary_html(
+    *,
+    success_required: int = 0,
+    success_optional: int = 0,
+    failure_required: int = 0,
+    failure_optional: int = 0,
+    in_progress_required: int = 0,
+    in_progress_optional: int = 0,
+    pending: int = 0,
+    cancelled: int = 0,
+) -> str:
+    """Render the compact CI summary used in the GitHub column (shared across dashboards).
+
+    This matches the visual style in `show_commit_history.j2`:
+    - green:  <required><required-success-icon> +<optional><optional-success-icon>
+    - red:    N + required-failure-icon
+    - amber:  N + in-progress-icon
+    - grey:   N + pending-icon / cancelled-icon
+    """
+    sr = int(success_required or 0)
+    so = int(success_optional or 0)
+    fr = int(failure_required or 0)
+    fo = int(failure_optional or 0)
+    ip = int(in_progress_required or 0) + int(in_progress_optional or 0)
+    pd = int(pending or 0)
+    cx = int(cancelled or 0)
+
+    parts: List[str] = []
+
+    success_total = sr + so
+    if success_total > 0:
+        s = '<span style="color: #2da44e;">'
+        s += f"<strong>{sr}</strong>{status_icon_html(status_norm=CIStatus.SUCCESS.value, is_required=True)}"
+        if so > 0:
+            s += f'<span style="{PASS_PLUS_STYLE}">+{so}</span>{status_icon_html(status_norm=CIStatus.SUCCESS.value, is_required=False)}'
+        s += "</span>"
+        parts.append(s)
+
+    if fr > 0:
+        parts.append(
+            f'<span style="color: #d73a49; font-weight: 800; font-size: 12px;" title="Required failures">{fr}</span>'
+            f'{status_icon_html(status_norm=CIStatus.FAILURE.value, is_required=True)}'
+        )
+    if fo > 0:
+        parts.append(
+            f'<span style="color: #f59e0b;" title="Optional failures">{fo}</span>'
+            f'{status_icon_html(status_norm=CIStatus.FAILURE.value, is_required=False)}'
+        )
+    if ip > 0:
+        parts.append(
+            f'<span style="color: #dbab09;">{ip}</span>{status_icon_html(status_norm=CIStatus.IN_PROGRESS.value, is_required=False)}'
+        )
+    if pd > 0:
+        parts.append(
+            f'<span style="color: #8c959f;">{pd}</span>{status_icon_html(status_norm=CIStatus.PENDING.value, is_required=False)}'
+        )
+    if cx > 0:
+        parts.append(
+            f'<span style="color: #8c959f;">{cx}</span>{status_icon_html(status_norm=CIStatus.CANCELLED.value, is_required=False)}'
+        )
+
+    return " ".join([p for p in parts if str(p or "").strip()])
+
+
 # ======================================================================================
 # Shared tree UI rendering (<pre>-safe)
 # ======================================================================================
@@ -426,21 +490,21 @@ def _parse_iso_utc(s: str) -> Optional[datetime]:
 def _status_norm_from_actions_step(status: str, conclusion: str) -> str:
     s = (status or "").strip().lower()
     c = (conclusion or "").strip().lower()
-    if c in (CIStatus.SUCCESS, CIStatus.NEUTRAL, CIStatus.SKIPPED):
-        return CIStatus.SUCCESS
+    if c in (CIStatus.SUCCESS.value, CIStatus.NEUTRAL.value, CIStatus.SKIPPED.value):
+        return CIStatus.SUCCESS.value
     if c in ("failure", "timed_out", "action_required"):
-        return CIStatus.FAILURE
-    if c in (CIStatus.CANCELLED, "canceled"):
-        return CIStatus.CANCELLED
+        return CIStatus.FAILURE.value
+    if c in (CIStatus.CANCELLED.value, "canceled"):
+        return CIStatus.CANCELLED.value
     # Some API responses omit `conclusion` even for completed successful steps.
     # Treat "completed + empty conclusion" as success so we don't auto-expand clean trees.
     if s == "completed" and c in ("", "null", "none"):
-        return CIStatus.SUCCESS
-    if s in (CIStatus.IN_PROGRESS, "in progress"):
-        return CIStatus.IN_PROGRESS
-    if s in ("queued", CIStatus.PENDING):
-        return CIStatus.PENDING
-    return CIStatus.UNKNOWN
+        return CIStatus.SUCCESS.value
+    if s in (CIStatus.IN_PROGRESS.value, "in progress"):
+        return CIStatus.IN_PROGRESS.value
+    if s in ("queued", CIStatus.PENDING.value):
+        return CIStatus.PENDING.value
+    return CIStatus.UNKNOWN.value
 
 
 def build_and_test_dynamo_phases_from_actions_job(job: Dict[str, object]) -> List[Tuple[str, str, str]]:

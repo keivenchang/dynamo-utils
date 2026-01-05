@@ -45,6 +45,7 @@ from common_dashboard_lib import (
     TreeNodeVM,
     check_line_html,
     ci_should_expand_by_default,
+    compact_ci_summary_html,
     disambiguate_check_run_name,
     extract_actions_job_id_from_url,
     sort_pr_check_rows_by_name,
@@ -477,7 +478,7 @@ class CIJobTreeNode(BranchNode):
         """Compute a 'worst descendant' status for icon rendering."""
         # Success-like entire subtree => success rollup.
         if CIJobTreeNode._subtree_all_success(node):
-            return CIJobTreeNode._Rollup(status=str(CIStatus.SUCCESS), has_required_failure=False, has_optional_failure=False)
+            return CIJobTreeNode._Rollup(status=CIStatus.SUCCESS.value, has_required_failure=False, has_optional_failure=False)
 
         has_required_failure = False
         has_optional_failure = False
@@ -489,14 +490,14 @@ class CIJobTreeNode(BranchNode):
             is_req = bool(getattr(n, "is_required", False))
             if st == CIStatus.FAILURE and is_req:
                 has_required_failure = True
-                statuses.append(str(CIStatus.FAILURE))
+                statuses.append(CIStatus.FAILURE.value)
             elif st == CIStatus.FAILURE and not is_req:
                 # Optional failures should not turn the parent red (FAIL), but they SHOULD be visible.
                 has_optional_failure = True
-                statuses.append(str(CIStatus.FAILURE))
+                statuses.append(CIStatus.FAILURE.value)
             elif st == CIStatus.SKIPPED:
                 # Skipped is success-like for rollup purposes (do not make parents look "worse").
-                statuses.append(str(CIStatus.SUCCESS))
+                statuses.append(CIStatus.SUCCESS.value)
             else:
                 statuses.append(str(st))
             for ch in (getattr(n, "children", None) or []):
@@ -507,12 +508,12 @@ class CIJobTreeNode(BranchNode):
 
         # Worst-first priority for status rollup.
         priority = [
-            str(CIStatus.FAILURE),
-            str(CIStatus.IN_PROGRESS),
-            str(CIStatus.PENDING),
-            str(CIStatus.CANCELLED),
-            str(CIStatus.UNKNOWN),
-            str(CIStatus.SUCCESS),
+            CIStatus.FAILURE.value,
+            CIStatus.IN_PROGRESS.value,
+            CIStatus.PENDING.value,
+            CIStatus.CANCELLED.value,
+            CIStatus.UNKNOWN.value,
+            CIStatus.SUCCESS.value,
         ]
         for s in priority:
             if s in statuses:
@@ -1354,44 +1355,18 @@ class PRStatusNode(BranchNode):
                     cancelled_jobs = list(summary.names.cancelled)
                     other_jobs = list(summary.names.other)
 
-                    # Rebuild the "Status:" line for HTML so CI uses the compact colored counts.
-                    ci_parts = []
-                    success_req = counts["success_required"]
-                    success_opt = counts["success_optional"]
-                    if success_req > 0 or success_opt > 0:
-                        # Convention: 15+5✓ (first number is required, and bold)
-                        if success_opt > 0:
-                            ci_parts.append(
-                                f'<span style="color: #2da44e;">'
-                                f'<strong>{success_req}</strong>'
-                                f'<span style="{PASS_PLUS_STYLE}">+{success_opt}</span>{status_icon_html(status_norm="success", is_required=False)}'
-                                f'</span>'
-                            )
-                        else:
-                            ci_parts.append(
-                                f'<span style="color: #2da44e;">'
-                                f'<strong>{success_req}</strong>{status_icon_html(status_norm="success", is_required=True)}'
-                                f'</span>'
-                            )
-                    if counts["failure_required"] > 0:
-                        ci_parts.append(
-                            f'<span style="color: #d73a49; font-weight: 800; font-size: 12px;" title="Required failures">'
-                            f'{counts["failure_required"]}'
-                            f'<span style="display: inline-flex; align-items: center; justify-content: center; width: 12px; height: 12px; margin-left: 2px; border-radius: 999px; background-color: #d73a49; color: #ffffff; font-size: 10px; font-weight: 900; line-height: 1;">✗</span>'
-                            f'</span>'
-                        )
-                    if counts["failure_optional"] > 0:
-                        ci_parts.append(
-                            f'<span style="color: #f59e0b;" title="Optional failures">'
-                            f'{counts["failure_optional"]}<span style="color: #d73a49; font-size: 13px; font-weight: 900; line-height: 1; margin-left: 2px;">✗</span>'
-                            f'</span>'
-                        )
-                    if counts["in_progress"] > 0:
-                        ci_parts.append(f'<span style="color: #dbab09;">{counts["in_progress"]}⏳</span>')
-                    if counts["pending"] > 0:
-                        ci_parts.append(f'<span style="color: #8c959f;">{counts["pending"]}⏸</span>')
-                    if counts["cancelled"] > 0:
-                        ci_parts.append(f'<span style="color: #8c959f;">{counts["cancelled"]}✖️</span>')
+                    # Rebuild the "Status:" line for HTML using the shared compact renderer
+                    # so it matches the GitHub column in commit history.
+                    ci_summary_html = compact_ci_summary_html(
+                        success_required=int(counts["success_required"]),
+                        success_optional=int(counts["success_optional"]),
+                        failure_required=int(counts["failure_required"]),
+                        failure_optional=int(counts["failure_optional"]),
+                        in_progress_required=int(counts["in_progress"]),
+                        in_progress_optional=0,
+                        pending=int(counts["pending"]),
+                        cancelled=int(counts["cancelled"]),
+                    )
 
                     # Tooltip HTML (match show_commit_history look/labels).
                     tooltip_parts: list[str] = []
@@ -1443,8 +1418,8 @@ class PRStatusNode(BranchNode):
                     tooltip_html = "<br>".join(tooltip_parts)
 
                     status_parts = []
-                    if ci_parts:
-                        ci_summary = " ".join(ci_parts)
+                    if ci_summary_html:
+                        ci_summary = str(ci_summary_html)
                         if tooltip_html:
                             ci_summary = (
                                 '<span class="gh-status-tooltip" style="margin-left: 2px;">'

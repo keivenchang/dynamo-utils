@@ -528,18 +528,16 @@ Notes:
 <span class="gh-status-tooltip" style="margin-left: 4px;">
 <span style="white-space: nowrap; font-weight: 600; font-size: 11px;">
 {%- set success_total = (commit_stats.success_required | int) + (commit_stats.success_optional | int) -%}
-{%- if (commit_stats.success_required | int) > 0 or (commit_stats.success_optional | int) > 0 -%}
-<span style="color: #2da44e;">
-  <strong>{{ commit_stats.success_required }}</strong>{{ success_required_icon_html|safe }}
-  {%- if (commit_stats.success_optional | int) > 0 -%}<span style="{{ pass_plus_style }}">+{{ commit_stats.success_optional }}</span>{{ success_icon_html|safe }}{%- endif -%}
-</span>
-{%- endif -%}
-{%- if commit_stats.failure_required > 0 -%}{%- if success_total > 0 %} {% endif -%}<span style="color: #d73a49; font-weight: 800; font-size: 12px;" title="Required failures">{{ commit_stats.failure_required }}</span>{{ failure_required_icon_html|safe }}{%- endif -%}
-{%- if commit_stats.failure_optional > 0 -%}{%- if success_total > 0 or commit_stats.failure_required > 0 %} {% endif -%}<span style="color: #f59e0b;" title="Optional failures">{{ commit_stats.failure_optional }}</span>{{ failure_optional_icon_html|safe }}{%- endif -%}
-{%- set inprog_total = commit_stats.in_progress_required + commit_stats.in_progress_optional -%}
-{%- if inprog_total > 0 -%}{%- if success_total > 0 or commit_stats.failure_required > 0 or commit_stats.failure_optional > 0 %} {% endif -%}<span style="color: #dbab09;">{{ inprog_total }}</span>{{ in_progress_icon_html|safe }}{%- endif -%}
-{%- if commit_stats.pending > 0 -%}{%- if success_total > 0 or commit_stats.failure_required > 0 or commit_stats.failure_optional > 0 or inprog_total > 0 %} {% endif -%}<span style="color: #8c959f;">{{ commit_stats.pending }}</span>{{ pending_icon_html|safe }}{%- endif -%}
-{%- if commit_stats.cancelled > 0 -%}{%- if success_total > 0 or commit_stats.failure_required > 0 or commit_stats.failure_optional > 0 or inprog_total > 0 or commit_stats.pending > 0 %} {% endif -%}<span style="color: #8c959f;">{{ commit_stats.cancelled }}</span>{{ cancelled_icon_html|safe }}{%- endif -%}
+{{ compact_ci_summary_html(
+  success_required=commit_stats.success_required,
+  success_optional=commit_stats.success_optional,
+  failure_required=commit_stats.failure_required,
+  failure_optional=commit_stats.failure_optional,
+  in_progress_required=commit_stats.in_progress_required,
+  in_progress_optional=commit_stats.in_progress_optional,
+  pending=commit_stats.pending,
+  cancelled=commit_stats.cancelled
+) | safe }}
 </span>
 <span class="tooltiptext">{{ tooltip_html|safe }}</span>
 </span>
