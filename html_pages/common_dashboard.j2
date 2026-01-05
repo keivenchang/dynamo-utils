@@ -15,15 +15,58 @@
       color: #24292f;
     }
     .header {
-      background-color: #24292f;
+      /* NVIDIA brand green (keep readable white text/links on top). */
+      background-color: #76b900;
       color: white;
       padding: 10px 15px;
       border-radius: 4px;
-      margin-bottom: 10px;
+      /* Keep pages visually tight: legend/content should sit close to the header. */
+      margin-bottom: 4px;
+    }
+    .header a {
+      color: #ffffff;
+      text-decoration: none;
+    }
+    .header a:hover {
+      text-decoration: underline;
     }
     .header h1 {
       margin: 0;
       font-size: 18px;
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      gap: 12px;
+    }
+    .header .header-meta {
+      font-size: 12px;
+      font-weight: 500;
+      opacity: 0.95;
+      white-space: nowrap;
+    }
+
+    /* Subtitle text in the header (keep high contrast against NVIDIA green). */
+    .header .header-subtitle {
+      margin: 5px 0 0 0;
+      opacity: 1;
+      color: #ffffff;
+    }
+    .header .header-subtitle .meta {
+      opacity: 0.95;
+      font-size: 12px;
+    }
+    .header .page-age {
+      display: inline-block;
+      margin-left: 6px;
+      padding: 1px 8px;
+      border-radius: 999px;
+      /* Subtle chip: enough contrast on NVIDIA green without looking “loud”. */
+      background: rgba(0, 0, 0, 0.16);
+      color: #ffffff;
+      font-weight: 600;
+      font-size: 12px;
+      line-height: 1.3;
+      white-space: nowrap;
     }
 
     .footer {

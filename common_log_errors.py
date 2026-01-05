@@ -38,33 +38,34 @@ Category frequency summary (all 713 logs, sorted by occurrence):
   1. network-timeout-kubectl-pods   209/713 (29.3%) - kubectl wait timeout (pods condition)
   2. build-status-check-error       195/713 (27.3%) - CI gate checking upstream builds
   3. pytest-error                   192/713 (26.9%) - Pytest test failures
-  4. python-error                   129/713 (18.1%) - Python exceptions/tracebacks
+  4. python-error                   119/713 (16.7%) - Python exceptions/tracebacks
   5. exit-127-cmd-not-found          62/713  (8.7%) - Exit code 127 (command not found / missing binary in PATH)
   6. network-download-error           29/713  (4.1%) - Failed downloads (pip/cargo/curl)
   7. docker-build-error              24/713  (3.4%) - Docker/BuildKit failures
   8. network-timeout-gitlab-mirror    23/713  (3.2%) - GitLab mirror sync infra timeout
   9. cuda-error                      18/713  (2.5%) - CUDA version/driver issues
  10. huggingface-auth-error          16/713  (2.2%) - HF token/gated model access
- 11. backend-failure                 14/713  (2.0%) - vllm/sglang/trtllm failures
- 12. github-lfs-error                12/713  (1.7%) - Git LFS fetch failures
- 13. etcd-error                      11/713  (1.5%) - Etcd lease/connection issues
- 14. network-error                   11/713  (1.5%) - Network connectivity failures
- 15. docker-image-error              11/713  (1.5%) - Missing Docker images
- 16. oom                              9/713  (1.3%) - Out of memory
- 17. vllm-error                       8/713  (1.1%) - VLLM backend failures
- 18. helm-error                       7/713  (1.0%) - Helm chart failures
- 19. trtllm-error                     6/713  (0.8%) - TensorRT-LLM failures
- 20. network-timeout-https             6/713  (0.8%) - HTTP(S) gateway timeouts + link-checker timeouts
- 21. network-timeout-github-action     5/713  (0.7%) - GitHub Actions step timed out
- 22. broken-links                     3/713  (0.4%) - Dead links in documentation
- 23. sglang-error                     2/713  (0.3%) - SGLang backend failures
- 24. exit-139-sigsegv                 1/713  (0.1%) - Exit code 139 (SIGSEGV / signal 11)
- 25. copyright-header-error           1/713  (0.1%) - Missing copyright headers
- 26. network-timeout-kubectl-portforward  1/713  (0.1%) - kubectl port-forward connect timeout
- 27. rust-error                       1/713  (0.1%) - Cargo test failures
+ 11. pytest-timeout-error             15/713  (2.1%) - Pytest per-test timeout (pytest-timeout plugin)
+ 12. backend-failure                 14/713  (2.0%) - vllm/sglang/trtllm failures
+ 13. github-lfs-error                12/713  (1.7%) - Git LFS fetch failures
+ 14. etcd-error                      11/713  (1.5%) - Etcd lease/connection issues
+ 15. network-error                   11/713  (1.5%) - Network connectivity failures
+ 16. docker-image-error              11/713  (1.5%) - Missing Docker images
+ 17. oom                              9/713  (1.3%) - Out of memory
+ 18. vllm-error                       8/713  (1.1%) - VLLM backend failures
+ 19. helm-error                       7/713  (1.0%) - Helm chart failures
+ 20. trtllm-error                     6/713  (0.8%) - TensorRT-LLM failures
+ 21. network-timeout-https             6/713  (0.8%) - HTTP(S) gateway timeouts + link-checker timeouts
+ 22. network-timeout-github-action     5/713  (0.7%) - GitHub Actions step timed out
+ 23. broken-links                     3/713  (0.4%) - Dead links in documentation
+ 24. sglang-error                     2/713  (0.3%) - SGLang backend failures
+ 25. exit-139-sigsegv                 1/713  (0.1%) - Exit code 139 (SIGSEGV / signal 11)
+ 26. copyright-header-error           1/713  (0.1%) - Missing copyright headers
+ 27. network-timeout-kubectl-portforward  1/713  (0.1%) - kubectl port-forward connect timeout
+ 28. rust-error                       1/713  (0.1%) - Cargo test failures
 
 Golden-log workflow (IMPORTANT for future edits):
-- These example logs are treated as *golden inputs* for regression testing. Keep them read-only:
+- These example logs are treated as *golden training set* for regression testing. Keep them read-only:
   - `chmod a-w /home/keivenc/nvidia/raw-log-text/<job_id>.log`
 - After changing rules/regexes/snippet logic, run the built-in self-test:
   - `python3 dynamo-utils/common_log_errors.py --self-test-examples`

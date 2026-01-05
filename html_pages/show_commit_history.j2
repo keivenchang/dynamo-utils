@@ -34,7 +34,7 @@ td {
     line-height: 1.2;
 }
 /* Make message column single line and flexible */
-td:last-child {
+td.col-message {
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -81,6 +81,12 @@ tr:hover {
 }
 .message {
     color: #24292f;
+}
+
+/* Make Message column consume remaining space when visible. */
+th.col-message,
+td.col-message {
+    width: 100%;
 }
 .pr-link {
     color: #0969da;
@@ -145,6 +151,69 @@ summary:hover {
 .author {
     color: #24292f;
     font-size: 14px;
+}
+
+/* Column visibility toggles (controlled by header checkboxes).
+ *
+ * IMPORTANT: do NOT `display:none` table cells. That changes the cell count per row and causes
+ * columns to shift left, misaligning header vs body.
+ *
+ * Policy: keep the header cell visible so the checkbox remains available to re-enable the column.
+ * When collapsed, hide the cell's contents and shrink the column width.
+ */
+#commits-table.hide-col-composite td.col-composite,
+#commits-table.hide-col-github td.col-github,
+#commits-table.hide-col-gitlab td.col-gitlab,
+#commits-table.hide-col-date td.col-date,
+#commits-table.hide-col-author td.col-author,
+#commits-table.hide-col-message td.col-message {
+    width: 1% !important;
+    max-width: 1px;
+    overflow: hidden;
+    white-space: nowrap;
+    padding-left: 6px;
+    padding-right: 6px;
+}
+
+#commits-table.hide-col-composite td.col-composite .col-body,
+#commits-table.hide-col-github td.col-github .col-body,
+#commits-table.hide-col-gitlab td.col-gitlab .col-body,
+#commits-table.hide-col-date td.col-date .col-body,
+#commits-table.hide-col-author td.col-author .col-body,
+#commits-table.hide-col-message td.col-message .col-body {
+    display: none;
+}
+
+#commits-table.hide-col-composite th.col-composite .col-title,
+#commits-table.hide-col-github th.col-github .col-title,
+#commits-table.hide-col-gitlab th.col-gitlab .col-title,
+#commits-table.hide-col-date th.col-date .col-title,
+#commits-table.hide-col-author th.col-author .col-title,
+#commits-table.hide-col-message th.col-message .col-title {
+    display: none;
+}
+
+#commits-table.hide-col-composite th.col-composite,
+#commits-table.hide-col-github th.col-github,
+#commits-table.hide-col-gitlab th.col-gitlab,
+#commits-table.hide-col-date th.col-date,
+#commits-table.hide-col-author th.col-author,
+#commits-table.hide-col-message th.col-message {
+    width: 1% !important;
+    padding-right: 6px;
+    opacity: 0.9;
+}
+
+.col-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    user-select: none;
+}
+
+.col-toggle input[type="checkbox"] {
+    margin: 0;
+    transform: translateY(0.5px);
 }
 .composite-sha-link {
     color: #0969da;
@@ -295,22 +364,65 @@ document.addEventListener('click', function(event) {
     }
 });
 
+function _commitTable() {
+    return document.getElementById('commits-table');
+}
+
+function applyCommitColumn(colKey, enabled, persist) {
+    var table = _commitTable();
+    if (!table) return;
+    var cls = 'hide-col-' + colKey;
+    table.classList.toggle(cls, !enabled);
+    try {
+        if (persist) {
+            localStorage.setItem('commitHistoryCol:' + colKey, enabled ? '1' : '0');
+        }
+    } catch (e) {}
+}
+
+function toggleCommitColumn(cb) {
+    if (!cb) return;
+    var key = cb.getAttribute('data-col') || '';
+    if (!key) return;
+    applyCommitColumn(key, !!cb.checked, true);
+}
+
+function initCommitColumnToggles() {
+    var table = _commitTable();
+    if (!table) return;
+    var cbs = document.querySelectorAll('input.commit-col-toggle[data-col]');
+    cbs.forEach(function(cb) {
+        var key = cb.getAttribute('data-col') || '';
+        if (!key) return;
+        try {
+            var saved = localStorage.getItem('commitHistoryCol:' + key);
+            if (saved === '0' || saved === '1') {
+                cb.checked = (saved === '1');
+            }
+        } catch (e) {}
+        applyCommitColumn(key, !!cb.checked, false);
+    });
+}
+
+document.addEventListener('DOMContentLoaded', initCommitColumnToggles);
+
 // copyToClipboard / copyFromClipboardAttr are provided by common_dashboard.j2
 </script>
 {% endblock %}
 
-{% block header_title %}Dynamo Commit History{% endblock %}
-{% block header_subtitle %}
-<p style="margin: 5px 0 0 0; opacity: 0.9;">Recent commits with Composite Docker SHAs (CDS) and Docker images &nbsp;&nbsp;|&nbsp;&nbsp; <span style="opacity: 0.77; font-size: 12px;">Page generated: {{ generated_time }} <span id="page-age" style="color: #ffa657;"></span></span></p>
+{% block header_title %}
+<span>Dynamo Commit History</span>
+<span class="header-meta">Page generated: {{ generated_time }} <span id="page-age" class="page-age"></span></span>
 {% endblock %}
+{% block header_subtitle %}{% endblock %}
 
 {% block content %}
 
 <!-- Key/Help Section -->
 <!-- NOTE: Do NOT use `.container` here; `.container` has a border and looks "boxed".
      Match the branches dashboard legend style (no border/box). -->
-<div style="margin-bottom: 0px; padding: 12px; background-color: #f6f8fa;">
-<details>
+<div style="margin-bottom: 0px; padding: 8px; background-color: #f6f8fa;">
+<details style="margin-top: 0;">
 <summary style="cursor: pointer; font-weight: 600; font-size: 14px; color: #24292f; user-select: none;">
 Legend & Help
 </summary>
@@ -369,16 +481,16 @@ Notes:
 </div>
 
 <div class="container">
-<table>
+<table id="commits-table">
 <thead>
 <tr>
 <th>Commit SHA</th>
-<th>Composite Docker SHA</th>
-<th>GitHub Status</th>
-<th>GitLab Status</th>
-<th>Date/Time (PST)</th>
-<th>Author</th>
-<th style="width: 100%;">Message</th>
+<th class="col-composite"><label class="col-toggle"><input class="commit-col-toggle" type="checkbox" checked data-col="composite" onchange="toggleCommitColumn(this)"><span class="col-title">Composite Docker SHA</span></label></th>
+<th class="col-github"><label class="col-toggle"><input class="commit-col-toggle" type="checkbox" checked data-col="github" onchange="toggleCommitColumn(this)"><span class="col-title">GitHub Status</span></label></th>
+<th class="col-gitlab"><label class="col-toggle"><input class="commit-col-toggle" type="checkbox" checked data-col="gitlab" onchange="toggleCommitColumn(this)"><span class="col-title">GitLab Status</span></label></th>
+<th class="col-date"><label class="col-toggle"><input class="commit-col-toggle" type="checkbox" checked data-col="date" onchange="toggleCommitColumn(this)"><span class="col-title">Date/Time (PST)</span></label></th>
+<th class="col-author"><label class="col-toggle"><input class="commit-col-toggle" type="checkbox" checked data-col="author" onchange="toggleCommitColumn(this)"><span class="col-title">Author</span></label></th>
+<th class="col-message"><label class="col-toggle"><input class="commit-col-toggle" type="checkbox" checked data-col="message" onchange="toggleCommitColumn(this)"><span class="col-title">Message</span></label></th>
 </tr>
 </thead>
 <tbody>
@@ -404,7 +516,7 @@ Notes:
 <td class="sha">
 <a href="{{ commit_link }}" target="_blank">{{ sha_short }}</a>
 </td>
-<td class="sha">
+<td class="sha col-composite"><span class="col-body">
 {%- set log_paths_list = log_paths.get(sha_short, []) -%}
 {%- set status_info = build_status.get(sha_short, {}) -%}
 {%- set status = status_info.get('status', 'unknown') -%}
@@ -443,8 +555,9 @@ Notes:
 {%- endif -%}
 <span style="background-color: {{ composite_bg_color }}; color: {{ commit.composite_text_color | default('#24292f') }}; padding: 2px 6px; border-radius: 3px;">CDS:{{ composite_sha[:6] }}</span>
 {%- endif -%}
+</span></td>
 </td>
-<td class="sha">
+<td class="sha col-github"><span class="col-body">
 {# GitHub Actions status for GHA badge color #}
 {%- set gha_status = github_actions_status.get(sha_full) -%}
 {%- if gha_status and gha_status.conclusion == 'success' -%}
@@ -542,8 +655,9 @@ Notes:
 <span class="tooltiptext">{{ tooltip_html|safe }}</span>
 </span>
 {%- endif -%}
+</span></td>
 </td>
-<td class="sha">
+<td class="sha col-gitlab"><span class="col-body">
 {# GitLab section #}
 <span class="gitlab-icons">
 {%- if commit.gitlab_checks_tree_html -%}
@@ -654,10 +768,11 @@ Notes:
 {%- endif -%}
 {%- endif -%}
 {%- endif -%}
+</span></td>
 </td>
-<td class="date">{{ date_str }}</td>
-<td class="author">{{ author }}</td>
-<td>
+<td class="date col-date"><span class="col-body">{{ date_str }}</span></td>
+<td class="author col-author"><span class="col-body">{{ author }}</span></td>
+<td class="col-message"><span class="col-body">
 <div class="message">{{ message | safe }}</div>
 {%- if commit.release_forkpoints -%}
 <div style="margin-top: 2px;">
@@ -666,6 +781,7 @@ Notes:
 {%- endfor -%}
 </div>
 {%- endif -%}
+</span></td>
 </td>
 </tr>
 
