@@ -1382,17 +1382,17 @@ class PRStatusNode(BranchNode):
                         )
                     if failed_required_jobs:
                         tooltip_parts.append(
-                            '<strong style="color: #d73a49;"><span style="display: inline-flex; align-items: center; justify-content: center; width: 14px; height: 14px; margin-right: 6px; border-radius: 999px; background-color: #d73a49; color: #ffffff; font-size: 11px; font-weight: 900; line-height: 1;">✗</span>Failed (required):</strong> '
+                            '<strong style="color: #c83a3a;"><span style="display: inline-flex; align-items: center; justify-content: center; width: 14px; height: 14px; margin-right: 6px; border-radius: 999px; background-color: #c83a3a; color: #ffffff; font-size: 11px; font-weight: 900; line-height: 1;">✗</span>Failed (required):</strong> '
                             + ", ".join(sorted(html_module.escape(n) for n in failed_required_jobs))
                         )
                     if failed_optional_jobs:
                         tooltip_parts.append(
-                            f'<strong style="color: #d73a49;">{status_icon_html(status_norm="failure", is_required=False)} Failed (optional):</strong> '
+                            f'<strong style="color: #c83a3a;">{status_icon_html(status_norm="failure", is_required=False)} Failed (optional):</strong> '
                             + ", ".join(sorted(html_module.escape(n) for n in failed_optional_jobs))
                         )
                     if progress_required_jobs:
                         tooltip_parts.append(
-                            '<strong style="color: #dbab09;">⏳ In Progress (required):</strong> '
+                            '<strong style="color: #8c959f;">⏳ In Progress (required):</strong> '
                             + ", ".join(sorted(html_module.escape(n) for n in progress_required_jobs))
                         )
                     if progress_optional_jobs:
@@ -1940,7 +1940,7 @@ class LocalRepoScanner:
                         try:
                             status_node.add_child(
                                 BranchNode(
-                                    label=f'<span style="color: #d73a49;">⚠ CI hierarchy error: {html.escape(str(e))}</span>'
+                                    label=f'<span style="color: #c83a3a;">✗ CI hierarchy error: {html.escape(str(e))}</span>'
                                 )
                             )
                         except Exception:

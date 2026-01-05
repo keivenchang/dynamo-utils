@@ -6,64 +6,62 @@ This module is intentionally dependency-light so it can be shared by:
 - `dynamo-utils/common.py` (log/snippet extraction, cache logic)
 - `dynamo-utils/html_pages/common_dashboard_lib.py` (HTML rendering for snippets/tags)
 
-Log to category training examples:
-- 56701494636.log => trtllm-error
-- 58864425410.log => trtllm-error
-- 57524186105.log => trtllm-error, sglang-error
+Log files to error markers -- training examples:
+- 56701494636.log => backend-failure, trtllm-error
+- 57524186105.log => backend-failure, trtllm-error, sglang-error
 - 58471383691.log => vllm-error
-- 58097278528.log => pytest-error, !huggingface-auth-error
-- 56700023895.log => pytest-error, !huggingface-auth-error
-- 57521050539.log => pytest-error, !huggingface-auth-error
+- 58097278528.log => pytest-error, !python-error, !huggingface-auth-error
+- 58179788784.log => pytest-error, pytest-timeout-error, !python-error, !huggingface-auth-error
 - 57521050554.log => exit-139-sigsegv, !huggingface-auth-error
-- 58861726335.log => docker-build-error
-- 58818079816.log => github-LFS-error, docker-build-error
+- 58861726335.log => network-timeout-https, docker-build-error
+- 58818079816.log => github-LFS-error, docker-build-error, !git-fetch
 - 58465471934.log => rust-error, !huggingface-auth-error
-- 58745798050.log => download-error, docker-build-error
-- 58861726335.log => http-timeout, docker-build-error
-- 58818079816.log => github-LFS-error, !git-fetch
+- 58745798050.log => network-download-error, docker-build-error
 - 58887254616.log => broken-links
 - 59030780729.log => build-status-check-error
-- 58912949188.log => build-status-check-error
 - 59030172010.log => helm-error
 - 57945094461.log => copyright-header-error
-- 58179788784.log => pytest-error, !huggingface-auth-error
 - 58906141961.log => !pytest-error  # success run (passed/skipped), should not be tagged as pytest-error
 - 57877945085.log => exit-127-cmd-not-found
 - 58412373114.log => oom
-- 57930747559.log => timeout
-- 56700023895.log => python-error, !huggingface-auth-error
+- 57930747559.log => network-timeout-gitlab-mirror
+- 59386365389.log => network-timeout-https, !broken-links
+- 58457161045.log => python-error, !pytest-error, !huggingface-auth-error
 - 57877945100.log => cuda-error
-- 56701494636.log => backend-failure
 - 56700029731.log => etcd-error
 - 57930774858.log => network-error
 - 58861639352.log => docker-image-error
+- 58463784363.log => network-timeout-kubectl-portforward, !network-timeout-generic
+- 58575902063.log => network-timeout-github-action, !network-timeout-generic
 
-Category frequency summary (all 623 logs, sorted by occurrence):
-  1. timeout                       214/623 (34.3%) - Generic timeouts (very broad)
-  2. build-status-check-error      183/623 (29.4%) - CI gate checking upstream builds
-  3. pytest-error                  139/623 (22.3%) - Pytest test failures
-  4. python-error                  124/623 (19.9%) - Python exceptions/tracebacks
-  5. exit-127-cmd-not-found         58/623  (9.3%) - Exit code 127 (command not found / missing binary in PATH)
-  6. huggingface-auth-error         28/623  (4.5%) - HF token/gated model access
-  7. download-error                 27/623  (4.3%) - Failed downloads (pip/cargo/curl)
-  8. docker-build-error             18/623  (2.9%) - Docker/BuildKit failures
-  9. cuda-error                     17/623  (2.7%) - CUDA version/driver issues
- 10. backend-failure                13/623  (2.1%) - vllm/sglang/trtllm failures
- 11. github-lfs-error               12/623  (1.9%) - Git LFS fetch failures
- 12. etcd-error                     10/623  (1.6%) - Etcd lease/connection issues
- 13. network-error                  10/623  (1.6%) - Network connectivity failures
- 14. docker                         10/623  (1.6%) - Docker daemon errors
- 15. docker-image-error             10/623  (1.6%) - Missing Docker images
- 16. oom                             9/623  (1.4%) - Out of memory
- 17. vllm-error                      8/623  (1.3%) - VLLM backend failures
- 18. helm-error                      7/623  (1.1%) - Helm chart failures
- 19. trtllm-error                    6/623  (1.0%) - TensorRT-LLM failures
- 20. broken-links                    3/623  (0.5%) - Dead links in documentation
- 21. http-timeout                    2/623  (0.3%) - HTTP 502/503/504 gateway timeouts
- 22. exit-139-sigsegv                1/623  (0.2%) - Exit code 139 (SIGSEGV / signal 11)
- 23. sglang-error                    1/623  (0.2%) - SGLang backend failures
- 24. copyright-header-error          1/623  (0.2%) - Missing copyright headers
- 25. rust-error                      1/623  (0.2%) - Cargo test failures
+Category frequency summary (all 713 logs, sorted by occurrence):
+  1. network-timeout-kubectl-pods   209/713 (29.3%) - kubectl wait timeout (pods condition)
+  2. build-status-check-error       195/713 (27.3%) - CI gate checking upstream builds
+  3. pytest-error                   192/713 (26.9%) - Pytest test failures
+  4. python-error                   129/713 (18.1%) - Python exceptions/tracebacks
+  5. exit-127-cmd-not-found          62/713  (8.7%) - Exit code 127 (command not found / missing binary in PATH)
+  6. network-download-error           29/713  (4.1%) - Failed downloads (pip/cargo/curl)
+  7. docker-build-error              24/713  (3.4%) - Docker/BuildKit failures
+  8. network-timeout-gitlab-mirror    23/713  (3.2%) - GitLab mirror sync infra timeout
+  9. cuda-error                      18/713  (2.5%) - CUDA version/driver issues
+ 10. huggingface-auth-error          16/713  (2.2%) - HF token/gated model access
+ 11. backend-failure                 14/713  (2.0%) - vllm/sglang/trtllm failures
+ 12. github-lfs-error                12/713  (1.7%) - Git LFS fetch failures
+ 13. etcd-error                      11/713  (1.5%) - Etcd lease/connection issues
+ 14. network-error                   11/713  (1.5%) - Network connectivity failures
+ 15. docker-image-error              11/713  (1.5%) - Missing Docker images
+ 16. oom                              9/713  (1.3%) - Out of memory
+ 17. vllm-error                       8/713  (1.1%) - VLLM backend failures
+ 18. helm-error                       7/713  (1.0%) - Helm chart failures
+ 19. trtllm-error                     6/713  (0.8%) - TensorRT-LLM failures
+ 20. network-timeout-https             6/713  (0.8%) - HTTP(S) gateway timeouts + link-checker timeouts
+ 21. network-timeout-github-action     5/713  (0.7%) - GitHub Actions step timed out
+ 22. broken-links                     3/713  (0.4%) - Dead links in documentation
+ 23. sglang-error                     2/713  (0.3%) - SGLang backend failures
+ 24. exit-139-sigsegv                 1/713  (0.1%) - Exit code 139 (SIGSEGV / signal 11)
+ 25. copyright-header-error           1/713  (0.1%) - Missing copyright headers
+ 26. network-timeout-kubectl-portforward  1/713  (0.1%) - kubectl port-forward connect timeout
+ 27. rust-error                       1/713  (0.1%) - Cargo test failures
 
 Golden-log workflow (IMPORTANT for future edits):
 - These example logs are treated as *golden inputs* for regression testing. Keep them read-only:
@@ -82,9 +80,10 @@ import argparse
 import html
 import os
 import re
+import stat
 import sys
 from pathlib import Path
-from typing import Iterable, List, Optional, Pattern, Sequence
+from typing import Dict, Iterable, List, Optional, Pattern, Sequence, Tuple
 
 #
 # Shared helpers (keep dependency-light)
@@ -281,6 +280,13 @@ def _self_test_examples(*, examples_root: Path) -> int:
             missing_files.append(str(p))
             continue
 
+        # Golden-log workflow: keep the example logs read-only.
+        # This should ONLY happen during the self-check process (per policy).
+        try:
+            _ = _chmod_remove_write_bits(p)
+        except Exception:
+            pass
+
         text = _read_text_tail(p, max_bytes=512 * 1024)
         all_lines = (text or "").splitlines()
         cats_full = [_norm_cat(x) for x in categorize_error_log_lines(all_lines)]
@@ -336,6 +342,142 @@ def _self_test_examples(*, examples_root: Path) -> int:
         return 1
 
     print("Self-test: OK")
+    return 0
+
+
+_GOLDEN_JOB_IDS: Optional[set[str]] = None
+
+
+def golden_log_job_ids() -> set[str]:
+    """Return the set of job_ids treated as "golden" example logs.
+
+    Source of truth is the module docstring "Log files to error markers -- training examples" list.
+    """
+    global _GOLDEN_JOB_IDS
+    if _GOLDEN_JOB_IDS is not None:
+        return set(_GOLDEN_JOB_IDS)
+    ids: set[str] = set()
+    try:
+        for log_name, _exp, _forb in _parse_examples_from_docstring():
+            m = re.match(r"^\s*(\d+)\.log\s*$", str(log_name or ""))
+            if m:
+                ids.add(str(m.group(1)))
+    except Exception:
+        ids = set()
+    _GOLDEN_JOB_IDS = set(ids)
+    return set(_GOLDEN_JOB_IDS)
+
+
+def is_golden_log_job_id(job_id: str) -> bool:
+    try:
+        j = str(job_id or "").strip()
+        if not j.isdigit():
+            return False
+        return j in golden_log_job_ids()
+    except Exception:
+        return False
+
+
+def _chmod_remove_write_bits(path: Path) -> bool:
+    """Best-effort `chmod a-w` for a file.
+
+    Returns True if we successfully *attempted* to update perms (including no-op),
+    False if we couldn't stat/chmod.
+    """
+    try:
+        p = Path(path)
+        st0 = p.stat()
+        new_mode = int(st0.st_mode) & ~stat.S_IWUSR & ~stat.S_IWGRP & ~stat.S_IWOTH
+        # Avoid unnecessary chmod syscalls when already read-only.
+        if int(st0.st_mode) == int(new_mode):
+            return True
+        os.chmod(str(p), int(new_mode))
+        return True
+    except Exception:
+        return False
+
+
+def _scan_all_logs(*, logs_root: Path, tail_bytes: int = 512 * 1024) -> int:
+    """Scan a directory of `*.log` files and report categorization + snippet coverage.
+
+    This is a practical "retrain/validate" helper:
+    - validates that snippet anchoring finds something in most logs
+    - summarizes category frequency (full-log + snippet-derived)
+
+    IMPORTANT POLICY (immutable):
+    - ALL logs are writable/deletable **except** the golden training-example logs.
+    - Therefore this scan MUST NOT chmod any logs. Only the `--self-test-examples` path
+      is allowed to chmod golden logs read-only.
+    """
+    root = Path(logs_root).expanduser().resolve()
+    if not root.exists():
+        print(f"ERROR: logs_root not found: {root}", file=sys.stderr)
+        return 2
+    if not root.is_dir():
+        print(f"ERROR: logs_root is not a directory: {root}", file=sys.stderr)
+        return 2
+
+    logs = sorted([p for p in root.glob("*.log") if p.is_file()])
+    total = len(logs)
+    print(f"Scan-all: logs_root={root}")
+    print(f"Scan-all: files={total}")
+    print("")
+
+    if total == 0:
+        return 0
+
+    cats_full_counts: Dict[str, int] = {}
+    cats_snip_counts: Dict[str, int] = {}
+    snippet_found = 0
+    no_snippet_samples: List[str] = []
+    for p in logs:
+        txt = _read_text_tail(p, max_bytes=int(tail_bytes))
+        lines = (txt or "").splitlines()
+
+        cats_full = [_norm_cat(x) for x in categorize_error_log_lines(lines)]
+        for c in cats_full:
+            if not c:
+                continue
+            cats_full_counts[c] = int(cats_full_counts.get(c, 0)) + 1
+
+        snip = extract_error_snippet_from_text(txt)
+        if (snip or "").strip():
+            snippet_found += 1
+        else:
+            # Keep a small sample for debugging if snippet anchoring regresses.
+            if len(no_snippet_samples) < 12:
+                no_snippet_samples.append(p.name)
+
+        cats_snip = [_norm_cat(x) for x in categorize_error_snippet_text(snip)]
+        for c in cats_snip:
+            if not c:
+                continue
+            cats_snip_counts[c] = int(cats_snip_counts.get(c, 0)) + 1
+
+    def _top_items(d: Dict[str, int], n: int = 25) -> List[Tuple[str, int]]:
+        return sorted(d.items(), key=lambda kv: (-int(kv[1]), str(kv[0])))
+
+    print(f"Scan-all: snippet_found={snippet_found}/{total} ({(100.0 * snippet_found / max(1, total)):.1f}%)")
+    print("")
+
+    print("Scan-all: category frequency (full-log categorization):")
+    for name, count in _top_items(cats_full_counts):
+        pct = 100.0 * float(count) / float(total)
+        print(f"  - {name:<28} {count:>5}/{total} ({pct:>4.1f}%)")
+    print("")
+
+    print("Scan-all: category frequency (snippet-derived categorization):")
+    for name, count in _top_items(cats_snip_counts):
+        pct = 100.0 * float(count) / float(total)
+        print(f"  - {name:<28} {count:>5}/{total} ({pct:>4.1f}%)")
+    print("")
+
+    if no_snippet_samples:
+        print("Scan-all: sample logs with NO snippet extracted (first 12):")
+        for nm in no_snippet_samples:
+            print(f"  - {nm}")
+        print("")
+
     return 0
 
 
@@ -406,8 +548,16 @@ CUDA_ERROR_RE: Pattern[str] = re.compile(
     r")"
 )
 HTTP_TIMEOUT_RE: Pattern[str] = re.compile(
-    r"awaiting\s+response\.\.\.\s*(?:504|503|502)\b|gateway\s+time-?out|\bhttp\s+(?:504|503|502)\b"
+    r"(?:"
+    r"awaiting\s+response\.\.\.\s*(?:504|503|502)\b"
+    r"|gateway\s+time-?out"
+    r"|\bhttp\s+(?:504|503|502)\b"
+    # Lychee/link-checker timeouts:
+    #   [TIMEOUT] https://example.com | Timeout
+    r"|\[timeout\]\s+https?://"
+    r")"
 )
+GITLAB_MIRROR_TIMEOUT_RE: Pattern[str] = re.compile(r"\bmirror sync failed or timed out\b", re.IGNORECASE)
 BUILD_STATUS_CHECK_ERROR_RE: Pattern[str] = re.compile(
     r"(?:"
     r"\bchecking\s+build\s+status\s+for\b"
@@ -462,8 +612,30 @@ DOCKER_INFRA_ERROR_RE: Pattern[str] = re.compile(
     r"|\bdocker:\s+.*\berror\b"
     r")"
 )
+DOCKER_DAEMON_CONNECTION_ERROR_RE: Pattern[str] = re.compile(
+    r"cannot\s+connect\s+to\s+the\s+docker\s+daemon", re.IGNORECASE
+)
+DOCKER_DAEMON_ERROR_RESPONSE_RE: Pattern[str] = re.compile(
+    r"error\s+response\s+from\s+daemon:(?!.*no\s+such\s+container)", re.IGNORECASE
+)
+DOCKER_CLI_ERROR_RE: Pattern[str] = re.compile(r"\bdocker:\s+.*\berror\b", re.IGNORECASE)
 BROKEN_LINKS_RE: Pattern[str] = re.compile(r"\bbroken\s+links?\b|\bdead\s+links?\b")
 TIMED_OUT_RE: Pattern[str] = re.compile(r"\b(?:timed\s*out|timedout)\b")
+K8S_PODS_TIMED_OUT_RE: Pattern[str] = re.compile(
+    r"\btimed\s*out\s+waiting\s+for\s+the\s+condition\s+on\s+pods/",
+    re.IGNORECASE,
+)
+KUBECTL_PORTFORWARD_TIMEOUT_RE: Pattern[str] = re.compile(
+    r"(?:"
+    r"\bportforward\.go:\d+\].*\bconnection timed out\b"
+    r"|\ban error occurred forwarding\b[^\n]{0,400}\bconnection timed out\b"
+    r")",
+    re.IGNORECASE,
+)
+GITHUB_ACTION_STEP_TIMEOUT_RE: Pattern[str] = re.compile(
+    r"##\[error\].{0,40}\bhas\s+timed\s+out\s+after\s+\d+\s+minutes?\b",
+    re.IGNORECASE,
+)
 RUST_TEST_FAIL_RE: Pattern[str] = re.compile(r"^\s*failures:\s*$|test result:\s*FAILED\.", re.IGNORECASE | re.MULTILINE)
 # Exit code 139 is conventionally SIGSEGV (signal 11) in POSIX shells (\(128 + 11 = 139\)).
 EXIT_CODE_139_RE: Pattern[str] = re.compile(r"process completed with exit code 139\b|exit code:\s*139\b", re.IGNORECASE)
@@ -527,10 +699,17 @@ def categorize_error_log_lines(lines: Sequence[str]) -> List[str]:
         # Pytest / Python
         # Only tag "pytest" when the log looks like an actual pytest run failure,
         # not when it merely mentions pytest packages/versions (e.g., "pytest==9.0.2").
-        if _has_pytest_failure_signal(lines[-4000:] if lines else []):
+        has_pytest = bool(_has_pytest_failure_signal(lines[-4000:] if lines else []))
+        if has_pytest:
             add("pytest-error")
+        # Per-test timeout (pytest-timeout plugin). Keep distinct from generic/network timeouts.
+        if PYTEST_TIMEOUT_E_LINE_RE.search(text):
+            add("pytest-timeout-error")
+        # Keep python-error distinct from pytest-error: pytest failures frequently contain AssertionError
+        # and other tracebacks that are not actionable as "python infra" errors.
         if _PYTHON_ERROR_DETECT_RE.search(t):
-            add("python-error")
+            if (not has_pytest) or bool(PYTHON_STRONG_EXCEPTION_RE.search(text)):
+                add("python-error")
         # Rust test failures (cargo test)
         if RUST_TEST_FAIL_RE.search(text):
             add("rust-error")
@@ -553,7 +732,7 @@ def categorize_error_log_lines(lines: Sequence[str]) -> List[str]:
 
         # Downloads (Rust/cargo, pip, curl, etc.)
         if DOWNLOAD_ERROR_RE.search(t):
-            add("download-error")
+            add("network-download-error")
 
         # Build failures (Docker/buildkit/etc.)
         if DOCKER_BUILD_ERROR_RE.search(t):
@@ -581,9 +760,12 @@ def categorize_error_log_lines(lines: Sequence[str]) -> List[str]:
         if CUDA_ERROR_RE.search(t):
             add("cuda-error")
 
-        # HTTP timeouts / gateway errors (wget/curl/HTTP clients)
+        # HTTP(S) gateway timeouts (wget/curl/HTTP clients + link-checker timeouts)
         if HTTP_TIMEOUT_RE.search(t):
-            add("http-timeout")
+            add("network-timeout-https")
+        # GitLab mirror infra timeout (special-case; keep distinct from generic timeout)
+        if GITLAB_MIRROR_TIMEOUT_RE.search(text):
+            add("network-timeout-gitlab-mirror")
 
         # Network connectivity
         if NETWORK_ERROR_RE.search(t):
@@ -595,14 +777,17 @@ def categorize_error_log_lines(lines: Sequence[str]) -> List[str]:
         if ETCD_ERROR_RE.search(t):
             add("etcd-error")
 
-        # Docker
-        # Only tag "docker" when the log indicates a docker *infrastructure* failure (daemon/CLI),
-        # not merely because the run executed `docker build/run` commands.
+        # Docker infrastructure / daemon / CLI errors.
         #
-        # IMPORTANT: BuildKit "failed to solve"/"ERROR: failed to build" are almost always *build* failures
-        # (often due to CUDA/Python deps/etc) and should not be attributed to "docker".
-        if DOCKER_INFRA_ERROR_RE.search(t):
-            add("docker")
+        # IMPORTANT: `docker-image-error` is already specific (manifest unknown). If we see that,
+        # don't also tag a redundant daemon error-response category.
+        if not DOCKER_IMAGE_NOT_FOUND_RE.search(t):
+            if DOCKER_DAEMON_CONNECTION_ERROR_RE.search(text):
+                add("docker-daemon-connection-error")
+            elif DOCKER_DAEMON_ERROR_RESPONSE_RE.search(text):
+                add("docker-daemon-error-response-error")
+            elif DOCKER_CLI_ERROR_RE.search(text):
+                add("docker-cli-error")
 
         # Backend result JSON-ish blocks (vllm/sglang/trtllm): multi-line aware.
         engines = _backend_failure_engines_from_lines(lines[-4000:] if lines else [])
@@ -615,11 +800,29 @@ def categorize_error_log_lines(lines: Sequence[str]) -> List[str]:
         if BROKEN_LINKS_RE.search(t):
             add("broken-links")
 
+        # Kubernetes wait timeouts ("timed out waiting for the condition on pods/...").
+        if K8S_PODS_TIMED_OUT_RE.search(text):
+            add("network-timeout-kubectl-pods")
+
+        # Kubernetes port-forward failures (portforward.go ... connection timed out).
+        if KUBECTL_PORTFORWARD_TIMEOUT_RE.search(text):
+            add("network-timeout-kubectl-portforward")
+
+        # GitHub Actions step timeout markers.
+        if GITHUB_ACTION_STEP_TIMEOUT_RE.search(text):
+            add("network-timeout-github-action")
+
         # Timeout / infra flake
         #
         # Keep this very conservative to avoid false positives.
-        if TIMED_OUT_RE.search(t):
-            add("timeout")
+        if TIMED_OUT_RE.search(t) and not (
+            HTTP_TIMEOUT_RE.search(t)
+            or GITLAB_MIRROR_TIMEOUT_RE.search(text)
+            or K8S_PODS_TIMED_OUT_RE.search(text)
+            or KUBECTL_PORTFORWARD_TIMEOUT_RE.search(text)
+            or GITHUB_ACTION_STEP_TIMEOUT_RE.search(text)
+        ):
+            add("network-timeout-generic")
 
         # Docker image not found (registry manifest unknown)
         if DOCKER_IMAGE_NOT_FOUND_RE.search(t):
@@ -820,6 +1023,28 @@ PYTHON_EXCEPTION_LINE_RE: Pattern[str] = re.compile(
     re.IGNORECASE,
 )
 
+# "Strong" Python exception signals that are typically actionable environment/infra/runtime errors,
+# not just normal assertion-based pytest failures.
+PYTHON_STRONG_EXCEPTION_RE: Pattern[str] = re.compile(
+    r"(?:"
+    r"\bModuleNotFoundError\b"
+    r"|\bImportError\b"
+    r"|\bNameError\b"
+    r"|\bAttributeError\b"
+    r"|\bKeyError\b"
+    r"|\bIndexError\b"
+    r"|\bValueError\b"
+    r"|\bTypeError\b"
+    r"|\bRuntimeError\b"
+    r"|\bOSError\b"
+    r"|\bPermissionError\b"
+    r"|\bFileNotFoundError\b"
+    r"|\bConnectionError\b"
+    r"|\bTimeoutError\b"
+    r")",
+    re.IGNORECASE,
+)
+
 # Docker build error context blocks (BuildKit prints file/line + a numbered snippet).
 DOCKERFILE_CONTEXT_HEADER_RE: Pattern[str] = re.compile(r"\bDockerfile\.[^: \t]+:\d+\b", re.IGNORECASE)
 DOCKERFILE_CONTEXT_LINE_RE: Pattern[str] = re.compile(r"^\s*\d+\s*\|\s", re.IGNORECASE)
@@ -877,50 +1102,117 @@ FULL_LINE_ERROR_REDS_RE: List[Pattern[str]] = [
 ]
 
 
-# Snippet category rules (HTML-side, to tag a snippet without re-reading the full raw log).
-# A snippet can have multiple categories; keep these high-signal and relatively stable.
-SNIPPET_CATEGORY_RULES: list[tuple[str, Pattern[str]]] = [
+#
+# Shared categorization rules (used by BOTH full-log categorization and snippet categorization).
+#
+# Keep this list "regex-only" and push special-case suppression logic into `_apply_category_rules()`
+# so we don’t duplicate business rules across categorization call sites.
+#
+CATEGORY_RULES: list[tuple[str, Pattern[str]]] = [
+    # Pytest per-test timeout (pytest-timeout plugin).
+    ("pytest-timeout-error", PYTEST_TIMEOUT_E_LINE_RE),
     ("pytest-error", re.compile(r"(?:^|\s)FAILED(?:\s+|$).*::|short test summary info|\\berror\\s+collecting\\b", re.IGNORECASE)),
-    ("download-error", re.compile(r"caused by:\s*failed to download|failed to download|download error", re.IGNORECASE)),
-    ("docker-build-error", re.compile(r"\berror:\s*failed\s+to\s+build\b|\bfailed\s+to\s+solve\b", re.IGNORECASE)),
+    ("network-download-error", re.compile(DOWNLOAD_ERROR_RE.pattern, re.IGNORECASE)),
+    ("docker-build-error", re.compile(DOCKER_BUILD_ERROR_RE.pattern, re.IGNORECASE)),
     ("build-status-check-error", BUILD_STATUS_CHECK_ERROR_RE),
     ("huggingface-auth-error", HUGGINGFACE_AUTH_ERROR_RE),
     ("copyright-header-error", COPYRIGHT_HEADER_ERROR_RE),
     ("helm-error", HELM_ERROR_RE),
     # Use the same CUDA matcher as full-log categorization, so snippets catch libcuda ImportError too.
     ("cuda-error", re.compile(CUDA_ERROR_RE.pattern, re.IGNORECASE)),
-    (
-        "http-timeout",
-        re.compile(
-            r"awaiting\s+response\.\.\.\s*(?:504|503|502)\b|gateway\s+time-?out|http\s+504\b|http\s+503\b|http\s+502\b",
-            re.IGNORECASE,
-        ),
-    ),
-    ("network-error", re.compile(r"network\s+error:\s*connection\s+failed|connection\s+failed\.\s*check\s+network\s+connectivity|firewall\s+settings", re.IGNORECASE)),
-    ("etcd-error", re.compile(r"unable\s+to\s+create\s+lease|check\s+etcd\s+server\s+status|\betcd[^\n]{0,80}\blease\b|\blease\b[^\n]{0,80}\betcd\b", re.IGNORECASE)),
+    ("network-timeout-https", re.compile(HTTP_TIMEOUT_RE.pattern, re.IGNORECASE)),
+    ("network-timeout-gitlab-mirror", GITLAB_MIRROR_TIMEOUT_RE),
+    ("network-timeout-kubectl-pods", K8S_PODS_TIMED_OUT_RE),
+    ("network-timeout-kubectl-portforward", KUBECTL_PORTFORWARD_TIMEOUT_RE),
+    ("network-timeout-github-action", GITHUB_ACTION_STEP_TIMEOUT_RE),
+    ("network-error", re.compile(NETWORK_ERROR_RE.pattern, re.IGNORECASE)),
+    ("etcd-error", re.compile(ETCD_ERROR_RE.pattern, re.IGNORECASE)),
     ("git-fetch", re.compile(r"failed to fetch some objects from|RPC failed|early EOF|remote end hung up|fetch-pack", re.IGNORECASE)),
     ("github-api", re.compile(r"Failed to query GitHub API|secondary rate limit|API rate limit exceeded|HTTP 403|HTTP 429", re.IGNORECASE)),
     ("github-lfs-error", re.compile(r"/info/lfs|git lfs", re.IGNORECASE)),
     # Avoid tagging timeout just because pytest plugins list "timeout-<ver>" or prose mentions "timeouts".
-    ("timeout", re.compile(r"\b(?:timed\s*out|timedout)\b", re.IGNORECASE)),
+    ("network-timeout-generic", re.compile(TIMED_OUT_RE.pattern, re.IGNORECASE)),
     ("oom", re.compile(r"\b(out of memory|CUDA out of memory|Killed process|oom)\b", re.IGNORECASE)),
-    (
-        "docker",
-        re.compile(
-            r"cannot\s+connect\s+to\s+the\s+docker\s+daemon"
-            r"|error\s+response\s+from\s+daemon:(?!.*no\s+such\s+container)"
-            r"|\bdocker:\s+.*\berror\b",
-            re.IGNORECASE,
-        ),
-    ),
+    ("docker-daemon-connection-error", DOCKER_DAEMON_CONNECTION_ERROR_RE),
+    ("docker-daemon-error-response-error", DOCKER_DAEMON_ERROR_RESPONSE_RE),
+    ("docker-cli-error", DOCKER_CLI_ERROR_RE),
     ("docker-image-error", DOCKER_IMAGE_NOT_FOUND_RE),
     ("k8s", re.compile(r"\bkubectl\b|\bkubernetes\b|CrashLoopBackOff|ImagePullBackOff|ErrImagePull", re.IGNORECASE)),
     ("python-error", PYTHON_EXCEPTION_LINE_RE),
-    ("broken-links", re.compile(r"\bbroken\s+links?\b|\bdead\s+links?\b|\blychee\b", re.IGNORECASE)),
-    ("rust-error", re.compile(r"^\s*failures:\s*$|test result:\s*FAILED\.", re.IGNORECASE | re.MULTILINE)),
+    # IMPORTANT: don't tag broken-links just because the tool name "lychee" appears; that causes false positives
+    # on timeout-only runs. Require an explicit broken/dead links phrase.
+    ("broken-links", re.compile(r"\bbroken\s+links?\b|\bdead\s+links?\b", re.IGNORECASE)),
+    ("rust-error", RUST_TEST_FAIL_RE),
     ("exit-139-sigsegv", EXIT_CODE_139_RE),
     ("exit-127-cmd-not-found", EXIT_CODE_127_RE),
 ]
+
+
+def _apply_category_rules(*, text: str, lines: Sequence[str], out: List[str], seen: set[str]) -> None:
+    """Apply shared regex-based category rules with shared suppression logic."""
+    try:
+        text_l = (text or "").lower()
+
+        has_specific_timeout = bool(
+            HTTP_TIMEOUT_RE.search(text_l)
+            or GITLAB_MIRROR_TIMEOUT_RE.search(text)
+            or K8S_PODS_TIMED_OUT_RE.search(text)
+            or KUBECTL_PORTFORWARD_TIMEOUT_RE.search(text)
+            or GITHUB_ACTION_STEP_TIMEOUT_RE.search(text)
+        )
+
+        def add(name: str) -> None:
+            if name and name not in seen:
+                seen.add(name)
+                out.append(name)
+
+        # Heuristic: in pytest output, plain AssertionError test failures frequently trigger the broad
+        # python exception regex. To keep categories meaningfully distinct, suppress python-error when
+        # pytest-error is present unless the snippet/log shows a "non-test-failure" exception type.
+        #
+        # This keeps ImportError/ModuleNotFoundError/etc visible (real infra/env problems), while
+        # avoiding redundant python-error tags for normal assertion-based test failures.
+        allow_python_error_with_pytest = True
+        if "pytest-error" in seen:
+            allow_python_error_with_pytest = bool(PYTHON_STRONG_EXCEPTION_RE.search(text))
+
+        for name, rx in CATEGORY_RULES:
+            try:
+                # Policy: if we can classify a specific timeout, do not show the generic timeout tag.
+                if name == "network-timeout-generic" and has_specific_timeout:
+                    continue
+
+                # LFS vs git-fetch: mutually exclusive for this class of failure.
+                if name == "git-fetch":
+                    if "github-lfs-error" in seen or "/info/lfs" in text_l or "git lfs" in text_l:
+                        continue
+
+                # HuggingFace auth: ignore WARN-level-only hits (common benign warnings).
+                if name == "huggingface-auth-error":
+                    if not _has_huggingface_auth_error_signal(lines):
+                        continue
+
+                if name == "python-error" and "pytest-error" in seen and not allow_python_error_with_pytest:
+                    continue
+
+                # Docker: if we already have docker-image-error, don't also tag daemon/CLI infra errors.
+                if name.startswith("docker-") and name != "docker-image-error":
+                    if "docker-image-error" in seen:
+                        continue
+
+                # Full-log categorization already separately handles "failed to fetch some objects" -> (git-fetch|github-lfs-error).
+                if name == "github-lfs-error":
+                    if "/info/lfs" not in text_l and "git lfs" not in text_l and "failed to fetch some objects" in text_l:
+                        # If we're in a generic git-fetch LFS-ish state but don't have explicit LFS strings,
+                        # avoid spuriously tagging LFS from a snippet.
+                        pass
+
+                if rx.search(text) and name not in seen:
+                    add(name)
+            except Exception:
+                continue
+    except Exception:
+        return
 
 
 def html_highlight_error_keywords(text: str) -> str:
@@ -935,7 +1227,8 @@ def html_highlight_error_keywords(text: str) -> str:
         return ""
 
     def repl(m: re.Match) -> str:
-        return f'<span style="color: #d73a49; font-weight: 700;">{m.group(0)}</span>'
+        # Slightly deeper red than GitHub default; keep readable and not overly saturated.
+        return f'<span style="color: #c83a3a; font-weight: 700;">{m.group(0)}</span>'
 
     return ERROR_HIGHLIGHT_RE.sub(repl, escaped)
 
@@ -948,7 +1241,6 @@ def categorize_error_snippet_text(snippet_text: str) -> List[str]:
 
     out: List[str] = []
     seen: set[str] = set()
-    text_l = text.lower()
 
     # If the snippet already contains a synthesized "Categories: ..." header line (generated from
     # full-log categorization), seed the snippet categories from it. This keeps the snippet view
@@ -979,22 +1271,9 @@ def categorize_error_snippet_text(snippet_text: str) -> List[str]:
     except Exception:
         pass
 
-    for name, rx in SNIPPET_CATEGORY_RULES:
-        try:
-            # If LFS is implicated, do not also tag git-fetch on the snippet (golden logs treat
-            # these as mutually exclusive for this class of failure).
-            if name == "git-fetch":
-                if "github-lfs-error" in seen or "/info/lfs" in text_l or "git lfs" in text_l:
-                    continue
-            # HuggingFace auth: ignore WARN-level-only hits (common benign warnings).
-            if name == "huggingface-auth-error":
-                if not _has_huggingface_auth_error_signal((snippet_text or "").splitlines()):
-                    continue
-            if rx.search(text) and name not in seen:
-                seen.add(name)
-                out.append(name)
-        except Exception:
-            continue
+    # Apply the shared marker rules to the snippet text as well, so snippet tags stay consistent
+    # with full-log categorization (and avoid duplicated special-case logic).
+    _apply_category_rules(text=text, lines=(snippet_text or "").splitlines(), out=out, seen=seen)
     return out
 
 
@@ -1022,7 +1301,7 @@ def render_error_snippet_html(snippet_text: str) -> str:
 
         if PYTEST_FAILED_LINE_RE.search(raw_line) or any(r.search(raw_line) for r in FULL_LINE_ERROR_REDS_RE):
             out_lines.append(
-                f'<span style="color: #d73a49; font-weight: 700;">{html.escape(raw_line)}</span>'
+                f'<span style="color: #c83a3a; font-weight: 700;">{html.escape(raw_line)}</span>'
             )
         else:
             out_lines.append(html_highlight_error_keywords(raw_line))
@@ -1647,10 +1926,25 @@ def _cli(argv: Optional[Sequence[str]] = None) -> int:
         default=str((Path(__file__).resolve().parent.parent / "raw-log-text")),
         help="Root directory containing raw-log-text/*.log for --self-test-examples (default: ../raw-log-text).",
     )
+    parser.add_argument(
+        "--scan-all-logs",
+        action="store_true",
+        help="Scan all *.log under --logs-root and print frequency/coverage stats.",
+    )
+    parser.add_argument(
+        "--logs-root",
+        default=str((Path(__file__).resolve().parent.parent / "raw-log-text")),
+        help="Directory containing raw-log-text/*.log for --scan-all-logs (default: ../raw-log-text).",
+    )
     args = parser.parse_args(list(argv) if argv is not None else None)
 
     if bool(getattr(args, "self_test_examples", False)):
         return _self_test_examples(examples_root=Path(str(args.examples_root)))
+    if bool(getattr(args, "scan_all_logs", False)):
+        return _scan_all_logs(
+            logs_root=Path(str(args.logs_root)),
+            tail_bytes=int(0 if bool(args.no_tail) else int(args.tail_bytes)),
+        )
 
     log_path = Path(args.log_path).expanduser()
     if not log_path.exists():

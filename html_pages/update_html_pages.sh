@@ -169,6 +169,7 @@ run_resource_report() {
 
     if [ -f "$RESOURCE_DB" ]; then
         echo "$(date '+%Y-%m-%d %H:%M:%S') - Generating resource report" >> "$LOG_FILE"
+        echo "===== $(date '+%Y-%m-%d %H:%M:%S') run_resource_report start =====" >> "$RESOURCE_REPORT_LOG"
         if python3 "$SCRIPT_DIR/show_local_resources.py" \
             --db-path "$RESOURCE_DB" \
             --output "$RESOURCE_REPORT_HTML" \
@@ -194,6 +195,7 @@ run_show_local_branches() {
         MAX_GH_FLAG="--max-github-api-calls ${MAX_GITHUB_API_CALLS}"
     fi
     echo "$(date '+%Y-%m-%d %H:%M:%S') - Generating branches dashboard" >> "$LOG_FILE"
+    echo "===== $(date '+%Y-%m-%d %H:%M:%S') run_show_local_branches start (output=$BRANCHES_OUTPUT_FILE) =====" >> "$BRANCHES_LOG"
     if python3 "$SCRIPT_DIR/show_local_branches.py" --repo-path "$NVIDIA_HOME" --output "$BRANCHES_OUTPUT_FILE" $REFRESH_CLOSED_FLAG $MAX_GH_FLAG >> "$BRANCHES_LOG" 2>&1; then
         echo "$(date '+%Y-%m-%d %H:%M:%S') - Updated $BRANCHES_OUTPUT_FILE" >> "$LOG_FILE"
     else
@@ -240,6 +242,7 @@ run_show_commit_history() {
     fi
 
     echo "$(date '+%Y-%m-%d %H:%M:%S') - Generating commit history dashboard (max_commits=$MAX_COMMITS)" >> "$LOG_FILE"
+    echo "===== $(date '+%Y-%m-%d %H:%M:%S') run_show_commit_history start (max_commits=$MAX_COMMITS output=$COMMIT_HISTORY_HTML) =====" >> "$COMMIT_HISTORY_LOG"
     if python3 "$SCRIPT_DIR/show_commit_history.py" --repo-path . --max-commits "$MAX_COMMITS" --output "$COMMIT_HISTORY_HTML" $SKIP_FLAG $MAX_GH_FLAG >> "$COMMIT_HISTORY_LOG" 2>&1; then
         echo "$(date '+%Y-%m-%d %H:%M:%S') - Updated $COMMIT_HISTORY_HTML" >> "$LOG_FILE"
     else

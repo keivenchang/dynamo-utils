@@ -181,12 +181,12 @@ a .status-indicator:hover {
     border-color: #1f7a37;
 }
 .status-failed {
-    background-color: #d73a49;
-    border-color: #b62d3b;
+    background-color: #c83a3a;
+    border-color: #a83232;
 }
 .status-building {
-    background-color: #dbab09;
-    border-color: #b08c00;
+    background-color: #8c959f;
+    border-color: #6e7781;
 }
 .status-success-inherited {
     background-color: #a8d5ba;
@@ -196,12 +196,12 @@ a .status-indicator:hover {
 .status-failed-inherited {
     background-color: #f5a3ab;
     border-color: #e67c87;
-    color: #b62d3b;
+    color: #a83232;
 }
 .status-building-inherited {
-    background-color: #f0d97d;
-    border-color: #d4bd5e;
-    color: #8b6f00;
+    background-color: #eaeef2;
+    border-color: #d0d7de;
+    color: #57606a;
 }
 .status-unknown {
     background-color: transparent;
@@ -322,7 +322,7 @@ Legend & Help
 <ul style="margin: 2px 0; padding-left: 20px; font-size: 12px;">
 <li><span class="status-indicator status-success" style="display: inline-block; vertical-align: middle;">PASS</span> Green - All builds/compile/sanity passed</li>
 <li><span class="status-indicator status-failed" style="display: inline-block; vertical-align: middle;">FAIL</span> Red - Some builds/compile/sanity failed</li>
-<li><span class="status-indicator status-building" style="display: inline-block; vertical-align: middle;">BUILD</span> Yellow - Build in progress</li>
+<li><span class="status-indicator status-building" style="display: inline-block; vertical-align: middle;">BUILD</span> Grey - Build in progress</li>
 <li><span class="status-indicator status-unknown" style="display: inline-block; vertical-align: middle;">----</span> Gray - No build status available</li>
 <li><span class="status-indicator status-success-inherited" style="display: inline-block; vertical-align: middle;">PASS</span> Lighter color - Inherited status (no direct build for this commit)</li>
 </ul>
@@ -346,7 +346,7 @@ Legend & Help
 <li>{{ cancelled_icon_html|safe }} - Checks/jobs canceled</li>
 <li>{{ skipped_icon_html|safe }} - Checks/jobs skipped</li>
 </ul>
-<p style="margin: 4px 0; color: #57606a; font-size: 12px;">Example: <span style="color: #2da44e;">21</span>{{ success_icon_html|safe }} <span style="color: #d73a49;">1</span>{{ failure_required_icon_html|safe }} <span style="color: #dbab09;">1</span>{{ in_progress_icon_html|safe }} <span style="color: #8c959f;">3</span>{{ pending_icon_html|safe }} <span style="color: #8c959f;">1</span>{{ cancelled_icon_html|safe }} means 21 passed, 1 failed, 1 in progress, 3 pending, 1 canceled.</p>
+<p style="margin: 4px 0; color: #57606a; font-size: 12px;">Example: {{ success_required_icon_html|safe }}<span style="color: #2da44e;">5</span> {{ success_icon_html|safe }}<span style="color: #2da44e;">25</span> {{ failure_required_icon_html|safe }}<span style="color: #c83a3a;">2</span> {{ failure_optional_icon_html|safe }}<span style="color: #c83a3a;">1</span> {{ in_progress_icon_html|safe }}<span style="color: #8c959f;">3</span> {{ pending_icon_html|safe }}<span style="color: #8c959f;">1</span> {{ cancelled_icon_html|safe }}<span style="color: #8c959f;">1</span></p>
 <div style="margin-top: 6px; color: #57606a; font-size: 12px;">
 Notes:
 <ul style="margin: 4px 0; padding-left: 20px;">
@@ -451,10 +451,10 @@ Notes:
 {%- set gha_color = '#2da44e' -%}
 {%- set gha_title = 'GitHub Actions: All checks passed' -%}
 {%- elif gha_status and gha_status.conclusion == 'failure' -%}
-{%- set gha_color = '#d73a49' -%}
+{%- set gha_color = '#c83a3a' -%}
 {%- set gha_title = 'GitHub Actions: Some checks failed' -%}
 {%- elif gha_status and gha_status.status == 'in_progress' -%}
-{%- set gha_color = '#dbab09' -%}
+{%- set gha_color = '#8c959f' -%}
 {%- set gha_title = 'GitHub Actions: Checks in progress' -%}
 {%- elif gha_status and gha_status.conclusion == 'cancelled' -%}
 {%- set gha_color = '#8c959f' -%}
@@ -517,9 +517,9 @@ Notes:
 {%- set tooltip_html_parts = [] -%}
 {%- if passed_required_jobs -%}{%- set _ = tooltip_html_parts.append('<strong style="color: #2da44e;">' ~ success_required_icon_html ~ ' Passed (required):</strong> ' ~ ((passed_required_jobs|sort)|join(', '))) -%}{%- endif -%}
 {%- if passed_optional_jobs -%}{%- set _ = tooltip_html_parts.append('<strong style="color: #2da44e;">' ~ success_icon_html ~ ' Passed (optional):</strong> ' ~ ((passed_optional_jobs|sort)|join(', '))) -%}{%- endif -%}
-{%- if failed_required_jobs -%}{%- set _ = tooltip_html_parts.append('<strong style="color: #d73a49;"><span style="display: inline-flex; align-items: center; justify-content: center; width: 14px; height: 14px; margin-right: 6px; border-radius: 999px; background-color: #d73a49; color: #ffffff; font-size: 11px; font-weight: 900; line-height: 1;">✗</span>Failed (required):</strong> ' + (failed_required_jobs|sort)|join(', ')) -%}{%- endif -%}
-{%- if failed_optional_jobs -%}{%- set _ = tooltip_html_parts.append('<strong style="color: #d73a49;">' ~ failure_optional_icon_html ~ ' Failed (optional):</strong> ' + (failed_optional_jobs|sort)|join(', ')) -%}{%- endif -%}
-{%- if progress_required_jobs -%}{%- set _ = tooltip_html_parts.append('<strong style="color: #dbab09;">⏳ In Progress (required):</strong> ' + (progress_required_jobs|sort)|join(', ')) -%}{%- endif -%}
+{%- if failed_required_jobs -%}{%- set _ = tooltip_html_parts.append('<strong style="color: #c83a3a;"><span style="display: inline-flex; align-items: center; justify-content: center; width: 14px; height: 14px; margin-right: 6px; border-radius: 999px; background-color: #c83a3a; color: #ffffff; font-size: 11px; font-weight: 900; line-height: 1;">✗</span>Failed (required):</strong> ' + (failed_required_jobs|sort)|join(', ')) -%}{%- endif -%}
+{%- if failed_optional_jobs -%}{%- set _ = tooltip_html_parts.append('<strong style="color: #c83a3a;">' ~ failure_optional_icon_html ~ ' Failed (optional):</strong> ' + (failed_optional_jobs|sort)|join(', ')) -%}{%- endif -%}
+{%- if progress_required_jobs -%}{%- set _ = tooltip_html_parts.append('<strong style="color: #8c959f;">⏳ In Progress (required):</strong> ' + (progress_required_jobs|sort)|join(', ')) -%}{%- endif -%}
 {%- if progress_optional_jobs -%}{%- set _ = tooltip_html_parts.append('<strong style="color: #8c959f;">⏳ In Progress (optional):</strong> ' + (progress_optional_jobs|sort)|join(', ')) -%}{%- endif -%}
 {%- if pending_jobs -%}{%- set _ = tooltip_html_parts.append('<strong style="color: #8c959f;">⏸ Pending:</strong> ' + (pending_jobs|sort)|join(', ')) -%}{%- endif -%}
 {%- if cancelled_jobs -%}{%- set _ = tooltip_html_parts.append('<strong style="color: #8c959f;">✖️ Canceled:</strong> ' + (cancelled_jobs|sort)|join(', ')) -%}{%- endif -%}
@@ -619,9 +619,9 @@ Notes:
 {%- set gitlab_tooltip_parts = [] -%}
 {# Use the same circled-check icon as GitHub for "passed" in tooltips #}
 {%- if success_jobs -%}{%- set _ = gitlab_tooltip_parts.append('<strong style="color: #2da44e;">' ~ success_icon_html ~ ' Passed:</strong> ' ~ ((success_jobs|sort)|join(', '))) -%}{%- endif -%}
-{%- if failed_required_jobs -%}{%- set _ = gitlab_tooltip_parts.append('<strong style="color: #d73a49;"><span style="display: inline-flex; align-items: center; justify-content: center; width: 14px; height: 14px; margin-right: 6px; border-radius: 999px; background-color: #d73a49; color: #ffffff; font-size: 11px; font-weight: 900; line-height: 1;">✗</span>Failed (mandatory):</strong> ' + (failed_required_jobs|sort)|join(', ')) -%}{%- endif -%}
-{%- if failed_optional_jobs -%}{%- set _ = gitlab_tooltip_parts.append('<strong style="color: #d73a49;">' ~ failure_optional_icon_html ~ ' Failed (non-mandatory):</strong> ' + (failed_optional_jobs|sort)|join(', ')) -%}{%- endif -%}
-{%- if running_required_jobs -%}{%- set _ = gitlab_tooltip_parts.append('<strong style="color: #dbab09;">⏳ In Progress (mandatory):</strong> ' + (running_required_jobs|sort)|join(', ')) -%}{%- endif -%}
+{%- if failed_required_jobs -%}{%- set _ = gitlab_tooltip_parts.append('<strong style="color: #c83a3a;"><span style="display: inline-flex; align-items: center; justify-content: center; width: 14px; height: 14px; margin-right: 6px; border-radius: 999px; background-color: #c83a3a; color: #ffffff; font-size: 11px; font-weight: 900; line-height: 1;">✗</span>Failed (mandatory):</strong> ' + (failed_required_jobs|sort)|join(', ')) -%}{%- endif -%}
+{%- if failed_optional_jobs -%}{%- set _ = gitlab_tooltip_parts.append('<strong style="color: #c83a3a;">' ~ failure_optional_icon_html ~ ' Failed (non-mandatory):</strong> ' + (failed_optional_jobs|sort)|join(', ')) -%}{%- endif -%}
+{%- if running_required_jobs -%}{%- set _ = gitlab_tooltip_parts.append('<strong style="color: #8c959f;">⏳ In Progress (mandatory):</strong> ' + (running_required_jobs|sort)|join(', ')) -%}{%- endif -%}
 {%- if running_optional_jobs -%}{%- set _ = gitlab_tooltip_parts.append('<strong style="color: #8c959f;">⏳ In Progress (non-mandatory):</strong> ' + (running_optional_jobs|sort)|join(', ')) -%}{%- endif -%}
 {%- if pending_jobs -%}{%- set _ = gitlab_tooltip_parts.append('<strong style="color: #8c959f;">⏸ Pending:</strong> ' + (pending_jobs|sort)|join(', ')) -%}{%- endif -%}
 {%- if canceled_jobs -%}{%- set _ = gitlab_tooltip_parts.append('<strong style="color: #8c959f;">✖️ Canceled:</strong> ' + (canceled_jobs|sort)|join(', ')) -%}{%- endif -%}
@@ -632,9 +632,9 @@ Notes:
 {%- set req_failed = failed_required_jobs|length -%}
 {%- set opt_failed = failed_optional_jobs|length -%}
 {%- set inprog_total = (running_required_jobs|length) + (running_optional_jobs|length) -%}
-{%- if req_failed > 0 -%}{%- if job_counts.success > 0 %} {% endif -%}<span style="color: #d73a49; font-weight: 800; font-size: 12px;" title="Mandatory failures">{{ req_failed }}</span>{{ failure_required_icon_html|safe }}{%- endif -%}
-{%- if opt_failed > 0 -%}{%- if job_counts.success > 0 or req_failed > 0 %} {% endif -%}<span style="color: #f59e0b;" title="Non-mandatory failures">{{ opt_failed }}</span>{{ failure_optional_icon_html|safe }}{%- endif -%}
-{%- if inprog_total > 0 -%}{%- if job_counts.success > 0 or req_failed > 0 or opt_failed > 0 %} {% endif -%}<span style="color: #dbab09;">{{ inprog_total }}</span>{{ in_progress_icon_html|safe }}{%- endif -%}
+{%- if req_failed > 0 -%}{%- if job_counts.success > 0 %} {% endif -%}<span style="color: #c83a3a; font-weight: 800; font-size: 12px;" title="Mandatory failures">{{ req_failed }}</span>{{ failure_required_icon_html|safe }}{%- endif -%}
+{%- if opt_failed > 0 -%}{%- if job_counts.success > 0 or req_failed > 0 %} {% endif -%}<span style="color: #c83a3a;" title="Non-mandatory failures">{{ opt_failed }}</span>{{ failure_optional_icon_html|safe }}{%- endif -%}
+{%- if inprog_total > 0 -%}{%- if job_counts.success > 0 or req_failed > 0 or opt_failed > 0 %} {% endif -%}<span style="color: #8c959f;">{{ inprog_total }}</span>{{ in_progress_icon_html|safe }}{%- endif -%}
 {%- if job_counts.pending > 0 -%}{%- if job_counts.success > 0 or req_failed > 0 or opt_failed > 0 or inprog_total > 0 %} {% endif -%}<span style="color: #8c959f;">{{ job_counts.pending }}</span>{{ pending_icon_html|safe }}{%- endif -%}
 {%- if job_counts.canceled > 0 -%}{%- if job_counts.success > 0 or req_failed > 0 or opt_failed > 0 or inprog_total > 0 or job_counts.pending > 0 %} {% endif -%}<span style="color: #8c959f;">{{ job_counts.canceled }}</span>{{ cancelled_icon_html|safe }}{%- endif -%}
 </span>
@@ -646,8 +646,8 @@ Notes:
 {# Old format or no job details - just show counts without tooltip #}
 <a href="{{ pipeline.web_url }}" target="_blank" style="margin-left: 4px; text-decoration: none; font-weight: 600; font-size: 11px;" title="Click to view pipeline">
 {%- if job_counts.success > 0 -%}<span style="color: #2da44e;">{{ job_counts.success }}</span>{{ success_icon_html|safe }}{%- endif -%}
-{%- if job_counts.failed > 0 -%}{%- if job_counts.success > 0 %} {% endif -%}<span style="color: #d73a49;">{{ job_counts.failed }}</span>{{ failure_required_icon_html|safe }}{%- endif -%}
-{%- if job_counts.running > 0 -%}{%- if job_counts.success > 0 or job_counts.failed > 0 %} {% endif -%}<span style="color: #dbab09;">{{ job_counts.running }}</span>{{ in_progress_icon_html|safe }}{%- endif -%}
+{%- if job_counts.failed > 0 -%}{%- if job_counts.success > 0 %} {% endif -%}<span style="color: #c83a3a;">{{ job_counts.failed }}</span>{{ failure_required_icon_html|safe }}{%- endif -%}
+{%- if job_counts.running > 0 -%}{%- if job_counts.success > 0 or job_counts.failed > 0 %} {% endif -%}<span style="color: #8c959f;">{{ job_counts.running }}</span>{{ in_progress_icon_html|safe }}{%- endif -%}
 {%- if job_counts.pending > 0 -%}{%- if job_counts.success > 0 or job_counts.failed > 0 or job_counts.running > 0 %} {% endif -%}<span style="color: #8c959f;">{{ job_counts.pending }}</span>{{ pending_icon_html|safe }}{%- endif -%}
 {%- if job_counts.canceled > 0 -%}{%- if job_counts.success > 0 or job_counts.failed > 0 or job_counts.running > 0 or job_counts.pending > 0 %} {% endif -%}<span style="color: #8c959f;">{{ job_counts.canceled }}</span>{{ cancelled_icon_html|safe }}{%- endif -%}
 </a>

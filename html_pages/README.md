@@ -2,6 +2,22 @@
 
 This directory contains the **HTML dashboard generators** and shared dashboard UI utilities.
 
+### Directory structure
+
+```
+html_pages/
+├── README.md
+├── common_dashboard.j2
+├── common_dashboard_lib.py
+├── common_github_workflow.py
+├── show_commit_history.j2
+├── show_commit_history.py
+├── show_local_branches.j2
+├── show_local_branches.py
+├── show_local_resources.py
+└── update_html_pages.sh
+```
+
 - **Branches dashboard**: `show_local_branches.py` → **HTML-only**; writes `index.html` under your “nvidia” workspace root
 - **Commit history dashboard**: `show_commit_history.py` → **HTML-only**; writes `index.html` under a Dynamo repo clone (e.g. `dynamo_latest/`)
 - **Resource report**: `show_local_resources.py` (generated from `resource_monitor.sqlite`)

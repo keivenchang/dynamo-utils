@@ -28,6 +28,8 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 from zoneinfo import ZoneInfo
 
+from common_types import CIStatus, MarkerStatus
+
 # Log/snippet detection lives in `common_log_errors.py`.
 
 # ======================================================================================
@@ -354,10 +356,10 @@ FRAMEWORKS = [f.lower() for f in FRAMEWORKS_UPPER]
 FRAMEWORK_NAMES = {"vllm": "VLLM", "sglang": "SGLang", "trtllm": "TensorRT-LLM"}
 
 # Marker file suffixes (shared by build_images.py and show_commit_history.py)
-MARKER_RUNNING = 'RUNNING'
-MARKER_PASSED = 'PASSED'
-MARKER_FAILED = 'FAILED'
-MARKER_KILLED = 'KILLED'
+MARKER_RUNNING = MarkerStatus.RUNNING.value
+MARKER_PASSED = MarkerStatus.PASSED.value
+MARKER_FAILED = MarkerStatus.FAILED.value
+MARKER_KILLED = MarkerStatus.KILLED.value
 
 def normalize_framework(framework: str) -> str:
     """Normalize framework name (e.g. engine name like "vllm") to canonical lowercase form. DEPRECATED: V1/retag only."""
@@ -1490,20 +1492,20 @@ class GHPRCheckRow:
         s = (self.status_raw or "").strip().lower()
         # We normalize GitHub check-run states into gh-like buckets:
         # pass, fail, skipped, cancelled, pending, in_progress, queued, neutral, timed_out, action_required, unknown
-        if s in {"pass", "success"}:
-            return "success"
+        if s in {"pass", CIStatus.SUCCESS.value}:
+            return CIStatus.SUCCESS.value
         # Treat "skipped"/"neutral" as success-like for UI aggregation.
-        if s in {"skipped", "skip", "neutral"}:
-            return "success"
+        if s in {CIStatus.SKIPPED.value, "skip", CIStatus.NEUTRAL.value}:
+            return CIStatus.SUCCESS.value
         if s in {"fail", "failure", "timed_out", "action_required"}:
-            return "failure"
+            return CIStatus.FAILURE.value
         if s in {"in_progress", "running"}:
-            return "in_progress"
+            return CIStatus.IN_PROGRESS.value
         if s in {"pending", "queued"}:
-            return "pending"
+            return CIStatus.PENDING.value
         if s in {"cancelled", "canceled"}:
-            return "cancelled"
-        return "unknown"
+            return CIStatus.CANCELLED.value
+        return CIStatus.UNKNOWN.value
 
 
 @dataclass(frozen=True)
@@ -1588,7 +1590,7 @@ def summarize_pr_check_rows(rows: Iterable[GHPRCheckRow]) -> GitHubChecksSummary
         except Exception:
             continue
 
-        if status == "success":
+        if status == CIStatus.SUCCESS.value:
             if is_req:
                 success_required += 1
                 if name:
@@ -1597,7 +1599,7 @@ def summarize_pr_check_rows(rows: Iterable[GHPRCheckRow]) -> GitHubChecksSummary
                 success_optional += 1
                 if name:
                     names_success_optional.append(name)
-        elif status == "failure":
+        elif status == CIStatus.FAILURE.value:
             if is_req:
                 failure_required += 1
                 if name:
@@ -1606,7 +1608,7 @@ def summarize_pr_check_rows(rows: Iterable[GHPRCheckRow]) -> GitHubChecksSummary
                 failure_optional += 1
                 if name:
                     names_failure_optional.append(name)
-        elif status == "in_progress":
+        elif status == CIStatus.IN_PROGRESS.value:
             if is_req:
                 in_progress_required += 1
                 if name:
@@ -1615,11 +1617,11 @@ def summarize_pr_check_rows(rows: Iterable[GHPRCheckRow]) -> GitHubChecksSummary
                 in_progress_optional += 1
                 if name:
                     names_in_progress_optional.append(name)
-        elif status == "pending":
+        elif status == CIStatus.PENDING.value:
             pending += 1
             if name:
                 names_pending.append(name)
-        elif status == "cancelled":
+        elif status == CIStatus.CANCELLED.value:
             cancelled += 1
             if name:
                 names_cancelled.append(name)
@@ -1713,7 +1715,7 @@ def summarize_check_runs(check_runs: Iterable[Dict[str, Any]]) -> GitHubChecksSu
             continue
 
         # Normalize check-run states into the buckets used by `GHPRCheckRow.status_norm`.
-        if conclusion in {"success", "neutral", "skipped"}:
+        if conclusion in {CIStatus.SUCCESS.value, CIStatus.NEUTRAL.value, CIStatus.SKIPPED.value}:
             if is_req:
                 success_required += 1
                 if name:
@@ -1731,11 +1733,11 @@ def summarize_check_runs(check_runs: Iterable[Dict[str, Any]]) -> GitHubChecksSu
                 failure_optional += 1
                 if name:
                     names_failure_optional.append(name)
-        elif conclusion in {"cancelled", "canceled"}:
+        elif conclusion in {CIStatus.CANCELLED.value, "canceled"}:
             cancelled += 1
             if name:
                 names_cancelled.append(name)
-        elif status_raw in {"in_progress"}:
+        elif status_raw in {CIStatus.IN_PROGRESS.value}:
             if is_req:
                 in_progress_required += 1
                 if name:
@@ -1744,7 +1746,7 @@ def summarize_check_runs(check_runs: Iterable[Dict[str, Any]]) -> GitHubChecksSu
                 in_progress_optional += 1
                 if name:
                     names_in_progress_optional.append(name)
-        elif status_raw in {"queued", "pending"}:
+        elif status_raw in {"queued", CIStatus.PENDING.value}:
             pending += 1
             if name:
                 names_pending.append(name)
@@ -4374,8 +4376,8 @@ class GitHubAPIClient:
             try:
                 res0 = subprocess.run(
                     ["gh", "api", f"repos/{owner}/{repo}/pulls/{prn}", "--jq", ".node_id"],
-                    capture_output=True,
-                    text=True,
+                capture_output=True,
+                text=True,
                     timeout=15,
                     check=False,
                 )
@@ -4468,7 +4470,7 @@ query($owner:String!,$name:String!,$number:Int!,$prid:ID!) {
             except Exception:
                 return set()
         except Exception:
-            return set()
+                return set()
 
     def _required_checks_cache_key(self, owner: str, repo: str, base_ref: str) -> str:
         return f"{owner}/{repo}:required_checks:{str(base_ref or '').strip()}"

@@ -17,13 +17,13 @@ from __future__ import annotations
 import hashlib
 import html
 import re
-from enum import Enum
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from datetime import datetime, timezone
 
 from common import GitHubAPIClient, classify_ci_kind
+from common_types import CIStatus
 
 # ======================================================================================
 # Shared ordering + default-expand policies
@@ -86,7 +86,7 @@ def ci_should_expand_by_default(*, rollup_status: str, has_required_failure: boo
 
     - expand for required failures (red ✗)
     - do NOT auto-expand long/step-heavy jobs by default (even if they have subsections)
-    - do NOT auto-expand for optional failures (⚠), in-progress/pending/cancelled, unknown-only leaves, or all-green trees
+    - do NOT auto-expand for optional failures, in-progress/pending/cancelled, unknown-only leaves, or all-green trees
     """
     if bool(has_required_failure):
         return True
@@ -96,21 +96,15 @@ def ci_should_expand_by_default(*, rollup_status: str, has_required_failure: boo
 # Shared UI snippets
 # ======================================================================================
 
-# Style for the optional pass count in the "REQ+OPT✓" compact CI summary.
+# Shared colors (keep consistent across dashboards).
+COLOR_GREEN = "#2da44e"
+# Slightly deeper than GitHub's default red; still readable and not overly saturated.
+COLOR_RED = "#c83a3a"
+COLOR_GREY = "#8c959f"
+
+# Back-compat: older callsites import this for the optional pass count styling in the compact CI summary.
+# (The current compact rendering no longer uses a "+N" format, but keep the constant to avoid crashes.)
 PASS_PLUS_STYLE = "font-size: 10px; font-weight: 600; opacity: 0.9;"
-
-
-class CIStatus(str, Enum):
-    """Canonical normalized status strings used across dashboards."""
-
-    SUCCESS = "success"
-    FAILURE = "failure"
-    IN_PROGRESS = "in_progress"
-    PENDING = "pending"
-    CANCELLED = "cancelled"
-    SKIPPED = "skipped"
-    NEUTRAL = "neutral"
-    UNKNOWN = "unknown"
 
 
 def compact_ci_summary_html(
@@ -127,10 +121,8 @@ def compact_ci_summary_html(
     """Render the compact CI summary used in the GitHub column (shared across dashboards).
 
     This matches the visual style in `show_commit_history.j2`:
-    - green:  <required><required-success-icon> +<optional><optional-success-icon>
-    - red:    N + required-failure-icon
-    - amber:  N + in-progress-icon
-    - grey:   N + pending-icon / cancelled-icon
+    - order:  ✓(required) N, ✓(optional) N, ✗(required) N, ✗(optional) N, then non-terminal states (grey)
+    - colors: green/red/grey only (no orange)
     """
     sr = int(success_required or 0)
     so = int(success_optional or 0)
@@ -142,36 +134,52 @@ def compact_ci_summary_html(
 
     parts: List[str] = []
 
-    success_total = sr + so
-    if success_total > 0:
-        s = '<span style="color: #2da44e;">'
-        s += f"<strong>{sr}</strong>{status_icon_html(status_norm=CIStatus.SUCCESS.value, is_required=True)}"
-        if so > 0:
-            s += f'<span style="{PASS_PLUS_STYLE}">+{so}</span>{status_icon_html(status_norm=CIStatus.SUCCESS.value, is_required=False)}'
-        s += "</span>"
-        parts.append(s)
+    # Successes (required first, then optional), icon then count.
+    if sr > 0:
+        parts.append(
+            f'<span style="color: {COLOR_GREEN};" title="Passed (required)">'
+            f'{status_icon_html(status_norm=CIStatus.SUCCESS.value, is_required=True)}'
+            f"<strong>{sr}</strong></span>"
+        )
+    if so > 0:
+        parts.append(
+            f'<span style="color: {COLOR_GREEN};" title="Passed (optional)">'
+            f'{status_icon_html(status_norm=CIStatus.SUCCESS.value, is_required=False)}'
+            f"<strong>{so}</strong></span>"
+        )
 
+    # Failures (required first, then optional), icon then count. All failures are red.
     if fr > 0:
         parts.append(
-            f'<span style="color: #d73a49; font-weight: 800; font-size: 12px;" title="Required failures">{fr}</span>'
+            f'<span style="color: {COLOR_RED};" title="Failed (required)">'
             f'{status_icon_html(status_norm=CIStatus.FAILURE.value, is_required=True)}'
+            f"<strong>{fr}</strong></span>"
         )
     if fo > 0:
         parts.append(
-            f'<span style="color: #f59e0b;" title="Optional failures">{fo}</span>'
+            f'<span style="color: {COLOR_RED};" title="Failed (optional)">'
             f'{status_icon_html(status_norm=CIStatus.FAILURE.value, is_required=False)}'
+            f"<strong>{fo}</strong></span>"
         )
+
+    # Non-terminal states: grey (avoid orange).
     if ip > 0:
         parts.append(
-            f'<span style="color: #dbab09;">{ip}</span>{status_icon_html(status_norm=CIStatus.IN_PROGRESS.value, is_required=False)}'
+            f'<span style="color: {COLOR_GREY};" title="In progress">'
+            f'{status_icon_html(status_norm=CIStatus.IN_PROGRESS.value, is_required=False)}'
+            f"<strong>{ip}</strong></span>"
         )
     if pd > 0:
         parts.append(
-            f'<span style="color: #8c959f;">{pd}</span>{status_icon_html(status_norm=CIStatus.PENDING.value, is_required=False)}'
+            f'<span style="color: {COLOR_GREY};" title="Pending">'
+            f'{status_icon_html(status_norm=CIStatus.PENDING.value, is_required=False)}'
+            f"<strong>{pd}</strong></span>"
         )
     if cx > 0:
         parts.append(
-            f'<span style="color: #8c959f;">{cx}</span>{status_icon_html(status_norm=CIStatus.CANCELLED.value, is_required=False)}'
+            f'<span style="color: {COLOR_GREY};" title="Canceled">'
+            f'{status_icon_html(status_norm=CIStatus.CANCELLED.value, is_required=False)}'
+            f"<strong>{cx}</strong></span>"
         )
 
     return " ".join([p for p in parts if str(p or "").strip()])
@@ -803,10 +811,10 @@ def required_badge_html(*, is_required: bool, status_norm: str) -> str:
 
     s = (status_norm or "").strip().lower()
     if s == CIStatus.FAILURE:
-        color = "#d73a49"
+        color = COLOR_RED
         weight = "700"
     elif s == CIStatus.SUCCESS:
-        color = "#2da44e"
+        color = COLOR_GREEN
         weight = "400"
     else:
         color = "#57606a"
@@ -822,10 +830,10 @@ def mandatory_badge_html(*, is_mandatory: bool, status_norm: str) -> str:
 
     s = (status_norm or "").strip().lower()
     if s == CIStatus.FAILURE:
-        color = "#d73a49"
+        color = COLOR_RED
         weight = "700"
     elif s == CIStatus.SUCCESS:
-        color = "#2da44e"
+        color = COLOR_GREEN
         weight = "400"
     else:
         color = "#57606a"
@@ -849,7 +857,7 @@ def status_icon_html(
         # optional successes use a simpler green check (no circle).
         if bool(is_required):
             out = (
-                '<span style="color: #2da44e; display: inline-flex; vertical-align: text-bottom;">'
+                f'<span style="color: {COLOR_GREEN}; display: inline-flex; vertical-align: text-bottom;">'
                 '<svg aria-hidden="true" viewBox="0 0 16 16" version="1.1" width="12" height="12" '
                 'data-view-component="true" class="octicon octicon-check-circle-fill" fill="currentColor">'
                 '<path fill-rule="evenodd" '
@@ -857,7 +865,7 @@ def status_icon_html(
                 "</path></svg></span>"
             )
         else:
-            out = '<span style="color: #2da44e; font-weight: 900;">✓</span>'
+            out = f'<span style="color: {COLOR_GREEN}; font-weight: 900;">✓</span>'
         if bool(warning_present):
             # Descendant failures: show a red X appended to the success icon.
             # - required_failure=True => show the required-failure circle-X
@@ -866,11 +874,11 @@ def status_icon_html(
             if bool(required_failure):
                 out += (
                     '<span style="display: inline-flex; align-items: center; justify-content: center; '
-                    'width: 12px; height: 12px; margin-left: 2px; border-radius: 999px; background-color: #d73a49; '
+                    f'width: 12px; height: 12px; margin-left: 2px; border-radius: 999px; background-color: {COLOR_RED}; '
                     'color: #ffffff; font-size: 10px; font-weight: 900; line-height: 1;">✗</span>'
                 )
             else:
-                out += '<span style="color: #d73a49; font-size: 13px; font-weight: 900; line-height: 1; margin-left: 2px;">✗</span>'
+                out += f'<span style="color: {COLOR_RED}; font-size: 13px; font-weight: 900; line-height: 1; margin-left: 2px;">✗</span>'
         return out
     if s in {CIStatus.SKIPPED, CIStatus.NEUTRAL}:
         # GitHub-like "skipped": grey circle with a slash.
@@ -886,13 +894,13 @@ def status_icon_html(
         if is_required or required_failure:
             return (
                 '<span style="display: inline-flex; align-items: center; justify-content: center; '
-                'width: 12px; height: 12px; border-radius: 999px; background-color: #d73a49; '
+                f'width: 12px; height: 12px; border-radius: 999px; background-color: {COLOR_RED}; '
                 'color: #ffffff; font-size: 10px; font-weight: 900; line-height: 1;">✗</span>'
             )
         # Optional failures: red X, no circle.
-        return '<span style="color: #d73a49; font-weight: 900;">✗</span>'
+        return f'<span style="color: {COLOR_RED}; font-weight: 900;">✗</span>'
     if s == CIStatus.IN_PROGRESS:
-        return '<span style="color: #dbab09;">⏳</span>'
+        return f'<span style="color: {COLOR_GREY};">⏳</span>'
     if s == CIStatus.PENDING:
         return (
             '<span style="display: inline-flex; align-items: center; justify-content: center; '
@@ -1106,7 +1114,7 @@ def _tag_pill_html(*, text: str, monospace: bool = False, kind: str = "category"
     """Render a small tag/pill for inline display next to links.
 
     kind:
-      - "category": orange-ish pill (high-level error category)
+      - "category": light red pill (high-level error category)
       - "command": gray pill (detected command; not the root cause)
     """
     t = (text or "").strip()
@@ -1118,9 +1126,10 @@ def _tag_pill_html(*, text: str, monospace: bool = False, kind: str = "category"
         bg = "#f6f8fa"
         fg = "#57606a"
     else:
-        border = "#d4a72c"
-        bg = "#fff8c5"
-        fg = "#7d4e00"
+        # Error categories: lightly red-tinted pill (avoid yellow/orange).
+        border = "#ffb8b8"
+        bg = "#ffebe9"
+        fg = "#8b1a1a"
     return (
         f' <span style="display: inline-block; vertical-align: baseline; '
         f'border: 1px solid {border}; background: {bg}; color: {fg}; '
@@ -1185,7 +1194,7 @@ def _error_snippet_toggle_html(*, dom_id_seed: str, snippet_text: str) -> str:
         f'<span style="display: block; width: 100%; max-width: 100%; box-sizing: border-box; '
         f'border: 1px solid #d0d7de; background: #f6f8fa; '
         f'border-radius: 6px; padding: 6px 8px; white-space: pre-wrap; overflow-wrap: anywhere; color: #24292f;">'
-        f'<span style="color: #d73a49; font-weight: 700;">Snippet:</span> {shown}'
+        f'<span style="color: {COLOR_RED}; font-weight: 700;">Snippet:</span> {shown}'
         f"</span>"
         f"</span>"
     )
