@@ -514,6 +514,12 @@ def process_file(filename: str) -> None:
         raise
 ```
 
+### 3.5.5 Dynamo-utils dashboards + log categorization
+
+See `dynamo-utils/README.md` (Dashboards / log categorization pitfalls) for the
+session learnings and dashboard-specific gotchas. Keep `.cursorrules` focused on
+coding conventions and mechanical checks.
+
 ### 3.5.4 Testing
 - Framework: pytest
 - Unit tests in tests/ directory

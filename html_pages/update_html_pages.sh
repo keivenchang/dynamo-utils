@@ -162,10 +162,17 @@ RESOURCE_REPORT_LOG="$DAY_LOG_DIR/resource_report.log"
 #   dynamo-utils/cleanup_log_and_docker.sh
 
 run_resource_report() {
-    # Generate resource report HTML (1 day) and prune older DB rows (best-effort; do not fail if DB is missing)
+    # Generate resource report HTML and prune older DB rows (best-effort; do not fail if DB is missing)
     RESOURCE_DB="${RESOURCE_DB:-$HOME/.cache/dynamo-utils/resource_monitor.sqlite}"
     # Output to the top-level nvidia directory so nginx can serve it at /
     RESOURCE_REPORT_HTML="${RESOURCE_REPORT_HTML:-$NVIDIA_HOME/resource_report.html}"
+
+    # Default window is 1 day. In --fast mode, shrink to the last 2 hours (requested) so cron/test
+    # runs are snappier while still showing recent activity.
+    RESOURCE_DAYS="1"
+    if [ "$FAST_TEST" = true ]; then
+        RESOURCE_DAYS="0.0833333"  # 2h / 24h
+    fi
 
     if [ -f "$RESOURCE_DB" ]; then
         echo "$(date '+%Y-%m-%d %H:%M:%S') - Generating resource report" >> "$LOG_FILE"
@@ -173,7 +180,7 @@ run_resource_report() {
         if python3 "$SCRIPT_DIR/show_local_resources.py" \
             --db-path "$RESOURCE_DB" \
             --output "$RESOURCE_REPORT_HTML" \
-            --days 1 \
+            --days "$RESOURCE_DAYS" \
             --prune-db-days 4 \
             --db-checkpoint-truncate \
             --title "keivenc-linux Resource Report" >> "$RESOURCE_REPORT_LOG" 2>&1; then

@@ -818,7 +818,7 @@ class GitUtils(BaseUtils):
 
 
 class DynamoRepositoryUtils(BaseUtils):
-    """Utilities for Dynamo repository operations including Composite Docker SHA (CDS) calculation."""
+    """Utilities for Dynamo repository operations including Image SHA (hash of container/ contents; formerly shown as CDS) calculation."""
 
     def __init__(self, repo_path: Any, dry_run: bool = False, verbose: bool = False):
         """
@@ -921,7 +921,7 @@ class DynamoRepositoryUtils(BaseUtils):
 
     def generate_composite_sha(self, full_hash: bool = False) -> str:
         """
-        Generate Composite Docker SHA (CDS) from container directory files.
+        Generate Image SHA (hash of container/ directory files; formerly shown as CDS).
 
         This creates a SHA256 hash of all relevant files in the container directory,
         excluding documentation, temporary files, etc. This hash can be used to
@@ -972,7 +972,7 @@ class DynamoRepositoryUtils(BaseUtils):
 
         self.logger.debug(f"Hashing {len(files_to_hash)} files from container directory")
 
-        # Calculate Composite Docker SHA (CDS)
+        # Calculate Image SHA (hash of container/ contents; formerly shown as CDS)
         try:
             with tempfile.NamedTemporaryFile(mode='w+b', delete=False) as temp_file:
                 temp_path = Path(temp_file.name)
@@ -990,17 +990,17 @@ class DynamoRepositoryUtils(BaseUtils):
                     with open(temp_path, 'rb') as f:
                         sha_full = hashlib.sha256(f.read()).hexdigest()
                         result = sha_full if full_hash else sha_full[:12]
-                        self.logger.debug(f"Composite Docker SHA: {result}")
+                        self.logger.debug(f"Image SHA: {result}")
                         return result
                 finally:
                     temp_path.unlink(missing_ok=True)
         except Exception as e:
-            self.logger.error(f"Error calculating Composite Docker SHA (CDS): {e}")
+            self.logger.error(f"Error calculating Image SHA (hash of container/ contents): {e}")
             return "ERROR"
 
     def get_stored_composite_sha(self) -> str:
         """
-        Get stored Composite Docker SHA (CDS) from file.
+        Get stored Image SHA (hash of container/ contents; formerly shown as CDS) from file.
 
         Returns:
             Stored SHA string, or empty string if not found
@@ -1008,27 +1008,27 @@ class DynamoRepositoryUtils(BaseUtils):
         sha_file = self.repo_path / ".last_build_composite_sha"
         if sha_file.exists():
             stored = sha_file.read_text().strip()
-            self.logger.debug(f"Found stored Composite Docker SHA (CDS): {stored[:12]}")
+            self.logger.debug(f"Found stored Image SHA: {stored[:12]}")
             return stored
-        self.logger.debug("No stored Composite Docker SHA (CDS) found")
+        self.logger.debug("No stored Image SHA found")
         return ""
 
     def store_composite_sha(self, sha: str) -> None:
         """
-        Store current Composite Docker SHA (CDS) to file.
+        Store current Image SHA (hash of container/ contents; formerly shown as CDS) to file.
 
         Args:
-            sha: Composite Docker SHA (CDS) to store
+            sha: Image SHA (hash of container/ contents) to store
         """
         sha_file = self.repo_path / ".last_build_composite_sha"
         sha_file.write_text(sha)
-        self.logger.info(f"Stored Composite Docker SHA (CDS): {sha[:12]}")
+        self.logger.info(f"Stored Image SHA: {sha[:12]}")
 
     def check_if_rebuild_needed(self, force_run: bool = False) -> bool:
         """
-        Check if rebuild is needed based on Composite Docker SHA (CDS) comparison.
+        Check if rebuild is needed based on Image SHA comparison.
 
-        Compares current Composite Docker SHA (CDS) with stored SHA to determine if
+        Compares current Image SHA with stored SHA to determine if
         container files have changed since last build.
 
         Args:
@@ -1038,35 +1038,35 @@ class DynamoRepositoryUtils(BaseUtils):
             True if rebuild is needed, False otherwise
         """
         self.logger.info("\nChecking if rebuild is needed based on file changes...")
-        self.logger.info(f"Composite Docker SHA file: {self.repo_path}/.last_build_composite_sha")
+        self.logger.info(f"Image SHA file: {self.repo_path}/.last_build_composite_sha")
 
-        # Generate current Composite Docker SHA (CDS) (full hash, not truncated)
+        # Generate current Image SHA (full hash, not truncated)
         current_sha = self.generate_composite_sha(full_hash=True)
         if current_sha in ("NO_CONTAINER_DIR", "NO_FILES", "ERROR"):
-            self.logger.warning(f"Failed to generate Composite Docker SHA (CDS): {current_sha}")
+            self.logger.warning(f"Failed to generate Image SHA: {current_sha}")
             return True  # Assume rebuild needed
 
-        # Get stored Composite Docker SHA (CDS)
+        # Get stored Image SHA
         stored_sha = self.get_stored_composite_sha()
 
         if stored_sha:
             if current_sha == stored_sha:
                 if force_run:
-                    self.logger.info(f"Composite Docker SHA (CDS) unchanged ({current_sha[:12]}) but --force-run specified - proceeding")
+                    self.logger.info(f"Image SHA unchanged ({current_sha[:12]}) but --force-run specified - proceeding")
                     return True
                 else:
-                    self.logger.info(f"Composite Docker SHA (CDS) unchanged ({current_sha[:12]}) - skipping rebuild")
+                    self.logger.info(f"Image SHA unchanged ({current_sha[:12]}) - skipping rebuild")
                     self.logger.info("Use --force-run to force rebuild")
                     return False  # No rebuild needed
             else:
-                self.logger.info("Composite Docker SHA (CDS) changed:")
+                self.logger.info("Image SHA changed:")
                 self.logger.info(f"  Previous: {stored_sha[:12]}")
                 self.logger.info(f"  Current:  {current_sha[:12]}")
                 self.logger.info("Rebuild needed")
                 self.store_composite_sha(current_sha)
                 return True
         else:
-            self.logger.info("No previous Composite Docker SHA (CDS) found - rebuild needed")
+            self.logger.info("No previous Image SHA found - rebuild needed")
             self.store_composite_sha(current_sha)
             return True
 
@@ -5987,7 +5987,7 @@ query($owner:String!,$name:String!,$number:Int!,$prid:ID!) {
                     check_runs = data.get("check_runs", []) if isinstance(data, dict) else []
                     total_count = data.get("total_count", 0) if isinstance(data, dict) else 0
 
-                    # Determine overall status
+                    # Determine overall status (best-effort; used by dashboards).
                     if int(total_count or 0) == 0:
                         status = "null"
                         conclusion = "null"

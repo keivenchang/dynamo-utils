@@ -56,6 +56,44 @@ dynamo-utils/
 
 ---
 
+## Dashboards / log categorization pitfalls (learnings)
+
+Repeated mistakes we hit while iterating on `dynamo-utils/html_pages/*` dashboards and
+`dynamo-utils/common_log_errors.py`:
+
+- **Golden logs + self-test discipline**
+  - After changing categorization/snippet logic, run:
+    - `python3 dynamo-utils/common_log_errors.py --self-test-examples`
+  - If you update the “Category frequency summary”, ensure every category has at least one golden
+    training example in the docstring list.
+  - Golden logs must be preserved: keep them **non-writable**; scans/retrain helpers should not
+    accidentally make them writable.
+
+- **Category naming + canonicalization**
+  - Use canonical category tokens in examples (e.g. `github-lfs-error`, not `github-LFS-error`).
+  - If you rename/add categories, update:
+    - categorization regexes
+    - `CATEGORY_RULES`
+    - suppression rules (e.g. “generic timeout” must not appear when any specific timeout matches)
+    - the docstring examples list
+
+- **Shared logic drift (full log vs snippet)**
+  - Don’t duplicate categorization rules in multiple places. Prefer a single rule table + shared
+    application helper.
+  - If a category exists but never triggers, check it’s actually wired into the shared rule table.
+
+- **Back-compat / imports**
+  - When refactoring shared dashboard libs (e.g. `html_pages/common_dashboard_lib.py`), do NOT delete
+    exported symbols without fixing all importers.
+  - Symptom: `./html_pages/update_html_pages.sh` “runs too quickly” because a generator crashed early
+    (ImportError).
+  - Prefer keeping a small back-compat constant/export over breaking runtime imports.
+
+- **HTML table column collapse**
+  - Don’t `display:none` `<td>` cells to “collapse” a column — it breaks alignment.
+  - Instead, keep the `<td>` and hide its *contents* (wrapper span/div) so the column count stays
+    stable.
+
 ## Key Scripts
 
 ### Build & Development

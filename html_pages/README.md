@@ -196,6 +196,21 @@ This script runs one or more generators and writes outputs via atomic replacemen
 - `update_html_pages.sh` writes per-run logs under `~/nvidia/logs/YYYY-MM-DD/` (when run with `NVIDIA_HOME=~/nvidia`).
 - `dynamo-utils/cron_log.sh` captures stdout/stderr for a job into `~/nvidia/logs/YYYY-MM-DD/<job>.log`.
 
+### Troubleshooting: `update_html_pages.sh` “runs too quickly”
+
+This almost always means **a generator crashed early** (Python exception / ImportError), so the wrapper script exits quickly.
+
+Do this:
+- **Check the per-generator logs** (they usually tell you which script crashed):
+  - `tail -200 html_pages/show_local_branches.log`
+  - `tail -200 html_pages/show_commit_history.log`
+  - `tail -200 html_pages/resource_report.log`
+- **Run the failing generator directly** to see the traceback:
+  - `python3 html_pages/show_local_branches.py --fast`
+  - `python3 html_pages/show_commit_history.py --fast`
+- **Common root cause**: refactors in `common_dashboard_lib.py` removed/renamed an exported symbol that another script still imports.
+  - Fix by updating the importer(s), or by keeping a small back-compat constant/export if appropriate.
+
 ### Typical cron schedule
 
 ```cron

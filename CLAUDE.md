@@ -477,6 +477,9 @@ grep -n "^[[:space:]]\\{0,2\\}<job_name>:" .github/workflows/*.yml
 grep -n "needs:" .github/workflows/<workflow>.yml
 ```
 
+Note: for `html_pages/update_html_pages.sh` operational troubleshooting, keep that documentation in:
+- `dynamo-utils/html_pages/README.md`
+
 =============================================================================
 5. GITHUB OPERATIONS
 =============================================================================

@@ -80,11 +80,30 @@
     .footer details summary {
       cursor: pointer;
       user-select: none;
+      /* Make "Legend & Help" less conspicuous per UX request. */
       font-weight: 600;
-      color: #24292f;
+      font-size: 12px;
+      color: #57606a;
     }
     .footer details summary:hover {
       color: #0969da;
+    }
+    .footer details {
+      color: #57606a;
+      font-size: 12px;
+    }
+
+    /* Legend/Help blocks embedded near the top of dashboards (not the footer). */
+    .legend details summary {
+      cursor: pointer;
+      user-select: none;
+      font-weight: 600;
+      font-size: 12px;
+      color: #57606a;
+    }
+    .legend details {
+      color: #57606a;
+      font-size: 12px;
     }
     .stats-table {
       width: 100%;

@@ -290,6 +290,58 @@ def mark_success_with_descendant_failures(nodes: List[TreeNodeVM]) -> List[TreeN
     return out
 
 
+def expand_nodes_with_required_failure_descendants(nodes: List[TreeNodeVM]) -> List[TreeNodeVM]:
+    """Expand any node that has a REQUIRED failure anywhere in its descendant subtree.
+
+    This is intentionally a *post-pass* so it can run after any logic that mutates/moves nodes
+    (e.g. workflow `jobs.*.needs` grouping).
+
+    Policy:
+    - expand for required failures only (not optional failures)
+    - only affects nodes that have children (expanding leaves is meaningless)
+    """
+    # Use the canonical icon HTML (via status_icon_html) to avoid brittle substring heuristics.
+    _ICON_FAIL_REQ = status_icon_html(status_norm="failure", is_required=True)
+
+    def walk(n: TreeNodeVM) -> Tuple[TreeNodeVM, bool]:
+        # returns: (new_node, has_required_failure_in_subtree)
+        new_children: List[TreeNodeVM] = []
+        child_req = False
+        for ch in (n.children or []):
+            ch2, r = walk(ch)
+            new_children.append(ch2)
+            child_req = child_req or r
+
+        own_req_fail = bool(_ICON_FAIL_REQ in str(n.label_html or ""))
+        has_req = bool(own_req_fail or child_req)
+
+        # Expand this node if it has children and any descendant required-failed.
+        new_default_expanded = bool(n.default_expanded)
+        if bool(new_children) and bool(has_req):
+            new_default_expanded = True
+
+        return (
+            TreeNodeVM(
+                node_key=str(n.node_key or ""),
+                label_html=str(n.label_html or ""),
+                children=new_children,
+                collapsible=bool(n.collapsible),
+                default_expanded=bool(new_default_expanded),
+                triangle_tooltip=n.triangle_tooltip,
+            ),
+            has_req,
+        )
+
+    out: List[TreeNodeVM] = []
+    for n in (nodes or []):
+        try:
+            n2, _ = walk(n)
+            out.append(n2)
+        except Exception:
+            out.append(n)
+    return out
+
+
 def _hash10(s: str) -> str:
     return hashlib.sha1(s.encode("utf-8")).hexdigest()[:10]
 

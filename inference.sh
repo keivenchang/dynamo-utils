@@ -298,6 +298,9 @@ OPTIONS:
     --gpu-mem-fraction FRACTION
                          GPU memory fraction to use (0.0 to 1.0)
                          Default: 0.24 (24% of GPU memory)
+    --enable-prefix-caching
+                         Enable vLLM automatic prefix caching (prefix cache hits)
+                         Default: disabled in this script (uses --no-enable-prefix-caching)
     --lmcache             Enable LMCache KV cache offloading (vLLM only, enabled by default)
     --no-lmcache          Disable LMCache KV cache offloading (vLLM only)
                          Note: LMCache only supported on x86 architecture
@@ -327,6 +330,7 @@ RUN_FRONTEND=false
 RUN_BACKEND=false
 DISAGG_MODE=false
 ENABLE_LMCACHE=true  # Enabled by default for vLLM (can be disabled with --no-lmcache)
+ENABLE_PREFIX_CACHING=false  # vLLM only; default disabled to reduce memory usage
 GPU_MEM_FRACTION_OVERRIDE=""  # Will override defaults if set
 QWEN_MODEL="Qwen/Qwen3-0.6B"
 TINYLLAMA_MODEL="TinyLlama/TinyLlama-1.1B-Chat-v1.0"
@@ -365,6 +369,10 @@ while [[ $# -gt 0 ]]; do
         --gpu-mem-fraction)
             GPU_MEM_FRACTION_OVERRIDE="$2"
             shift 2
+            ;;
+        --enable-prefix-caching)
+            ENABLE_PREFIX_CACHING=true
+            shift
             ;;
         --dryrun|--dry-run)
             DRY_RUN=true
@@ -606,7 +614,12 @@ fi
 # Set framework-specific arguments
 BATCH_SIZE=2
 if [ "$FRAMEWORK" = "vllm" ]; then
-    FRAMEWORK_ARGS="--gpu-memory-utilization $GPU_MEMORY_UTIL_AGG --enforce-eager --no-enable-prefix-caching --max-num-seqs $BATCH_SIZE"
+    if [ "$ENABLE_PREFIX_CACHING" = true ]; then
+        PREFIX_CACHING_ARGS="--enable-prefix-caching"
+    else
+        PREFIX_CACHING_ARGS="--no-enable-prefix-caching"
+    fi
+    FRAMEWORK_ARGS="--gpu-memory-utilization $GPU_MEMORY_UTIL_AGG --enforce-eager $PREFIX_CACHING_ARGS --max-num-seqs $BATCH_SIZE"
     # Add LMCache connector if enabled
     if [ "$ENABLE_LMCACHE" = true ]; then
         FRAMEWORK_ARGS="$FRAMEWORK_ARGS --connector lmcache"
@@ -775,7 +788,12 @@ if [ "$RUN_BACKEND" = true ]; then
 
         # Set framework-specific memory args for disagg mode
         if [ "$FRAMEWORK" = "vllm" ]; then
-            DISAGG_FRAMEWORK_ARGS="--gpu-memory-utilization $GPU_MEMORY_UTIL_DISAGG --enforce-eager --no-enable-prefix-caching --max-num-seqs $BATCH_SIZE"
+            if [ "$ENABLE_PREFIX_CACHING" = true ]; then
+                PREFIX_CACHING_ARGS="--enable-prefix-caching"
+            else
+                PREFIX_CACHING_ARGS="--no-enable-prefix-caching"
+            fi
+            DISAGG_FRAMEWORK_ARGS="--gpu-memory-utilization $GPU_MEMORY_UTIL_DISAGG --enforce-eager $PREFIX_CACHING_ARGS --max-num-seqs $BATCH_SIZE"
             PREFILL_FLAG="--is-prefill-worker"
             DECODE_FLAG=""
 

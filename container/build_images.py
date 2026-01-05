@@ -1078,7 +1078,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--force-run",
         action="store_true",
-        help="Force run even if Composite Docker SHA (CDS) hasn't changed (bypasses lock check)",
+        help="Force run even if Image SHA (hash of container/ contents; formerly shown as CDS) hasn't changed (bypasses lock check)",
     )
 
     # Build options
@@ -2789,7 +2789,7 @@ def main() -> int:
     else:
         logger.info("DynamoDockerBuilder V2 - Starting")
 
-        # Check if rebuild is needed based on Composite Docker SHA (CDS) (container files)
+        # Check if rebuild is needed based on Image SHA (hash of container/ contents; formerly shown as CDS)
         # Only check in non-dry-run mode to avoid writing .last_build_composite_sha
         dynamo_repo_utils = DynamoRepositoryUtils(repo_path)
         if not dynamo_repo_utils.check_if_rebuild_needed(force_run=args.force_run):

@@ -7,62 +7,81 @@ This module is intentionally dependency-light so it can be shared by:
 - `dynamo-utils/html_pages/common_dashboard_lib.py` (HTML rendering for snippets/tags)
 
 Log files to error markers -- training examples:
+Grouped (best-effort) so it’s easier to find the golden log for a given category:
+
+CI / tooling:
+- 59030780729.log => build-status-check-error
+- 58887254616.log => broken-links
+- 57945094461.log => copyright-header-error
+- 59030172010.log => helm-error
+
+Docker:
+- 58861726335.log => network-timeout-https, docker-build-error
+- 58745798050.log => network-download-error, docker-build-error
+- 58818079816.log => github-lfs-error, docker-build-error, !git-fetch
+- 58861639352.log => docker-image-error
+
+Infra / system:
+- 57877945100.log => cuda-error
+- 56700029731.log => etcd-error
+- 57877945085.log => exit-127-cmd-not-found
+- 57521050554.log => exit-139-sigsegv, !huggingface-auth-error
+- 58412373114.log => oom
+
+Network / timeouts:
+- 57930774858.log => network-error
+- 58745798050.log => network-download-error, docker-build-error
+- 57930747559.log => network-timeout-gitlab-mirror
+- 58575902063.log => network-timeout-github-action, !network-timeout-generic
+- 58861726335.log => network-timeout-https, docker-build-error
+- 59386365389.log => network-timeout-https, !broken-links
+- 58572103421.log => network-timeout-kubectl-pods
+- 58463784363.log => network-timeout-kubectl-portforward, !network-timeout-generic
+
+Tests / languages:
+- 58906141961.log => !pytest-error  # success run (passed/skipped), should not be tagged as pytest-error
+- 58097278528.log => pytest-error, !python-error, !huggingface-auth-error
+- 58179788784.log => pytest-error, pytest-timeout-error, !python-error, !huggingface-auth-error
+- 58457161045.log => python-error, !pytest-error, !huggingface-auth-error
+- 58465471934.log => rust-error, !huggingface-auth-error
+
+VLLM/SGLang/TRTLLM backends:
 - 56701494636.log => backend-failure, trtllm-error
 - 57524186105.log => backend-failure, trtllm-error, sglang-error
 - 58471383691.log => vllm-error
-- 58097278528.log => pytest-error, !python-error, !huggingface-auth-error
-- 58179788784.log => pytest-error, pytest-timeout-error, !python-error, !huggingface-auth-error
-- 57521050554.log => exit-139-sigsegv, !huggingface-auth-error
-- 58861726335.log => network-timeout-https, docker-build-error
-- 58818079816.log => github-LFS-error, docker-build-error, !git-fetch
-- 58465471934.log => rust-error, !huggingface-auth-error
-- 58745798050.log => network-download-error, docker-build-error
-- 58887254616.log => broken-links
-- 59030780729.log => build-status-check-error
-- 59030172010.log => helm-error
-- 57945094461.log => copyright-header-error
-- 58906141961.log => !pytest-error  # success run (passed/skipped), should not be tagged as pytest-error
-- 57877945085.log => exit-127-cmd-not-found
-- 58412373114.log => oom
-- 57930747559.log => network-timeout-gitlab-mirror
-- 59386365389.log => network-timeout-https, !broken-links
-- 58457161045.log => python-error, !pytest-error, !huggingface-auth-error
-- 57877945100.log => cuda-error
-- 56700029731.log => etcd-error
-- 57930774858.log => network-error
-- 58861639352.log => docker-image-error
-- 58463784363.log => network-timeout-kubectl-portforward, !network-timeout-generic
-- 58575902063.log => network-timeout-github-action, !network-timeout-generic
+
+HuggingFace auth:
+- 58604176773.log => pytest-error, network-download-error, build-status-check-error, huggingface-auth-error
 
 Category frequency summary (all 713 logs, sorted by occurrence):
-  1. network-timeout-kubectl-pods   209/713 (29.3%) - kubectl wait timeout (pods condition)
-  2. build-status-check-error       195/713 (27.3%) - CI gate checking upstream builds
-  3. pytest-error                   192/713 (26.9%) - Pytest test failures
-  4. python-error                   119/713 (16.7%) - Python exceptions/tracebacks
-  5. exit-127-cmd-not-found          62/713  (8.7%) - Exit code 127 (command not found / missing binary in PATH)
-  6. network-download-error           29/713  (4.1%) - Failed downloads (pip/cargo/curl)
-  7. docker-build-error              24/713  (3.4%) - Docker/BuildKit failures
-  8. network-timeout-gitlab-mirror    23/713  (3.2%) - GitLab mirror sync infra timeout
-  9. cuda-error                      18/713  (2.5%) - CUDA version/driver issues
- 10. huggingface-auth-error          16/713  (2.2%) - HF token/gated model access
- 11. pytest-timeout-error             15/713  (2.1%) - Pytest per-test timeout (pytest-timeout plugin)
- 12. backend-failure                 14/713  (2.0%) - vllm/sglang/trtllm failures
- 13. github-lfs-error                12/713  (1.7%) - Git LFS fetch failures
- 14. etcd-error                      11/713  (1.5%) - Etcd lease/connection issues
- 15. network-error                   11/713  (1.5%) - Network connectivity failures
- 16. docker-image-error              11/713  (1.5%) - Missing Docker images
- 17. oom                              9/713  (1.3%) - Out of memory
- 18. vllm-error                       8/713  (1.1%) - VLLM backend failures
- 19. helm-error                       7/713  (1.0%) - Helm chart failures
- 20. trtllm-error                     6/713  (0.8%) - TensorRT-LLM failures
- 21. network-timeout-https             6/713  (0.8%) - HTTP(S) gateway timeouts + link-checker timeouts
- 22. network-timeout-github-action     5/713  (0.7%) - GitHub Actions step timed out
- 23. broken-links                     3/713  (0.4%) - Dead links in documentation
- 24. sglang-error                     2/713  (0.3%) - SGLang backend failures
- 25. exit-139-sigsegv                 1/713  (0.1%) - Exit code 139 (SIGSEGV / signal 11)
- 26. copyright-header-error           1/713  (0.1%) - Missing copyright headers
- 27. network-timeout-kubectl-portforward  1/713  (0.1%) - kubectl port-forward connect timeout
- 28. rust-error                       1/713  (0.1%) - Cargo test failures
+    1. network-timeout-kubectl-pods        209/713 (29.3%) - kubectl wait timeout (pods condition)
+    2. build-status-check-error            195/713 (27.3%) - CI gate checking upstream builds
+    3. pytest-error                        192/713 (26.9%) - Pytest test failures
+    4. python-error                        119/713 (16.7%) - Python exceptions/tracebacks
+    5. exit-127-cmd-not-found               62/713  (8.7%) - Exit code 127 (command not found / missing binary in PATH)
+    6. network-download-error               29/713  (4.1%) - Failed downloads (pip/cargo/curl)
+    7. docker-build-error                   24/713  (3.4%) - Docker/BuildKit failures
+    8. network-timeout-gitlab-mirror        23/713  (3.2%) - GitLab mirror sync infra timeout
+    9. cuda-error                           18/713  (2.5%) - CUDA version/driver issues
+   10. huggingface-auth-error               16/713  (2.2%) - HF token/gated model access
+   11. pytest-timeout-error                 15/713  (2.1%) - Pytest per-test timeout (pytest-timeout plugin)
+   12. backend-failure                      14/713  (2.0%) - vllm/sglang/trtllm failures
+   13. github-lfs-error                     12/713  (1.7%) - Git LFS fetch failures
+   14. etcd-error                           11/713  (1.5%) - Etcd lease/connection issues
+   15. network-error                        11/713  (1.5%) - Network connectivity failures
+   16. docker-image-error                   11/713  (1.5%) - Missing Docker images
+   17. oom                                   9/713  (1.3%) - Out of memory
+   18. vllm-error                            8/713  (1.1%) - VLLM backend failures
+   19. helm-error                            7/713  (1.0%) - Helm chart failures
+   20. trtllm-error                          6/713  (0.8%) - TensorRT-LLM failures
+   21. network-timeout-https                 6/713  (0.8%) - HTTP(S) gateway timeouts + link-checker timeouts
+   22. network-timeout-github-action         5/713  (0.7%) - GitHub Actions step timed out
+   23. broken-links                          3/713  (0.4%) - Dead links in documentation
+   24. sglang-error                          2/713  (0.3%) - SGLang backend failures
+   25. exit-139-sigsegv                      1/713  (0.1%) - Exit code 139 (SIGSEGV / signal 11)
+   26. copyright-header-error                1/713  (0.1%) - Missing copyright headers
+   27. network-timeout-kubectl-portforward   1/713  (0.1%) - kubectl port-forward connect timeout
+   28. rust-error                            1/713  (0.1%) - Cargo test failures
 
 Golden-log workflow (IMPORTANT for future edits):
 - These example logs are treated as *golden training set* for regression testing. Keep them read-only:
@@ -398,6 +417,25 @@ def _chmod_remove_write_bits(path: Path) -> bool:
         return False
 
 
+def _chmod_add_user_write_bit(path: Path) -> bool:
+    """Best-effort `chmod u+w` for a file.
+
+    Returns True if we successfully *attempted* to update perms (including no-op),
+    False if we couldn't stat/chmod.
+    """
+    try:
+        p = Path(path)
+        st0 = p.stat()
+        new_mode = int(st0.st_mode) | stat.S_IWUSR
+        # Avoid unnecessary chmod syscalls when already user-writable.
+        if int(st0.st_mode) == int(new_mode):
+            return True
+        os.chmod(str(p), int(new_mode))
+        return True
+    except Exception:
+        return False
+
+
 def _scan_all_logs(*, logs_root: Path, tail_bytes: int = 512 * 1024) -> int:
     """Scan a directory of `*.log` files and report categorization + snippet coverage.
 
@@ -405,10 +443,10 @@ def _scan_all_logs(*, logs_root: Path, tail_bytes: int = 512 * 1024) -> int:
     - validates that snippet anchoring finds something in most logs
     - summarizes category frequency (full-log + snippet-derived)
 
-    IMPORTANT POLICY (immutable):
-    - ALL logs are writable/deletable **except** the golden training-example logs.
-    - Therefore this scan MUST NOT chmod any logs. Only the `--self-test-examples` path
-      is allowed to chmod golden logs read-only.
+    Permission policy:
+    - Golden training-example logs must be preserved (non-writable).
+    - All other logs in the directory should be user-writable so they can be edited/cleaned up.
+    - This scan enforces permissions on each `*.log` it touches (best-effort).
     """
     root = Path(logs_root).expanduser().resolve()
     if not root.exists():
@@ -432,6 +470,18 @@ def _scan_all_logs(*, logs_root: Path, tail_bytes: int = 512 * 1024) -> int:
     snippet_found = 0
     no_snippet_samples: List[str] = []
     for p in logs:
+        # Enforce log permissions:
+        # - golden/training logs must remain non-writable
+        # - all other logs should be user-writable (to allow cleanup/editing)
+        try:
+            job_id = str(p.stem or "")
+            if is_golden_log_job_id(job_id):
+                _ = _chmod_remove_write_bits(p)
+            else:
+                _ = _chmod_add_user_write_bit(p)
+        except Exception:
+            pass
+
         txt = _read_text_tail(p, max_bytes=int(tail_bytes))
         lines = (txt or "").splitlines()
 

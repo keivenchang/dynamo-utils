@@ -5,7 +5,7 @@ SPDX-License-Identifier: Apache-2.0
 
 Dynamo Commit History Generator - Standalone Tool
 
-Generates commit history with Composite Docker SHAs (CDS) and Docker image detection.
+Generates commit history with Image SHA (hash of container/ contents; previously shown as CDS) and Docker image detection.
 HTML-only dashboard generator.
 """
 
@@ -105,7 +105,7 @@ _normalize_check_name = normalize_check_name
 _is_required_check_name = is_required_check_name
 
 class CommitHistoryGenerator:
-    """Generate commit history with Composite Docker SHAs (CDS) and Docker images"""
+    """Generate commit history with Image SHA (hash of container/ contents) and Docker images"""
 
     def __init__(
         self,
@@ -202,7 +202,7 @@ class CommitHistoryGenerator:
         logs_dir: Optional[Path] = None,
         export_pipeline_pr_csv: Optional[Path] = None,
     ) -> int:
-        """Show recent commit history with Composite Docker SHAs (CDS)
+        """Show recent commit history with Image SHA (hash of container/ contents; previously shown as CDS)
 
         Args:
             max_commits: Maximum number of commits to show
@@ -225,7 +225,7 @@ class CommitHistoryGenerator:
         # Load cache (commit_history.json in dynamo-utils cache dir)
         # Format: {
         #   "<full_commit_sha>": {
-        #     "composite_docker_sha": "746bc31d05b3",
+        #     "composite_docker_sha": "746bc31d05b3",  # image SHA (hash of container/ contents; formerly shown as CDS)
         #     "author": "John Doe",
         #     "date": "2025-12-17 20:03:39",
         #     "merge_date": "2025-12-17 21:15:30",
@@ -237,7 +237,7 @@ class CommitHistoryGenerator:
         #   ...
         # }
         # Fields:
-        #   - composite_docker_sha: 12-character hash of container/ directory contents
+        #   - composite_docker_sha: 12-character image SHA (hash of container/ directory contents)
         #   - author: Commit author name
         #   - date: Commit timestamp (YYYY-MM-DD HH:MM:SS)
         #   - merge_date: When MR was merged (YYYY-MM-DD HH:MM:SS), null if not found/merged
@@ -278,13 +278,34 @@ class CommitHistoryGenerator:
                 # Fallback: SHA (may restore detached)
                 original_ref = repo.head.commit.hexsha
 
+            _INLINE_TRAILER_RE = re.compile(
+                r"\\s+(signed-off-by|co-authored-by|reviewed-by|tested-by|acked-by|suggested-by|fixes)\\s*:",
+                flags=re.IGNORECASE,
+            )
+
+            def _clean_subject_line(s: str) -> str:
+                """Clean commit subject lines for display.
+
+                Some commits embed trailers like `Signed-off-by:` / `Co-authored-by:` on the *same*
+                line as the subject. For the dashboard we want the human subject only.
+                """
+                # First, take ONLY the first line (Git subject). Some repos/users put trailers on
+                # subsequent lines, and we never want those in the subject display.
+                line = str(s or "").splitlines()[0].strip() if str(s or "") else ""
+                if not line:
+                    return ""
+                m = _INLINE_TRAILER_RE.search(line)
+                if m:
+                    return line[: m.start()].rstrip()
+                return line
+
             # Collect PR numbers for commits (cheap; used for HTML and for pipeline->PR exports).
             pr_to_merge_date: Dict[int, Optional[str]] = {}
             sha_to_pr_number: Dict[str, int] = {}
             pr_to_required_checks: Dict[int, List[str]] = {}
             pr_numbers: List[int] = []
             for commit in commits:
-                message = commit.message.strip().split('\n')[0]
+                message = _clean_subject_line(commit.message)
                 pr_num = GitLabAPIClient.parse_mr_number_from_message(message)
                 if pr_num:
                     pr_numbers.append(pr_num)
@@ -323,7 +344,7 @@ class CommitHistoryGenerator:
                     f"{sum(1 for v in pr_to_required_checks.values() if v)}/{len(set(pr_numbers))} PRs"
                 )
 
-            # Collect commit data
+        # Collect commit data
             commit_data = []
             cache_updated = False
             sha_to_message_first_line: Dict[str, str] = {}
@@ -344,19 +365,41 @@ class CommitHistoryGenerator:
 
                     cached_entry = cache.get(sha_full)
                     merge_date = None
+                    commit_dt_pt = commit.committed_datetime.astimezone(ZoneInfo("America/Los_Angeles"))
+                    date_epoch = int(commit_dt_pt.timestamp())
+                    author_email = ""
 
                     if cached_entry and isinstance(cached_entry, dict):
                         meta_stats["full_hit"] += 1
                         composite_sha = cached_entry['composite_docker_sha']
                         date_str = cached_entry['date']
                         author_name = cached_entry['author']
-                        message_first_line = cached_entry['message']
+                        author_email = str(cached_entry.get("author_email") or "")
+                        message_first_line = _clean_subject_line(cached_entry['message'])
                         merge_date = cached_entry.get('merge_date')
                         full_message = cached_entry['full_message']
                         files_changed = cached_entry['stats']['files']
                         insertions = cached_entry['stats']['insertions']
                         deletions = cached_entry['stats']['deletions']
                         changed_files = cached_entry['changed_files']
+
+                        # Normalize cached subject line if needed.
+                        try:
+                            if str(cached_entry.get("message") or "") != str(message_first_line or "") and message_first_line:
+                                cached_entry["message"] = message_first_line
+                                cache_updated = True
+                        except Exception:
+                            pass
+
+                        # Backfill author_email if missing.
+                        if not author_email:
+                            try:
+                                author_email = str(getattr(commit.author, "email", "") or "")
+                            except Exception:
+                                author_email = ""
+                            if author_email:
+                                cached_entry["author_email"] = author_email
+                                cache_updated = True
 
                         # Backfill merge_date if missing and available.
                         if merge_date is None:
@@ -368,10 +411,13 @@ class CommitHistoryGenerator:
                                     cache_updated = True
                     else:
                         # Cache miss: compute from git
-                        commit_dt_pt = commit.committed_datetime.astimezone(ZoneInfo('America/Los_Angeles'))
                         date_str = commit_dt_pt.strftime('%Y-%m-%d %H:%M:%S')
                         author_name = commit.author.name
-                        message_first_line = commit.message.strip().split('\\n')[0]
+                        try:
+                            author_email = str(getattr(commit.author, "email", "") or "")
+                        except Exception:
+                            author_email = ""
+                        message_first_line = _clean_subject_line(commit.message)
 
                         pr_number = GitLabAPIClient.parse_mr_number_from_message(message_first_line)
                         if pr_number and pr_number in pr_to_merge_date:
@@ -395,6 +441,7 @@ class CommitHistoryGenerator:
                         cache[sha_full] = {
                             'composite_docker_sha': composite_sha,
                             'author': author_name,
+                            'author_email': author_email,
                             'date': date_str,
                             'merge_date': merge_date,
                             'message': message_first_line,
@@ -413,9 +460,11 @@ class CommitHistoryGenerator:
                         'sha_full': sha_full,
                         'composite_sha': composite_sha,
                         'date': date_str,
+                        'date_epoch': date_epoch,
                         'merge_date': merge_date,
                         'committed_datetime': commit.committed_datetime,
                         'author': author_name,
+                        'author_email': author_email,
                         'message': message_first_line,
                         'full_message': full_message,
                         'files_changed': files_changed,
@@ -803,34 +852,20 @@ class CommitHistoryGenerator:
             
             gitlab_images[sha_full] = formatted_imgs
         
-        # Process commit messages for PR links and assign CDS colors
+        # Process commit messages for PR links and prepare Image-SHA alternation state.
         #
-        # CDS badge colors: alternate dark/light for high contrast. We do this per *unique CDS*
-        # encountered in the commit list, so the page alternates visually while keeping a stable
-        # color for each CDS within the page.
-        # Softer greys (requested): alternating light grey / dark grey.
-        # Keep text readable (white on dark, dark on light).
-        dark_cds_bg = "#4b5563"   # gray-600
-        light_cds_bg = "#e5e7eb"  # gray-200
-        dark_cds_fg = "#ffffff"
-        light_cds_fg = "#111827"
-        unique_cds = []
-        seen_cds = set()
-        for commit in commit_data:
-            cds = commit['composite_sha']
-            if cds not in seen_cds:
+        # UX: in the dashboard, the Image SHA badge background alternates per *unique image SHA* so it's easy
+        # to visually scan for groups. The actual hue (green/red/grey) is assigned later, after we
+        # compute local build status (PASS/FAIL/BUILD/UNKNOWN).
+        unique_cds: List[str] = []
+        seen_cds: set[str] = set()
+        for commit in (commit_data or []):
+            cds = str(commit.get("composite_sha", "") or "")
+            if cds and cds not in seen_cds:
                 unique_cds.append(cds)
                 seen_cds.add(cds)
 
-        cds_to_color: Dict[str, str] = {}
-        cds_to_text_color: Dict[str, str] = {}
-        for i, cds in enumerate(unique_cds):
-            if i % 2 == 0:
-                cds_to_color[cds] = dark_cds_bg
-                cds_to_text_color[cds] = dark_cds_fg
-            else:
-                cds_to_color[cds] = light_cds_bg
-                cds_to_text_color[cds] = light_cds_fg
+        cds_to_parity: Dict[str, int] = {cds: (i % 2) for i, cds in enumerate(unique_cds)}
 
         for commit in commit_data:
             # Handle PR links
@@ -852,10 +887,11 @@ class CommitHistoryGenerator:
             else:
                 commit['pr_number'] = sha_to_pr_number.get(commit.get("sha_full", ""))
 
-            # Assign color deterministically based on Composite Docker SHA (CDS)
-            composite_sha = commit['composite_sha']
-            commit['composite_bg_color'] = cds_to_color[composite_sha]
-            commit['composite_text_color'] = cds_to_text_color[composite_sha]
+            composite_sha = str(commit.get("composite_sha", "") or "")
+            commit["cds_parity"] = int(cds_to_parity.get(composite_sha, 0))
+            # Filled in later after local build status is computed.
+            commit["composite_bg_color"] = "#e5e7eb"
+            commit["composite_text_color"] = "#111827"
 
         # Compute fork-points for the last 5 release branches and annotate matching commits.
         # This helps identify "cut points" for release lines (e.g., release/v0.8.0).
@@ -976,14 +1012,14 @@ class CommitHistoryGenerator:
                 # Don't override existing status if we have no information
 
         # Pass 2: Assign status to all commits
-        # Commits with logs get their own status, commits without logs inherit from CDS
+        # Commits with logs get their own status, commits without logs inherit from Image SHA
         build_status = {}
         for commit in commit_data:
             sha_short = commit['sha_short']
             sha_full = commit['sha_full']
             composite_sha = commit['composite_sha']
 
-            # Use per-commit status if available, otherwise inherit from CDS
+            # Use per-commit status if available, otherwise inherit from Image SHA
             if sha_short in commit_to_status:
                 # This commit has its own build logs
                 build_status[sha_short] = {
@@ -991,7 +1027,7 @@ class CommitHistoryGenerator:
                     'inherited': False
                 }
             elif composite_sha in composite_to_status:
-                # Inherit status from CDS
+                # Inherit status from Image SHA
                 build_status[sha_short] = {
                     'status': composite_to_status[composite_sha],
                     'inherited': True
@@ -1006,6 +1042,76 @@ class CommitHistoryGenerator:
             # Note: We do NOT override local build status based on GitLab/GitHub status
             # The status indicator reflects LOCAL builds only (.PASS/.FAIL/.RUNNING markers)
             # GitHub Actions and GitLab pipeline status are shown separately in their own columns
+
+        # Now that local build status is known, color the Image SHA badge accordingly.
+        #
+        # UX request:
+        # - Image SHA badge background is ALWAYS alternating greys (for scan-ability / grouping)
+        # - Image SHA text color indicates status:
+        #   - PASS: alternating greens
+        #   - FAIL: alternating reds
+        #   - no local build data: black (to contrast with the grey)
+        #
+        # Background greys (higher contrast, but still light enough so black text remains readable).
+        grey_bg_a = "#a7b3c7"  # medium grey-blue (more contrasty)
+        grey_bg_b = "#e5e7eb"  # light grey
+
+        # Text colors for PASS/FAIL (single shade; no alternation).
+        green_fg = "#2da44e"
+        red_fg = "#c83a3a"
+        neutral_fg = "#111827"
+
+        # Image status chip colors (alternating shades for scan-ability).
+        # Use a darker + lighter pair for alternating IMAGE:... label backgrounds.
+        green_a = "#238636"  # darker green
+        green_b = "#63d887"  # lighter green
+        red_a = "#c83a3a"    # darker red
+        red_b = "#e06060"    # lighter red
+        grey_a = "#8c959f"   # darker grey
+        grey_b = "#b1bac4"   # lighter grey
+
+        def _fg_for_bg(hex_color: str) -> str:
+            """Pick a readable foreground color for a hex background."""
+            try:
+                s = str(hex_color or "").lstrip("#")
+                if len(s) != 6:
+                    return "#111827"
+                r = int(s[0:2], 16)
+                g = int(s[2:4], 16)
+                b = int(s[4:6], 16)
+                # Relative luminance (rough sRGB).
+                lum = (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255.0
+                return "#ffffff" if lum < 0.55 else "#111827"
+            except Exception:
+                return "#111827"
+
+        for commit in commit_data:
+            try:
+                sha_short = str(commit.get("sha_short", "") or "")
+                st = str((build_status.get(sha_short) or {}).get("status", STATUS_UNKNOWN) or STATUS_UNKNOWN)
+                parity = int(commit.get("cds_parity", 0) or 0)
+                # Background always alternates grey.
+                commit["composite_bg_color"] = grey_bg_a if (parity % 2 == 0) else grey_bg_b
+
+                # IMAGE:... label colors (alternating shades; foreground picked for contrast).
+                if st == STATUS_SUCCESS:
+                    bg = green_a if (parity % 2 == 0) else green_b
+                elif st == STATUS_FAILED:
+                    bg = red_a if (parity % 2 == 0) else red_b
+                else:
+                    bg = grey_a if (parity % 2 == 0) else grey_b
+                commit["image_label_bg_color"] = bg
+                commit["image_label_fg_color"] = _fg_for_bg(bg)
+
+                # Text color encodes status.
+                if st == STATUS_SUCCESS:
+                    commit["composite_text_color"] = green_fg
+                elif st == STATUS_FAILED:
+                    commit["composite_text_color"] = red_fg
+                else:
+                    commit["composite_text_color"] = neutral_fg
+            except Exception:
+                continue
         
         # Generate timestamp (PT)
         generated_time = datetime.now(ZoneInfo('America/Los_Angeles')).strftime('%Y-%m-%d %H:%M:%S %Z')
@@ -1305,6 +1411,7 @@ class CommitHistoryGenerator:
             try:
                 from common_github_workflow import group_ci_nodes_by_workflow_needs  # local import
                 from common_dashboard_lib import mark_success_with_descendant_failures  # local import
+                from common_dashboard_lib import expand_nodes_with_required_failure_descendants  # local import
 
                 children = list(
                     group_ci_nodes_by_workflow_needs(
@@ -1314,6 +1421,9 @@ class CommitHistoryGenerator:
                     or []
                 )
                 children = mark_success_with_descendant_failures(list(children or []))
+                # Post-pass (requested UX): if workflow grouping moved nodes under parents, ensure
+                # any ancestor of a REQUIRED failure is expanded by default.
+                children = expand_nodes_with_required_failure_descendants(list(children or []))
             except Exception:
                 children = [n for (_nm, n) in (node_items or [])]
 

@@ -9,7 +9,8 @@
     background-color: white;
     border: 1px solid #d0d7de;
     border-radius: 4px;
-    overflow: hidden;
+    /* Allow the table to grow wider than the viewport so the *page* can scroll horizontally. */
+    overflow: visible;
 }
 table {
     width: 100%;
@@ -33,12 +34,9 @@ td {
     vertical-align: middle;
     line-height: 1.2;
 }
-/* Make message column single line and flexible */
+/* Message column: do not truncate or add an inner scrollbar; let the page scroll horizontally. */
 td.col-message {
     white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    max-width: 0;
 }
 /* Prevent wrapping in other columns */
 .sha, .date, .author {
@@ -94,6 +92,30 @@ td.col-message {
     font-weight: 500;
 }
 .pr-link:hover {
+    text-decoration: underline;
+}
+.image-sha-text-link {
+    color: #0969da;
+    text-decoration: none;
+    font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
+    font-size: 12px;
+    white-space: nowrap;
+}
+.image-sha-text-link:hover {
+    text-decoration: underline;
+}
+.image-sha-badge {
+    display: inline-block;
+    padding: 0px 4px;
+    border-radius: 4px;
+    font-size: 12px;
+    line-height: 1.4;
+    vertical-align: middle;
+    border: none;
+    text-decoration: none;
+}
+/* Only clickable IMAGE:... should underline on hover. */
+a.image-sha-badge:hover {
     text-decoration: underline;
 }
 .release-forkpoint {
@@ -166,6 +188,7 @@ summary:hover {
 #commits-table.hide-col-gitlab td.col-gitlab,
 #commits-table.hide-col-date td.col-date,
 #commits-table.hide-col-author td.col-author,
+#commits-table.hide-col-email td.col-email,
 #commits-table.hide-col-message td.col-message {
     width: 1% !important;
     max-width: 1px;
@@ -180,6 +203,7 @@ summary:hover {
 #commits-table.hide-col-gitlab td.col-gitlab .col-body,
 #commits-table.hide-col-date td.col-date .col-body,
 #commits-table.hide-col-author td.col-author .col-body,
+#commits-table.hide-col-email td.col-email .col-body,
 #commits-table.hide-col-message td.col-message .col-body {
     display: none;
 }
@@ -189,6 +213,7 @@ summary:hover {
 #commits-table.hide-col-gitlab th.col-gitlab .col-title,
 #commits-table.hide-col-date th.col-date .col-title,
 #commits-table.hide-col-author th.col-author .col-title,
+#commits-table.hide-col-email th.col-email .col-title,
 #commits-table.hide-col-message th.col-message .col-title {
     display: none;
 }
@@ -198,6 +223,7 @@ summary:hover {
 #commits-table.hide-col-gitlab th.col-gitlab,
 #commits-table.hide-col-date th.col-date,
 #commits-table.hide-col-author th.col-author,
+#commits-table.hide-col-email th.col-email,
 #commits-table.hide-col-message th.col-message {
     width: 1% !important;
     padding-right: 6px;
@@ -404,7 +430,89 @@ function initCommitColumnToggles() {
     });
 }
 
-document.addEventListener('DOMContentLoaded', initCommitColumnToggles);
+// Date/Time mode toggle (absolute vs "time ago")
+var _commitDateModeTimer = null;
+
+function _pad2(n) {
+    n = parseInt(n || 0, 10);
+    return (n < 10 ? '0' : '') + String(n);
+}
+
+function _formatAgo(seconds) {
+    var s = Math.max(0, Math.floor(seconds || 0));
+    if (s < 60) {
+        return String(s) + 's ago';
+    }
+    if (s < 3600) {
+        var m = Math.floor(s / 60);
+        var rem = s % 60;
+        return String(m) + 'm ' + _pad2(rem) + 's ago';
+    }
+    if (s < 86400) {
+        var h = Math.floor(s / 3600);
+        var mm = Math.floor((s % 3600) / 60);
+        return String(h) + ':' + _pad2(mm) + ' hrs ago';
+    }
+    var d = Math.floor(s / 86400);
+    var hh = Math.floor((s % 86400) / 3600);
+    return String(d) + 'd ' + String(hh) + 'h ago';
+}
+
+function _updateCommitAges() {
+    var nowSec = Math.floor(Date.now() / 1000);
+    var nodes = document.querySelectorAll('.dt-ago[data-epoch]');
+    nodes.forEach(function(el) {
+        var ep = parseInt(el.getAttribute('data-epoch') || '0', 10);
+        if (!ep) return;
+        el.textContent = _formatAgo(nowSec - ep);
+    });
+}
+
+function applyCommitDateMode(mode, persist) {
+    var m = (mode === 'ago') ? 'ago' : 'abs';
+    var showAgo = (m === 'ago');
+    document.querySelectorAll('.dt-abs').forEach(function(el) { el.style.display = showAgo ? 'none' : ''; });
+    document.querySelectorAll('.dt-ago').forEach(function(el) { el.style.display = showAgo ? '' : 'none'; });
+    if (showAgo) {
+        _updateCommitAges();
+        if (_commitDateModeTimer === null) {
+            // Update frequently so the "ago" labels feel live (similar to the page-age ticker).
+            _commitDateModeTimer = window.setInterval(_updateCommitAges, 5000);
+        }
+    } else {
+        if (_commitDateModeTimer !== null) {
+            window.clearInterval(_commitDateModeTimer);
+            _commitDateModeTimer = null;
+        }
+    }
+    if (persist) {
+        try { localStorage.setItem('commitHistoryDateMode', m); } catch (e) {}
+    }
+}
+
+function toggleCommitDateMode(cb) {
+    applyCommitDateMode(cb && cb.checked ? 'ago' : 'abs', true);
+}
+
+function initCommitDateModeToggle() {
+    var cb = document.querySelector('input.commit-date-mode-toggle');
+    if (!cb) return;
+    // Default: show "ago" unless the user explicitly persisted "abs".
+    var mode = 'abs';
+    try {
+        var saved = localStorage.getItem('commitHistoryDateMode');
+        if (saved === 'ago' || saved === 'abs') {
+            mode = saved;
+        }
+    } catch (e) {}
+    cb.checked = (mode === 'ago');
+    applyCommitDateMode(mode, false);
+}
+
+document.addEventListener('DOMContentLoaded', function() {
+    initCommitColumnToggles();
+    initCommitDateModeToggle();
+});
 
 // copyToClipboard / copyFromClipboardAttr are provided by common_dashboard.j2
 </script>
@@ -421,25 +529,24 @@ document.addEventListener('DOMContentLoaded', initCommitColumnToggles);
 <!-- Key/Help Section -->
 <!-- NOTE: Do NOT use `.container` here; `.container` has a border and looks "boxed".
      Match the branches dashboard legend style (no border/box). -->
-<div style="margin-bottom: 0px; padding: 8px; background-color: #f6f8fa;">
+<div class="legend" style="margin-bottom: 0px; padding: 8px; background-color: #f6f8fa;">
 <details style="margin-top: 0;">
-<summary style="cursor: pointer; font-weight: 600; font-size: 14px; color: #24292f; user-select: none;">
+<summary>
 Legend & Help
 </summary>
-<div style="margin-top: 12px; font-size: 13px; line-height: 1.6;">
+<div style="margin-top: 10px; font-size: 12px; line-height: 1.55;">
 <div style="margin-bottom: 12px;">
 <div style="font-weight: 600; margin-bottom: 6px; color: #24292f;">Icons & Links:</div>
 <ul style="margin: 4px 0; padding-left: 20px;">
-<li><strong>Local Build Status Indicators</strong> - Button appears in Composite Docker SHA column (left of CDS). Click the button to view build logs.
+<li><strong>IMAGE:xxxxxx</strong> - Image SHA: a unique hash representing the exact state of all files in the <code style="background-color: #f6f8fa; padding: 2px 4px; border-radius: 3px;">container/*</code> directory. (Previously shown as CDS.)</li>
+<li><strong>IMAGE:xxxxxx colors</strong> - Local build status for this commit/image:
 <ul style="margin: 2px 0; padding-left: 20px; font-size: 12px;">
-<li><span class="status-indicator status-success" style="display: inline-block; vertical-align: middle;">PASS</span> Green - All builds/compile/sanity passed</li>
-<li><span class="status-indicator status-failed" style="display: inline-block; vertical-align: middle;">FAIL</span> Red - Some builds/compile/sanity failed</li>
-<li><span class="status-indicator status-building" style="display: inline-block; vertical-align: middle;">BUILD</span> Grey - Build in progress</li>
-<li><span class="status-indicator status-unknown" style="display: inline-block; vertical-align: middle;">----</span> Gray - No build status available</li>
-<li><span class="status-indicator status-success-inherited" style="display: inline-block; vertical-align: middle;">PASS</span> Lighter color - Inherited status (no direct build for this commit)</li>
+<li><span class="image-sha-badge" style="background: #238636; color: #ffffff;">IMAGE:xxxxxx</span> Green - All local builds/compile/sanity passed</li>
+<li><span class="image-sha-badge" style="background: #c83a3a; color: #ffffff;">IMAGE:xxxxxx</span> Red - Some local builds/compile/sanity failed</li>
+<li><span class="image-sha-badge" style="background: #8c959f; color: #ffffff;">IMAGE:xxxxxx</span> Gray - Build in progress / no local build status</li>
 </ul>
 </li>
-<li><strong>CDS:xxxxxx</strong> - Composite Docker SHA: a unique hash representing the exact state of all files in the <code style="background-color: #f6f8fa; padding: 2px 4px; border-radius: 3px;">container/*</code> directory. This concept is unique to this dashboard.</li>
+<li><strong>Click IMAGE:xxxxxx</strong> - Opens the latest local build report (when available). <strong>📋</strong> shows build history when multiple reports exist.</li>
 <li><strong>🐳</strong> - Search NVIDIA GitLab Docker registry (appears in Status column)</li>
 <li><strong><svg height="14" width="14" viewBox="0 0 16 16" fill="#24292f" style="display: inline-block; vertical-align: middle;"><path fill-rule="evenodd" clip-rule="evenodd" d="M8 0C3.58 0 0 3.58 0 8C0 11.54 2.29 14.53 5.47 15.59C5.87 15.66 6.02 15.42 6.02 15.21C6.02 15.02 6.01 14.39 6.01 13.72C4 14.09 3.48 13.23 3.32 12.78C3.23 12.55 2.84 11.84 2.5 11.65C2.22 11.5 1.82 11.13 2.49 11.12C3.12 11.11 3.57 11.7 3.72 11.94C4.44 13.15 5.59 12.81 6.05 12.6C6.12 12.08 6.33 11.73 6.56 11.53C4.78 11.33 2.92 10.64 2.92 7.58C2.92 6.71 3.23 5.99 3.74 5.43C3.66 5.23 3.38 4.41 3.82 3.31C3.82 3.31 4.49 3.1 6.02 4.13C6.66 3.95 7.34 3.86 8.02 3.86C8.7 3.86 9.38 3.95 10.02 4.13C11.55 3.09 12.22 3.31 12.22 3.31C12.66 4.41 12.38 5.23 12.3 5.43C12.81 5.99 13.12 6.7 13.12 7.58C13.12 10.65 11.25 11.33 9.47 11.53C9.76 11.78 10.01 12.26 10.01 13.01C10.01 14.08 10 14.94 10 15.21C10 15.42 10.15 15.67 10.55 15.59C13.71 14.53 16 11.53 16 8C16 3.58 12.42 0 8 0Z"></path></svg></strong> - View GitHub Actions logs (appears in Status column)</li>
 <li><strong>🦊</strong> - View commit in NVIDIA GitLab (appears in Status column with CI pipeline info)</li>
@@ -485,11 +592,21 @@ Notes:
 <thead>
 <tr>
 <th>Commit SHA</th>
-<th class="col-composite"><label class="col-toggle"><input class="commit-col-toggle" type="checkbox" checked data-col="composite" onchange="toggleCommitColumn(this)"><span class="col-title">Composite Docker SHA</span></label></th>
-<th class="col-github"><label class="col-toggle"><input class="commit-col-toggle" type="checkbox" checked data-col="github" onchange="toggleCommitColumn(this)"><span class="col-title">GitHub Status</span></label></th>
-<th class="col-gitlab"><label class="col-toggle"><input class="commit-col-toggle" type="checkbox" checked data-col="gitlab" onchange="toggleCommitColumn(this)"><span class="col-title">GitLab Status</span></label></th>
-<th class="col-date"><label class="col-toggle"><input class="commit-col-toggle" type="checkbox" checked data-col="date" onchange="toggleCommitColumn(this)"><span class="col-title">Date/Time (PST)</span></label></th>
+<th class="col-composite"><label class="col-toggle"><input class="commit-col-toggle" type="checkbox" checked data-col="composite" onchange="toggleCommitColumn(this)"><span class="col-title">🐳Image Sha</span></label></th>
+<th class="col-github"><label class="col-toggle"><input class="commit-col-toggle" type="checkbox" checked data-col="github" onchange="toggleCommitColumn(this)"><span class="col-title"><svg height="14" width="14" viewBox="0 0 16 16" fill="currentColor" style="display: inline-block; vertical-align: middle; margin-right: 4px;"><path fill-rule="evenodd" clip-rule="evenodd" d="M8 0C3.58 0 0 3.58 0 8C0 11.54 2.29 14.53 5.47 15.59C5.87 15.66 6.02 15.42 6.02 15.21C6.02 15.02 6.01 14.39 6.01 13.72C4 14.09 3.48 13.23 3.32 12.78C3.23 12.55 2.84 11.84 2.5 11.65C2.22 11.5 1.82 11.13 2.49 11.12C3.12 11.11 3.57 11.7 3.72 11.94C4.44 13.15 5.59 12.81 6.05 12.6C6.12 12.08 6.33 11.73 6.56 11.53C4.78 11.33 2.92 10.64 2.92 7.58C2.92 6.71 3.23 5.99 3.74 5.43C3.66 5.23 3.38 4.41 3.82 3.31C3.82 3.31 4.49 3.1 6.02 4.13C6.66 3.95 7.34 3.86 8.02 3.86C8.7 3.86 9.38 3.95 10.02 4.13C11.55 3.09 12.22 3.31 12.22 3.31C12.66 4.41 12.38 5.23 12.3 5.43C12.81 5.99 13.12 6.7 13.12 7.58C13.12 10.65 11.25 11.33 9.47 11.53C9.76 11.78 10.01 12.26 10.01 13.01C10.01 14.08 10 14.94 10 15.21C10 15.42 10.15 15.67 10.55 15.59C13.71 14.53 16 11.53 16 8C16 3.58 12.42 0 8 0Z"></path></svg>GitHub Status</span></label></th>
+<th class="col-gitlab"><label class="col-toggle"><input class="commit-col-toggle" type="checkbox" checked data-col="gitlab" onchange="toggleCommitColumn(this)"><span class="col-title">🦊 GitLab Status</span></label></th>
+<th class="col-date">
+  <label class="col-toggle">
+    <input class="commit-col-toggle" type="checkbox" checked data-col="date" onchange="toggleCommitColumn(this)">
+    <span class="col-title">PST</span>
+  </label>
+  <label class="col-toggle" style="margin-left: 8px;" title="Toggle absolute time vs time ago">
+    <input class="commit-date-mode-toggle" type="checkbox" onchange="toggleCommitDateMode(this)">
+    <span class="col-title">ago</span>
+  </label>
+</th>
 <th class="col-author"><label class="col-toggle"><input class="commit-col-toggle" type="checkbox" checked data-col="author" onchange="toggleCommitColumn(this)"><span class="col-title">Author</span></label></th>
+<th class="col-email"><label class="col-toggle"><input class="commit-col-toggle" type="checkbox" data-col="email" onchange="toggleCommitColumn(this)"><span class="col-title">Email</span></label></th>
 <th class="col-message"><label class="col-toggle"><input class="commit-col-toggle" type="checkbox" checked data-col="message" onchange="toggleCommitColumn(this)"><span class="col-title">Message</span></label></th>
 </tr>
 </thead>
@@ -501,6 +618,7 @@ Notes:
 {%- set composite_sha = commit.composite_sha -%}
 {%- set date_str = commit.date -%}
 {%- set author = commit.author -%}
+{%- set author_email = commit.author_email | default('') -%}
 {%- set message = commit.message -%}
 {%- set commit_link = "https://github.com/ai-dynamo/dynamo/commit/" ~ sha_full -%}
 {%- set gitlab_commit_link = "https://gitlab-master.nvidia.com/dl/ai-dynamo/dynamo/-/commit/" ~ sha_full -%}
@@ -524,36 +642,33 @@ Notes:
 {%- set has_composite_toggle = has_docker_images or has_gitlab -%}
 {# Expand/collapse triangle MUST be the first element in the cell (greyed out if nothing to expand). #}
 {%- if has_composite_toggle -%}
-<a href="#" class="composite-sha-link" onclick="toggleDockerImages(event, this); return false;" style="text-decoration: none; display: inline-block; width: 1em; text-align: center; margin-right: 4px; color: #0969da; user-select: none;" title="Show Docker images">▶</a>
+<a href="#" class="composite-sha-link" onclick="toggleDockerImages(event, this); return false;" style="text-decoration: none; display: inline-block; width: 1em; text-align: center; margin-right: 2px; color: #0969da; user-select: none;" title="Show Docker images">▶</a>
 {%- else -%}
-<span class="composite-sha-link-placeholder" style="display: inline-block; width: 1em; text-align: center; margin-right: 4px; color: #8c959f; opacity: 0.55; user-select: none;" title="No Docker images">▶</span>
+<span class="composite-sha-link-placeholder" style="display: inline-block; width: 1em; text-align: center; margin-right: 2px; color: #8c959f; opacity: 0.55; user-select: none;" title="No Docker images">▶</span>
 {%- endif -%}
-{# Local build status indicator before CDS #}
+{# Local build status coloring on IMAGE:... label (no extra chip/box). #}
 {%- if log_paths_list -%}
 {# Most recent build (last in list) #}
 {%- set latest_date, latest_path = log_paths_list[-1] -%}
-{%- if status == 'success' -%}
-<a href="{{ latest_path }}" target="_blank" style="text-decoration: none;" title="{%- if inherited -%}Inherited: {%- endif -%}All builds passed - Click to view build logs"><span class="status-indicator status-success{%- if inherited -%}-inherited{%- endif -%}">PASS</span></a>
-{%- elif status == 'failed' -%}
-<a href="{{ latest_path }}" target="_blank" style="text-decoration: none;" title="{%- if inherited -%}Inherited: {%- endif -%}Some builds failed - Click to view build logs"><span class="status-indicator status-failed{%- if inherited -%}-inherited{%- endif -%}">FAIL</span></a>
-{%- elif status == 'building' -%}
-<a href="{{ latest_path }}" target="_blank" style="text-decoration: none;" title="{%- if inherited -%}Inherited: {%- endif -%}Build in progress - Click to view build logs"><span class="status-indicator status-building{%- if inherited -%}-inherited{%- endif -%}">BUILD</span></a>
-{%- elif status == 'unknown' -%}
-<span class="status-indicator status-unknown" title="No build status available">----</span>
+{# UX: IMAGE badge is the link. #}
+{%- set cds_label = "IMAGE:" ~ composite_sha[:6] -%}
+<a href="{{ latest_path }}" target="_blank" class="image-sha-badge" style="background: {{ commit.image_label_bg_color }}; color: {{ commit.image_label_fg_color }};" title="{%- if inherited -%}Inherited: {%- endif -%}{%- if status == 'success' -%}All local builds passed{%- elif status == 'failed' -%}Some local builds failed{%- else -%}Build in progress / no local build status{%- endif -%} - Click to view build logs">{{ cds_label }}</a>
+{# Show history icon if multiple builds exist #}
+{%- if log_paths_list|length > 1 -%}
+<a href="#" onclick="toggleBuildHistory(event, '{{ sha_short }}'); return false;" style="text-decoration: none; margin-left: 2px; font-size: 11px; color: #656d76;" title="Show build history ({{ log_paths_list|length }} builds)">📋</a>
+<div id="build-history-{{ sha_short }}" style="display: none; position: absolute; background: #fff; border: 1px solid #d0d7de; border-radius: 6px; padding: 8px; margin-top: 4px; z-index: 1000; box-shadow: 0 8px 24px rgba(140, 149, 159, 0.2);">
+  <div style="font-weight: 600; font-size: 12px; margin-bottom: 6px; color: #24292f;">Build History</div>
+  {%- for date, path in log_paths_list|reverse -%}
+  <div style="padding: 4px 0;">
+    <a href="{{ path }}" target="_blank" style="color: #0969da; text-decoration: none; font-size: 12px;">{{ date }}</a>{%- if loop.first -%} <span style="color: #656d76; font-size: 11px;">(latest)</span>{%- endif -%}
+  </div>
+  {%- endfor -%}
+</div>
 {%- endif -%}
-<span style="background-color: {{ composite_bg_color }}; color: {{ commit.composite_text_color | default('#24292f') }}; padding: 2px 6px; border-radius: 3px;">CDS:{{ composite_sha[:6] }}</span>{# Show history icon if multiple builds exist #}{%- if log_paths_list|length > 1 -%}<a href="#" onclick="toggleBuildHistory(event, '{{ sha_short }}'); return false;" style="text-decoration: none; margin-left: 2px; font-size: 11px; color: #656d76;" title="Show build history ({{ log_paths_list|length }} builds)">📋</a><div id="build-history-{{ sha_short }}" style="display: none; position: absolute; background: #fff; border: 1px solid #d0d7de; border-radius: 6px; padding: 8px; margin-top: 4px; z-index: 1000; box-shadow: 0 8px 24px rgba(140, 149, 159, 0.2);"><div style="font-weight: 600; font-size: 12px; margin-bottom: 6px; color: #24292f;">Build History</div>{%- for date, path in log_paths_list|reverse -%}<div style="padding: 4px 0;"><a href="{{ path }}" target="_blank" style="color: #0969da; text-decoration: none; font-size: 12px;">{{ date }}</a>{%- if loop.first -%} <span style="color: #656d76; font-size: 11px;">(latest)</span>{%- endif -%}</div>{%- endfor -%}</div>{%- endif -%}
 {%- else -%}
-{# No build logs - show non-clickable status indicators #}
-{%- if status == 'success' -%}
-<span class="status-indicator status-success{%- if inherited -%}-inherited{%- endif -%}" title="{%- if inherited -%}Inherited: {%- endif -%}All builds passed">PASS</span>
-{%- elif status == 'failed' -%}
-<span class="status-indicator status-failed{%- if inherited -%}-inherited{%- endif -%}" title="{%- if inherited -%}Inherited: {%- endif -%}Some builds failed">FAIL</span>
-{%- elif status == 'building' -%}
-<span class="status-indicator status-building{%- if inherited -%}-inherited{%- endif -%}" title="{%- if inherited -%}Inherited: {%- endif -%}Build in progress">BUILD</span>
-{%- elif status == 'unknown' -%}
-<span class="status-indicator status-unknown" title="No build status available">----</span>
-{%- endif -%}
-<span style="background-color: {{ composite_bg_color }}; color: {{ commit.composite_text_color | default('#24292f') }}; padding: 2px 6px; border-radius: 3px;">CDS:{{ composite_sha[:6] }}</span>
+{# No build logs: still render the IMAGE badge (not a link) with the computed status color. #}
+{%- set cds_label = "IMAGE:" ~ composite_sha[:6] -%}
+<span class="image-sha-badge" style="background: {{ commit.image_label_bg_color }}; color: {{ commit.image_label_fg_color }};" title="{%- if inherited -%}Inherited: {%- endif -%}{%- if status == 'success' -%}All local builds passed{%- elif status == 'failed' -%}Some local builds failed{%- else -%}Build in progress / no local build status{%- endif -%}">{{ cds_label }}</span>
 {%- endif -%}
 </span></td>
 </td>
@@ -770,8 +885,14 @@ Notes:
 {%- endif -%}
 </span></td>
 </td>
-<td class="date col-date"><span class="col-body">{{ date_str }}</span></td>
+<td class="date col-date">
+  <span class="col-body">
+    <span class="dt-abs">{{ date_str }}</span>
+    <span class="dt-ago" data-epoch="{{ commit.date_epoch | default(0) }}" style="display: none;"></span>
+  </span>
+</td>
 <td class="author col-author"><span class="col-body">{{ author }}</span></td>
+<td class="col-email"><span class="col-body" style="color: #57606a; font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace; font-size: 12px;">{{ author_email }}</span></td>
 <td class="col-message"><span class="col-body">
 <div class="message">{{ message | safe }}</div>
 {%- if commit.release_forkpoints -%}
@@ -788,7 +909,7 @@ Notes:
 {# GitHub checks tree row (hidden by default) #}
 {%- if commit.github_checks_tree_html -%}
 <tr id="github-tree-row-{{ sha_short }}" style="display: none;">
-<td colspan="7" style="padding: 0; background-color: #ffffff;">
+<td colspan="8" style="padding: 0; background-color: #ffffff;">
 <div style="padding: 0; border-top: 0;">
           <pre style="margin: 0; padding: 0; background: transparent; border: 0; border-radius: 0; overflow: visible; white-space: pre-wrap; overflow-wrap: anywhere; font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace; font-size: 12px; line-height: 1;">{{ commit.github_checks_tree_html | safe }}</pre>
 </div>
@@ -799,7 +920,7 @@ Notes:
 {# GitLab checks tree row (hidden by default) #}
 {%- if commit.gitlab_checks_tree_html -%}
 <tr id="gitlab-tree-row-{{ sha_short }}" style="display: none;">
-<td colspan="7" style="padding: 0; background-color: #ffffff;">
+<td colspan="8" style="padding: 0; background-color: #ffffff;">
 <div style="padding: 0; border-top: 0;">
           <pre style="margin: 0; padding: 0; background: transparent; border: 0; border-radius: 0; overflow: visible; white-space: pre-wrap; overflow-wrap: anywhere; font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace; font-size: 12px; line-height: 1;">{{ commit.gitlab_checks_tree_html | safe }}</pre>
 </div>
@@ -818,7 +939,7 @@ Notes:
 {%- set gitlab_imgs = gitlab_images.get(sha_full, []) -%}
 
 <tr class="docker-images-row" style="display: none;">
-<td colspan="7" style="padding: 0; background-color: #f6f8fa;">
+<td colspan="8" style="padding: 0; background-color: #f6f8fa;">
 <div style="padding: 8px 12px; border-top: 1px solid #d0d7de;">
 <!-- Commit Details Section -->
 <div style="margin-bottom: 12px; padding: 8px; background-color: white; border: 1px solid #d0d7de; border-radius: 4px;">
