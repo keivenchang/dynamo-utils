@@ -16,9 +16,9 @@ CI / tooling:
 - 59030172010.log => helm-error, k8s-error
 
 Docker:
-- 58861726335.log => network-timeout-https, docker-build-error
+- 58861726335.log => network-timeout-https, docker-build-error, !pytest-error
 - 58745798050.log => network-download-error, docker-build-error
-- 58818079816.log => github-lfs-error, docker-build-error, !git-fetch
+- 58818079816.log => github-lfs-error, docker-build-error, !git-fetch, !pytest-error
 - 58861639352.log => docker-image-error
 
 Infra / system:
@@ -35,8 +35,8 @@ Network / timeouts:
 - 58575902063.log => network-timeout-github-action, !network-timeout-generic
 - 58861726335.log => network-timeout-https, docker-build-error
 - 59386365389.log => network-timeout-https, !broken-links
-- 58572103421.log => network-timeout-kubectl-pods, k8s-error
-- 58463784363.log => network-timeout-kubectl-portforward, k8s-error, !network-timeout-generic
+- 58572103421.log => k8s-network-timeout-pod, k8s-error
+- 58463784363.log => k8s-network-timeout-portfwd, k8s-error, !network-timeout-generic
 
 Tests / languages:
 - 58906141961.log => !pytest-error  # success run (passed/skipped), should not be tagged as pytest-error
@@ -55,9 +55,9 @@ HuggingFace auth:
 
 Category frequency summary (all 733 logs, sorted by occurrence):
     1. k8s-error                           306/733 (41.7%) - Kubernetes/kubectl failure signal (cluster-related failures)
-    2. network-timeout-kubectl-pods        209/733 (28.5%) - kubectl wait timeout (pods condition)
-    3. pytest-error                        196/733 (26.7%) - Pytest test failures
-    4. build-status-check-error            195/733 (26.6%) - CI gate checking upstream builds
+    2. k8s-network-timeout-pod            209/733 (28.5%) - kubectl wait timeout (pods condition)
+    3. build-status-check-error            195/733 (26.6%) - CI gate checking upstream builds
+    4. pytest-error                        178/733 (24.3%) - Pytest test failures
     5. python-error                        119/733 (16.2%) - Python exceptions/tracebacks
     6. exit-127-cmd-not-found               62/733  (8.5%) - Exit code 127 (command not found / missing binary in PATH)
     7. network-timeout-gitlab-mirror        33/733  (4.5%) - GitLab mirror sync infra timeout
@@ -82,7 +82,7 @@ Category frequency summary (all 733 logs, sorted by occurrence):
    26. rust-error                            2/733  (0.3%) - Cargo test failures
    27. sglang-error                          2/733  (0.3%) - SGLang backend failures
    28. exit-139-sigsegv                      1/733  (0.1%) - Exit code 139 (SIGSEGV / signal 11)
-   29. network-timeout-kubectl-portforward   1/733  (0.1%) - kubectl port-forward connect timeout
+   29. k8s-network-timeout-portfwd           1/733  (0.1%) - kubectl port-forward connect timeout
 
 Golden-log workflow (IMPORTANT for future edits):
 - These example logs are treated as *golden training set* for regression testing. Keep them read-only:
@@ -199,6 +199,13 @@ _PYTEST_NONZERO_FAIL_OR_ERROR_COUNT_RE: Pattern[str] = re.compile(
     r"\b([1-9]\d*)\s+failed\b|\b([1-9]\d*)\s+errors?\b", re.IGNORECASE
 )
 
+# BuildKit/docker logs often prefix lines with progress markers like:
+#   "#55 ERROR: ..."  or  "41.35 Errors logged to ..."
+# Those can accidentally look like pytest's "N errors" summaries. Strip these prefixes before
+# applying count-based pytest heuristics.
+_BUILDKIT_STEP_PREFIX_RE: Pattern[str] = re.compile(r"^\s*#\d+\s+")
+_BUILDKIT_TIME_PREFIX_RE: Pattern[str] = re.compile(r"^\s*\d+\.\d+\s+")
+
 
 def _has_pytest_failure_signal(lines: Sequence[str]) -> bool:
     """True if a log looks like pytest had failures/errors (not just a successful run summary)."""
@@ -214,7 +221,9 @@ def _has_pytest_failure_signal(lines: Sequence[str]) -> bool:
             if PYTEST_ERROR_FILE_LINE_RE.search(s):
                 return True
             # Summary-style output: only treat non-zero failures/errors as a failure signal.
-            if _PYTEST_NONZERO_FAIL_OR_ERROR_COUNT_RE.search(s):
+            s2 = _BUILDKIT_STEP_PREFIX_RE.sub("", s)
+            s2 = _BUILDKIT_TIME_PREFIX_RE.sub("", s2)
+            if _PYTEST_NONZERO_FAIL_OR_ERROR_COUNT_RE.search(s2):
                 return True
             # Collection errors are always failures.
             if re.search(r"\berror[ \t]+collecting\b", s, flags=re.IGNORECASE):
@@ -875,11 +884,11 @@ def categorize_error_log_lines(lines: Sequence[str]) -> List[str]:
 
         # Kubernetes wait timeouts ("timed out waiting for the condition on pods/...").
         if K8S_PODS_TIMED_OUT_RE.search(text):
-            add("network-timeout-kubectl-pods")
+            add("k8s-network-timeout-pod")
 
         # Kubernetes port-forward failures (portforward.go ... connection timed out).
         if KUBECTL_PORTFORWARD_TIMEOUT_RE.search(text):
-            add("network-timeout-kubectl-portforward")
+            add("k8s-network-timeout-portfwd")
 
         # GitHub Actions step timeout markers.
         if GITHUB_ACTION_STEP_TIMEOUT_RE.search(text):
@@ -1195,8 +1204,8 @@ CATEGORY_RULES: list[tuple[str, Pattern[str]]] = [
     ("cuda-error", re.compile(CUDA_ERROR_RE.pattern, re.IGNORECASE)),
     ("network-timeout-https", re.compile(HTTP_TIMEOUT_RE.pattern, re.IGNORECASE)),
     ("network-timeout-gitlab-mirror", GITLAB_MIRROR_TIMEOUT_RE),
-    ("network-timeout-kubectl-pods", K8S_PODS_TIMED_OUT_RE),
-    ("network-timeout-kubectl-portforward", KUBECTL_PORTFORWARD_TIMEOUT_RE),
+    ("k8s-network-timeout-pod", K8S_PODS_TIMED_OUT_RE),
+    ("k8s-network-timeout-portfwd", KUBECTL_PORTFORWARD_TIMEOUT_RE),
     ("network-timeout-github-action", GITHUB_ACTION_STEP_TIMEOUT_RE),
     ("network-error", re.compile(NETWORK_ERROR_RE.pattern, re.IGNORECASE)),
     ("etcd-error", re.compile(ETCD_ERROR_RE.pattern, re.IGNORECASE)),
