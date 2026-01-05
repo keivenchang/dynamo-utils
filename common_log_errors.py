@@ -13,7 +13,7 @@ CI / tooling:
 - 59030780729.log => build-status-check-error
 - 58887254616.log => broken-links
 - 57945094461.log => copyright-header-error
-- 59030172010.log => helm-error
+- 59030172010.log => helm-error, k8s-error
 
 Docker:
 - 58861726335.log => network-timeout-https, docker-build-error
@@ -35,8 +35,8 @@ Network / timeouts:
 - 58575902063.log => network-timeout-github-action, !network-timeout-generic
 - 58861726335.log => network-timeout-https, docker-build-error
 - 59386365389.log => network-timeout-https, !broken-links
-- 58572103421.log => network-timeout-kubectl-pods
-- 58463784363.log => network-timeout-kubectl-portforward, !network-timeout-generic
+- 58572103421.log => network-timeout-kubectl-pods, k8s-error
+- 58463784363.log => network-timeout-kubectl-portforward, k8s-error, !network-timeout-generic
 
 Tests / languages:
 - 58906141961.log => !pytest-error  # success run (passed/skipped), should not be tagged as pytest-error
@@ -53,35 +53,36 @@ VLLM/SGLang/TRTLLM backends:
 HuggingFace auth:
 - 58604176773.log => pytest-error, network-download-error, build-status-check-error, huggingface-auth-error
 
-Category frequency summary (all 713 logs, sorted by occurrence):
-    1. network-timeout-kubectl-pods        209/713 (29.3%) - kubectl wait timeout (pods condition)
-    2. build-status-check-error            195/713 (27.3%) - CI gate checking upstream builds
-    3. pytest-error                        192/713 (26.9%) - Pytest test failures
-    4. python-error                        119/713 (16.7%) - Python exceptions/tracebacks
-    5. exit-127-cmd-not-found               62/713  (8.7%) - Exit code 127 (command not found / missing binary in PATH)
-    6. network-download-error               29/713  (4.1%) - Failed downloads (pip/cargo/curl)
-    7. docker-build-error                   24/713  (3.4%) - Docker/BuildKit failures
-    8. network-timeout-gitlab-mirror        23/713  (3.2%) - GitLab mirror sync infra timeout
-    9. cuda-error                           18/713  (2.5%) - CUDA version/driver issues
-   10. huggingface-auth-error               16/713  (2.2%) - HF token/gated model access
-   11. pytest-timeout-error                 15/713  (2.1%) - Pytest per-test timeout (pytest-timeout plugin)
-   12. backend-failure                      14/713  (2.0%) - vllm/sglang/trtllm failures
-   13. github-lfs-error                     12/713  (1.7%) - Git LFS fetch failures
-   14. etcd-error                           11/713  (1.5%) - Etcd lease/connection issues
-   15. network-error                        11/713  (1.5%) - Network connectivity failures
-   16. docker-image-error                   11/713  (1.5%) - Missing Docker images
-   17. oom                                   9/713  (1.3%) - Out of memory
-   18. vllm-error                            8/713  (1.1%) - VLLM backend failures
-   19. helm-error                            7/713  (1.0%) - Helm chart failures
-   20. trtllm-error                          6/713  (0.8%) - TensorRT-LLM failures
-   21. network-timeout-https                 6/713  (0.8%) - HTTP(S) gateway timeouts + link-checker timeouts
-   22. network-timeout-github-action         5/713  (0.7%) - GitHub Actions step timed out
-   23. broken-links                          3/713  (0.4%) - Dead links in documentation
-   24. sglang-error                          2/713  (0.3%) - SGLang backend failures
-   25. exit-139-sigsegv                      1/713  (0.1%) - Exit code 139 (SIGSEGV / signal 11)
-   26. copyright-header-error                1/713  (0.1%) - Missing copyright headers
-   27. network-timeout-kubectl-portforward   1/713  (0.1%) - kubectl port-forward connect timeout
-   28. rust-error                            1/713  (0.1%) - Cargo test failures
+Category frequency summary (all 732 logs, sorted by occurrence):
+    1. k8s-error                           428/732 (58.5%) - Kubernetes/kubectl signal (cluster-related failures)
+    2. network-timeout-kubectl-pods        209/732 (28.6%) - kubectl wait timeout (pods condition)
+    3. pytest-error                        196/732 (26.8%) - Pytest test failures
+    4. build-status-check-error            195/732 (26.6%) - CI gate checking upstream builds
+    5. python-error                        119/732 (16.3%) - Python exceptions/tracebacks
+    6. exit-127-cmd-not-found               62/732  (8.5%) - Exit code 127 (command not found / missing binary in PATH)
+    7. network-timeout-gitlab-mirror        33/732  (4.5%) - GitLab mirror sync infra timeout
+    8. network-download-error               29/732  (4.0%) - Failed downloads (pip/cargo/curl)
+    9. docker-build-error                   24/732  (3.3%) - Docker/BuildKit failures
+   10. cuda-error                           18/732  (2.5%) - CUDA version/driver issues
+   11. huggingface-auth-error               16/732  (2.2%) - HF token/gated model access
+   12. pytest-timeout-error                 15/732  (2.0%) - Pytest per-test timeout (pytest-timeout plugin)
+   13. backend-failure                      14/732  (1.9%) - vllm/sglang/trtllm failures
+   14. github-lfs-error                     12/732  (1.6%) - Git LFS fetch failures
+   15. docker-image-error                   11/732  (1.5%) - Missing Docker images
+   16. etcd-error                           11/732  (1.5%) - Etcd lease/connection issues
+   17. network-error                        11/732  (1.5%) - Network connectivity failures
+   18. oom                                   9/732  (1.2%) - Out of memory
+   19. vllm-error                            8/732  (1.1%) - VLLM backend failures
+   20. helm-error                            7/732  (1.0%) - Helm chart failures
+   21. network-timeout-https                 7/732  (1.0%) - HTTP(S) gateway timeouts + link-checker timeouts
+   22. trtllm-error                          6/732  (0.8%) - TensorRT-LLM failures
+   23. network-timeout-github-action         5/732  (0.7%) - GitHub Actions step timed out
+   24. broken-links                          3/732  (0.4%) - Dead links in documentation
+   25. rust-error                            2/732  (0.3%) - Cargo test failures
+   26. sglang-error                          2/732  (0.3%) - SGLang backend failures
+   27. copyright-header-error                1/732  (0.1%) - Missing copyright headers
+   28. exit-139-sigsegv                      1/732  (0.1%) - Exit code 139 (SIGSEGV / signal 11)
+   29. network-timeout-kubectl-portforward   1/732  (0.1%) - kubectl port-forward connect timeout
 
 Golden-log workflow (IMPORTANT for future edits):
 - These example logs are treated as *golden training set* for regression testing. Keep them read-only:
@@ -235,6 +236,8 @@ def _norm_cat(s: str) -> str:
     x = re.sub(r"[^a-z0-9-]+", "-", x)
     x = re.sub(r"-{2,}", "-", x).strip("-")
     # Canonicalize common variants
+    if x in {"k8s"}:
+        return "k8s-error"
     if x in {"github-lfs", "github-lfs"}:
         return "github-lfs-error"
     if x in {"mystery-139-error", "mystery-139"}:
@@ -676,6 +679,10 @@ K8S_PODS_TIMED_OUT_RE: Pattern[str] = re.compile(
     r"\btimed\s*out\s+waiting\s+for\s+the\s+condition\s+on\s+pods/",
     re.IGNORECASE,
 )
+K8S_ERROR_RE: Pattern[str] = re.compile(
+    r"(?:\bkubectl\b|\bkubernetes\b|CrashLoopBackOff|ImagePullBackOff|ErrImagePull)",
+    re.IGNORECASE,
+)
 KUBECTL_PORTFORWARD_TIMEOUT_RE: Pattern[str] = re.compile(
     r"(?:"
     r"\bportforward\.go:\d+\].*\bconnection timed out\b"
@@ -806,6 +813,9 @@ def categorize_error_log_lines(lines: Sequence[str]) -> List[str]:
         # Helm/k8s workflow failures (deploy/cleanup)
         if HELM_ERROR_RE.search(text):
             add("helm-error")
+        # Kubernetes signal (generic) — useful to quickly spot cluster-related failures.
+        if K8S_ERROR_RE.search(text):
+            add("k8s-error")
 
         # CUDA / GPU toolchain
         if CUDA_ERROR_RE.search(t):
@@ -1188,7 +1198,7 @@ CATEGORY_RULES: list[tuple[str, Pattern[str]]] = [
     ("docker-daemon-error-response-error", DOCKER_DAEMON_ERROR_RESPONSE_RE),
     ("docker-cli-error", DOCKER_CLI_ERROR_RE),
     ("docker-image-error", DOCKER_IMAGE_NOT_FOUND_RE),
-    ("k8s", re.compile(r"\bkubectl\b|\bkubernetes\b|CrashLoopBackOff|ImagePullBackOff|ErrImagePull", re.IGNORECASE)),
+    ("k8s-error", re.compile(r"\bkubectl\b|\bkubernetes\b|CrashLoopBackOff|ImagePullBackOff|ErrImagePull", re.IGNORECASE)),
     ("python-error", PYTHON_EXCEPTION_LINE_RE),
     # IMPORTANT: don't tag broken-links just because the tool name "lychee" appears; that causes false positives
     # on timeout-only runs. Require an explicit broken/dead links phrase.
