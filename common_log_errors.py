@@ -63,6 +63,7 @@ Tests / languages:
 - 58179788784.log => pytest-error, pytest-timeout-error, !python-error, !huggingface-auth-error
 - 58457161045.log => python-error, !pytest-error, !huggingface-auth-error
 - 58465471934.log => rust-error, !huggingface-auth-error
+- 59493756549.log => rust-error, !pytest-error
 
 VLLM/SGLang/TRTLLM backends:
 - 56701494636.log => backend-failure, trtllm-error
@@ -246,6 +247,11 @@ def _has_pytest_failure_signal(lines: Sequence[str]) -> bool:
         for raw in (lines or []):
             s = _strip_ts_and_ansi(str(raw or ""))
             if not s:
+                continue
+            # Avoid misclassifying Rust test output as pytest.
+            # Cargo prints summaries like:
+            #   test result: FAILED. 630 passed; 1 failed; ...
+            if re.search(r"^\s*test\s+result:\s+FAILED\.", s, flags=re.IGNORECASE):
                 continue
             # Explicit failing test id lines.
             if PYTEST_FAILED_LINE_RE.search(s):
