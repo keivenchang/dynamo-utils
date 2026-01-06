@@ -86,6 +86,44 @@ DEFAULT_HTML_PATH = "/nvidia/dynamo_ci/logs"
 
 # Global frameworks data cache for HTML reporting (initialized once, updated as tasks run)
 _frameworks_data_cache: Optional[Dict[str, Dict[str, Any]]] = None
+_html_out_file: Optional[Path] = None
+
+
+def _rewrite_html_links_for_repo_root(html_content: str) -> str:
+    """
+    The HTML report is primarily generated for a file living in logs/<date>/, where
+    log links can be simple basenames like "YYYY-MM-DD.<sha>.<task>.log".
+
+    When we also write the same report to repo root (e.g. <repo>/build.html),
+    those basenames must become "logs/<date>/YYYY-MM-DD.<sha>.<task>.log" so they
+    resolve correctly when served from the repo root URL.
+    """
+    # Previous-log links are stored as "../<date>/<file>" (relative to logs/<date>/).
+    # From repo root, those should be "logs/<date>/<file>".
+    html_content = html_content.replace('href="../', 'href="logs/')
+
+    # Current-log links are often stored as just the log filename.
+    # Convert: href="YYYY-MM-DD....log" -> href="logs/YYYY-MM-DD/YYYY-MM-DD....log"
+    return re.sub(
+        r'href="(?P<fname>(?P<d>\d{4}-\d{2}-\d{2})\.[^"]+?\.log)"',
+        r'href="logs/\g<d>/\g<fname>"',
+        html_content,
+    )
+
+
+def _write_html_report_files(html_content: str, primary_html_file: Path) -> None:
+    """
+    Write the HTML report to the primary location (logs/...report.html) and also to
+    an optional secondary location (e.g., <repo>/build.html) if configured.
+    """
+    primary_html_file.write_text(html_content)
+    if _html_out_file is not None:
+        try:
+            _html_out_file.parent.mkdir(parents=True, exist_ok=True)
+            _html_out_file.write_text(_rewrite_html_links_for_repo_root(html_content))
+        except Exception:
+            # Best-effort: don't fail the build if the secondary write fails.
+            pass
 
 
 class TaskStatus(Enum):
@@ -1051,6 +1089,19 @@ def parse_args() -> argparse.Namespace:
         help="Pull latest code from main branch before building",
     )
 
+    # Report generation
+    parser.add_argument(
+        "--generate-html-only",
+        action="store_true",
+        help="Generate the HTML report and exit without running any builds/sanity/compilation",
+    )
+    parser.add_argument(
+        "--html-out",
+        type=Path,
+        default=None,
+        help="Path to write the HTML report (default: <repo-path>/build.html)",
+    )
+
     # Framework and target selection
     parser.add_argument(
         "-f", "--framework",
@@ -1434,7 +1485,7 @@ def execute_task_sequential(
                 use_absolute_urls=False,
             )
             html_file = log_dir / f"{log_date}.{sha}.report.html"
-            html_file.write_text(html_content)
+            _write_html_report_files(html_content, html_file)
             update_report_status_marker(html_file, all_tasks)
         except Exception as e:
             logger.warning(f"Failed to generate HTML report before task execution: {e}")
@@ -1479,7 +1530,7 @@ def execute_task_sequential(
                 use_absolute_urls=False,
             )
             html_file = log_dir / f"{log_date}.{sha}.report.html"
-            html_file.write_text(html_content)
+            _write_html_report_files(html_content, html_file)
             update_report_status_marker(html_file, all_tasks)
         except Exception as e:
             logger.warning(f"Failed to generate incremental HTML report: {e}")
@@ -1563,7 +1614,7 @@ def execute_task_parallel(
                         use_absolute_urls=False,
                     )
                     html_file = log_dir / f"{log_date}.{sha}.report.html"
-                    html_file.write_text(html_content)
+                    _write_html_report_files(html_content, html_file)
                     update_report_status_marker(html_file, all_tasks)
                 except Exception as e:
                     # Silently continue on error to avoid spam
@@ -1630,7 +1681,7 @@ def execute_task_parallel(
                     use_absolute_urls=False,
                 )
                 html_file = log_dir / f"{log_date}.{sha}.report.html"
-                html_file.write_text(html_content)
+                _write_html_report_files(html_content, html_file)
                 update_report_status_marker(html_file, all_tasks)
                 logger.info(f"  Generated final HTML report: {html_file}")
             except Exception as e:
@@ -1765,7 +1816,7 @@ def execute_task_parallel(
                     use_absolute_urls=False,
                 )
                 html_file = log_dir / f"{log_date}.{sha}.report.html"
-                html_file.write_text(html_content)
+                _write_html_report_files(html_content, html_file)
                 update_report_status_marker(html_file, all_tasks)
             except Exception as e:
                 with lock:
@@ -1824,7 +1875,7 @@ def execute_task_parallel(
                     use_absolute_urls=False,
                 )
                 html_file = log_dir / f"{log_date}.{sha}.report.html"
-                html_file.write_text(html_content)
+                _write_html_report_files(html_content, html_file)
                 update_report_status_marker(html_file, all_tasks)
             except Exception as e:
                 with lock:
@@ -2627,12 +2678,100 @@ def main() -> int:
     setup_logging(args.verbose)
 
     logger = logging.getLogger("main")
+    global _frameworks_data_cache
+    global _html_out_file
 
     # Get repository info
     repo_path = args.repo_path.resolve()
     if not repo_path.exists():
         logger.error(f"Repository path does not exist: {repo_path}")
         return 1
+
+    # Validate conflicting flags early
+    if args.pull_latest and args.repo_sha:
+        logger.error("Cannot use --pull-latest and --repo-sha together. They conflict in intent.")
+        return 1
+
+    # HTML-only mode: generate report without running tasks, lockfiles, or rebuild checks
+    if args.generate_html_only:
+        if args.pull_latest:
+            logger.warning("--pull-latest ignored in --generate-html-only mode")
+
+        # Get commit SHA and checkout if needed (consistent with normal mode)
+        try:
+            if git is None:
+                raise RuntimeError("GitPython not installed; cannot resolve repo SHA")
+            repo = git.Repo(repo_path)
+
+            if args.repo_sha:
+                current_sha = repo.head.commit.hexsha[:9]
+                target_sha = args.repo_sha[:9]
+                if current_sha != target_sha:
+                    logger.info(f"Checking out SHA: {args.repo_sha}")
+                    repo.git.checkout(args.repo_sha)
+                sha = repo.head.commit.hexsha[:9]
+            else:
+                sha = repo.head.commit.hexsha[:9]
+        except Exception as e:
+            logger.error(f"Failed to get/checkout commit SHA: {e}")
+            return 1
+
+        # Determine which frameworks to include
+        if args.framework:
+            frameworks: List[str] = []
+            for f in args.framework:
+                frameworks.extend([normalize_framework(fw.strip()) for fw in f.split(',')])
+        else:
+            frameworks = FRAMEWORKS
+
+        # Prepare log dir (used for linking to historical logs + marker discovery)
+        log_date = datetime.now().strftime("%Y-%m-%d")
+        log_dir = repo_path / "logs" / log_date
+        log_dir.mkdir(parents=True, exist_ok=True)
+
+        # Create task graphs (also determines image names and versioning)
+        all_tasks: Dict[str, BaseTask] = {}
+        for framework in frameworks:
+            logger.info(f"Extracting version from build.sh for {framework.upper()}...")
+            try:
+                version = extract_version_from_build_sh(framework, repo_path)
+                logger.info(f"  Version: {version}")
+            except Exception as e:
+                logger.error(f"Failed to extract version for {framework}: {e}")
+                return 1
+            framework_tasks = create_task_graph(framework, sha, repo_path, version=version)
+            all_tasks.update(framework_tasks)
+
+        # Set log_file paths for all tasks (needed for HTML generation)
+        for task_id, task in all_tasks.items():
+            task.set_log_file_path(log_dir, log_date, sha)
+
+        # Initialize frameworks data cache once (loads previous logs and image info)
+        _frameworks_data_cache = initialize_frameworks_data_cache(
+            all_tasks=all_tasks,
+            log_dir=log_dir,
+            date_str=log_date,
+            sha=sha,
+            repo_path=repo_path,
+            use_absolute_urls=False,
+        )
+
+        # Generate and write HTML report
+        html_content = generate_html_report(
+            all_tasks=all_tasks,
+            repo_path=repo_path,
+            sha=sha,
+            log_dir=log_dir,
+            date_str=log_date,
+            use_absolute_urls=False,
+        )
+
+        html_out = args.html_out if args.html_out is not None else (repo_path / "build.html")
+        html_out.parent.mkdir(parents=True, exist_ok=True)
+        # html_out is typically written to repo root; rewrite links so log URLs resolve.
+        html_out.write_text(_rewrite_html_links_for_repo_root(html_content))
+        logger.info(f"HTML report written: {html_out}")
+        return 0
 
     # Check for lock file to prevent concurrent runs
     lock_file = repo_path / ".build_images.lock"
@@ -2673,11 +2812,6 @@ def main() -> int:
             except:
                 pass
     atexit.register(cleanup_lock)
-
-    # Validate conflicting flags
-    if args.pull_latest and args.repo_sha:
-        logger.error("Cannot use --pull-latest and --repo-sha together. They conflict in intent.")
-        return 1
 
     # Pull latest code if requested
     if args.pull_latest:
@@ -2799,6 +2933,10 @@ def main() -> int:
     # Track overall execution time
     execution_start_time = time.time()
 
+    # Keep a stable "latest report" output path updated during execution
+    # (defaults to <repo-path>/build.html)
+    _html_out_file = args.html_out if args.html_out is not None else (repo_path / "build.html")
+
     # Setup log directory: logs/YYYY-MM-DD/ (skip in dry-run)
     if not args.dry_run:
         log_date = datetime.now().strftime("%Y-%m-%d")
@@ -2833,7 +2971,6 @@ def main() -> int:
             task.set_log_file_path(log_dir, log_date, sha)
 
         # Initialize frameworks data cache once (this loads previous logs and image info)
-        global _frameworks_data_cache
         _frameworks_data_cache = initialize_frameworks_data_cache(
             all_tasks=all_tasks,
             log_dir=log_dir,
@@ -2938,7 +3075,7 @@ def main() -> int:
                     use_absolute_urls=False,
                 )
                 html_file = log_dir / f"{log_date}.{sha}.report.html"
-                html_file.write_text(html_content)
+                _write_html_report_files(html_content, html_file)
                 update_report_status_marker(html_file, all_tasks)
                 logger.info(f"  Generated final HTML report: {html_file}")
             except Exception as e:
@@ -3062,7 +3199,7 @@ def main() -> int:
 
             # Always save HTML file
             html_file = log_dir / f"{log_date}.{sha}.report.html"
-            html_file.write_text(html_content_file)
+            _write_html_report_files(html_content_file, html_file)
 
             # Create status marker file for the report
             update_report_status_marker(html_file, all_tasks)
