@@ -1127,9 +1127,9 @@ def parse_args() -> argparse.Namespace:
         help="Show what would be executed without running commands",
     )
     parser.add_argument(
-        "--force-run",
+        "--run-ignore-lock",
         action="store_true",
-        help="Force run even if Image SHA (hash of container/ contents; formerly shown as CDS) hasn't changed (bypasses lock check)",
+        help="Run-ignore-lock: force run even if Image SHA (hash of container/ contents; formerly shown as CDS) hasn't changed (bypasses lock check)",
     )
 
     # Build options
@@ -2926,7 +2926,7 @@ def main() -> int:
         # Check if rebuild is needed based on Image SHA (hash of container/ contents; formerly shown as CDS)
         # Only check in non-dry-run mode to avoid writing .last_build_composite_sha
         dynamo_repo_utils = DynamoRepositoryUtils(repo_path)
-        if not dynamo_repo_utils.check_if_rebuild_needed(force_run=args.force_run):
+        if not dynamo_repo_utils.check_if_rebuild_needed(force_run=bool(getattr(args, "run_ignore_lock", False))):
             logger.info("✅ No rebuild needed - exiting")
             return 0
 

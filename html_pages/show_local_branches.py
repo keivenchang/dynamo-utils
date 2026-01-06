@@ -21,6 +21,7 @@ import urllib.parse
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+import functools
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Set, Tuple
 from zoneinfo import ZoneInfo
@@ -105,19 +106,29 @@ class RawLogValidationError(RuntimeError):
 # Small HTML helpers
 #
 
-_COPY_ICON_SVG = (
-    '<svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor" '
-    'style="display: inline-block; vertical-align: middle;">'
-    '<path d="M0 6.75C0 5.784.784 5 1.75 5h1.5a.75.75 0 0 1 0 1.5h-1.5a.25.25 0 0 0-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 0 0 .25-.25v-1.5a.75.75 0 0 1 1.5 0v1.5A1.75 1.75 0 0 1 9.25 16h-7.5A1.75 1.75 0 0 1 0 14.25Z"></path>'
-    '<path d="M5 1.75C5 .784 5.784 0 6.75 0h7.5C15.216 0 16 .784 16 1.75v7.5A1.75 1.75 0 0 1 14.25 11h-7.5A1.75 1.75 0 0 1 5 9.25Zm1.75-.25a.25.25 0 0 0-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 0 0 .25-.25v-7.5a.25.25 0 0 0-.25-.25Z"></path>'
-    "</svg>"
-)
-
 _COPY_BTN_STYLE = (
     "padding: 1px 4px; font-size: 10px; line-height: 1; background-color: transparent; color: #57606a; "
     "border: 1px solid #d0d7de; border-radius: 5px; cursor: pointer; display: inline-flex; "
     "align-items: center; vertical-align: baseline; margin-right: 4px;"
 )
+
+
+@functools.lru_cache(maxsize=1)
+def _copy_icon_svg(*, size_px: int = 12) -> str:
+    """Return the shared 'copy' icon SVG (2-squares), sourced from copy_icon_paths.svg."""
+    try:
+        p = (Path(__file__).resolve().parent / "copy_icon_paths.svg").resolve()
+        paths = p.read_text(encoding="utf-8").strip()
+    except Exception:
+        paths = ""
+    return (
+        f'<svg width="{int(size_px)}" height="{int(size_px)}" viewBox="0 0 16 16" fill="currentColor" '
+        f'style="display: inline-block; vertical-align: middle;">{paths}</svg>'
+    )
+
+
+# Keep a module-level constant for existing call sites / template rendering.
+_COPY_ICON_SVG = _copy_icon_svg(size_px=12)
 
 
 def _format_epoch_pt(epoch_s: Optional[int]) -> Optional[str]:

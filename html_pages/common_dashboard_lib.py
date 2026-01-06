@@ -202,6 +202,8 @@ class TreeNodeVM:
     - collapsible: if True, render a triangle placeholder (▶/▼) and allow toggling children.
     - default_expanded: initial state for collapsible nodes.
     - triangle_tooltip: optional title for the triangle element.
+    - noncollapsible_icon: optional icon for non-collapsible nodes (keeps alignment with triangles).
+      Supported values: "square" (renders ■). Default: "" (renders a blank placeholder).
     - node_key: a stable key for the logical node (used for debugging/caching, not DOM ids).
     """
 
@@ -211,6 +213,7 @@ class TreeNodeVM:
     collapsible: bool = False
     default_expanded: bool = False
     triangle_tooltip: Optional[str] = None
+    noncollapsible_icon: str = ""
 
 
 def _dom_id_from_node_key(node_key: str) -> str:
@@ -299,6 +302,7 @@ def mark_success_with_descendant_failures(nodes: List[TreeNodeVM]) -> List[TreeN
             collapsible=bool(n.collapsible),
             default_expanded=bool(n.default_expanded),
             triangle_tooltip=n.triangle_tooltip,
+            noncollapsible_icon=getattr(n, "noncollapsible_icon", ""),
         )
 
         return new_node, (own_req_fail or child_req), (own_opt_fail or child_opt)
@@ -348,6 +352,7 @@ def expand_nodes_with_required_failure_descendants(nodes: List[TreeNodeVM]) -> L
                 collapsible=bool(n.collapsible),
                 default_expanded=bool(new_default_expanded),
                 triangle_tooltip=n.triangle_tooltip,
+                noncollapsible_icon=getattr(n, "noncollapsible_icon", ""),
             ),
             has_req,
         )
@@ -394,6 +399,7 @@ def expand_nodes_with_in_progress_descendants(nodes: List[TreeNodeVM]) -> List[T
                 collapsible=bool(n.collapsible),
                 default_expanded=bool(new_default_expanded),
                 triangle_tooltip=n.triangle_tooltip,
+                noncollapsible_icon=getattr(n, "noncollapsible_icon", ""),
             ),
             has_ip,
         )
@@ -469,6 +475,14 @@ def _triangle_html(
 
 def _triangle_placeholder_html() -> str:
     return '<span style="display: inline-block; width: 12px; margin-right: 2px;"></span>'
+
+
+def _noncollapsible_icon_html(icon: str) -> str:
+    """Render a fixed-width icon placeholder for non-collapsible nodes (keeps alignment)."""
+    s = str(icon or "").strip().lower()
+    if s == "square":
+        return '<span style="display: inline-block; width: 12px; margin-right: 2px; color: #57606a; user-select: none;">■</span>'
+    return _triangle_placeholder_html()
 
 
 def render_tree_pre_lines(root_nodes: List[TreeNodeVM]) -> List[str]:
@@ -569,7 +583,7 @@ def render_tree_pre_lines(root_nodes: List[TreeNodeVM]) -> List[str]:
             else:
                 tri = _triangle_placeholder_html()
         else:
-            tri = ""
+            tri = _noncollapsible_icon_html(getattr(node, "noncollapsible_icon", ""))
 
         line = (node.label_html or "").strip()
         if line:
@@ -1410,7 +1424,7 @@ def _error_snippet_toggle_html(*, dom_id_seed: str, snippet_text: str) -> str:
         f'<span id="{html.escape(err_id, quote=True)}" style="display: none;">'
         f"<br>"
         # Full-width snippet box (within the <pre> container) so it expands to available screen width.
-        f'<span style="display: block; width: 100%; max-width: 100%; box-sizing: border-box; '
+        f'<span style="display: block; width: 100%; max-width: 100%; box-sizing: border-box; margin-left: 16px; '
         f'border: 1px solid #d0d7de; background: #f6f8fa; '
         f'border-radius: 6px; padding: 6px 8px; white-space: pre-wrap; overflow-wrap: anywhere; color: #24292f;">'
         f'<span style="display: flex; align-items: center; justify-content: flex-start; margin-bottom: 4px;">'

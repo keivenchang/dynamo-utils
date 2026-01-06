@@ -382,7 +382,8 @@
       document.body.removeChild(textArea);
       if (successful && button) {
         var originalHTML = button.innerHTML;
-        var icon = '{{ copy_icon_svg | default("", true) | safe }}';
+        // copy_icon_svg is HTML and may contain newlines/quotes; encode as JSON to avoid breaking JS parsing.
+        var icon = {{ copy_icon_svg | default("") | tojson }};
         button.innerHTML = (icon ? icon : '') + '<span style="margin-left: 6px;">Copied!</span>';
         setTimeout(function() { button.innerHTML = originalHTML; }, 2000);
       }
@@ -809,27 +810,31 @@
     });
 
     // ====================================================================================
-    // Sleep/wake fault-tolerant auto-refresh (replaces meta refresh)
+    // Sleep/wake fault-tolerant "reload only if new file" checker (replaces meta refresh)
     //
-    // Problem: meta-refresh does a full navigation. If the machine sleeps and the server/DNS
-    // is temporarily unreachable on wake, the tab can land on the browser's "site can't be reached"
-    // error page and won't auto-recover.
+    // Requirement:
+    // - Poll every 30 seconds.
+    // - Only reload when the underlying HTML file changed on the server (ETag / Last-Modified).
+    // - Tolerate sleep/wake + transient disconnects (keep page; retry).
     //
-    // Approach: periodically attempt a lightweight fetch to the current URL (cache-busted).
-    // - If reachable: reload the page normally.
-    // - If unreachable: keep the current rendered page and retry with backoff.
-    // - Also re-check quickly after wake (detected via timer gap) and when the tab becomes visible.
+    // Note: dashboard URLs often include query/hash for view state; we intentionally probe the
+    // *path* only (same file), then reload the full current URL to preserve view state.
     // ====================================================================================
     (function() {
-      var refreshSeconds = Number('{{ refresh_seconds | default(300) }}' || '0');
-      if (!isFinite(refreshSeconds) || refreshSeconds <= 0) return;
-
-      var baseDelayMs = Math.max(5, refreshSeconds) * 1000;
+      var checkIntervalMs = 30000;
       var retryMs = 2000;
       var maxRetryMs = 60000;
       var retryTimer = null;
       var scheduledTimer = null;
       var lastTick = Date.now();
+      var lastPathname = String(window.location && window.location.pathname || "");
+      var lastEtag = "";
+      var lastLastModified = "";
+      var lastContentLength = "";
+      var hasBaseline = false;
+
+      // Intentionally do NOT compare Last-Modified to generated_time on load.
+      // That heuristic can cause reload loops when time parsing differs or clocks drift.
 
       function _ensureBanner() {
         var el = document.getElementById('auto-refresh-banner');
@@ -869,83 +874,119 @@
         lastTick = now;
         // If timers were paused (sleep), re-check quickly after wake.
         if (delta > 30000) {
-          _attemptReloadSoon(250);
+          _attemptCheckSoon(250);
         }
       }
 
-      function _buildPingUrl() {
+      function _buildProbeUrl() {
         try {
-          var u = new URL(window.location.href);
-          u.hash = '';
-          u.searchParams.set('__ping', String(Date.now()));
+          // Probe the file at the current path (ignore query/hash which are UI state).
+          var u = new URL(window.location.origin + window.location.pathname);
+          u.searchParams.set('__probe', String(Date.now()));
           return u.toString();
         } catch (e) {
           return String(window.location.href || '');
         }
       }
 
-      function _pingOnce() {
-        var url = _buildPingUrl();
+      function _probeOnce() {
+        var url = _buildProbeUrl();
         // Prefer HEAD (cheap), but fallback to GET if the server doesn't allow it.
         return fetch(url, { method: 'HEAD', cache: 'no-store', credentials: 'same-origin' })
           .then(function(resp) {
             if (resp && (resp.status === 405 || resp.status === 501)) {
               return fetch(url, { method: 'GET', cache: 'no-store', credentials: 'same-origin' })
-                .then(function(r2) { return !!(r2 && r2.ok); })
-                .catch(function() { return false; });
+                .then(function(r2) { return r2; })
+                .catch(function() { return null; });
             }
-            return !!(resp && resp.ok);
+            return resp;
           })
-          .catch(function() { return false; });
+          .catch(function() { return null; });
       }
 
-      function _attemptReloadSoon(ms) {
+      function _attemptCheckSoon(ms) {
         try { if (retryTimer) window.clearTimeout(retryTimer); } catch (e) {}
-        retryTimer = window.setTimeout(_attemptReload, Math.max(0, Number(ms || 0)));
+        retryTimer = window.setTimeout(_attemptCheck, Math.max(0, Number(ms || 0)));
       }
 
-      function _scheduleNextNormalRefresh() {
+      function _scheduleNextNormalCheck() {
         try { if (scheduledTimer) window.clearTimeout(scheduledTimer); } catch (e) {}
-        scheduledTimer = window.setTimeout(function() { _attemptReloadSoon(0); }, baseDelayMs);
+        scheduledTimer = window.setTimeout(function() { _attemptCheckSoon(0); }, checkIntervalMs);
       }
 
-      function _attemptReload() {
+      function _attemptCheck() {
+        // If the URL changed (SPA-style or manual), reset validators.
+        try {
+          var pn = String(window.location && window.location.pathname || "");
+          if (pn && pn !== lastPathname) {
+            lastPathname = pn;
+            lastEtag = "";
+            lastLastModified = "";
+            lastContentLength = "";
+          }
+        } catch (e) {}
+
         // Don't churn hidden tabs; we'll refresh when visible again.
         if (document.hidden) {
-          _scheduleNextNormalRefresh();
+          _scheduleNextNormalCheck();
           return;
         }
         // If we know we're offline, keep the page and retry.
         try {
           if (navigator && navigator.onLine === false) {
             _setBanner('Disconnected (offline). Keeping this page; retrying…');
-            retryMs = Math.min(maxRetryMs, Math.floor(retryMs * 1.6));
-            _attemptReloadSoon(retryMs);
+            _scheduleNextNormalCheck();
             return;
           }
         } catch (e) {}
 
-        _pingOnce().then(function(ok) {
-          if (ok) {
-            _hideBanner();
-            retryMs = 2000;
+        _probeOnce().then(function(resp) {
+          if (!(resp && resp.ok)) {
+            _setBanner('Disconnected (server unreachable). Keeping this page; retrying…');
+            _scheduleNextNormalCheck();
+            return;
+          }
+
+          _hideBanner();
+          retryMs = 2000;
+
+          // Compare validators.
+          var etag = '';
+          var lm = '';
+          var cl = '';
+          try { etag = String(resp.headers.get('etag') || ''); } catch (e) { etag = ''; }
+          try { lm = String(resp.headers.get('last-modified') || ''); } catch (e) { lm = ''; }
+          try { cl = String(resp.headers.get('content-length') || ''); } catch (e) { cl = ''; }
+
+          var changed = false;
+          if (hasBaseline) {
+            if (etag && lastEtag && etag !== lastEtag) changed = true;
+            if (!changed && lm && lastLastModified && lm !== lastLastModified) changed = true;
+            if (!changed && cl && lastContentLength && cl !== lastContentLength) changed = true;
+          }
+
+          // Update stored validators (even if empty, keep best-effort).
+          if (etag) lastEtag = etag;
+          if (lm) lastLastModified = lm;
+          if (cl) lastContentLength = cl;
+          hasBaseline = true;
+
+          if (changed) {
             try { window.location.reload(); } catch (e) {}
             return;
           }
-          _setBanner('Disconnected (server unreachable). Keeping this page; retrying…');
-          retryMs = Math.min(maxRetryMs, Math.floor(retryMs * 1.6));
-          _attemptReloadSoon(retryMs);
+          _scheduleNextNormalCheck();
         });
       }
 
-      // Start normal refresh loop.
-      _scheduleNextNormalRefresh();
+      // Start normal check loop.
+      _scheduleNextNormalCheck();
 
       // Wake / connectivity helpers.
       window.setInterval(_sleepAwareTick, 5000);
-      window.addEventListener('online', function() { _attemptReloadSoon(250); });
+      window.addEventListener('online', function() { _attemptCheckSoon(250); });
       document.addEventListener('visibilitychange', function() {
-        if (!document.hidden) _attemptReloadSoon(250);
+        if (!document.hidden) _attemptCheckSoon(250);
       });
     })();
   })();

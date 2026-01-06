@@ -1230,8 +1230,8 @@ class CommitHistoryGenerator:
                             default_expanded=False,
                         )
                     ],
-                    collapsible=True,
-                    default_expanded=True,
+                    collapsible=False,
+                    noncollapsible_icon="square",
                     triangle_tooltip="GitHub checks",
                 )
                 # Add a trailing blank line to visually separate the expanded block from the next row's SHA.
@@ -1438,8 +1438,8 @@ class CommitHistoryGenerator:
                     f'target="_blank" style="color: #0969da; font-size: 11px; text-decoration: none;">[checks]</a>'
                 ),
                 children=children,
-                collapsible=True,
-                default_expanded=True,
+                collapsible=False,
+                noncollapsible_icon="square",
                 triangle_tooltip="GitHub checks",
             )
             # Add a trailing blank line to visually separate the expanded block from the next row's SHA.
@@ -1526,8 +1526,8 @@ class CommitHistoryGenerator:
                         f'<span style="color: #57606a; font-size: 12px;">({html.escape(status)})</span>'
                     ),
                     children=children,
-                    collapsible=True,
-                    default_expanded=status.lower() not in ("success",),
+                    collapsible=False,
+                    noncollapsible_icon="square",
                     triangle_tooltip="GitLab pipeline jobs",
                 )
                 return ("\n".join(render_tree_pre_lines([root])).rstrip() + "\n")
@@ -1549,8 +1549,8 @@ class CommitHistoryGenerator:
                         default_expanded=False,
                     )
                 ],
-                collapsible=True,
-                default_expanded=True,
+                collapsible=False,
+                noncollapsible_icon="square",
                 triangle_tooltip="GitLab pipeline (if available)",
             )
             return ("\n".join(render_tree_pre_lines([root])).rstrip() + "\n")

@@ -59,9 +59,12 @@ fi
 
 usage() {
     cat <<'EOF' >&2
-Usage: update_html_pages.sh [--show-local-branches] [--show-commit-history] [--show-local-resources] [--fast-test|--fast]
+Usage: update_html_pages.sh [--show-local-branches] [--show-commit-history] [--show-local-resources] [--fast-test|--fast] [--run-ignore-lock]
 
 If no args are provided, ALL tasks run.
+
+Flags:
+  --run-ignore-lock   Bypass the /tmp lock (no flock). Useful for manual runs when a stale lock exists.
 EOF
 }
 
@@ -69,6 +72,7 @@ RUN_SHOW_DYNAMO_BRANCHES=false
 RUN_SHOW_COMMIT_HISTORY=false
 RUN_RESOURCE_REPORT=false
 ANY_FLAG=false
+IGNORE_LOCK=false
 
 USER_NAME="${USER:-${LOGNAME:-}}"
 if [ -z "$USER_NAME" ]; then
@@ -87,6 +91,8 @@ while [ "$#" -gt 0 ]; do
             FAST_TEST=true; shift ;;
         --fast)
             FAST_TEST=true; shift ;;
+        --run-ignore-lock)
+            IGNORE_LOCK=true; shift ;;
 
         # Back-compat aliases (deprecated)
         --run-show-dynamo-branches)
@@ -124,11 +130,15 @@ if [ "$RUN_RESOURCE_REPORT" = true ] && [ "$RUN_SHOW_DYNAMO_BRANCHES" = false ] 
     # Separate lock so frequent resource updates aren't blocked by dashboard runs.
     LOCK_FILE="/tmp/dynamo-utils.update_resource_report.${USER_NAME}.lock"
 fi
-exec 9>"$LOCK_FILE"
-if ! flock -n 9; then
-    # Another instance is running; log a warning and exit to avoid piling up GitHub/GitLab calls.
-    echo "[$(date '+%Y-%m-%d %H:%M:%S')] WARNING: update_html_pages.sh is locked (lock=$LOCK_FILE); skipping this run" >&2
-    exit 0
+if [ "$IGNORE_LOCK" = true ]; then
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] WARNING: --run-ignore-lock set; bypassing lock (lock=$LOCK_FILE)" >&2
+else
+    exec 9>"$LOCK_FILE"
+    if ! flock -n 9; then
+        # Another instance is running; log a warning and exit to avoid piling up GitHub/GitLab calls.
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] WARNING: update_html_pages.sh is locked (lock=$LOCK_FILE); skipping this run" >&2
+        exit 0
+    fi
 fi
 
 #
