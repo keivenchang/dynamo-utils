@@ -2,7 +2,6 @@
 <html>
 <head>
   <meta charset="UTF-8">
-  <meta http-equiv="refresh" content="{{ refresh_seconds | default(300) }}">
   <title>{% block title %}{% endblock %}</title>
   {% block favicon %}{% endblock %}
   <style>
@@ -187,6 +186,45 @@
       visibility: visible;
       opacity: 1;
       transition-delay: 1s;
+    }
+
+    /* Auto-refresh connection banner (sleep/wake fault tolerance) */
+    .auto-refresh-banner {
+      position: fixed;
+      left: 10px;
+      right: 10px;
+      bottom: 10px;
+      z-index: 9999;
+      padding: 8px 12px;
+      border-radius: 8px;
+      border: 1px solid #d0d7de;
+      background: rgba(255, 255, 255, 0.96);
+      color: #24292f;
+      box-shadow: 0 4px 12px rgba(0,0,0,0.12);
+      font-size: 12px;
+      display: none;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+    }
+    .auto-refresh-banner .msg {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .auto-refresh-banner button {
+      border: 1px solid #d0d7de;
+      background: #f6f8fa;
+      color: #24292f;
+      border-radius: 8px;
+      padding: 4px 10px;
+      cursor: pointer;
+      font-size: 12px;
+      font-weight: 600;
+      white-space: nowrap;
+    }
+    .auto-refresh-banner button:hover {
+      background: #eef1f4;
     }
   </style>
 
@@ -769,6 +807,147 @@
         q.forEach(function(fn) { try { fn(); } catch (e) {} });
       } catch (e) {}
     });
+
+    // ====================================================================================
+    // Sleep/wake fault-tolerant auto-refresh (replaces meta refresh)
+    //
+    // Problem: meta-refresh does a full navigation. If the machine sleeps and the server/DNS
+    // is temporarily unreachable on wake, the tab can land on the browser's "site can't be reached"
+    // error page and won't auto-recover.
+    //
+    // Approach: periodically attempt a lightweight fetch to the current URL (cache-busted).
+    // - If reachable: reload the page normally.
+    // - If unreachable: keep the current rendered page and retry with backoff.
+    // - Also re-check quickly after wake (detected via timer gap) and when the tab becomes visible.
+    // ====================================================================================
+    (function() {
+      var refreshSeconds = Number('{{ refresh_seconds | default(300) }}' || '0');
+      if (!isFinite(refreshSeconds) || refreshSeconds <= 0) return;
+
+      var baseDelayMs = Math.max(5, refreshSeconds) * 1000;
+      var retryMs = 2000;
+      var maxRetryMs = 60000;
+      var retryTimer = null;
+      var scheduledTimer = null;
+      var lastTick = Date.now();
+
+      function _ensureBanner() {
+        var el = document.getElementById('auto-refresh-banner');
+        if (el) return el;
+        el = document.createElement('div');
+        el.id = 'auto-refresh-banner';
+        el.className = 'auto-refresh-banner';
+        el.innerHTML = '<div class="msg" id="auto-refresh-banner-msg"></div>' +
+                       '<div style="display:flex; gap:8px; align-items:center;">' +
+                       '<button id="auto-refresh-banner-retry" type="button">Retry now</button>' +
+                       '</div>';
+        document.body.appendChild(el);
+        var btn = document.getElementById('auto-refresh-banner-retry');
+        if (btn) btn.addEventListener('click', function() { _attemptReloadSoon(0); });
+        return el;
+      }
+
+      function _setBanner(msg) {
+        try {
+          var el = _ensureBanner();
+          var msgEl = document.getElementById('auto-refresh-banner-msg');
+          if (msgEl) msgEl.textContent = String(msg || '');
+          el.style.display = 'inline-flex';
+        } catch (e) {}
+      }
+
+      function _hideBanner() {
+        try {
+          var el = document.getElementById('auto-refresh-banner');
+          if (el) el.style.display = 'none';
+        } catch (e) {}
+      }
+
+      function _sleepAwareTick() {
+        var now = Date.now();
+        var delta = now - lastTick;
+        lastTick = now;
+        // If timers were paused (sleep), re-check quickly after wake.
+        if (delta > 30000) {
+          _attemptReloadSoon(250);
+        }
+      }
+
+      function _buildPingUrl() {
+        try {
+          var u = new URL(window.location.href);
+          u.hash = '';
+          u.searchParams.set('__ping', String(Date.now()));
+          return u.toString();
+        } catch (e) {
+          return String(window.location.href || '');
+        }
+      }
+
+      function _pingOnce() {
+        var url = _buildPingUrl();
+        // Prefer HEAD (cheap), but fallback to GET if the server doesn't allow it.
+        return fetch(url, { method: 'HEAD', cache: 'no-store', credentials: 'same-origin' })
+          .then(function(resp) {
+            if (resp && (resp.status === 405 || resp.status === 501)) {
+              return fetch(url, { method: 'GET', cache: 'no-store', credentials: 'same-origin' })
+                .then(function(r2) { return !!(r2 && r2.ok); })
+                .catch(function() { return false; });
+            }
+            return !!(resp && resp.ok);
+          })
+          .catch(function() { return false; });
+      }
+
+      function _attemptReloadSoon(ms) {
+        try { if (retryTimer) window.clearTimeout(retryTimer); } catch (e) {}
+        retryTimer = window.setTimeout(_attemptReload, Math.max(0, Number(ms || 0)));
+      }
+
+      function _scheduleNextNormalRefresh() {
+        try { if (scheduledTimer) window.clearTimeout(scheduledTimer); } catch (e) {}
+        scheduledTimer = window.setTimeout(function() { _attemptReloadSoon(0); }, baseDelayMs);
+      }
+
+      function _attemptReload() {
+        // Don't churn hidden tabs; we'll refresh when visible again.
+        if (document.hidden) {
+          _scheduleNextNormalRefresh();
+          return;
+        }
+        // If we know we're offline, keep the page and retry.
+        try {
+          if (navigator && navigator.onLine === false) {
+            _setBanner('Disconnected (offline). Keeping this page; retrying…');
+            retryMs = Math.min(maxRetryMs, Math.floor(retryMs * 1.6));
+            _attemptReloadSoon(retryMs);
+            return;
+          }
+        } catch (e) {}
+
+        _pingOnce().then(function(ok) {
+          if (ok) {
+            _hideBanner();
+            retryMs = 2000;
+            try { window.location.reload(); } catch (e) {}
+            return;
+          }
+          _setBanner('Disconnected (server unreachable). Keeping this page; retrying…');
+          retryMs = Math.min(maxRetryMs, Math.floor(retryMs * 1.6));
+          _attemptReloadSoon(retryMs);
+        });
+      }
+
+      // Start normal refresh loop.
+      _scheduleNextNormalRefresh();
+
+      // Wake / connectivity helpers.
+      window.setInterval(_sleepAwareTick, 5000);
+      window.addEventListener('online', function() { _attemptReloadSoon(250); });
+      document.addEventListener('visibilitychange', function() {
+        if (!document.hidden) _attemptReloadSoon(250);
+      });
+    })();
   })();
   </script>
 

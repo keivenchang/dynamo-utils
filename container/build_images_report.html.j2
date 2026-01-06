@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 {% if running > 0 or queued > 0 %}
-<meta http-equiv="refresh" content="12">
+{# NOTE: no meta-refresh. We do a fault-tolerant JS auto-refresh instead (see tail script). #}
 {% endif %}
 <title>DynamoDockerBuilder - {{ sha_display }} - {{ overall_status }}</title>
 <style>
@@ -37,6 +37,45 @@ a:hover { text-decoration: underline; }
 a.log-link { font-size: 0.85em; margin-left: 4px; }
 p { margin: 1px 0; }
 h2 { margin: 0; font-size: 1.2em; font-weight: bold; }
+
+/* Auto-refresh connection banner (sleep/wake fault tolerance) */
+.auto-refresh-banner {
+  position: fixed;
+  left: 10px;
+  right: 10px;
+  bottom: 10px;
+  z-index: 9999;
+  padding: 8px 12px;
+  border-radius: 8px;
+  border: 1px solid #dee2e6;
+  background: rgba(255, 255, 255, 0.96);
+  color: #111;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.12);
+  font-size: 12px;
+  display: none;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.auto-refresh-banner .msg {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.auto-refresh-banner button {
+  border: 1px solid #dee2e6;
+  background: #f8f9fa;
+  color: #111;
+  border-radius: 8px;
+  padding: 4px 10px;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+.auto-refresh-banner button:hover {
+  background: #eef1f4;
+}
 </style>
 </head>
 <body>
@@ -216,6 +255,125 @@ function updateElapsedTimers() {
 
 // Update every second
 setInterval(updateElapsedTimers, 1000);
+
+// Sleep/wake fault-tolerant auto-refresh (replaces meta refresh).
+// Only active while builds are running/queued.
+(function() {
+    var shouldRefresh = {{ 'true' if (running > 0 or queued > 0) else 'false' }};
+    if (!shouldRefresh) return;
+
+    var baseDelayMs = 12000;
+    var retryMs = 2000;
+    var maxRetryMs = 60000;
+    var retryTimer = null;
+    var scheduledTimer = null;
+    var lastTick = Date.now();
+
+    function ensureBanner() {
+        var el = document.getElementById('auto-refresh-banner');
+        if (el) return el;
+        el = document.createElement('div');
+        el.id = 'auto-refresh-banner';
+        el.className = 'auto-refresh-banner';
+        el.innerHTML = '<div class="msg" id="auto-refresh-banner-msg"></div>' +
+                       '<div style="display:flex; gap:8px; align-items:center;">' +
+                       '<button id="auto-refresh-banner-retry" type="button">Retry now</button>' +
+                       '</div>';
+        document.body.appendChild(el);
+        var btn = document.getElementById('auto-refresh-banner-retry');
+        if (btn) btn.addEventListener('click', function() { attemptReloadSoon(0); });
+        return el;
+    }
+
+    function setBanner(msg) {
+        try {
+            var el = ensureBanner();
+            var msgEl = document.getElementById('auto-refresh-banner-msg');
+            if (msgEl) msgEl.textContent = String(msg || '');
+            el.style.display = 'inline-flex';
+        } catch (e) {}
+    }
+
+    function hideBanner() {
+        try {
+            var el = document.getElementById('auto-refresh-banner');
+            if (el) el.style.display = 'none';
+        } catch (e) {}
+    }
+
+    function sleepAwareTick() {
+        var now = Date.now();
+        var delta = now - lastTick;
+        lastTick = now;
+        if (delta > 30000) attemptReloadSoon(250);
+    }
+
+    function buildPingUrl() {
+        try {
+            var u = new URL(window.location.href);
+            u.hash = '';
+            u.searchParams.set('__ping', String(Date.now()));
+            return u.toString();
+        } catch (e) {
+            return String(window.location.href || '');
+        }
+    }
+
+    function pingOnce() {
+        var url = buildPingUrl();
+        return fetch(url, { method: 'HEAD', cache: 'no-store', credentials: 'same-origin' })
+            .then(function(resp) {
+                if (resp && (resp.status === 405 || resp.status === 501)) {
+                    return fetch(url, { method: 'GET', cache: 'no-store', credentials: 'same-origin' })
+                        .then(function(r2) { return !!(r2 && r2.ok); })
+                        .catch(function() { return false; });
+                }
+                return !!(resp && resp.ok);
+            })
+            .catch(function() { return false; });
+    }
+
+    function attemptReloadSoon(ms) {
+        try { if (retryTimer) window.clearTimeout(retryTimer); } catch (e) {}
+        retryTimer = window.setTimeout(attemptReload, Math.max(0, Number(ms || 0)));
+    }
+
+    function scheduleNextNormalRefresh() {
+        try { if (scheduledTimer) window.clearTimeout(scheduledTimer); } catch (e) {}
+        scheduledTimer = window.setTimeout(function() { attemptReloadSoon(0); }, baseDelayMs);
+    }
+
+    function attemptReload() {
+        if (document.hidden) { scheduleNextNormalRefresh(); return; }
+        try {
+            if (navigator && navigator.onLine === false) {
+                setBanner('Disconnected (offline). Keeping this page; retrying…');
+                retryMs = Math.min(maxRetryMs, Math.floor(retryMs * 1.6));
+                attemptReloadSoon(retryMs);
+                return;
+            }
+        } catch (e) {}
+
+        pingOnce().then(function(ok) {
+            if (ok) {
+                hideBanner();
+                retryMs = 2000;
+                try { window.location.reload(); } catch (e) {}
+                return;
+            }
+            setBanner('Disconnected (server unreachable). Keeping this page; retrying…');
+            retryMs = Math.min(maxRetryMs, Math.floor(retryMs * 1.6));
+            attemptReloadSoon(retryMs);
+        });
+    }
+
+    scheduleNextNormalRefresh();
+    window.setInterval(sleepAwareTick, 5000);
+    window.addEventListener('online', function() { attemptReloadSoon(250); });
+    document.addEventListener('visibilitychange', function() {
+        if (!document.hidden) attemptReloadSoon(250);
+    });
+})();
 </script>
 </body></html>
 
