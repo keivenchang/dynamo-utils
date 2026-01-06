@@ -983,6 +983,41 @@ def _query_docker_timeseries(
     return out
 
 
+def _query_docker_totals_timeseries(con: sqlite3.Connection, *, start_ts: float) -> Dict[str, Any]:
+    """
+    Returns total docker usage across *all* sampled containers per sample timestamp.
+
+    This is used to keep the Containers chart continuous even if the selected top-K containers
+    change over time (container IDs can disappear/reappear).
+
+    Returns:
+      {"x":[...], "mem_usage_bytes":[...], "cpu_percent":[...]}
+    """
+    if not _table_exists(con, "docker_container_samples"):
+        return {"x": [], "mem_usage_bytes": [], "cpu_percent": []}
+    cur = con.cursor()
+    rows = cur.execute(
+        """
+        SELECT
+          s.ts_unix AS ts_unix,
+          SUM(COALESCE(d.mem_usage_bytes,0)) AS mem_usage_bytes,
+          SUM(COALESCE(d.cpu_percent,0)) AS cpu_percent
+        FROM docker_container_samples d
+        JOIN samples s ON s.id = d.sample_id
+        WHERE s.ts_unix >= ?
+        GROUP BY d.sample_id
+        ORDER BY s.ts_unix ASC
+        """,
+        (start_ts,),
+    ).fetchall()
+    out = {"x": [], "mem_usage_bytes": [], "cpu_percent": []}
+    for r in rows:
+        out["x"].append(_ts_to_iso(float(r["ts_unix"])))
+        out["mem_usage_bytes"].append(float(r["mem_usage_bytes"] or 0.0))
+        out["cpu_percent"].append(float(r["cpu_percent"] or 0.0))
+    return out
+
+
 def _query_top_process_per_sample(con: sqlite3.Connection, *, start_ts: float) -> List[Dict[str, Any]]:
     """
     Best-effort: process_samples only stores "offenders", so this finds the max cpu process among recorded ones.
@@ -1890,9 +1925,9 @@ def _build_html(payload: Dict[str, Any]) -> str:
 
   function commonLayout(title) {{
     const grid = 'rgba(255,255,255,0.09)';
-    // Default initial view: current last 1 hour (ending at "now").
+    // Default initial view: ALWAYS current last 2 hours (ending at "now").
     // (Not "last sample timestamp" — that can be stale and land on e.g. the last hour of a day.)
-    // Users can zoom out via range selector buttons (15m/30m/1h/6h/...).
+    // Users can zoom out via range selector buttons (15m/30m/1h/2h/6h/...).
     let defaultStart = null;
     let defaultEnd = null;
     try {{
@@ -1904,7 +1939,7 @@ def _build_html(payload: Dict[str, Any]) -> str:
         return `${{d.getFullYear()}}-${{pad(d.getMonth()+1)}}-${{pad(d.getDate())}}T${{pad(d.getHours())}}:${{pad(d.getMinutes())}}:${{pad(d.getSeconds())}}`;
       }}
       const end = new Date(); // now (viewer local time)
-      const start = new Date(end.getTime() - 60 * 60 * 1000);
+      const start = new Date(end.getTime() - 2 * 60 * 60 * 1000);
       defaultEnd = toLocalIsoSeconds(end);
       defaultStart = toLocalIsoSeconds(start);
     }} catch (e) {{
@@ -1944,6 +1979,7 @@ def _build_html(payload: Dict[str, Any]) -> str:
             {{count: 15, label: '15m', step: 'minute', stepmode: 'backward'}},
             {{count: 30, label: '30m', step: 'minute', stepmode: 'backward'}},
             {{count: 1, label: '1h', step: 'hour', stepmode: 'backward'}},
+            {{count: 2, label: '2h', step: 'hour', stepmode: 'backward'}},
             {{count: 6, label: '6h', step: 'hour', stepmode: 'backward'}},
             {{count: 12, label: '12h', step: 'hour', stepmode: 'backward'}},
             {{count: 1, label: '1d', step: 'day', stepmode: 'backward'}},
@@ -1988,7 +2024,18 @@ def _build_html(payload: Dict[str, Any]) -> str:
 
     const traces = [
       {{ x, y: cpu, name: 'CPU % (system)', mode: 'lines', line: {{ color: '#6ee7ff', width: 2, dash: DASH.solid }} , yaxis: 'y1' }},
-      {{ x, y: mem, name: 'MEM % (system)', mode: 'lines', line: {{ color: '#a78bfa', width: 2, dash: DASH.solid }} , yaxis: 'y1' }},
+      // Memory is downsampled (mem_percent can be null between samples). Use markers so it remains visible,
+      // and connect gaps for readability.
+      {{
+        x,
+        y: mem,
+        name: 'MEM % (system)',
+        mode: 'lines+markers',
+        connectgaps: true,
+        line: {{ color: '#a78bfa', width: 2, dash: DASH.solid }},
+        marker: {{ size: 4, color: '#a78bfa' }},
+        yaxis: 'y1'
+      }},
       // GPU overlays on the same 0-100% axis; use distinct dash styles so they don't blend.
       {{ x, y: gpuUtil, name: 'GPU util % (max)', mode: 'lines', line: {{ color: '#f97316', width: 1.8, dash: DASH.longdash }} , yaxis: 'y1' }},
       {{ x, y: gpuMemPct, name: 'GPU mem % (total)', mode: 'lines', line: {{ color: '#fb7185', width: 1.6, dash: DASH.dashdot }} , yaxis: 'y1' }},
@@ -2757,33 +2804,124 @@ def _build_html(payload: Dict[str, Any]) -> str:
   function renderDockerGraph() {{
     const d = PAYLOAD.docker || {{}};
     const meta = PAYLOAD.docker_meta || {{}};
+    const totals = PAYLOAD.docker_total || {{}};
     const keys = Object.keys(d);
     const traces = [];
+
+    // Use totals x-axis if available; it covers ALL containers and keeps the chart continuous even if the selected
+    // top-K container IDs change over time.
+    let xRef = (totals && totals.x && totals.x.length) ? totals.x : null;
+    if (!xRef || !xRef.length) {{
+      // Fallback: union of timestamps across the selected keys.
+      const xSet = new Set();
+      for (const k of keys) {{
+        const rx = (d[k] && d[k].x) ? d[k].x : [];
+        for (let i = 0; i < (rx || []).length; i++) xSet.add(rx[i]);
+      }}
+      xRef = Array.from(xSet);
+      xRef.sort();
+    }}
+
+    const n = xRef.length;
+    const totalMem = (totals && totals.mem_usage_bytes && totals.mem_usage_bytes.length)
+      ? xRef.map((_, i) => bytesToGiB((totals.mem_usage_bytes[i] ?? 0)))
+      : Array(n).fill(0);
+    const totalCpu = (totals && totals.cpu_percent && totals.cpu_percent.length)
+      ? xRef.map((_, i) => (totals.cpu_percent[i] ?? 0))
+      : Array(n).fill(0);
+
+    function buildMap(x, y) {{
+      const m = Object.create(null);
+      const xn = (x || []).length;
+      const yn = (y || []).length;
+      const L = Math.min(xn, yn);
+      for (let i = 0; i < L; i++) {{
+        m[x[i]] = y[i];
+      }}
+      return m;
+    }}
+
+    const sumSelMem = Array(n).fill(0);
+
+    let firstMem = true;
     for (const k of keys) {{
       const r = d[k];
-      const x = r.x || [];
-      const memGiB = (r.mem_usage_bytes || []).map(v => bytesToGiB(v));
-      const cpu = (r.cpu_percent || []).map(v => v);
+      const rx = r.x || [];
+      const memSeries = (r.mem_usage_bytes || []).map(v => bytesToGiB(v));
+      const cpuSeries = (r.cpu_percent || []).map(v => v);
+      const memMap = buildMap(rx, memSeries);
+      const cpuMap = buildMap(rx, cpuSeries);
+
+      // Missing points => 0 contribution (container absent / not sampled).
+      const memGiB = xRef.map((t, i) => {{
+        const v = (memMap[t] !== undefined && memMap[t] !== null) ? (Number(memMap[t]) || 0) : 0;
+        sumSelMem[i] += v;
+        return v;
+      }});
+      const cpu = xRef.map((t) => ((cpuMap[t] !== undefined && cpuMap[t] !== null) ? (Number(cpuMap[t]) || 0) : 0));
+
       const img = (meta[k] && meta[k].image) ? meta[k].image : '';
       const label = `${{k.slice(0,12)}} ${{img}}`.trim();
 
       traces.push({{
-        x,
+        x: xRef,
         y: memGiB,
         name: `${{label}} mem`,
         mode: 'lines',
-        line: {{ width: 2, dash: 'solid' }},
+        stackgroup: 'mem',
+        fill: firstMem ? 'tozeroy' : 'tonexty',
+        line: {{ width: 0.6 }},
+        opacity: 0.40,
+        showlegend: false,
         yaxis: 'y1',
       }});
+      firstMem = false;
+
       traces.push({{
-        x,
+        x: xRef,
         y: cpu,
         name: `${{label}} cpu`,
         mode: 'lines',
-        line: {{ width: 1.8, dash: 'dash' }},
+        // CPU is rendered as lines only (no area).
+        line: {{ width: 0.8, dash: 'dot' }},
+        opacity: 0.35,
+        showlegend: false,
         yaxis: 'y2',
       }});
     }}
+
+    // Residual "Other" so the stacked MEMORY area matches totals even when top-K doesn't cover all containers.
+    const otherMem = totalMem.map((v, i) => Math.max(0, (Number(v) || 0) - (Number(sumSelMem[i]) || 0)));
+    traces.push({{
+      x: xRef,
+      y: otherMem,
+      name: 'Other mem',
+      mode: 'lines',
+      stackgroup: 'mem',
+      fill: firstMem ? 'tozeroy' : 'tonexty',
+      line: {{ width: 0.6 }},
+      opacity: 0.22,
+      showlegend: false,
+      yaxis: 'y1',
+    }});
+
+    // Totals (bold lines)
+    traces.push({{
+      x: xRef,
+      y: totalMem,
+      name: 'Total mem (all containers)',
+      mode: 'lines',
+      line: {{ width: 2.6, color: 'rgba(255,255,255,0.90)' }},
+      yaxis: 'y1',
+    }});
+    traces.push({{
+      x: xRef,
+      y: totalCpu,
+      name: 'Total cpu (all containers)',
+      mode: 'lines',
+      line: {{ width: 2.2, dash: 'dash', color: 'rgba(110,231,255,0.95)' }},
+      yaxis: 'y2',
+    }});
     const layout = commonLayout('');
     layout.yaxis = {{ title: 'mem GiB', rangemode: 'tozero', gridcolor: 'rgba(255,255,255,0.09)' }};
     layout.yaxis2 = {{
@@ -2798,7 +2936,7 @@ def _build_html(payload: Dict[str, Any]) -> str:
       automargin: true,
     }};
     const config = {{ displayModeBar: true, responsive: true }};
-    if (!keys.length) {{
+    if (!xRef.length) {{
       return Plotly.newPlot('docker_graph', [{{x: [PAYLOAD.window_end], y: [0], mode:'text', text:['No docker stats in window'], textfont:{{size:14}}, hoverinfo:'skip'}}], layout, config)
         .then(() => installHoverDelay('docker_graph'));
     }}
@@ -3017,11 +3155,15 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 else 0.0
             )
 
+        # Choose which containers to render as individual series based on recent activity,
+        # not the full report window (which can include long-dead containers).
+        docker_lb_start_ts = max(float(start_ts), float(end_ts) - 2.0 * 3600.0)  # last 2 hours
         docker_leaderboard = _query_docker_leaderboard(
-            con, start_ts=start_ts, limit=int(args.docker_limit)
+            con, start_ts=docker_lb_start_ts, limit=int(args.docker_limit)
         )
         docker_keys = [str(r.get("container_id") or "") for r in docker_leaderboard if (r.get("container_id") or "")]
         docker = _query_docker_timeseries(con, start_ts=start_ts, keys=docker_keys)
+        docker_total = _query_docker_totals_timeseries(con, start_ts=start_ts)
         docker_meta = {str(r.get("container_id") or ""): {"image": r.get("image") or ""} for r in docker_leaderboard}
         pings = _query_ping_timeseries(con, start_ts=start_ts)
         ping_summary = _query_ping_summary(con, start_ts=start_ts)
@@ -3140,6 +3282,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             ],
             "gpus": gpus,
             "docker": docker,
+            "docker_total": docker_total,
             "docker_leaderboard": docker_leaderboard,
             "docker_meta": docker_meta,
             "pings": pings,

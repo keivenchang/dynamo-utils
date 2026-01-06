@@ -740,8 +740,9 @@ class ResourceDB:
         cpu_percent: Optional[float],
         load: Tuple[Optional[float], Optional[float], Optional[float]],
         # psutil's public API returns namedtuples; avoid depending on psutil._common types.
-        mem: Any,
-        swap: Any,
+        # mem/swap are optional so callers can downsample memory writes (store NULLs between samples).
+        mem: Optional[Any],
+        swap: Optional[Any],
         net_totals: Any,
         net_rates: Tuple[Optional[float], Optional[float]],
         disk_totals: Optional[Any],
@@ -768,11 +769,11 @@ class ResourceDB:
                 load[0],
                 load[1],
                 load[2],
-                int(mem.total),
-                int(mem.used),
-                int(mem.available),
-                float(mem.percent),
-                int(swap.used),
+                (int(mem.total) if mem is not None else None),
+                (int(mem.used) if mem is not None else None),
+                (int(mem.available) if mem is not None else None),
+                (float(mem.percent) if mem is not None else None),
+                (int(swap.used) if swap is not None else None),
                 int(net_totals.bytes_sent),
                 int(net_totals.bytes_recv),
                 net_rates[0],
@@ -1156,6 +1157,7 @@ class Monitor:
         lock: SingleInstanceLock,
         hostname: str,
         interval_s: float,
+        mem_interval_s: float,
         thresholds: Thresholds,
         top_k: int,
         net_top: bool,
@@ -1173,6 +1175,7 @@ class Monitor:
         self.lock = lock
         self.hostname = hostname
         self.interval_s = interval_s
+        self.mem_interval_s = float(mem_interval_s)
         self.thresholds = thresholds
         self.top_k = top_k
         self.net_top = net_top
@@ -1194,6 +1197,7 @@ class Monitor:
         self._prev_net_top_ts: float = 0.0
         self._prev_docker_stats_ts: float = 0.0
         self._prev_gh_rate_limit_ts: float = 0.0
+        self._prev_mem_ts: float = 0.0
 
     def request_stop(self) -> None:
         self._stop = True
@@ -1237,8 +1241,19 @@ class Monitor:
                 pass
 
             load = _get_loadavg()
-            mem = psutil.virtual_memory()
-            swap = psutil.swap_memory()
+            # Memory can be downsampled to reduce DB churn/size; store NULLs between samples.
+            mem = None
+            swap = None
+            if (ts - float(self._prev_mem_ts)) >= max(1.0, float(self.mem_interval_s)) or self._prev_mem_ts == 0.0:
+                self._prev_mem_ts = ts
+                try:
+                    mem = psutil.virtual_memory()
+                except Exception:
+                    mem = None
+                try:
+                    swap = psutil.swap_memory()
+                except Exception:
+                    swap = None
 
             net = psutil.net_io_counters()
             net_sent_bps = None
@@ -1361,7 +1376,7 @@ class Monitor:
             LOGGER.info(
                 "sample: cpu=%.1f%% mem=%.1f%% net=%.1f/%.1f MB/s disk=%.1f/%.1f MB/s offenders=%d gpus=%d",
                 (cpu_percent or 0.0),
-                float(mem.percent),
+                float(mem.percent) if mem is not None else -1.0,
                 ((net_sent_bps or 0.0) / (1024 * 1024)),
                 ((net_recv_bps or 0.0) / (1024 * 1024)),
                 ((disk_read_bps or 0.0) / (1024 * 1024)),
@@ -1413,17 +1428,24 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         help="Use a per-db lock file (<db>.lock) instead of the global default lock",
     )
     p.add_argument(
-        "--force-start",
+        "--run-ignore-lock",
         action="store_true",
-        help="Force start: clobber PID in lock file to signal an existing instance to exit, then wait for the flock",
+        help="Run-ignore-lock: request takeover by clobbering PID in lock file to signal an existing instance to exit, then wait for the flock",
     )
     p.add_argument(
-        "--force-start-timeout-seconds",
+        "--run-ignore-lock-timeout-seconds",
         type=float,
         default=10.0,
-        help="How long to wait for the existing instance to release the lock when using --force-start (default: 10s)",
+        help="How long to wait for the existing instance to release the lock when using --run-ignore-lock (default: 10s)",
     )
-    p.add_argument("--interval-seconds", type=float, default=15.0, help="Sampling interval (seconds)")
+    # Defaults are tuned for a "minimal args" invocation on keivenc-linux.
+    p.add_argument("--interval-seconds", type=float, default=17.0, help="Sampling interval (seconds)")
+    p.add_argument(
+        "--mem-interval-seconds",
+        type=float,
+        default=57.0,
+        help="How often to store system memory/swap fields in samples (seconds)",
+    )
     p.add_argument("--once", action="store_true", help="Take one sample and exit")
     p.add_argument("--duration-seconds", type=float, default=None, help="Run for N seconds then exit")
 
@@ -1436,48 +1458,51 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     p.add_argument(
         "--net-top",
         action="store_true",
-        help="Best-effort per-process network throughput attribution (requires nethogs and root); stored in net_process_samples",
+        default=True,
+        help="Best-effort per-process network throughput attribution (requires nethogs and root); stored in net_process_samples (default: enabled)",
     )
     p.add_argument(
         "--net-top-interval-seconds",
         type=float,
-        default=15.0,
-        help="How often to sample per-process network usage when --net-top is enabled (default: 15s)",
+        default=17.0,
+        help="How often to sample per-process network usage when --net-top is enabled (seconds)",
     )
     p.add_argument(
         "--net-top-k",
         type=int,
-        default=5,
-        help="How many top talkers to store per net-top sample (default: 5)",
+        default=3,
+        help="How many top talkers to store per net-top sample",
     )
 
     p.add_argument(
         "--docker-stats",
         action="store_true",
-        help="Best-effort per-container CPU/memory sampling via `docker stats --no-stream`; stored in docker_container_samples",
+        default=True,
+        help="Best-effort per-container CPU/memory sampling via `docker stats --no-stream`; stored in docker_container_samples (default: enabled)",
     )
     p.add_argument(
         "--docker-stats-interval-seconds",
         type=float,
-        default=20.0,
-        help="How often to sample docker container stats when enabled (default: 20s)",
+        default=19.0,
+        help="How often to sample docker container stats when enabled (seconds)",
     )
 
     p.add_argument(
         "--gh-rate-limit",
         action="store_true",
-        help="Best-effort GitHub API rate limit sampling via `gh api rate_limit`; stored in gh_rate_limit_samples",
+        default=True,
+        help="Best-effort GitHub API rate limit sampling via `gh api rate_limit`; stored in gh_rate_limit_samples (default: enabled)",
     )
     p.add_argument(
         "--gh-rate-limit-interval-seconds",
         type=float,
-        default=60.0,
-        help="How often to sample GitHub rate limits when enabled (default: 60s)",
+        default=59.0,
+        help="How often to sample GitHub rate limits when enabled (seconds)",
     )
     p.add_argument(
         "--gh-rate-limit-resources",
         default="core,search,graphql",
-        help="Comma-separated GitHub rate-limit resources to record (default: core,search,graphql)",
+        help="Comma-separated GitHub rate-limit resources to record",
     )
 
     p.add_argument("--log-level", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR"])
@@ -1496,8 +1521,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     lock = SingleInstanceLock(lock_path)
     lock.acquire_or_exit(
-        force_start=bool(getattr(args, "force_start", False)),
-        force_timeout_s=float(getattr(args, "force_start_timeout_seconds", 10.0)),
+        force_start=bool(getattr(args, "run_ignore_lock", False)),
+        force_timeout_s=float(getattr(args, "run_ignore_lock_timeout_seconds", 10.0)),
     )
 
     db = ResourceDB(db_path)
@@ -1515,6 +1540,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         lock=lock,
         hostname=hostname,
         interval_s=float(args.interval_seconds),
+        mem_interval_s=float(getattr(args, "mem_interval_seconds", 60.0)),
         thresholds=thresholds,
         top_k=int(args.top_k),
         net_top=bool(args.net_top),
