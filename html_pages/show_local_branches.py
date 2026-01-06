@@ -530,7 +530,8 @@ class CIJobTreeNode(BranchNode):
 
         Policy (per UX request):
         - expand for required failures (red ✗)
-        - do NOT auto-expand long/step-heavy jobs (like sglang/trtllm/vllm) by default
+        - expand if ANY descendant is running/pending (so active work is visible)
+        - do NOT auto-expand for optional failures only
         """
         # All-success-like subtree: no need to expand.
         if CIJobTreeNode._subtree_all_success(node):
@@ -540,6 +541,22 @@ class CIJobTreeNode(BranchNode):
         # We therefore expand only if we see a required failure.
         if getattr(node, "status", CIStatus.UNKNOWN) == CIStatus.FAILURE and bool(getattr(node, "is_required", False)):
             return True
+
+        # Expand if ANY descendant is in progress or pending/queued, regardless of optional failures.
+        try:
+            def walk_running(n: "CIJobTreeNode") -> bool:
+                st = str(getattr(n, "status", "") or "").strip().lower()
+                if st in {CIStatus.IN_PROGRESS.value, CIStatus.PENDING.value, "running", "building"}:
+                    return True
+                for ch in (getattr(n, "children", None) or []):
+                    if isinstance(ch, CIJobTreeNode) and walk_running(ch):
+                        return True
+                return False
+
+            if walk_running(node):
+                return True
+        except Exception:
+            pass
 
         # Shared rule: expand only for required failures or non-completed states.
         roll = CIJobTreeNode._subtree_rollup(node)
@@ -1552,10 +1569,14 @@ class PRStatusNode(BranchNode):
 
         has_children = bool(self.children)
 
-        # Expand by default only when something needs attention (required failure / pending / running / cancelled / unknown).
+        # Expand by default only when something needs attention in the CI subtree:
+        # - required failures
+        # - any running/pending descendants
+        # NOTE: helper nodes (e.g. rerun link) should not force expansion.
         default_expanded = any(
-            (not isinstance(c, CIJobTreeNode)) or CIJobTreeNode._subtree_needs_attention(c)
+            CIJobTreeNode._subtree_needs_attention(c)
             for c in (self.children or [])
+            if isinstance(c, CIJobTreeNode)
         )
 
         # Unique DOM id per render occurrence.
@@ -1603,8 +1624,9 @@ class PRStatusNode(BranchNode):
     def to_tree_vm(self) -> TreeNodeVM:
         # Default expansion: only when something needs attention in the CI subtree.
         default_expanded = any(
-            (not isinstance(c, CIJobTreeNode)) or CIJobTreeNode._subtree_needs_attention(c)
+            CIJobTreeNode._subtree_needs_attention(c)
             for c in (self.children or [])
+            if isinstance(c, CIJobTreeNode)
         )
         return TreeNodeVM(
             node_key=f"PRStatus:{getattr(self.pr, 'number', '')}",
