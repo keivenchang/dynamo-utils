@@ -3087,11 +3087,10 @@ def main() -> int:
                     html_path=args.html_path,
                 )
 
-                # Collect failed task names
-                failed_task_names = [
-                    task_id for task_id, task in all_tasks.items()
-                    if task.status == TaskStatus.FAILED
-                ]
+                # Collect failed task names for the email subject.
+                # Keep this consistent with exit-status calculation above: some failures are expected
+                # (framework=none compilation/sanity) and should not flip the overall status to FAIL.
+                failed_task_names = list(critical_failures)
 
                 # Send email
                 email_sent = send_email_notification(
