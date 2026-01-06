@@ -336,6 +336,19 @@ function toggleDockerImages(event, linkElement) {
     }
 }
 
+function collapseDockerImages(shaShort) {
+    // Collapse docker images row and reset its toggle triangle + URL state.
+    var row = document.getElementById('docker-row-' + shaShort);
+    var toggleEl = document.getElementById('docker-toggle-' + shaShort);
+    if (row) {
+        row.style.display = 'none';
+    }
+    if (toggleEl) {
+        toggleEl.textContent = '▶';
+    }
+    try { if (window.DashboardUrlState && shaShort) { window.DashboardUrlState.setBoolDefault('d.' + shaShort, false, false); } } catch (e) {}
+}
+
 function toggleCommitGitHubTree(event, shaShort) {
     event.preventDefault();
     event.stopPropagation();
@@ -350,6 +363,17 @@ function toggleCommitGitHubTree(event, shaShort) {
     try { if (window.DashboardUrlState) { window.DashboardUrlState.setBoolDefault('gh.' + String(shaShort || ''), hidden, false); } } catch (e) {}
 }
 
+function collapseCommitGitHubTree(shaShort) {
+    var row = document.getElementById('github-tree-row-' + shaShort);
+    var toggleEl = document.getElementById('github-tree-toggle-' + shaShort);
+    if (!row) return;
+    row.style.display = 'none';
+    if (toggleEl) {
+        toggleEl.textContent = '▶';
+    }
+    try { if (window.DashboardUrlState) { window.DashboardUrlState.setBoolDefault('gh.' + String(shaShort || ''), false, false); } } catch (e) {}
+}
+
 function toggleCommitGitLabTree(event, shaShort) {
     event.preventDefault();
     event.stopPropagation();
@@ -362,6 +386,17 @@ function toggleCommitGitLabTree(event, shaShort) {
         toggleEl.textContent = hidden ? '▼' : '▶';
     }
     try { if (window.DashboardUrlState) { window.DashboardUrlState.setBoolDefault('gl.' + String(shaShort || ''), hidden, false); } } catch (e) {}
+}
+
+function collapseCommitGitLabTree(shaShort) {
+    var row = document.getElementById('gitlab-tree-row-' + shaShort);
+    var toggleEl = document.getElementById('gitlab-tree-toggle-' + shaShort);
+    if (!row) return;
+    row.style.display = 'none';
+    if (toggleEl) {
+        toggleEl.textContent = '▶';
+    }
+    try { if (window.DashboardUrlState) { window.DashboardUrlState.setBoolDefault('gl.' + String(shaShort || ''), false, false); } } catch (e) {}
 }
 
 function toggleBuildHistory(event, shaShort) {
@@ -991,6 +1026,12 @@ Notes:
 <tr id="github-tree-row-{{ sha_short }}" style="display: none;">
 <td colspan="8" style="padding: 0; background-color: #ffffff;">
 <div style="padding: 0; border-top: 0;">
+          <div style="display: flex; align-items: center; justify-content: flex-start; padding: 6px 8px 0 8px;">
+            <button type="button"
+                    onclick="event.stopPropagation(); try { collapseCommitGitHubTree('{{ sha_short }}'); } catch (e) {}"
+                    style="padding: 0 6px; height: 18px; line-height: 16px; font-size: 14px; border: 1px solid #d0d7de; border-radius: 999px; background: #ffffff; color: #57606a; cursor: pointer;"
+                    title="Close GitHub checks">×</button>
+          </div>
           <pre style="margin: 0; padding: 0; background: transparent; border: 0; border-radius: 0; overflow: visible; white-space: pre-wrap; overflow-wrap: anywhere; font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace; font-size: 12px; line-height: 1;">{{ commit.github_checks_tree_html | safe }}</pre>
 </div>
 </td>
@@ -1002,6 +1043,12 @@ Notes:
 <tr id="gitlab-tree-row-{{ sha_short }}" style="display: none;">
 <td colspan="8" style="padding: 0; background-color: #ffffff;">
 <div style="padding: 0; border-top: 0;">
+          <div style="display: flex; align-items: center; justify-content: flex-start; padding: 6px 8px 0 8px;">
+            <button type="button"
+                    onclick="event.stopPropagation(); try { collapseCommitGitLabTree('{{ sha_short }}'); } catch (e) {}"
+                    style="padding: 0 6px; height: 18px; line-height: 16px; font-size: 14px; border: 1px solid #d0d7de; border-radius: 999px; background: #ffffff; color: #57606a; cursor: pointer;"
+                    title="Close GitLab pipeline">×</button>
+          </div>
           <pre style="margin: 0; padding: 0; background: transparent; border: 0; border-radius: 0; overflow: visible; white-space: pre-wrap; overflow-wrap: anywhere; font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace; font-size: 12px; line-height: 1;">{{ commit.gitlab_checks_tree_html | safe }}</pre>
 </div>
 </td>
@@ -1021,6 +1068,12 @@ Notes:
 <tr class="docker-images-row" id="docker-row-{{ sha_short }}" style="display: none;">
 <td colspan="8" style="padding: 0; background-color: #f6f8fa;">
 <div style="padding: 8px 12px; border-top: 1px solid #d0d7de;">
+<div style="display: flex; align-items: center; justify-content: flex-start; margin-bottom: 6px;">
+  <button type="button"
+          onclick="event.stopPropagation(); try { collapseDockerImages('{{ sha_short }}'); } catch (e) {}"
+          style="padding: 0 6px; height: 18px; line-height: 16px; font-size: 14px; border: 1px solid #d0d7de; border-radius: 999px; background: #ffffff; color: #57606a; cursor: pointer;"
+          title="Close Docker images">×</button>
+</div>
 <!-- Commit Details Section -->
 <div style="margin-bottom: 12px; padding: 8px; background-color: white; border: 1px solid #d0d7de; border-radius: 4px;">
 <div style="font-weight: 600; margin-bottom: 6px; font-size: 13px;">Commit Message:</div>

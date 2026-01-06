@@ -1398,9 +1398,11 @@ def _error_snippet_toggle_html(*, dom_id_seed: str, snippet_text: str) -> str:
     shown = _format_snippet_html(snippet_text or "")
     if not shown:
         shown = '<span style="color: #57606a;">(no snippet found)</span>'
+    toggle_id = f"{err_id}__toggle"
     return (
         f' <span style="cursor: pointer; color: #0969da; font-size: 11px; margin-left: 5px; '
         f'text-decoration: none; font-weight: 500; user-select: none;" '
+        f'id="{html.escape(toggle_id, quote=True)}" '
         f'data-default-expanded="0" '
         f'data-error-id="{html.escape(err_id, quote=True)}" '
         f'data-url-key="{html.escape(url_key, quote=True)}" '
@@ -1411,7 +1413,15 @@ def _error_snippet_toggle_html(*, dom_id_seed: str, snippet_text: str) -> str:
         f'<span style="display: block; width: 100%; max-width: 100%; box-sizing: border-box; '
         f'border: 1px solid #d0d7de; background: #f6f8fa; '
         f'border-radius: 6px; padding: 6px 8px; white-space: pre-wrap; overflow-wrap: anywhere; color: #24292f;">'
-        f'<span style="color: {COLOR_RED}; font-weight: 700;">Snippet:</span> {shown}'
+        f'<span style="display: flex; align-items: center; justify-content: flex-start; margin-bottom: 4px;">'
+        f'<button type="button" '
+        f'onclick="event.stopPropagation(); try {{ collapseErrorSnippet(\'{html.escape(err_id, quote=True)}\'); }} catch (e) {{}}" '
+        f'style="padding: 0 6px; height: 18px; line-height: 16px; font-size: 14px; '
+        f'border: 1px solid #d0d7de; border-radius: 999px; background: #ffffff; '
+        f'color: #57606a; cursor: pointer;" '
+        f'title="Close snippet">×</button>'
+        f"</span>"
+        f"{shown}"
         f"</span>"
         f"</span>"
     )

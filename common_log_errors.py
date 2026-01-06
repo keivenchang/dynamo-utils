@@ -6,6 +6,18 @@ This module is intentionally dependency-light so it can be shared by:
 - `dynamo-utils/common.py` (log/snippet extraction, cache logic)
 - `dynamo-utils/html_pages/common_dashboard_lib.py` (HTML rendering for snippets/tags)
 
+Snippet UX (what it should look like)
+------------------------------------
+- Snippets are **timestamp/ANSI stripped**. They should NOT show `2026-...Z` prefixes.
+- Snippets may include **.github/workflows/** and **.github/actions/** lines *preceding the failure*
+  (breadcrumbs for "what workflow/action was running").
+- Snippets may include one or more **multi-line command blocks** (docker/cargo/pytest) preceding the
+  failure. These are rendered inline in blue with a Copy button.
+- Snippets use literal `...` lines to indicate omitted content.
+- Error emphasis:
+  - Full-line error signals like `FAILED ...`, `[TIMEOUT]`, `assertion failed:`, `ERROR: failed to build`,
+    and `[FAIL] incorrect date:` render the entire line in red (not bold).
+
 Log files to error markers -- training examples:
 Grouped (best-effort) so it’s easier to find the golden log for a given category:
 
@@ -24,6 +36,13 @@ Docker:
 Infra / system:
 - 57877945100.log => cuda-error
 - 56700029731.log => etcd-error
+- 59347193958.log => etcd-error
+- 59418212320.log => etcd-error, pytest-error
+- 59520885010.log => pytest-error  # router decisions disagg failures (ea9503559 merge)
+- 59520513875.log => copyright-header-error, etcd-error  # includes "[FAIL] incorrect date: ..."
+- 59525400060.log => copyright-header-error, etcd-error  # includes "[FAIL] incorrect date: ..."
+- 59539777738.log => copyright-header-error, etcd-error  # includes "[FAIL] incorrect date: ..." (container/dev/*.sh)
+- 58588864118.log => k8s-error, k8s-network-timeout-pod, !pytest-error
 - 57877945085.log => exit-127-cmd-not-found
 - 57521050554.log => exit-139-sigsegv, !huggingface-auth-error
 - 58412373114.log => oom
@@ -93,12 +112,26 @@ Golden-log workflow (IMPORTANT for future edits):
     missing/extra categories for both full-log categorization and snippet-derived categorization.
 - If mismatches show up, adjust categorization/snippet anchors until the example logs match again,
   then re-run the self-test until it’s clean.
+
+Snippet output assertions (extra self-test)
+------------------------------------------
+Grammar:
+  * `<job_id>.log => +must_contain1, +must_contain2, !must_not_contain1, !must_not_contain2`
+Notes:
+  - These assertions validate snippet **text output** (not HTML).
+  - Prefer stable substrings (avoid volatile IDs/timings).
+
+* 59520885010.log => +docker run -w /workspace, +bash -c "pytest, +FAILED tests/router/test_router_e2e_with_mockers.py::test_router_decisions_disagg, !2026-
+* 56700029731.log => +docker run --runtime=nvidia, +mkdir -p /workspace/test-results && pytest -v --tb=short, !pytest     = <module 'pytest'
+* 59539777738.log => +[FAIL] incorrect date:, !2026-
+* 59540519012.log => +docker buildx create --name builder-, +docker buildx inspect --bootstrap, !2026-
 """
 
 from __future__ import annotations
 
 import argparse
 import html
+import json
 import os
 import re
 import stat
@@ -224,7 +257,20 @@ def _has_pytest_failure_signal(lines: Sequence[str]) -> bool:
             s2 = _BUILDKIT_STEP_PREFIX_RE.sub("", s)
             s2 = _BUILDKIT_TIME_PREFIX_RE.sub("", s2)
             if _PYTEST_NONZERO_FAIL_OR_ERROR_COUNT_RE.search(s2):
-                return True
+                # Guard against false positives from k8s tables like:
+                #   "0/1     Error              5 (3m ago)"
+                # which can match "1 Error" as "1 error".
+                low = s2.lower()
+                if (
+                    ("passed" in low)
+                    or ("skipped" in low)
+                    or ("deselected" in low)
+                    or ("warnings" in low)
+                    or re.search(r"\bin\s+\d", low)  # e.g. "in 12.34s"
+                    or ("short test summary info" in low)
+                    or ("====" in low)
+                ):
+                    return True
             # Collection errors are always failures.
             if re.search(r"\berror[ \t]+collecting\b", s, flags=re.IGNORECASE):
                 return True
@@ -291,12 +337,48 @@ def _parse_examples_from_docstring() -> list[tuple[str, list[str], list[str]]]:
     return out
 
 
+def _parse_snippet_assertions_from_docstring() -> list[tuple[str, list[str], list[str]]]:
+    """Parse snippet output assertions from the module docstring.
+
+    Grammar:
+      * `<file>.log => +must_contain1, +must_contain2, !must_not_contain1, !must_not_contain2`
+    """
+    out: list[tuple[str, list[str], list[str]]] = []
+    doc = (__doc__ or "").splitlines()
+    for ln in doc:
+        s = (ln or "").strip()
+        if not s.startswith("* "):
+            continue
+        if "=>" not in s:
+            continue
+        left, right = s[2:].split("=>", 1)
+        log_name = left.strip()
+        if not log_name.endswith(".log"):
+            continue
+        # Avoid matching the grammar line (e.g. `<job_id>.log`) or other placeholders.
+        if not re.match(r"^\d+\.log$", log_name):
+            continue
+        right_no_comment = right.split("#", 1)[0].strip()
+        tokens = [c.strip() for c in right_no_comment.split(",") if c.strip()]
+        must: list[str] = []
+        must_not: list[str] = []
+        for tok in tokens:
+            if tok.startswith("+"):
+                must.append(tok[1:].strip())
+            elif tok.startswith("!"):
+                must_not.append(tok[1:].strip())
+        if log_name and (must or must_not):
+            out.append((log_name, must, must_not))
+    return out
+
+
 def _self_test_examples(*, examples_root: Path) -> int:
     """Self-test: load the example logs and report category match coverage."""
     examples = _parse_examples_from_docstring()
     if not examples:
         print("Self-test: no Examples found in module docstring.")
         return 2
+    snippet_assertions = _parse_snippet_assertions_from_docstring()
 
     root = Path(examples_root).expanduser().resolve()
     missing_files: list[str] = []
@@ -361,6 +443,44 @@ def _self_test_examples(*, examples_root: Path) -> int:
         if forbidden_snip:
             print(f"  forbidden(snip): {', '.join(forbidden_snip)}")
         print("")
+
+    # Extra snippet output assertions (text-level must-include / must-not-include)
+    if snippet_assertions:
+        print("Self-test: snippet output assertions")
+        for log_name, must, must_not in snippet_assertions:
+            p = (root / log_name).resolve()
+            if not p.exists():
+                missing_files.append(str(p))
+                continue
+            try:
+                _ = _chmod_remove_write_bits(p)
+            except Exception:
+                pass
+            # Snippet assertions are sensitive to truncation. Use a larger tail budget than the
+            # category self-test so we reliably capture preceding command blocks / workflow paths.
+            text = _read_text_tail(p, max_bytes=2 * 1024 * 1024)
+            snip = extract_error_snippet_from_text(text)
+            missing: list[str] = []
+            present_forbidden: list[str] = []
+            for m in (must or []):
+                if m and m not in (snip or ""):
+                    missing.append(m)
+            for f in (must_not or []):
+                if f and f in (snip or ""):
+                    present_forbidden.append(f)
+            ok = (not missing) and (not present_forbidden)
+            if not ok:
+                failures += 1
+            print(f"- {log_name}")
+            if must:
+                print(f"  must_contain: {', '.join(must)}")
+            if must_not:
+                print(f"  must_not:    {', '.join(must_not)}")
+            if missing:
+                print(f"  missing:     {', '.join(missing)}")
+            if present_forbidden:
+                print(f"  forbidden:   {', '.join(present_forbidden)}")
+            print("")
 
     if missing_files:
         print("Self-test: missing example log files:")
@@ -976,6 +1096,23 @@ FAILED_TO_BUILD_RE: Pattern[str] = re.compile(
     re.IGNORECASE,
 )
 
+# Snippet: command/execution lines (user wants these shown prominently in blue).
+COMMAND_LINE_BLUE_RE: Pattern[str] = re.compile(
+    r"(?:"
+    r"\bPYTEST_CMD\s*="
+    # Treat pytest as a command only when it doesn't look like a Python module/variable dump:
+    #   pytest = <module 'pytest' from '...'>
+    r"|\bpython\s+-m\s+pytest\b(?!\s*=)"
+    r"|\bpytest\b(?!\s*=)(?:\s|$)"
+    r"|\bbash\s+-c\s+['\"][^'\"]*\bpytest\b"
+    r"|\bcargo\s+(?:test|build|check|clippy|fmt|rustfmt)\b"
+    r"|\bdocker\s+(?:run|buildx|build)\b"
+    r"|\b(?:\./)?run\.sh\b"
+    r"|\b(?:\./)?build\.sh\b"
+    r")",
+    re.IGNORECASE,
+)
+
 # Exit code 139 is conventionally SIGSEGV (signal 11) in POSIX shells (\(128 + 11 = 139\)).
 # Many CI jobs only report the exit code near the end.
 EXIT_CODE_139_LINE_RE: Pattern[str] = re.compile(
@@ -1172,6 +1309,14 @@ FULL_LINE_ERROR_REDS_RE: List[Pattern[str]] = [
     re.compile(r"\"result\"\s*:\s*\"failure\"", re.IGNORECASE),
     # Docker registry manifest missing.
     DOCKER_IMAGE_NOT_FOUND_RE,
+    # Timeout marker inserted by snippet extraction / categorization.
+    re.compile(r"\\[TIMEOUT\\]", re.IGNORECASE),
+    # Assertion failures: user wants the whole line red.
+    re.compile(r"\\bassertion\\s+failed:\\b", re.IGNORECASE),
+    # BuildKit/cargo/etc generic build failure summary.
+    FAILED_TO_BUILD_RE,
+    # Local policy checks (e.g. dev scripts) that emit a [FAIL] marker.
+    re.compile(r"\\[FAIL\\]\\s*incorrect\\s+date\\s*:", re.IGNORECASE),
     # Pytest failure block lines (high-signal).
     PYTEST_FAILURES_HEADER_RE,
     PYTEST_UNDERSCORE_TITLE_RE,
@@ -1314,7 +1459,8 @@ def html_highlight_error_keywords(text: str) -> str:
 
     def repl(m: re.Match) -> str:
         # Slightly deeper red than GitHub default; keep readable and not overly saturated.
-        return f'<span style="color: #c83a3a; font-weight: 700;">{m.group(0)}</span>'
+        # (No bold: user wants red without extra emphasis.)
+        return f'<span style="color: #c83a3a;">{m.group(0)}</span>'
 
     return ERROR_HIGHLIGHT_RE.sub(repl, escaped)
 
@@ -1328,11 +1474,11 @@ def categorize_error_snippet_text(snippet_text: str) -> List[str]:
     out: List[str] = []
     seen: set[str] = set()
 
-    # If the snippet already contains a synthesized "Categories: ..." header line (generated from
-    # full-log categorization), seed the snippet categories from it. This keeps the snippet view
-    # self-consistent even when the snippet window doesn't include the original root-cause lines.
+    # Seed from synthesized "Categories: ..." header line (generated from full-log categorization).
+    # This is intentionally not displayed in the UI, but it helps snippet categorization match
+    # the full-log outcome even when the visible snippet window doesn't include the root-cause line.
     try:
-        for ln in (snippet_text or "").splitlines()[:5]:
+        for ln in (snippet_text or "").splitlines()[:6]:
             s = (ln or "").strip()
             if not s:
                 continue
@@ -1359,7 +1505,29 @@ def categorize_error_snippet_text(snippet_text: str) -> List[str]:
 
     # Apply the shared marker rules to the snippet text as well, so snippet tags stay consistent
     # with full-log categorization (and avoid duplicated special-case logic).
-    _apply_category_rules(text=text, lines=(snippet_text or "").splitlines(), out=out, seen=seen)
+    #
+    # Also, ignore our synthetic command blocks (they can include "docker run"/"pytest" strings,
+    # which are execution context and should not influence error categorization).
+    try:
+        in_cmd = False
+        filtered: List[str] = []
+        for ln in (snippet_text or "").splitlines():
+            s = (ln or "").strip()
+            if s == "[[CMD]]":
+                in_cmd = True
+                continue
+            if s == "[[/CMD]]":
+                in_cmd = False
+                continue
+            if in_cmd:
+                continue
+            # Skip the synthetic "Snippet:" prefix (if any) and any stray "Categories:" lines.
+            if s.lower().startswith("snippet:") or s.lower().startswith("categories:"):
+                continue
+            filtered.append(ln)
+        _apply_category_rules(text=text, lines=filtered, out=out, seen=seen)
+    except Exception:
+        _apply_category_rules(text=text, lines=(snippet_text or "").splitlines(), out=out, seen=seen)
     return out
 
 
@@ -1374,23 +1542,63 @@ def render_error_snippet_html(snippet_text: str) -> str:
         return ""
 
     out_lines: List[str] = []
-    for raw_line in (snippet_text or "").splitlines():
-        # Don't highlight the synthetic snippet header line(s).
+    lines = (snippet_text or "").splitlines()
+    i = 0
+    while i < len(lines):
+        raw_line = lines[i]
+        if raw_line.strip() == "[[CMD]]":
+            # Consume a command block and render it as a multi-line blue block with a Copy button.
+            cmd_lines: List[str] = []
+            j = i + 1
+            while j < len(lines):
+                if lines[j].strip() == "[[/CMD]]":
+                    break
+                cmd_lines.append(_strip_ts_and_ansi(lines[j]))
+                j += 1
+            cmd_text = "\n".join(cmd_lines).strip("\n")
+            cmd_js = html.escape(json.dumps(cmd_text), quote=True)
+            cmd_html = html.escape(cmd_text)
+            out_lines.append(
+                '<span style="display: block; margin: 2px 0; white-space: pre-wrap; overflow-wrap: anywhere; color: #0969da;">'
+                f'<button type="button" onclick="event.stopPropagation(); try {{ copyToClipboard({cmd_js}, this); }} catch (e) {{}}" '
+                'style="display: inline-block; padding: 1px 8px; font-size: 11px; line-height: 1.2; '
+                'background: transparent; color: #0969da; border: 1px solid #0969da; border-radius: 999px; '
+                'cursor: pointer; margin: 0 0 2px 0;" title="Copy command">Copy</button>\n'
+                f"{cmd_html}"
+                "</span>"
+            )
+            # Skip to the end marker (or end of file if missing).
+            i = (j + 1) if (j < len(lines) and lines[j].strip() == "[[/CMD]]") else j
+            continue
+
+        # Don't display synthetic snippet header line(s) (they're used internally for categorization).
         if raw_line.strip().lower().startswith("categories:") or raw_line.strip().lower().startswith("commands:"):
-            out_lines.append(html.escape(raw_line))
+            i += 1
             continue
 
         # Keep empty lines (they matter for readability) but don't highlight them.
         if raw_line == "":
             out_lines.append("")
+            i += 1
             continue
 
-        if PYTEST_FAILED_LINE_RE.search(raw_line) or any(r.search(raw_line) for r in FULL_LINE_ERROR_REDS_RE):
+        # Match red/blue rules on a normalized view (strip timestamp prefix + ANSI), but render
+        # the normalized line so snippets don't show noisy timestamps.
+        s_norm = _strip_ts_and_ansi(raw_line)
+        display_line = s_norm
+
+        if PYTEST_FAILED_LINE_RE.search(s_norm) or any(r.search(s_norm) for r in FULL_LINE_ERROR_REDS_RE):
             out_lines.append(
-                f'<span style="color: #c83a3a; font-weight: 700;">{html.escape(raw_line)}</span>'
+                f'<span style="color: #c83a3a;">{html.escape(display_line)}</span>'
+            )
+        elif COMMAND_LINE_BLUE_RE.search(s_norm):
+            out_lines.append(
+                f'<span style="color: #0969da;">{html.escape(display_line)}</span>'
             )
         else:
-            out_lines.append(html_highlight_error_keywords(raw_line))
+            out_lines.append(html_highlight_error_keywords(display_line))
+
+        i += 1
 
     return "\n".join(out_lines)
 
@@ -1422,12 +1630,18 @@ def extract_error_snippet_from_text(
             # Capture multi-line commands like:
             #   docker run ... \n  --flag ... \n  --flag ...
             start_res = [
-                # Require whitespace/end after "pytest" so we don't match package/version strings like
-                # "pytest==9.0.2" or "pytest-timeout==2.4.0".
-                re.compile(r"(?:^|\\s)(?:python\\s+-m\\s+pytest|pytest)(?:\\s|$)", re.IGNORECASE),
-                re.compile(r"\\bdocker\\s+(?:build|run)\\b", re.IGNORECASE),
-                re.compile(r"(?:^|\\s)(?:\\./)?run\\.sh\\b", re.IGNORECASE),
-                re.compile(r"(?:^|\\s)(?:\\./)?build\\.sh\\b", re.IGNORECASE),
+                # Pytest commands: only treat these as execution context when they look like actual commands.
+                # Avoid prose matches like "request: Pytest request fixture ...".
+                re.compile(r"^(?:python\\s+-m\\s+pytest|pytest)\\b", re.IGNORECASE),
+                re.compile(r"\\bbash\\s+-c\\s+['\"][^'\"]*\\bpytest\\b", re.IGNORECASE),
+                # Prefer the explicit PYTEST_CMD line when present (highest-signal, most complete).
+                PYTEST_CMD_LINE_RE,
+                # Rust/cargo commands (common in CI).
+                re.compile(r"^cargo\\s+(?:test|build|check|clippy|fmt|rustfmt)\\b", re.IGNORECASE),
+                # Docker commands (often multi-line with backslashes).
+                re.compile(r"^docker\\s+(?:build|run)\\b", re.IGNORECASE),
+                re.compile(r"^(?:\\./)?run\\.sh\\b", re.IGNORECASE),
+                re.compile(r"^(?:\\./)?build\\.sh\\b", re.IGNORECASE),
             ]
 
             def normalize_cmd_line(raw: str) -> str:
@@ -1491,13 +1705,21 @@ def extract_error_snippet_from_text(
                 blk = collect_continuation_block(i)
                 if not blk:
                     continue
-                # Skip trivial fragments.
+                # Skip truly trivial fragments (single token / no args).
                 low = blk.strip().lower()
-                if low in {"pytest", "docker build", "docker run"}:
+                if low in {"pytest", "cargo", "docker build", "docker run"}:
                     continue
-                # Cap size per command
-                if len(blk) > 1200:
-                    blk = blk[:1200] + "\\n...(truncated)"
+                # Keep the *entire* multi-line invocation in the snippet (docker/pytest/cargo/etc).
+                try:
+                    parts = [x.rstrip() for x in blk.splitlines() if x.strip()]
+                    if parts:
+                        blk = "\n".join(parts).strip()
+                except Exception:
+                    pass
+                # Cap length so commands don't drown out the actual failure lines.
+                cap = 2200
+                if len(blk) > cap:
+                    blk = blk[:cap].rstrip() + "…"
                 if blk not in seen:
                     seen.add(blk)
                     out.append(blk)
@@ -1536,6 +1758,7 @@ def extract_error_snippet_from_text(
         last_libcuda_import_err: Optional[int] = None
         last_pytest_error_file: Optional[int] = None
         last_pytest_cmd: Optional[int] = None
+        last_pytest_exec_cmd: Optional[int] = None
         last_module_not_found: Optional[int] = None
         last_pytest_short_summary: Optional[int] = None
         last_python_exception_line: Optional[int] = None
@@ -1544,9 +1767,22 @@ def extract_error_snippet_from_text(
         last_rust_failures_header: Optional[int] = None
         last_git_lfs_anchor: Optional[int] = None
         last_exit_code_139: Optional[int] = None
-        last_etcd_sig: Optional[int] = None
+        etcd_sigs: List[int] = []
         last_hf_auth_sig: Optional[int] = None
         last_copyright_sig: Optional[int] = None
+        last_docker_exec_cmd: Optional[int] = None
+        last_cargo_exec_cmd: Optional[int] = None
+
+        # Detect executed pytest invocations (not package/version lines like "pytest==8.4.2",
+        # and not prose like "request: Pytest request fixture ...").
+        PYTEST_EXEC_AT_START_RE: Pattern[str] = re.compile(
+            r"^(?:python\s+-m\s+pytest|pytest)\b",
+            re.IGNORECASE,
+        )
+        PYTEST_EXEC_IN_BASH_RE: Pattern[str] = re.compile(
+            r"\bbash\s+-c\s+['\"][^'\"]*\bpytest\b",
+            re.IGNORECASE,
+        )
 
         for i, line in enumerate(all_lines):
             if not line or not line.strip():
@@ -1562,8 +1798,17 @@ def extract_error_snippet_from_text(
                 last_pytest_error_file = i
             if PYTEST_CMD_LINE_RE.search(s_norm):
                 last_pytest_cmd = i
+            # Also capture generic "pytest ..." invocations (e.g. docker run ... bash -c "pytest ...")
+            # since many CI logs do not emit PYTEST_CMD=... but still include the executed command.
+            if PYTEST_EXEC_AT_START_RE.search(s_norm) or PYTEST_EXEC_IN_BASH_RE.search(s_norm):
+                last_pytest_exec_cmd = i
             if DOCKER_DAEMON_ERROR_LINE_RE.search(s_norm):
                 last_docker_daemon_err = i
+            # Capture actual execution commands for snippet context (user wants these shown).
+            if re.search(r"\bdocker\s+(?:run|build)\b", s_norm, flags=re.IGNORECASE):
+                last_docker_exec_cmd = i
+            if re.search(r"\bcargo\s+(?:test|build|check|clippy|fmt|rustfmt)\b", s_norm, flags=re.IGNORECASE):
+                last_cargo_exec_cmd = i
             if UNSUPPORTED_CUDA_VLLM_RE.search(s_norm):
                 last_cuda_err = i
             if CUDA_LIBCUDA_IMPORT_ERROR_RE.search(s_norm):
@@ -1585,7 +1830,7 @@ def extract_error_snippet_from_text(
             # Some categories are often only visible as a single high-signal line that can get
             # pushed out of the snippet window. Track them explicitly so we can force-include.
             if ETCD_ERROR_RE.search(line.lower()):
-                last_etcd_sig = i
+                etcd_sigs.append(i)
             if HUGGINGFACE_AUTH_ERROR_RE.search(_strip_ts_and_ansi(line)) and not _line_is_warn_or_lower(line):
                 last_hf_auth_sig = i
             if COPYRIGHT_HEADER_ERROR_RE.search(line):
@@ -1681,6 +1926,11 @@ def extract_error_snippet_from_text(
             cmd_line = all_lines[last_pytest_cmd]
             if cmd_line and cmd_line.strip() and cmd_line not in snippet_lines:
                 snippet_lines.append(cmd_line)
+        # If we saw a generic "pytest ..." execution line, include it too (often more reliable than PYTEST_CMD).
+        if last_pytest_exec_cmd is not None:
+            cmd_line2 = all_lines[last_pytest_exec_cmd]
+            if cmd_line2 and cmd_line2.strip() and cmd_line2 not in snippet_lines:
+                snippet_lines.append(cmd_line2)
 
         # Ensure we include the libcuda ImportError line if present (often the true root cause).
         if last_libcuda_import_err is not None:
@@ -1825,14 +2075,25 @@ def extract_error_snippet_from_text(
                 if k > hdr_i and not DOCKERFILE_CONTEXT_LINE_RE.search(ln) and not DOCKERFILE_CONTEXT_DIVIDER_RE.search(ln):
                     break
 
-        # Ensure we include one representative line for some “single-line” failure categories.
+        # Ensure we include representative lines for some “single-line” failure categories.
         #
         # These are common in CI gate checks and linters, and without forcing them in, the snippet
         # can accidentally miss the line even though the full log clearly indicates the failure.
-        for idx in (last_etcd_sig, last_hf_auth_sig, last_copyright_sig):
+        # For etcd, include *all* matched etcd error lines (these are typically few, and seeing
+        # the whole set is useful for debugging).
+        try:
+            for idx in (etcd_sigs or []):
+                if idx is None:
+                    continue
+                ln = _strip_ts_and_ansi(all_lines[idx])
+                if ln and ln.strip() and ln not in snippet_lines:
+                    snippet_lines.append(ln)
+        except Exception:
+            pass
+        for idx in (last_hf_auth_sig, last_copyright_sig):
             if idx is None:
                 continue
-            ln = all_lines[idx]
+            ln = _strip_ts_and_ansi(all_lines[idx])
             if ln and ln.strip() and ln not in snippet_lines:
                 snippet_lines.append(ln)
 
@@ -1898,42 +2159,258 @@ def extract_error_snippet_from_text(
             content = content + ["..."]
         snippet_lines = content
 
+        # Include .github/actions/* and .github/workflows/* context lines right before the failure.
+        # These are often the clearest "what was running" breadcrumbs when debugging CI.
+        try:
+            gh_path_re: Pattern[str] = re.compile(r"\.github/(?:actions|workflows)/[A-Za-z0-9_.\-/]+", re.IGNORECASE)
+            anchor_for_ctx = int(anchor_idx) if anchor_idx is not None else (len(all_lines) - 1)
+            ctx_start = max(0, anchor_for_ctx - 6000)
+            ctx_lines: List[str] = []
+            seen_ctx: set[str] = set()
+            for ln in all_lines[ctx_start : anchor_for_ctx + 1]:
+                s = _strip_ts_and_ansi(ln or "").strip()
+                if not s:
+                    continue
+                if not gh_path_re.search(s):
+                    continue
+                if s not in seen_ctx:
+                    seen_ctx.add(s)
+                    ctx_lines.append(s)
+            ctx_lines = ctx_lines[-6:]
+            if ctx_lines:
+                snippet_lines = ctx_lines + ["..."] + list(snippet_lines or [])
+        except Exception:
+            pass
+
+        # Prepend "execution context" commands into the snippet body, separated by ellipses.
+        # These are the best breadcrumbs for debugging (docker run/build, cargo, pytest).
+        #
+        # We intentionally extract these from GitHub Actions "##[group]Run ..." blocks so we can
+        # preserve *multi-line* invocations (docker run/build + wrapped bash -c "pytest ...").
+        try:
+            cmd_blocks: List[str] = []
+            try:
+                cleaned = [_strip_ts_and_ansi(x).rstrip("\n") for x in (all_lines or [])]
+                anchor_for_cmds = int(anchor_idx) if anchor_idx is not None else (len(cleaned) - 1)
+
+                # Also capture docker buildx commands that appear as Actions "[command]" lines,
+                # e.g. "[command]/usr/bin/docker buildx create ...". These are often critical
+                # for debugging docker-build failures.
+                try:
+                    buildx_re = re.compile(
+                        r"^(?:##\[(?:command)\]|\[(?:command)\])\s*/usr/bin/docker\s+buildx\b",
+                        re.IGNORECASE,
+                    )
+                    buildx_lines: List[str] = []
+                    for ln in cleaned[: anchor_for_cmds + 1]:
+                        s = (ln or "").strip()
+                        if not s:
+                            continue
+                        if not buildx_re.search(s):
+                            continue
+                        # Normalize: strip "[command]/usr/bin/" or "##[command]/usr/bin/" prefix.
+                        s2 = re.sub(r"^(?:##\[(?:command)\]|\[(?:command)\])\s*/usr/bin/", "", s, flags=re.IGNORECASE)
+                        if s2 and s2 not in buildx_lines:
+                            buildx_lines.append(s2)
+                    # Keep only the last few to avoid drowning the snippet.
+                    buildx_lines = buildx_lines[-6:]
+                    if buildx_lines:
+                        cmd_blocks.append("\n".join(buildx_lines))
+                except Exception:
+                    pass
+
+                # Find the last few "Run ..." command groups and keep the most relevant ones.
+                # Many workflows use "Run # <comment>" headers, so we don't try to match the header text.
+                idxs: List[int] = []
+                for idx in range(len(cleaned) - 1, -1, -1):
+                    s0 = (cleaned[idx] or "").strip()
+                    if not s0.startswith("##[group]Run "):
+                        continue
+                    idxs.append(idx)
+                    if len(idxs) >= 8:
+                        break
+                idxs.reverse()
+
+                def _is_pytest_module_dump(ln: str) -> bool:
+                    return bool(re.search(r"^\s*pytest\s*=\s*<module\s+'pytest'\b", ln or "", flags=re.IGNORECASE))
+
+                want_cmd_start_re = re.compile(
+                    r"^(?:docker\s+(?:run|buildx|build)\b|cargo\s+(?:test|build|check|clippy|fmt|rustfmt)\b|python\s+-m\s+pytest\b|pytest\b|bash\s+-c\s+['\"][^'\"]*\bpytest\b)",
+                    re.IGNORECASE,
+                )
+
+                for idx in idxs:
+                    # Grab the group body until endgroup/shell/env; then extract the meaningful command lines.
+                    raw_block: List[str] = []
+                    j = idx
+                    while j < len(cleaned) and len(raw_block) < 80:
+                        s = (cleaned[j] or "").rstrip()
+                        if not s:
+                            # GitHub Actions groups often include blank lines; skip them.
+                            j += 1
+                            continue
+                        if s.startswith("##[endgroup]"):
+                            break
+                        if s.startswith("shell:") or s.startswith("env:"):
+                            break
+                        if s.startswith("##[group]Run "):
+                            # Keep the header text as a hint, but we'll filter it out unless it looks like a command.
+                            s = s.split("##[group]Run ", 1)[1].strip()
+                        raw_block.append(s)
+                        j += 1
+
+                    # Find the first real command line in the block.
+                    start_k: Optional[int] = None
+                    for k, ln in enumerate(raw_block):
+                        s = (ln or "").strip()
+                        if not s or s.startswith("#"):
+                            continue
+                        if _is_pytest_module_dump(s):
+                            continue
+                        if want_cmd_start_re.search(s):
+                            start_k = k
+                            break
+                        # docker run lines in some logs are indented but still start with docker once stripped
+                        if want_cmd_start_re.search(s.lstrip()):
+                            start_k = k
+                            raw_block[k] = s.lstrip()
+                            break
+                    if start_k is None:
+                        continue
+
+                    # Collect the command block including continuation lines until a clear stop marker.
+                    block: List[str] = []
+                    k = start_k
+                    while k < len(raw_block) and len(block) < 40:
+                        s = (raw_block[k] or "").rstrip()
+                        if not s:
+                            break
+                        if s.startswith("shell:") or s.startswith("env:") or s.startswith("TEST_EXIT_CODE="):
+                            break
+                        if _is_pytest_module_dump(s):
+                            break
+                        # Stop once we hit post-run bookkeeping that isn't part of the command itself.
+                        if s.startswith("echo ") or s.startswith("exit "):
+                            break
+                        block.append(s)
+                        # If line ends with "\" keep consuming obvious continuations.
+                        if s.rstrip().endswith("\\"):
+                            k += 1
+                            continue
+                        nxt = (raw_block[k + 1] if (k + 1) < len(raw_block) else "") or ""
+                        nxt_s = nxt.lstrip()
+                        if nxt_s.startswith("--") or nxt_s.startswith("-") or nxt_s.startswith("bash -c "):
+                            k += 1
+                            raw_block[k] = nxt_s
+                            continue
+                        break
+
+                    # Drop consecutive dupes.
+                    dedup: List[str] = []
+                    for ln in block:
+                        if dedup and dedup[-1] == ln:
+                            continue
+                        dedup.append(ln)
+                    blk = "\n".join([x for x in dedup if x.strip()]).strip()
+                    if blk:
+                        cmd_blocks.append(blk)
+            except Exception:
+                cmd_blocks = []
+
+            # De-dup blocks
+            try:
+                uniq: List[str] = []
+                seenb: set[str] = set()
+                for blk in cmd_blocks:
+                    s = (blk or "").strip()
+                    if s and s not in seenb:
+                        seenb.add(s)
+                        uniq.append(s)
+                cmd_blocks = uniq
+            except Exception:
+                pass
+
+            cmd_lines: List[str] = []
+            for blk in (cmd_blocks or []):
+                s = (blk or "").strip("\n")
+                if not s.strip():
+                    continue
+                # Mark command blocks so HTML renderer can add copy buttons + multiline formatting.
+                cmd_lines.append("[[CMD]]")
+                cmd_lines.extend(s.splitlines())
+                cmd_lines.append("[[/CMD]]")
+                cmd_lines.append("...")
+
+            if cmd_lines:
+                cmd_lines.pop()  # trailing ellipsis
+                tail = list(snippet_lines or [])
+                if tail and tail[0].strip() != "...":
+                    cmd_lines.append("...")
+                combined = cmd_lines + tail
+                if len(combined) > max_lines_i:
+                    keep_tail = max(0, max_lines_i - len(cmd_lines))
+                    combined = cmd_lines + (tail[-keep_tail:] if keep_tail > 0 else [])
+                snippet_lines = combined
+        except Exception:
+            pass
+
+        # Normalize body lines: never show noisy GitHub Actions timestamp prefixes or ANSI codes.
+        try:
+            normalized_lines: List[str] = []
+            for ln in (snippet_lines or []):
+                if ln == "...":
+                    normalized_lines.append(ln)
+                    continue
+                # Handle multi-line entries (e.g., docker run blocks) by normalizing each line.
+                try:
+                    if "\n" in (ln or ""):
+                        normalized_lines.append(
+                            "\n".join(_strip_ts_and_ansi(x) for x in (ln or "").splitlines())
+                        )
+                    else:
+                        normalized_lines.append(_strip_ts_and_ansi(ln))
+                except Exception:
+                    normalized_lines.append(_strip_ts_and_ansi(ln))
+            snippet_lines = normalized_lines
+        except Exception:
+            pass
+
         body = "\n".join(snippet_lines).strip()
         if not body:
             return ""
 
         cats = categorize_error_log_lines(all_lines)
-        cmds = extract_commands(all_lines)
-
         cats_line = ("Categories: " + ", ".join(cats)) if cats else ""
-        cmds_block = ("Commands:\n" + "\n".join(f"  {c}" for c in cmds)) if cmds else ""
-
-        def build_header(include_cmds: bool) -> str:
-            parts: List[str] = []
-            if cats_line:
-                parts.append(cats_line)
-            if include_cmds and cmds_block:
-                parts.append(cmds_block)
-            return ("\n\n".join(parts) + "\n\n") if parts else ""
-
-        header = build_header(include_cmds=True)
+        header = (cats_line + "\n") if cats_line else ""
         snippet = header + body
 
-        # If too large, first drop the commands block (it can be very long), then keep the *tail* of the body
-        # so we preserve the highest-signal failure lines (which are typically near the end).
+        # If too large, preserve BOTH:
+        # - the beginning of the body (often contains docker/cargo/pytest invocations)
+        # - the tail of the body (often contains the actual failure)
+        #
+        # This matches the desired UX:
+        #   docker run ...
+        #   ...
+        #   PYTEST_CMD=...
+        #   ...
+        #   <failure block>
         max_chars_i = int(max_chars)
         if len(snippet) > max_chars_i:
-            header = build_header(include_cmds=False)
-            snippet = header + body
-
-        if len(snippet) > max_chars_i:
-            trunc_marker = "\n\n...(truncated)"
+            trunc_marker = "\n...\n"
             keep_body = max(0, max_chars_i - len(header) - len(trunc_marker))
             if keep_body <= 0:
-                return body[-max_chars_i:]
+                return (header + body)[-max_chars_i:]
             if len(body) > keep_body:
-                body = body[-keep_body:]
-                snippet = header + body + trunc_marker
+                # Keep a small head to retain command context, and the remaining budget for tail.
+                head_keep = min(len(body), 900)
+                tail_keep = max(0, keep_body - head_keep)
+                if tail_keep > 0 and (head_keep + tail_keep + len(trunc_marker)) <= keep_body + len(trunc_marker):
+                    body = body[:head_keep].rstrip() + trunc_marker + body[-tail_keep:].lstrip()
+                    snippet = header + body
+                else:
+                    # Fallback: tail-only.
+                    body = body[-keep_body:]
+                    snippet = header + body
             else:
                 snippet = header + body
 

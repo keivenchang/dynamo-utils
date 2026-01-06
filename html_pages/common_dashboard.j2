@@ -295,6 +295,38 @@
     } catch (e) {}
   }
 
+  // Collapse snippet from the in-snippet "X" button (also resets toggle triangle + URL state).
+  function collapseErrorSnippet(errorId) {
+    var el = document.getElementById(errorId);
+    if (!el) return;
+    el.style.display = 'none';
+
+    var toggleEl = document.getElementById(String(errorId || '') + '__toggle');
+    if (!toggleEl) {
+      try { toggleEl = document.querySelector('[data-error-id=\"' + String(errorId || '') + '\"]'); } catch (e) {}
+    }
+    if (toggleEl) {
+      toggleEl.textContent = '▶ Snippet';
+    }
+
+    try {
+      if (window.DashboardUrlState && typeof window.DashboardUrlState.setBool === 'function') {
+        var defExp = false;
+        try { defExp = (toggleEl && toggleEl.getAttribute('data-default-expanded') === '1'); } catch (e) {}
+        var urlKey = '';
+        try { urlKey = String((toggleEl && toggleEl.getAttribute('data-url-key')) || ''); } catch (e) { urlKey = ''; }
+        if (!urlKey) {
+          urlKey = 's.' + String(errorId || '');
+        }
+        if (typeof window.DashboardUrlState.setBoolDefault === 'function') {
+          window.DashboardUrlState.setBoolDefault(urlKey, false, defExp);
+        } else {
+          window.DashboardUrlState.setBool(urlKey, false);
+        }
+      }
+    } catch (e) {}
+  }
+
   // Shared copy-to-clipboard helpers
   function copyToClipboard(text, button) {
     if (!text) return;
@@ -677,6 +709,27 @@
                 snipDivs.forEach(function(el) { el.style.display = 'none'; });
                 var snipToggles = document.querySelectorAll('[onclick^="toggleErrorSnippet("]');
                 snipToggles.forEach(function(tg) { tg.textContent = '▶ Snippet'; });
+              } catch (e) {}
+
+              // Commit-history specific: collapse expanded rows (GitHub/GitLab trees + docker details).
+              // These are not part of the <pre> tree renderer, so we must reset them explicitly.
+              try {
+                // Docker details rows
+                document.querySelectorAll('tr[id^="docker-row-"]').forEach(function(tr) {
+                  tr.style.display = 'none';
+                });
+                // GitHub tree rows
+                document.querySelectorAll('tr[id^="github-tree-row-"]').forEach(function(tr) {
+                  tr.style.display = 'none';
+                });
+                // GitLab tree rows
+                document.querySelectorAll('tr[id^="gitlab-tree-row-"]').forEach(function(tr) {
+                  tr.style.display = 'none';
+                });
+                // Reset the toggle glyphs
+                document.querySelectorAll('[id^="docker-toggle-"]').forEach(function(el) { el.textContent = '▶'; });
+                document.querySelectorAll('[id^="github-tree-toggle-"]').forEach(function(el) { el.textContent = '▶'; });
+                document.querySelectorAll('[id^="gitlab-tree-toggle-"]').forEach(function(el) { el.textContent = '▶'; });
               } catch (e) {}
             } finally {
               _restoring = false;
