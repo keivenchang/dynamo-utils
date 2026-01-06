@@ -1428,28 +1428,24 @@ class PRStatusNode(BranchNode):
                                 '</span>'
                             )
                         # Roll up the top-level PR status:
-                        # - FAIL iff a REQUIRED check failed
+                        # - FAILED iff a REQUIRED check failed
                         # - WARN if only non-required checks failed
-                        # - BUILD if anything is in progress
-                        # - ---- if pending/queued only (no pass/fail yet)
-                        # - PASS otherwise
+                        # - RUNNING if anything is in progress/pending
+                        # - PASSED otherwise
                         #
                         # IMPORTANT: determining "required" purely from branch protection can be unreliable
                         # (branch protection is often not accessible). Use PRInfo.failed_checks' `is_required`
                         # flags for the FAIL decision.
                         # Top-level pill should reflect REQUIRED checks only:
-                        # - FAIL iff a required check failed
-                        # - BUILD if anything is in progress
-                        # - ---- if pending/queued only (no pass/fail yet)
-                        # - PASS otherwise (even if optional checks failed)
+                        # - FAILED iff a required check failed
+                        # - RUNNING if anything is in progress/pending
+                        # - PASSED otherwise (even if optional checks failed)
                         if counts["failure_required"] > 0:
-                            ci_label = '<span class="status-indicator status-failed">FAIL</span>'
-                        elif counts["in_progress"] > 0:
-                            ci_label = '<span class="status-indicator status-building">BUILD</span>'
-                        elif counts["pending"] > 0:
-                            ci_label = '<span class="status-indicator status-unknown">----</span>'
+                            ci_label = '<span class="status-indicator status-failed">FAILED</span>'
+                        elif counts["in_progress"] > 0 or counts["pending"] > 0:
+                            ci_label = '<span class="status-indicator status-building">RUNNING</span>'
                         else:
-                            ci_label = '<span class="status-indicator status-success">PASS</span>'
+                            ci_label = '<span class="status-indicator status-success">PASSED</span>'
 
                         # Replace the literal "CI:" with a clickable GitHub icon (links to commit checks page).
                         checks_link = ""

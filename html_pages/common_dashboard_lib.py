@@ -86,9 +86,13 @@ def ci_should_expand_by_default(*, rollup_status: str, has_required_failure: boo
 
     - expand for required failures (red ✗)
     - do NOT auto-expand long/step-heavy jobs by default (even if they have subsections)
-    - do NOT auto-expand for optional failures, in-progress/pending/cancelled, unknown-only leaves, or all-green trees
+    - expand for in-progress/pending states so "BUILDING" remains visible
+    - do NOT auto-expand for optional failures, cancelled, unknown-only leaves, or all-green trees
     """
     if bool(has_required_failure):
+        return True
+    st = str(rollup_status or "").strip().lower()
+    if st in {CIStatus.IN_PROGRESS.value, CIStatus.PENDING.value, "building", "running"}:
         return True
     return False
 
@@ -330,6 +334,52 @@ def expand_nodes_with_required_failure_descendants(nodes: List[TreeNodeVM]) -> L
                 triangle_tooltip=n.triangle_tooltip,
             ),
             has_req,
+        )
+
+    out: List[TreeNodeVM] = []
+    for n in (nodes or []):
+        try:
+            n2, _ = walk(n)
+            out.append(n2)
+        except Exception:
+            out.append(n)
+    return out
+
+
+def expand_nodes_with_in_progress_descendants(nodes: List[TreeNodeVM]) -> List[TreeNodeVM]:
+    """Expand any node that has an in-progress/pending descendant anywhere in its subtree.
+
+    This is a post-pass (like required-failure expansion) so it works after workflow grouping.
+    """
+    _ICON_INPROG = status_icon_html(status_norm=CIStatus.IN_PROGRESS.value, is_required=False)
+    _ICON_PENDING = status_icon_html(status_norm=CIStatus.PENDING.value, is_required=False)
+
+    def walk(n: TreeNodeVM) -> Tuple[TreeNodeVM, bool]:
+        new_children: List[TreeNodeVM] = []
+        child_ip = False
+        for ch in (n.children or []):
+            ch2, ip = walk(ch)
+            new_children.append(ch2)
+            child_ip = child_ip or ip
+
+        h = str(n.label_html or "")
+        own_ip = bool((_ICON_INPROG in h) or (_ICON_PENDING in h))
+        has_ip = bool(own_ip or child_ip)
+
+        new_default_expanded = bool(n.default_expanded)
+        if bool(new_children) and bool(has_ip):
+            new_default_expanded = True
+
+        return (
+            TreeNodeVM(
+                node_key=str(n.node_key or ""),
+                label_html=str(n.label_html or ""),
+                children=new_children,
+                collapsible=bool(n.collapsible),
+                default_expanded=bool(new_default_expanded),
+                triangle_tooltip=n.triangle_tooltip,
+            ),
+            has_ip,
         )
 
     out: List[TreeNodeVM] = []
@@ -1297,6 +1347,7 @@ def check_line_html(
         required_failure=required_failure,
         warning_present=warning_present,
     )
+
     def _format_arch_text(raw_text: str) -> str:
         """Format the job text with arch styling.
 

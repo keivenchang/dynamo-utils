@@ -55,7 +55,7 @@ HuggingFace auth:
 
 Category frequency summary (all 733 logs, sorted by occurrence):
     1. k8s-error                           306/733 (41.7%) - Kubernetes/kubectl failure signal (cluster-related failures)
-    2. k8s-network-timeout-pod            209/733 (28.5%) - kubectl wait timeout (pods condition)
+    2. k8s-network-timeout-pod             209/733 (28.5%) - kubectl wait timeout (pods condition)
     3. build-status-check-error            195/733 (26.6%) - CI gate checking upstream builds
     4. pytest-error                        178/733 (24.3%) - Pytest test failures
     5. python-error                        119/733 (16.2%) - Python exceptions/tracebacks

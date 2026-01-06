@@ -1411,6 +1411,7 @@ class CommitHistoryGenerator:
             try:
                 from common_github_workflow import group_ci_nodes_by_workflow_needs  # local import
                 from common_dashboard_lib import mark_success_with_descendant_failures  # local import
+                from common_dashboard_lib import expand_nodes_with_in_progress_descendants  # local import
                 from common_dashboard_lib import expand_nodes_with_required_failure_descendants  # local import
 
                 children = list(
@@ -1424,6 +1425,8 @@ class CommitHistoryGenerator:
                 # Post-pass (requested UX): if workflow grouping moved nodes under parents, ensure
                 # any ancestor of a REQUIRED failure is expanded by default.
                 children = expand_nodes_with_required_failure_descendants(list(children or []))
+                # Also expand any ancestor of an in-progress/pending job so running work is visible by default.
+                children = expand_nodes_with_in_progress_descendants(list(children or []))
             except Exception:
                 children = [n for (_nm, n) in (node_items or [])]
 

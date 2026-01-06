@@ -48,7 +48,7 @@
     .status-success { background-color: #2da44e; border-color: #1f7a37; }
     .status-failed { background-color: #c83a3a; border-color: #a83232; }
     .status-warning { background-color: #8c959f; border-color: #6e7781; }
-    .status-building { background-color: #8c959f; border-color: #6e7781; }
+    .status-building { background-color: #bf8700; border-color: #9a6a00; } /* RUNNING */
     .status-unknown { background-color: #8c959f; border-color: #6e7781; }
 {% endblock %}
 
@@ -82,7 +82,7 @@
             Notes:
             <ul style="margin: 4px 0; padding-left: 20px;">
               <li><strong>Skipped</strong> shows as a grey circle-slash.</li>
-              <li><strong>Optional failures</strong> show as a red ✗ (no circle) and do not force the top PASS/FAIL pill to FAIL.</li>
+              <li><strong>Optional failures</strong> show as a red ✗ (no circle) and do not force the top PASSED/FAILED/RUNNING pill to FAILED.</li>
             </ul>
           </div>
         </div>
