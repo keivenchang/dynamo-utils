@@ -250,6 +250,22 @@
     if (toggleEl) {
       toggleEl.textContent = hidden ? '▼' : '▶';
     }
+    try {
+      if (window.DashboardUrlState && typeof window.DashboardUrlState.setBool === 'function') {
+        var defExp = false;
+        try { defExp = (toggleEl && toggleEl.getAttribute('data-default-expanded') === '1'); } catch (e) {}
+        var urlKey = '';
+        try { urlKey = String((toggleEl && toggleEl.getAttribute('data-url-key')) || ''); } catch (e) { urlKey = ''; }
+        if (!urlKey) {
+          urlKey = 't.' + String(childrenId || '');
+        }
+        if (typeof window.DashboardUrlState.setBoolDefault === 'function') {
+          window.DashboardUrlState.setBoolDefault(urlKey, hidden, defExp);
+        } else {
+          window.DashboardUrlState.setBool(urlKey, hidden);
+        }
+      }
+    } catch (e) {}
   }
 
   // Shared "Snippet" toggle (used by [raw log] leaves)
@@ -261,6 +277,22 @@
     if (toggleEl) {
       toggleEl.textContent = hidden ? '▼ Hide snippet' : '▶ Snippet';
     }
+    try {
+      if (window.DashboardUrlState && typeof window.DashboardUrlState.setBool === 'function') {
+        var defExp = false;
+        try { defExp = (toggleEl && toggleEl.getAttribute('data-default-expanded') === '1'); } catch (e) {}
+        var urlKey = '';
+        try { urlKey = String((toggleEl && toggleEl.getAttribute('data-url-key')) || ''); } catch (e) { urlKey = ''; }
+        if (!urlKey) {
+          urlKey = 's.' + String(errorId || '');
+        }
+        if (typeof window.DashboardUrlState.setBoolDefault === 'function') {
+          window.DashboardUrlState.setBoolDefault(urlKey, hidden, defExp);
+        } else {
+          window.DashboardUrlState.setBool(urlKey, hidden);
+        }
+      }
+    } catch (e) {}
   }
 
   // Shared copy-to-clipboard helpers
@@ -332,6 +364,358 @@
 
     updatePageAge();
     setInterval(updatePageAge, 3000);
+  })();
+
+  // ====================================================================================
+  // URL <-> UI state sync (shared)
+  //
+  // Goal: allow cut/paste of dashboard URLs that preserve view state:
+  // - checkboxes / selects / <details> that opt-in via `data-url-state="1"`
+  // - tree expansions/snippets via toggleTreeChildren()/toggleErrorSnippet()
+  //
+  // Storage:
+  // - querystring (`?key=value`) using history.replaceState (no reload)
+  // - also supports reading state from hash (`#key=value&...`) for convenience/back-compat
+  // ====================================================================================
+  (function() {
+    function _parseParams() {
+      var out = new URLSearchParams();
+      try {
+        var qs = new URLSearchParams(window.location.search || '');
+        qs.forEach(function(v, k) { out.set(k, v); });
+      } catch (e) {}
+      try {
+        var h = String(window.location.hash || '');
+        if (h && h.indexOf('=') !== -1) {
+          var hs = h.startsWith('#') ? h.slice(1) : h;
+          var hp = new URLSearchParams(hs);
+          hp.forEach(function(v, k) {
+            if (!out.has(k)) out.set(k, v);
+          });
+        }
+      } catch (e) {}
+      return out;
+    }
+
+    function _isTruthyParam(v) {
+      var s = String(v || '').trim().toLowerCase();
+      return (s === '1' || s === 'true' || s === 'yes' || s === 'on' || s === 'open');
+    }
+
+    function _controlKey(el) {
+      if (!el) return '';
+      var k = el.getAttribute('data-url-key');
+      if (k) return String(k);
+      if (el.id) return String(el.id);
+      var nm = el.getAttribute('name');
+      if (nm) return String(nm);
+      return '';
+    }
+
+    function _replaceUrl(params) {
+      try {
+        var url = new URL(window.location.href);
+        // Preserve any existing non-state hash (anchors). If hash looks like state, prefer empty hash.
+        var keepHash = '';
+        var h = String(url.hash || '');
+        if (h && h.indexOf('=') === -1) keepHash = h;
+        url.search = params.toString() ? ('?' + params.toString()) : '';
+        url.hash = keepHash;
+        window.history.replaceState({}, '', url.toString());
+      } catch (e) {}
+    }
+
+    var _defaults = {};
+    var _restoring = false;
+
+    function _captureDefaults() {
+      var nodes = document.querySelectorAll('[data-url-state="1"]');
+      nodes.forEach(function(el) {
+        var key = _controlKey(el);
+        if (!key) return;
+        if (el.tagName && el.tagName.toLowerCase() === 'details') {
+          _defaults[key] = el.open ? '1' : '0';
+          return;
+        }
+        if (el.tagName && el.tagName.toLowerCase() === 'select') {
+          _defaults[key] = String(el.value || '');
+          return;
+        }
+        var t = (el.getAttribute('type') || '').toLowerCase();
+        if (t === 'checkbox') {
+          _defaults[key] = el.checked ? '1' : '0';
+          return;
+        }
+      });
+    }
+
+    function _applyToControlsFromParams(params) {
+      var nodes = document.querySelectorAll('[data-url-state="1"]');
+      _restoring = true;
+      try {
+        nodes.forEach(function(el) {
+          var key = _controlKey(el);
+          if (!key) return;
+          if (!params.has(key)) return;
+          var v = params.get(key);
+          if (el.tagName && el.tagName.toLowerCase() === 'details') {
+            el.open = _isTruthyParam(v);
+            // 'toggle' event is not reliably fired by setting `open` in all browsers; dispatch one.
+            try { el.dispatchEvent(new Event('toggle')); } catch (e) {}
+            return;
+          }
+          if (el.tagName && el.tagName.toLowerCase() === 'select') {
+            el.value = String(v || '');
+            try { el.dispatchEvent(new Event('change')); } catch (e) {}
+            return;
+          }
+          var t = (el.getAttribute('type') || '').toLowerCase();
+          if (t === 'checkbox') {
+            el.checked = _isTruthyParam(v);
+            try { el.dispatchEvent(new Event('change')); } catch (e) {}
+            return;
+          }
+        });
+      } finally {
+        _restoring = false;
+      }
+    }
+
+    function _bindControlsToUrl() {
+      var nodes = document.querySelectorAll('[data-url-state="1"]');
+      nodes.forEach(function(el) {
+        var key = _controlKey(el);
+        if (!key) return;
+        var evt = 'change';
+        if (el.tagName && el.tagName.toLowerCase() === 'details') evt = 'toggle';
+        el.addEventListener(evt, function() {
+          if (_restoring) return;
+          var params = _parseParams();
+          var val = '';
+          if (el.tagName && el.tagName.toLowerCase() === 'details') {
+            val = el.open ? '1' : '0';
+          } else if (el.tagName && el.tagName.toLowerCase() === 'select') {
+            val = String(el.value || '');
+          } else {
+            var t = (el.getAttribute('type') || '').toLowerCase();
+            if (t === 'checkbox') {
+              val = el.checked ? '1' : '0';
+            }
+          }
+          // Remove param if it matches default (keeps URLs short/clean).
+          if (_defaults.hasOwnProperty(key) && String(_defaults[key]) === String(val)) {
+            params.delete(key);
+          } else {
+            params.set(key, String(val));
+          }
+          _replaceUrl(params);
+        });
+      });
+    }
+
+    function _applyTreeAndSnippetTogglesFromParams(params) {
+      // Apply per-toggle URL keys (compact, SHA-first).
+      try {
+        // Tree nodes (triangles)
+        var tris = document.querySelectorAll('[data-children-id][data-url-key]');
+        tris.forEach(function(tg) {
+          try {
+            var urlKey = String(tg.getAttribute('data-url-key') || '');
+            if (!urlKey || !params.has(urlKey)) return;
+            var wantOpen = _isTruthyParam(params.get(urlKey));
+            var cid = String(tg.getAttribute('data-children-id') || '');
+            if (!cid) return;
+            var el = document.getElementById(cid);
+            if (!el) return;
+            el.style.display = wantOpen ? 'inline' : 'none';
+            tg.textContent = wantOpen ? '▼' : '▶';
+          } catch (e) {}
+        });
+
+        // Snippets
+        var snToggles = document.querySelectorAll('[data-error-id][data-url-key]');
+        snToggles.forEach(function(tg) {
+          try {
+            var urlKey = String(tg.getAttribute('data-url-key') || '');
+            if (!urlKey || !params.has(urlKey)) return;
+            var wantOpen = _isTruthyParam(params.get(urlKey));
+            var errId = String(tg.getAttribute('data-error-id') || '');
+            if (!errId) return;
+            var el = document.getElementById(errId);
+            if (!el) return;
+            el.style.display = wantOpen ? 'inline' : 'none';
+            tg.textContent = wantOpen ? '▼ Hide snippet' : '▶ Snippet';
+          } catch (e) {}
+        });
+      } catch (e) {}
+    }
+
+    window.DashboardUrlState = {
+      get: function(key) {
+        try { return _parseParams().get(String(key || '')); } catch (e) { return null; }
+      },
+      has: function(key) {
+        try { return _parseParams().has(String(key || '')); } catch (e) { return false; }
+      },
+      set: function(key, value) {
+        if (_restoring) return;
+        try {
+          var k = String(key || '');
+          if (!k) return;
+          var params = _parseParams();
+          params.set(k, String(value == null ? '' : value));
+          _replaceUrl(params);
+        } catch (e) {}
+      },
+      setBool: function(key, boolVal) {
+        if (_restoring) return;
+        try {
+          var k = String(key || '');
+          if (!k) return;
+          var params = _parseParams();
+          params.set(k, boolVal ? '1' : '0');
+          _replaceUrl(params);
+        } catch (e) {}
+      },
+      // Like setBool(), but remove the key from the URL when the value matches the default.
+      // This keeps URLs short and avoids `...?x=0` noise.
+      setBoolDefault: function(key, boolVal, defaultVal) {
+        if (_restoring) return;
+        try {
+          var k = String(key || '');
+          if (!k) return;
+          var params = _parseParams();
+          var v = !!boolVal;
+          var d = !!defaultVal;
+          if (v === d) {
+            params.delete(k);
+          } else {
+            params.set(k, v ? '1' : '0');
+          }
+          _replaceUrl(params);
+        } catch (e) {}
+      },
+      resetView: function(opts) {
+        // Remove known dashboard-state query params and restore defaults.
+        // Default behavior reloads the page after clearing URL so non-control state (e.g. default-expanded trees)
+        // is also restored.
+        try {
+          var o = opts || {};
+          var doReload = (o.reload !== false);
+          var params = _parseParams();
+
+          // Remove dashboard state params.
+          var toDelete = [];
+          params.forEach(function(v, k) {
+            var ks = String(k || '');
+            if (!ks) return;
+            if (ks === 'legend') { toDelete.push(ks); return; }
+            if (ks === 'date.mode') { toDelete.push(ks); return; }
+            if (ks.startsWith('col.')) { toDelete.push(ks); return; }
+            if (ks.startsWith('t.')) { toDelete.push(ks); return; }      // tree toggles
+            if (ks.startsWith('s.')) { toDelete.push(ks); return; }      // snippet toggles
+            if (ks.startsWith('d.')) { toDelete.push(ks); return; }      // commit-history docker rows
+            if (ks.startsWith('gh.')) { toDelete.push(ks); return; }     // commit-history github tree
+            if (ks.startsWith('gl.')) { toDelete.push(ks); return; }     // commit-history gitlab tree
+          });
+          toDelete.forEach(function(k) { try { params.delete(k); } catch (e) {} });
+
+          // Also remove any known control keys we recorded defaults for.
+          try {
+            Object.keys(_defaults || {}).forEach(function(k) {
+              try { params.delete(String(k || '')); } catch (e) {}
+            });
+          } catch (e) {}
+
+          _replaceUrl(params);
+
+          if (doReload) {
+            try { window.location.reload(); } catch (e) {}
+          } else {
+            // Best-effort restore of known controls without reload.
+            _restoring = true;
+            try {
+              var nodes = document.querySelectorAll('[data-url-state="1"]');
+              nodes.forEach(function(el) {
+                var key = _controlKey(el);
+                if (!key || !_defaults.hasOwnProperty(key)) return;
+                var dv = _defaults[key];
+                if (el.tagName && el.tagName.toLowerCase() === 'details') {
+                  el.open = _isTruthyParam(dv);
+                  try { el.dispatchEvent(new Event('toggle')); } catch (e) {}
+                  return;
+                }
+                if (el.tagName && el.tagName.toLowerCase() === 'select') {
+                  el.value = String(dv || '');
+                  try { el.dispatchEvent(new Event('change')); } catch (e) {}
+                  return;
+                }
+                var t = (el.getAttribute('type') || '').toLowerCase();
+                if (t === 'checkbox') {
+                  el.checked = _isTruthyParam(dv);
+                  try { el.dispatchEvent(new Event('change')); } catch (e) {}
+                  return;
+                }
+              });
+
+              // Restore tree toggles to their default expanded/collapsed state.
+              try {
+                var triNodes = document.querySelectorAll('[data-children-id]');
+                triNodes.forEach(function(tg) {
+                  var cid = tg.getAttribute('data-children-id');
+                  if (!cid) return;
+                  var defExp = (tg.getAttribute('data-default-expanded') === '1');
+                  var cont = document.getElementById(cid);
+                  if (cont) cont.style.display = defExp ? 'inline' : 'none';
+                  tg.textContent = defExp ? '▼' : '▶';
+                });
+              } catch (e) {}
+
+              // Restore snippets to default-collapsed.
+              try {
+                var snipDivs = document.querySelectorAll('span[id^="err_snip_"]');
+                snipDivs.forEach(function(el) { el.style.display = 'none'; });
+                var snipToggles = document.querySelectorAll('[onclick^="toggleErrorSnippet("]');
+                snipToggles.forEach(function(tg) { tg.textContent = '▶ Snippet'; });
+              } catch (e) {}
+            } finally {
+              _restoring = false;
+            }
+          }
+        } catch (e) {}
+      },
+      init: function() {
+        _captureDefaults();
+        var params = _parseParams();
+        _applyToControlsFromParams(params);
+        _applyTreeAndSnippetTogglesFromParams(params);
+        _bindControlsToUrl();
+      }
+    };
+
+    // Simple ready-queue so dashboard-specific scripts can run AFTER DashboardUrlState.init()
+    // without relying on DOMContentLoaded handler registration order.
+    window.__dashboardReady = window.__dashboardReady || { fired: false };
+    window.__dashboardOnReadyQueue = window.__dashboardOnReadyQueue || [];
+    window.dashboardOnReady = function(cb) {
+      try {
+        if (window.__dashboardReady && window.__dashboardReady.fired) {
+          cb();
+        } else {
+          window.__dashboardOnReadyQueue.push(cb);
+        }
+      } catch (e) {}
+    };
+
+    document.addEventListener('DOMContentLoaded', function() {
+      try { window.DashboardUrlState.init(); } catch (e) {}
+      try {
+        window.__dashboardReady.fired = true;
+        var q = window.__dashboardOnReadyQueue || [];
+        window.__dashboardOnReadyQueue = [];
+        q.forEach(function(fn) { try { fn(); } catch (e) {} });
+      } catch (e) {}
+    });
   })();
   </script>
 

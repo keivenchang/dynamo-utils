@@ -213,6 +213,22 @@ class TreeNodeVM:
     triangle_tooltip: Optional[str] = None
 
 
+def _dom_id_from_node_key(node_key: str) -> str:
+    """Best-effort stable DOM id for a tree node's children container.
+
+    This is used so URL state can target specific nodes across page regenerations.
+    The caller should ensure node_key is stable and unique-enough (e.g. include repo/branch/SHA).
+    """
+    try:
+        k = str(node_key or "")
+        if not k:
+            return ""
+        # Prefix with a letter for HTML id validity.
+        return f"tree_children_k_{_hash10(k)}"
+    except Exception:
+        return ""
+
+
 def mark_success_with_descendant_failures(nodes: List[TreeNodeVM]) -> List[TreeNodeVM]:
     """If a node is successful but any descendant failed, render it as ✓/✗.
 
@@ -425,7 +441,14 @@ def disambiguate_check_run_name(name: str, url: str, *, name_counts: Dict[str, i
         return str(name or "")
 
 
-def _triangle_html(*, expanded: bool, children_id: str, tooltip: Optional[str], parent_children_id: Optional[str]) -> str:
+def _triangle_html(
+    *,
+    expanded: bool,
+    children_id: str,
+    tooltip: Optional[str],
+    parent_children_id: Optional[str],
+    url_key: str = "",
+) -> str:
     ch = "▼" if expanded else "▶"
     title_attr = f' title="{html.escape(tooltip or "", quote=True)}"' if tooltip else ""
     parent_attr = (
@@ -433,10 +456,13 @@ def _triangle_html(*, expanded: bool, children_id: str, tooltip: Optional[str], 
         if parent_children_id
         else ""
     )
+    url_key_attr = f' data-url-key="{html.escape(url_key, quote=True)}"' if url_key else ""
     return (
         f'<span style="display: inline-block; width: 12px; margin-right: 2px; color: #0969da; '
         f'cursor: pointer; user-select: none;"{title_attr} '
         f'data-children-id="{html.escape(children_id, quote=True)}"{parent_attr} '
+        f'data-default-expanded="{"1" if expanded else "0"}" '
+        f"{url_key_attr} "
         f'onclick="toggleTreeChildren(\'{html.escape(children_id, quote=True)}\', this)">{ch}</span>'
     )
 
@@ -449,8 +475,8 @@ def render_tree_pre_lines(root_nodes: List[TreeNodeVM]) -> List[str]:
     """Render a forest into lines suitable to be joined with \n and placed inside <pre>."""
 
     out: List[str] = []
-    # NOTE: This function may be called multiple times per HTML page (e.g. per-repo / per-PR).
-    # DOM ids must be unique across the whole document, not just per call.
+    # Prefer stable ids derived from node_key so URL state survives page refreshes.
+    # Fall back to a per-render counter when keys collide or are missing.
     global _TREE_RENDER_CALL_SEQ
     try:
         _TREE_RENDER_CALL_SEQ += 1
@@ -458,13 +484,48 @@ def render_tree_pre_lines(root_nodes: List[TreeNodeVM]) -> List[str]:
         _TREE_RENDER_CALL_SEQ = 1
     render_call_id = _TREE_RENDER_CALL_SEQ
     next_dom_id = 0
+    used_ids: Dict[str, int] = {}
 
-    def alloc_children_id() -> str:
-        # Must be unique within the document. Deterministic IDs (e.g., hashed from labels)
-        # are not safe because the same logical node label/template can appear many times.
+    def alloc_children_id(node_key: str) -> str:
         nonlocal next_dom_id
+        base = _dom_id_from_node_key(node_key)
+        if base:
+            n = int(used_ids.get(base, 0) or 0) + 1
+            used_ids[base] = n
+            if n == 1:
+                return base
+            # Extremely rare: collisions for identical node_key. Keep deterministic by suffixing.
+            return f"{base}_{n}"
         next_dom_id += 1
         return f"tree_children_{render_call_id:x}_{next_dom_id:x}"
+
+    _HEX_SHA_RE = re.compile(r"\b[0-9a-f]{7,40}\b", re.IGNORECASE)
+
+    def _sha7_from_key(s: str) -> str:
+        try:
+            m = _HEX_SHA_RE.findall(str(s or ""))
+            if not m:
+                return ""
+            # Prefer the last SHA-ish token (often the most specific like branch head SHA).
+            return str(m[-1])[:7].lower()
+        except Exception:
+            return ""
+
+    def _repo_token_from_key(s: str) -> str:
+        """Extract a repo/dir token for URL readability (not uniqueness)."""
+        try:
+            txt = str(s or "")
+        except Exception:
+            return ""
+        try:
+            m = re.search(r"\b(?:PRStatus|CI):([^:>]+):", txt)
+            if not m:
+                return ""
+            repo = str(m.group(1) or "").strip()
+            repo = re.sub(r"[^a-zA-Z0-9._-]+", "-", repo).strip("-").lower()
+            return repo[:32]
+        except Exception:
+            return ""
 
     def render_node(
         node: TreeNodeVM,
@@ -472,6 +533,7 @@ def render_tree_pre_lines(root_nodes: List[TreeNodeVM]) -> List[str]:
         is_last: bool,
         is_root: bool,
         parent_children_id: Optional[str],
+        node_key_path: str,
     ) -> None:
         # Tree connector
         if not is_root:
@@ -484,12 +546,25 @@ def render_tree_pre_lines(root_nodes: List[TreeNodeVM]) -> List[str]:
         children_id: Optional[str] = None
         if node.collapsible:
             if node.children:
-                children_id = alloc_children_id()
+                nk = str(node.node_key or "")
+                full_key = (str(node_key_path or "") + ">" + nk).strip(">")
+                children_id = alloc_children_id(full_key)
+                sha7 = _sha7_from_key(full_key) or _sha7_from_key(nk)
+                # Compact URL key, SHA-first: t.<sha7>.<h6>
+                # (h6 is derived from the same stable id string, so it remains stable across regen)
+                repo_tok = _repo_token_from_key(full_key)
+                if repo_tok and sha7:
+                    url_key = f"t.{repo_tok}.{sha7}.{_hash10(full_key)[:6]}"
+                elif sha7:
+                    url_key = f"t.{sha7}.{_hash10(full_key)[:6]}"
+                else:
+                    url_key = f"t.{_hash10(full_key)[:10]}"
                 tri = _triangle_html(
                     expanded=bool(node.default_expanded),
                     children_id=children_id,
                     tooltip=node.triangle_tooltip,
                     parent_children_id=parent_children_id,
+                    url_key=url_key,
                 )
             else:
                 tri = _triangle_placeholder_html()
@@ -523,6 +598,7 @@ def render_tree_pre_lines(root_nodes: List[TreeNodeVM]) -> List[str]:
                     idx == len(node.children) - 1,
                     False,
                     children_id,
+                    (str(node_key_path or "") + ">" + str(node.node_key or "")).strip(">"),
                 )
 
             # Close children span on the last rendered child line, or on the parent line if no child line rendered.
@@ -540,10 +616,11 @@ def render_tree_pre_lines(root_nodes: List[TreeNodeVM]) -> List[str]:
                 idx == len(node.children) - 1,
                 False,
                 parent_children_id,
+                (str(node_key_path or "") + ">" + str(node.node_key or "")).strip(">"),
             )
 
     for i, n in enumerate(root_nodes):
-        render_node(n, prefix="", is_last=(i == len(root_nodes) - 1), is_root=True, parent_children_id=None)
+        render_node(n, prefix="", is_last=(i == len(root_nodes) - 1), is_root=True, parent_children_id=None, node_key_path="")
 
     return out
 
@@ -1277,18 +1354,56 @@ def _snippet_first_command(snippet_text: str) -> str:
 
 
 def _error_snippet_toggle_html(*, dom_id_seed: str, snippet_text: str) -> str:
-    global _ERROR_SNIP_SEQ
+    # Stable snippet id so URLs can target it across page regenerations.
+    # Fall back to a unique suffix if collisions occur within a single document.
+    base = f"err_snip_{_hash10(str(dom_id_seed or ''))}"
+    global _ERROR_SNIP_USED
     try:
-        _ERROR_SNIP_SEQ += 1
-    except NameError:
-        _ERROR_SNIP_SEQ = 1
-    err_id = f"err_snip_{_ERROR_SNIP_SEQ:x}"
+        _ERROR_SNIP_USED = _ERROR_SNIP_USED  # type: ignore[name-defined]
+    except Exception:
+        _ERROR_SNIP_USED = {}  # type: ignore[assignment]
+    try:
+        n = int(_ERROR_SNIP_USED.get(base, 0) or 0) + 1  # type: ignore[attr-defined]
+        _ERROR_SNIP_USED[base] = n  # type: ignore[index]
+    except Exception:
+        n = 1
+    err_id = base if n == 1 else f"{base}_{n}"
+    # Compact URL key, SHA-first, but prefer the *full numeric Actions job id* when available:
+    #   s.<sha7>.j<jobid>
+    # Fallback:
+    #   s.<sha7>.<h6>  (or s.<h6> if no sha)
+    try:
+        seed_s = str(dom_id_seed or "")
+    except Exception:
+        seed_s = ""
+    try:
+        m = re.findall(r"\b[0-9a-f]{7,40}\b", seed_s, flags=re.IGNORECASE)
+        sha7 = (str(m[-1])[:7].lower() if m else "")
+    except Exception:
+        sha7 = ""
+    jobid = ""
+    try:
+        m2 = re.search(r"/job/([0-9]{5,})", seed_s)
+        jobid = str(m2.group(1)) if m2 else ""
+    except Exception:
+        jobid = ""
+    try:
+        suffix = _hash10(seed_s)[:6]
+    except Exception:
+        suffix = "x"
+    if jobid:
+        url_key = f"s.{sha7}.j{jobid}" if sha7 else f"s.j{jobid}"
+    else:
+        url_key = f"s.{sha7}.{suffix}" if sha7 else f"s.{suffix}"
     shown = _format_snippet_html(snippet_text or "")
     if not shown:
         shown = '<span style="color: #57606a;">(no snippet found)</span>'
     return (
         f' <span style="cursor: pointer; color: #0969da; font-size: 11px; margin-left: 5px; '
         f'text-decoration: none; font-weight: 500; user-select: none;" '
+        f'data-default-expanded="0" '
+        f'data-error-id="{html.escape(err_id, quote=True)}" '
+        f'data-url-key="{html.escape(url_key, quote=True)}" '
         f'onclick="toggleErrorSnippet(\'{html.escape(err_id, quote=True)}\', this)">▶ Snippet</span>'
         f'<span id="{html.escape(err_id, quote=True)}" style="display: none;">'
         f"<br>"
@@ -1393,7 +1508,11 @@ def check_line_html(
         cmd = _snippet_first_command(error_snippet_text or "")
         if cmd:
             links += _tag_pill_html(text=cmd, monospace=True, kind="command")
-        links += _error_snippet_toggle_html(dom_id_seed=f"{job_id}|{raw_log_href}", snippet_text=error_snippet_text)
+        # Include URL/context so the snippet id is stable and unique across the page.
+        links += _error_snippet_toggle_html(
+            dom_id_seed=f"{job_id}|{display_name}|{raw_log_href}|{log_url}",
+            snippet_text=error_snippet_text,
+        )
 
     return f"{icon} {id_html}{req_html}{name_html}{dur_html}{links}"
 

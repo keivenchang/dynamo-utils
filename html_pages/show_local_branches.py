@@ -451,6 +451,8 @@ class CIJobTreeNode(BranchNode):
     error_snippet_text: str = ""
     is_required: bool = False
     failed_check: Optional[FailedCheck] = None
+    # Stable context key (repo/branch/SHA/PR) to make DOM ids stable across regenerations.
+    context_key: str = ""
 
     @dataclass(frozen=True)
     class _Rollup:
@@ -700,7 +702,7 @@ class CIJobTreeNode(BranchNode):
         default_expanded = self._subtree_needs_attention(self) if has_children else False
 
         return TreeNodeVM(
-            node_key=f"CI:{self.job_id}:{self.url}",
+            node_key=f"CI:{self.context_key}:{self.job_id}:{self.url}",
             label_html=self._format_html_content(),
             children=[c.to_tree_vm() for c in (self.children or []) if isinstance(c, BranchNode)],
             collapsible=True,  # show triangle placeholder for alignment, even on leaves
@@ -1275,6 +1277,8 @@ class PRStatusNode(BranchNode):
     refresh_checks: bool = False
     branch_commit_dt: Optional[datetime] = None
     allow_fetch_checks: bool = True
+    # Stable context key (repo/branch/SHA) so the main triangle is stable across refreshes.
+    context_key: str = ""
 
     def _format_content(self) -> str:
         if not self.pr:
@@ -1629,7 +1633,7 @@ class PRStatusNode(BranchNode):
             if isinstance(c, CIJobTreeNode)
         )
         return TreeNodeVM(
-            node_key=f"PRStatus:{getattr(self.pr, 'number', '')}",
+            node_key=f"PRStatus:{self.context_key}:{getattr(self.pr, 'number', '')}",
             label_html=self._format_html_content(),
             children=[c.to_tree_vm() for c in (self.children or []) if isinstance(c, BranchNode)],
             collapsible=True,
@@ -1980,6 +1984,7 @@ class LocalRepoScanner:
                         refresh_checks=bool(self.refresh_closed_prs),
                         branch_commit_dt=branch_dt,
                         allow_fetch_checks=bool(allow_fetch_checks),
+                        context_key=f"{repo_dir.name}:{branch_name}:{info.get('sha','')}",
                     )
                     pr_node.add_child(status_node)
 
@@ -1993,6 +1998,11 @@ class LocalRepoScanner:
                             checks_ttl_s=int(checks_ttl_s),
                             skip_fetch=(not bool(allow_fetch_checks)),
                         ):
+                            try:
+                                if isinstance(ci_node, CIJobTreeNode):
+                                    ci_node.context_key = str(status_node.context_key or "")
+                            except Exception:
+                                pass
                             status_node.add_child(ci_node)
                     except RawLogValidationError:
                         # Hard fail: for failed Actions jobs we require `[raw log]` links.

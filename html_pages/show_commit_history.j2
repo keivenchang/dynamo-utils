@@ -310,6 +310,9 @@ a .status-indicator:hover {
 
 function toggleDockerImages(event, linkElement) {
     event.preventDefault();
+    // If URL state wants to target this, we rely on `data-sha-short` and stable row ids.
+    var shaShort = '';
+    try { shaShort = String(linkElement.getAttribute('data-sha-short') || ''); } catch (e) { shaShort = ''; }
     // Find the current row
     var currentRow = linkElement.closest('tr');
     // Find the docker-images-row.
@@ -324,9 +327,11 @@ function toggleDockerImages(event, linkElement) {
         if (dockerRow.style.display === 'none') {
             dockerRow.style.display = 'table-row';
             linkElement.textContent = '▼';  // Point down when expanded
+            try { if (window.DashboardUrlState && shaShort) { window.DashboardUrlState.setBoolDefault('d.' + shaShort, true, false); } } catch (e) {}
         } else {
             dockerRow.style.display = 'none';
             linkElement.textContent = '▶';  // Point right when collapsed
+            try { if (window.DashboardUrlState && shaShort) { window.DashboardUrlState.setBoolDefault('d.' + shaShort, false, false); } } catch (e) {}
         }
     }
 }
@@ -342,6 +347,7 @@ function toggleCommitGitHubTree(event, shaShort) {
     if (toggleEl) {
         toggleEl.textContent = hidden ? '▼' : '▶';
     }
+    try { if (window.DashboardUrlState) { window.DashboardUrlState.setBoolDefault('gh.' + String(shaShort || ''), hidden, false); } } catch (e) {}
 }
 
 function toggleCommitGitLabTree(event, shaShort) {
@@ -355,6 +361,7 @@ function toggleCommitGitLabTree(event, shaShort) {
     if (toggleEl) {
         toggleEl.textContent = hidden ? '▼' : '▶';
     }
+    try { if (window.DashboardUrlState) { window.DashboardUrlState.setBoolDefault('gl.' + String(shaShort || ''), hidden, false); } } catch (e) {}
 }
 
 function toggleBuildHistory(event, shaShort) {
@@ -420,6 +427,13 @@ function initCommitColumnToggles() {
     cbs.forEach(function(cb) {
         var key = cb.getAttribute('data-col') || '';
         if (!key) return;
+        // URL overrides localStorage when present.
+        try {
+            if (window.DashboardUrlState && window.DashboardUrlState.has('col.' + key)) {
+                applyCommitColumn(key, !!cb.checked, false);
+                return;
+            }
+        } catch (e) {}
         try {
             var saved = localStorage.getItem('commitHistoryCol:' + key);
             if (saved === '0' || saved === '1') {
@@ -497,6 +511,13 @@ function toggleCommitDateMode(cb) {
 function initCommitDateModeToggle() {
     var cb = document.querySelector('input.commit-date-mode-toggle');
     if (!cb) return;
+    // URL overrides localStorage when present.
+    try {
+        if (window.DashboardUrlState && window.DashboardUrlState.has('date.mode')) {
+            applyCommitDateMode(cb.checked ? 'ago' : 'abs', false);
+            return;
+        }
+    } catch (e) {}
     // Default: show "ago" unless the user explicitly persisted "abs".
     var mode = 'abs';
     try {
@@ -509,9 +530,60 @@ function initCommitDateModeToggle() {
     applyCommitDateMode(mode, false);
 }
 
-document.addEventListener('DOMContentLoaded', function() {
+// Register a "ready" callback without depending on DOMContentLoaded handler registration order.
+// common_dashboard.j2 will call DashboardUrlState.init() first, then run this queue.
+window.__dashboardOnReadyQueue = window.__dashboardOnReadyQueue || [];
+window.__dashboardOnReadyQueue.push(function() {
     initCommitColumnToggles();
     initCommitDateModeToggle();
+    // Apply commit-history-specific expansion toggles encoded in the URL.
+    try {
+        // Merge search + hash params (hash is supported when it looks like `#k=v&...`).
+        var params = new URLSearchParams(window.location.search || '');
+        try {
+            var h = String(window.location.hash || '');
+            if (h && h.indexOf('=') !== -1) {
+                var hs = h.startsWith('#') ? h.slice(1) : h;
+                var hp = new URLSearchParams(hs);
+                hp.forEach(function(v, k) { if (!params.has(k)) params.set(k, v); });
+            }
+        } catch (e) {}
+
+        params.forEach(function(v, k) {
+            try {
+                var ks = String(k || '');
+                var vv = String(v || '').trim().toLowerCase();
+                var wantOpen = (vv === '1' || vv === 'true' || vv === 'yes' || vv === 'on');
+                if (ks.startsWith('d.')) {
+                    var sha = ks.slice('d.'.length);
+                    if (!sha) return;
+                    var row = document.getElementById('docker-row-' + sha);
+                    var tg = document.getElementById('docker-toggle-' + sha);
+                    if (row) row.style.display = wantOpen ? 'table-row' : 'none';
+                    if (tg) tg.textContent = wantOpen ? '▼' : '▶';
+                    return;
+                }
+                if (ks.startsWith('gh.')) {
+                    var sha2 = ks.slice('gh.'.length);
+                    if (!sha2) return;
+                    var r2 = document.getElementById('github-tree-row-' + sha2);
+                    var t2 = document.getElementById('github-tree-toggle-' + sha2);
+                    if (r2) r2.style.display = wantOpen ? 'table-row' : 'none';
+                    if (t2) t2.textContent = wantOpen ? '▼' : '▶';
+                    return;
+                }
+                if (ks.startsWith('gl.')) {
+                    var sha3 = ks.slice('gl.'.length);
+                    if (!sha3) return;
+                    var r3 = document.getElementById('gitlab-tree-row-' + sha3);
+                    var t3 = document.getElementById('gitlab-tree-toggle-' + sha3);
+                    if (r3) r3.style.display = wantOpen ? 'table-row' : 'none';
+                    if (t3) t3.textContent = wantOpen ? '▼' : '▶';
+                    return;
+                }
+            } catch (e) {}
+        });
+    } catch (e) {}
 });
 
 // copyToClipboard / copyFromClipboardAttr are provided by common_dashboard.j2
@@ -530,9 +602,17 @@ document.addEventListener('DOMContentLoaded', function() {
 <!-- NOTE: Do NOT use `.container` here; `.container` has a border and looks "boxed".
      Match the branches dashboard legend style (no border/box). -->
 <div class="legend" style="margin-bottom: 0px; padding: 8px; background-color: #f6f8fa;">
-<details style="margin-top: 0;">
+<details style="margin-top: 0;" data-url-state="1" data-url-key="legend">
 <summary>
-Legend & Help
+  <span style="display: inline-flex; align-items: center; justify-content: space-between; gap: 10px; width: calc(100% - 18px);">
+    <span style="flex: 1 1 auto;">Legend &amp; Help</span>
+    <button type="button"
+            onclick="event.preventDefault(); event.stopPropagation(); try { DashboardUrlState.resetView({reload: false}); } catch (e) {}"
+            style="flex: 0 0 auto; padding: 2px 8px; font-size: 11px; line-height: 1.2; background: transparent; color: #0969da; border: 1px solid #0969da; border-radius: 999px; cursor: pointer;"
+            title="Reset view state (clears URL params and restores defaults)">
+      Reset view
+    </button>
+  </span>
 </summary>
 <div style="margin-top: 10px; font-size: 12px; line-height: 1.55;">
 <div style="margin-bottom: 12px;">
@@ -592,22 +672,22 @@ Notes:
 <thead>
 <tr>
 <th>Commit SHA</th>
-<th class="col-composite"><label class="col-toggle"><input class="commit-col-toggle" type="checkbox" checked data-col="composite" onchange="toggleCommitColumn(this)"><span class="col-title">🐳Image SHA</span></label></th>
-<th class="col-github"><label class="col-toggle"><input class="commit-col-toggle" type="checkbox" checked data-col="github" onchange="toggleCommitColumn(this)"><span class="col-title"><svg height="14" width="14" viewBox="0 0 16 16" fill="currentColor" style="display: inline-block; vertical-align: middle; margin-right: 4px;"><path fill-rule="evenodd" clip-rule="evenodd" d="M8 0C3.58 0 0 3.58 0 8C0 11.54 2.29 14.53 5.47 15.59C5.87 15.66 6.02 15.42 6.02 15.21C6.02 15.02 6.01 14.39 6.01 13.72C4 14.09 3.48 13.23 3.32 12.78C3.23 12.55 2.84 11.84 2.5 11.65C2.22 11.5 1.82 11.13 2.49 11.12C3.12 11.11 3.57 11.7 3.72 11.94C4.44 13.15 5.59 12.81 6.05 12.6C6.12 12.08 6.33 11.73 6.56 11.53C4.78 11.33 2.92 10.64 2.92 7.58C2.92 6.71 3.23 5.99 3.74 5.43C3.66 5.23 3.38 4.41 3.82 3.31C3.82 3.31 4.49 3.1 6.02 4.13C6.66 3.95 7.34 3.86 8.02 3.86C8.7 3.86 9.38 3.95 10.02 4.13C11.55 3.09 12.22 3.31 12.22 3.31C12.66 4.41 12.38 5.23 12.3 5.43C12.81 5.99 13.12 6.7 13.12 7.58C13.12 10.65 11.25 11.33 9.47 11.53C9.76 11.78 10.01 12.26 10.01 13.01C10.01 14.08 10 14.94 10 15.21C10 15.42 10.15 15.67 10.55 15.59C13.71 14.53 16 11.53 16 8C16 3.58 12.42 0 8 0Z"></path></svg>GitHub Status</span></label></th>
-<th class="col-gitlab"><label class="col-toggle"><input class="commit-col-toggle" type="checkbox" checked data-col="gitlab" onchange="toggleCommitColumn(this)"><span class="col-title">🦊 GitLab Status</span></label></th>
+<th class="col-composite"><label class="col-toggle"><input class="commit-col-toggle" type="checkbox" checked data-col="composite" data-url-state="1" data-url-key="col.composite" onchange="toggleCommitColumn(this)"><span class="col-title">🐳Image SHA</span></label></th>
+<th class="col-github"><label class="col-toggle"><input class="commit-col-toggle" type="checkbox" checked data-col="github" data-url-state="1" data-url-key="col.github" onchange="toggleCommitColumn(this)"><span class="col-title"><svg height="14" width="14" viewBox="0 0 16 16" fill="currentColor" style="display: inline-block; vertical-align: middle; margin-right: 4px;"><path fill-rule="evenodd" clip-rule="evenodd" d="M8 0C3.58 0 0 3.58 0 8C0 11.54 2.29 14.53 5.47 15.59C5.87 15.66 6.02 15.42 6.02 15.21C6.02 15.02 6.01 14.39 6.01 13.72C4 14.09 3.48 13.23 3.32 12.78C3.23 12.55 2.84 11.84 2.5 11.65C2.22 11.5 1.82 11.13 2.49 11.12C3.12 11.11 3.57 11.7 3.72 11.94C4.44 13.15 5.59 12.81 6.05 12.6C6.12 12.08 6.33 11.73 6.56 11.53C4.78 11.33 2.92 10.64 2.92 7.58C2.92 6.71 3.23 5.99 3.74 5.43C3.66 5.23 3.38 4.41 3.82 3.31C3.82 3.31 4.49 3.1 6.02 4.13C6.66 3.95 7.34 3.86 8.02 3.86C8.7 3.86 9.38 3.95 10.02 4.13C11.55 3.09 12.22 3.31 12.22 3.31C12.66 4.41 12.38 5.23 12.3 5.43C12.81 5.99 13.12 6.7 13.12 7.58C13.12 10.65 11.25 11.33 9.47 11.53C9.76 11.78 10.01 12.26 10.01 13.01C10.01 14.08 10 14.94 10 15.21C10 15.42 10.15 15.67 10.55 15.59C13.71 14.53 16 11.53 16 8C16 3.58 12.42 0 8 0Z"></path></svg>GitHub Status</span></label></th>
+<th class="col-gitlab"><label class="col-toggle"><input class="commit-col-toggle" type="checkbox" checked data-col="gitlab" data-url-state="1" data-url-key="col.gitlab" onchange="toggleCommitColumn(this)"><span class="col-title">🦊 GitLab Status</span></label></th>
 <th class="col-date">
   <label class="col-toggle">
-    <input class="commit-col-toggle" type="checkbox" checked data-col="date" onchange="toggleCommitColumn(this)">
+    <input class="commit-col-toggle" type="checkbox" checked data-col="date" data-url-state="1" data-url-key="col.date" onchange="toggleCommitColumn(this)">
     <span class="col-title">PST</span>
   </label>
   <label class="col-toggle" style="margin-left: 8px;" title="Toggle absolute time vs time ago">
-    <input class="commit-date-mode-toggle" type="checkbox" onchange="toggleCommitDateMode(this)">
+    <input class="commit-date-mode-toggle" type="checkbox" data-url-state="1" data-url-key="date.mode" onchange="toggleCommitDateMode(this)">
     <span class="col-title">ago</span>
   </label>
 </th>
-<th class="col-author"><label class="col-toggle"><input class="commit-col-toggle" type="checkbox" checked data-col="author" onchange="toggleCommitColumn(this)"><span class="col-title">Author</span></label></th>
-<th class="col-email"><label class="col-toggle"><input class="commit-col-toggle" type="checkbox" data-col="email" onchange="toggleCommitColumn(this)"><span class="col-title">Email</span></label></th>
-<th class="col-message"><label class="col-toggle"><input class="commit-col-toggle" type="checkbox" checked data-col="message" onchange="toggleCommitColumn(this)"><span class="col-title">Message</span></label></th>
+<th class="col-author"><label class="col-toggle"><input class="commit-col-toggle" type="checkbox" checked data-col="author" data-url-state="1" data-url-key="col.author" onchange="toggleCommitColumn(this)"><span class="col-title">Author</span></label></th>
+<th class="col-email"><label class="col-toggle"><input class="commit-col-toggle" type="checkbox" data-col="email" data-url-state="1" data-url-key="col.email" onchange="toggleCommitColumn(this)"><span class="col-title">Email</span></label></th>
+<th class="col-message"><label class="col-toggle"><input class="commit-col-toggle" type="checkbox" checked data-col="message" data-url-state="1" data-url-key="col.message" onchange="toggleCommitColumn(this)"><span class="col-title">Message</span></label></th>
 </tr>
 </thead>
 <tbody>
@@ -642,7 +722,7 @@ Notes:
 {%- set has_composite_toggle = has_docker_images or has_gitlab -%}
 {# Expand/collapse triangle MUST be the first element in the cell (greyed out if nothing to expand). #}
 {%- if has_composite_toggle -%}
-<a href="#" class="composite-sha-link" onclick="toggleDockerImages(event, this); return false;" style="text-decoration: none; display: inline-block; width: 1em; text-align: center; margin-right: 2px; color: #0969da; user-select: none;" title="Show Docker images">▶</a>
+<a href="#" id="docker-toggle-{{ sha_short }}" data-sha-short="{{ sha_short }}" class="composite-sha-link" onclick="toggleDockerImages(event, this); return false;" style="text-decoration: none; display: inline-block; width: 1em; text-align: center; margin-right: 2px; color: #0969da; user-select: none;" title="Show Docker images">▶</a>
 {%- else -%}
 <span class="composite-sha-link-placeholder" style="display: inline-block; width: 1em; text-align: center; margin-right: 2px; color: #8c959f; opacity: 0.55; user-select: none;" title="No Docker images">▶</span>
 {%- endif -%}
@@ -938,7 +1018,7 @@ Notes:
 {%- set changed_files = commit.changed_files -%}
 {%- set gitlab_imgs = gitlab_images.get(sha_full, []) -%}
 
-<tr class="docker-images-row" style="display: none;">
+<tr class="docker-images-row" id="docker-row-{{ sha_short }}" style="display: none;">
 <td colspan="8" style="padding: 0; background-color: #f6f8fa;">
 <div style="padding: 8px 12px; border-top: 1px solid #d0d7de;">
 <!-- Commit Details Section -->
