@@ -89,6 +89,23 @@ def parse_actions_run_id_from_url(url: str) -> str:
         return ""
 
 
+def parse_actions_job_id_from_url(url: str) -> str:
+    """Extract a GitHub Actions job_id from a typical Actions job URL.
+
+    Examples:
+      https://github.com/OWNER/REPO/actions/runs/20732129035/job/59522167110 -> 59522167110
+    """
+    try:
+        s = str(url or "").strip()
+        if "/job/" not in s:
+            return ""
+        rest = s.split("/job/", 1)[1]
+        job_id = rest.split("/", 1)[0].split("?", 1)[0].strip()
+        return job_id if job_id.isdigit() else ""
+    except Exception:
+        return ""
+
+
 def _safe_int(x: Any, default: int = 0) -> int:
     try:
         return int(x)
@@ -1484,6 +1501,11 @@ class GHPRCheckRow:
     status_raw: str
     duration: str = ""
     url: str = ""
+    # GitHub Actions workflow run_id (best-effort parsed from `url`/`target_url`).
+    # Useful for UI affordances like "Restart failed jobs".
+    run_id: str = ""
+    # GitHub Actions job_id (best-effort parsed from `url` when it points at a specific job).
+    job_id: str = ""
     description: str = ""
     is_required: bool = False
 
@@ -3679,7 +3701,9 @@ class GitHubAPIClient:
         now = int(datetime.now(timezone.utc).timestamp())
         # Cache schema version. Bump this when the serialized shape/semantics change.
         # v2 adds status-context checks (GET /commits/<sha>/status) in addition to check-runs.
-        CACHE_VER = 2
+        # v3 added name-level dedupe (later reverted) and persisted `run_id`.
+        # v4 persists both `run_id` and `job_id` per row so UIs can disambiguate duplicates.
+        CACHE_VER = 4
 
         # 1) memory cache
         try:
@@ -3704,6 +3728,8 @@ class GitHubAPIClient:
                                     status_raw=str(r.get("status_raw", "") or ""),
                                     duration=str(r.get("duration", "") or ""),
                                     url=str(r.get("url", "") or ""),
+                                    run_id=str(r.get("run_id", "") or ""),
+                                    job_id=str(r.get("job_id", "") or ""),
                                     description=str(r.get("description", "") or ""),
                                     is_required=(name in required_checks) or bool(r.get("is_required", False)),
                                 )
@@ -3741,6 +3767,8 @@ class GitHubAPIClient:
                                     status_raw=str(r.get("status_raw", "") or ""),
                                     duration=str(r.get("duration", "") or ""),
                                     url=str(r.get("url", "") or ""),
+                                    run_id=str(r.get("run_id", "") or ""),
+                                    job_id=str(r.get("job_id", "") or ""),
                                     description=str(r.get("description", "") or ""),
                                     is_required=(name in required_checks) or bool(r.get("is_required", False)),
                                 )
@@ -3819,8 +3847,10 @@ class GitHubAPIClient:
                 except Exception:
                     return ""
 
-            rows_dicts = []
-            out = []
+            rows_dicts: List[Dict[str, Any]] = []
+            out: List[GHPRCheckRow] = []
+            # De-dupe exact duplicates only (same name+url). If the same check name appears multiple
+            # times with different run/job URLs (reruns), we keep them all so UIs can show each.
             seen: set[tuple[str, str]] = set()
             for cr in check_runs:
                 if not isinstance(cr, dict):
@@ -3869,21 +3899,28 @@ class GitHubAPIClient:
                     continue
                 if name:
                     seen.add(key2)
-                row = GHPRCheckRow(
-                    name=name,
-                    status_raw=status_raw,
-                    duration=duration,
-                    url=url,
-                    description=description,
-                    is_required=is_req,
+                run_id = parse_actions_run_id_from_url(url)
+                job_id = parse_actions_job_id_from_url(url)
+                out.append(
+                    GHPRCheckRow(
+                        name=name,
+                        status_raw=status_raw,
+                        duration=duration,
+                        url=url,
+                        run_id=run_id,
+                        job_id=job_id,
+                        description=description,
+                        is_required=is_req,
+                    )
                 )
-                out.append(row)
                 rows_dicts.append(
                     {
                         "name": name,
                         "status_raw": status_raw,
                         "duration": duration,
                         "url": url,
+                        "run_id": run_id,
+                        "job_id": job_id,
                         "description": description,
                         "is_required": is_req,
                     }
@@ -3919,12 +3956,16 @@ class GitHubAPIClient:
                 if key2 in seen:
                     continue
                 seen.add(key2)
+                run_id = parse_actions_run_id_from_url(target)
+                job_id = parse_actions_job_id_from_url(target)
                 out.append(
                     GHPRCheckRow(
                         name=name,
                         status_raw=status_raw,
                         duration="",
                         url=target,
+                        run_id=run_id,
+                        job_id=job_id,
                         description=desc,
                         is_required=is_req,
                     )
@@ -3935,6 +3976,8 @@ class GitHubAPIClient:
                         "status_raw": status_raw,
                         "duration": "",
                         "url": target,
+                        "run_id": run_id,
+                        "job_id": job_id,
                         "description": desc,
                         "is_required": is_req,
                     }

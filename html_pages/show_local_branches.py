@@ -727,9 +727,22 @@ def _build_ci_hierarchy_nodes(
     # Sort by job name for stable/scan-friendly output (same order as Details list).
     rows = sort_pr_check_rows_by_name(list(rows))
 
+    # If the same check name appears multiple times (reruns), append a stable unique id
+    # so users can tell them apart.
+    name_counts: Dict[str, int] = {}
+    for _r in (rows or []):
+        try:
+            nm0 = str(getattr(_r, "name", "") or "").strip()
+            if nm0:
+                name_counts[nm0] = int(name_counts.get(nm0, 0) or 0) + 1
+        except Exception:
+            continue
+
     # CI view: the expanded tree under the PR status line shows the check list and optional subsections.
     out: List[BranchNode] = []
     missing_failed_raw_logs: List[Tuple[str, str]] = []
+    any_failed = False
+    rerun_run_id: str = ""
     for r in rows:
         nm = str(getattr(r, "name", "") or "").strip()
         raw = str(getattr(r, "status_raw", "") or "").strip().lower()
@@ -739,6 +752,7 @@ def _build_ci_hierarchy_nodes(
             st = "success"
         elif raw in {"fail", "failure", "timed_out", "action_required"}:
             st = "failure"
+            any_failed = True
         elif raw in {"in_progress", "in progress", "running"}:
             st = "in_progress"
         elif raw in {"queued", "pending"}:
@@ -749,6 +763,17 @@ def _build_ci_hierarchy_nodes(
             st = str(getattr(r, "status_norm", "") or "unknown")
 
         job_url = str(getattr(r, "url", "") or "").strip()
+        # Capture a run_id for the "Restart failed jobs" affordance.
+        # Prefer the row's parsed run_id (if present), otherwise parse from URL.
+        if (not rerun_run_id) and st == "failure":
+            try:
+                rid = str(getattr(r, "run_id", "") or "").strip()
+                if not rid:
+                    rid = str(common.parse_actions_run_id_from_url(job_url) or "").strip()
+                if rid:
+                    rerun_run_id = rid
+            except Exception:
+                pass
         base_dir = (Path(page_root_dir) if page_root_dir is not None else repo_path)
         raw_href = ""
         raw_size = 0
@@ -797,10 +822,23 @@ def _build_ci_hierarchy_nodes(
             except Exception:
                 pass
 
+        # Disambiguate duplicates by job_id (best) or run_id.
+        display_name = ""
+        try:
+            if int(name_counts.get(nm, 0) or 0) > 1:
+                jid = str(getattr(r, "job_id", "") or "").strip()
+                rid = str(getattr(r, "run_id", "") or "").strip()
+                if jid:
+                    display_name = f"{nm} [{jid}]"
+                elif rid:
+                    display_name = f"{nm} [run {rid}]"
+        except Exception:
+            display_name = ""
+
         node = CIJobTreeNode(
             label="",
             job_id=nm,
-            display_name="",
+            display_name=str(display_name or ""),
             status=str(st or "unknown"),
             duration=str(getattr(r, "duration", "") or ""),
             url=job_url,
@@ -929,6 +967,22 @@ def _build_ci_hierarchy_nodes(
         )
     except Exception:
         pass
+
+    # If CI failed and we can identify a GitHub Actions run_id, include an explicit restart link.
+    #
+    # This is shown as a sibling of the checks list, so you can click straight into the workflow run page
+    # (and/or copy a `gh run rerun ... --failed` command).
+    if any_failed and rerun_run_id:
+        try:
+            out.append(
+                RerunLinkNode(
+                    label="",
+                    url=f"https://github.com/{DYNAMO_REPO_SLUG}/actions/runs/{rerun_run_id}",
+                    run_id=rerun_run_id,
+                )
+            )
+        except Exception:
+            pass
 
     return out
 @dataclass
@@ -1906,16 +1960,6 @@ class LocalRepoScanner:
                         allow_fetch_checks=bool(allow_fetch_checks),
                     )
                     pr_node.add_child(status_node)
-
-                    # If CI failed, show "Restart failed jobs" immediately after the FAIL line.
-                    try:
-                        github_run_id = next((check.run_id for check in (pr.failed_checks or []) if check.run_id), None)
-                    except Exception:
-                        github_run_id = None
-                    if pr.failed_checks:
-                        rerun_url = pr.rerun_url or (f"https://github.com/{DYNAMO_REPO_SLUG}/actions/runs/{github_run_id}" if github_run_id else None)
-                        if rerun_url and github_run_id:
-                            pr_node.add_child(RerunLinkNode(label="", url=rerun_url, run_id=github_run_id))
 
                     # Add CI hierarchy as children of the PR status line (cached; long TTL when no recent pushes).
                     try:
