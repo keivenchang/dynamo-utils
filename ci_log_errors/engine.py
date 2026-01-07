@@ -708,6 +708,8 @@ def _self_test_examples(*, raw_log_path: Path) -> int:
             "[FAIL] incorrect date: container/dev/dev_build.sh",
             "Git operation failed",
             "failed to fetch LFS objects",
+            # Port bind failures (common e2e root cause)
+            "Failed to start HTTP server: port 8081 already in use.",
             "failures:",
             "recorder::tests::test_recorder_streams_events_to_file",
         ]

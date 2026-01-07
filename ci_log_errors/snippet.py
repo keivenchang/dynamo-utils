@@ -49,7 +49,7 @@ def extract_error_snippet_from_text(
                 return ""
             # Requested UX: prefer a concise, prefix-style marker rather than a trailing suffix.
             # This also makes it easier to visually scan snippets and to strip for copy/paste.
-            return f"# suggested: {s}"
+            return f"# [suggested]: {s}"
 
         def extract_commands(lines: List[str]) -> List[str]:
             """Best-effort extraction of interesting commands (pytest/docker/run.sh/build.sh)."""

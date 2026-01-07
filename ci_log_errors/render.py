@@ -137,7 +137,7 @@ def render_error_snippet_html(snippet_text: str) -> str:
                 j += 1
             cmd_text = "\n".join(cmd_lines).strip("\n")
             # UX: some command blocks are *suggestions* and we render them as shell comments:
-            #   # suggested: <cmd>
+            #   # [suggested]: <cmd>
             # When copying, strip the comment marker + suggested marker so the clipboard contains
             # a runnable command.
             cmd_copy_text = cmd_text
@@ -145,10 +145,15 @@ def render_error_snippet_html(snippet_text: str) -> str:
                 cleaned: List[str] = []
                 for ln in (cmd_text or "").splitlines():
                     s = str(ln or "")
-                    # New format: "# suggested: <cmd>"
-                    m = re.match(r"^\s*#\s*suggested\s*:\s*(.*)$", s, flags=re.IGNORECASE)
+                    # New format: "# [suggested]: <cmd>"
+                    m = re.match(r"^\s*#\s*\[\s*suggested\s*\]\s*:\s*(.*)$", s, flags=re.IGNORECASE)
                     if m:
                         cleaned.append(str(m.group(1) or "").rstrip())
+                        continue
+                    # Back-compat: "# suggested: <cmd>"
+                    m2 = re.match(r"^\s*#\s*suggested\s*:\s*(.*)$", s, flags=re.IGNORECASE)
+                    if m2:
+                        cleaned.append(str(m2.group(1) or "").rstrip())
                         continue
                     # Back-compat: "# <cmd>   # suggested"
                     if re.search(r"#\s*suggested\s*$", s, flags=re.IGNORECASE):
