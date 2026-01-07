@@ -23,6 +23,7 @@ Grouped (best-effort) so it’s easier to find the golden log for a given catego
 
 CI / tooling:
 - 59030780729.log => build-status-check-error
+- 59652435193.log => ci-filter-coverage-error
 - 58887254616.log => broken-links
 - 57945094461.log => copyright-header-error
 - 59030172010.log => helm-error, k8s-error
@@ -136,6 +137,7 @@ Notes:
 * 59540519012.log => +docker buildx create --name builder-, +docker buildx inspect --bootstrap, !2026-
 * 58465491442.log => +docker buildx create --name builder-, +cp /tmp/deps/vllm/install_vllm.sh /tmp/install_vllm.sh, +--cuda-version $CUDA_VERSION, !2026-
 * 58818079816.log => +Git operation failed, +failed to fetch LFS objects, +RED:Git operation failed, +RED:failed to fetch LFS objects
+* 59652435193.log => +CI_FILTER_UNCOVERED, +Please add these paths to .github/filters.yaml, +RED:CI filter, +RED:CI_FILTER_UNCOVERED
 * 58465471934.log => +failures:, +recorder::tests::test_recorder_streams_events_to_file, +RED:failures:, +RED:    recorder::tests::test_recorder_streams_events_to_file
 * 59520885010.log => +FAILED tests/router/test_router_e2e_with_mockers.py::test_router_decisions_disagg, +pytest --basetemp=/tmp/pytest-parallel --junitxml=pytest_parallel.xml -n 4, +-m \"pre_merge and parallel, +tests/router/test_router_e2e_with_mockers.py::test_router_decisions_disagg[with_bootstrap-decode_first], +'tests/router/test_router_e2e_with_mockers.py::test_router_decisions_disagg[with_bootstrap-decode_first]', !RED:__________ test_router_decisions_disagg[with_bootstrap-prefill_first] __________
 """
@@ -160,6 +162,7 @@ from .regexes import (
     CAT_BACKEND_RESULT_FAILURE_RE,
     CAT_BROKEN_LINKS_RE,
     CAT_BUILD_STATUS_CHECK_ERROR_RE,
+    CAT_CI_FILTER_UNCOVERED_RE,
     CAT_COPYRIGHT_HEADER_ERROR_RE,
     CAT_CUDA_ERROR_RE,
     CAT_DOCKER_BUILD_ERROR_RE,
@@ -1115,6 +1118,10 @@ def categorize_error_log_lines(lines: Sequence[str]) -> List[str]:
         # Build-status-check failures (CI gate that checks upstream build job status)
         if CAT_BUILD_STATUS_CHECK_ERROR_RE.search(text):
             add("build-status-check-error")
+        
+        # CI filters coverage validation (workflows/.github/filters.yaml)
+        if CAT_CI_FILTER_UNCOVERED_RE.search(text):
+            add("ci-filter-coverage-error")
 
         # HuggingFace auth/token failures (missing/invalid HF_TOKEN or gated model access).
         #

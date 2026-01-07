@@ -42,6 +42,14 @@ CAT_BUILD_STATUS_CHECK_ERROR_RE: Pattern[str] = re.compile(
     re.IGNORECASE,
 )
 
+CAT_CI_FILTER_UNCOVERED_RE: Pattern[str] = re.compile(
+    r"(?:"
+    r"\bnot\s+covered\s+by\s+any\s+ci\s+filter\b"
+    r"|\bplease\s+add\s+these\s+paths\s+to\s+\.github/filters\.yaml\b"
+    r")",
+    re.IGNORECASE,
+)
+
 CAT_COPYRIGHT_HEADER_ERROR_RE: Pattern[str] = re.compile(
     r"(?:"
     r"\bcopyright-checks\b"
@@ -196,6 +204,7 @@ CAT_RULES: List[Tuple[str, Pattern[str]]] = [
     ("network-download-error", re.compile(CAT_DOWNLOAD_ERROR_RE.pattern, re.IGNORECASE)),
     ("docker-build-error", re.compile(CAT_DOCKER_BUILD_ERROR_RE.pattern, re.IGNORECASE)),
     ("build-status-check-error", CAT_BUILD_STATUS_CHECK_ERROR_RE),
+    ("ci-filter-coverage-error", CAT_CI_FILTER_UNCOVERED_RE),
     ("huggingface-auth-error", CAT_HUGGINGFACE_AUTH_ERROR_RE),
     ("copyright-header-error", CAT_COPYRIGHT_HEADER_ERROR_RE),
     ("helm-error", CAT_HELM_ERROR_RE),
@@ -422,6 +431,15 @@ RED_NETWORK_ERROR_LINE_RE: Pattern[str] = re.compile(
     re.IGNORECASE,
 )
 
+RED_CI_FILTER_UNCOVERED_FILES_RE: Pattern[str] = re.compile(
+    r"\bnot\s+covered\s+by\s+any\s+ci\s+filter\b",
+    re.IGNORECASE,
+)
+RED_CI_FILTER_UNCOVERED_MARKER_RE: Pattern[str] = re.compile(
+    r"^\[CI_FILTER_UNCOVERED\]\s*$",
+    re.IGNORECASE,
+)
+
 # This list is ORDERED (not alphabetized): it’s a UX/tuning list, not a catalog.
 RED_FULL_LINE_RES: List[Pattern[str]] = [
     # Kubernetes timeouts - highlight explicitly
@@ -443,6 +461,10 @@ RED_FULL_LINE_RES: List[Pattern[str]] = [
     # Docker registry manifest missing (kept as legacy in engine for now)
     # Timeout markers inserted by snippet extraction / categorization.
     re.compile(r"\[TIMEOUT\]", re.IGNORECASE),
+    # CI filter coverage marker (inserted by snippet extraction).
+    RED_CI_FILTER_UNCOVERED_MARKER_RE,
+    # CI filter coverage error lines from logs.
+    RED_CI_FILTER_UNCOVERED_FILES_RE,
     # Assertion failures
     re.compile(r"\bassertion\s+failed:", re.IGNORECASE),
     # Build failure summary

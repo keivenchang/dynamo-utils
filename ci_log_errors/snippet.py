@@ -500,6 +500,27 @@ def extract_error_snippet_from_text(
             if build_line and build_line.strip() and build_line not in snippet_lines:
                 snippet_lines.append(build_line)
 
+        # CI tooling: files not covered by CI filters.
+        #
+        # Make the key line stand out in HTML by:
+        #  - ensuring it’s present in the snippet, and
+        #  - inserting a synthetic marker that we can full-line-highlight red.
+        #
+        # Example log: 59652435193.log
+        try:
+            ci_filter_phrase_re = re.compile(r"\bnot\s+covered\s+by\s+any\s+ci\s+filter\b", re.IGNORECASE)
+            marker = "[CI_FILTER_UNCOVERED]"
+            insert_at: Optional[int] = None
+            for i, ln in enumerate(list(snippet_lines or [])):
+                s = _strip_ts_and_ansi(str(ln or ""))
+                if s and ci_filter_phrase_re.search(s):
+                    insert_at = int(i)
+                    break
+            if insert_at is not None and marker not in snippet_lines:
+                snippet_lines.insert(insert_at, marker)
+        except Exception:
+            pass
+
         # Git LFS dependency fetch failures: include the whole uv/pip/LFS error block when present.
         #
         # These failures often occur *before* BuildKit prints its generic "ERROR: failed to build" summary,
