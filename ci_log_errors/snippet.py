@@ -42,6 +42,13 @@ def extract_error_snippet_from_text(
         if not all_lines:
             return ""
 
+        def _format_suggested_cmd(cmd: str) -> str:
+            """Render a suggested command as a commented line; copy strips markers in HTML renderer."""
+            s = str(cmd or "").strip()
+            if not s:
+                return ""
+            return f"# {s}   # suggested"
+
         def extract_commands(lines: List[str]) -> List[str]:
             """Best-effort extraction of interesting commands (pytest/docker/run.sh/build.sh)."""
             # Capture multi-line commands like:
@@ -50,7 +57,8 @@ def extract_error_snippet_from_text(
                 # Pytest commands: only treat these as execution context when they look like actual commands.
                 # Avoid prose matches like "request: Pytest request fixture ...".
                 re.compile(r"^(?:python\\s+-m\\s+pytest|pytest)\\b", re.IGNORECASE),
-                re.compile(r"\\bbash\\s+-c\\s+['\"][^'\"]*\\bpytest\\b", re.IGNORECASE),
+                # Shell-wrapped payloads (common: docker run ... bash/sh ... -c "<payload>").
+                re.compile(r"\\b(?:/bin/)?(?:bash|sh)\\b.*\\bpytest\\b", re.IGNORECASE),
                 # Prefer the explicit PYTEST_CMD line when present (highest-signal, most complete).
                 PYTEST_CMD_LINE_RE,
                 # Rust/cargo commands (common in CI).
@@ -61,24 +69,44 @@ def extract_error_snippet_from_text(
                 re.compile(r"^(?:\\./)?build\\.sh\\b", re.IGNORECASE),
             ]
 
+            def _extract_shell_c_payload(line: str) -> str:
+                """Extract the quoted payload from shell `... -c "<payload>"` (bash/sh variants)."""
+                try:
+                    s = str(line or "").strip()
+                    if not s:
+                        return ""
+                    # Handle:
+                    # - bash -c "..."
+                    # - /bin/bash -lc "..."
+                    # - sh -c '...'
+                    # - bash -eux -c "..."
+                    for rx in (
+                        re.compile(
+                            r"\\b(?:/bin/)?(?:bash|sh)\\b.*?\\s+-c\\s+(['\"])(.+?)\\1\\s*$",
+                            re.IGNORECASE,
+                        ),
+                        re.compile(
+                            r"\\b(?:/bin/)?(?:bash|sh)\\b.*?\\s+-[A-Za-z]*c[A-Za-z]*\\s+(['\"])(.+?)\\1\\s*$",
+                            re.IGNORECASE,
+                        ),
+                    ):
+                        m = rx.search(s)
+                        if m:
+                            return str(m.group(2) or "")
+                    return ""
+                except Exception:
+                    return ""
+
             def extract_vanilla_pytest_from_shell(line: str) -> str:
-                """If line contains bash -c "... pytest ...", extract the inner `pytest ...` command."""
+                """If line contains shell `-c "<payload>"` with pytest, extract the inner payload."""
                 try:
                     s = str(line or "")
-                    m = re.search(r"\bbash\s+-c\s+(['\"])(.+?)\1\s*$", s, flags=re.IGNORECASE)
-                    if not m:
+                    inner = _extract_shell_c_payload(s)
+                    if not inner:
                         return ""
-                    inner = str(m.group(2) or "")
-                    # Prefer the last pytest invocation inside the shell fragment.
-                    last = None
-                    for mm in re.finditer(r"(?:^|&&\s*|;\s*|\|\|\s*)(pytest\b.*)$", inner, flags=re.IGNORECASE):
-                        last = mm
-                    if not last:
+                    if not re.search(r"\\bpytest\\b", inner, flags=re.IGNORECASE):
                         return ""
-                    cmd = str(last.group(1) or "").strip()
-                    if not cmd.lower().startswith("pytest"):
-                        return ""
-                    return _unescape_nested_shell_quotes(cmd)
+                    return _unescape_nested_shell_quotes(inner).strip()
                 except Exception:
                     return ""
 
@@ -166,12 +194,13 @@ def extract_error_snippet_from_text(
                 if blk not in seen:
                     seen.add(blk)
                     out.append(blk)
-                    # Also include a "vanilla pytest ..." command extracted from bash -c blocks.
-                    # This makes it easy to copy/paste just the pytest invocation.
+                    # Also include a suggested inner payload extracted from shell `-c "<payload>"`.
+                    # This makes it easy to copy/paste without the `bash/sh ... -c` wrapper.
                     py = extract_vanilla_pytest_from_shell(blk)
-                    if py and py not in seen:
-                        seen.add(py)
-                        out.append(py)
+                    py_sug = _format_suggested_cmd(py) if py else ""
+                    if py_sug and py_sug not in seen:
+                        seen.add(py_sug)
+                        out.append(py_sug)
                 if len(out) >= 4:
                     break
 
@@ -239,7 +268,7 @@ def extract_error_snippet_from_text(
             re.IGNORECASE,
         )
         PYTEST_EXEC_IN_BASH_RE: Pattern[str] = re.compile(
-            r"\bbash\s+-c\s+['\"][^'\"]*\bpytest\b",
+            r"\b(?:/bin/)?(?:bash|sh)\b.*\bpytest\b",
             re.IGNORECASE,
         )
 
@@ -951,7 +980,11 @@ def extract_error_snippet_from_text(
                             continue
                         nxt = (raw_block[k + 1] if (k + 1) < len(raw_block) else "") or ""
                         nxt_s = nxt.lstrip()
-                        if nxt_s.startswith("--") or nxt_s.startswith("-") or nxt_s.startswith("bash -c "):
+                        if (
+                            nxt_s.startswith("--")
+                            or nxt_s.startswith("-")
+                            or re.match(r"^(?:/bin/)?(?:bash|sh)\b", nxt_s, flags=re.IGNORECASE)
+                        ):
                             k += 1
                             raw_block[k] = nxt_s
                             continue
@@ -1041,26 +1074,69 @@ def extract_error_snippet_from_text(
                     except Exception:
                         return []
 
-                def _extract_bash_c_line_from_cmd_block(blk: str) -> str:
+                def _extract_shell_c_payload_from_cmd_block(blk: str) -> str:
+                    """Extract shell `-c "<payload>"` payload from a command block (bash/sh variants)."""
                     s = (blk or "").strip()
                     if not s:
                         return ""
                     for ln in s.splitlines():
-                        ln_s = ln.strip()
-                        if re.search(r"\bbash\s+-c\s+(['\"]).+\1\s*$", ln_s, flags=re.IGNORECASE):
-                            return ln_s
+                        ln_s = (ln or "").strip()
+                        if not ln_s:
+                            continue
+                        m = None
+                        try:
+                            for rx in (
+                                re.compile(
+                                    r"\b(?:/bin/)?(?:bash|sh)\b.*?\s+-c\s+(['\"])(.+?)\1\s*$",
+                                    re.IGNORECASE,
+                                ),
+                                re.compile(
+                                    r"\b(?:/bin/)?(?:bash|sh)\b.*?\s+-[A-Za-z]*c[A-Za-z]*\s+(['\"])(.+?)\1\s*$",
+                                    re.IGNORECASE,
+                                ),
+                            ):
+                                m = rx.search(ln_s)
+                                if m:
+                                    break
+                        except Exception:
+                            m = None
+                        if not m:
+                            continue
+                        inner = str(m.group(2) or "")
+                        if not inner:
+                            continue
+                        return _unescape_nested_shell_quotes(inner).strip()
                     return ""
 
                 def _extract_vanilla_pytest_from_cmd_block(blk: str) -> str:
                     s = (blk or "").strip()
                     if not s:
                         return ""
-                    # Look for the bash -c payload on any line.
+                    # Look for a shell `-c "<payload>"` payload on any line.
                     for ln in s.splitlines():
-                        m = re.search(r"\bbash\s+-c\s+(['\"])(.+?)\1\s*$", ln.strip(), flags=re.IGNORECASE)
-                        if not m:
+                        ln_s = (ln or "").strip()
+                        if not ln_s:
                             continue
-                        inner = str(m.group(2) or "")
+                        inner = ""
+                        try:
+                            for rx in (
+                                re.compile(
+                                    r"\b(?:/bin/)?(?:bash|sh)\b.*?\s+-c\s+(['\"])(.+?)\1\s*$",
+                                    re.IGNORECASE,
+                                ),
+                                re.compile(
+                                    r"\b(?:/bin/)?(?:bash|sh)\b.*?\s+-[A-Za-z]*c[A-Za-z]*\s+(['\"])(.+?)\1\s*$",
+                                    re.IGNORECASE,
+                                ),
+                            ):
+                                m = rx.search(ln_s)
+                                if m:
+                                    inner = str(m.group(2) or "")
+                                    break
+                        except Exception:
+                            inner = ""
+                        if not inner:
+                            continue
                         last = None
                         for mm in re.finditer(r"(?:^|&&\s*|;\s*|\|\|\s*)(pytest\b.*)$", inner, flags=re.IGNORECASE):
                             last = mm
@@ -1102,15 +1178,17 @@ def extract_error_snippet_from_text(
                                 best_vanilla_pytest = _unescape_nested_shell_quotes(first)
                         except Exception:
                             pass
-                    # Add the bare `bash -c "..."` line as its own command block (copyable).
-                    bash_c = _extract_bash_c_line_from_cmd_block(b)
-                    if bash_c and bash_c not in seen_exp:
-                        seen_exp.add(bash_c)
-                        expanded.append(bash_c)
+                    # If executed via `bash/sh ... -c "<payload>"`, suggest the inner payload (without shell wrapper).
+                    inner_payload = _extract_shell_c_payload_from_cmd_block(b)
+                    inner_sug = _format_suggested_cmd(inner_payload) if inner_payload else ""
+                    if inner_sug and inner_sug not in seen_exp:
+                        seen_exp.add(inner_sug)
+                        expanded.append(inner_sug)
                     py = _extract_vanilla_pytest_from_cmd_block(b)
-                    if py and py not in seen_exp:
-                        seen_exp.add(py)
-                        expanded.append(py)
+                    py_sug = _format_suggested_cmd(py) if py else ""
+                    if py_sug and py_sug not in seen_exp:
+                        seen_exp.add(py_sug)
+                        expanded.append(py_sug)
                         if not best_vanilla_pytest:
                             best_vanilla_pytest = py
 
@@ -1206,7 +1284,7 @@ def extract_error_snippet_from_text(
                             if rerun_only_failed_pytest_cmd not in "\n".join(tail):
                                 tail[insert_at:insert_at] = [
                                     "[[CMD]]",
-                                    rerun_only_failed_pytest_cmd,
+                                    _format_suggested_cmd(rerun_only_failed_pytest_cmd) or rerun_only_failed_pytest_cmd,
                                     "[[/CMD]]",
                                 ]
                 except Exception:

@@ -136,7 +136,25 @@ def render_error_snippet_html(snippet_text: str) -> str:
                 cmd_lines.append(_strip_ts_and_ansi(lines[j]))
                 j += 1
             cmd_text = "\n".join(cmd_lines).strip("\n")
-            cmd_js = html.escape(json.dumps(cmd_text), quote=True)
+            # UX: some command blocks are *suggestions* and we render them as shell comments:
+            #   # <cmd>   # suggested
+            # When copying, strip the comment marker + trailing '# suggested' so the clipboard contains
+            # a runnable command (no leading '#', no '# suggested').
+            cmd_copy_text = cmd_text
+            try:
+                cleaned: List[str] = []
+                for ln in (cmd_text or "").splitlines():
+                    if re.search(r"#\s*suggested\s*$", ln or "", flags=re.IGNORECASE):
+                        ln2 = re.sub(r"#\s*suggested\s*$", "", ln or "", flags=re.IGNORECASE).rstrip()
+                        ln2 = re.sub(r"^\s*#\s*", "", ln2).rstrip()
+                        cleaned.append(ln2)
+                    else:
+                        cleaned.append(ln)
+                cmd_copy_text = "\n".join(cleaned).strip("\n")
+            except Exception:
+                cmd_copy_text = cmd_text
+
+            cmd_js = html.escape(json.dumps(cmd_copy_text), quote=True)
             cmd_html = html.escape(cmd_text)
             text_style = _SNIP_COPY_TEXT_STYLE + ("; font-weight: 600;" if cmd_block_idx == 0 else "")
             out_lines.append(
