@@ -131,6 +131,7 @@ Notes:
 * 59332716597.log => +docker run -w /workspace, +bash -c "pytest --basetemp=/tmp/pytest-parallel, +pytest --basetemp=/tmp/pytest-parallel --junitxml=pytest_parallel.xml, +-m \\\"pre_merge and parallel, !pytest     = <module 'pytest'
 * 59539777738.log => +[FAIL] incorrect date:, !2026-
 * 59540519012.log => +docker buildx create --name builder-, +docker buildx inspect --bootstrap, !2026-
+* 58465491442.log => +docker buildx create --name builder-, +cp /tmp/deps/vllm/install_vllm.sh /tmp/install_vllm.sh, +--cuda-version $CUDA_VERSION, !2026-
 * 58818079816.log => +Git operation failed, +failed to fetch LFS objects, +RED:Git operation failed, +RED:failed to fetch LFS objects
 * 58465471934.log => +failures:, +recorder::tests::test_recorder_streams_events_to_file, +RED:failures:, +RED:    recorder::tests::test_recorder_streams_events_to_file
 * 59520885010.log => +FAILED tests/router/test_router_e2e_with_mockers.py::test_router_decisions_disagg, +pytest --basetemp=/tmp/pytest-parallel --junitxml=pytest_parallel.xml -n 4, +-m \"pre_merge and parallel, +tests/router/test_router_e2e_with_mockers.py::test_router_decisions_disagg[with_bootstrap-decode_first], +'tests/router/test_router_e2e_with_mockers.py::test_router_decisions_disagg[with_bootstrap-decode_first]', !RED:__________ test_router_decisions_disagg[with_bootstrap-prefill_first] __________
@@ -411,7 +412,7 @@ def _parse_snippet_assertions_from_docstring() -> list[tuple[str, list[str], lis
     return out
 
 
-def _self_test_examples(*, examples_root: Path) -> int:
+def _self_test_examples(*, raw_log_path: Path) -> int:
     """Self-test: load the example logs and report category match coverage."""
     examples = _parse_examples_from_docstring()
     if not examples:
@@ -419,11 +420,11 @@ def _self_test_examples(*, examples_root: Path) -> int:
         return 2
     snippet_assertions = _parse_snippet_assertions_from_docstring()
 
-    root = Path(examples_root).expanduser().resolve()
+    root = Path(raw_log_path).expanduser().resolve()
     missing_files: list[str] = []
     failures: int = 0
 
-    print(f"Self-test: examples_root={root}")
+    print(f"Self-test: raw_log_path={root}")
     print(f"Self-test: cases={len(examples)}")
     print("")
 
@@ -632,6 +633,44 @@ def _self_test_examples(*, examples_root: Path) -> int:
             failures += 1
     except Exception:
         # Never hard-fail self-test on the unit runner itself; the golden logs are the primary guardrail.
+        pass
+
+    # Extra unit test: ensure the derived "rerun only failed tests" pytest command is placed
+    # immediately BEFORE the pytest summary line (and not after).
+    try:
+        print("Self-test: snippet rerun-only-failed placement (unit)")
+        unit_log = "\n".join(
+            [
+                # Put the real command on the Actions "Run ..." line (this matches how the extractor
+                # finds execution commands in practice).
+                '##[group]Run docker run dynamo:latest bash -c "pytest --basetemp=/tmp/pytest-parallel --junitxml=pytest_parallel.xml -n 4 -m \\"pre_merge and parallel and not (vllm or sglang or trtllm) and (gpu_0 or gpu_1)\\""',
+                "##[endgroup]",
+                "FAILED tests/router/test_router_e2e_with_mockers.py::test_router_decisions_disagg[prefill_first-nats]",
+                "FAILED tests/router/test_router_e2e_with_mockers.py::test_router_decisions_disagg[prefill_first-tcp]",
+                "FAILED tests/router/test_router_e2e_with_mockers.py::test_router_decisions_disagg[decode_first-tcp]",
+                "FAILED tests/router/test_router_e2e_with_mockers.py::test_router_decisions_disagg[decode_first-nats]",
+                "============= 4 failed, 27 passed, 1 skipped in 199.28s (0:03:19) ==============",
+            ]
+        )
+        unit_snip = extract_error_snippet_from_text(unit_log, context_before=10, context_after=5, max_lines=120, max_chars=12000)
+        # Expected: derived rerun command appears before the summary line.
+        summary_line = "============= 4 failed, 27 passed, 1 skipped in 199.28s (0:03:19) =============="
+        rerun_prefix = "pytest --basetemp=/tmp/pytest-parallel --junitxml=pytest_parallel.xml -n 4 -m \"pre_merge and parallel"
+        ok = True
+        if summary_line not in unit_snip:
+            print("  missing_summary_line")
+            ok = False
+        if rerun_prefix not in unit_snip:
+            print("  missing_rerun_cmd")
+            ok = False
+        if ok:
+            if unit_snip.find(rerun_prefix) > unit_snip.find(summary_line):
+                print("  ordering_error: rerun cmd appears after summary line")
+                ok = False
+        print("")
+        if not ok:
+            failures += 1
+    except Exception:
         pass
 
     if missing_files:
@@ -2033,6 +2072,10 @@ def extract_error_snippet_from_text(
         last_broken_links_count: Optional[int] = None
         last_broken_link_error: Optional[int] = None
         last_problematic_symlink_error: Optional[int] = None
+        # Docker/BuildKit: when a build fails, BuildKit often prints the exact failing shell payload:
+        #   process "/bin/sh -c <payload...>" did not complete successfully
+        # We surface this as a copyable command block in the snippet.
+        last_buildkit_process_cmd: str = ""
 
         # Detect executed pytest invocations (not package/version lines like "pytest==8.4.2",
         # and not prose like "request: Pytest request fixture ...").
@@ -2049,7 +2092,10 @@ def extract_error_snippet_from_text(
             if not line or not line.strip():
                 continue
             if line.startswith("#"):
-                continue
+                # Keep BuildKit step lines like "#48 ..." (they often contain the root-cause command).
+                # Skip other "#" lines (usually shell comments / noise).
+                if not re.match(r"^#\d+\b", line):
+                    continue
             s_norm = _strip_ts_and_ansi(line)
             if PYTEST_FAILED_LINE_RE.search(s_norm):
                 last_pytest_failed = i
@@ -2099,6 +2145,20 @@ def extract_error_snippet_from_text(
                 last_copyright_sig = i
             if FAILED_TO_BUILD_RE.search(s_norm):
                 last_failed_to_build = i
+
+            # Capture the exact failing BuildKit payload for copy/paste.
+            # Examples:
+            #   #48 ERROR: process "/bin/sh -c cp ... && ..." did not complete successfully
+            #   ERROR: failed to solve: process "/bin/sh -c ..." did not complete successfully
+            if not last_buildkit_process_cmd:
+                try:
+                    m = re.search(r'process\s+"?/bin/sh\s+-c\s+([^"]+)"', s_norm, flags=re.IGNORECASE)
+                    if m:
+                        cmd = str(m.group(1) or "").strip()
+                        if cmd:
+                            last_buildkit_process_cmd = _unescape_nested_shell_quotes(cmd)
+                except Exception:
+                    pass
             if NETWORK_ERROR_LINE_RE.search(s_norm):
                 last_network_err = i
             if BACKEND_RESULT_FAILURE_LINE_RE.search(s_norm):
@@ -2541,7 +2601,8 @@ def extract_error_snippet_from_text(
                 # for debugging docker-build failures.
                 try:
                     buildx_re = re.compile(
-                        r"^(?:##\[(?:command)\]|\[(?:command)\])\s*/usr/bin/docker\s+buildx\b",
+                        # Actions often uses /usr/bin/docker, but some runners use /usr/local/bin/docker.
+                        r"^(?:##\[(?:command)\]|\[(?:command)\])\s*/usr/(?:local/)?bin/docker\s+buildx\b",
                         re.IGNORECASE,
                     )
                     buildx_lines: List[str] = []
@@ -2551,8 +2612,13 @@ def extract_error_snippet_from_text(
                             continue
                         if not buildx_re.search(s):
                             continue
-                        # Normalize: strip "[command]/usr/bin/" or "##[command]/usr/bin/" prefix.
-                        s2 = re.sub(r"^(?:##\[(?:command)\]|\[(?:command)\])\s*/usr/bin/", "", s, flags=re.IGNORECASE)
+                        # Normalize: strip "[command]/usr/(local/)?bin/" or "##[command]/usr/(local/)?bin/" prefix.
+                        s2 = re.sub(
+                            r"^(?:##\[(?:command)\]|\[(?:command)\])\s*/usr/(?:local/)?bin/",
+                            "",
+                            s,
+                            flags=re.IGNORECASE,
+                        )
                         if s2 and s2 not in buildx_lines:
                             buildx_lines.append(s2)
                     # Keep only the last few to avoid drowning the snippet.
@@ -2560,6 +2626,14 @@ def extract_error_snippet_from_text(
                     # For pytest/rust failures, keep the prelude laser-focused; don't add unrelated buildx noise.
                     if buildx_lines and not want_single_closest_execution_cmd:
                         cmd_blocks.append("\n".join(buildx_lines))
+                except Exception:
+                    pass
+
+                # Also surface the BuildKit failing "/bin/sh -c ..." payload if we captured it.
+                # This is often the most actionable "command preceding the error" for docker-build failures.
+                try:
+                    if last_buildkit_process_cmd and last_buildkit_process_cmd not in cmd_blocks:
+                        cmd_blocks.append(last_buildkit_process_cmd)
                 except Exception:
                     pass
 
@@ -2882,24 +2956,49 @@ def extract_error_snippet_from_text(
                 tail = list(snippet_lines or [])
 
                 # If we synthesized a "rerun only failed tests" pytest command, insert it immediately
-                # after the last contiguous chunk of `FAILED ...` lines in the tail (i.e., after the
-                # chunk the user is looking at).
+                # BEFORE the FAILED-chunk *summary* line when available, e.g.:
+                #   "============= 4 failed, 27 passed, 1 skipped in ... =============="
+                # Otherwise, fall back to inserting right after the last contiguous `FAILED ...` chunk.
                 try:
                     if rerun_only_failed_pytest_cmd and tail:
-                        # Find the last contiguous FAILED-chunk in the tail (normalized).
-                        last_chunk_end: Optional[int] = None
-                        in_failed = False
-                        for idx, ln in enumerate(tail):
-                            s = _strip_ts_and_ansi(ln or "").strip()
-                            if s.startswith("FAILED "):
-                                in_failed = True
-                                last_chunk_end = idx
+                        summary_re = re.compile(r"^=+\s*\d+\s+failed\b.*=+\s*$", re.IGNORECASE)
+
+                        # Find contiguous FAILED chunks and prefer the last one that is followed by a
+                        # pytest summary line (e.g. "==== 4 failed, 27 passed ... ====").
+                        best_insert_at: Optional[int] = None
+                        last_failed_chunk_end: Optional[int] = None
+                        i0 = 0
+                        while i0 < len(tail):
+                            s0 = _strip_ts_and_ansi(tail[i0] or "").strip()
+                            if not s0.startswith("FAILED "):
+                                i0 += 1
                                 continue
-                            if in_failed:
-                                # First non-FAILED after a FAILED run ends the chunk.
-                                in_failed = False
-                        if last_chunk_end is not None:
-                            insert_at = int(last_chunk_end) + 1
+                            # Consume the chunk.
+                            j0 = i0
+                            while j0 < len(tail):
+                                sj0 = _strip_ts_and_ansi(tail[j0] or "").strip()
+                                if not sj0.startswith("FAILED "):
+                                    break
+                                j0 += 1
+                            chunk_end = j0 - 1
+                            last_failed_chunk_end = chunk_end
+
+                            # Look ahead for the pytest summary line; if found, place BEFORE it.
+                            look_end = min(len(tail), j0 + 35)
+                            for k in range(j0, look_end):
+                                sk = _strip_ts_and_ansi(tail[k] or "").strip()
+                                if summary_re.search(sk):
+                                    best_insert_at = k
+                                    break
+                            i0 = j0
+
+                        insert_at: Optional[int] = None
+                        if best_insert_at is not None:
+                            insert_at = int(best_insert_at)
+                        elif last_failed_chunk_end is not None:
+                            insert_at = int(last_failed_chunk_end) + 1
+
+                        if insert_at is not None:
                             # Avoid inserting duplicates if the rerun cmd is already present.
                             if rerun_only_failed_pytest_cmd not in "\n".join(tail):
                                 tail[insert_at:insert_at] = [
@@ -3194,9 +3293,9 @@ def _cli(argv: Optional[Sequence[str]] = None) -> int:
         help="Run the Examples self-test (parses module docstring Examples and validates categories).",
     )
     parser.add_argument(
-        "--examples-root",
+        "--raw-log-path",
         default=str((Path(__file__).resolve().parent.parent / "raw-log-text")),
-        help="Root directory containing raw-log-text/*.log for --self-test-examples (default: ../raw-log-text).",
+        help="Directory containing raw-log-text/*.log for --self-test-examples (default: ../raw-log-text).",
     )
     parser.add_argument(
         "--scan-all-logs",
@@ -3216,7 +3315,7 @@ def _cli(argv: Optional[Sequence[str]] = None) -> int:
     args = parser.parse_args(list(argv) if argv is not None else None)
 
     if bool(getattr(args, "self_test_examples", False)):
-        return _self_test_examples(examples_root=Path(str(args.examples_root)))
+        return _self_test_examples(raw_log_path=Path(str(args.raw_log_path)))
     if bool(getattr(args, "scan_all_logs", False)):
         return _scan_all_logs(
             logs_root=Path(str(args.logs_root)),
