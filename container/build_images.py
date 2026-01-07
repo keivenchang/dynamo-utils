@@ -277,6 +277,7 @@ def create_task_graph(framework: str, sha: str, repo_path: Path, version: Option
         version = extract_version_from_build_sh(framework, repo_path)
 
     tasks: Dict[str, BaseTask] = {}
+    sanity_no_framework_flag = " --no-framework-check" if framework == "none" else ""
 
     # Level 0: Runtime image build (builds directly from CUDA base image)
     runtime_image_tag = f"dynamo:{version}-{framework}-runtime"
@@ -292,7 +293,7 @@ def create_task_graph(framework: str, sha: str, repo_path: Path, version: Option
     tasks[f"{framework}-runtime-sanity"] = CommandTask(
         task_id=f"{framework}-runtime-sanity",
         description=f"Run sanity_check.py in {framework.upper()} runtime container",
-        command=f"{repo_path}/container/run.sh --image {runtime_image_tag} -- python3 /workspace/deploy/sanity_check.py --runtime-check",
+        command=f"{repo_path}/container/run.sh --image {runtime_image_tag} -- python3 /workspace/deploy/sanity_check.py --runtime-check{sanity_no_framework_flag}",
         input_image=runtime_image_tag,
         parents=[f"{framework}-runtime-build"],
         timeout=45.0,  # 45 seconds for sanity checks
@@ -349,7 +350,7 @@ def create_task_graph(framework: str, sha: str, repo_path: Path, version: Option
     tasks[f"{framework}-dev-sanity"] = CommandTask(
         task_id=f"{framework}-dev-sanity",
         description=f"Run sanity_check.py in {framework.upper()} dev container",
-        command=f"{repo_path}/container/run.sh --image {dev_image_tag} --mount-workspace -v {home_dir}/.cargo:/root/.cargo -- python3 /workspace/deploy/sanity_check.py",
+        command=f"{repo_path}/container/run.sh --image {dev_image_tag} --mount-workspace -v {home_dir}/.cargo:/root/.cargo -- python3 /workspace/deploy/sanity_check.py{sanity_no_framework_flag}",
         input_image=dev_image_tag,
         parents=[dev_sanity_parent],
         timeout=45.0,  # 45 seconds for sanity checks
@@ -392,7 +393,7 @@ def create_task_graph(framework: str, sha: str, repo_path: Path, version: Option
     tasks[f"{framework}-local-dev-sanity"] = CommandTask(
         task_id=f"{framework}-local-dev-sanity",
         description=f"Run sanity_check.py in {framework.upper()} local-dev container",
-        command=f"{repo_path}/container/run.sh --image {local_dev_image_tag} --mount-workspace -v {home_dir}/.cargo:/home/ubuntu/.cargo -- python3 /workspace/deploy/sanity_check.py",
+        command=f"{repo_path}/container/run.sh --image {local_dev_image_tag} --mount-workspace -v {home_dir}/.cargo:/home/ubuntu/.cargo -- python3 /workspace/deploy/sanity_check.py{sanity_no_framework_flag}",
         input_image=local_dev_image_tag,
         parents=[local_dev_sanity_parent],
         timeout=45.0,  # 45 seconds for sanity checks
@@ -1106,7 +1107,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "-f", "--framework",
         action="append",
-        help="Framework(s) to build (vllm, sglang, trtllm). Can specify multiple times. Default: all",
+        help=(
+            "Framework(s) to build/test (none, vllm, sglang, trtllm). "
+            "Can specify multiple times and/or as a comma-separated list. "
+            "Default: all (but if --sanity-check-only is set and --framework is omitted, defaults to 'none')."
+        ),
     )
     parser.add_argument(
         "--target",
@@ -1136,7 +1141,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--sanity-check-only",
         action="store_true",
-        help="Only run sanity checks, skip builds",
+        help="Only run sanity checks, skip builds (defaults to framework 'none' if --framework is omitted)",
     )
     parser.add_argument(
         "--skip-action-if-already-passed",
@@ -2911,7 +2916,9 @@ def main() -> int:
             # Split on comma in case user provided comma-separated list
             frameworks.extend([normalize_framework(fw.strip()) for fw in f.split(',')])
     else:
-        frameworks = FRAMEWORKS
+        # In sanity-check-only mode, default to the lightweight "none" sanity checks
+        # unless the user explicitly requested frameworks via --framework.
+        frameworks = ["none"] if args.sanity_check_only else FRAMEWORKS
 
     # Handle --show-tree flag: show dependency tree
     if args.show_tree:
