@@ -44,6 +44,7 @@ dynamo-utils/
 ├── cron_log.sh                   # Cron wrapper that writes logs to ~/nvidia/logs/YYYY-MM-DD/<job>.log
 ├── curl.sh                       # Test models via chat completions API
 ├── soak_fe.py                    # Frontend soak testing script
+├── py_indent_report.py           # Python indentation gate (runs py_compile -tt + tabnanny + quick indent report)
 ├── devcontainer.json.j2          # VS Code Dev Container template (Jinja2)
 ├── devcontainer_sync.py          # Sync dev configs across projects
 ├── git_stats.py                  # Git repository statistics analyzer
@@ -55,6 +56,27 @@ dynamo-utils/
 ```
 
 ---
+
+## Python indentation checker (`py_indent_report.py`)
+
+If you keep hitting `IndentationError` / `TabError` / “off-by-one indent” mistakes, use this tool as a quick, single-command gate.
+
+What it does:
+- Runs `python -tt -m py_compile <file>` (hard syntax/indent gate)
+- Runs `tabnanny` (ambiguous/mixed indentation detector)
+- Prints a compact indentation report and flags suspicious-but-legal indent patterns (e.g., an `else:` block that indents by 8 instead of 4)
+
+Examples:
+```bash
+# Show only suspicious lines (recommended)
+python3 py_indent_report.py --only-problems html_pages/common_dashboard_lib.py
+
+# Show more context (all non-blank lines)
+python3 py_indent_report.py --all html_pages/common_dashboard_lib.py
+
+# Verify the detector catches common mistakes
+python3 py_indent_report.py --self-check
+```
 
 ## Dashboards / log categorization pitfalls (learnings)
 

@@ -468,15 +468,16 @@ Notes:
 - Put imports at top of file (not inside functions)
 - Check indentation carefully (must be perfect)
 - **Indentation/continuation-indent MUST be mechanically verified after edits (don’t rely on eyeballing):**
-  - **Hard gate (catches IndentationError/SyntaxError immediately):**
-    - `python3 -tt -m py_compile <touched_py_files>`
-      - Example: `python3 -tt -m py_compile dynamo-utils/html_pages/common_dashboard_lib.py`
-    - If you touched many files/dirs: `python3 -m compileall -q <touched_dirs_or_files>`
-  - **Detect mixed tabs/spaces (optional but useful when “indent looks fine”):**
-    - `python3 -m tabnanny -v <touched_dirs_or_files>`
-    - **Escalation rule:** If you (the AI) keep introducing indentation errors (IndentationError, TabError, unexpected indent, mismatched continuation indent), start running `tabnanny` **more frequently**:
-      - Run `python3 -m tabnanny -v <touched_file_or_parent_dir>` after each meaningful edit chunk (or after each file edit) until the errors stop.
-      - Pair it with `python3 -tt -m py_compile <touched_py_files>` so you catch failures immediately.
+  - **Single-command indentation gate (preferred):**
+    - `python3 py_indent_report.py --only-problems <touched_py_files>`
+      - This **subsumes** both:
+        - `python3 -tt -m py_compile ...` (hard syntax/indent gate)
+        - `python3 -m tabnanny ...` (mixed tabs/spaces / ambiguous indent)
+      - Example: `python3 py_indent_report.py --only-problems dynamo-utils/html_pages/common_dashboard_lib.py`
+    - Optional: `python3 py_indent_report.py --self-check` (verifies the detector catches common mistakes like mis-indented `else:` blocks).
+    - **Escalation rule:** If you (the AI) keep introducing indentation errors, run `py_indent_report.py` **after each meaningful edit chunk** until the errors stop.
+  - If you touched many files/dirs and want a fast parse-only pass:
+    - `python3 -m compileall -q <touched_dirs_or_files>`
   - **Auto-fix formatting + indentation (preferred):**
     - `ruff format <touched_paths>`
   - **Lint (and auto-fix what it can):**
