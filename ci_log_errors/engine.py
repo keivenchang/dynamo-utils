@@ -691,6 +691,7 @@ def _self_test_examples(*, raw_log_path: Path) -> int:
                 "E           Failed: Timeout (>60.0s) from pytest-timeout.",
                 "assertion failed: (7..=13).contains(&elapsed_ms)",
                 "Exception: Failed to start HTTP server: port 8081 already in use. Use --http-port to specify a different port.",
+                "E   Exception: Unable to create lease. Check etcd server status at http://localhost:2379",
                 "Caught signal 11 (Segmentation fault: invalid permissions for mapped object at address 0x6aed2c30)",
                 "Signal: Segmentation fault (11)",
                 "ERROR: failed to build",
@@ -715,6 +716,8 @@ def _self_test_examples(*, raw_log_path: Path) -> int:
             "failed to fetch LFS objects",
             # Port bind failures (common e2e root cause)
             "Failed to start HTTP server: port 8081 already in use.",
+            # Etcd lease failures
+            "Unable to create lease. Check etcd server status",
             # SIGSEGV / caught signal lines
             "Caught signal 11",
             "Segmentation fault (11)",

@@ -89,6 +89,9 @@ CAT_ETCD_ERROR_RE: Pattern[str] = re.compile(
     r"\bunable\s+to\s+create\s+lease\b|\bcheck\s+etcd\s+server\s+status\b|\betcd[^\n]{0,80}\blease\b|\blease\b[^\n]{0,80}\betcd\b"
 )
 
+# Full-line red highlighting for etcd lease/connection failures (often a hard stop in tests).
+RED_ETCD_ERROR_LINE_RE: Pattern[str] = re.compile(CAT_ETCD_ERROR_RE.pattern, re.IGNORECASE)
+
 CAT_EXIT_CODE_127_RE: Pattern[str] = re.compile(
     r"process completed with exit code 127\b|exit code:\s*127\b|\bcommand not found\b",
     re.IGNORECASE,
@@ -483,6 +486,8 @@ RED_FULL_LINE_RES: List[Pattern[str]] = [
     RED_DOCKER_DAEMON_ERROR_LINE_RE,
     RED_DOCKER_NO_SUCH_CONTAINER_RE,
     RED_NETWORK_ERROR_LINE_RE,
+    # Etcd failures (lease/connection)
+    RED_ETCD_ERROR_LINE_RE,
     # Runtime/server bind failures (common root cause for e2e tests)
     re.compile(r"\baddress already in use\b|\bport\s+\d+\s+already\s+in\s+use\b", re.IGNORECASE),
     re.compile(r"\bfailed\s+to\s+bind\s+server\b|\bfailed\s+to\s+start\s+http\s+server\b", re.IGNORECASE),
