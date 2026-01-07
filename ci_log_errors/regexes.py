@@ -172,6 +172,16 @@ CAT_NETWORK_ERROR_RE: Pattern[str] = re.compile(
     r"\bnetwork\s+error:\s*connection\s+failed\b|\bconnection\s+failed\.\s*check\s+network\s+connectivity\b|\bfirewall\s+settings\b"
 )
 
+CAT_NETWORK_PORT_CONFLICT_ERROR_RE: Pattern[str] = re.compile(
+    r"(?:"
+    r"\baddress\s+already\s+in\s+use\b"
+    r"|\bport\s+\d+\s+already\s+in\s+use\b"
+    r"|\bfailed\s+to\s+bind\s+server\b"
+    r"|\bfailed\s+to\s+start\s+http\s+server\b"
+    r")",
+    re.IGNORECASE,
+)
+
 CAT_OOM_RE: Pattern[str] = re.compile(r"\b(out of memory|CUDA out of memory|Killed process|oom)\b", re.IGNORECASE)
 
 CAT_PYTEST_DETECT_RE: Pattern[str] = re.compile(
@@ -214,6 +224,7 @@ CAT_RULES: List[Tuple[str, Pattern[str]]] = [
     ("k8s-network-timeout-pod", CAT_K8S_PODS_TIMED_OUT_RE),
     ("k8s-network-timeout-portfwd", CAT_KUBECTL_PORTFORWARD_TIMEOUT_RE),
     ("network-timeout-github-action", CAT_GITHUB_ACTION_STEP_TIMEOUT_RE),
+    ("network-port-conflict-error", CAT_NETWORK_PORT_CONFLICT_ERROR_RE),
     ("network-error", re.compile(CAT_NETWORK_ERROR_RE.pattern, re.IGNORECASE)),
     ("etcd-error", re.compile(CAT_ETCD_ERROR_RE.pattern, re.IGNORECASE)),
     ("git-fetch", CAT_GITHUB_FETCH_RE),

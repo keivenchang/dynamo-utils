@@ -192,6 +192,7 @@ from .regexes import (
     CAT_K8S_PODS_TIMED_OUT_RE,
     CAT_KUBECTL_PORTFORWARD_TIMEOUT_RE,
     CAT_NETWORK_ERROR_RE,
+    CAT_NETWORK_PORT_CONFLICT_ERROR_RE,
     CAT_OOM_RE,
     CAT_PYTEST_DETECT_RE,
     CAT_PYTEST_ERROR_RE,
@@ -688,6 +689,7 @@ def _self_test_examples(*, raw_log_path: Path) -> int:
                 "...",
                 "E           Failed: Timeout (>60.0s) from pytest-timeout.",
                 "assertion failed: (7..=13).contains(&elapsed_ms)",
+                "Exception: Failed to start HTTP server: port 8081 already in use. Use --http-port to specify a different port.",
                 "ERROR: failed to build",
                 "[FAIL] incorrect date: container/dev/dev_build.sh",
                 "#104 25.87   ├─▶ Git operation failed",
@@ -772,6 +774,21 @@ def _self_test_examples(*, raw_log_path: Path) -> int:
     except Exception:
         pass
 
+    # Extra categorization unit test: network port conflicts.
+    try:
+        print("Self-test: categorize (unit) network-port-conflict-error")
+        unit_lines = [
+            "ERROR    KVRouterProcess:managed_process.py:332 [PYTHON3] Exception: Failed to start HTTP server: port 8081 already in use. Use --http-port to specify a different port.",
+        ]
+        cats = categorize_error_log_lines(unit_lines)
+        if "network-port-conflict-error" not in set(cats or []):
+            failures += 1
+            print("  missing: network-port-conflict-error")
+            print(f"  got: {cats}")
+        print("")
+    except Exception:
+        pass
+
     # Extra golden regression guard: `PYTEST_CMD="pytest ..."` variable expansion should still produce
     # a suggested rerun-only-failed command, and it should appear after the FAILED chunk and before
     # the `====== N failed, ... ======` summary (note: this summary format is common in our logs).
@@ -814,7 +831,9 @@ def _self_test_examples(*, raw_log_path: Path) -> int:
                 #   # suggested: pytest ...
                 # Accept both plain and suggested formats (back-compat).
                 s = re.sub(r"#\s*auto suggested\s*$", "", s0, flags=re.IGNORECASE).strip()
-                # New format: "# suggested: <cmd>"
+                # New format: "# [suggested]: <cmd>"
+                s = re.sub(r"^\s*#\s*\[\s*suggested\s*\]\s*:\s*", "", s, flags=re.IGNORECASE).strip()
+                # Back-compat: "# suggested: <cmd>"
                 s = re.sub(r"^\s*#\s*suggested\s*:\s*", "", s, flags=re.IGNORECASE).strip()
                 # Old/plain: "# <cmd>" (or non-comment)
                 s = re.sub(r"^\s*#\s*", "", s).strip()
@@ -1164,6 +1183,9 @@ def categorize_error_log_lines(lines: Sequence[str]) -> List[str]:
         # HTTP(S) gateway timeouts (wget/curl/HTTP clients + link-checker timeouts)
         if CAT_HTTP_TIMEOUT_RE.search(t):
             add("network-timeout-https")
+        # Local service bind failures / port conflicts (common root cause for e2e tests).
+        if CAT_NETWORK_PORT_CONFLICT_ERROR_RE.search(text):
+            add("network-port-conflict-error")
         # GitLab mirror infra timeout (special-case; keep distinct from generic timeout)
         if CAT_GITLAB_MIRROR_TIMEOUT_RE.search(text):
             add("network-timeout-gitlab-mirror")
