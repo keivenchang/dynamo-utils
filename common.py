@@ -6241,6 +6241,13 @@ class GitLabAPIClient:
         if self.token:
             self.headers['PRIVATE-TOKEN'] = self.token
 
+        # Best-effort per-run REST stats (mirrors GitHubAPIClient counters; useful for dashboards).
+        self._rest_calls_total: int = 0
+        self._rest_calls_by_endpoint: Dict[str, int] = {}
+        self._rest_time_total_s: float = 0.0
+        self._rest_time_by_endpoint_s: Dict[str, float] = {}
+        self._rest_errors_by_status: Dict[int, int] = {}
+
     def has_token(self) -> bool:
         """Check if a GitLab token is configured."""
         return self.token is not None
@@ -6283,6 +6290,9 @@ class GitLabAPIClient:
                 }
             ]
         """
+        ep = str(endpoint or "")
+        t0 = time.monotonic()
+        status_code: Optional[int] = None
         if not HAS_REQUESTS:
             # Fallback to urllib for basic GET requests
 
@@ -6294,9 +6304,24 @@ class GitLabAPIClient:
             try:
                 req = urllib.request.Request(url, headers=self.headers)
                 with urllib.request.urlopen(req, timeout=timeout) as response:
+                    try:
+                        status_code = int(getattr(response, "status", 200) or 200)
+                    except Exception:
+                        status_code = 200
                     return json.loads(response.read().decode())
             except Exception:
                 return None
+            finally:
+                dt = max(0.0, time.monotonic() - t0)
+                try:
+                    self._rest_calls_total += 1
+                    self._rest_calls_by_endpoint[ep] = int(self._rest_calls_by_endpoint.get(ep, 0) or 0) + 1
+                    self._rest_time_total_s += float(dt)
+                    self._rest_time_by_endpoint_s[ep] = float(self._rest_time_by_endpoint_s.get(ep, 0.0) or 0.0) + float(dt)
+                    if status_code is not None and int(status_code) >= 400:
+                        self._rest_errors_by_status[int(status_code)] = int(self._rest_errors_by_status.get(int(status_code), 0) or 0) + 1
+                except Exception:
+                    pass
 
         # Use requests if available
         url = f"{self.base_url}{endpoint}" if endpoint.startswith('/') else f"{self.base_url}/{endpoint}"
@@ -6304,6 +6329,10 @@ class GitLabAPIClient:
         try:
             assert requests is not None
             response = requests.get(url, headers=self.headers, params=params, timeout=timeout)
+            try:
+                status_code = int(response.status_code)
+            except Exception:
+                status_code = None
 
             if response.status_code == 401:
                 raise Exception("GitLab API returned 401 Unauthorized. Check your token.")
@@ -6317,6 +6346,30 @@ class GitLabAPIClient:
 
         except requests.exceptions.RequestException as e:  # type: ignore[union-attr]
             raise Exception(f"GitLab API request failed for {endpoint}: {e}")
+        finally:
+            dt = max(0.0, time.monotonic() - t0)
+            try:
+                self._rest_calls_total += 1
+                self._rest_calls_by_endpoint[ep] = int(self._rest_calls_by_endpoint.get(ep, 0) or 0) + 1
+                self._rest_time_total_s += float(dt)
+                self._rest_time_by_endpoint_s[ep] = float(self._rest_time_by_endpoint_s.get(ep, 0.0) or 0.0) + float(dt)
+                if status_code is not None and int(status_code) >= 400:
+                    self._rest_errors_by_status[int(status_code)] = int(self._rest_errors_by_status.get(int(status_code), 0) or 0) + 1
+            except Exception:
+                pass
+
+    def get_rest_call_stats(self) -> Dict[str, Any]:
+        """Return best-effort REST call stats for the current process/run."""
+        try:
+            return {
+                "total": int(getattr(self, "_rest_calls_total", 0) or 0),
+                "time_total_s": float(getattr(self, "_rest_time_total_s", 0.0) or 0.0),
+                "by_endpoint": dict(sorted(dict(getattr(self, "_rest_calls_by_endpoint", {}) or {}).items(), key=lambda kv: (-int(kv[1] or 0), kv[0]))),
+                "time_by_endpoint_s": dict(sorted(dict(getattr(self, "_rest_time_by_endpoint_s", {}) or {}).items(), key=lambda kv: (-float(kv[1] or 0.0), kv[0]))),
+                "errors_by_status": dict(sorted(dict(getattr(self, "_rest_errors_by_status", {}) or {}).items(), key=lambda kv: (-int(kv[1] or 0), int(kv[0] or 0)))),
+            }
+        except Exception:
+            return {"total": 0, "time_total_s": 0.0, "by_endpoint": {}, "time_by_endpoint_s": {}, "errors_by_status": {}}
 
     def get_cached_registry_images_for_shas(self, project_id: str, registry_id: str,
                                            sha_list: List[str],

@@ -813,7 +813,7 @@
     // Sleep/wake fault-tolerant "reload only if new file" checker (replaces meta refresh)
     //
     // Requirement:
-    // - Poll every 30 seconds.
+    // - Poll periodically (configurable per page; default 30 seconds).
     // - Only reload when the underlying HTML file changed on the server (ETag / Last-Modified).
     // - Tolerate sleep/wake + transient disconnects (keep page; retry).
     //
@@ -821,7 +821,7 @@
     // *path* only (same file), then reload the full current URL to preserve view state.
     // ====================================================================================
     (function() {
-      var checkIntervalMs = 30000;
+      var checkIntervalMs = {{ refresh_check_interval_ms | default(30000) }};
       var retryMs = 2000;
       var maxRetryMs = 60000;
       var retryTimer = null;

@@ -287,6 +287,106 @@ SNIPPET_PYTEST_FAILED_LINE_RE: Pattern[str] = re.compile(
     re.IGNORECASE,
 )
 
+# Other snippet anchors / structured contexts (alphabetized).
+SNIPPET_BACKEND_RESULT_FAILURE_LINE_RE: Pattern[str] = re.compile(r"\"result\"\s*:\s*\"failure\"", re.IGNORECASE)
+
+SNIPPET_CUDA_LIBCUDA_IMPORT_ERROR_RE: Pattern[str] = re.compile(
+    r"\bImportError:\s*libcuda\.so\.1:\s*cannot\s+open\s+shared\s+object\s+file\b",
+    re.IGNORECASE,
+)
+
+SNIPPET_DOCKERFILE_CONTEXT_DIVIDER_RE: Pattern[str] = re.compile(r"^-{8,}\s*$")
+SNIPPET_DOCKERFILE_CONTEXT_HEADER_RE: Pattern[str] = re.compile(r"\bDockerfile\.[^: \t]+:\d+\b", re.IGNORECASE)
+SNIPPET_DOCKERFILE_CONTEXT_LINE_RE: Pattern[str] = re.compile(r"^\s*\d+\s*\|\s", re.IGNORECASE)
+
+SNIPPET_DOCKER_IMAGE_NOT_FOUND_RE: Pattern[str] = re.compile(
+    r"\bnot\s+found:\s*manifest\s+unknown:\s*requested\s+image\s+not\s+found\b",
+    re.IGNORECASE,
+)
+
+SNIPPET_EXIT_CODE_139_LINE_RE: Pattern[str] = re.compile(
+    r"(?:\bprocess completed with exit code 139\b|\bexit code:\s*139\b)",
+    re.IGNORECASE,
+)
+
+SNIPPET_FAILED_TO_BUILD_RE: Pattern[str] = re.compile(r"\berror:\s*failed\s+to\s+build\b", re.IGNORECASE)
+
+SNIPPET_GIT_LFS_BLOCK_END_RE: Pattern[str] = re.compile(
+    r"(?:"
+    r"\bprocess\b.*\bdid\s+not\s+complete\s+successfully\b"
+    r"|\bERROR:\s*process\b.*\bdid\s+not\s+complete\s+successfully\b"
+    r"|\bERROR:\s*failed\s+to\s+build\b"
+    r"|^------\s*$"
+    r"|##\\[error\\]"
+    r")",
+    re.IGNORECASE,
+)
+SNIPPET_GIT_LFS_BLOCK_START_RE: Pattern[str] = re.compile(r"\bFailed\s+to\s+download\s+and\s+build\s+`", re.IGNORECASE)
+SNIPPET_GIT_LFS_SNIPPET_ANCHOR_RE: Pattern[str] = re.compile(
+    r"(?:"
+    r"\bFailed\s+to\s+download\s+and\s+build\s+`"
+    r"|\bGit\s+operation\s+failed\b"
+    r"|\bfailed\s+to\s+fetch\s+LFS\s+objects\b"
+    r"|\bUse\s+`git\s+lfs\s+logs\s+last`\b"
+    r"|\bprocess\s+didn'?t\s+exit\s+successfully:.*\bgit\s+lfs\b"
+    r"|\berror:\s*failed\s+to\s+fetch\s+some\s+objects\s+from\b"
+    r")",
+    re.IGNORECASE,
+)
+
+SNIPPET_PYTEST_FAILURES_HEADER_RE: Pattern[str] = re.compile(r"=+\s*FAILURES\s*=+", re.IGNORECASE)
+SNIPPET_PYTEST_PROGRESS_100_RE: Pattern[str] = re.compile(r"^.*\[100%\].*$")
+SNIPPET_PYTEST_SHORT_TEST_SUMMARY_RE: Pattern[str] = re.compile(r"===+\s*short test summary info\s*===+", re.IGNORECASE)
+SNIPPET_PYTEST_UNDERSCORE_TITLE_RE: Pattern[str] = re.compile(r"_{5,}\s*test_[A-Za-z0-9_\[\]-]+\s*_{5,}", re.IGNORECASE)
+SNIPPET_PYTEST_TIMEOUT_E_LINE_RE: Pattern[str] = re.compile(
+    r"\bE\s+Failed:\s+Timeout\b.*\bpytest-timeout\b",
+    re.IGNORECASE,
+)
+
+SNIPPET_PYTHON_EXCEPTION_LINE_RE: Pattern[str] = re.compile(
+    r"(?:"
+    r"Traceback\s*\(most\s+recent\s+call\s+last\)"
+    r"|\b(?:"
+    r"ModuleNotFoundError"
+    r"|ImportError"
+    r"|AttributeError"
+    r"|NameError"
+    r"|KeyError"
+    r"|IndexError"
+    r"|ValueError"
+    r"|TypeError"
+    r"|AssertionError"
+    r"|RuntimeError"
+    r"|NotImplementedError"
+    r"|TimeoutError"
+    r"|FileNotFoundError"
+    r"|PermissionError"
+    r"|OSError"
+    r"|IOError"
+    r"|EOFError"
+    r"|ConnectionError"
+    r"|BrokenPipeError"
+    r"|SyntaxError"
+    r")\b"
+    r"|(?-i:(?<![./])\b[A-Z][A-Za-z0-9]{2,}(?:Error|Exception)(?::|\b$))"
+    r")",
+    re.IGNORECASE,
+)
+
+SNIPPET_PYTHON_MODULE_NOT_FOUND_RE: Pattern[str] = re.compile(
+    r"\bModuleNotFoundError:\s*No\s+module\s+named\b",
+    re.IGNORECASE,
+)
+
+SNIPPET_RUST_TEST_FAILURES_HEADER_RE: Pattern[str] = re.compile(r"^\s*failures:\s*$", re.IGNORECASE)
+SNIPPET_RUST_TEST_FAILED_TEST_NAME_RE: Pattern[str] = re.compile(r"^\s*[A-Za-z0-9_:]+\s*$")
+SNIPPET_RUST_TEST_RESULT_FAILED_RE: Pattern[str] = re.compile(r"test result:\s*FAILED\.", re.IGNORECASE)
+
+SNIPPET_UNSUPPORTED_CUDA_VLLM_RE: Pattern[str] = re.compile(
+    r"unsupported\s+cuda\s+version\s+for\s+vllm\s+installation",
+    re.IGNORECASE,
+)
+
 #
 # =============================================================================
 # RED_* (full-line red highlighting)

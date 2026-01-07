@@ -23,9 +23,10 @@ import re
 import subprocess
 import sys
 import time
+import hashlib
 from datetime import datetime
 from pathlib import Path
-from typing import List, Dict, Optional, Set, Tuple
+from typing import List, Dict, Optional, Set, Tuple, Any
 from zoneinfo import ZoneInfo
 
 # Ensure we can import sibling utilities (common.py) from the parent dynamo-utils directory
@@ -133,6 +134,14 @@ class CommitHistoryGenerator:
         self.logger = self._setup_logger()
         # Cache files live in ~/.cache/dynamo-utils to avoid polluting the repo checkout
         self.cache_file = dynamo_utils_cache_dir() / "commit_history.json"
+        # Persistent snippet cache (speeds up repeated runs by avoiding re-parsing the same raw logs).
+        self.snippet_cache_file = dynamo_utils_cache_dir() / "commit_history_snippets.json"
+        self._snippet_cache_dirty = False
+        self._snippet_cache_data: Dict[str, object] = {}
+        self._ci_log_errors_fingerprint: str = ""
+        # Per-run performance counters (shown in Statistics).
+        self._perf: Dict[str, float] = {}
+        self._perf_i: Dict[str, int] = {}
         self.gitlab_client = GitLabAPIClient()  # Single instance for all GitLab operations
         require_auth = not bool(allow_anonymous_github)
         self.github_client = GitHubAPIClient(
@@ -147,6 +156,152 @@ class CommitHistoryGenerator:
         # GitHub network fetching is governed by cache TTLs in `common.py`.
         # We allow fetches when entries are missing or stale so the dashboard self-heals and
         # raw logs can be materialized whenever they are needed.
+
+    def _ci_log_errors_fp(self) -> str:
+        """Fingerprint the ci_log_errors implementation (used for snippet cache invalidation)."""
+        fp = str(getattr(self, "_ci_log_errors_fingerprint", "") or "")
+        if fp:
+            return fp
+        try:
+            # Hash the core implementation files; this avoids false hits when snippet logic changes.
+            base = _UTILS_DIR / "ci_log_errors"
+            files = [
+                base / "engine.py",
+                base / "snippet.py",
+                base / "render.py",
+                base / "regexes.py",
+            ]
+            h = hashlib.sha1()
+            for p in files:
+                try:
+                    h.update(p.read_bytes())
+                except Exception:
+                    # Still include filename so missing files change the fingerprint.
+                    h.update(str(p).encode("utf-8", errors="ignore"))
+                    h.update(b"\0")
+            fp = h.hexdigest()[:12]
+        except Exception:
+            fp = "unknown"
+        self._ci_log_errors_fingerprint = fp
+        return fp
+
+    def _load_snippet_cache(self) -> None:
+        """Load persistent snippet cache (best-effort)."""
+        if self._snippet_cache_data:
+            return
+        data: Dict[str, object] = {}
+        try:
+            if self.snippet_cache_file.exists():
+                data = json.loads(self.snippet_cache_file.read_text() or "{}")
+        except Exception:
+            data = {}
+        if not isinstance(data, dict):
+            data = {}
+        # Invalidate on ci_log_errors changes.
+        want_fp = self._ci_log_errors_fp()
+        got_fp = str(data.get("ci_log_errors_fp", "") or "")
+        if got_fp != want_fp:
+            data = {"ci_log_errors_fp": want_fp, "items": {}}
+            self._snippet_cache_dirty = True
+        # Normalize structure.
+        if not isinstance(data.get("items"), dict):
+            data["items"] = {}
+        self._snippet_cache_data = data
+
+    def _save_snippet_cache(self) -> None:
+        """Persist snippet cache (best-effort)."""
+        if not bool(self._snippet_cache_dirty):
+            return
+        try:
+            self.snippet_cache_file.parent.mkdir(parents=True, exist_ok=True)
+            # Size cap: keep at most ~5000 entries (oldest by ts).
+            data = self._snippet_cache_data if isinstance(self._snippet_cache_data, dict) else {}
+            items = data.get("items") if isinstance(data, dict) else None
+            if isinstance(items, dict) and len(items) > 5200:
+                try:
+                    pairs = []
+                    for k, v in items.items():
+                        if not isinstance(v, dict):
+                            continue
+                        ts = int(v.get("ts", 0) or 0)
+                        pairs.append((ts, k))
+                    pairs.sort()
+                    # Drop oldest to ~5000
+                    for _ts, k in pairs[: max(0, len(pairs) - 5000)]:
+                        try:
+                            items.pop(k, None)
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+            atomic_write_text(self.snippet_cache_file, json.dumps(data, indent=2), encoding="utf-8")
+            self._snippet_cache_dirty = False
+        except Exception:
+            # Don't fail page generation on cache persistence issues.
+            pass
+
+    def _snippet_cache_key_for_raw_log(self, raw_log_path: Path) -> str:
+        # Use filename (job_id.log) to keep keys stable even if the dashboard path changes.
+        return str(raw_log_path.name or raw_log_path)
+
+    def _snippet_from_cached_raw_log(self, raw_log_path: Path) -> str:
+        """Return an error snippet for a raw log file, using the persistent cache when possible."""
+        t0 = time.monotonic()
+        try:
+            p = Path(raw_log_path)
+            if not p.exists() or not p.is_file():
+                return ""
+        except Exception:
+            return ""
+
+        self._load_snippet_cache()
+        data = self._snippet_cache_data if isinstance(self._snippet_cache_data, dict) else {}
+        items = data.get("items") if isinstance(data.get("items"), dict) else {}
+        key = self._snippet_cache_key_for_raw_log(Path(raw_log_path))
+        try:
+            st = Path(raw_log_path).stat()
+            mtime_ns = int(getattr(st, "st_mtime_ns", 0) or 0)
+            size = int(getattr(st, "st_size", 0) or 0)
+        except Exception:
+            mtime_ns = 0
+            size = 0
+
+        ent = items.get(key) if isinstance(items, dict) else None
+        if isinstance(ent, dict):
+            try:
+                if int(ent.get("mtime_ns", -1) or -1) == mtime_ns and int(ent.get("size", -1) or -1) == size:
+                    sn = str(ent.get("snippet", "") or "")
+                    if sn:
+                        self._perf_i["snippet.cache_hit"] = int(self._perf_i.get("snippet.cache_hit", 0) or 0) + 1
+                        self._perf["snippet.total_s"] = float(self._perf.get("snippet.total_s", 0.0) or 0.0) + max(0.0, time.monotonic() - t0)
+                        return sn
+            except Exception:
+                pass
+
+        # Cache miss/stale: compute and store.
+        self._perf_i["snippet.cache_miss"] = int(self._perf_i.get("snippet.cache_miss", 0) or 0) + 1
+        t1 = time.monotonic()
+        try:
+            snippet = extract_error_snippet_from_log_file(Path(raw_log_path))
+        except Exception:
+            snippet = ""
+        dt_compute = max(0.0, time.monotonic() - t1)
+        self._perf["snippet.compute_s"] = float(self._perf.get("snippet.compute_s", 0.0) or 0.0) + float(dt_compute)
+        try:
+            if isinstance(items, dict):
+                items[key] = {
+                    "mtime_ns": mtime_ns,
+                    "size": size,
+                    "ts": int(time.time()),
+                    "snippet": str(snippet or ""),
+                }
+                data["items"] = items
+                self._snippet_cache_data = data
+                self._snippet_cache_dirty = True
+        except Exception:
+            pass
+        self._perf["snippet.total_s"] = float(self._perf.get("snippet.total_s", 0.0) or 0.0) + max(0.0, time.monotonic() - t0)
+        return str(snippet or "")
 
     def _setup_logger(self) -> logging.Logger:
         """Setup logging configuration"""
@@ -355,6 +510,7 @@ class CommitHistoryGenerator:
                 for i, commit in enumerate(commits):
                     sha_short = commit.hexsha[:9]
                     sha_full = commit.hexsha
+                    t_sha_total = time.monotonic()
 
                     # Defaults
                     full_message = ""
@@ -371,6 +527,7 @@ class CommitHistoryGenerator:
 
                     if cached_entry and isinstance(cached_entry, dict):
                         meta_stats["full_hit"] += 1
+                        self._perf_i["composite_sha.cache_hit"] = int(self._perf_i.get("composite_sha.cache_hit", 0) or 0) + 1
                         composite_sha = cached_entry['composite_docker_sha']
                         date_str = cached_entry['date']
                         author_name = cached_entry['author']
@@ -423,12 +580,16 @@ class CommitHistoryGenerator:
                             merge_date = pr_to_merge_date[pr_number]
 
                         meta_stats["miss"] += 1
+                        self._perf_i["composite_sha.cache_miss"] = int(self._perf_i.get("composite_sha.cache_miss", 0) or 0) + 1
+                        t_sha = time.monotonic()
                         try:
                             repo.git.checkout(commit.hexsha)
                             composite_sha = repo_utils.generate_composite_sha()
                         except Exception as e:
                             composite_sha = "ERROR"
                             self.logger.error(f"Failed to calculate composite SHA for {sha_short}: {e}")
+                            self._perf_i["composite_sha.errors"] = int(self._perf_i.get("composite_sha.errors", 0) or 0) + 1
+                        self._perf["composite_sha.compute_s"] = float(self._perf.get("composite_sha.compute_s", 0.0) or 0.0) + max(0.0, time.monotonic() - t_sha)
 
                         stats = commit.stats.total
                         files_changed = stats['files']
@@ -437,7 +598,7 @@ class CommitHistoryGenerator:
                         full_message = commit.message.strip()
                         changed_files = list(commit.stats.files.keys())
 
-                        cache[sha_full] = {
+                        cache_entry = {
                             'composite_docker_sha': composite_sha,
                             'author': author_name,
                             'author_email': author_email,
@@ -452,7 +613,13 @@ class CommitHistoryGenerator:
                             },
                             'changed_files': changed_files,
                         }
+                        cache[sha_full] = cache_entry
                         cache_updated = True
+
+                    # Total time spent obtaining composite SHA (hit + miss path).
+                    self._perf["composite_sha.total_s"] = float(self._perf.get("composite_sha.total_s", 0.0) or 0.0) + max(
+                        0.0, time.monotonic() - t_sha_total
+                    )
 
                     # Always include this commit in the HTML, regardless of cache hit/miss.
                     commit_data.append(
@@ -639,11 +806,18 @@ class CommitHistoryGenerator:
                 t0 = phase_t.start()
                 try:
                     self.cache_file.parent.mkdir(parents=True, exist_ok=True)
-                    self.cache_file.write_text(json.dumps(cache, indent=2))
+                    # Atomic write: avoid partial/corrupted JSON which can cause "cache misses" on next run.
+                    atomic_write_text(self.cache_file, json.dumps(cache, indent=2), encoding="utf-8")
                     self.logger.debug(f"Cache saved with {len(cache)} entries")
                 except Exception as e:
                     self.logger.warning(f"Failed to save cache: {e}")
                 phase_t.stop("cache_save", t0)
+
+            # Persist snippet cache (best-effort).
+            try:
+                self._save_snippet_cache()
+            except Exception:
+                pass
 
             # Persist timings for HTML page stats / debugging (best-effort).
             try:
@@ -913,6 +1087,7 @@ class CommitHistoryGenerator:
                 commit['release_forkpoints'] = []
         
         # Build log paths dictionary and status indicators
+        t_markers = time.monotonic()
         log_paths = {}  # Maps sha_short to list of (date, path) tuples
         composite_to_status = {}  # Maps composite_sha to status (with priority: building > failed > success)
         commit_to_status = {}  # Maps commit sha_short to its own build status
@@ -938,6 +1113,7 @@ class CommitHistoryGenerator:
             matching_logs = glob.glob(search_pattern)
 
             if matching_logs:
+                self._perf_i["marker.report_hit"] = int(self._perf_i.get("marker.report_hit", 0) or 0) + 1
                 # Store all build attempts with dates
                 log_paths[sha_short] = []
                 for log_file in sorted(matching_logs):
@@ -966,6 +1142,7 @@ class CommitHistoryGenerator:
 
                 status = STATUS_UNKNOWN  # Default status
                 if all_status_files:
+                    self._perf_i["marker.status_hit"] = int(self._perf_i.get("marker.status_hit", 0) or 0) + 1
                     # Extract dates from filenames (format: YYYY-MM-DD.sha.task.STATUS)
                     # Group files by date
                     from collections import defaultdict
@@ -1008,10 +1185,12 @@ class CommitHistoryGenerator:
                     if status_priority[status] > status_priority[composite_to_status[composite_sha]]:
                         composite_to_status[composite_sha] = status
             else:
+                self._perf_i["marker.report_miss"] = int(self._perf_i.get("marker.report_miss", 0) or 0) + 1
                 # No report yet, status unknown
                 if composite_sha not in composite_to_status:
                     composite_to_status[composite_sha] = STATUS_UNKNOWN
                 # Don't override existing status if we have no information
+                self._perf_i["marker.status_miss"] = int(self._perf_i.get("marker.status_miss", 0) or 0) + 1
 
         # Pass 2: Assign status to all commits
         # Commits with logs get their own status, commits without logs inherit from Image SHA
@@ -1044,6 +1223,9 @@ class CommitHistoryGenerator:
             # Note: We do NOT override local build status based on GitLab/GitHub status
             # The status indicator reflects LOCAL builds only (.PASS/.FAIL/.RUNNING markers)
             # GitHub Actions and GitLab pipeline status are shown separately in their own columns
+
+        # Marker scan time (glob+grouping) regardless of cache.
+        self._perf["marker.total_s"] = float(self._perf.get("marker.total_s", 0.0) or 0.0) + max(0.0, time.monotonic() - t_markers)
         
         # Now that local build status is known, color the Image SHA badge accordingly.
         #
@@ -1253,7 +1435,7 @@ class CommitHistoryGenerator:
                 if raw_href in snippet_cache:
                     return snippet_cache[raw_href]
                 try:
-                    snippet = extract_error_snippet_from_log_file(Path(self.repo_path) / raw_href)
+                    snippet = self._snippet_from_cached_raw_log(Path(self.repo_path) / raw_href)
                 except Exception:
                     snippet = ""
                 snippet_cache[raw_href] = snippet
@@ -1639,6 +1821,103 @@ class CommitHistoryGenerator:
         page_stats.append(("Commits shown", str(len(commit_data))))
         page_stats.append(("skip_gitlab_fetch", "true" if self.skip_gitlab_fetch else "false"))
 
+        # Performance breakdown (best-effort; collected across the run).
+        try:
+            perf = dict(getattr(self, "_perf", {}) or {})
+            perfi = dict(getattr(self, "_perf_i", {}) or {})
+            if perf or perfi:
+                page_stats.append(("## Performance", None))
+                # Composite SHA
+                page_stats.append(("composite_sha.cache_hit", str(int(perfi.get("composite_sha.cache_hit", 0) or 0))))
+                page_stats.append(("composite_sha.cache_miss", str(int(perfi.get("composite_sha.cache_miss", 0) or 0))))
+                page_stats.append(("composite_sha.errors", str(int(perfi.get("composite_sha.errors", 0) or 0))))
+                page_stats.append(("timing.composite_sha_total", f"{float(perf.get('composite_sha.total_s') or 0.0):.2f}s"))
+                page_stats.append(("timing.composite_sha_compute", f"{float(perf.get('composite_sha.compute_s') or 0.0):.2f}s"))
+                # Snippets
+                page_stats.append(("snippet.cache_hit", str(int(perfi.get("snippet.cache_hit", 0) or 0))))
+                page_stats.append(("snippet.cache_miss", str(int(perfi.get("snippet.cache_miss", 0) or 0))))
+                page_stats.append(("timing.snippet_total", f"{float(perf.get('snippet.total_s') or 0.0):.2f}s"))
+                page_stats.append(("timing.snippet_compute", f"{float(perf.get('snippet.compute_s') or 0.0):.2f}s"))
+                # Markers / local build reports
+                page_stats.append(("marker.report_hit", str(int(perfi.get("marker.report_hit", 0) or 0))))
+                page_stats.append(("marker.report_miss", str(int(perfi.get("marker.report_miss", 0) or 0))))
+                page_stats.append(("marker.status_hit", str(int(perfi.get("marker.status_hit", 0) or 0))))
+                page_stats.append(("marker.status_miss", str(int(perfi.get("marker.status_miss", 0) or 0))))
+                page_stats.append(("timing.marker_total", f"{float(perf.get('marker.total_s') or 0.0):.2f}s"))
+
+                # GitLab cache hit/miss (cache files under ~/.cache/dynamo-utils)
+                page_stats.append(("## Cache (GitLab)", None))
+                for k in [
+                    "gitlab.cache.registry_images.hit",
+                    "gitlab.cache.registry_images.miss",
+                    "gitlab.cache.pipeline_status.hit",
+                    "gitlab.cache.pipeline_status.miss",
+                    "gitlab.cache.pipeline_jobs.hit",
+                    "gitlab.cache.pipeline_jobs.miss",
+                ]:
+                    if k in perfi:
+                        page_stats.append((k, str(int(perfi.get(k, 0) or 0))))
+                page_stats.append(("timing.gitlab.registry_images_total", f"{float(perf.get('timing.gitlab.registry_images_total') or 0.0):.2f}s"))
+                page_stats.append(("timing.gitlab.pipeline_status_total", f"{float(perf.get('timing.gitlab.pipeline_status_total') or 0.0):.2f}s"))
+                page_stats.append(("timing.gitlab.pipeline_jobs_total", f"{float(perf.get('timing.gitlab.pipeline_jobs_total') or 0.0):.2f}s"))
+        except Exception:
+            pass
+
+        # GitLab API totals (best-effort).
+        try:
+            gl = getattr(self, "gitlab_client", None)
+            if gl is not None and hasattr(gl, "get_rest_call_stats"):
+                st = gl.get_rest_call_stats() or {}
+                page_stats.append(("## GitLab API", None))
+                page_stats.append(("GitLab REST calls", str(int(st.get("total") or 0))))
+                page_stats.append(("GitLab REST time", f"{float(st.get('time_total_s') or 0.0):.2f}s"))
+                es = st.get("errors_by_status") if isinstance(st, dict) else None
+                if isinstance(es, dict) and es:
+                    page_stats.append(
+                        ("GitLab REST errors_by_status", ", ".join([f"{k}={v}" for k, v in list(es.items())[:8]]))
+                    )
+                # Top endpoints (time + count) to spot hot paths quickly.
+                try:
+                    by_ep = st.get("by_endpoint") if isinstance(st, dict) else {}
+                    t_by_ep = st.get("time_by_endpoint_s") if isinstance(st, dict) else {}
+                    if isinstance(by_ep, dict) and isinstance(t_by_ep, dict) and (by_ep or t_by_ep):
+                        labels = sorted(set(list(by_ep.keys()) + list(t_by_ep.keys())))
+                        labels.sort(key=lambda k: (-int(by_ep.get(k, 0) or 0), -float(t_by_ep.get(k, 0.0) or 0.0), str(k)))
+                        labels = labels[:10]
+                        w = max(10, max(len(str(x)) for x in labels))
+                        lines = [f"{'endpoint':<{w}}  calls   time"]
+                        for k in labels:
+                            c = int(by_ep.get(k, 0) or 0)
+                            t = float(t_by_ep.get(k, 0.0) or 0.0)
+                            lines.append(f"{str(k):<{w}}  {c:>5d}  {t:>6.2f}s")
+                        page_stats.append(("GitLab REST by endpoint (top 10)", "\n".join(lines)))
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+        # GitHub cache hit/miss (derived from `cache_stats` we already collect).
+        try:
+            cs = cache_stats if isinstance(cache_stats, dict) else {}
+            if cs:
+                page_stats.append(("## Cache (GitHub)", None))
+                md = cs.get("merge_dates_cache") if isinstance(cs.get("merge_dates_cache"), dict) else {}
+                rc = cs.get("required_checks_cache") if isinstance(cs.get("required_checks_cache"), dict) else {}
+                gha = cs.get("github_actions_status_cache") if isinstance(cs.get("github_actions_status_cache"), dict) else {}
+                if isinstance(md, dict) and md:
+                    page_stats.append(("github.cache.merge_dates.hits", str(md.get("hits"))))
+                    page_stats.append(("github.cache.merge_dates.misses", str(md.get("misses"))))
+                if isinstance(rc, dict) and rc:
+                    page_stats.append(("github.cache.required_checks.hits", str(rc.get("hits"))))
+                    page_stats.append(("github.cache.required_checks.misses", str(rc.get("misses"))))
+                if isinstance(gha, dict) and gha:
+                    page_stats.append(("github.cache.actions_status.hit_fresh", str(gha.get("cache_hit_fresh"))))
+                    page_stats.append(("github.cache.actions_status.stale_refresh", str(gha.get("cache_stale_refresh"))))
+                    page_stats.append(("github.cache.actions_status.miss_fetch", str(gha.get("cache_miss_fetch"))))
+                    page_stats.append(("github.cache.actions_status.miss_no_fetch", str(gha.get("cache_miss_no_fetch"))))
+        except Exception:
+            pass
+
         # Include timing breakdown if available (best-effort).
         try:
             t = getattr(self, "_last_timings", None) or {}
@@ -1750,6 +2029,21 @@ class CommitHistoryGenerator:
         sha_to_datetime = {c['sha_full']: c['committed_datetime'] for c in commit_data}
         
         self.logger.debug(f"Getting Docker images for {len(sha_full_list)} SHAs")
+
+        # Cache hit/miss accounting (best-effort).
+        try:
+            cache_path = common.resolve_cache_path(cache_file)
+            cache0 = json.loads(cache_path.read_text() or "{}") if cache_path.exists() else {}
+            if isinstance(cache0, dict):
+                hit = sum(1 for sha in sha_full_list if sha in cache0)
+                self._perf_i["gitlab.cache.registry_images.hit"] = int(self._perf_i.get("gitlab.cache.registry_images.hit", 0) or 0) + int(hit)
+                self._perf_i["gitlab.cache.registry_images.miss"] = int(self._perf_i.get("gitlab.cache.registry_images.miss", 0) or 0) + int(
+                    max(0, len(sha_full_list) - hit)
+                )
+        except Exception:
+            pass
+
+        t0 = time.monotonic()
         
         result = self.gitlab_client.get_cached_registry_images_for_shas(
             project_id="169905",  # dl/ai-dynamo/dynamo
@@ -1758,6 +2052,9 @@ class CommitHistoryGenerator:
             sha_to_datetime=sha_to_datetime,
             cache_file=cache_file,
             skip_fetch=self.skip_gitlab_fetch
+        )
+        self._perf["timing.gitlab.registry_images_total"] = float(self._perf.get("timing.gitlab.registry_images_total", 0.0) or 0.0) + max(
+            0.0, time.monotonic() - t0
         )
         
         cached_count = sum(1 for v in result.values() if v)
@@ -1794,8 +2091,26 @@ class CommitHistoryGenerator:
         cache_file = "gitlab_pipeline_status.json"
 
         self.logger.debug(f"Getting pipeline status for {len(sha_full_list)} commits")
+
+        # Cache hit/miss accounting (best-effort).
+        try:
+            cache_path = common.resolve_cache_path(cache_file)
+            cache0 = json.loads(cache_path.read_text() or "{}") if cache_path.exists() else {}
+            if isinstance(cache0, dict):
+                hit = sum(1 for sha in sha_full_list if sha in cache0)
+                self._perf_i["gitlab.cache.pipeline_status.hit"] = int(self._perf_i.get("gitlab.cache.pipeline_status.hit", 0) or 0) + int(hit)
+                self._perf_i["gitlab.cache.pipeline_status.miss"] = int(self._perf_i.get("gitlab.cache.pipeline_status.miss", 0) or 0) + int(
+                    max(0, len(sha_full_list) - hit)
+                )
+        except Exception:
+            pass
+
+        t0 = time.monotonic()
         
         result = self.gitlab_client.get_cached_pipeline_status(sha_full_list, cache_file=cache_file, skip_fetch=self.skip_gitlab_fetch)
+        self._perf["timing.gitlab.pipeline_status_total"] = float(self._perf.get("timing.gitlab.pipeline_status_total", 0.0) or 0.0) + max(
+            0.0, time.monotonic() - t0
+        )
         
         cached_count = sum(1 for v in result.values() if v is not None)
         self.logger.debug(f"Found pipeline status for {cached_count}/{len(sha_full_list)} commits")
@@ -1851,7 +2166,26 @@ class CommitHistoryGenerator:
 
         self.logger.debug(f"Getting job details for {len(pipeline_ids)} pipelines")
 
+        # Cache hit/miss accounting (best-effort).
+        try:
+            keys = [str(int(x)) for x in (pipeline_ids or [])]
+            cache_path = common.resolve_cache_path(cache_file)
+            cache0 = json.loads(cache_path.read_text() or "{}") if cache_path.exists() else {}
+            if isinstance(cache0, dict):
+                hit = sum(1 for k in keys if k in cache0)
+                self._perf_i["gitlab.cache.pipeline_jobs.hit"] = int(self._perf_i.get("gitlab.cache.pipeline_jobs.hit", 0) or 0) + int(hit)
+                self._perf_i["gitlab.cache.pipeline_jobs.miss"] = int(self._perf_i.get("gitlab.cache.pipeline_jobs.miss", 0) or 0) + int(
+                    max(0, len(keys) - hit)
+                )
+        except Exception:
+            pass
+
+        t0 = time.monotonic()
+
         result = self.gitlab_client.get_cached_pipeline_job_details(pipeline_ids, cache_file=cache_file, skip_fetch=self.skip_gitlab_fetch)
+        self._perf["timing.gitlab.pipeline_jobs_total"] = float(self._perf.get("timing.gitlab.pipeline_jobs_total", 0.0) or 0.0) + max(
+            0.0, time.monotonic() - t0
+        )
 
         cached_count = sum(1 for v in result.values() if v is not None)
         self.logger.debug(f"Found job details for {cached_count}/{len(pipeline_ids)} pipelines")

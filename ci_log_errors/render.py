@@ -27,7 +27,7 @@ def html_highlight_error_keywords(text: str) -> str:
     """HTML: escape and keyword-highlight error tokens (inline highlighting)."""
     # Don't keyword-highlight this common post-failure docker noise.
     # It's useful to *show* in snippets sometimes, but shouldn't draw attention.
-    if DOCKER_NO_SUCH_CONTAINER_RE.search(text or ""):
+    if RED_DOCKER_NO_SUCH_CONTAINER_RE.search(text or ""):
         return html.escape(text or "")
 
     escaped = html.escape(text or "")
@@ -39,7 +39,7 @@ def html_highlight_error_keywords(text: str) -> str:
         # (No bold: user wants red without extra emphasis.)
         return f'<span style="color: #c83a3a;">{m.group(0)}</span>'
 
-    return ERROR_HIGHLIGHT_RE.sub(repl, escaped)
+    return RED_KEYWORD_HIGHLIGHT_RE.sub(repl, escaped)
 
 
 def categorize_error_snippet_text(snippet_text: str) -> List[str]:
@@ -167,13 +167,13 @@ def render_error_snippet_html(snippet_text: str) -> str:
         s_norm = _strip_ts_and_ansi(raw_line)
         display_line = s_norm
 
-        if PYTEST_FAILED_LINE_RE.search(s_norm) or any(r.search(s_norm) for r in FULL_LINE_ERROR_REDS_RE):
+        if SNIPPET_PYTEST_FAILED_LINE_RE.search(s_norm) or any(r.search(s_norm) for r in RED_FULL_LINE_RES):
             out_lines.append(
                 f'<span style="color: #c83a3a;">{html.escape(display_line)}</span>'
             )
-        elif COMMAND_LINE_BLUE_RE.search(s_norm):
+        elif SNIPPET_COMMAND_LINE_BLUE_RE.search(s_norm):
             # Special-case: make PYTEST_CMD=... copyable (high-signal and often very long).
-            if PYTEST_CMD_LINE_RE.search(s_norm):
+            if SNIPPET_PYTEST_CMD_LINE_RE.search(s_norm):
                 # Extract payload after the first "=" and strip a single matching quote pair.
                 payload = ""
                 try:

@@ -15,6 +15,7 @@ against workflow job `name:` templates in a conservative way.
 
 from __future__ import annotations
 
+import functools
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -95,6 +96,25 @@ def load_workflow_defs(repo_root: Path) -> List[WorkflowDef]:
     if not wf_dir.exists() or not wf_dir.is_dir():
         return []
 
+    # PERF: This function is called once-per-commit when grouping check runs.
+    # YAML parsing of workflow files is relatively expensive; cache within a process.
+    #
+    # Cache key includes the workflows directory mtime so edits invalidate the cache.
+    try:
+        wf_dir_mtime_ns = int(wf_dir.stat().st_mtime_ns)
+    except Exception:
+        wf_dir_mtime_ns = 0
+    return _load_workflow_defs_cached(str(wf_dir.resolve()), wf_dir_mtime_ns)
+
+
+@functools.lru_cache(maxsize=8)
+def _load_workflow_defs_cached(wf_dir_resolved: str, wf_dir_mtime_ns: int) -> List[WorkflowDef]:
+    """Cached implementation for `load_workflow_defs()` (see caller for keying)."""
+    if yaml is None:
+        return []
+    wf_dir = Path(str(wf_dir_resolved or ""))
+    if not wf_dir.exists() or not wf_dir.is_dir():
+        return []
     out: List[WorkflowDef] = []
     for p in sorted(list(wf_dir.glob("*.yml")) + list(wf_dir.glob("*.yaml"))):
         try:

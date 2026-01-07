@@ -254,7 +254,7 @@ def extract_error_snippet_from_text(
             s_norm = _strip_ts_and_ansi(line)
             if PYTEST_FAILED_LINE_RE.search(s_norm):
                 last_pytest_failed = i
-            if PYTEST_SHORT_TEST_SUMMARY_RE.search(s_norm):
+            if SNIPPET_PYTEST_SHORT_TEST_SUMMARY_RE.search(s_norm):
                 last_pytest_short_summary = i
             if PYTEST_ERROR_FILE_LINE_RE.search(s_norm):
                 last_pytest_error_file = i
@@ -272,23 +272,23 @@ def extract_error_snippet_from_text(
                 last_docker_exec_cmd = i
             if re.search(r"\bcargo\s+(?:test|build|check|clippy|fmt|rustfmt)\b", s_norm, flags=re.IGNORECASE):
                 last_cargo_exec_cmd = i
-            if UNSUPPORTED_CUDA_VLLM_RE.search(s_norm):
+            if SNIPPET_UNSUPPORTED_CUDA_VLLM_RE.search(s_norm):
                 last_cuda_err = i
-            if CUDA_LIBCUDA_IMPORT_ERROR_RE.search(s_norm):
+            if SNIPPET_CUDA_LIBCUDA_IMPORT_ERROR_RE.search(s_norm):
                 last_libcuda_import_err = i
-            if PYTHON_MODULE_NOT_FOUND_RE.search(s_norm):
+            if SNIPPET_PYTHON_MODULE_NOT_FOUND_RE.search(s_norm):
                 last_module_not_found = i
-            if PYTHON_EXCEPTION_LINE_RE.search(s_norm):
+            if SNIPPET_PYTHON_EXCEPTION_LINE_RE.search(s_norm):
                 last_python_exception_line = i
-            if DOCKERFILE_CONTEXT_HEADER_RE.search(s_norm):
+            if SNIPPET_DOCKERFILE_CONTEXT_HEADER_RE.search(s_norm):
                 last_dockerfile_ctx_hdr = i
-            if RUST_TEST_FAILURES_HEADER_RE.search(_strip_ts_and_ansi(line)):
+            if SNIPPET_RUST_TEST_FAILURES_HEADER_RE.search(_strip_ts_and_ansi(line)):
                 last_rust_failures_header = i
-            if RUST_TEST_RESULT_FAILED_RE.search(s_norm):
+            if SNIPPET_RUST_TEST_RESULT_FAILED_RE.search(s_norm):
                 last_rust_test_result_failed = i
-            if GIT_LFS_SNIPPET_ANCHOR_RE.search(s_norm):
+            if SNIPPET_GIT_LFS_SNIPPET_ANCHOR_RE.search(s_norm):
                 last_git_lfs_anchor = i
-            if EXIT_CODE_139_LINE_RE.search(s_norm):
+            if SNIPPET_EXIT_CODE_139_LINE_RE.search(s_norm):
                 last_exit_code_139 = i
             # Some categories are often only visible as a single high-signal line that can get
             # pushed out of the snippet window. Track them explicitly so we can force-include.
@@ -298,7 +298,7 @@ def extract_error_snippet_from_text(
                 last_hf_auth_sig = i
             if CAT_COPYRIGHT_HEADER_ERROR_RE.search(line):
                 last_copyright_sig = i
-            if FAILED_TO_BUILD_RE.search(s_norm):
+            if SNIPPET_FAILED_TO_BUILD_RE.search(s_norm):
                 last_failed_to_build = i
 
             # Capture the exact failing BuildKit payload for copy/paste.
@@ -316,7 +316,7 @@ def extract_error_snippet_from_text(
                     pass
             if NETWORK_ERROR_LINE_RE.search(s_norm):
                 last_network_err = i
-            if BACKEND_RESULT_FAILURE_LINE_RE.search(s_norm):
+            if SNIPPET_BACKEND_RESULT_FAILURE_LINE_RE.search(s_norm):
                 last_backend_result_failure = i
             if ERROR_SNIPPET_LINE_RE.search(s_norm):
                 last_generic = i
@@ -422,12 +422,12 @@ def extract_error_snippet_from_text(
                 except Exception:
                     return
 
-            add_last(PYTEST_PROGRESS_100_RE)
-            add_last(PYTEST_FAILURES_HEADER_RE)
-            add_last(PYTEST_UNDERSCORE_TITLE_RE)
+            add_last(SNIPPET_PYTEST_PROGRESS_100_RE)
+            add_last(SNIPPET_PYTEST_FAILURES_HEADER_RE)
+            add_last(SNIPPET_PYTEST_UNDERSCORE_TITLE_RE)
             # The explicit FAILED test id line is the anchor itself, but ensure it’s present.
             add_last(PYTEST_FAILED_LINE_RE)
-            add_last(PYTEST_TIMEOUT_E_LINE_RE)
+            add_last(SNIPPET_PYTEST_TIMEOUT_E_LINE_RE)
 
         # Ensure we include the last docker daemon error line if present (high-signal and easy to miss).
         if last_docker_daemon_err is not None:
@@ -532,7 +532,7 @@ def extract_error_snippet_from_text(
                     continue
                 if not same_step(ln):
                     continue
-                if GIT_LFS_BLOCK_START_RE.search(ln):
+                if SNIPPET_GIT_LFS_BLOCK_START_RE.search(ln):
                     start_i = k
                     break
                 # If we see the uv command line for this step, treat that as a good start too.
@@ -553,7 +553,7 @@ def extract_error_snippet_from_text(
                 if not same_step(ln) and k > last_git_lfs_anchor:
                     end_i = k - 1
                     break
-                if GIT_LFS_BLOCK_END_RE.search(_strip_ts_and_ansi(ln)):
+                if SNIPPET_GIT_LFS_BLOCK_END_RE.search(_strip_ts_and_ansi(ln)):
                     end_i = k
                     break
 
@@ -581,12 +581,20 @@ def extract_error_snippet_from_text(
                     continue
                 if ln.startswith("#"):
                     continue
-                if k == hdr_i or DOCKERFILE_CONTEXT_DIVIDER_RE.search(ln) or DOCKERFILE_CONTEXT_LINE_RE.search(ln):
+                if (
+                    k == hdr_i
+                    or SNIPPET_DOCKERFILE_CONTEXT_DIVIDER_RE.search(ln)
+                    or SNIPPET_DOCKERFILE_CONTEXT_LINE_RE.search(ln)
+                ):
                     if ln not in snippet_lines:
                         snippet_lines.append(ln)
                     continue
                 # Stop once we leave the Dockerfile block.
-                if k > hdr_i and not DOCKERFILE_CONTEXT_LINE_RE.search(ln) and not DOCKERFILE_CONTEXT_DIVIDER_RE.search(ln):
+                if (
+                    k > hdr_i
+                    and not SNIPPET_DOCKERFILE_CONTEXT_LINE_RE.search(ln)
+                    and not SNIPPET_DOCKERFILE_CONTEXT_DIVIDER_RE.search(ln)
+                ):
                     break
 
         # Ensure we include representative lines for some “single-line” failure categories.
@@ -1258,6 +1266,13 @@ def extract_error_snippet_from_text(
 
         return snippet
     except Exception:
+        # Debugging aid: snippet extraction is intentionally best-effort and swallows many errors to
+        # avoid breaking dashboards. During refactors, enable this to surface the root cause:
+        #   CI_LOG_ERRORS_DEBUG=1 python3 ci_log_errors/core.py <log>
+        if os.getenv("CI_LOG_ERRORS_DEBUG"):
+            import traceback
+
+            traceback.print_exc()
         return ""
 
 

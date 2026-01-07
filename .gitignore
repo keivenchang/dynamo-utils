@@ -10,3 +10,5 @@ no-commit/
 .cache/
 update_html_pages.log
 .backup_sha
+raw-log-text
+raw-log-text/

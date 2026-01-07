@@ -1527,18 +1527,37 @@ def check_line_html(
     # Error tags/snippet can be shown either:
     # - after [cached raw log] when present (preferred), OR
     # - on its own (e.g. for step subsections) when we have a snippet but no dedicated raw-log link.
-    if (error_snippet_text or "").strip():
-        cats = _snippet_categories(error_snippet_text or "")
-        for c in cats[:3]:
-            links += _tag_pill_html(text=c, monospace=False, kind="category")
-        cmd = _snippet_first_command(error_snippet_text or "")
-        if cmd:
-            links += _tag_pill_html(text=cmd, monospace=True, kind="command")
-        # Include URL/context so the snippet id is stable and unique across the page.
-        links += _error_snippet_toggle_html(
-            dom_id_seed=f"{job_id}|{display_name}|{raw_log_href}|{log_url}",
-            snippet_text=error_snippet_text,
-        )
+    #
+    # UX invariant (recurring issue):
+    # - If a job FAILED and we have a log link (live or cached), always render a "▶ Snippet" toggle,
+    #   even if snippet extraction produced an empty string. Otherwise users interpret the absence of
+    #   the toggle as "snippets are broken/missing" rather than "(no snippet found)".
+    #
+    # The expanded body will show "(no snippet found)" (see `_error_snippet_toggle_html()`).
+    snippet_text = str(error_snippet_text or "")
+    has_snippet_text = bool(snippet_text.strip())
+    st_lc = str(status_norm or "").strip().lower()
+    # "failure-like": completed but not success. Avoid in-progress/pending (no stable snippet yet).
+    has_log_link = bool((raw_log_href or "").strip() or (log_url or "").strip())
+    want_snippet_toggle = has_snippet_text or (has_log_link and st_lc not in {"success", "in_progress", "pending", "skipped"})
+
+    if want_snippet_toggle:
+        if has_snippet_text:
+            cats = _snippet_categories(snippet_text)
+            for c in cats[:3]:
+                links += _tag_pill_html(text=c, monospace=False, kind="category")
+            cmd = _snippet_first_command(snippet_text)
+            if cmd:
+                links += _tag_pill_html(text=cmd, monospace=True, kind="command")
+            # Include URL/context so the snippet id is stable and unique across the page.
+            links += _error_snippet_toggle_html(
+                dom_id_seed=f"{job_id}|{display_name}|{raw_log_href}|{log_url}",
+                snippet_text=snippet_text,
+            )
+        else:
+            # If we don't have snippet content, show a non-clickable indicator (gray box only).
+            # Keep this compact: users explicitly asked for *no* "No snippet" label text.
+            links += ' <span style="color: #8c959f; font-size: 11px; margin-left: 5px; user-select: none;">◼</span>'
 
     return f"{icon} {id_html}{req_html}{name_html}{dur_html}{links}"
 
