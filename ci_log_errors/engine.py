@@ -63,6 +63,7 @@ Tests / languages:
 - 58906141961.log => !pytest-error  # success run (passed/skipped), should not be tagged as pytest-error
 - 58097278528.log => pytest-error, !python-error, !huggingface-auth-error
 - 58179788784.log => pytest-error, pytest-timeout-error, !python-error, !huggingface-auth-error
+- 56700023895.log => pytest-error, python-error  # ModuleNotFoundError: sniffio (pytest parallel)
 - 58457161045.log => python-error, !pytest-error, !huggingface-auth-error
 - 58465471934.log => rust-error, !huggingface-auth-error
 - 59493756549.log => rust-error, !pytest-error
@@ -137,6 +138,7 @@ Notes:
 * 59540519012.log => +docker buildx create --name builder-, +docker buildx inspect --bootstrap, !2026-
 * 58465491442.log => +docker buildx create --name builder-, +cp /tmp/deps/vllm/install_vllm.sh /tmp/install_vllm.sh, +--cuda-version $CUDA_VERSION, !2026-
 * 58818079816.log => +Git operation failed, +failed to fetch LFS objects, +RED:Git operation failed, +RED:failed to fetch LFS objects
+* 56700023895.log => +E   ModuleNotFoundError: No module named 'sniffio'
 * 59652435193.log => +CI_FILTER_UNCOVERED, +Please add these paths to .github/filters.yaml, +RED:CI filter, +RED:CI_FILTER_UNCOVERED
 * 58465471934.log => +failures:, +recorder::tests::test_recorder_streams_events_to_file, +RED:failures:, +RED:    recorder::tests::test_recorder_streams_events_to_file
 * 59520885010.log => +FAILED tests/router/test_router_e2e_with_mockers.py::test_router_decisions_disagg, +# pytest --basetemp=/tmp/pytest-parallel --junitxml=pytest_parallel.xml -n 4, +# suggested, +-m \"pre_merge and parallel, +tests/router/test_router_e2e_with_mockers.py::test_router_decisions_disagg[with_bootstrap-decode_first], +'tests/router/test_router_e2e_with_mockers.py::test_router_decisions_disagg[with_bootstrap-decode_first]', !RED:__________ test_router_decisions_disagg[with_bootstrap-prefill_first] __________
@@ -801,7 +803,12 @@ def _self_test_examples(*, raw_log_path: Path) -> int:
                 "tests/router/test_router_e2e_with_sglang.py::test_sglang_indexers_sync",
             ]
             for ln in (sn or "").splitlines():
-                s = (ln or "").strip()
+                s0 = (ln or "").strip()
+                # Suggested command lines are rendered as shell comments in snippet text:
+                #   # pytest ...   # suggested
+                # Accept both plain and suggested formats.
+                s = re.sub(r"#\s*suggested\s*$", "", s0, flags=re.IGNORECASE).strip()
+                s = re.sub(r"^\s*#\s*", "", s).strip()
                 if not s.lower().startswith("pytest "):
                     continue
                 if any(nid in s for nid in want_nodeids):

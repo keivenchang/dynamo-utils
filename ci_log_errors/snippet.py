@@ -239,6 +239,7 @@ def extract_error_snippet_from_text(
         pytest_cmd_idxs: List[int] = []
         last_pytest_exec_cmd: Optional[int] = None
         last_module_not_found: Optional[int] = None
+        last_e_module_not_found: Optional[int] = None
         last_pytest_short_summary: Optional[int] = None
         last_python_exception_line: Optional[int] = None
         last_dockerfile_ctx_hdr: Optional[int] = None
@@ -307,6 +308,14 @@ def extract_error_snippet_from_text(
                 last_libcuda_import_err = i
             if SNIPPET_PYTHON_MODULE_NOT_FOUND_RE.search(s_norm):
                 last_module_not_found = i
+                # Prefer the pytest traceback-style line:
+                #   E   ModuleNotFoundError: No module named 'sniffio'
+                # This is often clearer than the short summary `ERROR tests/... - ModuleNotFoundError: ...`.
+                try:
+                    if re.search(r"^E\s+ModuleNotFoundError:\s*No\s+module\s+named\b", s_norm):
+                        last_e_module_not_found = i
+                except Exception:
+                    pass
             if SNIPPET_PYTHON_EXCEPTION_LINE_RE.search(s_norm):
                 last_python_exception_line = i
             if SNIPPET_DOCKERFILE_CONTEXT_HEADER_RE.search(s_norm):
@@ -486,6 +495,17 @@ def extract_error_snippet_from_text(
             err_file_line = all_lines[last_pytest_error_file]
             if err_file_line and err_file_line.strip() and err_file_line not in snippet_lines:
                 snippet_lines.append(err_file_line)
+
+        # Ensure we include the actual `E   ModuleNotFoundError: No module named '...'` line when present.
+        # This often appears in pytest traceback output and can be truncated away by summary lines like:
+        #   ERROR tests/... - ModuleNotFoundError: No module named 'sn...'
+        if last_e_module_not_found is not None:
+            try:
+                mn_line = _strip_ts_and_ansi(all_lines[int(last_e_module_not_found)]).rstrip("\n")
+                if mn_line and mn_line.strip() and mn_line not in snippet_lines:
+                    snippet_lines.append(mn_line)
+            except Exception:
+                pass
 
         # If we anchored on a python ModuleNotFoundError inside pytest, ensure we include the
         # "short test summary info" header (it often provides useful context like skipped tests).
@@ -1185,12 +1205,14 @@ def extract_error_snippet_from_text(
                         seen_exp.add(inner_sug)
                         expanded.append(inner_sug)
                     py = _extract_vanilla_pytest_from_cmd_block(b)
+                    # Even if we already emitted the suggested `# pytest ...` line elsewhere,
+                    # still capture the plain pytest command as the canonical rerun base.
+                    if py and not best_vanilla_pytest:
+                        best_vanilla_pytest = py
                     py_sug = _format_suggested_cmd(py) if py else ""
                     if py_sug and py_sug not in seen_exp:
                         seen_exp.add(py_sug)
                         expanded.append(py_sug)
-                        if not best_vanilla_pytest:
-                            best_vanilla_pytest = py
 
                 # If we saw failed nodeids and we have a plain pytest command, synthesize a command
                 # that reruns ONLY those failing tests.
