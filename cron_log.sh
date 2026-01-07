@@ -20,11 +20,10 @@ fi
 JOB_NAME="$1"
 shift
 
-# Testing / maintenance kill-switch:
+# Optional maintenance kill-switch:
 # - Set `DYNAMO_UTILS_DISABLE_CRON=1` to skip ALL cron-invoked jobs that use this wrapper.
-# - Or create `~/.cache/dynamo-utils/disable-cron` (no need to edit system crontab).
-if [ "${DYNAMO_UTILS_DISABLE_CRON:-}" = "1" ] || [ -f "${HOME}/.cache/dynamo-utils/disable-cron" ]; then
-  echo "cron_log.sh: disabled (DYNAMO_UTILS_DISABLE_CRON=1 or ~/.cache/dynamo-utils/disable-cron exists); skipping job=${JOB_NAME}" >&2
+if [ "${DYNAMO_UTILS_DISABLE_CRON:-}" = "1" ]; then
+  echo "cron_log.sh: disabled (DYNAMO_UTILS_DISABLE_CRON=1); skipping job=${JOB_NAME}" >&2
   exit 0
 fi
 
