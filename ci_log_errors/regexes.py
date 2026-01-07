@@ -440,6 +440,11 @@ RED_CI_FILTER_UNCOVERED_MARKER_RE: Pattern[str] = re.compile(
     re.IGNORECASE,
 )
 
+RED_INVALID_TASK_TYPE_RE: Pattern[str] = re.compile(
+    r"\binvalid\s+or\s+missing\s+task\s+type\s*:",
+    re.IGNORECASE,
+)
+
 # This list is ORDERED (not alphabetized): it’s a UX/tuning list, not a catalog.
 RED_FULL_LINE_RES: List[Pattern[str]] = [
     # Kubernetes timeouts - highlight explicitly
@@ -465,6 +470,8 @@ RED_FULL_LINE_RES: List[Pattern[str]] = [
     RED_CI_FILTER_UNCOVERED_MARKER_RE,
     # CI filter coverage error lines from logs.
     RED_CI_FILTER_UNCOVERED_FILES_RE,
+    # Commit message policy check (conventional commits / task type).
+    RED_INVALID_TASK_TYPE_RE,
     # Assertion failures
     re.compile(r"\bassertion\s+failed:", re.IGNORECASE),
     # Build failure summary

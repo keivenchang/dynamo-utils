@@ -26,6 +26,7 @@ CI / tooling:
 - 59652435193.log => ci-filter-coverage-error
 - 58887254616.log => broken-links
 - 57945094461.log => copyright-header-error
+- 56859612414.log =>  # invalid/missing task type (commit message policy)
 - 59030172010.log => helm-error, k8s-error
 
 Docker:
@@ -139,6 +140,7 @@ Notes:
 * 58465491442.log => +docker buildx create --name builder-, +cp /tmp/deps/vllm/install_vllm.sh /tmp/install_vllm.sh, +--cuda-version $CUDA_VERSION, !2026-
 * 58818079816.log => +Git operation failed, +failed to fetch LFS objects, +RED:Git operation failed, +RED:failed to fetch LFS objects
 * 56700023895.log => +E   ModuleNotFoundError: No module named 'sniffio'
+* 56859612414.log => +Invalid or missing task type:, +RED:Invalid or missing task type:
 * 59652435193.log => +CI_FILTER_UNCOVERED, +Please add these paths to .github/filters.yaml, +RED:CI filter, +RED:CI_FILTER_UNCOVERED
 * 58465471934.log => +failures:, +recorder::tests::test_recorder_streams_events_to_file, +RED:failures:, +RED:    recorder::tests::test_recorder_streams_events_to_file
 * 59520885010.log => +FAILED tests/router/test_router_e2e_with_mockers.py::test_router_decisions_disagg, +# pytest --basetemp=/tmp/pytest-parallel --junitxml=pytest_parallel.xml -n 4, +# suggested, +-m \"pre_merge and parallel, +tests/router/test_router_e2e_with_mockers.py::test_router_decisions_disagg[with_bootstrap-decode_first], +'tests/router/test_router_e2e_with_mockers.py::test_router_decisions_disagg[with_bootstrap-decode_first]', !RED:__________ test_router_decisions_disagg[with_bootstrap-prefill_first] __________
