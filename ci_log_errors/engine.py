@@ -135,7 +135,7 @@ Notes:
 * 58887254616.log => +Run the broken links detection script and capture exit code, +set +e, +python3 .github/workflows/detect_broken_links.py, +--check-symlinks, +--output broken-links-report.json, +📄 File: docs/kubernetes/installation_guide.md, +1 broken link(s) found, +Problematic symlink: Suspicious symlink: target requires many directory traversals, +1. docs/examples/runtime/hello_world/README.md, +→ ../../../../examples/custom_backend/hello_world/README.md
 * 59520885010.log => +docker run -w /workspace, +bash -c "pytest, +FAILED tests/router/test_router_e2e_with_mockers.py::test_router_decisions_disagg, !2026-
 * 57521050539.log => +FAILED tests/router/test_router_e2e_with_sglang.py::test_sglang_kv_router_basic, +FAILED tests/router/test_router_e2e_with_sglang.py::test_router_decisions_sglang_multiple_workers, +FAILED tests/router/test_router_e2e_with_sglang.py::test_sglang_indexers_sync, +pytest -v --tb=short --basetemp=/tmp -o cache_dir=/tmp/.pytest_cache --junitxml=/workspace/test-results/pytest_test_report.xml --durations=10 -m, +tests/router/test_router_e2e_with_sglang.py::test_sglang_kv_router_basic, +tests/router/test_router_e2e_with_sglang.py::test_router_decisions_sglang_multiple_workers, +tests/router/test_router_e2e_with_sglang.py::test_sglang_indexers_sync, +====== 3 failed, 8 passed, 4 skipped, 626 deselected
-* 56700029731.log => +docker run --runtime=nvidia, +bash -c "mkdir -p /workspace/test-results && pytest -v --tb=short --basetemp=/tmp, +pytest -v --tb=short --basetemp=/tmp -o cache_dir=/tmp/.pytest_cache --junitxml=/workspace/test-results/pytest_test_report.xml, +not slow, !unit and trtllm_marker, !pytest     = <module 'pytest'
+* 56700029731.log => +docker run --runtime=nvidia, +bash -c "mkdir -p /workspace/test-results && pytest -v --tb=short --basetemp=/tmp, +pytest -v --tb=short --basetemp=/tmp -o cache_dir=/tmp/.pytest_cache --junitxml=/workspace/test-results/pytest_test_report.xml, +not slow, +Caught signal 11, +Segmentation fault (11), +RED:Caught signal 11, +RED:Segmentation fault (11), !unit and trtllm_marker, !pytest     = <module 'pytest'
 * 59332716597.log => +docker run -w /workspace, +bash -c "pytest --basetemp=/tmp/pytest-parallel, +pytest --basetemp=/tmp/pytest-parallel --junitxml=pytest_parallel.xml, +-m \\\"pre_merge and parallel, !pytest     = <module 'pytest'
 * 59539777738.log => +[FAIL] incorrect date:, !2026-
 * 59540519012.log => +docker buildx create --name builder-, +docker buildx inspect --bootstrap, !2026-
@@ -213,6 +213,7 @@ from .regexes import (
     SNIPPET_DOCKERFILE_CONTEXT_LINE_RE,
     SNIPPET_DOCKER_IMAGE_NOT_FOUND_RE,
     SNIPPET_EXIT_CODE_139_LINE_RE,
+    SNIPPET_SIGSEGV_LINE_RE,
     SNIPPET_FAILED_TO_BUILD_RE,
     SNIPPET_GIT_LFS_BLOCK_END_RE,
     SNIPPET_GIT_LFS_BLOCK_START_RE,
@@ -690,6 +691,8 @@ def _self_test_examples(*, raw_log_path: Path) -> int:
                 "E           Failed: Timeout (>60.0s) from pytest-timeout.",
                 "assertion failed: (7..=13).contains(&elapsed_ms)",
                 "Exception: Failed to start HTTP server: port 8081 already in use. Use --http-port to specify a different port.",
+                "Caught signal 11 (Segmentation fault: invalid permissions for mapped object at address 0x6aed2c30)",
+                "Signal: Segmentation fault (11)",
                 "ERROR: failed to build",
                 "[FAIL] incorrect date: container/dev/dev_build.sh",
                 "#104 25.87   ├─▶ Git operation failed",
@@ -712,6 +715,9 @@ def _self_test_examples(*, raw_log_path: Path) -> int:
             "failed to fetch LFS objects",
             # Port bind failures (common e2e root cause)
             "Failed to start HTTP server: port 8081 already in use.",
+            # SIGSEGV / caught signal lines
+            "Caught signal 11",
+            "Segmentation fault (11)",
             "failures:",
             "recorder::tests::test_recorder_streams_events_to_file",
         ]

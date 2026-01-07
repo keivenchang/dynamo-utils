@@ -329,6 +329,17 @@ SNIPPET_EXIT_CODE_139_LINE_RE: Pattern[str] = re.compile(
     re.IGNORECASE,
 )
 
+# SIGSEGV markers (some runners print signal lines without an explicit exit code 139 line).
+SNIPPET_SIGSEGV_LINE_RE: Pattern[str] = re.compile(
+    r"(?:"
+    r"\bCaught\s+signal\s+11\b"
+    r"|\bSIGSEGV\b"
+    r"|\bSegmentation\s+fault\b"
+    r"|\bSignal:\s*Segmentation\s+fault\s*\(11\)"
+    r")",
+    re.IGNORECASE,
+)
+
 SNIPPET_FAILED_TO_BUILD_RE: Pattern[str] = re.compile(r"\berror:\s*failed\s+to\s+build\b", re.IGNORECASE)
 
 SNIPPET_GIT_LFS_BLOCK_END_RE: Pattern[str] = re.compile(
@@ -466,6 +477,8 @@ RED_FULL_LINE_RES: List[Pattern[str]] = [
     # Exit codes
     re.compile(r"\bprocess completed with exit code 139\b|\bexit code:\s*139\b", re.IGNORECASE),
     re.compile(r"\bprocess completed with exit code 127\b|\bexit code:\s*127\b|\bcommand not found\b", re.IGNORECASE),
+    # SIGSEGV / caught signal lines (some runners don't print an explicit exit code line)
+    SNIPPET_SIGSEGV_LINE_RE,
     # Network / docker infra errors
     RED_DOCKER_DAEMON_ERROR_LINE_RE,
     RED_DOCKER_NO_SUCH_CONTAINER_RE,

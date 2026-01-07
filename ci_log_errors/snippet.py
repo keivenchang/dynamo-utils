@@ -249,6 +249,7 @@ def extract_error_snippet_from_text(
         last_rust_failures_header: Optional[int] = None
         last_git_lfs_anchor: Optional[int] = None
         last_exit_code_139: Optional[int] = None
+        sigsegv_sigs: List[int] = []
         etcd_sigs: List[int] = []
         last_hf_auth_sig: Optional[int] = None
         last_copyright_sig: Optional[int] = None
@@ -330,6 +331,8 @@ def extract_error_snippet_from_text(
                 last_git_lfs_anchor = i
             if SNIPPET_EXIT_CODE_139_LINE_RE.search(s_norm):
                 last_exit_code_139 = i
+            if SNIPPET_SIGSEGV_LINE_RE.search(s_norm):
+                sigsegv_sigs.append(i)
             # Some categories are often only visible as a single high-signal line that can get
             # pushed out of the snippet window. Track them explicitly so we can force-include.
             if CAT_ETCD_ERROR_RE.search(line.lower()):
@@ -387,6 +390,7 @@ def extract_error_snippet_from_text(
             last_pytest_error_file,
             last_cuda_err,
             last_rust_test_result_failed,
+            (sigsegv_sigs[-1] if sigsegv_sigs else None),
             last_exit_code_139,
             last_dockerfile_ctx_hdr,
             last_git_lfs_anchor,
@@ -728,6 +732,30 @@ def extract_error_snippet_from_text(
             ln = all_lines[last_exit_code_139]
             if ln and ln.strip() and ln not in snippet_lines:
                 snippet_lines.append(ln)
+
+        # Ensure we include SIGSEGV / "Caught signal 11" lines if present (high-signal crash markers).
+        # Keep a few representative lines (in log order) so we don't lose the exact failure signature.
+        try:
+            if sigsegv_sigs:
+                # Prefer the first "Caught signal 11 ..." line if present, then a couple more.
+                caught = [i for i in sigsegv_sigs if re.search(r"\bCaught\s+signal\s+11\b", _strip_ts_and_ansi(all_lines[i] or ""), re.IGNORECASE)]
+                chosen = []
+                if caught:
+                    chosen.append(int(caught[0]))
+                # Add up to 2 more unique signal lines.
+                for i in sigsegv_sigs:
+                    if i in chosen:
+                        continue
+                    chosen.append(int(i))
+                    if len(chosen) >= 3:
+                        break
+                chosen = sorted(set(chosen))
+                for i in chosen:
+                    ln = all_lines[int(i)]
+                    if ln and ln.strip() and ln not in snippet_lines:
+                        snippet_lines.append(ln)
+        except Exception:
+            pass
 
         # broken-links: force-include the high-signal report blocks users need to fix the issue.
         # Without this, the snippet can degrade into the verbose script footer ("what to do next")
