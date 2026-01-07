@@ -1400,12 +1400,24 @@ class Monitor:
 
 def _default_db_path() -> Path:
     # Policy: do not write to repo-local `.cache/`; always use the global dynamo-utils cache dir.
+    try:
+        override = os.environ.get("DYNAMO_UTILS_CACHE_DIR", "").strip()
+        if override:
+            return Path(override).expanduser() / "resource_monitor.sqlite"
+    except Exception:
+        pass
     return Path.home() / ".cache" / "dynamo-utils" / "resource_monitor.sqlite"
 
 
 def _default_lock_path(db_path: Path) -> Path:
     # Default to a GLOBAL lock so starting from different CWDs (and thus different default DB paths)
     # doesn't accidentally allow multiple monitors to run.
+    try:
+        override = os.environ.get("DYNAMO_UTILS_CACHE_DIR", "").strip()
+        if override:
+            return Path(override).expanduser() / "resource_monitor.lock"
+    except Exception:
+        pass
     return Path.home() / ".cache" / "dynamo-utils" / "resource_monitor.lock"
 
 

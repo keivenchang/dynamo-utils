@@ -173,7 +173,11 @@ RESOURCE_REPORT_LOG="$DAY_LOG_DIR/resource_report.log"
 
 run_resource_report() {
     # Generate resource report HTML and prune older DB rows (best-effort; do not fail if DB is missing)
-    RESOURCE_DB="${RESOURCE_DB:-$HOME/.cache/dynamo-utils/resource_monitor.sqlite}"
+    # Single source of truth for caches:
+    # - $DYNAMO_UTILS_CACHE_DIR (explicit override), else
+    # - ~/.cache/dynamo-utils
+    CACHE_ROOT="${DYNAMO_UTILS_CACHE_DIR:-$HOME/.cache/dynamo-utils}"
+    RESOURCE_DB="${RESOURCE_DB:-$CACHE_ROOT/resource_monitor.sqlite}"
     # Output to the top-level nvidia directory so nginx can serve it at /
     RESOURCE_REPORT_HTML="${RESOURCE_REPORT_HTML:-$NVIDIA_HOME/resource_report.html}"
 

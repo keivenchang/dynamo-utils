@@ -109,7 +109,8 @@ Golden-log workflow (IMPORTANT for future edits):
   - `chmod a-w /home/keivenc/nvidia/raw-log-text/<job_id>.log`
 - After changing rules/regexes/snippet logic, run the built-in self-test:
   - `python3 dynamo-utils/common_log_errors.py --self-test-examples`
-  - This parses the "Examples:" list above, loads each log from `../raw-log-text/`, and reports
+  - This parses the "Examples:" list above, loads each log from `~/.cache/dynamo-utils/raw-log-text/`
+    (or `$DYNAMO_UTILS_CACHE_DIR/raw-log-text`), and reports
     missing/extra categories for both full-log categorization and snippet-derived categorization.
 - If mismatches show up, adjust categorization/snippet anchors until the example logs match again,
   then re-run the self-test until it’s clean.
