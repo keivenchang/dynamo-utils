@@ -77,36 +77,38 @@ VLLM/SGLang/TRTLLM backends:
 HuggingFace auth:
 - 58604176773.log => pytest-error, network-download-error, build-status-check-error, huggingface-auth-error
 
-Category frequency summary (snapshot from one scan of 733 logs; run `python3 -m ci_log_errors --scan-all-logs` to regenerate for your local cache):
-    1. k8s-error                           306/733 (41.7%) - Kubernetes/kubectl failure signal (cluster-related failures)
-    2. k8s-network-timeout-pod             209/733 (28.5%) - kubectl wait timeout (pods condition)
-    3. build-status-check-error            195/733 (26.6%) - CI gate checking upstream builds
-    4. pytest-error                        178/733 (24.3%) - Pytest test failures
-    5. python-error                        119/733 (16.2%) - Python exceptions/tracebacks
-    6. exit-127-cmd-not-found               62/733  (8.5%) - Exit code 127 (command not found / missing binary in PATH)
-    7. network-timeout-gitlab-mirror        33/733  (4.5%) - GitLab mirror sync infra timeout
-    8. network-download-error               29/733  (4.0%) - Failed downloads (pip/cargo/curl)
-    9. docker-build-error                   24/733  (3.3%) - Docker/BuildKit failures
-   10. cuda-error                           18/733  (2.5%) - CUDA version/driver issues
-   11. huggingface-auth-error               16/733  (2.2%) - HF token/gated model access
-   12. pytest-timeout-error                 15/733  (2.0%) - Pytest per-test timeout (pytest-timeout plugin)
-   13. backend-failure                      14/733  (1.9%) - vllm/sglang/trtllm failures
-   14. etcd-error                           12/733  (1.6%) - Etcd lease/connection issues
-   15. github-lfs-error                     12/733  (1.6%) - Git LFS fetch failures
-   16. docker-image-error                   11/733  (1.5%) - Missing Docker images
-   17. network-error                        11/733  (1.5%) - Network connectivity failures
-   18. oom                                   9/733  (1.2%) - Out of memory
-   19. vllm-error                            8/733  (1.1%) - VLLM backend failures
-   20. helm-error                            7/733  (1.0%) - Helm chart failures
-   21. network-timeout-https                 7/733  (1.0%) - HTTP(S) gateway timeouts + link-checker timeouts
-   22. trtllm-error                          6/733  (0.8%) - TensorRT-LLM failures
-   23. network-timeout-github-action         5/733  (0.7%) - GitHub Actions step timed out
-   24. broken-links                          3/733  (0.4%) - Dead links in documentation
-   25. copyright-header-error                2/733  (0.3%) - Missing copyright headers
-   26. rust-error                            2/733  (0.3%) - Cargo test failures
-   27. sglang-error                          2/733  (0.3%) - SGLang backend failures
-   28. exit-139-sigsegv                      1/733  (0.1%) - Exit code 139 (SIGSEGV / signal 11)
-   29. k8s-network-timeout-portfwd           1/733  (0.1%) - kubectl port-forward connect timeout
+Category frequency summary (snapshot from one scan of 867 logs; run `python3 -m ci_log_errors --scan-all-logs` to regenerate for your local cache):
+    1. k8s-error                           356/867 (41.1%) - Kubernetes/kubectl failure signal (cluster-related failures)
+    2. k8s-network-timeout-pod             255/867 (29.4%) - kubectl wait timeout (pods condition)
+    3. build-status-check-error            218/867 (25.1%) - CI gate checking upstream builds
+    4. pytest-error                        166/867 (19.1%) - Pytest test failures
+    5. python-error                        125/867 (14.4%) - Python exceptions/tracebacks
+    6. exit-127-cmd-not-found               68/867  (7.8%) - Exit code 127 (command not found / missing binary in PATH)
+    7. network-timeout-gitlab-mirror        65/867  (7.5%) - GitLab mirror sync infra timeout
+    8. docker-build-error                   33/867  (3.8%) - Docker/BuildKit failures
+    9. network-download-error               33/867  (3.8%) - Failed downloads (pip/cargo/curl)
+   10. cuda-error                           23/867  (2.7%) - CUDA version/driver issues
+   11. etcd-error                           18/867  (2.1%) - Etcd lease/connection issues
+   12. huggingface-auth-error               18/867  (2.1%) - HF token/gated model access
+   13. pytest-timeout-error                 16/867  (1.8%) - Pytest per-test timeout (pytest-timeout plugin)
+   14. backend-failure                      15/867  (1.7%) - vllm/sglang/trtllm failures
+   15. network-timeout-https                14/867  (1.6%) - HTTP(S) gateway timeouts + link-checker timeouts
+   16. docker-image-error                   13/867  (1.5%) - Missing Docker images
+   17. github-lfs-error                     12/867  (1.4%) - Git LFS fetch failures
+   18. network-error                        12/867  (1.4%) - Network connectivity failures
+   19. oom                                  10/867  (1.2%) - Out of memory
+   20. helm-error                            9/867  (1.0%) - Helm chart failures
+   21. vllm-error                            9/867  (1.0%) - VLLM backend failures
+   22. trtllm-error                          7/867  (0.8%) - TensorRT-LLM failures
+   23. copyright-header-error                5/867  (0.6%) - Missing copyright headers
+   24. network-timeout-github-action         5/867  (0.6%) - GitHub Actions step timed out
+   25. broken-links                          3/867  (0.3%) - Dead links in documentation
+   26. sglang-error                          3/867  (0.3%) - SGLang backend failures
+   27. rust-error                            2/867  (0.2%) - Cargo test failures
+   28. ci-filter-coverage-error              1/867  (0.1%) - Files not covered by any CI filter
+   29. exit-139-sigsegv                      1/867  (0.1%) - Exit code 139 (SIGSEGV / signal 11)
+   30. k8s-network-timeout-portfwd           1/867  (0.1%) - kubectl port-forward connect timeout
+   31. network-timeout-generic               1/867  (0.1%) - Generic timeout signal
 
 Golden-log workflow (IMPORTANT for future edits):
 - These example logs are treated as *golden training set* for regression testing. Keep them read-only:
