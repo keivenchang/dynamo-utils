@@ -63,7 +63,7 @@ Repeated mistakes we hit while iterating on `dynamo-utils/html_pages/*` dashboar
 
 - **Golden logs + self-test discipline**
   - After changing categorization/snippet logic, run:
-    - `python3 dynamo-utils/common_log_errors.py --self-test-examples --raw-log-path ../raw-log-text`
+    - `python3 dynamo-utils/common_log_errors.py --self-test-examples`
   - If you update the “Category frequency summary”, ensure every category has at least one golden
     training example in the docstring list.
   - Golden logs must be preserved: keep them **non-writable**; scans/retrain helpers should not

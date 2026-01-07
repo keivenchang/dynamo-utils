@@ -38,6 +38,7 @@ Infra / system:
 - 56700029731.log => etcd-error
 - 59347193958.log => etcd-error
 - 59418212320.log => etcd-error, pytest-error
+- 57521050539.log => pytest-error, etcd-error, python-error
 - 59520885010.log => pytest-error  # router decisions disagg failures (ea9503559 merge)
 - 59520513875.log => copyright-header-error, etcd-error  # includes "[FAIL] incorrect date: ..."
 - 59525400060.log => copyright-header-error, etcd-error  # includes "[FAIL] incorrect date: ..."
@@ -128,6 +129,7 @@ Notes:
 
 * 58887254616.log => +Run the broken links detection script and capture exit code, +set +e, +python3 .github/workflows/detect_broken_links.py, +--check-symlinks, +--output broken-links-report.json, +📄 File: docs/kubernetes/installation_guide.md, +1 broken link(s) found, +Problematic symlink: Suspicious symlink: target requires many directory traversals, +1. docs/examples/runtime/hello_world/README.md, +→ ../../../../examples/custom_backend/hello_world/README.md
 * 59520885010.log => +docker run -w /workspace, +bash -c "pytest, +FAILED tests/router/test_router_e2e_with_mockers.py::test_router_decisions_disagg, !2026-
+* 57521050539.log => +FAILED tests/router/test_router_e2e_with_sglang.py::test_sglang_kv_router_basic, +FAILED tests/router/test_router_e2e_with_sglang.py::test_router_decisions_sglang_multiple_workers, +FAILED tests/router/test_router_e2e_with_sglang.py::test_sglang_indexers_sync, +pytest -v --tb=short --basetemp=/tmp -o cache_dir=/tmp/.pytest_cache --junitxml=/workspace/test-results/pytest_test_report.xml --durations=10 -m, +tests/router/test_router_e2e_with_sglang.py::test_sglang_kv_router_basic, +tests/router/test_router_e2e_with_sglang.py::test_router_decisions_sglang_multiple_workers, +tests/router/test_router_e2e_with_sglang.py::test_sglang_indexers_sync, +====== 3 failed, 8 passed, 4 skipped, 626 deselected
 * 56700029731.log => +docker run --runtime=nvidia, +bash -c "mkdir -p /workspace/test-results && pytest -v --tb=short --basetemp=/tmp, +pytest -v --tb=short --basetemp=/tmp -o cache_dir=/tmp/.pytest_cache --junitxml=/workspace/test-results/pytest_test_report.xml, +not slow, !unit and trtllm_marker, !pytest     = <module 'pytest'
 * 59332716597.log => +docker run -w /workspace, +bash -c "pytest --basetemp=/tmp/pytest-parallel, +pytest --basetemp=/tmp/pytest-parallel --junitxml=pytest_parallel.xml, +-m \\\"pre_merge and parallel, !pytest     = <module 'pytest'
 * 59539777738.log => +[FAIL] incorrect date:, !2026-
@@ -687,6 +689,65 @@ def _self_test_examples(*, raw_log_path: Path) -> int:
         print("")
         if not ok:
             failures += 1
+    except Exception:
+        pass
+
+    # Extra golden regression guard: `PYTEST_CMD="pytest ..."` variable expansion should still produce
+    # a suggested rerun-only-failed command, and it should appear after the FAILED chunk and before
+    # the `====== N failed, ... ======` summary (note: this summary format is common in our logs).
+    try:
+        job_id = "57521050539"
+        p = Path(raw_log_path) / f"{job_id}.log"
+        if p.exists() and p.is_file():
+            print("Self-test: rerun-only-failed (PYTEST_CMD) placement (golden)")
+            sn = extract_error_snippet_from_log_file(p, tail_bytes=0, context_before=15, context_after=15, max_lines=160, max_chars=20000)
+            # Last FAILED line in that log:
+            last_failed = "FAILED tests/router/test_router_e2e_with_sglang.py::test_sglang_indexers_sync"
+            # Summary style in that log:
+            summary_re = re.compile(r"^=+\s*\d+\s+failed\b.*=+\s*$", re.IGNORECASE)
+            ok = True
+            if last_failed not in sn:
+                print("  missing_failed_line")
+                ok = False
+            # Find a summary line (any variant)
+            summary_line = ""
+            for ln in (sn or "").splitlines():
+                if summary_re.search((ln or "").strip()):
+                    summary_line = ln
+                    break
+            if not summary_line:
+                print("  missing_summary_line")
+                ok = False
+
+            # Identify the synthesized rerun-only-failed command line:
+            # it must start with `pytest` and include at least one of the failed nodeids
+            # (so we don't confuse it with the base pytest command in the prelude).
+            rerun_line = ""
+            want_nodeids = [
+                "tests/router/test_router_e2e_with_sglang.py::test_sglang_kv_router_basic",
+                "tests/router/test_router_e2e_with_sglang.py::test_router_decisions_sglang_multiple_workers",
+                "tests/router/test_router_e2e_with_sglang.py::test_sglang_indexers_sync",
+            ]
+            for ln in (sn or "").splitlines():
+                s = (ln or "").strip()
+                if not s.lower().startswith("pytest "):
+                    continue
+                if any(nid in s for nid in want_nodeids):
+                    rerun_line = ln
+                    break
+            if not rerun_line:
+                print("  missing_rerun_cmd")
+                ok = False
+            if ok:
+                if sn.find(rerun_line) < sn.find(last_failed):
+                    print("  ordering_error: rerun cmd appears before FAILED chunk")
+                    ok = False
+                if summary_line and sn.find(rerun_line) > sn.find(summary_line):
+                    print("  ordering_error: rerun cmd appears after summary line")
+                    ok = False
+            print("")
+            if not ok:
+                failures += 1
     except Exception:
         pass
 
@@ -2916,6 +2977,25 @@ def extract_error_snippet_from_text(
                     if b not in seen_exp:
                         seen_exp.add(b)
                         expanded.append(b)
+                    # If we already have a plain `pytest ...` command block (common when we expand
+                    # a `PYTEST_CMD="pytest ..."` variable), use it as the canonical rerun base.
+                    #
+                    # This fixes a gap where `bash -c "${PYTEST_CMD}"` contains no inline `pytest ...`
+                    # payload, so `_extract_vanilla_pytest_from_cmd_block()` can't recover it.
+                    if not best_vanilla_pytest:
+                        try:
+                            # Use the first line only; rerun command must be a single line.
+                            first = (b.splitlines()[0] if b.splitlines() else "").strip()
+                            # Prefer the actual underlying `pytest ...` for `PYTEST_CMD="pytest ..."` style logs.
+                            m_cmd = re.match(r"^PYTEST_CMD=(['\"])(.*)\1\s*$", first, flags=re.IGNORECASE)
+                            if m_cmd:
+                                inner = str(m_cmd.group(2) or "").strip()
+                                if inner.lower().startswith("pytest"):
+                                    best_vanilla_pytest = _unescape_nested_shell_quotes(inner)
+                            elif first.lower().startswith("pytest"):
+                                best_vanilla_pytest = _unescape_nested_shell_quotes(first)
+                        except Exception:
+                            pass
                     # Add the bare `bash -c "..."` line as its own command block (copyable).
                     bash_c = _extract_bash_c_line_from_cmd_block(b)
                     if bash_c and bash_c not in seen_exp:
