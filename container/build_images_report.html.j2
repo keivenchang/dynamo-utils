@@ -196,7 +196,7 @@ h2 { margin: 0; font-size: 1.2em; font-weight: bold; }
 {%- else %}
 <span class="failure">❌ FAIL</span> <span class="chart-timing">({{ build_task.time if build_task.time else 'n/a' }})</span>
 {%- endif %}
-{%- if build_task.log_file %} <a href="{{ build_task.log_file }}" class="log-link">[log]</a>{%- endif %}
+{%- if build_task.log_file %} <a href="{{ build_task.log_file }}" class="log-link" target="_blank" rel="noopener noreferrer">[log]</a>{%- endif %}
 {%- else %}-{%- endif %}
 </div>
 <div class="chart-cell chart-status">
@@ -214,7 +214,7 @@ h2 { margin: 0; font-size: 1.2em; font-weight: bold; }
 {%- else %}
 <span class="failure">❌ FAIL</span> <span class="chart-timing">({{ compilation_task.time if compilation_task.time else 'n/a' }})</span>
 {%- endif %}
-{%- if compilation_task.log_file %} <a href="{{ compilation_task.log_file }}" class="log-link">[log]</a>{%- endif %}
+{%- if compilation_task.log_file %} <a href="{{ compilation_task.log_file }}" class="log-link" target="_blank" rel="noopener noreferrer">[log]</a>{%- endif %}
 {%- else %}-{%- endif %}
 </div>
 <div class="chart-cell chart-status">
@@ -232,7 +232,7 @@ h2 { margin: 0; font-size: 1.2em; font-weight: bold; }
 {%- else %}
 <span class="failure">❌ FAIL</span> <span class="chart-timing">({{ sanity_task.time if sanity_task.time else 'n/a' }})</span>
 {%- endif %}
-{%- if sanity_task.log_file %} <a href="{{ sanity_task.log_file }}" class="log-link">[log]</a>{%- endif %}
+{%- if sanity_task.log_file %} <a href="{{ sanity_task.log_file }}" class="log-link" target="_blank" rel="noopener noreferrer">[log]</a>{%- endif %}
 {%- else %}-{%- endif %}
 </div>
 <div class="chart-cell chart-timing">{{ target_data.image_size if target_data.image_size else '-' }}</div>
@@ -242,19 +242,35 @@ h2 { margin: 0; font-size: 1.2em; font-weight: bold; }
 </div></div>
 {%- endfor %}
 <script>
-// Update elapsed time for all RUNNING tasks every second
+// Update elapsed time for all RUNNING tasks on a randomized cadence (0.25–0.5s).
+// IMPORTANT: since cadence is not fixed, we increment by real elapsed wall time so it
+// stays accurate even under timer throttling / sleep-wake.
 function updateElapsedTimers() {
     const timers = document.querySelectorAll('.elapsed-seconds');
 
     timers.forEach(secondsSpan => {
-        // Parse current value and add 1 second
+        // Parse current value and add delta seconds
         const current = parseFloat(secondsSpan.textContent) || 0;
-        secondsSpan.textContent = (current + 1.0).toFixed(1);
+        secondsSpan.textContent = (current + window.__elapsedTimersDeltaSeconds).toFixed(1);
     });
 }
 
-// Update every second
-setInterval(updateElapsedTimers, 1000);
+// Randomized scheduler: 250ms to 500ms
+(function scheduleElapsedTimerUpdates() {
+    if (typeof window.__elapsedTimersLastTickMs !== 'number') {
+        window.__elapsedTimersLastTickMs = Date.now();
+    }
+
+    const now = Date.now();
+    const deltaSeconds = Math.max(0, (now - window.__elapsedTimersLastTickMs) / 1000.0);
+    window.__elapsedTimersLastTickMs = now;
+    window.__elapsedTimersDeltaSeconds = deltaSeconds;
+
+    updateElapsedTimers();
+
+    const delayMs = 250 + Math.random() * 250;
+    window.setTimeout(scheduleElapsedTimerUpdates, delayMs);
+})();
 
 // Sleep/wake fault-tolerant auto-refresh (replaces meta refresh).
 // Only active while builds are running/queued.
