@@ -292,11 +292,11 @@ def extract_error_snippet_from_text(
                 last_exit_code_139 = i
             # Some categories are often only visible as a single high-signal line that can get
             # pushed out of the snippet window. Track them explicitly so we can force-include.
-            if ETCD_ERROR_RE.search(line.lower()):
+            if CAT_ETCD_ERROR_RE.search(line.lower()):
                 etcd_sigs.append(i)
-            if HUGGINGFACE_AUTH_ERROR_RE.search(_strip_ts_and_ansi(line)) and not _line_is_warn_or_lower(line):
+            if CAT_HUGGINGFACE_AUTH_ERROR_RE.search(_strip_ts_and_ansi(line)) and not _line_is_warn_or_lower(line):
                 last_hf_auth_sig = i
-            if COPYRIGHT_HEADER_ERROR_RE.search(line):
+            if CAT_COPYRIGHT_HEADER_ERROR_RE.search(line):
                 last_copyright_sig = i
             if FAILED_TO_BUILD_RE.search(s_norm):
                 last_failed_to_build = i

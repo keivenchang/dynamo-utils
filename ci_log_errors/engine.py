@@ -154,6 +154,53 @@ import sys
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Pattern, Sequence, Tuple
 
+# Grouped, prefixed regex definitions live in `ci_log_errors/regexes.py`.
+from .regexes import (
+    CAT_BACKEND_BLOCK_START_RE,
+    CAT_BACKEND_RESULT_FAILURE_RE,
+    CAT_BROKEN_LINKS_RE,
+    CAT_BUILD_STATUS_CHECK_ERROR_RE,
+    CAT_COPYRIGHT_HEADER_ERROR_RE,
+    CAT_CUDA_ERROR_RE,
+    CAT_DOCKER_BUILD_ERROR_RE,
+    CAT_DOCKER_CLI_ERROR_RE,
+    CAT_DOCKER_DAEMON_CONNECTION_ERROR_RE,
+    CAT_DOCKER_DAEMON_ERROR_RESPONSE_RE,
+    CAT_DOCKER_INFRA_ERROR_RE,
+    CAT_DOWNLOAD_ERROR_RE,
+    CAT_ETCD_ERROR_RE,
+    CAT_EXIT_CODE_127_RE,
+    CAT_EXIT_CODE_139_RE,
+    CAT_GITHUB_ACTION_STEP_TIMEOUT_RE,
+    CAT_GITHUB_API_RE,
+    CAT_GITHUB_FETCH_RE,
+    CAT_GITHUB_LFS_RE,
+    CAT_GITLAB_MIRROR_TIMEOUT_RE,
+    CAT_HELM_ERROR_RE,
+    CAT_HUGGINGFACE_AUTH_ERROR_RE,
+    CAT_HTTP_TIMEOUT_RE,
+    CAT_K8S_ERROR_RE,
+    CAT_K8S_PODS_TIMED_OUT_RE,
+    CAT_KUBECTL_PORTFORWARD_TIMEOUT_RE,
+    CAT_NETWORK_ERROR_RE,
+    CAT_OOM_RE,
+    CAT_PYTEST_DETECT_RE,
+    CAT_PYTEST_ERROR_RE,
+    CAT_RUST_TEST_FAIL_RE,
+    CAT_RULES,
+    CAT_TIMED_OUT_RE,
+    RED_DOCKER_DAEMON_ERROR_LINE_RE,
+    RED_DOCKER_NO_SUCH_CONTAINER_RE,
+    RED_FULL_LINE_RES,
+    RED_KEYWORD_HIGHLIGHT_RE,
+    RED_NETWORK_ERROR_LINE_RE,
+    SNIPPET_ANCHOR_LINE_RE,
+    SNIPPET_COMMAND_LINE_BLUE_RE,
+    SNIPPET_PYTEST_CMD_LINE_RE,
+    SNIPPET_PYTEST_ERROR_FILE_LINE_RE,
+    SNIPPET_PYTEST_FAILED_LINE_RE,
+ )
+
 
 def _default_raw_log_dir() -> Path:
     """Default raw-log directory (single source of truth).
@@ -267,7 +314,7 @@ def _has_huggingface_auth_error_signal(lines: Sequence[str]) -> bool:
             s = _strip_ts_and_ansi(str(raw or ""))
             if not s:
                 continue
-            if not HUGGINGFACE_AUTH_ERROR_RE.search(s):
+            if not CAT_HUGGINGFACE_AUTH_ERROR_RE.search(s):
                 continue
             # If the line is explicitly WARN/INFO/etc, treat it as a warning, not a root-cause error tag.
             if _line_is_warn_or_lower(str(raw or "")):
@@ -938,35 +985,8 @@ def _scan_all_logs(*, logs_root: Path, tail_bytes: int = 512 * 1024) -> int:
 # =============================================================================
 #
 
-# Lines that should anchor an "error snippet" extraction from raw logs.
-# Keep this conservative and high-signal to avoid pulling unrelated noise.
-ERROR_SNIPPET_LINE_RE: Pattern[str] = re.compile(
-    r"(?:"
-    r"\b(?:error|failed|failure|exception|traceback|fatal)\b"
-    # Pytest failures (the exact failing test id line is the most useful snippet anchor).
-    # Example: "FAILED tests/x.py::test_name[param]"
-    r"|(?:^|\s)FAILED(?:\s+|$).*::"
-    # Timeout: keep this very conservative to avoid false positives from dependency strings like
-    # "pytest-timeout==2.4.0" / "timeout-2.4.0" and from prose like "individual test timeouts".
-    r"|\b(?:timed\s*out|timedout)\b"
-    # Generic error/exception class tokens (CamelCase) like "ModuleNotFoundError:".
-    # Avoid false positives from crate/package names like "serde_path_to_error" and from stack traces.
-    r"|(?-i:(?<![./])\b[A-Z][A-Za-z0-9]{2,}(?:Error|Exception)(?::|\b$))"
-    r"|\b(?:broken\s+links?|broken\s+link|dead\s+links?)\b"
-    r"|\b(?:network\s+error|connection\s+failed)\b"
-    # Multi-line backend result blocks (JSON-ish) often show:
-    #   "trtllm": { ... "result": "failure", ... }
-    # Anchor on the high-signal failure field so the snippet includes the surrounding block.
-    r"|\"result\"\s*:\s*\"failure\""
-    # Copyright header checks
-    r"|\bInvalid/Missing\s+Header:\b"
-    r"|\binvalid/missing\s+header:\b"
-    r"|\bcopyright\s+checkers\s+detected\s+missing\s+or\s+invalid\s+copyright\s+headers\b"
-    # HuggingFace auth / missing token warnings
-    r"|\bHF_TOKEN\s+not\s+found\s+in\s+environment\b"
-    r")",
-    re.IGNORECASE,
-)
+# Back-compat alias: the canonical name is `SNIPPET_ANCHOR_LINE_RE`.
+ERROR_SNIPPET_LINE_RE: Pattern[str] = SNIPPET_ANCHOR_LINE_RE
 
 
 #
@@ -974,145 +994,10 @@ ERROR_SNIPPET_LINE_RE: Pattern[str] = re.compile(
 # =============================================================================
 #
 
-# Backend result blocks are printed as JSON-ish text in logs, e.g.:
-#   "sglang": { ... "result": "failure", ... }
-_BACKEND_BLOCK_START_RE: Pattern[str] = re.compile(r"\"(trtllm|sglang|vllm)\"\s*:\s*\{", re.IGNORECASE)
-_BACKEND_RESULT_FAILURE_RE: Pattern[str] = re.compile(r"\"result\"\s*:\s*\"failure\"", re.IGNORECASE)
-
-# Categorization patterns (full log)
-PYTEST_DETECT_RE: Pattern[str] = re.compile(
-    r"(?:"
-    # Restrict to pytest-style failing test ids: "FAILED path/to/test_foo.py::test_name[...]"
-    r"(?:^|[ \t])FAILED(?:[ \t]+|$)[^\\n]*\\.py::"
-    r"|==+\\s*FAILURES\\s*==+"
-    r"|==+\\s*ERRORS\\s*==+"
-    r"|\berror[ \t]+collecting\b"
-    r")",
-    re.IGNORECASE | re.MULTILINE,
-)
-DOWNLOAD_ERROR_RE: Pattern[str] = re.compile(r"\bcaused by:\s*failed to download\b|\bfailed to download\b|\bdownload error\b")
-DOCKER_BUILD_ERROR_RE: Pattern[str] = re.compile(r"\berror:\s*failed\s+to\s+build\b|\bfailed\s+to\s+solve\b")
-CUDA_ERROR_RE: Pattern[str] = re.compile(
-    r"(?:"
-    r"unsupported\s+cuda\s+version\s+for\s+vllm\s+installation"
-    r"|\bcuda\b[^\n]{0,120}\bunsupported\b"
-    r"|\bimporterror:\s*libcuda\.so\.1:\s*cannot\s+open\s+shared\s+object\s+file\b"
-    r")"
-)
-HTTP_TIMEOUT_RE: Pattern[str] = re.compile(
-    r"(?:"
-    r"awaiting\s+response\.\.\.\s*(?:504|503|502)\b"
-    r"|gateway\s+time-?out"
-    r"|\bhttp\s+(?:504|503|502)\b"
-    # Lychee/link-checker timeouts:
-    #   [TIMEOUT] https://example.com | Timeout
-    r"|\[timeout\]\s+https?://"
-    r")"
-)
-GITLAB_MIRROR_TIMEOUT_RE: Pattern[str] = re.compile(r"\bmirror sync failed or timed out\b", re.IGNORECASE)
-BUILD_STATUS_CHECK_ERROR_RE: Pattern[str] = re.compile(
-    r"(?:"
-    r"\bchecking\s+build\s+status\s+for\b"
-    r"|\bbuild\s+status\s+for\s+'Build\b"
-    r"|\bError:\s*Failed\s+to\s+query\s+GitHub\s+API\b"
-    r"|\bBuild\s+failed\s+or\s+did\s+not\s+complete\s+successfully\.\s*(?:Failing\s+tests|Marking\s+tests\s+as\s+failed)\b"
-    r")",
-    re.IGNORECASE,
-)
-HUGGINGFACE_AUTH_ERROR_RE: Pattern[str] = re.compile(
-    r"(?:"
-    r"\bHF_TOKEN\s+not\s+found\s+in\s+environment\b"
-    r"|\bHfHubHTTPError\b"
-    r"|\bGatedRepoError\b"
-    r"|\bRepositoryNotFoundError\b"
-    r"|\bhuggingface[_-]hub\b[^\n]{0,160}\b(unauthorized|forbidden|invalid|token)\b"
-    r"|\b401\b[^\n]{0,120}\bhuggingface\b"
-    r"|\b403\b[^\n]{0,120}\bhuggingface\b"
-    r")",
-    re.IGNORECASE,
-)
-COPYRIGHT_HEADER_ERROR_RE: Pattern[str] = re.compile(
-    r"(?:"
-    r"\bcopyright-checks\b"
-    r"|\bcopyright\s+checkers\s+detected\s+missing\s+or\s+invalid\s+copyright\s+headers\b"
-    r"|\bInvalid/Missing\s+Header:\b"
-    r"|\binvalid/missing\s+header:\b"
-    r")",
-    re.IGNORECASE,
-)
-HELM_ERROR_RE: Pattern[str] = re.compile(
-    r"(?:"
-    r"\bUPGRADE\s+FAILED\b"
-    r"|\bINSTALLATION\s+FAILED\b"
-    r"|\bKubernetes\s+cluster\s+unreachable\b"
-    r"|\bhelm\b[^\n]{0,120}\berror\b"
-    r"|\berror:\s*flag\s+needs\s+an\s+argument:\s*'n'\s+in\s+-n\b"
-    r"|\berror:\s*resource\(s\)\s+were\s+provided,\s+but\s+no\s+name\s+was\s+specified\b"
-    r")",
-    re.IGNORECASE,
-)
-NETWORK_ERROR_RE: Pattern[str] = re.compile(
-    r"\bnetwork\s+error:\s*connection\s+failed\b|\bconnection\s+failed\.\s*check\s+network\s+connectivity\b|\bfirewall\s+settings\b"
-)
-ETCD_ERROR_RE: Pattern[str] = re.compile(
-    r"\bunable\s+to\s+create\s+lease\b|\bcheck\s+etcd\s+server\s+status\b|\betcd[^\n]{0,80}\blease\b|\blease\b[^\n]{0,80}\betcd\b"
-)
-DOCKER_INFRA_ERROR_RE: Pattern[str] = re.compile(
-    r"(?:"
-    r"cannot\s+connect\s+to\s+the\s+docker\s+daemon"
-    r"|error\s+response\s+from\s+daemon:(?!.*no\s+such\s+container)"
-    r"|\bdocker:\s+.*\berror\b"
-    r")"
-)
-DOCKER_DAEMON_CONNECTION_ERROR_RE: Pattern[str] = re.compile(
-    r"cannot\s+connect\s+to\s+the\s+docker\s+daemon", re.IGNORECASE
-)
-DOCKER_DAEMON_ERROR_RESPONSE_RE: Pattern[str] = re.compile(
-    r"error\s+response\s+from\s+daemon:(?!.*no\s+such\s+container)", re.IGNORECASE
-)
-DOCKER_CLI_ERROR_RE: Pattern[str] = re.compile(r"\bdocker:\s+.*\berror\b", re.IGNORECASE)
-BROKEN_LINKS_RE: Pattern[str] = re.compile(r"\bbroken\s+links?\b|\bdead\s+links?\b")
-TIMED_OUT_RE: Pattern[str] = re.compile(r"\b(?:timed\s*out|timedout)\b")
-K8S_PODS_TIMED_OUT_RE: Pattern[str] = re.compile(
-    r"\btimed\s*out\s+waiting\s+for\s+the\s+condition\s+on\s+pods/",
-    re.IGNORECASE,
-)
-# Kubernetes error signals.
-#
-# IMPORTANT: Do NOT match on the bare word "kubernetes" because it frequently appears as a Python
-# dependency install (e.g. `pip install kubernetes==...`) and is not a Kubernetes *error*.
-K8S_ERROR_RE: Pattern[str] = re.compile(
-    r"(?:"
-    r"CrashLoopBackOff|ImagePullBackOff|ErrImagePull"
-    r"|Kubernetes\s+cluster\s+unreachable"
-    r"|\bkubectl\b[^\n]{0,200}\b("
-    r"error|failed|failure|timed\s*out|timeout|unable|forbidden|unauthorized|refused|i/o\s+timeout|not\s+found|"
-    r"context\s+deadline\s+exceeded"
-    r")\b"
-    r")",
-    re.IGNORECASE,
-)
-KUBECTL_PORTFORWARD_TIMEOUT_RE: Pattern[str] = re.compile(
-    r"(?:"
-    r"\bportforward\.go:\d+\].*\bconnection timed out\b"
-    r"|\ban error occurred forwarding\b[^\n]{0,400}\bconnection timed out\b"
-    r")",
-    re.IGNORECASE,
-)
-GITHUB_ACTION_STEP_TIMEOUT_RE: Pattern[str] = re.compile(
-    r"##\[error\].{0,40}\bhas\s+timed\s+out\s+after\s+\d+\s+minutes?\b",
-    re.IGNORECASE,
-)
-RUST_TEST_FAIL_RE: Pattern[str] = re.compile(r"^\s*failures:\s*$|test result:\s*FAILED\.", re.IGNORECASE | re.MULTILINE)
-# Exit code 139 is conventionally SIGSEGV (signal 11) in POSIX shells (\(128 + 11 = 139\)).
-EXIT_CODE_139_RE: Pattern[str] = re.compile(r"process completed with exit code 139\b|exit code:\s*139\b", re.IGNORECASE)
-
-# Exit code 127 is conventionally “command not found” in POSIX shells.
-# In CI logs this usually means a missing dependency inside the container or a PATH issue.
-EXIT_CODE_127_RE: Pattern[str] = re.compile(
-    r"process completed with exit code 127\b|exit code:\s*127\b|\bcommand not found\b",
-    re.IGNORECASE,
-)
+# Categorization regexes are defined in `ci_log_errors/regexes.py` under the `CAT_*` prefix.
+# Keep legacy names here as aliases to avoid churn in call sites.
+_BACKEND_BLOCK_START_RE: Pattern[str] = CAT_BACKEND_BLOCK_START_RE
+_BACKEND_RESULT_FAILURE_RE: Pattern[str] = CAT_BACKEND_RESULT_FAILURE_RE
 
 
 def _backend_failure_engines_from_lines(lines: Sequence[str]) -> set[str]:
@@ -1178,13 +1063,13 @@ def categorize_error_log_lines(lines: Sequence[str]) -> List[str]:
             if (not has_pytest) or bool(PYTHON_STRONG_EXCEPTION_RE.search(text)):
                 add("python-error")
         # Rust test failures (cargo test)
-        if RUST_TEST_FAIL_RE.search(text):
+        if CAT_RUST_TEST_FAIL_RE.search(text):
             add("rust-error")
         # Exit code 139 is conventionally SIGSEGV (signal 11): 128 + 11 = 139.
-        if EXIT_CODE_139_RE.search(text):
+        if CAT_EXIT_CODE_139_RE.search(text):
             add("exit-139-sigsegv")
         # Exit code 127: command not found (missing dependency / PATH issue).
-        if EXIT_CODE_127_RE.search(text):
+        if CAT_EXIT_CODE_127_RE.search(text):
             add("exit-127-cmd-not-found")
 
         # Git / GitHub LFS
@@ -1198,15 +1083,15 @@ def categorize_error_log_lines(lines: Sequence[str]) -> List[str]:
                 add("git-fetch")
 
         # Downloads (Rust/cargo, pip, curl, etc.)
-        if DOWNLOAD_ERROR_RE.search(t):
+        if CAT_DOWNLOAD_ERROR_RE.search(t):
             add("network-download-error")
 
         # Build failures (Docker/buildkit/etc.)
-        if DOCKER_BUILD_ERROR_RE.search(t):
+        if CAT_DOCKER_BUILD_ERROR_RE.search(t):
             add("docker-build-error")
 
         # Build-status-check failures (CI gate that checks upstream build job status)
-        if BUILD_STATUS_CHECK_ERROR_RE.search(text):
+        if CAT_BUILD_STATUS_CHECK_ERROR_RE.search(text):
             add("build-status-check-error")
 
         # HuggingFace auth/token failures (missing/invalid HF_TOKEN or gated model access).
@@ -1216,36 +1101,36 @@ def categorize_error_log_lines(lines: Sequence[str]) -> List[str]:
             add("huggingface-auth-error")
 
         # Copyright header checks
-        if COPYRIGHT_HEADER_ERROR_RE.search(text):
+        if CAT_COPYRIGHT_HEADER_ERROR_RE.search(text):
             add("copyright-header-error")
 
         # Helm/k8s workflow failures (deploy/cleanup)
-        if HELM_ERROR_RE.search(text):
+        if CAT_HELM_ERROR_RE.search(text):
             add("helm-error")
         # Kubernetes signal (error) — keep this strict so we don't mis-tag logs that merely install
         # the Python `kubernetes` package.
-        if K8S_ERROR_RE.search(text) or ("helm-error" in cats):
+        if CAT_K8S_ERROR_RE.search(text) or ("helm-error" in cats):
             add("k8s-error")
 
         # CUDA / GPU toolchain
-        if CUDA_ERROR_RE.search(t):
+        if CAT_CUDA_ERROR_RE.search(t):
             add("cuda-error")
 
         # HTTP(S) gateway timeouts (wget/curl/HTTP clients + link-checker timeouts)
-        if HTTP_TIMEOUT_RE.search(t):
+        if CAT_HTTP_TIMEOUT_RE.search(t):
             add("network-timeout-https")
         # GitLab mirror infra timeout (special-case; keep distinct from generic timeout)
-        if GITLAB_MIRROR_TIMEOUT_RE.search(text):
+        if CAT_GITLAB_MIRROR_TIMEOUT_RE.search(text):
             add("network-timeout-gitlab-mirror")
 
         # Network connectivity
-        if NETWORK_ERROR_RE.search(t):
+        if CAT_NETWORK_ERROR_RE.search(t):
             add("network-error")
 
         # Etcd / lease
         # Avoid tagging `etcd-error` just because the word "etcd" appears (it often shows up in benign logs).
         # Require a lease/status failure signature.
-        if ETCD_ERROR_RE.search(t):
+        if CAT_ETCD_ERROR_RE.search(t):
             add("etcd-error")
 
         # Docker infrastructure / daemon / CLI errors.
@@ -1253,11 +1138,11 @@ def categorize_error_log_lines(lines: Sequence[str]) -> List[str]:
         # IMPORTANT: `docker-image-error` is already specific (manifest unknown). If we see that,
         # don't also tag a redundant daemon error-response category.
         if not DOCKER_IMAGE_NOT_FOUND_RE.search(t):
-            if DOCKER_DAEMON_CONNECTION_ERROR_RE.search(text):
+            if CAT_DOCKER_DAEMON_CONNECTION_ERROR_RE.search(text):
                 add("docker-daemon-connection-error")
-            elif DOCKER_DAEMON_ERROR_RESPONSE_RE.search(text):
+            elif CAT_DOCKER_DAEMON_ERROR_RESPONSE_RE.search(text):
                 add("docker-daemon-error-response-error")
-            elif DOCKER_CLI_ERROR_RE.search(text):
+            elif CAT_DOCKER_CLI_ERROR_RE.search(text):
                 add("docker-cli-error")
 
         # Backend result JSON-ish blocks (vllm/sglang/trtllm): multi-line aware.
@@ -1268,30 +1153,30 @@ def categorize_error_log_lines(lines: Sequence[str]) -> List[str]:
                 add(f"{e}-error")
 
         # Broken links
-        if BROKEN_LINKS_RE.search(t):
+        if CAT_BROKEN_LINKS_RE.search(t):
             add("broken-links")
 
         # Kubernetes wait timeouts ("timed out waiting for the condition on pods/...").
-        if K8S_PODS_TIMED_OUT_RE.search(text):
+        if CAT_K8S_PODS_TIMED_OUT_RE.search(text):
             add("k8s-network-timeout-pod")
 
         # Kubernetes port-forward failures (portforward.go ... connection timed out).
-        if KUBECTL_PORTFORWARD_TIMEOUT_RE.search(text):
+        if CAT_KUBECTL_PORTFORWARD_TIMEOUT_RE.search(text):
             add("k8s-network-timeout-portfwd")
 
         # GitHub Actions step timeout markers.
-        if GITHUB_ACTION_STEP_TIMEOUT_RE.search(text):
+        if CAT_GITHUB_ACTION_STEP_TIMEOUT_RE.search(text):
             add("network-timeout-github-action")
 
         # Timeout / infra flake
         #
         # Keep this very conservative to avoid false positives.
-        if TIMED_OUT_RE.search(t) and not (
-            HTTP_TIMEOUT_RE.search(t)
-            or GITLAB_MIRROR_TIMEOUT_RE.search(text)
-            or K8S_PODS_TIMED_OUT_RE.search(text)
-            or KUBECTL_PORTFORWARD_TIMEOUT_RE.search(text)
-            or GITHUB_ACTION_STEP_TIMEOUT_RE.search(text)
+        if CAT_TIMED_OUT_RE.search(t) and not (
+            CAT_HTTP_TIMEOUT_RE.search(t)
+            or CAT_GITLAB_MIRROR_TIMEOUT_RE.search(text)
+            or CAT_K8S_PODS_TIMED_OUT_RE.search(text)
+            or CAT_KUBECTL_PORTFORWARD_TIMEOUT_RE.search(text)
+            or CAT_GITHUB_ACTION_STEP_TIMEOUT_RE.search(text)
         ):
             add("network-timeout-generic")
 
@@ -1397,46 +1282,16 @@ def _audit_snippet_commands(*, logs_root: Path, tail_bytes: int) -> int:
 # =============================================================================
 #
 
-ERROR_HIGHLIGHT_RE: Pattern[str] = re.compile(
-    r"(?:"
-    r"\b(?:error|failed|failure|exception|traceback|fatal)\b"
-    r"|\bno\s+module\s+named\b"
-    # Timeout: keep conservative to avoid false positives like "timeout-2.4.0" (pytest plugin) or prose.
-    r"|\b(?:timed\s*out|timedout)\b"
-    r"|\b(?:gateway\s+time-?out)\b"
-    r"|\b(?:http\s*)?(?:502|503|504)\b"
-    r"|\b(?:network\s+error|connection\s+failed|check\s+network\s+connectivity|firewall\s+settings)\b"
-    # Don't highlight bare "etcd"/"lease" (too many false positives). Highlight the actual error phrases.
-    r"|\b(?:unable\s+to\s+create\s+lease|check\s+etcd\s+server\s+status)\b"
-    # Generic error/exception class tokens (CamelCase) like "ModuleNotFoundError:".
-    # Avoid false positives from crate/package names like "serde_path_to_error" and from stack traces.
-    r"|(?-i:(?<![./])\b[A-Z][A-Za-z0-9]{2,}(?:Error|Exception)(?::|\b$))"
-    r"|\b(?:broken\s+links?|broken\s+link|dead\s+links?)\b"
-    r")",
-    re.IGNORECASE,
-)
+# Back-compat alias: canonical name lives in `ci_log_errors/regexes.py`.
+ERROR_HIGHLIGHT_RE: Pattern[str] = RED_KEYWORD_HIGHLIGHT_RE
 
-PYTEST_FAILED_LINE_RE: Pattern[str] = re.compile(
-    r"(?:^|\s)FAILED(?:\s+|$).*::",  # e.g. "... FAILED tests/x.py::test_name"
-    re.IGNORECASE,
-)
+PYTEST_FAILED_LINE_RE: Pattern[str] = SNIPPET_PYTEST_FAILED_LINE_RE
 
-# Docker daemon errors we want to surface explicitly in snippets.
-DOCKER_DAEMON_ERROR_LINE_RE: Pattern[str] = re.compile(
-    r"^.*\berror response from daemon:.*$",
-    re.IGNORECASE,
-)
+DOCKER_DAEMON_ERROR_LINE_RE: Pattern[str] = RED_DOCKER_DAEMON_ERROR_LINE_RE
 
-DOCKER_NO_SUCH_CONTAINER_RE: Pattern[str] = re.compile(
-    r"\berror response from daemon:\s*no\s+such\s+container\b",
-    re.IGNORECASE,
-)
+DOCKER_NO_SUCH_CONTAINER_RE: Pattern[str] = RED_DOCKER_NO_SUCH_CONTAINER_RE
 
-# Network connectivity failures we want to surface explicitly in snippets.
-NETWORK_ERROR_LINE_RE: Pattern[str] = re.compile(
-    r"\bnetwork\s+error:\s*connection\s+failed\b|\bconnection\s+failed\.\s*check\s+network\s+connectivity\b",
-    re.IGNORECASE,
-)
+NETWORK_ERROR_LINE_RE: Pattern[str] = RED_NETWORK_ERROR_LINE_RE
 
 # CUDA / vLLM install failures
 UNSUPPORTED_CUDA_VLLM_RE: Pattern[str] = re.compile(
@@ -1449,22 +1304,7 @@ FAILED_TO_BUILD_RE: Pattern[str] = re.compile(
     re.IGNORECASE,
 )
 
-# Snippet: command/execution lines (user wants these shown prominently in blue).
-COMMAND_LINE_BLUE_RE: Pattern[str] = re.compile(
-    r"(?:"
-    r"\bPYTEST_CMD\s*="
-    # Treat pytest as a command only when it doesn't look like a Python module/variable dump:
-    #   pytest = <module 'pytest' from '...'>
-    r"|\bpython\s+-m\s+pytest\b(?!\s*=)"
-    r"|\bpytest\b(?!\s*=)(?:\s|$)"
-    r"|\bbash\s+-c\s+['\"][^'\"]*\bpytest\b"
-    r"|\bcargo\s+(?:test|build|check|clippy|fmt|rustfmt)\b"
-    r"|\bdocker\s+(?:run|buildx|build)\b"
-    r"|\b(?:\./)?run\.sh\b"
-    r"|\b(?:\./)?build\.sh\b"
-    r")",
-    re.IGNORECASE,
-)
+COMMAND_LINE_BLUE_RE: Pattern[str] = SNIPPET_COMMAND_LINE_BLUE_RE
 
 # Snippet HTML helpers/styles (shared by multiple snippet render paths)
 _SNIP_COPY_ROW_STYLE = "display: flex; align-items: flex-start; gap: 8px; margin: 2px 0; color: #0969da;"
@@ -1540,13 +1380,9 @@ CUDA_LIBCUDA_IMPORT_ERROR_RE: Pattern[str] = re.compile(
 
 # Pytest often prints file-level error markers like:
 #   ERROR components/src/dynamo/trtllm/tests/test_trtllm_unit.py
-PYTEST_ERROR_FILE_LINE_RE: Pattern[str] = re.compile(
-    r"(?:^|\s)\bERROR\s+components/src/dynamo/trtllm/tests/test_trtllm_[^\s]+\.py\b",
-    re.IGNORECASE,
-)
+PYTEST_ERROR_FILE_LINE_RE: Pattern[str] = SNIPPET_PYTEST_ERROR_FILE_LINE_RE
 
-# Capture the effective pytest command line for debugging.
-PYTEST_CMD_LINE_RE: Pattern[str] = re.compile(r"\bPYTEST_CMD\s*=", re.IGNORECASE)
+PYTEST_CMD_LINE_RE: Pattern[str] = SNIPPET_PYTEST_CMD_LINE_RE
 
 # Docker image pull/tag errors (registry manifest missing).
 DOCKER_IMAGE_NOT_FOUND_RE: Pattern[str] = re.compile(
@@ -1654,63 +1490,7 @@ RUST_TEST_FAILURES_HEADER_RE: Pattern[str] = re.compile(r"^\s*failures:\s*$", re
 RUST_TEST_FAILED_TEST_NAME_RE: Pattern[str] = re.compile(r"^\s*[A-Za-z0-9_:]+\s*$")
 
 # Lines where the user wants the *entire line* red (not just keyword highlighting).
-FULL_LINE_ERROR_REDS_RE: List[Pattern[str]] = [
-    # Git fetch failures (common infra issue); user wants the whole line red.
-    re.compile(r"\berror:\s*failed\s+to\s+fetch\s+some\s+objects\s+from\b", re.IGNORECASE),
-    # HTTP gateway timeouts (wget/curl/etc); user wants 504 Gateway Time-out red.
-    re.compile(r"\b504\s+gateway\s+time-?out\b|\bgateway\s+time-?out\b", re.IGNORECASE),
-    # Network connectivity failures.
-    re.compile(r"\bnetwork\s+error:\s*connection\s+failed\b|\bconnection\s+failed\.\s*check\s+network\s+connectivity\b", re.IGNORECASE),
-    # Etcd lease creation failures.
-    re.compile(r"\bunable\s+to\s+create\s+lease\b|\bcheck\s+etcd\s+server\s+status\b", re.IGNORECASE),
-    # Docker daemon errors.
-    # Don't full-line-highlight the common post-failure noise:
-    #   "Error response from daemon: No such container: ..."
-    re.compile(r"\berror response from daemon:(?!.*no\s+such\s+container)", re.IGNORECASE),
-    # Mirror sync infra errors (user wants the entire line red).
-    re.compile(r"\bmirror sync failed or timed out\b", re.IGNORECASE),
-    # CUDA / vLLM install errors.
-    UNSUPPORTED_CUDA_VLLM_RE,
-    # CUDA runtime missing on runner.
-    CUDA_LIBCUDA_IMPORT_ERROR_RE,
-    # Python import errors are high-signal; make the entire line red.
-    PYTHON_MODULE_NOT_FOUND_RE,
-    # CI sentinel variables indicating test failure. Example:
-    #   FAILED_TESTS=1  # Treat missing XML as failure
-    re.compile(r"\bFAILED_TESTS\s*=\s*1\b", re.IGNORECASE),
-    # Pytest collection errors are high-signal and typically the true root cause.
-    # Example:
-    #   ________________ ERROR collecting tests/... _________________
-    re.compile(r"\berror\s+collecting\b", re.IGNORECASE),
-    # Pytest file-level ERROR markers (helps identify the failing suite quickly).
-    PYTEST_ERROR_FILE_LINE_RE,
-    # Multi-line backend result blocks: full-line highlight the failure field.
-    re.compile(r"\"result\"\s*:\s*\"failure\"", re.IGNORECASE),
-    # Docker registry manifest missing.
-    DOCKER_IMAGE_NOT_FOUND_RE,
-    # Timeout marker inserted by snippet extraction / categorization.
-    re.compile(r"\[TIMEOUT\]", re.IGNORECASE),
-    # Assertion failures: user wants the whole line red.
-    re.compile(r"\bassertion\s+failed:", re.IGNORECASE),
-    # BuildKit/cargo/etc generic build failure summary.
-    FAILED_TO_BUILD_RE,
-    # Local policy checks (e.g. dev scripts) that emit a [FAIL] marker.
-    re.compile(r"\[FAIL\]\s*incorrect\s+date\s*:", re.IGNORECASE),
-    # Git LFS failures surfaced through BuildKit/uv/pip snippet formatting.
-    # Example lines (user wants whole line red, not bold):
-    #   ├─▶ Git operation failed
-    #   ├─▶ failed to fetch LFS objects at <sha>
-    re.compile(r"\bGit\s+operation\s+failed\b", re.IGNORECASE),
-    re.compile(r"\bfailed\s+to\s+fetch\s+LFS\s+objects\b", re.IGNORECASE),
-    PYTEST_TIMEOUT_E_LINE_RE,
-    # The 100% progress line that contains the failing "F" is useful context.
-    re.compile(r"\[100%\].*F", re.IGNORECASE),
-    # Rust test harness failure summary.
-    RUST_TEST_FAILURES_HEADER_RE,
-    # Rust failure list entry (indented test path), e.g. "    recorder::tests::test_...".
-    RUST_TEST_FAILED_TEST_NAME_RE,
-    re.compile(r"test result:\s*FAILED\.", re.IGNORECASE),
-]
+FULL_LINE_ERROR_REDS_RE: List[Pattern[str]] = list(RED_FULL_LINE_RES)
 
 
 #
@@ -1719,98 +1499,7 @@ FULL_LINE_ERROR_REDS_RE: List[Pattern[str]] = [
 # Keep this list "regex-only" and push special-case suppression logic into `_apply_category_rules()`
 # so we don’t duplicate business rules across categorization call sites.
 #
-CATEGORY_RULES: list[tuple[str, Pattern[str]]] = [
-    # Pytest per-test timeout (pytest-timeout plugin).
-    ("pytest-timeout-error", PYTEST_TIMEOUT_E_LINE_RE),
-    # Pytest failures:
-    # - "short test summary info" can appear on successful runs (skips/xfail), so do NOT treat it as failure.
-    # - Prefer explicit failure/collection error markers.
-    ("pytest-error", re.compile(r"(?:^|\s)FAILED(?:\s+|$).*::|\\berror\\s+collecting\\b|==+\\s*(?:FAILURES|ERRORS)\\s*==+", re.IGNORECASE)),
-    ("network-download-error", re.compile(DOWNLOAD_ERROR_RE.pattern, re.IGNORECASE)),
-    ("docker-build-error", re.compile(DOCKER_BUILD_ERROR_RE.pattern, re.IGNORECASE)),
-    ("build-status-check-error", BUILD_STATUS_CHECK_ERROR_RE),
-    ("huggingface-auth-error", HUGGINGFACE_AUTH_ERROR_RE),
-    ("copyright-header-error", COPYRIGHT_HEADER_ERROR_RE),
-    ("helm-error", HELM_ERROR_RE),
-    # Use the same CUDA matcher as full-log categorization, so snippets catch libcuda ImportError too.
-    ("cuda-error", re.compile(CUDA_ERROR_RE.pattern, re.IGNORECASE)),
-    ("network-timeout-https", re.compile(HTTP_TIMEOUT_RE.pattern, re.IGNORECASE)),
-    ("network-timeout-gitlab-mirror", GITLAB_MIRROR_TIMEOUT_RE),
-    ("k8s-network-timeout-pod", K8S_PODS_TIMED_OUT_RE),
-    ("k8s-network-timeout-portfwd", KUBECTL_PORTFORWARD_TIMEOUT_RE),
-    ("network-timeout-github-action", GITHUB_ACTION_STEP_TIMEOUT_RE),
-    ("network-error", re.compile(NETWORK_ERROR_RE.pattern, re.IGNORECASE)),
-    ("etcd-error", re.compile(ETCD_ERROR_RE.pattern, re.IGNORECASE)),
-    ("git-fetch", re.compile(r"failed to fetch some objects from|RPC failed|early EOF|remote end hung up|fetch-pack", re.IGNORECASE)),
-    ("github-api", re.compile(r"Failed to query GitHub API|secondary rate limit|API rate limit exceeded|HTTP 403|HTTP 429", re.IGNORECASE)),
-    ("github-lfs-error", re.compile(r"/info/lfs|git lfs", re.IGNORECASE)),
-    # Avoid tagging timeout just because pytest plugins list "timeout-<ver>" or prose mentions "timeouts".
-    ("network-timeout-generic", re.compile(TIMED_OUT_RE.pattern, re.IGNORECASE)),
-    ("oom", re.compile(r"\b(out of memory|CUDA out of memory|Killed process|oom)\b", re.IGNORECASE)),
-    ("docker-daemon-connection-error", DOCKER_DAEMON_CONNECTION_ERROR_RE),
-    ("docker-daemon-error-response-error", DOCKER_DAEMON_ERROR_RESPONSE_RE),
-    ("docker-cli-error", DOCKER_CLI_ERROR_RE),
-    ("docker-image-error", DOCKER_IMAGE_NOT_FOUND_RE),
-    ("k8s-error", K8S_ERROR_RE),
-    ("python-error", PYTHON_EXCEPTION_LINE_RE),
-    # IMPORTANT: don't tag broken-links just because the tool name "lychee" appears; that causes false positives
-    # on timeout-only runs. Require an explicit broken/dead links phrase.
-    ("broken-links", re.compile(r"\bbroken\s+links?\b|\bdead\s+links?\b", re.IGNORECASE)),
-    ("rust-error", RUST_TEST_FAIL_RE),
-    ("exit-139-sigsegv", EXIT_CODE_139_RE),
-    ("exit-127-cmd-not-found", EXIT_CODE_127_RE),
-]
-
-# =============================================================================
-# Canonical regex naming (preferred)
-#
-# This file historically accumulated many regexes with ad-hoc names. For readability, new code
-# should use the grouped, prefixed aliases below:
-# - CAT_*     : categorization (full-log + snippet categorization)
-# - SNIPPET_* : snippet extraction / command prelude detection
-# - RED_*     : "full-line red" highlighting rules
-#
-# The original names are kept as the source of truth for now, but these aliases provide a clean,
-# discoverable vocabulary without touching all call sites at once.
-# =============================================================================
-#
-
-# Categorization (CAT_*)
-CAT_RULES = CATEGORY_RULES
-CAT_BACKEND_BLOCK_START_RE = _BACKEND_BLOCK_START_RE
-CAT_BACKEND_RESULT_FAILURE_RE = _BACKEND_RESULT_FAILURE_RE
-CAT_BUILD_STATUS_CHECK_ERROR_RE = BUILD_STATUS_CHECK_ERROR_RE
-CAT_BROKEN_LINKS_RE = BROKEN_LINKS_RE
-CAT_CUDA_ERROR_RE = CUDA_ERROR_RE
-CAT_COPYRIGHT_HEADER_ERROR_RE = COPYRIGHT_HEADER_ERROR_RE
-CAT_DOCKER_BUILD_ERROR_RE = DOCKER_BUILD_ERROR_RE
-CAT_DOWNLOAD_ERROR_RE = DOWNLOAD_ERROR_RE
-CAT_ETCD_ERROR_RE = ETCD_ERROR_RE
-CAT_EXIT_CODE_127_RE = EXIT_CODE_127_RE
-CAT_EXIT_CODE_139_RE = EXIT_CODE_139_RE
-CAT_GITHUB_ACTION_STEP_TIMEOUT_RE = GITHUB_ACTION_STEP_TIMEOUT_RE
-CAT_GITLAB_MIRROR_TIMEOUT_RE = GITLAB_MIRROR_TIMEOUT_RE
-CAT_HELM_ERROR_RE = HELM_ERROR_RE
-CAT_HUGGINGFACE_AUTH_ERROR_RE = HUGGINGFACE_AUTH_ERROR_RE
-CAT_HTTP_TIMEOUT_RE = HTTP_TIMEOUT_RE
-CAT_K8S_ERROR_RE = K8S_ERROR_RE
-CAT_K8S_PODS_TIMED_OUT_RE = K8S_PODS_TIMED_OUT_RE
-CAT_KUBECTL_PORTFORWARD_TIMEOUT_RE = KUBECTL_PORTFORWARD_TIMEOUT_RE
-CAT_NETWORK_ERROR_RE = NETWORK_ERROR_RE
-CAT_PYTEST_DETECT_RE = PYTEST_DETECT_RE
-CAT_RUST_TEST_FAIL_RE = RUST_TEST_FAIL_RE
-CAT_TIMED_OUT_RE = TIMED_OUT_RE
-
-# Snippet extraction + commands (SNIPPET_*)
-SNIPPET_ANCHOR_LINE_RE = ERROR_SNIPPET_LINE_RE
-SNIPPET_COMMAND_LINE_BLUE_RE = COMMAND_LINE_BLUE_RE
-SNIPPET_PYTEST_CMD_LINE_RE = PYTEST_CMD_LINE_RE
-SNIPPET_PYTEST_ERROR_FILE_LINE_RE = PYTEST_ERROR_FILE_LINE_RE
-SNIPPET_PYTEST_FAILED_LINE_RE = PYTEST_FAILED_LINE_RE
-
-# Full-line red rules (RED_*)
-RED_FULL_LINE_RES = FULL_LINE_ERROR_REDS_RE
-
+CATEGORY_RULES: list[tuple[str, Pattern[str]]] = list(CAT_RULES)
 
 def _apply_category_rules(*, text: str, lines: Sequence[str], out: List[str], seen: set[str]) -> None:
     """Apply shared regex-based category rules with shared suppression logic."""
@@ -1818,11 +1507,11 @@ def _apply_category_rules(*, text: str, lines: Sequence[str], out: List[str], se
         text_l = (text or "").lower()
 
         has_specific_timeout = bool(
-            HTTP_TIMEOUT_RE.search(text_l)
-            or GITLAB_MIRROR_TIMEOUT_RE.search(text)
-            or K8S_PODS_TIMED_OUT_RE.search(text)
-            or KUBECTL_PORTFORWARD_TIMEOUT_RE.search(text)
-            or GITHUB_ACTION_STEP_TIMEOUT_RE.search(text)
+            CAT_HTTP_TIMEOUT_RE.search(text_l)
+            or CAT_GITLAB_MIRROR_TIMEOUT_RE.search(text)
+            or CAT_K8S_PODS_TIMED_OUT_RE.search(text)
+            or CAT_KUBECTL_PORTFORWARD_TIMEOUT_RE.search(text)
+            or CAT_GITHUB_ACTION_STEP_TIMEOUT_RE.search(text)
         )
 
         def add(name: str) -> None:
