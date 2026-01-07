@@ -77,7 +77,7 @@ VLLM/SGLang/TRTLLM backends:
 HuggingFace auth:
 - 58604176773.log => pytest-error, network-download-error, build-status-check-error, huggingface-auth-error
 
-Category frequency summary (all 733 logs, sorted by occurrence):
+Category frequency summary (snapshot from one scan of 733 logs; run `python3 -m ci_log_errors --scan-all-logs` to regenerate for your local cache):
     1. k8s-error                           306/733 (41.7%) - Kubernetes/kubectl failure signal (cluster-related failures)
     2. k8s-network-timeout-pod             209/733 (28.5%) - kubectl wait timeout (pods condition)
     3. build-status-check-error            195/733 (26.6%) - CI gate checking upstream builds
@@ -809,7 +809,7 @@ def _self_test_examples(*, raw_log_path: Path) -> int:
                 # Suggested command lines are rendered as shell comments in snippet text:
                 #   # pytest ...   # suggested
                 # Accept both plain and suggested formats.
-                s = re.sub(r"#\s*suggested\s*$", "", s0, flags=re.IGNORECASE).strip()
+                s = re.sub(r"#\s*auto suggested\s*$", "", s0, flags=re.IGNORECASE).strip()
                 s = re.sub(r"^\s*#\s*", "", s).strip()
                 if not s.lower().startswith("pytest "):
                     continue
