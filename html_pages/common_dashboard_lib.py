@@ -115,13 +115,6 @@ COLOR_GREY = "#8c959f"
 # Both dashboards should use the exact same symbol so their trees look identical.
 EXPECTED_CHECK_PLACEHOLDER_SYMBOL = "◇"
 
-# Small curated optional set to show as expectations even when branch-protection required checks are unavailable.
-# (Required expectations come from branch protection / PRInfo where possible.)
-EXPECTED_OPTIONAL_CHECK_NAMES = {
-    "backend-status-check",
-    "dynamo-status-check",
-}
-
 # Back-compat: older callsites import this for the optional pass count styling in the compact CI summary.
 # (The current compact rendering no longer uses a "+N" format, but keep the constant to avoid crashes.)
 PASS_PLUS_STYLE = "font-size: 10px; font-weight: 600; opacity: 0.9;"
@@ -1557,25 +1550,52 @@ def check_line_html(
     required_failure: bool = False,
     warning_present: bool = False,
 ) -> str:
-    icon = status_icon_html(
-        status_norm=status_norm,
-        is_required=is_required,
-        required_failure=required_failure,
-        warning_present=warning_present,
-    )
+    # Expected placeholder checks:
+    # - Use the placeholder symbol as the *icon* (instead of the generic pending dot),
+    #   since the symbol already communicates "not yet returned by the API".
+    # - Also suppress the redundant trailing "— ◇" marker in the label.
+    is_expected_placeholder = bool(str(display_name or "").strip() == EXPECTED_CHECK_PLACEHOLDER_SYMBOL)
+    if is_expected_placeholder:
+        icon = (
+            '<span style="display: inline-flex; align-items: center; justify-content: center; '
+            f'width: 12px; height: 12px; color: #8c959f; font-size: 12px; font-weight: 900;">{EXPECTED_CHECK_PLACEHOLDER_SYMBOL}</span>'
+        )
+    else:
+        icon = status_icon_html(
+            status_norm=status_norm,
+            is_required=is_required,
+            required_failure=required_failure,
+            warning_present=warning_present,
+        )
 
     def _format_arch_text(raw_text: str) -> str:
         """Format the job text with arch styling.
 
-        - If the job contains an explicit `(arm64)` token, grey out the *entire* string.
+        - If the job contains an explicit arch token:
+          - `(arm64)` / `(aarch64)` -> keep the original token `(arm64)` and append `; aarch64` (pink)
+          - `(amd64)`              -> keep the original token `(amd64)` and append `; x86_64` (blue)
         - Otherwise, keep normal styling (no special casing).
         """
         raw = str(raw_text or "")
-        esc = html.escape(raw)
-        if "arm64" in raw and "(" in raw and ")" in raw:
-            # Grey out the whole label (requested).
-            return f'<span style="color: #8c959f;">{esc}</span>'
-        return esc
+        # Only rewrite when we see an explicit arch token (avoid surprising renames).
+        m = re.search(r"\((arm64|aarch64|amd64)\)", raw, flags=re.IGNORECASE)
+        if not m:
+            return html.escape(raw)
+
+        arch = str(m.group(1) or "").strip().lower()
+        # Rewrite arch token casing/label.
+        if arch in {"arm64", "aarch64"}:
+            # Normalize to "(arm64)" and append "; aarch64" immediately after the token.
+            raw2 = re.sub(r"\(\s*(arm64|aarch64)\s*\)", "(arm64)", raw, flags=re.IGNORECASE)
+            raw2 = re.sub(r"\(\s*arm64\s*\)(?!\s*;\s*aarch64\b)", "(arm64); aarch64", raw2, flags=re.IGNORECASE)
+            # Light lavender (requested)
+            return f'<span style="color: #c084fc;">{html.escape(raw2)}</span>'
+        if arch == "amd64":
+            raw2 = re.sub(r"\(\s*amd64\s*\)", "(amd64)", raw, flags=re.IGNORECASE)
+            raw2 = re.sub(r"\(\s*amd64\s*\)(?!\s*;\s*x86_64\b)", "(amd64); x86_64", raw2, flags=re.IGNORECASE)
+            # Blue
+            return f'<span style="color: #0969da;">{html.escape(raw2)}</span>'
+        return html.escape(raw)
 
     id_html = (
         '<span style="font-family: SFMono-Regular, Consolas, Liberation Mono, Menlo, monospace; font-size: 12px;">'
@@ -1585,7 +1605,7 @@ def check_line_html(
     req_html = required_badge_html(is_required=is_required, status_norm=status_norm)
 
     name_html = ""
-    if display_name and display_name != job_id:
+    if (not is_expected_placeholder) and display_name and display_name != job_id:
         name_html = f'<span style="color: #57606a; font-size: 12px;"> — {_format_arch_text(display_name)}</span>'
 
     dur_html = f'<span style="color: #57606a; font-size: 12px;"> ({html.escape(duration)})</span>' if duration else ""

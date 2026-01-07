@@ -1395,10 +1395,19 @@ class CommitHistoryGenerator:
         def _build_github_checks_tree_html(*, repo_path: Path, sha_full: str) -> str:
             gha = github_actions_status.get(sha_full) if github_actions_status else None
             check_runs = (gha.get("check_runs") if isinstance(gha, dict) else None) or []
+            # Snapshot of API-returned check names (before we inject placeholders).
+            # We use this to scope workflow-YAML inference to "relevant" workflows, and to avoid
+            # placeholder-driven matching (which can otherwise make us infer too much when API data is missing).
+            api_present_names = [
+                str((cr or {}).get("name", "") or "").strip()
+                for cr in (check_runs or [])
+                if isinstance(cr, dict) and str((cr or {}).get("name", "") or "").strip()
+            ]
             # Inject "expected but missing" placeholder checks so the commit-history tree matches
             # the local-branches tree UX (and makes missing required checks visible).
             try:
-                from common_dashboard_lib import EXPECTED_CHECK_PLACEHOLDER_SYMBOL, EXPECTED_OPTIONAL_CHECK_NAMES  # local import
+                from common_dashboard_lib import EXPECTED_CHECK_PLACEHOLDER_SYMBOL  # local import
+                from common_github_workflow import expected_check_names_from_workflows, workflow_paths_for_present_checks  # local import
                 from common import normalize_check_name  # local import
 
                 present_norm = {
@@ -1406,6 +1415,8 @@ class CommitHistoryGenerator:
                     for cr in (check_runs or [])
                     if isinstance(cr, dict)
                 }
+                # Track what we've already seen/added so we never append duplicate placeholders.
+                seen_norm = set(present_norm)
                 required_names: List[str] = []
                 try:
                     # Branch protection required checks for main (best-effort; may be empty on 403).
@@ -1415,11 +1426,10 @@ class CommitHistoryGenerator:
                 except Exception:
                     required_names = []
                 required_norm = {normalize_check_name(x) for x in (required_names or []) if str(x).strip()}
-                expected_optional = {str(x) for x in (EXPECTED_OPTIONAL_CHECK_NAMES or set()) if str(x).strip()}
-                expected_all = sorted({*set(required_names or []), *expected_optional}, key=lambda s: str(s).lower())
+                expected_all = sorted({*set(required_names or [])}, key=lambda s: str(s).lower())
                 for nm0 in expected_all:
                     n0 = normalize_check_name(nm0)
-                    if n0 and n0 not in present_norm:
+                    if n0 and n0 not in seen_norm:
                         check_runs.append(
                             {
                                 "name": str(nm0),
@@ -1433,6 +1443,41 @@ class CommitHistoryGenerator:
                                 "_expected_placeholder_symbol": EXPECTED_CHECK_PLACEHOLDER_SYMBOL,
                             }
                         )
+                        seen_norm.add(n0)
+
+                # Best-effort: also inject "expected" checks inferred from workflow YAML jobs, even if
+                # GitHub hasn't returned them yet (e.g., queued/not-started or missing contexts).
+                #
+                # To keep this bounded and relevant, we only consider workflows that match at least one
+                # present check name for this commit.
+                try:
+                    if not api_present_names:
+                        wf_paths = []
+                    else:
+                        wf_paths = workflow_paths_for_present_checks(repo_root=Path(repo_path), check_names=list(api_present_names or []))
+                    expected_from_yml = expected_check_names_from_workflows(
+                        repo_root=Path(repo_path),
+                        workflow_paths=(wf_paths or None) if wf_paths else None,
+                        cap=200,
+                    )
+                    for nm0 in (expected_from_yml or []):
+                        n0 = normalize_check_name(str(nm0 or ""))
+                        if n0 and n0 not in seen_norm:
+                            check_runs.append(
+                                {
+                                    "name": str(nm0),
+                                    "status": "queued",  # renders as the pending/not-started icon
+                                    "conclusion": "",
+                                    "html_url": "",
+                                    "details_url": "",
+                                    "is_required": (n0 in required_norm),
+                                    "_expected_placeholder": True,
+                                    "_expected_placeholder_symbol": EXPECTED_CHECK_PLACEHOLDER_SYMBOL,
+                                }
+                            )
+                            seen_norm.add(n0)
+                except Exception:
+                    pass
             except Exception:
                 pass
             check_runs = sort_github_check_runs_by_name(check_runs)  # shared ordering

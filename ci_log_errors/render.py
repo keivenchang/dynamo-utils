@@ -137,17 +137,25 @@ def render_error_snippet_html(snippet_text: str) -> str:
                 j += 1
             cmd_text = "\n".join(cmd_lines).strip("\n")
             # UX: some command blocks are *suggestions* and we render them as shell comments:
-            #   # <cmd>   # suggested
-            # When copying, strip the comment marker + trailing '# suggested' so the clipboard contains
-            # a runnable command (no leading '#', no '# suggested').
+            #   # suggested: <cmd>
+            # When copying, strip the comment marker + suggested marker so the clipboard contains
+            # a runnable command.
             cmd_copy_text = cmd_text
             try:
                 cleaned: List[str] = []
                 for ln in (cmd_text or "").splitlines():
-                    if re.search(r"#\s*suggested\s*$", ln or "", flags=re.IGNORECASE):
-                        ln2 = re.sub(r"#\s*suggested\s*$", "", ln or "", flags=re.IGNORECASE).rstrip()
+                    s = str(ln or "")
+                    # New format: "# suggested: <cmd>"
+                    m = re.match(r"^\s*#\s*suggested\s*:\s*(.*)$", s, flags=re.IGNORECASE)
+                    if m:
+                        cleaned.append(str(m.group(1) or "").rstrip())
+                        continue
+                    # Back-compat: "# <cmd>   # suggested"
+                    if re.search(r"#\s*suggested\s*$", s, flags=re.IGNORECASE):
+                        ln2 = re.sub(r"#\s*suggested\s*$", "", s, flags=re.IGNORECASE).rstrip()
                         ln2 = re.sub(r"^\s*#\s*", "", ln2).rstrip()
                         cleaned.append(ln2)
+                        continue
                     else:
                         cleaned.append(ln)
                 cmd_copy_text = "\n".join(cleaned).strip("\n")

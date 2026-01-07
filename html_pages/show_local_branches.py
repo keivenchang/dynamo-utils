@@ -43,7 +43,6 @@ except Exception:  # pragma: no cover
 from common_dashboard_lib import (
     CIStatus,
     EXPECTED_CHECK_PLACEHOLDER_SYMBOL,
-    EXPECTED_OPTIONAL_CHECK_NAMES,
     PASS_PLUS_STYLE,
     TreeNodeVM,
     check_line_html,
@@ -765,28 +764,61 @@ def _build_ci_hierarchy_nodes(
     # This makes "missing required checks" visible even when GitHub never posts a check context for them.
     try:
         present_norm = {common.normalize_check_name(str(getattr(r, "name", "") or "")) for r in (rows or [])}
+        seen_norm = set(present_norm)
         expected_required = {str(x) for x in (required_set or set()) if str(x).strip()}
-        expected_optional = {str(x) for x in (EXPECTED_OPTIONAL_CHECK_NAMES or set()) if str(x).strip()}
-        expected_all = sorted({*expected_required, *expected_optional}, key=lambda s: str(s).lower())
         required_norm = {common.normalize_check_name(x) for x in expected_required}
-        missing = []
-        for nm0 in expected_all:
+
+        # Expected checks from branch protection required checks.
+        for nm0 in sorted(expected_required, key=lambda s: str(s).lower()):
             n0 = common.normalize_check_name(nm0)
-            if n0 and n0 not in present_norm:
-                missing.append(nm0)
-        for nm0 in missing:
-            rows.append(
-                GHPRCheckRow(
-                    name=str(nm0),
-                    status_raw="pending",
-                    duration="",
-                    url="",
-                    run_id="",
-                    job_id="",
-                    description="expected",
-                    is_required=(common.normalize_check_name(nm0) in required_norm),
+            if n0 and n0 not in seen_norm:
+                rows.append(
+                    GHPRCheckRow(
+                        name=str(nm0),
+                        status_raw="pending",
+                        duration="",
+                        url="",
+                        run_id="",
+                        job_id="",
+                        description="expected",
+                        is_required=(common.normalize_check_name(nm0) in required_norm),
+                    )
                 )
+                seen_norm.add(n0)
+
+        # Expected checks inferred from workflow YAML (PyYAML assumed present).
+        try:
+            from common_github_workflow import expected_check_names_from_workflows, workflow_paths_for_present_checks  # local import
+
+            present_names = [
+                str(getattr(r, "name", "") or "").strip()
+                for r in (rows or [])
+                if str(getattr(r, "name", "") or "").strip()
+            ]
+            wf_paths = workflow_paths_for_present_checks(repo_root=Path(repo_path), check_names=list(present_names or []))
+            expected_from_yml = expected_check_names_from_workflows(
+                repo_root=Path(repo_path),
+                workflow_paths=(wf_paths or None) if wf_paths else None,
+                cap=200,
             )
+            for nm0 in (expected_from_yml or []):
+                n0 = common.normalize_check_name(str(nm0 or ""))
+                if n0 and n0 not in seen_norm:
+                    rows.append(
+                        GHPRCheckRow(
+                            name=str(nm0),
+                            status_raw="pending",
+                            duration="",
+                            url="",
+                            run_id="",
+                            job_id="",
+                            description="expected",
+                            is_required=(common.normalize_check_name(nm0) in required_norm),
+                        )
+                    )
+                    seen_norm.add(n0)
+        except Exception:
+            pass
     except Exception:
         pass
 

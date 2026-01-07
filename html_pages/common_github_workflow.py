@@ -338,3 +338,62 @@ def group_ci_nodes_by_workflow_needs(
     return out
 
 
+def workflow_paths_for_present_checks(*, repo_root: Path, check_names: List[str]) -> List[str]:
+    """Return workflow paths (as strings) that match at least one of the present check names.
+
+    This is used to scope "expected checks" inference to the workflows that appear relevant,
+    rather than returning every job from every workflow file.
+    """
+    wfs = load_workflow_defs(repo_root)
+    if not wfs:
+        return []
+    out: List[str] = []
+    seen: set[str] = set()
+    for nm in (check_names or []):
+        meta = match_check_to_workflow_job(check_name=str(nm or ""), workflow_defs=wfs)
+        if not meta:
+            continue
+        wf_path, _job_id = meta
+        key = str(wf_path)
+        if key and key not in seen:
+            seen.add(key)
+            out.append(key)
+    return out
+
+
+def expected_check_names_from_workflows(
+    *,
+    repo_root: Path,
+    workflow_paths: Optional[List[str]] = None,
+    cap: int = 200,
+) -> List[str]:
+    """Return best-effort expected check-run names for the selected workflows.
+
+    Notes:
+    - This intentionally does NOT try to fully emulate GitHub's runtime naming rules.
+    - We primarily return workflow job display names (`jobs.*.name`, falling back to job id).
+    - `cap` is a safety guard to avoid exploding the UI on repos with many jobs/workflows.
+    """
+    wfs = load_workflow_defs(repo_root)
+    if not wfs:
+        return []
+    want: Optional[set[str]] = None
+    if workflow_paths:
+        want = {str(x) for x in (workflow_paths or []) if str(x).strip()}
+    out: List[str] = []
+    seen: set[str] = set()
+    for wf in (wfs or []):
+        if want is not None and str(wf.workflow_path) not in want:
+            continue
+        for job_id, jd in (wf.jobs_by_id or {}).items():
+            # Prefer the display name (what most check-runs are called). Fall back to job_id.
+            nm = str(getattr(jd, "display_name", "") or "").strip()
+            if not nm:
+                nm = str(job_id or "").strip()
+            if nm and nm not in seen:
+                seen.add(nm)
+                out.append(nm)
+                if int(cap or 0) > 0 and len(out) >= int(cap):
+                    return out
+    return out
+

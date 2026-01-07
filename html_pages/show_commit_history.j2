@@ -2,7 +2,7 @@
 {% set refresh_seconds = 900 %}
 {% set refresh_check_interval_ms = 600000 %}
 
-{% block title %}Dynamo Commit History{% endblock %}
+{% block title %}Dynamo Commit History (last {{ commit_count }} commits){% endblock %}
 {% block favicon %}<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect x='15' y='55' width='70' height='20' rx='3' fill='%232196f3'/><rect x='20' y='40' width='60' height='20' rx='3' fill='%234caf50'/><rect x='25' y='25' width='50' height='20' rx='3' fill='%23ff9800'/></svg>">{% endblock %}
 
 {% block css %}
@@ -673,7 +673,7 @@ window.__dashboardOnReadyQueue.push(function() {
 {% endblock %}
 
 {% block header_title %}
-<span>Dynamo Commit History</span>
+<span>Dynamo Commit History (last {{ commit_count }} commits)</span>
 <span class="header-meta">Page generated: {{ generated_time }} <span id="page-age" class="page-age"></span></span>
 {% endblock %}
 {% block header_subtitle %}{% endblock %}
@@ -698,27 +698,7 @@ window.__dashboardOnReadyQueue.push(function() {
 </summary>
 <div style="margin-top: 10px; font-size: 12px; line-height: 1.55;">
 <div style="margin-bottom: 12px;">
-<div style="font-weight: 600; margin-bottom: 6px; color: #24292f;">Icons & Links:</div>
-<ul style="margin: 4px 0; padding-left: 20px;">
-<li><strong>IMAGE:xxxxxx</strong> - Image SHA: a unique hash representing the exact state of all files in the <code style="background-color: #f6f8fa; padding: 2px 4px; border-radius: 3px;">container/*</code> directory. (Previously shown as CDS.)</li>
-<li><strong>IMAGE:xxxxxx colors</strong> - Local build status for this commit/image:
-<ul style="margin: 2px 0; padding-left: 20px; font-size: 12px;">
-<li><span class="image-sha-badge" style="background: #238636; color: #ffffff;">IMAGE:xxxxxx</span> Green - All local builds/compile/sanity passed</li>
-<li><span class="image-sha-badge" style="background: #c83a3a; color: #ffffff;">IMAGE:xxxxxx</span> Red - Some local builds/compile/sanity failed</li>
-<li><span class="image-sha-badge" style="background: #8c959f; color: #ffffff;">IMAGE:xxxxxx</span> Gray - Build in progress / no local build status</li>
-</ul>
-</li>
-<li><strong>Click IMAGE:xxxxxx</strong> - Opens the latest local build report (when available). <strong>📋</strong> shows build history when multiple reports exist.</li>
-<li><strong>🐳</strong> - Search NVIDIA GitLab Docker registry (appears in Status column)</li>
-<li><strong><svg height="14" width="14" viewBox="0 0 16 16" fill="#24292f" style="display: inline-block; vertical-align: middle;"><path fill-rule="evenodd" clip-rule="evenodd" d="M8 0C3.58 0 0 3.58 0 8C0 11.54 2.29 14.53 5.47 15.59C5.87 15.66 6.02 15.42 6.02 15.21C6.02 15.02 6.01 14.39 6.01 13.72C4 14.09 3.48 13.23 3.32 12.78C3.23 12.55 2.84 11.84 2.5 11.65C2.22 11.5 1.82 11.13 2.49 11.12C3.12 11.11 3.57 11.7 3.72 11.94C4.44 13.15 5.59 12.81 6.05 12.6C6.12 12.08 6.33 11.73 6.56 11.53C4.78 11.33 2.92 10.64 2.92 7.58C2.92 6.71 3.23 5.99 3.74 5.43C3.66 5.23 3.38 4.41 3.82 3.31C3.82 3.31 4.49 3.1 6.02 4.13C6.66 3.95 7.34 3.86 8.02 3.86C8.7 3.86 9.38 3.95 10.02 4.13C11.55 3.09 12.22 3.31 12.22 3.31C12.66 4.41 12.38 5.23 12.3 5.43C12.81 5.99 13.12 6.7 13.12 7.58C13.12 10.65 11.25 11.33 9.47 11.53C9.76 11.78 10.01 12.26 10.01 13.01C10.01 14.08 10 14.94 10 15.21C10 15.42 10.15 15.67 10.55 15.59C13.71 14.53 16 11.53 16 8C16 3.58 12.42 0 8 0Z"></path></svg></strong> - View GitHub Actions logs (appears in Status column)</li>
-<li><strong>🦊</strong> - View commit in NVIDIA GitLab (appears in Status column with CI pipeline info)</li>
-<li><strong>🛠️</strong> - View GitLab build pipeline (appears next to the 🦊 icon when available)</li>
-<li><strong>▶</strong> - Expand to see Docker images and commit details</li>
-</ul>
-</div>
-
-<div style="margin-bottom: 12px;">
-<div style="font-weight: 600; margin-bottom: 6px; color: #24292f;">CI Status Symbols (GitHub & NVIDIA GitLab):</div>
+<div style="font-weight: 600; margin-bottom: 6px; color: #24292f;">GitHub Status (ai-dynamo/dynamo):</div>
 <ul style="margin: 4px 0; padding-left: 20px;">
 <li>{{ success_required_icon_html|safe }} / {{ success_icon_html|safe }} - Passed (required/optional)</li>
 <li>{{ failure_required_icon_html|safe }} / {{ failure_optional_icon_html|safe }} - Checks/jobs failed (required/optional)</li>
@@ -726,23 +706,41 @@ window.__dashboardOnReadyQueue.push(function() {
 <li>{{ pending_icon_html|safe }} - Checks/jobs pending (not started yet)</li>
 <li>{{ cancelled_icon_html|safe }} - Checks/jobs canceled</li>
 <li>{{ skipped_icon_html|safe }} - Checks/jobs skipped</li>
+<li><strong style="color: #8c959f;">◇</strong> - Expected (inferred from <code>.github/workflows/*.yml</code> / <code>.github/workflows/*.yaml</code>; not yet returned by the GitHub API)</li>
 </ul>
 <p style="margin: 4px 0; color: #57606a; font-size: 12px;">Example: {{ success_required_icon_html|safe }}<span style="color: #2da44e;">5</span> {{ success_icon_html|safe }}<span style="color: #2da44e;">25</span> {{ failure_required_icon_html|safe }}<span style="color: #c83a3a;">2</span> {{ failure_optional_icon_html|safe }}<span style="color: #c83a3a;">1</span> {{ in_progress_icon_html|safe }}<span style="color: #8c959f;">3</span> {{ pending_icon_html|safe }}<span style="color: #8c959f;">1</span> {{ cancelled_icon_html|safe }}<span style="color: #8c959f;">1</span></p>
 <div style="margin-top: 6px; color: #57606a; font-size: 12px;">
-Notes:
 <ul style="margin: 4px 0; padding-left: 20px;">
-<li><strong>Skipped</strong> shows as a grey circle-slash.</li>
 <li><strong>Optional failures</strong> show as a red ✗ (no circle) and do not force the PR merge-box status to FAIL.</li>
+<li>GitHub checks tree grouping is derived from <code>jobs.*.needs</code> in those workflow files (best-effort matching on job <code>name:</code>).</li>
 </ul>
 </div>
 </div>
 
 <div style="margin-bottom: 12px;">
-<div style="font-weight: 600; margin-bottom: 6px; color: #24292f;">Subsections:</div>
+<div style="font-weight: 600; margin-bottom: 6px; color: #24292f;">GitLab Status (gitlab-master.nvidia.com/dl/ai-dynamo/dynamo):</div>
 <ul style="margin: 4px 0; padding-left: 20px;">
-<li><strong>Build and Test - dynamo</strong>: shows phase breakdown (Build Image / Rust checks / pytest...) when available.</li>
-<li><strong>Long-running Actions jobs</strong> (e.g. <code>sglang (arm64)</code>, <code>trtllm (amd64)</code>): shows job steps with duration ≥ 30s.</li>
-<li>Step timing comes from the GitHub Actions job steps API and is cached; we only display steps ≥ 30s.</li>
+<li><strong>🦊</strong> opens the commit on NVIDIA GitLab.</li>
+<li><strong>🛠️</strong> opens the GitLab pipeline/run (when available).</li>
+<li>Pipeline job/stage names come from the GitLab pipeline API for that commit; the source-of-truth is the GitLab CI configuration (e.g. <code>.gitlab-ci.yml</code> and included YAMLs) in the NVIDIA GitLab repo.</li>
+</ul>
+</div>
+
+<div style="margin-bottom: 12px;">
+<div style="font-weight: 600; margin-bottom: 6px; color: #24292f;">Images, Local Builds, &amp; Links:</div>
+<ul style="margin: 4px 0; padding-left: 20px;">
+<li><strong>IMAGE:xxxxxx</strong> - Image SHA for <code style="background-color: #f6f8fa; padding: 2px 4px; border-radius: 3px;">container/*</code>.</li>
+<li><strong>IMAGE:xxxxxx colors</strong> - Local build status:
+<ul style="margin: 2px 0; padding-left: 20px; font-size: 12px;">
+<li><span class="image-sha-badge" style="background: #238636; color: #ffffff;">IMAGE:xxxxxx</span> passed</li>
+<li><span class="image-sha-badge" style="background: #c83a3a; color: #ffffff;">IMAGE:xxxxxx</span> failed</li>
+<li><span class="image-sha-badge" style="background: #8c959f; color: #ffffff;">IMAGE:xxxxxx</span> building / unknown</li>
+</ul>
+</li>
+<li><strong>Click IMAGE:xxxxxx</strong> opens the latest local build report. <strong>📋</strong> shows build history.</li>
+<li><strong><svg height="14" width="14" viewBox="0 0 16 16" fill="#24292f" style="display: inline-block; vertical-align: middle;"><path fill-rule="evenodd" clip-rule="evenodd" d="M8 0C3.58 0 0 3.58 0 8C0 11.54 2.29 14.53 5.47 15.59C5.87 15.66 6.02 15.42 6.02 15.21C6.02 15.02 6.01 14.39 6.01 13.72C4 14.09 3.48 13.23 3.32 12.78C3.23 12.55 2.84 11.84 2.5 11.65C2.22 11.5 1.82 11.13 2.49 11.12C3.12 11.11 3.57 11.7 3.72 11.94C4.44 13.15 5.59 12.81 6.05 12.6C6.12 12.08 6.33 11.73 6.56 11.53C4.78 11.33 2.92 10.64 2.92 7.58C2.92 6.71 3.23 5.99 3.74 5.43C3.66 5.23 3.38 4.41 3.82 3.31C3.82 3.31 4.49 3.1 6.02 4.13C6.66 3.95 7.34 3.86 8.02 3.86C8.7 3.86 9.38 3.95 10.02 4.13C11.55 3.09 12.22 3.31 12.22 3.31C12.66 4.41 12.38 5.23 12.3 5.43C12.81 5.99 13.12 6.7 13.12 7.58C13.12 10.65 11.25 11.33 9.47 11.53C9.76 11.78 10.01 12.26 10.01 13.01C10.01 14.08 10 14.94 10 15.21C10 15.42 10.15 15.67 10.55 15.59C13.71 14.53 16 11.53 16 8C16 3.58 12.42 0 8 0Z"></path></svg></strong> opens the GitHub commit/checks/logs links in a new tab.</li>
+<li><strong>🐳</strong> searches NVIDIA GitLab Docker registry (Status column).</li>
+<li><strong>▶</strong> expands a row to show details.</li>
 </ul>
 </div>
 </div>

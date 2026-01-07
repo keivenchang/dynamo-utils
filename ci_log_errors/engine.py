@@ -809,9 +809,12 @@ def _self_test_examples(*, raw_log_path: Path) -> int:
             for ln in (sn or "").splitlines():
                 s0 = (ln or "").strip()
                 # Suggested command lines are rendered as shell comments in snippet text:
-                #   # pytest ...   # suggested
-                # Accept both plain and suggested formats.
+                #   # suggested: pytest ...
+                # Accept both plain and suggested formats (back-compat).
                 s = re.sub(r"#\s*auto suggested\s*$", "", s0, flags=re.IGNORECASE).strip()
+                # New format: "# suggested: <cmd>"
+                s = re.sub(r"^\s*#\s*suggested\s*:\s*", "", s, flags=re.IGNORECASE).strip()
+                # Old/plain: "# <cmd>" (or non-comment)
                 s = re.sub(r"^\s*#\s*", "", s).strip()
                 if not s.lower().startswith("pytest "):
                     continue
