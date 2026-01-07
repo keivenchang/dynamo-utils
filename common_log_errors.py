@@ -151,6 +151,22 @@ import sys
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Pattern, Sequence, Tuple
 
+
+def _default_raw_log_dir() -> Path:
+    """Default raw-log directory (single source of truth).
+
+    Resolution order:
+    - $DYNAMO_UTILS_CACHE_DIR/raw-log-text
+    - ~/.cache/dynamo-utils/raw-log-text
+    """
+    try:
+        override = os.environ.get("DYNAMO_UTILS_CACHE_DIR", "").strip()
+        if override:
+            return Path(override).expanduser() / "raw-log-text"
+    except Exception:
+        pass
+    return Path.home() / ".cache" / "dynamo-utils" / "raw-log-text"
+
 #
 # Shared helpers (keep dependency-light)
 # =============================================================================
@@ -3294,8 +3310,8 @@ def _cli(argv: Optional[Sequence[str]] = None) -> int:
     )
     parser.add_argument(
         "--raw-log-path",
-        default=str((Path(__file__).resolve().parent.parent / "raw-log-text")),
-        help="Directory containing raw-log-text/*.log for --self-test-examples (default: ../raw-log-text).",
+        default=str(_default_raw_log_dir()),
+        help="Directory containing raw-log-text/*.log for --self-test-examples (default: ~/.cache/dynamo-utils/raw-log-text).",
     )
     parser.add_argument(
         "--scan-all-logs",
@@ -3309,8 +3325,8 @@ def _cli(argv: Optional[Sequence[str]] = None) -> int:
     )
     parser.add_argument(
         "--logs-root",
-        default=str((Path(__file__).resolve().parent.parent / "raw-log-text")),
-        help="Directory containing raw-log-text/*.log for --scan-all-logs (default: ../raw-log-text).",
+        default=str(_default_raw_log_dir()),
+        help="Directory containing raw-log-text/*.log for --scan-all-logs (default: ~/.cache/dynamo-utils/raw-log-text).",
     )
     args = parser.parse_args(list(argv) if argv is not None else None)
 
