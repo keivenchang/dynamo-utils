@@ -10,7 +10,7 @@ It is designed to be dependency-light so it can be reused by:
 - `dynamo-utils/common.py`
 - `dynamo-utils/html_pages/*` dashboards
 
-Public API is re-exported from `log_errors.core`.
+Public API is re-exported from `ci_log_errors.core`.
 """
 
 from .core import (  # noqa: F401

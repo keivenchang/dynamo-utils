@@ -968,8 +968,8 @@ def step_window_snippet_from_cached_raw_log(
         return ""
 
     try:
-        # Shared library (dependency-light): `dynamo-utils/log_errors/`
-        from log_errors import extract_error_snippet_from_text  # local import (avoid circulars)
+        # Shared library (dependency-light): `dynamo-utils/ci_log_errors/`
+        from ci_log_errors import extract_error_snippet_from_text  # local import (avoid circulars)
     except Exception:
         return ""
 
@@ -1119,9 +1119,9 @@ def _small_link_html(*, url: str, label: str) -> str:
     )
 
 
-# Shared library (dependency-light): `dynamo-utils/log_errors/`
-from log_errors import render_error_snippet_html as _format_snippet_html  # shared implementation
-from log_errors import categorize_error_snippet_text as _snippet_categories
+# Shared library (dependency-light): `dynamo-utils/ci_log_errors/`
+from ci_log_errors import render_error_snippet_html as _format_snippet_html  # shared implementation
+from ci_log_errors import categorize_error_snippet_text as _snippet_categories
 
 
 def github_api_stats_rows(

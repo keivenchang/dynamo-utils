@@ -109,7 +109,7 @@ Golden-log workflow (IMPORTANT for future edits):
 - These example logs are treated as *golden training set* for regression testing. Keep them read-only:
   - `chmod a-w /home/keivenc/nvidia/raw-log-text/<job_id>.log`
 - After changing rules/regexes/snippet logic, run the built-in self-test:
-  - `python3 dynamo-utils/log_errors/core.py --self-test-examples`
+  - `python3 dynamo-utils/ci_log_errors/core.py --self-test-examples`
   - This parses the "Examples:" list above, loads each log from `~/.cache/dynamo-utils/raw-log-text/`
     (or `$DYNAMO_UTILS_CACHE_DIR/raw-log-text`), and reports
     missing/extra categories for both full-log categorization and snippet-derived categorization.
@@ -1395,7 +1395,7 @@ _SNIP_COPY_TEXT_STYLE = "flex: 1 1 auto; white-space: pre-wrap; overflow-wrap: a
 def _copy_icon_svg(*, size_px: int = 12) -> str:
     """Return the shared 'copy' icon SVG (2-squares), sourced from html_pages/copy_icon_paths.svg."""
     try:
-        # Shared library lives in dynamo-utils/log_errors/; the shared icon lives in dynamo-utils/html_pages/
+        # Shared library lives in dynamo-utils/ci_log_errors/; the shared icon lives in dynamo-utils/html_pages/
         p = (Path(__file__).resolve().parent / "html_pages" / "copy_icon_paths.svg").resolve()
         paths = p.read_text(encoding="utf-8").strip()
     except Exception:
