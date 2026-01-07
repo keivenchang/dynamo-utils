@@ -1637,6 +1637,11 @@ def check_line_html(
     want_snippet_toggle = has_snippet_text or (has_log_link and st_lc not in {"success", "in_progress", "pending", "skipped"})
 
     if want_snippet_toggle:
+        # Always render a "▶ Snippet" toggle when we consider snippets relevant (failure-like + log link),
+        # even if extraction produced an empty string. The expanded panel will show "(no snippet found)".
+        #
+        # This avoids the confusing UX where the snippet button appears/disappears across refreshes due
+        # to cache timing or extractor heuristics.
         if has_snippet_text:
             cats = _snippet_categories(snippet_text)
             for c in cats[:3]:
@@ -1644,15 +1649,11 @@ def check_line_html(
             cmd = _snippet_first_command(snippet_text)
             if cmd:
                 links += _tag_pill_html(text=cmd, monospace=True, kind="command")
-            # Include URL/context so the snippet id is stable and unique across the page.
-            links += _error_snippet_toggle_html(
-                dom_id_seed=f"{job_id}|{display_name}|{raw_log_href}|{log_url}",
-                snippet_text=snippet_text,
-            )
-        else:
-            # If we don't have snippet content, show a non-clickable indicator (gray box only).
-            # Keep this compact: users explicitly asked for *no* "No snippet" label text.
-            links += ' <span style="color: #8c959f; font-size: 11px; margin-left: 5px; user-select: none;">◼</span>'
+        # Include URL/context so the snippet id is stable and unique across the page.
+        links += _error_snippet_toggle_html(
+            dom_id_seed=f"{job_id}|{display_name}|{raw_log_href}|{log_url}",
+            snippet_text=snippet_text,
+        )
 
     return f"{icon} {id_html}{req_html}{name_html}{dur_html}{links}"
 
