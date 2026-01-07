@@ -10,10 +10,10 @@ It is designed to be dependency-light so it can be reused by:
 - `dynamo-utils/common.py`
 - `dynamo-utils/html_pages/*` dashboards
 
-Public API is re-exported from `ci_log_errors.core`.
+Public API is re-exported from `ci_log_errors.engine` (implementation) and `ci_log_errors.core` (CLI entrypoint).
 """
 
-from .core import (  # noqa: F401
+from .engine import (  # noqa: F401
     categorize_error_log_lines,
     categorize_error_snippet_text,
     extract_error_snippet_from_log_file,

@@ -427,14 +427,19 @@ class BranchNode:
 
     def to_tree_vm(self) -> TreeNodeVM:
         """Convert this node subtree into a TreeNodeVM tree (shared renderer)."""
-        # Default behavior: non-collapsible, always-expanded node.
-        # Subclasses that previously had custom expand/collapse UI should override this.
+        # Default behavior: **collapsible** node when it has children.
+        #
+        # UX: users expect a triangle (▶/▼) to expand/collapse branch sections and PR details.
+        # If we mark these nodes as non-collapsible, `render_tree_pre_lines()` will emit an empty
+        # placeholder span instead of the triangle, which looks broken/misaligned.
         key = f"{self.__class__.__name__}:{self.label}"
+        has_children = bool(self.children)
         return TreeNodeVM(
             node_key=key,
             label_html=self._format_html_content(),
             children=[c.to_tree_vm() for c in (self.children or [])],
-            collapsible=False,
+            collapsible=bool(has_children),
+            # Preserve historical behavior: expanded by default, but now user-toggleable.
             default_expanded=True,
         )
 

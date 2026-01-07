@@ -313,14 +313,14 @@ class CommitHistoryGenerator:
 
             cache_only_github = bool(getattr(self.github_client, "cache_only_mode", False))
             if pr_numbers and (not self.skip_gitlab_fetch) and (not cache_only_github):
-                    # Batch fetch merge dates for all PRs (GitHub)
-                    self.logger.info(f"Fetching merge dates for {len(pr_numbers)} PRs...")
+                # Batch fetch merge dates for all PRs (GitHub)
+                self.logger.info(f"Fetching merge dates for {len(pr_numbers)} PRs...")
                 t0 = phase_t.start()
-                    pr_to_merge_date = self.github_client.get_cached_pr_merge_dates(
-                        pr_numbers,
+                pr_to_merge_date = self.github_client.get_cached_pr_merge_dates(
+                    pr_numbers,
                     cache_file="github_pr_merge_dates.json",
                     stats=cache_stats,
-                    )
+                )
                 phase_t.stop("github_merge_dates", t0)
                 self.logger.info(
                     f"Got merge dates for {sum(1 for v in pr_to_merge_date.values() if v)} PRs"
@@ -331,11 +331,11 @@ class CommitHistoryGenerator:
                     # If skip_gitlab_fetch=True, we still read from cache (skip_fetch=True).
                     self.logger.info(f"Fetching required checks for {len(pr_numbers)} PRs...")
                 t0 = phase_t.start()
-                    pr_to_required_checks = self.github_client.get_cached_required_checks(
-                        pr_numbers,
-                        owner="ai-dynamo",
-                        repo="dynamo",
-                        cache_file="github_required_checks.json",
+                pr_to_required_checks = self.github_client.get_cached_required_checks(
+                    pr_numbers,
+                    owner="ai-dynamo",
+                    repo="dynamo",
+                    cache_file="github_required_checks.json",
                     skip_fetch=bool(self.skip_gitlab_fetch) or bool(cache_only_github),
                 )
                 phase_t.stop("github_required_checks", t0)
@@ -377,11 +377,11 @@ class CommitHistoryGenerator:
                         author_email = str(cached_entry.get("author_email") or "")
                         message_first_line = _clean_subject_line(cached_entry['message'])
                         merge_date = cached_entry.get('merge_date')
-                            full_message = cached_entry['full_message']
-                            files_changed = cached_entry['stats']['files']
-                            insertions = cached_entry['stats']['insertions']
-                            deletions = cached_entry['stats']['deletions']
-                            changed_files = cached_entry['changed_files']
+                        full_message = cached_entry['full_message']
+                        files_changed = cached_entry['stats']['files']
+                        insertions = cached_entry['stats']['insertions']
+                        deletions = cached_entry['stats']['deletions']
+                        changed_files = cached_entry['changed_files']
 
                         # Normalize cached subject line if needed.
                         try:
@@ -418,61 +418,63 @@ class CommitHistoryGenerator:
                         except Exception:
                             author_email = ""
                         message_first_line = _clean_subject_line(commit.message)
-
-                            pr_number = GitLabAPIClient.parse_mr_number_from_message(message_first_line)
-                            if pr_number and pr_number in pr_to_merge_date:
-                                merge_date = pr_to_merge_date[pr_number]
+                        pr_number = GitLabAPIClient.parse_mr_number_from_message(message_first_line)
+                        if pr_number and pr_number in pr_to_merge_date:
+                            merge_date = pr_to_merge_date[pr_number]
 
                         meta_stats["miss"] += 1
-                            try:
-                                repo.git.checkout(commit.hexsha)
-                                composite_sha = repo_utils.generate_composite_sha()
-                            except Exception as e:
-                                composite_sha = "ERROR"
-                                self.logger.error(f"Failed to calculate composite SHA for {sha_short}: {e}")
+                        try:
+                            repo.git.checkout(commit.hexsha)
+                            composite_sha = repo_utils.generate_composite_sha()
+                        except Exception as e:
+                            composite_sha = "ERROR"
+                            self.logger.error(f"Failed to calculate composite SHA for {sha_short}: {e}")
 
-                            stats = commit.stats.total
-                            files_changed = stats['files']
-                            insertions = stats['insertions']
-                            deletions = stats['deletions']
-                            full_message = commit.message.strip()
-                            changed_files = list(commit.stats.files.keys())
+                        stats = commit.stats.total
+                        files_changed = stats['files']
+                        insertions = stats['insertions']
+                        deletions = stats['deletions']
+                        full_message = commit.message.strip()
+                        changed_files = list(commit.stats.files.keys())
 
-                            cache[sha_full] = {
-                                'composite_docker_sha': composite_sha,
-                                'author': author_name,
-                            'author_email': author_email,
-                                'date': date_str,
-                            'merge_date': merge_date,
-                                'message': message_first_line,
-                                'full_message': full_message,
-                                'stats': {
-                                    'files': files_changed,
-                                    'insertions': insertions,
-                                'deletions': deletions,
-                                },
-                            'changed_files': changed_files,
-                            }
-                                cache_updated = True
-
-                        commit_data.append({
-                            'sha_short': sha_short,
-                            'sha_full': sha_full,
-                            'composite_sha': composite_sha,
-                            'date': date_str,
-                        'date_epoch': date_epoch,
-                        'merge_date': merge_date,
-                        'committed_datetime': commit.committed_datetime,
+                        cache[sha_full] = {
+                            'composite_docker_sha': composite_sha,
                             'author': author_name,
-                        'author_email': author_email,
+                            'author_email': author_email,
+                            'date': date_str,
+                            'merge_date': merge_date,
                             'message': message_first_line,
                             'full_message': full_message,
-                            'files_changed': files_changed,
-                            'insertions': insertions,
-                            'deletions': deletions,
-                        'changed_files': changed_files,
-                        })
-                        self.logger.debug(f"Processed commit {i+1}/{len(commits)}: {sha_short}")
+                            'stats': {
+                                'files': files_changed,
+                                'insertions': insertions,
+                                'deletions': deletions,
+                            },
+                            'changed_files': changed_files,
+                        }
+                        cache_updated = True
+
+                    # Always include this commit in the HTML, regardless of cache hit/miss.
+                    commit_data.append(
+                        {
+                            "sha_short": sha_short,
+                            "sha_full": sha_full,
+                            "composite_sha": composite_sha,
+                            "date": date_str,
+                            "date_epoch": date_epoch,
+                            "merge_date": merge_date,
+                            "committed_datetime": commit.committed_datetime,
+                            "author": author_name,
+                            "author_email": author_email,
+                            "message": message_first_line,
+                            "full_message": full_message,
+                            "files_changed": files_changed,
+                            "insertions": insertions,
+                            "deletions": deletions,
+                            "changed_files": changed_files,
+                        }
+                    )
+                    self.logger.debug(f"Processed commit {i+1}/{len(commits)}: {sha_short}")
 
                     sha_to_message_first_line[sha_full] = message_first_line
 
@@ -1098,7 +1100,7 @@ class CommitHistoryGenerator:
                     bg = green_a if (parity % 2 == 0) else green_b
                 elif st == STATUS_FAILED:
                     bg = red_a if (parity % 2 == 0) else red_b
-            else:
+                else:
                     bg = grey_a if (parity % 2 == 0) else grey_b
                 commit["image_label_bg_color"] = bg
                 commit["image_label_fg_color"] = _fg_for_bg(bg)
@@ -1108,7 +1110,7 @@ class CommitHistoryGenerator:
                     commit["composite_text_color"] = green_fg
                 elif st == STATUS_FAILED:
                     commit["composite_text_color"] = red_fg
-        else:
+                else:
                     commit["composite_text_color"] = neutral_fg
             except Exception:
                 continue
@@ -1341,7 +1343,7 @@ class CommitHistoryGenerator:
                             kind2 = classify_ci_kind(str(sub_name))
                             sub_id = f"{kind2}: {sub_name}" if kind2 and kind2 != "check" else str(sub_name)
                             node_key = f"gha-phase:{sha_full}:{sub_name}"
-                    else:
+                        else:
                             sub_id = str(sub_name)
                             node_key = f"gha-step:{sha_full}:{name}:{sub_name}"
 
