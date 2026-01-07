@@ -1207,6 +1207,37 @@ class RepoNode(BranchNode):
             return f'{repo_link}{link_suffix}\n<span class="error">⚠️  {self.error}</span>'
         return f"{repo_link}{link_suffix}"
 
+    def to_tree_vm(self) -> TreeNodeVM:
+        """Repo nodes are normally expandable, but symlink repos should be inert (no expansion).
+
+        UX: if a repo directory is a symlink, users asked to avoid showing/expanding any nested info
+        (branches/PRs/CI) since it is often just a pointer into another location.
+        """
+        key = f"{self.__class__.__name__}:{self.label}"
+        try:
+            p = Path(self.path) if self.path is not None else None
+            if p is not None and p.is_symlink():
+                return TreeNodeVM(
+                    node_key=key,
+                    label_html=self._format_html_content(),
+                    children=[],
+                    collapsible=False,
+                    default_expanded=False,
+                    noncollapsible_icon="square",
+                )
+        except Exception:
+            pass
+
+        # Default behavior for normal (non-symlink) repos: collapsible when it has children.
+        has_children = bool(self.children)
+        return TreeNodeVM(
+            node_key=key,
+            label_html=self._format_html_content(),
+            children=[c.to_tree_vm() for c in (self.children or [])],
+            collapsible=bool(has_children),
+            default_expanded=True,
+        )
+
 
 @dataclass
 class SectionNode(BranchNode):
@@ -1962,6 +1993,14 @@ class LocalRepoScanner:
         """Scan a single repository"""
         repo_name = f"{repo_dir.name}/"
         repo_node = RepoNode(label=repo_name, path=repo_dir)
+
+        # Symlink repos are intentionally treated as "pointers": show the repo line (with → target),
+        # but do not scan/render any nested info (branches/PR/CI). Also render as non-expandable in the UI.
+        try:
+            if Path(repo_dir).is_symlink():
+                return repo_node
+        except Exception:
+            pass
 
         if git is None:
             repo_node.error = "GitPython is required. Install with: pip install gitpython"
