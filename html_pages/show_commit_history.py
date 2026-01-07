@@ -1395,6 +1395,46 @@ class CommitHistoryGenerator:
         def _build_github_checks_tree_html(*, repo_path: Path, sha_full: str) -> str:
             gha = github_actions_status.get(sha_full) if github_actions_status else None
             check_runs = (gha.get("check_runs") if isinstance(gha, dict) else None) or []
+            # Inject "expected but missing" placeholder checks so the commit-history tree matches
+            # the local-branches tree UX (and makes missing required checks visible).
+            try:
+                from common_dashboard_lib import EXPECTED_CHECK_PLACEHOLDER_SYMBOL, EXPECTED_OPTIONAL_CHECK_NAMES  # local import
+                from common import normalize_check_name  # local import
+
+                present_norm = {
+                    normalize_check_name(str((cr or {}).get("name", "") or ""))
+                    for cr in (check_runs or [])
+                    if isinstance(cr, dict)
+                }
+                required_names: List[str] = []
+                try:
+                    # Branch protection required checks for main (best-effort; may be empty on 403).
+                    required_names = list(
+                        self.github_client.get_required_checks_for_base_ref(owner="ai-dynamo", repo="dynamo", base_ref="main") or []
+                    )
+                except Exception:
+                    required_names = []
+                required_norm = {normalize_check_name(x) for x in (required_names or []) if str(x).strip()}
+                expected_optional = {str(x) for x in (EXPECTED_OPTIONAL_CHECK_NAMES or set()) if str(x).strip()}
+                expected_all = sorted({*set(required_names or []), *expected_optional}, key=lambda s: str(s).lower())
+                for nm0 in expected_all:
+                    n0 = normalize_check_name(nm0)
+                    if n0 and n0 not in present_norm:
+                        check_runs.append(
+                            {
+                                "name": str(nm0),
+                                "status": "queued",
+                                "conclusion": "",
+                                "html_url": "",
+                                "details_url": "",
+                                "is_required": (n0 in required_norm),
+                                # Marker so rendering can show "— ◇" like branches page.
+                                "_expected_placeholder": True,
+                                "_expected_placeholder_symbol": EXPECTED_CHECK_PLACEHOLDER_SYMBOL,
+                            }
+                        )
+            except Exception:
+                pass
             check_runs = sort_github_check_runs_by_name(check_runs)  # shared ordering
             if not check_runs:
                 # Always render a stable placeholder so every commit row can show the dropdown.
@@ -1456,10 +1496,11 @@ class CommitHistoryGenerator:
                 name = str(cr.get("name", "") or "").strip()
                 if not name:
                     continue
-                url = str(cr.get("html_url", "") or cr.get("details_url", "") or "").strip()
+                is_expected_placeholder = bool(cr.get("_expected_placeholder", False))
+                url = "" if is_expected_placeholder else str(cr.get("html_url", "") or cr.get("details_url", "") or "").strip()
                 st = _status_norm_for_check_run(status=str(cr.get("status", "") or ""), conclusion=str(cr.get("conclusion", "") or ""))
                 is_req = bool(cr.get("is_required", False))
-                dur = format_gh_check_run_duration(cr)
+                dur = "" if is_expected_placeholder else format_gh_check_run_duration(cr)
 
                 raw_href = ""
                 if st == "failure" and str(cr.get("status", "") or "").lower() == "completed":
@@ -1569,11 +1610,17 @@ class CommitHistoryGenerator:
                     subsection_children = []
 
                 leaf_name = disambiguate_check_run_name(name, url, name_counts=name_counts)
+                disp = ""
+                try:
+                    if is_expected_placeholder:
+                        disp = str(cr.get("_expected_placeholder_symbol") or "")
+                except Exception:
+                    disp = ""
                 node = TreeNodeVM(
                         node_key=f"gha:{sha_full}:{leaf_name}:{extract_actions_job_id_from_url(url) or url}",
                         label_html=check_line_html(
                             job_id=job_id if leaf_name == name else f"{job_id} [{leaf_name}]",
-                            display_name="",
+                            display_name=str(disp or ""),
                             status_norm=st_eff,
                             is_required=is_req,
                             duration=dur,
@@ -1595,6 +1642,7 @@ class CommitHistoryGenerator:
             try:
                 from common_github_workflow import group_ci_nodes_by_workflow_needs  # local import
                 from common_dashboard_lib import mark_success_with_descendant_failures  # local import
+                from common_dashboard_lib import reorder_children_by_arch  # local import
                 from common_dashboard_lib import expand_nodes_with_in_progress_descendants  # local import
                 from common_dashboard_lib import expand_nodes_with_required_failure_descendants  # local import
 
@@ -1606,6 +1654,7 @@ class CommitHistoryGenerator:
                     or []
                 )
                 children = mark_success_with_descendant_failures(list(children or []))
+                children = reorder_children_by_arch(list(children or []))
                 # Post-pass (requested UX): if workflow grouping moved nodes under parents, ensure
                 # any ancestor of a REQUIRED failure is expanded by default.
                 children = expand_nodes_with_required_failure_descendants(list(children or []))

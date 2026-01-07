@@ -500,17 +500,21 @@ function initCommitColumnToggles() {
     cbs.forEach(function(cb) {
         var key = cb.getAttribute('data-col') || '';
         if (!key) return;
-        // Force a stable default regardless of browser form-state restoration.
-        // (DashboardUrlState may override this before we run; localStorage may override below.)
-        try {
-            cb.checked = (String(cb.getAttribute('data-url-state') || '') === '1');
-        } catch (e) {}
-        // URL overrides localStorage when present.
+        // URL overrides everything when present (DashboardUrlState will have set `cb.checked` already).
         try {
             if (window.DashboardUrlState && window.DashboardUrlState.has('col.' + key)) {
                 applyCommitColumn(key, !!cb.checked, false);
                 return;
             }
+        } catch (e) {}
+        // Force a stable default regardless of browser form-state restoration.
+        // (localStorage may override below.)
+        try {
+            var def = cb.getAttribute('data-url-default');
+            if (def === null || def === undefined || String(def) === '') {
+                def = cb.getAttribute('data-url-state');  // backward compat
+            }
+            cb.checked = (String(def || '') === '1');
         } catch (e) {}
         try {
             var saved = localStorage.getItem('commitHistoryCol:v3:' + key);
@@ -752,9 +756,11 @@ Notes:
 <tr>
 <th>Commit SHA</th>
 {# Column header layout policy: checkbox, icon, description (in that order). #}
-<th class="col-composite"><label class="col-toggle"><input class="commit-col-toggle" type="checkbox" data-col="composite" data-url-state="0" data-url-key="col.composite" onchange="toggleCommitColumn(this)"><span class="col-icon" title="Image SHA">🐳</span><span class="col-title-text">Image SHA</span></label></th>
-<th class="col-github"><label class="col-toggle"><input class="commit-col-toggle" type="checkbox" checked data-col="github" data-url-state="1" data-url-key="col.github" onchange="toggleCommitColumn(this)"><span class="col-icon" title="GitHub Status"><svg height="14" width="14" viewBox="0 0 16 16" fill="currentColor" style="display: inline-block; vertical-align: middle;"><path fill-rule="evenodd" clip-rule="evenodd" d="M8 0C3.58 0 0 3.58 0 8C0 11.54 2.29 14.53 5.47 15.59C5.87 15.66 6.02 15.42 6.02 15.21C6.02 15.02 6.01 14.39 6.01 13.72C4 14.09 3.48 13.23 3.32 12.78C3.23 12.55 2.84 11.84 2.5 11.65C2.22 11.5 1.82 11.13 2.49 11.12C3.12 11.11 3.57 11.7 3.72 11.94C4.44 13.15 5.59 12.81 6.05 12.6C6.12 12.08 6.33 11.73 6.56 11.53C4.78 11.33 2.92 10.64 2.92 7.58C2.92 6.71 3.23 5.99 3.74 5.43C3.66 5.23 3.38 4.41 3.82 3.31C3.82 3.31 4.49 3.1 6.02 4.13C6.66 3.95 7.34 3.86 8.02 3.86C8.7 3.86 9.38 3.95 10.02 4.13C11.55 3.09 12.22 3.31 12.22 3.31C12.66 4.41 12.38 5.23 12.3 5.43C12.81 5.99 13.12 6.7 13.12 7.58C13.12 10.65 11.25 11.33 9.47 11.53C9.76 11.78 10.01 12.26 10.01 13.01C10.01 14.08 10 14.94 10 15.21C10 15.42 10.15 15.67 10.55 15.59C13.71 14.53 16 11.53 16 8C16 3.58 12.42 0 8 0Z"></path></svg></span><span class="col-title-text">GitHub Status</span></label></th>
-<th class="col-gitlab"><label class="col-toggle"><input class="commit-col-toggle" type="checkbox" data-col="gitlab" data-url-state="0" data-url-key="col.gitlab" onchange="toggleCommitColumn(this)"><span class="col-icon" title="GitLab Status">🦊</span><span class="col-title-text">GitLab Status</span></label></th>
+{# NOTE: `data-url-state="1"` opts into URL syncing (common_dashboard.j2 DashboardUrlState). #}
+{# We keep desired defaults in `data-url-default` so the JS can override browser form restoration. #}
+<th class="col-composite"><label class="col-toggle"><input class="commit-col-toggle" type="checkbox" data-col="composite" data-url-state="1" data-url-default="0" data-url-key="col.composite" onchange="toggleCommitColumn(this)"><span class="col-icon" title="Image SHA">🐳</span><span class="col-title-text">Image SHA</span></label></th>
+<th class="col-github"><label class="col-toggle"><input class="commit-col-toggle" type="checkbox" checked data-col="github" data-url-state="1" data-url-default="1" data-url-key="col.github" onchange="toggleCommitColumn(this)"><span class="col-icon" title="GitHub Status"><svg height="14" width="14" viewBox="0 0 16 16" fill="currentColor" style="display: inline-block; vertical-align: middle;"><path fill-rule="evenodd" clip-rule="evenodd" d="M8 0C3.58 0 0 3.58 0 8C0 11.54 2.29 14.53 5.47 15.59C5.87 15.66 6.02 15.42 6.02 15.21C6.02 15.02 6.01 14.39 6.01 13.72C4 14.09 3.48 13.23 3.32 12.78C3.23 12.55 2.84 11.84 2.5 11.65C2.22 11.5 1.82 11.13 2.49 11.12C3.12 11.11 3.57 11.7 3.72 11.94C4.44 13.15 5.59 12.81 6.05 12.6C6.12 12.08 6.33 11.73 6.56 11.53C4.78 11.33 2.92 10.64 2.92 7.58C2.92 6.71 3.23 5.99 3.74 5.43C3.66 5.23 3.38 4.41 3.82 3.31C3.82 3.31 4.49 3.1 6.02 4.13C6.66 3.95 7.34 3.86 8.02 3.86C8.7 3.86 9.38 3.95 10.02 4.13C11.55 3.09 12.22 3.31 12.22 3.31C12.66 4.41 12.38 5.23 12.3 5.43C12.81 5.99 13.12 6.7 13.12 7.58C13.12 10.65 11.25 11.33 9.47 11.53C9.76 11.78 10.01 12.26 10.01 13.01C10.01 14.08 10 14.94 10 15.21C10 15.42 10.15 15.67 10.55 15.59C13.71 14.53 16 11.53 16 8C16 3.58 12.42 0 8 0Z"></path></svg></span><span class="col-title-text">GitHub Status</span></label></th>
+<th class="col-gitlab"><label class="col-toggle"><input class="commit-col-toggle" type="checkbox" data-col="gitlab" data-url-state="1" data-url-default="0" data-url-key="col.gitlab" onchange="toggleCommitColumn(this)"><span class="col-icon" title="GitLab Status">🦊</span><span class="col-title-text">GitLab Status</span></label></th>
 <th class="col-date">
   <span class="date-header-controls">
     <label class="col-toggle">
@@ -767,9 +773,9 @@ Notes:
     </label>
   </span>
 </th>
-<th class="col-author"><label class="col-toggle"><input class="commit-col-toggle" type="checkbox" checked data-col="author" data-url-state="1" data-url-key="col.author" onchange="toggleCommitColumn(this)"><span class="col-icon" title="Author">👤</span><span class="col-title-text">Author</span></label></th>
-<th class="col-email"><label class="col-toggle"><input class="commit-col-toggle" type="checkbox" data-col="email" data-url-state="1" data-url-key="col.email" onchange="toggleCommitColumn(this)"><span class="col-icon" title="Email">📧</span><span class="col-title-text">Email</span></label></th>
-<th class="col-message"><label class="col-toggle"><input class="commit-col-toggle" type="checkbox" checked data-col="message" data-url-state="1" data-url-key="col.message" onchange="toggleCommitColumn(this)"><span class="col-title-text">Message</span></label></th>
+<th class="col-author"><label class="col-toggle"><input class="commit-col-toggle" type="checkbox" checked data-col="author" data-url-state="1" data-url-default="1" data-url-key="col.author" onchange="toggleCommitColumn(this)"><span class="col-icon" title="Author">👤</span><span class="col-title-text">Author</span></label></th>
+<th class="col-email"><label class="col-toggle"><input class="commit-col-toggle" type="checkbox" data-col="email" data-url-state="1" data-url-default="1" data-url-key="col.email" onchange="toggleCommitColumn(this)"><span class="col-icon" title="Email">📧</span><span class="col-title-text">Email</span></label></th>
+<th class="col-message"><label class="col-toggle"><input class="commit-col-toggle" type="checkbox" checked data-col="message" data-url-state="1" data-url-default="1" data-url-key="col.message" onchange="toggleCommitColumn(this)"><span class="col-title-text">Message</span></label></th>
 </tr>
 </thead>
 <tbody>

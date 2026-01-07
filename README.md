@@ -81,11 +81,11 @@ python3 py_indent_report.py --self-check
 ## Dashboards / log categorization pitfalls (learnings)
 
 Repeated mistakes we hit while iterating on `dynamo-utils/html_pages/*` dashboards and
-`dynamo-utils/ci_log_errors/core.py` (shared library + CLI):
+`dynamo-utils/ci_log_errors/*` (shared library + CLI):
 
 - **Golden logs + self-test discipline**
   - After changing categorization/snippet logic, run:
-    - `python3 dynamo-utils/ci_log_errors/core.py --self-test-examples`
+    - `cd dynamo-utils && python3 -m ci_log_errors --self-test-examples`
   - If you update the “Category frequency summary”, ensure every category has at least one golden
     training example in the docstring list.
   - Golden logs must be preserved: keep them **non-writable**; scans/retrain helpers should not

@@ -1289,7 +1289,7 @@ def extract_error_snippet_from_text(
     except Exception:
         # Debugging aid: snippet extraction is intentionally best-effort and swallows many errors to
         # avoid breaking dashboards. During refactors, enable this to surface the root cause:
-        #   CI_LOG_ERRORS_DEBUG=1 python3 ci_log_errors/core.py <log>
+        #   CI_LOG_ERRORS_DEBUG=1 python3 -m ci_log_errors <log>
         if os.getenv("CI_LOG_ERRORS_DEBUG"):
             import traceback
 

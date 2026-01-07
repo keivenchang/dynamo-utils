@@ -42,6 +42,8 @@ except Exception:  # pragma: no cover
 # Shared dashboard helpers (UI + workflow graph)
 from common_dashboard_lib import (
     CIStatus,
+    EXPECTED_CHECK_PLACEHOLDER_SYMBOL,
+    EXPECTED_OPTIONAL_CHECK_NAMES,
     PASS_PLUS_STYLE,
     TreeNodeVM,
     check_line_html,
@@ -96,7 +98,6 @@ from common import (
 DYNAMO_OWNER = "ai-dynamo"
 DYNAMO_REPO = "dynamo"
 DYNAMO_REPO_SLUG = f"{DYNAMO_OWNER}/{DYNAMO_REPO}"
-
 
 class RawLogValidationError(RuntimeError):
     """Raised when we expect a local `[raw log]` for a failed Actions job but cannot produce one."""
@@ -759,6 +760,36 @@ def _build_ci_hierarchy_nodes(
     if not rows:
         return []
 
+    # Inject placeholders for expected checks that are missing from the reported contexts.
+    #
+    # This makes "missing required checks" visible even when GitHub never posts a check context for them.
+    try:
+        present_norm = {common.normalize_check_name(str(getattr(r, "name", "") or "")) for r in (rows or [])}
+        expected_required = {str(x) for x in (required_set or set()) if str(x).strip()}
+        expected_optional = {str(x) for x in (EXPECTED_OPTIONAL_CHECK_NAMES or set()) if str(x).strip()}
+        expected_all = sorted({*expected_required, *expected_optional}, key=lambda s: str(s).lower())
+        required_norm = {common.normalize_check_name(x) for x in expected_required}
+        missing = []
+        for nm0 in expected_all:
+            n0 = common.normalize_check_name(nm0)
+            if n0 and n0 not in present_norm:
+                missing.append(nm0)
+        for nm0 in missing:
+            rows.append(
+                GHPRCheckRow(
+                    name=str(nm0),
+                    status_raw="pending",
+                    duration="",
+                    url="",
+                    run_id="",
+                    job_id="",
+                    description="expected",
+                    is_required=(common.normalize_check_name(nm0) in required_norm),
+                )
+            )
+    except Exception:
+        pass
+
     # Sort by job name for stable/scan-friendly output (same order as Details list).
     rows = sort_pr_check_rows_by_name(list(rows))
 
@@ -869,6 +900,12 @@ def _build_ci_hierarchy_nodes(
                     display_name = f"{nm} [run {rid}]"
         except Exception:
             display_name = ""
+        # Placeholder check row (expected but not yet reported).
+        try:
+            if (not display_name) and (not job_url) and str(getattr(r, "description", "") or "").strip().lower() == "expected":
+                display_name = EXPECTED_CHECK_PLACEHOLDER_SYMBOL
+        except Exception:
+            pass
 
         node = CIJobTreeNode(
             label="",
@@ -992,7 +1029,11 @@ def _build_ci_hierarchy_nodes(
                 repo_root=Path(repo_path),
                 items=[
                     (
-                        re.sub(r"^[a-z]+:\\s+", "", str(getattr(n, "display_name", "") or getattr(n, "job_id", "") or ""), flags=re.IGNORECASE),
+                        # IMPORTANT: use the actual check/job name for workflow matching.
+                        #
+                        # `display_name` is for UI disambiguation (and may be a placeholder symbol like "◇"),
+                        # and must NOT be used as the workflow grouping key.
+                        re.sub(r"^[a-z]+:\\s+", "", str(getattr(n, "job_id", "") or ""), flags=re.IGNORECASE),
                         n,
                     )
                     for n in (out or [])
@@ -1000,6 +1041,52 @@ def _build_ci_hierarchy_nodes(
             )
             or []
         )
+    except Exception:
+        pass
+
+    # Post-pass: if a parent has both (amd64) and (arm64) children, group them by arch:
+    # - non-arch children first
+    # - all (amd64)
+    # - all (arm64)
+    try:
+        _ARCH_RE = re.compile(r"\((amd64|arm64)\)", re.IGNORECASE)
+
+        def _arch_rank(job_id: str) -> int:
+            s = str(job_id or "")
+            m = _ARCH_RE.search(s)
+            if not m:
+                return 0
+            a = str(m.group(1) or "").strip().lower()
+            if a == "amd64":
+                return 1
+            if a == "arm64":
+                return 2
+            return 3
+
+        def walk(n: BranchNode) -> None:
+            kids = list(getattr(n, "children", None) or [])
+            for ch in kids:
+                if isinstance(ch, BranchNode):
+                    walk(ch)
+            # Only reorder CIJobTreeNode children; preserve other tree sections.
+            if not isinstance(n, CIJobTreeNode):
+                return
+            kids2 = [k for k in kids if isinstance(k, CIJobTreeNode)]
+            if not kids2:
+                return
+            ranks = [_arch_rank(getattr(k, "job_id", "")) for k in kids2]
+            if not (any(r == 1 for r in ranks) and any(r == 2 for r in ranks)):
+                return
+            buckets = {0: [], 1: [], 2: [], 3: []}
+            for k in kids2:
+                buckets[_arch_rank(getattr(k, "job_id", ""))].append(k)
+            # Keep any non-CIJobTreeNode children (rare) at the front in original order.
+            non_ci = [k for k in kids if not isinstance(k, CIJobTreeNode)]
+            n.children = non_ci + buckets[0] + buckets[1] + buckets[2] + buckets[3]
+
+        for top in (out or []):
+            if isinstance(top, BranchNode):
+                walk(top)
     except Exception:
         pass
 

@@ -110,7 +110,7 @@ Golden-log workflow (IMPORTANT for future edits):
 - These example logs are treated as *golden training set* for regression testing. Keep them read-only:
   - `chmod a-w /home/keivenc/nvidia/raw-log-text/<job_id>.log`
 - After changing rules/regexes/snippet logic, run the built-in self-test:
-  - `python3 dynamo-utils/ci_log_errors/core.py --self-test-examples`
+  - `cd dynamo-utils && python3 -m ci_log_errors --self-test-examples`
   - This parses the "Examples:" list above, loads each log from `~/.cache/dynamo-utils/raw-log-text/`
     (or `$DYNAMO_UTILS_CACHE_DIR/raw-log-text`), and reports
     missing/extra categories for both full-log categorization and snippet-derived categorization.

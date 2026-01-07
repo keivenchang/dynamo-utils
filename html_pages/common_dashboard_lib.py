@@ -106,6 +106,22 @@ COLOR_GREEN = "#2da44e"
 COLOR_RED = "#c83a3a"
 COLOR_GREY = "#8c959f"
 
+# CI UX: show "expected but not yet reported" checks.
+#
+# GitHub required-ness APIs only return contexts that already exist on the commit. For checks that are
+# expected (especially required checks) but never start / never post a check-run context (e.g. filtered out),
+# the dashboards used to show *nothing*, which is confusing.
+#
+# Both dashboards should use the exact same symbol so their trees look identical.
+EXPECTED_CHECK_PLACEHOLDER_SYMBOL = "◇"
+
+# Small curated optional set to show as expectations even when branch-protection required checks are unavailable.
+# (Required expectations come from branch protection / PRInfo where possible.)
+EXPECTED_OPTIONAL_CHECK_NAMES = {
+    "backend-status-check",
+    "dynamo-status-check",
+}
+
 # Back-compat: older callsites import this for the optional pass count styling in the compact CI summary.
 # (The current compact rendering no longer uses a "+N" format, but keep the constant to avoid crashes.)
 PASS_PLUS_STYLE = "font-size: 10px; font-weight: 600; opacity: 0.9;"
@@ -409,6 +425,65 @@ def expand_nodes_with_in_progress_descendants(nodes: List[TreeNodeVM]) -> List[T
         try:
             n2, _ = walk(n)
             out.append(n2)
+        except Exception:
+            out.append(n)
+    return out
+
+
+def reorder_children_by_arch(nodes: List[TreeNodeVM]) -> List[TreeNodeVM]:
+    """Reorder children so arch-specific matrix jobs are grouped by arch.
+
+    Requested UX:
+    - if a parent has many arch-qualified children like `vllm (amd64)` / `vllm (arm64)`,
+      group them as:
+        - non-arch children first (preserve relative order)
+        - all `(amd64)` children
+        - all `(arm64)` children
+
+    This is a post-pass and is safe to run after workflow `needs` grouping.
+    """
+    _ARCH_RE = re.compile(r"\((amd64|arm64)\)", re.IGNORECASE)
+
+    def _arch_rank(label_html: str) -> int:
+        h = str(label_html or "")
+        m = _ARCH_RE.search(h)
+        if not m:
+            return 0  # non-arch first
+        arch = str(m.group(1) or "").strip().lower()
+        if arch == "amd64":
+            return 1
+        if arch == "arm64":
+            return 2
+        return 3
+
+    def walk(n: TreeNodeVM) -> TreeNodeVM:
+        new_children = [walk(ch) for ch in (n.children or [])]
+
+        # Only reorder when we actually have both arch groups present.
+        ranks = [_arch_rank(ch.label_html) for ch in new_children]
+        has_amd = any(r == 1 for r in ranks)
+        has_arm = any(r == 2 for r in ranks)
+        if has_amd and has_arm:
+            # Stable bucket order; preserve relative ordering within each bucket.
+            buckets = {0: [], 1: [], 2: [], 3: []}
+            for ch in new_children:
+                buckets[_arch_rank(ch.label_html)].append(ch)
+            new_children = buckets[0] + buckets[1] + buckets[2] + buckets[3]
+
+        return TreeNodeVM(
+            node_key=str(n.node_key or ""),
+            label_html=str(n.label_html or ""),
+            children=new_children,
+            collapsible=bool(n.collapsible),
+            default_expanded=bool(n.default_expanded),
+            triangle_tooltip=n.triangle_tooltip,
+            noncollapsible_icon=getattr(n, "noncollapsible_icon", ""),
+        )
+
+    out: List[TreeNodeVM] = []
+    for n in (nodes or []):
+        try:
+            out.append(walk(n))
         except Exception:
             out.append(n)
     return out
