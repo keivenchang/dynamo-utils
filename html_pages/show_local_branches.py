@@ -1150,9 +1150,24 @@ class RepoNode(BranchNode):
     is_correct_repo: bool = True
 
     def _format_content(self) -> str:
+        # If the repository directory itself is a symlink, show the target for clarity.
+        link_suffix = ""
+        try:
+            p = Path(self.path) if self.path is not None else None
+            if p is not None and p.is_symlink():
+                tgt = ""
+                try:
+                    tgt = os.readlink(p)
+                except Exception:
+                    tgt = ""
+                if tgt:
+                    link_suffix = f" -> {tgt}"
+        except Exception:
+            link_suffix = ""
+
         if self.error:
-            return f"\033[1m{self.label}\033[0m\n  \033[91m⚠️  {self.error}\033[0m"
-        return f"\033[1m{self.label}\033[0m"
+            return f"\033[1m{self.label}\033[0m{link_suffix}\n  \033[91m⚠️  {self.error}\033[0m"
+        return f"\033[1m{self.label}\033[0m{link_suffix}"
 
     def _format_html_content(self) -> str:
         # Make repo name clickable (relative URL to the directory)
@@ -1160,9 +1175,37 @@ class RepoNode(BranchNode):
         repo_dirname = self.label.rstrip('/')
         repo_link = f'<a href="{repo_dirname}/" class="repo-name">{self.label}</a>'
 
+        # If the repository directory itself is a symlink, show the target for clarity.
+        #
+        # Keep this compact; show the raw link target (often relative) and include the resolved
+        # absolute target as a tooltip.
+        link_suffix = ""
+        try:
+            p = Path(self.path) if self.path is not None else None
+            if p is not None and p.is_symlink():
+                tgt = ""
+                try:
+                    tgt = os.readlink(p)
+                except Exception:
+                    tgt = ""
+                resolved = ""
+                try:
+                    resolved = str(p.resolve())
+                except Exception:
+                    resolved = ""
+                if tgt:
+                    title = f' title="{html.escape(resolved, quote=True)}"' if resolved else ""
+                    link_suffix = (
+                        f' <span style="color: #57606a; font-size: 12px; user-select: none;"{title}>'
+                        f'→ {html.escape(str(tgt), quote=False)}'
+                        f"</span>"
+                    )
+        except Exception:
+            link_suffix = ""
+
         if self.error:
-            return f'{repo_link}\n<span class="error">⚠️  {self.error}</span>'
-        return repo_link
+            return f'{repo_link}{link_suffix}\n<span class="error">⚠️  {self.error}</span>'
+        return f"{repo_link}{link_suffix}"
 
 
 @dataclass
