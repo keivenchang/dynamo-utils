@@ -468,6 +468,14 @@ def extract_error_snippet_from_text(
             # The explicit FAILED test id line is the anchor itself, but ensure it’s present.
             add_last(PYTEST_FAILED_LINE_RE)
             add_last(SNIPPET_PYTEST_TIMEOUT_E_LINE_RE)
+            # Common infra/runtime failures surfaced inside pytest output (high-signal, easy to miss).
+            # Example: "port 8081 already in use" from dynamo frontend startup.
+            add_last(
+                re.compile(
+                    r"(?:Address\s+already\s+in\s+use|port\s+\d+\s+already\s+in\s+use|Failed\s+to\s+bind\s+server|Failed\s+to\s+start\s+HTTP\s+server)",
+                    re.IGNORECASE,
+                )
+            )
 
         # Ensure we include the last docker daemon error line if present (high-signal and easy to miss).
         if last_docker_daemon_err is not None:
@@ -1435,7 +1443,19 @@ def extract_error_snippet_from_log_file(
     best-effort "second pass" with a larger tail window when the first pass yields no command blocks.
     """
     p = Path(log_path)
+    # Some CI logs have large post-failure epilogues (artifact upload, env dumps, etc) which can
+    # push the actual failure block *out* of a small tail window. If the file is small enough,
+    # just read it entirely. Otherwise, do a best-effort progressive tail expansion.
+    try:
+        size_b = int(p.stat().st_size)
+    except Exception:
+        size_b = 0
+
     tb = int(tail_bytes)
+    # If the file is small-ish, it's cheaper and more reliable to read the whole thing.
+    if size_b and size_b <= 4 * 1024 * 1024:
+        tb = 0
+
     txt = _read_text_tail(p, max_bytes=int(tb))
     snip = extract_error_snippet_from_text(
         txt,
@@ -1444,6 +1464,28 @@ def extract_error_snippet_from_log_file(
         max_lines=max_lines,
         max_chars=max_chars,
     )
+
+    def _has_high_signal(s: str) -> bool:
+        try:
+            t = (s or "").lower()
+            return any(
+                x in t
+                for x in (
+                    "short test summary info",
+                    "\nfailed ",
+                    "traceback (most recent call last)",
+                    "modulenotfounderror",
+                    "assertionerror",
+                    "address already in use",
+                    "port ",
+                    "already in use",
+                    "test result: failed",
+                    "process completed with exit code",
+                    "tests completed with exit code",
+                )
+            )
+        except Exception:
+            return False
 
     # If we didn't find command blocks for a pytest/rust failure, retry with a larger tail window.
     try:
@@ -1463,6 +1505,24 @@ def extract_error_snippet_from_log_file(
                 )
                 if "[[CMD]]" in (snip2 or ""):
                     return snip2
+    except Exception:
+        pass
+
+    # If the tail window likely missed the real failure, expand and try again (bounded).
+    try:
+        if tb > 0 and not _has_high_signal(txt) and size_b and size_b > tb:
+            tb3 = min(size_b, max(tb, 2 * 1024 * 1024, 4 * tb))
+            txt3 = _read_text_tail(p, max_bytes=int(tb3))
+            snip3 = extract_error_snippet_from_text(
+                txt3,
+                context_before=context_before,
+                context_after=context_after,
+                max_lines=max_lines,
+                max_chars=max_chars,
+            )
+            # Prefer the expanded snippet if it contains more high-signal content.
+            if _has_high_signal(snip3) and not _has_high_signal(snip):
+                return snip3
     except Exception:
         pass
 
