@@ -30,7 +30,7 @@ from zoneinfo import ZoneInfo
 
 from common_types import CIStatus, MarkerStatus
 
-# Log/snippet detection lives in `common_log_errors.py`.
+# Log/snippet detection lives in the shared library: `dynamo-utils/log_errors/`.
 
 # ======================================================================================
 # API inventory (where the dashboard data comes from)
@@ -5066,7 +5066,7 @@ query($owner:String!,$name:String!,$number:Int!,$prid:ID!) {
 
             # Prefer the purpose-built snippet extractor (lazily imported to avoid heavy deps at import time).
             try:
-                from common_log_errors import extract_error_snippet_from_text  # type: ignore
+                from log_errors import extract_error_snippet_from_text  # type: ignore
 
                 snippet = extract_error_snippet_from_text(txt)
                 snippet = (snippet or "").strip()

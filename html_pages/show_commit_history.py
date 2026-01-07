@@ -62,8 +62,8 @@ from common_dashboard_runtime import (
     prune_partial_raw_log_caches,
 )
 
-# Log/snippet helpers
-from common_log_errors import extract_error_snippet_from_log_file
+# Log/snippet helpers (shared library: `dynamo-utils/log_errors/`)
+from log_errors import extract_error_snippet_from_log_file
 
 # Import utilities from common module
 import common
