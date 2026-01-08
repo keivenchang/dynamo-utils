@@ -294,26 +294,79 @@ def main() -> int:
     except Exception:
         prs_latest = list(prs_list)
 
-    # Tree HTML for both sort orders (JS toggles which one is shown; URL param 'sort' persists it).
+    # Generate branch-level tree blocks with sort metadata
+    # Each PR gets rendered once, wrapped in a container with data attributes for sorting
     from common_dashboard_lib import render_tree_pre_lines  # local import
-
-    root_latest = build_root(prs_latest)
-    root_branch = build_root(prs_branch)
-
-    def _tree_html_for_root(rr: BranchNode) -> str:
-        lines: List[str] = []
-        for i, child in enumerate(rr.children):
-            is_last = i == len(rr.children) - 1
-            lines.extend(render_tree_pre_lines([child.to_tree_vm()]))
-            if not is_last:
-                lines.append("")
-        return "\n".join(lines).rstrip() + "\n"
-
-    tree_html_latest = _tree_html_for_root(root_latest) if prs_latest else "(no PRs)\n"
-    tree_html_branch = _tree_html_for_root(root_branch) if prs_branch else "(no PRs)\n"
+    
+    # Build a mapping of PR number to rendered node
+    root_for_render = build_root(prs_latest)
+    pr_nodes = {}  # pr_number -> BranchNode
+    for child in root_for_render.children:
+        # Try to extract PR number from the node
+        # The node structure has the PR embedded, let's find it
+        try:
+            # Look for PRNode or PRStatusNode children that have a 'pr' attribute
+            def find_pr(node):
+                if hasattr(node, 'pr') and hasattr(node.pr, 'number'):
+                    return node.pr
+                for c in (getattr(node, 'children', None) or []):
+                    pr = find_pr(c)
+                    if pr:
+                        return pr
+                return None
+            
+            pr = find_pr(child)
+            if pr and hasattr(pr, 'number'):
+                pr_nodes[int(pr.number)] = child
+        except Exception:
+            pass
+    
+    # Render each PR as a separate block with sort keys
+    tree_blocks = []
+    for pr in prs_latest:
+        pr_num = int(getattr(pr, "number", 0) or 0)
+        if pr_num not in pr_nodes:
+            continue
+            
+        child = pr_nodes[pr_num]
+        branch_name = _branch_display_for_pr(pr)
+        updated_dt = _dt_from_iso(str(getattr(pr, "updated_at", "") or ""))
+        created_dt = _dt_from_iso(str(getattr(pr, "created_at", "") or ""))
+        
+        # For sorting by "modified", fallback to created_dt if updated_dt is unavailable (cache-only mode).
+        sort_modified_dt = updated_dt if updated_dt else created_dt
+        
+        # Sort keys:
+        # - Latest modified: by update time (desc), then PR number (desc)
+        latest_modified_key = f"{-(sort_modified_dt.timestamp() if sort_modified_dt else 0):.6f}_{-pr_num}"
+        # - Latest created: by creation time (desc), then PR number (desc)
+        latest_created_key = f"{-(created_dt.timestamp() if created_dt else 0):.6f}_{-pr_num}"
+        # - Branch name: by branch name (case-insensitive), then PR number (desc)  
+        branch_key = f"{branch_name.lower()}_{-pr_num}"
+        
+        # Render this branch's tree
+        block_html = "\n".join(render_tree_pre_lines([child.to_tree_vm()]))
+        
+        tree_blocks.append({
+            'html': block_html,
+            'sort_latest': latest_modified_key,  # Keep for backward compatibility
+            'sort_modified': latest_modified_key,
+            'sort_created': latest_created_key,
+            'sort_branch': branch_key,
+            'pr_num': pr_num,
+        })
+    
+    # Generate wrapped HTML
+    tree_html_wrapped = ""
+    for i, block in enumerate(tree_blocks):
+        tree_html_wrapped += f'<div class="sortable-branch" data-sort-latest="{block["sort_latest"]}" data-sort-modified="{block["sort_modified"]}" data-sort-created="{block["sort_created"]}" data-sort-branch="{block["sort_branch"]}" data-pr-num="{block["pr_num"]}">'
+        tree_html_wrapped += block['html']
+        tree_html_wrapped += "</div>\n"
 
     if not prs:
-        root.add_child(BranchNode(label=f"(no open PRs found for {user} in {owner}/{repo})"))
+        root_latest = build_root([])
+        root_latest.add_child(BranchNode(label=f"(no open PRs found for {user} in {owner}/{repo})"))
+        tree_html_wrapped = "\n".join(render_tree_pre_lines([root_latest.children[0].to_tree_vm()]))
 
     elapsed_s = max(0.0, time.monotonic() - t0)
     page_stats = [
@@ -344,13 +397,14 @@ def main() -> int:
     # If the CLI requested a particular sort, reflect it as the default (JS still allows switching).
     tree_sort_default = str(args.sort or "latest").strip().lower()
     html = generate_html(
-        root_latest,
+        build_root(prs_latest) if prs_latest else build_root([]),
         page_stats=page_stats,
         page_title=f"Remote PR Info ({user})",
         header_title=f"Remote PR Info ({user})",
-        tree_html_override=tree_html_latest,
-        tree_html_alt=tree_html_branch,
+        tree_html_override=tree_html_wrapped,
+        tree_html_alt=None,  # No longer need alternate tree
         tree_sort_default=tree_sort_default,
+        tree_sortable=True,  # Enable client-side sorting
     )
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(html, encoding="utf-8")

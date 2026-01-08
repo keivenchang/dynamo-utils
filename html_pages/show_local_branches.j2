@@ -117,10 +117,121 @@
     </details>
   </div>
 
-  {# Optional sort control for pages that provide an alternate ordering (used by remote PR dashboard). #}
+  {# Optional sort control for pages that provide sortable branches #}
   {% set _tree_alt = (tree_html_alt or "") %}
-  {% if _tree_alt.strip() %}
-    <div class="container" style="margin-bottom: 6px; padding: 8px 12px; background-color: #ffffff; border: 1px solid #d0d7de; border-radius: 6px;">
+  {% if tree_sortable is defined and tree_sortable %}
+    <style>
+      .sortable-branch {
+        padding-bottom: 1.5em;
+      }
+      .sortable-branch:first-child {
+        margin-top: -1.5em;
+      }
+    </style>
+    <div class="container" style="margin-bottom: 6px; padding: 4px 0;">
+      <span style="color: #57606a; font-size: 12px; font-weight: 600; margin-right: 8px;">Sort:</span>
+      <label style="margin-right: 12px; cursor: pointer; user-select: none;">
+        <input type="radio" name="tree-sort" value="modified" style="vertical-align: middle; margin-right: 4px;">
+        <span style="vertical-align: middle;">latest modified</span>
+      </label>
+      <label style="margin-right: 12px; cursor: pointer; user-select: none;">
+        <input type="radio" name="tree-sort" value="created" style="vertical-align: middle; margin-right: 4px;">
+        <span style="vertical-align: middle;">latest created</span>
+      </label>
+      <label style="margin-right: 12px; cursor: pointer; user-select: none;">
+        <input type="radio" name="tree-sort" value="branch" style="vertical-align: middle; margin-right: 4px;">
+        <span style="vertical-align: middle;">branch name</span>
+      </label>
+    </div>
+
+    <pre id="tree-pre-sortable">{{ tree_html | safe }}</pre>
+
+    <script>
+      // Client-side reordering of sortable branch containers
+      window.__dashboardOnReadyQueue = window.__dashboardOnReadyQueue || [];
+      window.__dashboardOnReadyQueue.push(function() {
+        try {
+          var radios = document.querySelectorAll('input[name="tree-sort"]');
+          var preEl = document.getElementById('tree-pre-sortable');
+          if (!radios || !radios.length || !preEl) return;
+
+          function _setRadio(val) {
+            try {
+              radios.forEach(function(r) { r.checked = (String(r.value||'') === String(val||'')); });
+            } catch (e) {}
+          }
+          function _getRadio() {
+            try {
+              var v = 'modified';
+              radios.forEach(function(r) { if (r.checked) v = String(r.value || 'modified'); });
+              return v;
+            } catch (e) { return 'modified'; }
+          }
+
+          // Set default (server-provided), then allow URL to override.
+          try {
+            var defv = String({{ (tree_sort_default or "modified")|tojson }});
+            if (defv === 'latest') defv = 'modified';  // Map legacy 'latest' to 'modified'
+            if (defv) _setRadio(defv);
+          } catch (e) {}
+          try {
+            if (window.DashboardUrlState && typeof window.DashboardUrlState.get === 'function') {
+              var v = window.DashboardUrlState.get('sort');
+              if (v) {
+                if (v === 'latest') v = 'modified';  // Map legacy 'latest' to 'modified'
+                _setRadio(String(v));
+              }
+            }
+          } catch (e) {}
+
+          function apply() {
+            try {
+              var sortMode = String(_getRadio() || 'modified');
+              var sortAttr = 'data-sort-' + sortMode;
+              
+              // Get all sortable branch containers
+              var branches = Array.from(preEl.querySelectorAll('.sortable-branch'));
+              if (!branches.length) return;
+              
+              // Sort them by the appropriate data attribute
+              branches.sort(function(a, b) {
+                var aKey = String(a.getAttribute(sortAttr) || '');
+                var bKey = String(b.getAttribute(sortAttr) || '');
+                
+                // For timestamp-based sorts (modified, created), use numeric comparison
+                if (sortMode === 'modified' || sortMode === 'created') {
+                  var aNum = parseFloat(aKey.split('_')[0] || '0');
+                  var bNum = parseFloat(bKey.split('_')[0] || '0');
+                  return aNum - bNum;  // Ascending (negative timestamps, so most recent first)
+                }
+                
+                // For branch name, use string comparison
+                return aKey.localeCompare(bKey);
+              });
+              
+              // Reattach in sorted order
+              branches.forEach(function(br) {
+                preEl.appendChild(br);
+              });
+              
+              // Update URL state
+              try {
+                if (window.DashboardUrlState && typeof window.DashboardUrlState.setDefault === 'function') {
+                  window.DashboardUrlState.setDefault('sort', sortMode, 'modified');
+                }
+              } catch (e) {}
+            } catch (e) {}
+          }
+          radios.forEach(function(r) { r.addEventListener('change', apply); });
+          apply();
+        } catch (e) {}
+      });
+    </script>
+  {% elif _tree_alt.strip() %}
+    {# Legacy dual-tree approach (kept for backward compatibility if needed) #}
+    {# Make IDs unique in the alternate tree by adding 'alt_' prefix to avoid conflicts with the main tree. #}
+    {% set _tree_alt_unique = _tree_alt.replace('id="tree_children_k_', 'id="alt_tree_children_k_').replace('data-children-id="tree_children_k_', 'data-children-id="alt_tree_children_k_').replace('data-parent-children-id="tree_children_k_', 'data-parent-children-id="alt_tree_children_k_').replace('onclick="toggleTreeChildren(\'tree_children_k_', 'onclick="toggleTreeChildren(\'alt_tree_children_k_').replace('id="err_snip_', 'id="alt_err_snip_').replace('data-error-id="err_snip_', 'data-error-id="alt_err_snip_').replace('onclick="toggleErrorSnippet(\'err_snip_', 'onclick="toggleErrorSnippet(\'alt_err_snip_') %}
+    <div class="container" style="margin-bottom: 6px; padding: 4px 0;">
       <span style="color: #57606a; font-size: 12px; font-weight: 600; margin-right: 8px;">Sort:</span>
       <label style="margin-right: 12px; cursor: pointer; user-select: none;">
         <input type="radio" name="tree-sort" value="latest" style="vertical-align: middle; margin-right: 4px;">
@@ -133,7 +244,7 @@
     </div>
 
     <pre id="tree-pre-latest">{{ tree_html | safe }}</pre>
-    <pre id="tree-pre-branch" style="display: none;">{{ _tree_alt | safe }}</pre>
+    <pre id="tree-pre-branch" style="display: none;">{{ _tree_alt_unique | safe }}</pre>
 
     <script>
       // Toggle between pre-rendered orderings (keeps the exact same look/feel as local branches).
@@ -176,6 +287,17 @@
               var showBranch = (v === 'branch');
               preLatest.style.display = showBranch ? 'none' : 'block';
               preBranch.style.display = showBranch ? 'block' : 'none';
+              
+              // Re-apply URL state to the newly visible tree
+              try {
+                if (window.DashboardUrlState && window.DashboardUrlState._applyTreeToggles) {
+                  // Wait a tick for display changes to take effect
+                  setTimeout(function() {
+                    try { window.DashboardUrlState._applyTreeToggles(); } catch (e) {}
+                  }, 10);
+                }
+              } catch (e) {}
+              
               try {
                 if (window.DashboardUrlState && typeof window.DashboardUrlState.setDefault === 'function') {
                   window.DashboardUrlState.setDefault('sort', v, 'latest');

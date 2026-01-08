@@ -70,10 +70,7 @@
 
     .footer {
       margin-top: 12px;
-      padding: 10px 12px;
-      border: 1px solid #d0d7de;
-      border-radius: 6px;
-      background: #ffffff;
+      padding: 10px 0;
       color: #24292f;
     }
     .footer details summary {
@@ -628,6 +625,12 @@
       has: function(key) {
         try { return _parseParams().has(String(key || '')); } catch (e) { return false; }
       },
+      // Expose tree toggle application for use when switching between sort views
+      _applyTreeToggles: function() {
+        try {
+          _applyTreeAndSnippetTogglesFromParams(_parseParams());
+        } catch (e) {}
+      },
       set: function(key, value) {
         if (_restoring) return;
         try {
@@ -748,24 +751,61 @@
               });
 
               // Restore tree toggles to their default expanded/collapsed state.
+              // BUT: keep nodes expanded if they contain currently-visible error snippets.
               try {
+                // First, find all visible snippets
+                var visibleSnippets = new Set();
+                document.querySelectorAll('span[id^="err_snip_"]:not([id$="__toggle"])').forEach(function(snip) {
+                  if (snip.style.display !== 'none') {
+                    // This snippet is visible, find its parent tree node
+                    var parent = snip.parentElement;
+                    while (parent) {
+                      if (parent.id && parent.id.startsWith('tree_children_k_')) {
+                        visibleSnippets.add(parent.id);
+                      }
+                      parent = parent.parentElement;
+                    }
+                  }
+                });
+                
                 var triNodes = document.querySelectorAll('[data-children-id]');
                 triNodes.forEach(function(tg) {
                   var cid = tg.getAttribute('data-children-id');
                   if (!cid) return;
                   var defExp = (tg.getAttribute('data-default-expanded') === '1');
                   var cont = document.getElementById(cid);
-                  if (cont) cont.style.display = defExp ? 'inline' : 'none';
-                  tg.textContent = defExp ? '▼' : '▶';
+                  if (!cont) return;
+                  
+                  // If this container or any child has visible snippets, keep it expanded
+                  var hasVisibleSnippet = visibleSnippets.has(cid);
+                  var shouldExpand = defExp || hasVisibleSnippet;
+                  
+                  cont.style.display = shouldExpand ? 'inline' : 'none';
+                  tg.textContent = shouldExpand ? '▼' : '▶';
                 });
               } catch (e) {}
 
-              // Restore snippets to default-collapsed.
+              // Restore snippets to default-collapsed, UNLESS they were manually expanded
+              // (i.e., have a URL param that is '1').
               try {
-                var snipDivs = document.querySelectorAll('span[id^="err_snip_"]');
-                snipDivs.forEach(function(el) { el.style.display = 'none'; });
-                var snipToggles = document.querySelectorAll('[onclick^="toggleErrorSnippet("]');
-                snipToggles.forEach(function(tg) { tg.textContent = '▶ Snippet'; });
+                var snipToggles = document.querySelectorAll('[data-error-id][data-url-key]');
+                snipToggles.forEach(function(tg) {
+                  var urlKey = String(tg.getAttribute('data-url-key') || '');
+                  var errId = String(tg.getAttribute('data-error-id') || '');
+                  var el = document.getElementById(errId);
+                  if (!urlKey || !el) return;
+
+                  // If the snippet was explicitly expanded in the URL, keep it expanded.
+                  // Otherwise, collapse it.
+                  var wasExpandedInUrl = params.has(urlKey) && _isTruthyParam(params.get(urlKey));
+                  if (wasExpandedInUrl) {
+                    el.style.display = 'inline';
+                    tg.textContent = '▼ Hide snippet';
+                  } else {
+                    el.style.display = 'none';
+                    tg.textContent = '▶ Snippet';
+                  }
+                });
               } catch (e) {}
 
               // Commit-history specific: collapse expanded rows (GitHub/GitLab trees + docker details).
@@ -791,6 +831,22 @@
             } finally {
               _restoring = false;
             }
+            
+            // Restore sort radio buttons AFTER _restoring is false so the change event can update URL/display.
+            try {
+              var sortRadios = document.querySelectorAll('input[name="tree-sort"]');
+              if (sortRadios && sortRadios.length) {
+                sortRadios.forEach(function(r) {
+                  // Default is 'modified' (was 'latest' before)
+                  r.checked = (String(r.value || '') === 'modified');
+                });
+                // Trigger change event to update the display
+                var checkedRadio = Array.from(sortRadios).find(function(r) { return r.checked; });
+                if (checkedRadio) {
+                  try { checkedRadio.dispatchEvent(new Event('change')); } catch (e) {}
+                }
+              }
+            } catch (e) {}
           }
         } catch (e) {}
       },

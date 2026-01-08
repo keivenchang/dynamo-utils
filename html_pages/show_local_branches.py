@@ -2179,18 +2179,60 @@ class PRStatusNode(BranchNode):
         Policy: collapse when PASSED (no required failures), expand when FAILED (has required failures).
         We ignore RUNNING state and optional failures - if it displays "PASSED", it collapses.
         """
-        kids = [c.to_tree_vm() for c in (self.children or []) if isinstance(c, BranchNode)]
+        # Sort children alphabetically by display name.
+        # Special nodes (RerunLinkNode, ConflictWarningNode, BlockedMessageNode) always stay at the end.
+        def _sort_key_for_ci_node(node: BranchNode) -> tuple:
+            """Returns (is_special, display_name_lower).
+            
+            Special nodes (like RerunLinkNode) get priority=1 to sort last.
+            Regular CI nodes get priority=0 and sort alphabetically by display name.
+            """
+            # Check if this is a special node that should always be last
+            node_type = type(node).__name__
+            is_special = node_type in ('RerunLinkNode', 'ConflictWarningNode', 'BlockedMessageNode')
+            
+            if is_special:
+                return (1, "")  # Special nodes sort last
+            
+            # Get the display name for sorting
+            if isinstance(node, CIJobTreeNode):
+                # Use display_name if present, otherwise job_id, otherwise label
+                name = getattr(node, 'display_name', '') or getattr(node, 'job_id', '') or getattr(node, 'label', '')
+            else:
+                # For other BranchNode types, use label
+                name = getattr(node, 'label', '')
+            
+            return (0, str(name).lower())
         
-        # Simple rule: expand ONLY if there are required failures
-        # This matches the display logic: PASSED = no required failures
+        sorted_children = sorted(
+            (self.children or []),
+            key=_sort_key_for_ci_node
+        )
+        
+        kids = [c.to_tree_vm() for c in sorted_children if isinstance(c, BranchNode)]
+        
+        # Determine if we should expand by checking for required failures.
+        # We need to check BOTH pr.failed_checks (from GitHub API) AND the actual children
+        # (from _build_ci_hierarchy_nodes) because pr.failed_checks may be empty in some cases.
         pr = getattr(self, "pr", None)
-        required_failed = any(
+        pr_num = getattr(pr, "number", None)
+        
+        # Check pr.failed_checks first (from GitHub API)
+        required_failed_from_api = any(
             bool(getattr(fc, "is_required", False))
             for fc in (getattr(pr, "failed_checks", None) or [])
         )
         
-        # Expand only for FAILED (has required failures)
-        auto_expand_checks = required_failed
+        # Also check children (CIJobTreeNode objects) for required failures
+        required_failed_from_children = any(
+            isinstance(child, CIJobTreeNode) 
+            and getattr(child, "status", "") == "failure" 
+            and getattr(child, "is_required", False)
+            for child in sorted_children
+        )
+        
+        # Expand if EITHER source shows required failures
+        auto_expand_checks = required_failed_from_api or required_failed_from_children
         
         # If we have required failures but no child nodes (cache-only run),
         # inject a placeholder so the triangle still renders
@@ -2935,6 +2977,7 @@ def generate_html(
     tree_html_override: Optional[str] = None,
     tree_html_alt: Optional[str] = None,
     tree_sort_default: Optional[str] = None,
+    tree_sortable: bool = False,
 ) -> str:
     """Generate HTML output from tree"""
     # Get current time in both UTC and PDT
@@ -2981,6 +3024,7 @@ def generate_html(
         tree_html=tree_html,
         tree_html_alt=(str(tree_html_alt) if tree_html_alt is not None else ""),
         tree_sort_default=(str(tree_sort_default) if tree_sort_default is not None else ""),
+        tree_sortable=bool(tree_sortable),
         page_stats=page_stats,
         success_icon_html=status_icon_html(status_norm="success", is_required=False),
         success_required_icon_html=status_icon_html(status_norm="success", is_required=True),

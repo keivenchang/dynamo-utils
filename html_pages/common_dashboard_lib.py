@@ -633,14 +633,15 @@ def render_tree_pre_lines(root_nodes: List[TreeNodeVM]) -> List[str]:
                 children_id = alloc_children_id(full_key)
                 sha7 = _sha7_from_key(full_key) or _sha7_from_key(nk)
                 # Compact URL key, SHA-first: t.<sha7>.<h6>
-                # (h6 is derived from the same stable id string, so it remains stable across regen)
+                # Use only the node's own key (not full path) for the hash to ensure
+                # URL keys remain stable across different tree orderings (e.g., sort by latest vs branch).
                 repo_tok = _repo_token_from_key(full_key)
                 if repo_tok and sha7:
-                    url_key = f"t.{repo_tok}.{sha7}.{_hash10(full_key)[:6]}"
+                    url_key = f"t.{repo_tok}.{sha7}.{_hash10(nk)[:6]}"
                 elif sha7:
-                    url_key = f"t.{sha7}.{_hash10(full_key)[:6]}"
+                    url_key = f"t.{sha7}.{_hash10(nk)[:6]}"
                 else:
-                    url_key = f"t.{_hash10(full_key)[:10]}"
+                    url_key = f"t.{_hash10(nk)[:10]}"
                 tri = _triangle_html(
                     expanded=bool(node.default_expanded),
                     children_id=children_id,
