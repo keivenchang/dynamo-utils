@@ -7,7 +7,7 @@ set -e
 
 # Default values
 DEFAULT_SOURCE_DIR="$HOME/nvidia"
-DEFAULT_DEST_DIR="/mnt/sda/keivenc/nvidia"
+DEFAULT_DEST_DIR="/mnt/sda/keivenc/dynamo"
 
 # Get the directory where this script lives
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -46,7 +46,7 @@ Options:
 
 Backup History:
     Changed/deleted files are stored in: <output-path-parent>/backup_history/YYYYMMDD_HHMMSS/
-    Example: If backing up to /mnt/sda/keivenc/nvidia, history is stored in:
+    Example: If backing up to /mnt/sda/keivenc/dynamo, history is stored in:
              /mnt/sda/keivenc/backup_history/20251217_172633/
 
 Example:

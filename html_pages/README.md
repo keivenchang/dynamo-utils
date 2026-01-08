@@ -1,164 +1,94 @@
-## HTML dashboards (`dynamo-utils/html_pages/`)
+# HTML Dashboards
 
-This directory contains the **HTML dashboard generators** and shared dashboard UI utilities.
-
-### Directory structure
-
-```
-html_pages/
-├── README.md
-├── TREE_NODE_REFERENCE.md  ← Node type definitions and hierarchy
-├── common_dashboard.j2
-├── common_dashboard_lib.py
-├── common_github_workflow.py
-├── show_commit_history.j2
-├── show_commit_history.py
-├── show_local_branches.j2
-├── show_local_branches.py
-├── show_remote_branches.py
-├── show_local_resources.py
-└── update_html_pages.sh
-```
-
-- **Branches dashboard**: `show_local_branches.py` → **HTML-only**; writes `index.html` under your "nvidia" workspace root
-- **Remote PRs dashboard**: `show_remote_branches.py` → **HTML-only**; writes `speedoflight/users/<user>/index.html`
-- **Commit history dashboard**: `show_commit_history.py` → **HTML-only**; writes `index.html` under a Dynamo repo clone (e.g. `dynamo_latest/`)
-- **Resource report**: `show_local_resources.py` (generated from `resource_monitor.sqlite`)
-- **Cron wrapper**: `update_html_pages.sh` (runs the generators and updates outputs atomically)
-- **Node reference**: `TREE_NODE_REFERENCE.md` (comprehensive guide to all tree node types)
-
-### Prerequisites
-
-- **Python**: 3.10+
-- **Jinja2**: required (`pip install jinja2`)
-- **requests**: required for GitHub API usage (`pip install requests`)
-- **GitHub token** (recommended): use `~/.config/github-token` (or `~/.config/gh/hosts.yml`) to avoid anonymous rate limits.
-
-### Outputs (what gets generated)
-
-- **Branches**: `<NVIDIA_HOME>/index.html`
-- **Commit history**: `<DYNAMO_REPO>/index.html`
-- **Resource report**: `<NVIDIA_HOME>/resource_report.html` (or the path you pass)
-
-These are **build artifacts**; don’t commit them unless you explicitly intend to.
+HTML dashboard generators and shared UI utilities for monitoring Dynamo CI/CD.
 
 ---
 
-## show_local_branches.py (branches dashboard)
+## Overview
 
-### What it shows
+**Key dashboards:**
+- **Local branches** (`show_local_branches.py`) - Scans local repos, shows PRs + CI + workflow status
+- **Remote PRs** (`show_remote_branches.py`) - Shows PRs by GitHub username
+- **Commit history** (`show_commit_history.py`) - Shows recent commits with CI checks
+- **Resource report** (`show_local_resources.py`) - System resource monitoring
 
-- Local repo discovery under `--repo-path` (direct children)
-- Branches + linked PRs (GitHub)
-- CI checks per PR (GitHub check-runs)
-- **NEW (2026-01-07):** Workflow runs for branches with remotes but no PRs
-- Failure snippets and stable `[cached raw log]` links (downloaded once, cached)
-- A bottom "Statistics" section with timings and API usage breakdown
+**Utilities:**
+- `update_html_pages.sh` - Cron-friendly wrapper for atomic updates
+- `TREE_NODE_REFERENCE.md` - Complete node type documentation
+- `common_dashboard*.py` - Shared rendering logic
 
-### Tree structure (updated 2026-01-07)
+**Prerequisites:**
+- Python 3.10+
+- `pip install jinja2 requests`
+- GitHub token: `~/.config/github-token` or `~/.config/gh/hosts.yml`
 
-Each branch with a PR is now rendered as:
+**Outputs:**
+- Branches: `$NVIDIA_HOME/index.html`
+- Commit history: `$DYNAMO_REPO/index.html`  
+- Resource report: `$NVIDIA_HOME/resource_report.html`
 
+---
+
+## Local Branches Dashboard
+
+Scans local git repositories and displays branch status with GitHub integration.
+
+### Features (Updated 2026-01-07)
+
+- **Branch discovery** under `--repo-path` (scans direct children)
+- **PR integration** with CI checks from GitHub
+- **Workflow status** for branches with remotes but no PRs *(NEW)*
+- **Client-side sorting** (latest modified/created/branch name) *(NEW)*
+- **Failure snippets** with cached raw logs
+- **URL state persistence** for view settings
+- **Statistics panel** with API usage and timing
+
+### Tree Structure
+
+**Branch with PR:**
 ```
-[copy] [✖ closed] branch-name → base [SHA]
-├─ commit message (#PR_NUMBER)
-├─ (modified ..., created ..., ... ago)
-└─ PASSED/FAILED/RUNNING summary
-   ├─ CI check 1
-   └─ CI check 2
+[copy] [✖] branch-name → base [SHA]
+├─ commit message (#PR)
+├─ (modified PT, created UTC, age)
+└─ ▶ PASSED ✓26 ✗2
+   ├─ ✓ check-1 (6m) [log]
+   └─ ✗ check-2 (2m) [log] ▶ Snippet
 ```
 
-**Branches without PRs** (but with remotes) show workflow status:
-
+**Branch without PR (remote):**
 ```
 [copy] branch-name → base [SHA]
 └─ ✅ PASSED ✓5
    ├─ ✓ pre_merge
    ├─ ✓ Rust pre-merge checks
-   ├─ ✓ Copyright Checks
-   ├─ ✓ DCO Commenter
-   └─ ✓ Docs link check
+   └─ ✓ Copyright Checks
 ```
 
-**Key changes from previous format:**
-- Branch line is cleaner: only shows name, base, and SHA
-- Commit message moved to first child line with PR# link
-- Metadata (timestamps, age) moved to second child line
-- Status line is third child (always visible)
-- **NEW:** Branches with remotes but no PRs show GitHub Actions workflow runs
-- See `TREE_NODE_REFERENCE.md` for full node definitions
+See `TREE_NODE_REFERENCE.md` for complete node definitions.
 
-### CI view (flat tree)
+### CI Check Details
 
-The branches dashboard renders CI as a **flat tree** under the PR status line:
+**Ordering:** Checks sorted lexically by display name (`kind: job name`)
 
-- Each GitHub check-run becomes a node (sorted by job name; see “Ordering” below).
-- Some jobs have optional child “subsections” (phases/steps; see below).
+**Required badge:** Derived from GitHub GraphQL `statusCheckRollup.isRequired`
+- Cached in `~/.cache/dynamo-utils/github_required_checks.json`
+- Persists in `PRInfo` for cache-only mode
 
-- **Required badge (`[REQUIRED]`)**: derived from GitHub’s merge/required-checks data.
-  - We do *not* rely on the branch-protection REST endpoint (often 403). We derive required-ness from GitHub’s
-    GraphQL merge-box data: `statusCheckRollup … isRequired(pullRequestId: …)` (via `gh api graphql`).
-  - This is cached in `~/.cache/dynamo-utils/github_required_checks.json`, and is also copied into cached `PRInfo`
-    so the REQUIRED label persists even if the dashboard later runs in cache-only / REST-budget-exhausted mode.
+**Job steps:** Shown for long-running jobs (≥10 min) and required jobs
+- Display steps ≥30s duration + all failing steps
+- Fetched via GitHub Actions job details API
 
-### Ordering (shared logic)
+**Special handling:** `Build and Test - dynamo` shows phase breakdown
+- Uses job `steps[]` for accurate duration and status
+- Falls back to simple display if steps unavailable
 
-Both dashboards sort check-run / check-row lists by the **lexical display label**:
+### API Budget
 
-- `kind: job name` (e.g. `lint: …`, `test: …`, `build: …`), then stable tie-breakers (job id / URL).
+- Default: `--max-github-api-calls 100`
+- Switches to cache-only mode when exhausted
+- Statistics panel shows API usage breakdown
 
-- Commit-history additionally disambiguates identical names by appending a stable suffix (e.g. `[job 12345]`).
-
-### Example tree (local branches dashboard)
-
-```text
-<branch name> → <base branch> [SHA]
-├─ <commit message first line> (#PR_NUMBER)
-├─ (modified YYYY-MM-DD HH:MM PT, created YYYY-MM-DD HH:MM, Xd Yh ago)
-└─ PASSED/FAILED/RUNNING  counts summary
-   ├─ backend-status-check [REQUIRED] (…)
-   ├─ Build and Test - dynamo [REQUIRED] (…)
-   │  ├─ build: Build Image (…)
-   │  ├─ lint: Rust checks (…)
-   │  ├─ test: pytest (parallel) (…)
-   │  └─ test: pytest (serial) (…)
-   ├─ pre-commit [REQUIRED] (…)
-   ├─ CodeRabbit (…)
-   └─ …
-```
-
-### Special rule: `Build and Test - dynamo` phase breakdown
-
-If a check-run’s name is exactly `Build and Test - dynamo`, we expand it with phase children so you can see
-where the time went:
-
-- **Preferred source**: GitHub Actions **job details** (`GET /repos/{owner}/{repo}/actions/jobs/{job_id}`),
-  using the job’s `steps[]` to compute per-phase **duration** and **✓/✗**.
-- If steps aren’t available, we simply omit the phase breakdown (no raw-log parsing fallback).
-
-### Long-running job subsections (steps)
-
-For GitHub Actions jobs we may show job-step children:
-
-- We always cache the full job `steps[]` payload (job details API).
-- We display steps whose duration is **≥ 30 seconds** (to avoid noise), and we **always display failing steps** even if they’re shorter.
-- **Required jobs**: steps can be shown even if the job isn’t “long-running” (still using the same ≥30s + failing rule).
-- **Non-required jobs**: steps are shown only for long-running jobs (default threshold: 10 minutes) to avoid noise.
-
-### Legend (status icons)
-
-Both dashboards use the same icon rendering (from `common_dashboard_lib.py` → `status_icon_html()`), including:
-
-- **Skipped**: grey circle-slash icon (GitHub-like “skipped/neutral”).
-
-### API budget (per invocation)
-
-The script enforces a hard cap on GitHub REST calls:
-
-- `--max-github-api-calls N` (default: **100**)
-- Once exhausted, the client switches into **cache-only mode** (best-effort) instead of failing.
-
-### Example
+### Usage
 
 ```bash
 python3 html_pages/show_local_branches.py \
@@ -169,14 +99,22 @@ python3 html_pages/show_local_branches.py \
 
 ---
 
-## show_remote_branches.py (remote PRs dashboard)
+## Remote PRs Dashboard
 
-### What it shows
+Shows PRs by GitHub username (not tied to local repos).
 
-- Remote PRs by GitHub username (not tied to local git repos)
-- Same tree structure and UI as `show_local_branches.py`
-- Branches + PR metadata + CI checks per PR
-- Sorted by latest activity (or by branch name)
+### Features
+
+- Fetches PRs via GitHub API
+- Same tree structure and UI as local branches
+- Sorted by latest activity or branch name
+- Reuses all formatting/status helpers
+
+### Key Differences
+
+- Uses PR title (no local `git log` access)
+- Shows only PRs created by specified user
+- No local-only branches section
 
 ### Usage
 
@@ -187,532 +125,233 @@ python3 show_remote_branches.py \
   --output speedoflight/users/keivenchang/index.html
 ```
 
-### Key differences from local branches
-
-- **No local git access**: Uses PR title as commit message instead of `git log`
-- **Remote-only view**: Shows PRs created by the specified user
-- **Same node structure**: Uses `CommitMessageNode`, `MetadataNode`, `PRStatusNode`
-- **Reuses helpers**: All formatting/status logic from `show_local_branches.py`
-
-### Cron integration
-
-Add to `update_html_pages.sh`:
+### Cron Integration
 
 ```bash
-# Remote PRs for specific users (opt-in)
-update_html_pages.sh --show-remote-branches
-
-# Set users via environment:
-REMOTE_GITHUB_USERS="keivenchang user2" update_html_pages.sh --show-remote-branches
+# Via update_html_pages.sh
+REMOTE_GITHUB_USERS="user1 user2" update_html_pages.sh --show-remote-branches
 ```
+
+See `CRONTAB_REMOTE_BRANCHES.md` for scheduling details.
 
 ---
 
-## show_commit_history.py (commit history dashboard)
+## Commit History Dashboard
 
-### What it shows
+Shows recent commits with expandable GitHub checks.
 
-- Recent commits (local git)
-- GitHub checks tree per commit (GitHub check-runs)
-- GitLab pipeline summary (optional; can be skipped)
-- Stable `[cached raw log]` links + snippets for failures
-- Timing + API counters at the bottom
+### Features
 
-### CI expanded view
+- Recent commits from local git
+- GitHub checks tree per commit
+- GitLab pipeline summary (optional)
+- Cached raw logs + snippets for failures
+- Same job step rules as branches dashboard
 
-`show_commit_history.py` renders an expandable GitHub checks section per commit, using the same subsections rules:
-
-- `Build and Test - dynamo` gets phase children (job steps API, with raw-log fallback).
-- Steps are displayed using the same rule as branches:
-  - steps ≥ 30 seconds, plus any failing steps
-  - required jobs can show steps even if the job isn’t “long-running”
-
-### Example tree (commit history dashboard, merge-to-main commit)
-
-```text
-<commit subject> (<short sha>)
-└─ GitHub checks
-   ├─ Build and Test - dynamo [REQUIRED] (…)
-   │  ├─ build: Build Image (…)
-   │  ├─ lint: Rust checks (…)
-   │  ├─ test: pytest (parallel) (…)
-   │  └─ test: pytest (serial) (…)
-   ├─ clippy (…)
-   └─ tests (…)
-```
-
-### API budget (per invocation)
-
-- `--max-github-api-calls N` (default: **100**)
-
-### Examples
+### Usage
 
 ```bash
-# HTML output (typical)
+# Full refresh
 python3 html_pages/show_commit_history.py \
   --repo-path ~/nvidia/dynamo_latest \
   --max-commits 100 \
-  --output ~/nvidia/dynamo_latest/index.html \
-  --max-github-api-calls 100
+  --output ~/nvidia/dynamo_latest/index.html
 
-# Cache-only style run (skip GitLab network)
+# Cache-only (skip GitLab)
 python3 html_pages/show_commit_history.py \
   --repo-path ~/nvidia/dynamo_latest \
-  --max-commits 100 \
   --skip-gitlab-fetch \
   --output ~/nvidia/dynamo_latest/index.html
 ```
 
 ---
 
-## update_html_pages.sh (cron-friendly wrapper)
+## Cron Wrapper
 
-This script runs one or more generators and writes outputs via atomic replacement.
+`update_html_pages.sh` runs generators with atomic file updates.
 
-### Logs
-
-- `update_html_pages.sh` writes per-run logs under `~/nvidia/logs/YYYY-MM-DD/` (when run with `NVIDIA_HOME=~/nvidia`).
-- `dynamo-utils/cron_log.sh` captures stdout/stderr for a job into `~/nvidia/logs/YYYY-MM-DD/<job>.log`.
-
-### Troubleshooting: `update_html_pages.sh` “runs too quickly”
-
-This almost always means **a generator crashed early** (Python exception / ImportError), so the wrapper script exits quickly.
-
-Do this:
-- **Check the per-generator logs** (they usually tell you which script crashed):
-  - `tail -200 html_pages/show_local_branches.log`
-  - `tail -200 html_pages/show_commit_history.log`
-  - `tail -200 html_pages/resource_report.log`
-- **Run the failing generator directly** to see the traceback:
-  - `python3 html_pages/show_local_branches.py --fast`
-  - `python3 html_pages/show_commit_history.py --fast`
-- **Common root cause**: refactors in `common_dashboard_lib.py` removed/renamed an exported symbol that another script still imports.
-  - Fix by updating the importer(s), or by keeping a small back-compat constant/export if appropriate.
-
-### Typical cron schedule
+### Scheduling
 
 ```cron
-# Dashboards:
-# - Full update every 30 minutes
+# Full update every 30 minutes
 0,30 * * * * NVIDIA_HOME=$HOME/nvidia $HOME/nvidia/dynamo-utils/cron_log.sh update_html_pages_full $HOME/nvidia/dynamo-utils/html_pages/update_html_pages.sh --show-local-branches --show-commit-history
 
-# - Cache-heavy runs between full updates
+# Cache-heavy between full updates (every 4 minutes)
 8-59/4 * * * * NVIDIA_HOME=$HOME/nvidia SKIP_GITLAB_FETCH=1 $HOME/nvidia/dynamo-utils/cron_log.sh update_html_pages_cached $HOME/nvidia/dynamo-utils/html_pages/update_html_pages.sh --show-local-branches --show-commit-history
 
-# Resource report:
+# Resource report (every minute)
 * * * * * NVIDIA_HOME=$HOME/nvidia $HOME/nvidia/dynamo-utils/cron_log.sh resource_report $HOME/nvidia/dynamo-utils/html_pages/update_html_pages.sh --show-local-resources
 
-# Remote PR dashboards (kthui, keivenchang):
-# - Working hours (8am-6pm PT / 4pm-2am UTC): every 1 minute
+# Remote PRs - working hours (8am-6pm PT): every minute
 * 16-23 * * * NVIDIA_HOME=$HOME/nvidia REMOTE_GITHUB_USERS="kthui keivenchang" $HOME/nvidia/dynamo-utils/cron_log.sh remote_prs_working $HOME/nvidia/dynamo-utils/html_pages/update_html_pages.sh --show-remote-branches
 * 0-1 * * * NVIDIA_HOME=$HOME/nvidia REMOTE_GITHUB_USERS="kthui keivenchang" $HOME/nvidia/dynamo-utils/cron_log.sh remote_prs_working $HOME/nvidia/dynamo-utils/html_pages/update_html_pages.sh --show-remote-branches
 
-# - Off hours (6pm-8am PT / 2am-4pm UTC): every 20 minutes
+# Remote PRs - off hours (6pm-8am PT): every 20 minutes
 */20 2-15 * * * NVIDIA_HOME=$HOME/nvidia REMOTE_GITHUB_USERS="kthui keivenchang" $HOME/nvidia/dynamo-utils/cron_log.sh remote_prs_offhours $HOME/nvidia/dynamo-utils/html_pages/update_html_pages.sh --show-remote-branches
 ```
 
+### Logs
+
+- Per-run logs: `~/nvidia/logs/YYYY-MM-DD/<job>.log`
+- Generator logs: `html_pages/show_*.log`
+
+### Troubleshooting
+
+**Script exits too quickly?** Usually means a generator crashed.
+
+1. Check per-generator logs:
+   ```bash
+   tail -200 html_pages/show_local_branches.log
+   tail -200 html_pages/show_commit_history.log
+   ```
+
+2. Run generator directly:
+   ```bash
+   python3 html_pages/show_local_branches.py --fast
+   ```
+
+3. Common cause: Missing/renamed exports in `common_dashboard_lib.py`
+
 ---
 
-## Caching (important)
+## Caching
 
-All persistent caches live under:
-
+**Location:**
 - `~/.cache/dynamo-utils/` (default)
-- or `$DYNAMO_UTILS_CACHE_DIR/` (override)
+- `$DYNAMO_UTILS_CACHE_DIR/` (override)
 
-Key caches used by the dashboards:
+**Key caches:**
 
-- **PR list**: `pulls/`
-- **PR check-runs rows**: `pr-checks/`
-- **Enriched PRInfo (per-PR, updated_at-keyed)**: `pr-info/pr_info.json`
-- **PR updated_at probe (search/issues)**: `search-issues/search_issues.json`
-- **Required checks (branch protection)**: `required-checks/required_checks.json`
-- **Actions job details (steps/timings; used for phase breakdown)**: `actions-jobs/actions_jobs.json`
-- **Actions job raw log redirect URLs**: `raw-log-urls/`
-- **Downloaded raw log text**: `raw-log-text/` (+ `raw-log-text/index.json`)
+| Cache | Path | TTL | Purpose |
+|-------|------|-----|---------|
+| PR list | `pulls/` | 60s | Open PRs per repo |
+| PR checks | `pr-checks/` | 300s | Check-runs per PR |
+| PR info | `pr-info/pr_info.json` | Keyed by `updated_at` | Full PR details |
+| PR updated_at | `search-issues/` | 60s | Batched probe |
+| Required checks | `required-checks/` | Long-lived | Branch protection |
+| Job details | `actions-jobs/` | 600s | Steps/timings |
+| Raw log URLs | `raw-log-urls/` | 3600s | Signed URLs |
+| Raw log text | `raw-log-text/` | 30 days | Downloaded logs |
 
-### PRInfo “0 API” reuse for unchanged PRs
+### Zero-API PRInfo Reuse
 
-For `show_local_branches.py`, the biggest win is skipping per-PR enrichment when a PR hasn’t changed.
+For unchanged PRs, we skip all per-PR API calls:
 
-We do this by:
+1. Batch probe `updated_at` via `/search/issues` (1 call for all PRs)
+2. Cache `PRInfo` keyed by `(pr_number, updated_at)`
+3. Reuse cached `PRInfo` if `updated_at` matches → **0 API calls**
 
-- probing `updated_at` for the target PR list via **one** `search/issues` request (batched)
-- caching the fully enriched `PRInfo` object keyed by **(pr_number, updated_at)**
-
-If the PR’s `updated_at` matches what we already cached, we reuse the cached `PRInfo` and do **zero**
-per-PR network calls.
-
-In cache-only / budget-exhausted mode, the dashboards will reuse cached `PRInfo` even if TTLs for other
-short-lived caches have expired.
+In cache-only/budget-exhausted mode, stale `PRInfo` is reused even when TTLs expire.
 
 ---
 
-## Statistics: interpreting “API call types”
+## API Call Types
 
-Dashboards report GitHub REST usage by **label** (see `common.py` → `_rest_label_for_url`).
+Dashboards report GitHub REST usage by label (see `common.py`):
 
-Common labels you’ll see:
+**Common labels:**
+- `rate_limit` - Quota check
+- `search_issues` - Batched PR probe
+- `pulls_list` - Open PRs per repo
+- `pull_request` - PR details
+- `check_runs` - Check-runs per commit
+- `actions_run` - Workflow run metadata
+- `actions_job_status` - Job details
+- `actions_job_logs_zip` - Raw log download
+- `pr_review_comments` - Conversation count
 
-- `rate_limit`
-- `search_issues`
-- `pulls_list`
-- `pull_request`
-- `check_runs`
-- `actions_run`
-- `actions_run_jobs`
-- `actions_job_status`
-- `actions_job_logs_zip`
-- `pr_review_comments`
-- `commit_pulls`
-- `required_status_checks`
-- `repos_<resource>` (fallback bucket for other `/repos/.../<resource>` endpoints)
-
-If you see calls happening “even though nothing changed”, the usual causes are:
-
-- short TTL caches for check-runs (intentionally refreshes recent/unsettled CI)
-- new Actions runs due to reruns (new run_id → new `actions_run` metadata)
-- missing raw logs (failure triggers log materialization)
-- phase breakdown for `Build and Test - dynamo` (may fetch job details to read `steps[]`)
+**Why calls happen "when nothing changed":**
+- Short TTL on check-runs (refreshes unsettled CI)
+- New workflow reruns (new `run_id`)
+- Missing raw logs (triggers download)
+- Phase breakdown fetch (job steps API)
 
 ---
 
-## Concrete API call graph (branches dashboard)
-
-This section is a **step-by-step, concrete example** of what the branches dashboard does for *one* local branch.
-It shows:
-
-- which GitHub APIs are called
-- what we read from the responses (example keys)
-- what follow-on calls happen because of those values
-- how many calls happen in best/worst cases
-- whether each call is cacheable in this codebase today
-
-### Example setup (REAL: `keivenchang/DIS-1200__refactor-out-dev-from-Dockerfiles`)
-
-This is a real branch/PR from your environment:
-
-- Local branch: `keivenchang/DIS-1200__refactor-out-dev-from-Dockerfiles`
-- Matched open PR: `#5050` in `ai-dynamo/dynamo`
-- PR URL: `https://github.com/ai-dynamo/dynamo/pull/5050`
-- PR head SHA: `5065cf08a1caffbfeb123aa3258271344980af95`
-- `--max-github-api-calls 100`
-
-Important nuance: the script does **not** call GitHub “per branch” first. It calls GitHub **per repo** (list open PRs once),
-then maps PRs to local branches, then does per-PR enrichment.
-
-### Step 0: quota check (optional / best-effort)
-
-**Call (type `rate_limit`)**
-
-- `GET /rate_limit`
-
-**Used for**
-
-- Showing quota info in the HTML “Statistics” section
-- Deciding whether to start in cache-only mode
-
-**Cacheable?**
-
-- Not persisted; called for observability. (Could be cached, but isn’t important.)
-
-**Calls**
-
-- Usually 1–2 per invocation (we may call it more than once for display).
-
----
-
-### Step 1: map local branches → open PRs (per repo)
-
-**Call (type `pulls_list`)**
-
-- `GET /repos/ai-dynamo/dynamo/pulls?state=open&per_page=100&page=1`
-
-**We read from the response**
-
-Response is a list of PR dicts. We primarily use:
-
-```json
-{
-  "number": 5050,
-  "state": "open",
-  "html_url": "https://github.com/ai-dynamo/dynamo/pull/5050",
-  "head": {
-    "ref": "keivenchang/DIS-1200__refactor-out-dev-from-Dockerfiles",
-    "sha": "5065cf08a1caffbfeb123aa3258271344980af95"
-  },
-  "base": { "ref": "main" }
-}
-```
-
-**Follow-on effects**
-
-- If `head.ref` matches a local branch name, we treat that branch as “has an open PR”
-- We now need per-PR enrichment (next step)
-
-**Cacheable?**
-
-- Yes. Cached in memory + disk by `GitHubAPIClient.list_pull_requests(...)`
-- TTL: **60s** (1 minute) (`DEFAULT_OPEN_PRS_TTL_S`) because open PR lists can change
-
-**Calls**
-
-- **Best case**: 0 (served from cache)
-- **Worst case**: 1 per page (usually 1; more only if >100 open PRs)
-
----
-
-### Step 2: per-PR enrichment for one matched PR (#5050)
-
-This happens in `GitHubAPIClient._pr_info_from_pr_data(...)`.
-
-Before we do per-PR enrichment, we try to avoid it entirely:
-
-#### 2A) Probe `updated_at` for PRs we care about (batched)
-
-**Call (type `search_issues`)**
-
-- `GET /search/issues?q=repo:ai-dynamo/dynamo type:pr number:5050 number:4578 number:4790`
-
-**We read from the response**
-
-Each item includes:
-
-```json
-{
-  "number": 5050,
-  "updated_at": "2025-12-25T07:30:00Z",
-  "pull_request": { "url": "https://api.github.com/repos/ai-dynamo/dynamo/pulls/5050" }
-}
-```
-
-For the other PRs in the same call, the items look the same shape:
-
-```json
-{
-  "number": 4578,
-  "updated_at": "2025-11-20T18:12:00Z",
-  "pull_request": { "url": "https://api.github.com/repos/ai-dynamo/dynamo/pulls/4578" }
-}
-```
-
-```json
-{
-  "number": 4790,
-  "updated_at": "2025-10-02T09:41:00Z",
-  "pull_request": { "url": "https://api.github.com/repos/ai-dynamo/dynamo/pulls/4790" }
-}
-```
-
-**Follow-on effects**
-
-- If `updated_at` matches the cached PRInfo entry, we reuse the cached PRInfo and do **0 per-PR network calls**
-  (no PR fetch, no check-runs fetch, no comments fetch, etc).
-
-**Cacheable?**
-
-- Yes.
-- TTL: **60s** (1 minute) (default `get_pr_updated_at_via_search_issues(..., ttl_s=60)`)
-- Cache-only behavior: reuse stale disk cache if present.
-
-#### 2B) Fetch check-runs data (so we can compute CI state)
-
-**Calls**
-
-- (type `pull_request`) `GET /repos/ai-dynamo/dynamo/pulls/5050`
-- (type `check_runs`) `GET /repos/ai-dynamo/dynamo/commits/5065cf08a1caffbfeb123aa3258271344980af95/check-runs?per_page=100`
-
-**We read from the responses**
-
-From `/pulls/5050`:
-
-```json
-{
-  "number": 5050,
-  "base": { "ref": "main" },
-  "head": { "sha": "5065cf08a1caffbfeb123aa3258271344980af95" }
-}
-```
-
-From `/commits/<sha>/check-runs`:
-
-```json
-{
-  "total_count": 31,
-  "check_runs": [
-    {
-      "name": "Validate PR title and add label",
-      "status": "completed",
-      "conclusion": "success",
-      "html_url": "https://github.com/ai-dynamo/dynamo/actions/runs/20661331612/job/59324346738"
-    },
-    {
-      "name": "deploy-test-vllm (disagg_router)",
-      "status": "completed",
-      "conclusion": "failure",
-      "html_url": "https://github.com/ai-dynamo/dynamo/actions/runs/20500122691/job/58907618904"
-    }
-  ]
-}
-```
-
-**Cacheable?**
-
-- The *rendered check rows* are cached by `GitHubAPIClient.get_pr_checks_rows(...)` in `pr-checks/`.
-- TTL: **300s** (5 minutes) (default `get_pr_checks_rows(..., ttl_s=300)`)
-- Cache-only behavior: reuse stale disk cache if present (even if TTL expired).
-- However, this particular sub-step uses an internal fetch (`_fetch_pr_checks_data`) and may still hit the network even if the UI is unchanged.
-
-#### 2C) Required checks (best-effort; long-lived cache)
-
-**Calls**
-
-- (type `pull_request`) `GET /repos/ai-dynamo/dynamo/pulls/5050` (to read PR metadata like `node_id`)
-- (best-effort) branch protection required checks can be queried, but is often 403 depending on token permissions
-- fallback (preferred): GitHub GraphQL “merge box” required-ness (`statusCheckRollup … isRequired(pullRequestId: …)`)
-  via `gh api graphql`
-
-**We read from the responses**
-
-From required checks:
-
-```json
-{
-  "contexts": ["lint", "build"],
-  "checks": [{"context": "Build and Test - dynamo", "app_id": 12345}]
-}
-```
-
-**Cacheable?**
-
-- Yes. Cached per PR number in `github_required_checks.json` (long-lived; required-ness changes rarely).
-- We also maintain a branch-protection cache in `required-checks/required_checks.json` when accessible, but we do not
-  rely on it.
-
-#### 2D) “Unresolved conversations” approximation (review comments)
-
-**Call (type `pr_review_comments`)**
-
+## API Call Example (One PR)
+
+Detailed walkthrough for branch `keivenchang/DIS-1200__refactor` with PR #5050:
+
+### Step 0: Rate Limit Check
+- `GET /rate_limit` (observability only)
+- **Calls:** 1-2 per run
+
+### Step 1: List Open PRs
+- `GET /repos/ai-dynamo/dynamo/pulls?state=open&per_page=100`
+- **Cache:** 60s TTL
+- **Calls:** 0 (cached) or 1
+
+### Step 2: Per-PR Enrichment
+
+**2A) Probe updated_at (batched)**
+- `GET /search/issues?q=repo:ai-dynamo/dynamo type:pr number:5050 ...`
+- Returns `updated_at` for all PRs in one call
+- If matches cached `PRInfo` → **skip all remaining per-PR calls**
+- **Cache:** 60s TTL
+- **Calls:** 0 (cached) or 1
+
+**2B) Fetch PR + checks (if updated)**
+- `GET /repos/ai-dynamo/dynamo/pulls/5050`
+- `GET /repos/ai-dynamo/dynamo/commits/{sha}/check-runs`
+- **Cache:** 300s TTL (checks)
+- **Calls:** 0-2
+
+**2C) Required checks (long-lived)**
+- GraphQL via `gh api graphql`
+- **Cache:** Persistent (rarely changes)
+- **Calls:** 0-1
+
+**2D) Review comments**
 - `GET /repos/ai-dynamo/dynamo/pulls/5050/comments`
+- **Cache:** None (not cached today)
+- **Calls:** 0-1
 
-**We read from the response**
+### Step 3: Failed Job Logs (on failures)
 
-We count comments without `in_reply_to_id`:
+**3A) Job status**
+- `GET /repos/ai-dynamo/dynamo/actions/jobs/{job_id}`
+- **Cache:** 120s TTL (memory)
+- **Calls:** 0-2 (per failed job)
 
-```json
-[
-  {"id": 1, "in_reply_to_id": null},
-  {"id": 2, "in_reply_to_id": 1}
-]
-```
+**3B) Download logs**
+- `GET /repos/ai-dynamo/dynamo/actions/jobs/{job_id}/logs`
+- **Cache:** 30 days (persistent)
+- **Calls:** 0-2 (download once, reuse forever)
 
-**Cacheable?**
+**3C) Job details (for phase breakdown)**
+- `GET /repos/ai-dynamo/dynamo/actions/jobs/{job_id}`
+- **Cache:** 600s TTL
+- **Calls:** 0-1 (for `Build and Test - dynamo` jobs)
 
-- Not cached by this code path today.
+### Call Count Summary (One PR)
 
----
+**Best case (warm caches, nothing changed):**
+- Total: **1-2 calls** (just rate_limit)
 
-### Step 3 (only on failures): stable raw log + snippet materialization
-
-If a check is failed and we want a stable `[cached raw log]` link + snippet, we may do:
-
-#### 4A) Ensure job is completed
-
-**Call (type `actions_job_status`)**
-
-- `GET /repos/ai-dynamo/dynamo/actions/jobs/53317461976`
-
-We read:
-
-```json
-{"id": 53317461976, "status": "completed"}
-```
-
-**Cacheable?**
-
-- Yes (in-memory only).
-- TTL: **120s** (default `get_actions_job_status(..., ttl_s=120)`).
-
-#### 4B) Download job logs (zip) and cache the extracted text
-
-**Call (type `actions_job_logs_zip`)**
-
-- `GET /repos/ai-dynamo/dynamo/actions/jobs/53317461976/logs`
-
-We store:
-
-- `raw-log-text/53317461976.log` (text) + `raw-log-text/index.json` metadata
-
-**Cacheable?**
-
-- Yes. Persisted. Once downloaded, subsequent runs reuse the local file and do **not** re-download.
-- Raw log redirect URL TTL: **3600s** (1 hour) (`DEFAULT_RAW_LOG_URL_TTL_S`) (signed URLs expire quickly).
-- Raw log text TTL: **30 days** (`DEFAULT_RAW_LOG_TEXT_TTL_S`) (whether we consider refreshing the downloaded content).
-
----
-
-### Step 4C (best-effort): job details for phase breakdown (`Build and Test - dynamo`)
-
-If we want per-phase ✓/✗ + timings (instead of guessing from raw logs), we fetch job details:
-
-**Call (type `actions_job_status`)**
-
-- `GET /repos/ai-dynamo/dynamo/actions/jobs/53317461976`
-
-We read:
-
-```json
-{
-  "id": 53317461976,
-  "status": "completed",
-  "conclusion": "failure",
-  "steps": [
-    {"name": "Build Image", "status": "completed", "conclusion": "success"},
-    {"name": "Rust checks", "status": "completed", "conclusion": "failure"}
-  ]
-}
-```
-
-**Cacheable?**
-
-- Yes. Persisted to `actions-jobs/actions_jobs.json` (memory + disk).
-- TTL: **600s** (default `get_actions_job_details_cached(..., ttl_s=600)`).
-  - (This is intentionally shorter than run metadata; step timings can change during an in-progress run.)
-
-### Call counts summary for this example (single PR)
-
-Assume:
-
-- PR has 25 check-runs
-- They reference 3 unique Actions runs (`run_id`s)
-- 2 failed jobs need logs/snippets
-
-**Best-case (warm caches, nothing new)**
-
-- `pulls_list`: 0
-- `check_runs`: 0
-- `actions_run`: 0
-- `actions_job_logs_zip`: 0
-- `rate_limit`: ~1–2
-- (others): 0
-
-Total: **~1–2 calls**
-
-**Worst-case (cold caches)**
-
-- `rate_limit`: 1–2
+**Worst case (cold caches):**
+- `rate_limit`: 1-2
 - `pulls_list`: 1
-- `pull_request`: 2 (PR details fetched twice in current code paths)
-- `check_runs`: 2 (check-runs fetched via multiple helpers in current code paths)
+- `search_issues`: 1
+- `pull_request`: 2
+- `check_runs`: 2
 - `required_status_checks`: 1
 - `pr_review_comments`: 1
-- `actions_run`: 3 (one per unique run_id)
+- `actions_run`: 3 (per unique run_id)
 - `actions_job_status`: 2
 - `actions_job_logs_zip`: 2
+- Total: **15-16 calls**
 
-Total: **~15–16 calls** for one PR.
+Multiply by number of PRs to estimate total. Budget (`--max-github-api-calls`) caps total and switches to cache-only mode when exhausted.
 
-Multiply by “number of PRs shown” to estimate the run’s ceiling, and note that the **API budget** caps the total
-per invocation (`--max-github-api-calls`), switching to cache-only mode when exhausted.
+---
 
+## Quick Reference
 
+**Node types:** See `TREE_NODE_REFERENCE.md`
+
+**Common modifications:**
+- Branch line format → `BranchInfoNode._format_html_content()`
+- CI expansion logic → `PRStatusNode.to_tree_vm()` or `CIJobTreeNode._subtree_needs_attention()`
+- Repo icon → `RepoNode._format_html_content()`
+
+**Helper functions:** See "Shared Helper Functions" in `TREE_NODE_REFERENCE.md`

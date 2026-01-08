@@ -242,7 +242,7 @@ python3 gitlab_pipeline_pr_map.py 40743226 https://gitlab-master.nvidia.com/dl/a
 
 ```bash
 # Basic backup (required parameters)
-./backup.sh --input-path ~/nvidia --output-path /mnt/sda/keivenc/nvidia
+./backup.sh --input-path ~/nvidia --output-path /mnt/sda/keivenc/dynamo
 
 # Show help
 ./backup.sh --help
@@ -273,7 +273,7 @@ python3 gitlab_pipeline_pr_map.py 40743226 https://gitlab-master.nvidia.com/dl/a
 
 ```bash
 # Backup every 6 minutes
-*/6 * * * * NVIDIA_HOME=$HOME/nvidia $HOME/nvidia/dynamo-utils/cron_log.sh backup $HOME/nvidia/dynamo-utils/backup.sh --input-path $HOME/nvidia --output-path /mnt/sda/keivenc/nvidia
+*/6 * * * * NVIDIA_HOME=$HOME/nvidia $HOME/nvidia/dynamo-utils/cron_log.sh backup $HOME/nvidia/dynamo-utils/backup.sh --input-path $HOME/nvidia --output-path /mnt/sda/keivenc/dynamo
 ```
 
 ---

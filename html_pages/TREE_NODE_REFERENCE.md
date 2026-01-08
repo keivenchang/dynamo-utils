@@ -1,55 +1,82 @@
 # Tree Node Reference Guide
 
-This document defines all tree node types used in the local and remote branches dashboards, their hierarchy, and their behavior.
+Complete reference for all tree node types in the local/remote branches dashboards.
 
 ---
 
-## Node Type Hierarchy
+## Node Hierarchy
 
 ```
 RepoNode (repository directory)
-├─ SectionNode ("Branches with PRs", "Local-only branches")
+├─ SectionNode ("Branches with PRs", "Branches", "Local-only branches")
 │  └─ BranchInfoNode (individual branch)
-│     ├─ CommitMessageNode (first line of commit with PR# link)
-│     ├─ MetadataNode (modified, created, age timestamps)
-│     └─ PRStatusNode (PASSED/FAILED/RUNNING summary line)
-│        ├─ CIJobTreeNode (individual CI check/job)
-│        │  └─ CIJobTreeNode (nested job steps, optional)
-│        ├─ ConflictWarningNode (merge conflict warning, optional)
-│        ├─ BlockedMessageNode (blocked status message, optional)
-│        └─ RerunLinkNode (GitHub Actions rerun link, optional)
+│     ├─ CommitMessageNode (commit message with PR link)
+│     ├─ MetadataNode (timestamps and age)
+│     ├─ PRStatusNode (CI status for PRs)
+│     │  ├─ CIJobTreeNode (CI check/job)
+│     │  │  └─ CIJobTreeNode (nested steps)
+│     │  ├─ ConflictWarningNode
+│     │  ├─ BlockedMessageNode
+│     │  └─ RerunLinkNode
+│     └─ WorkflowStatusBranchNode (workflow status for non-PR branches)
+│        └─ BranchNode (individual workflow run)
 ```
 
 ---
 
-## Node Type Definitions
+## Visual Example
 
-### 1. **`BranchNode`** (base class)
-- **Purpose:** Abstract base class for all tree nodes
-- **Key fields:**
-  - `label` - Display text
-  - `children` - List of child nodes
-- **Methods:**
-  - `to_tree_vm()` - Convert to `TreeNodeVM` for rendering
-  - `_format_html_content()` - Generate HTML for the node line
-- **Used directly:** No (always subclassed)
+```
+▼ dynamo/                                      ← RepoNode
+│  ├─ Branches with PRs                        ← SectionNode
+│  │  ├─ [copy] ✖ branch-1 → main [SHA]      ← BranchInfoNode (closed PR)
+│  │  │  ├─ commit message (#1234)            ← CommitMessageNode
+│  │  │  ├─ (modified ..., created ..., ago) ← MetadataNode
+│  │  │  └─ ▶ PASSED  3 ✓26 ✗2               ← PRStatusNode (collapsed)
+│  │  │     ├─ ✓ check-1 (6m) [log]          ← CIJobTreeNode (hidden)
+│  │  │     └─ ✗ check-2 (2m) [log] ▶ Snippet
+│  │  └─ [copy] branch-2 → release/0.8 [SHA]  ← BranchInfoNode (open PR)
+│  │     ├─ fix: memory leak (#2345)          ← CommitMessageNode
+│  │     ├─ (modified ..., created ..., ago) ← MetadataNode
+│  │     └─ ▼ FAILED  2 ✓24 ✗1               ← PRStatusNode (expanded)
+│  │        ├─ ✓ check-1 (5m)                 ← CIJobTreeNode
+│  │        └─ ▼ ✗ check-2 (3m) [log] ▶ Snippet
+│  │           ├─ ✓ setup (10s)               ← CIJobTreeNode (step)
+│  │           ├─ ✗ test (2m 30s)             ← CIJobTreeNode (step)
+│  │           └─ ✓ cleanup (20s)             ← CIJobTreeNode (step)
+│  ├─ Branches                                 ← SectionNode (non-PR)
+│  │  └─ [copy] feature → main [SHA]          ← BranchInfoNode
+│  │     └─ ✅ PASSED ✓5                      ← WorkflowStatusBranchNode
+│  │        ├─ ✓ pre_merge                    ← BranchNode
+│  │        ├─ ✓ Rust checks                  ← BranchNode
+│  │        ├─ ✓ Copyright                    ← BranchNode
+│  │        ├─ ✓ DCO                          ← BranchNode
+│  │        └─ ✓ Docs                         ← BranchNode
+│  └─ Local-only branches                      ← SectionNode
+│     └─ [copy] local-branch [SHA]            ← BranchInfoNode
+```
 
 ---
 
-### 2. **`RepoNode`** (extends `BranchNode`)
-- **Purpose:** Represents a repository directory
-- **Display:** 
-  - Normal: `▼ dynamo/` (collapsible triangle)
-  - Symlink: `■ speedoflight/ → ../other/path` (square, non-collapsible)
-- **Key fields:**
-  - `path` - Filesystem path to repository
-  - `error` - Optional error message if scanning failed
-  - `remote_url` - Git remote URL
-- **Children:** `SectionNode` instances
-- **Special behavior:**
-  - Detects symlinks and shows target path with tooltip
-  - Symlink repos are non-expandable (no children scanned)
-  - Repository name is clickable (links to directory)
+## Core Node Types
+
+### `BranchNode` (base class)
+Abstract base for all tree nodes. Not used directly.
+
+**Key methods:**
+- `to_tree_vm()` - Convert to `TreeNodeVM` for rendering
+- `_format_html_content()` - Generate HTML for the node
+
+---
+
+### `RepoNode`
+Represents a repository directory.
+
+**Display:**
+- Normal: `▼ dynamo/` (collapsible)
+- Symlink: `■ speedoflight/ → ../path` (non-collapsible)
+
+**Children:** `SectionNode` instances
 
 **Example:**
 ```
@@ -60,389 +87,284 @@ RepoNode (repository directory)
 
 ---
 
-### 3. **`SectionNode`** (extends `BranchNode`)
-- **Purpose:** Section header grouping branches by category
-- **Display:** Plain text, always collapsible
-- **Common sections:**
-  - "Branches with PRs" - branches with open or closed pull requests
-  - "Branches" - branches with remotes but no PRs (shows workflow status)
-  - "Local-only branches" - branches without remote tracking
-  - "Merged branches" (optional)
-- **Children:** `BranchInfoNode` instances
-- **Special behavior:** None (simple grouping node)
+### `SectionNode`
+Groups branches by category.
 
-**Example:**
-```
-├─ Branches with PRs
-│  ├─ keivenchang/DIS-1200...
-│  └─ keivenchang/DIS-1150...
-├─ Branches
-│  └─ feature-branch (with workflow status)
-```
+**Common sections:**
+- "Branches with PRs" - branches with open/closed PRs
+- "Branches" - branches with remotes but no PRs (shows workflow status)
+- "Local-only branches" - no remote tracking
+
+**Children:** `BranchInfoNode` instances
 
 ---
 
-### 4. **`BranchInfoNode`** (extends `BranchNode`)
-- **Purpose:** Individual git branch with metadata
-- **Display format (NEW as of 2026-01-07):**
-  ```
-  [copy button] [✖ closed mark] branch-name → base-branch [SHA]
-  ├─ commit message first line (#PR_NUMBER)
-  ├─ (modified PT, created UTC, age)
-  └─ PRStatusNode OR WorkflowStatusNode...
-  ```
-- **Key fields:**
-  - `sha` - Commit SHA (short form, e.g., "4afb3fb")
-  - `commit_url` - GitHub commit URL (no longer displayed as link)
-  - `commit_time_pt` - Last modified time (Pacific Time)
-  - `commit_datetime` - Commit timestamp for age calculation
-  - `commit_message` - Full commit message (used in `CommitMessageNode`)
-  - `is_current` - Whether this is the current checked-out branch
-- **Children:** 
-  - `CommitMessageNode` (first child, shows commit message + PR#) - if PR exists
-  - `MetadataNode` (second child, shows timestamps) - if PR exists
-  - `PRStatusNode` (third child, shows CI status) - if PR exists
-  - **WorkflowStatusNode** (shows GitHub Actions runs) - **NEW: if remote branch without PR**
-- **Expansion policy:**
-  - **Always expanded** when children exist (so all metadata is visible)
-- **Special behavior:**
-  - Base branch shown inline (`→ main`)
-  - SHA shown as plain text (no link)
-  - PR# shown in `CommitMessageNode` as link
-  - Copy button strips repo prefixes like "ai-dynamo/"
-  - Closed PRs show a ✖ mark after the copy button
-  - **NEW (2026-01-07):** For branches with remotes but no PRs, fetches and displays recent GitHub Actions workflow runs
+### `BranchInfoNode`
+Individual git branch with metadata.
+
+**Display:**
+```
+[copy] [✖] branch-name → base [SHA]
+├─ commit message (#PR)
+├─ (modified PT, created UTC, age)
+└─ Status (PR or Workflow)
+```
+
+**Special behavior:**
+- Copy button strips repo prefixes ("ai-dynamo/")
+- Closed PRs show ✖ mark
+- Always expanded when has children
+- For non-PR branches: fetches GitHub Actions workflow runs
 
 **Example with PR:**
 ```
-├─ [copy] keivenchang/DIS-1200__refactor... → main [4afb3fb]
-│  ├─ refactor: remove "dev" stage from Dockerfile.* (#5050)
-│  ├─ (modified 2026-01-07 10:36 PT, created 2025-12-22 03:49, 8h 39m ago)
-│  └─ ▶ PASSED  3 ✓26 ✗2
-```
-
-**Example without PR (showing workflow runs):**
-```
-├─ [copy] feature-branch → main [abc123]
-│  └─ ✅ PASSED ✓5
-│     ├─ ✓ pre_merge
-│     ├─ ✓ Rust pre-merge checks
-│     ├─ ✓ Copyright Checks
-│     ├─ ✓ DCO Commenter
-│     └─ ✓ Docs link check
-```
-
----
-
-### 5. **`CommitMessageNode`** (extends `BranchNode`)
-- **Purpose:** Shows first line of commit message with PR number link
-- **Display format:**
-  ```
-  commit message first line (#PR_NUMBER)
-  ```
-- **Key fields:**
-  - `commit_message` - Full commit message (only first line displayed)
-  - `pr_number` - GitHub PR number for link
-- **Children:** None
-- **Expansion policy:** Non-collapsible (leaf node)
-- **Special behavior:**
-  - Truncates message to 100 characters if too long
-  - PR number shown as clickable GitHub link
-  - Grey text for subtle appearance
-
-**Example:**
-```
-├─ refactor: remove "dev" stage from Dockerfile.* (#5050)
-```
-
----
-
-### 6. **`MetadataNode`** (extends `BranchNode`)
-- **Purpose:** Shows branch timestamps and age
-- **Display format:**
-  ```
-  (modified YYYY-MM-DD HH:MM PT, created YYYY-MM-DD HH:MM, Xd Yh ago)
-  ```
-- **Key fields:**
-  - `commit_time_pt` - Last modified time (Pacific Time)
-  - `commit_datetime` - Commit timestamp for age calculation
-  - `pr_created_at_iso` - PR creation timestamp (ISO format)
-- **Children:** None
-- **Expansion policy:** Non-collapsible (leaf node)
-- **Special behavior:**
-  - Compact age format (e.g., "8h 39m ago", "16d 23h ago")
-  - Grey text for subtle appearance
-
-**Example:**
-```
+[copy] feature/DIS-1200 → main [4afb3fb]
+├─ refactor: remove "dev" stage (#5050)
 ├─ (modified 2026-01-07 10:36 PT, created 2025-12-22 03:49, 8h 39m ago)
+└─ ▶ PASSED  3 ✓26 ✗2
+```
+
+**Example without PR:**
+```
+[copy] feature-branch → main [abc123]
+└─ ✅ PASSED ✓5
+   ├─ ✓ pre_merge
+   ├─ ✓ Rust pre-merge checks
+   └─ ✓ Copyright Checks
 ```
 
 ---
 
-### 7. **`PRNode`** (extends `BranchNode`)
-- **Purpose:** Stores PR metadata (merged into parent `BranchInfoNode`, never rendered as separate line)
-- **Key fields:**
-  - `pr` - Full `PRInfo` object with PR details
-- **Children:** None (absorbed by parent)
-- **Special behavior:**
-  - Not rendered in the tree (metadata merged into `BranchInfoNode`)
-  - Provides PR title, number, state, base branch for tooltip
+## Metadata Nodes
 
-**Note:** This node exists in the tree structure but is filtered out during rendering.
+### `CommitMessageNode`
+First line of commit message with PR link.
+
+**Display:** `commit message first line (#PR_NUMBER)`
+
+**Behavior:**
+- Truncates to 100 chars if too long
+- PR number is clickable GitHub link
+- Grey text for subtle appearance
 
 ---
 
-### 8. **`PRStatusNode`** (extends `BranchNode`)
-- **Purpose:** Shows the aggregate PASSED/FAILED/RUNNING status with check counts
-- **Display format:**
-  ```
-  [triangle] PASSED/FAILED/RUNNING [GitHub icon] counts [review status] [conversations]
-  ```
-- **Key fields:**
-  - `pr` - `PRInfo` object for status calculation
-  - `context_key` - Stable key for DOM id generation
-- **Children:** `CIJobTreeNode` instances (individual checks)
-- **Expansion policy:**
-  - ✅ **PASSED**: Collapsed (▶) - CI children hidden
-  - ⚠️ **FAILED**: Expanded (▼) - CI children visible
-  - 🔄 **RUNNING**: Expanded (▼) - CI children visible
-- **Special behavior:**
-  - Always visible as a line (controlled by parent `BranchInfoNode`)
-  - Calculates counts from `gh pr checks` data
-  - Shows review status (✅ Approved, 🔴 Changes Requested)
-  - Shows unresolved conversation count
-  - GitHub icon links to commit checks page
+### `MetadataNode`
+Branch timestamps and age.
+
+**Display:** `(modified YYYY-MM-DD HH:MM PT, created YYYY-MM-DD HH:MM, Xd Yh ago)`
+
+**Format:** Compact age like "8h 39m ago" or "16d 23h ago"
+
+---
+
+### `PRNode`
+Stores PR metadata (not rendered separately).
+
+**Purpose:** Provides PR title, number, state, base branch for tooltips
+
+---
+
+## Status Nodes
+
+### `PRStatusNode`
+Aggregate CI status for PRs.
+
+**Display:** `[▼/▶] PASSED/FAILED/RUNNING [icon] ✓count ✗count [reviews] [💬]`
+
+**Expansion:**
+- ✅ PASSED: Collapsed (▶) - hides CI children
+- ⚠️ FAILED: Expanded (▼) - shows CI children
+- 🔄 RUNNING: Expanded (▼) - shows CI children
+
+**Shows:**
+- Review status (✅ Approved, 🔴 Changes Requested)
+- Unresolved conversation count
+- GitHub icon links to commit checks page
+
+**Children:** `CIJobTreeNode` instances
 
 **Example:**
 ```
-└─ ▶ PASSED  3 ✓26 ✗2, 💬 Unresolved: 28
-   ├─ ✓ Build and push Dynamo docker images (amd64) (6m)
-   └─ ✗ deploy-test-vllm (disagg_router) (2m)
+▶ PASSED  3 ✓26 ✗2, 💬 Unresolved: 28
+├─ ✓ Build and push Dynamo (6m)
+└─ ✗ deploy-test-vllm (2m)
 ```
 
 ---
 
-### 9. **`CIJobTreeNode`** (extends `BranchNode`)
-- **Purpose:** Individual CI check/job from GitHub Actions
-- **Display format:**
-  ```
-  [triangle] [icon] check-name (duration) [log link]
-  ```
-- **Key fields:**
-  - `job_id` - Unique job identifier
-  - `display_name` - Human-readable check name
-  - `status` - `success`, `failure`, `in_progress`, `pending`, `cancelled`, `skipped`, `unknown`
-  - `is_required` - Whether this is a required check (branch protection)
-  - `duration` - Human-readable duration (e.g., "6m", "2h 15m")
-  - `url` - GitHub Actions job URL
-  - `raw_log_href` - Local raw log file path (if cached)
-  - `error_snippet_text` - Extracted error snippet from log
-  - `failed_check` - Optional `FailedCheck` object with details
-- **Children:** Nested `CIJobTreeNode` instances (job steps, matrix jobs)
-- **Icons:**
-  - ✓ (green circle) - Required success
-  - ✓ (green checkmark) - Optional success
-  - ✗ (red circle) - Required failure
-  - ✗ (red X) - Optional failure
-  - ⏳ (hourglass) - In progress
-  - ⏸ (pause) - Pending/queued
-  - ✖️ (multiply) - Cancelled
-  - ? (grey) - Unknown/skipped
-- **Expansion policy:**
-  - **Success-like** (passed, skipped, unknown with 0 duration): Collapsed
-  - **Required failure**: Expanded
-  - **Running/pending**: Expanded
-  - **Optional failure only**: Collapsed
-- **Special behavior:**
-  - Shows "▶ Snippet" button if log available
-  - Groups by architecture (amd64 first, then arm64) when matrix jobs present
-  - Shows nested job steps in hierarchical tree
+### `WorkflowStatusBranchNode` *(NEW 2026-01-07)*
+GitHub Actions workflow status for branches without PRs.
+
+**Display:** `[icon] STATUS ✓count ✗count`
+
+**Status priority:**
+1. **❌ FAILED** - any workflow has `conclusion=failure`
+2. **⏳ RUNNING** - any workflow `in_progress` or `queued`
+3. **✅ PASSED** - at least one `conclusion=success` (no failures/running)
+4. **⚪ UNKNOWN** - no matching workflows
+
+**Behavior:**
+- Always expanded (non-collapsible)
+- Shows up to 5 most recent workflow runs
+- Fetched via `/repos/{owner}/{repo}/actions/runs?branch={branch_name}`
+- Cached with 5-minute TTL
+
+**Implementation:** Uses generic `BranchNode` with computed label (no dedicated class)
+
+**Children:** `BranchNode` instances for individual workflow runs
+
+---
+
+## CI Nodes
+
+### `CIJobTreeNode`
+Individual CI check/job from GitHub Actions.
+
+**Display:** `[▼/▶] [icon] check-name (duration) [log] [▶ Snippet]`
+
+**Icons:**
+- ✓ (green circle/checkmark) - Success (required/optional)
+- ✗ (red circle/X) - Failure (required/optional)
+- ⏳ - In progress
+- ⏸ - Pending/queued
+- ✖️ - Cancelled
+- ? - Unknown/skipped
+
+**Expansion:**
+- Success/skipped: Collapsed
+- Required failure: Expanded
+- Running/pending: Expanded
+- Optional failure: Collapsed
+
+**Special behavior:**
+- Groups matrix jobs by architecture (amd64, then arm64)
+- Shows nested job steps in hierarchy
+- Snippet button if log available
+
+**Children:** Nested `CIJobTreeNode` for job steps
 
 **Example:**
 ```
-├─ ▼ ✗ deploy-test-vllm (disagg_router) (2m) [log] ▶ Snippet
-│  ├─ ✓ checkout (5s)
-│  ├─ ✗ run-tests (1m 45s)
-│  └─ ✓ cleanup (10s)
+▼ ✗ deploy-test-vllm (2m) [log] ▶ Snippet
+├─ ✓ checkout (5s)
+├─ ✗ run-tests (1m 45s)
+└─ ✓ cleanup (10s)
 ```
 
 ---
 
-### 10. **`PRURLNode`** (extends `BranchNode`)
-- **Purpose:** Shows a clickable GitHub PR link with title
-- **Display format:**
-  ```
-  📖 PR#1234: Title of the pull request
-  ```
-- **Key fields:**
-  - `url` - GitHub PR URL
-  - `pr_number` - PR number
-  - `title` - PR title
-- **Children:** None
-- **Special behavior:**
-  - Icon: 📖 (open book emoji)
-  - Title truncated if too long
-  - Opens in new tab
+## Utility Nodes
 
-**Example:**
-```
-└─ 📖 PR#5050: refactor: remove "dev" stage from Dockerfile.* and centralize them into Dockerfile.dev
-```
+### `PRURLNode`
+Clickable GitHub PR link with title.
+
+**Display:** `📖 PR#1234: Title of the pull request`
+
+**Behavior:** Opens in new tab, truncates long titles
 
 ---
 
-### 9. **`RerunLinkNode`** (extends `BranchNode`)
-- **Purpose:** Shows a link to rerun failed GitHub Actions workflow
-- **Display format:**
-  ```
-  🔄 Rerun workflow [run 123456789]
-  ```
-- **Key fields:**
-  - `url` - GitHub Actions run URL
-  - `run_id` - Workflow run ID
-- **Children:** None
-- **Special behavior:**
-  - Only shown when CI has failures
-  - Includes copy button for `gh run rerun --failed` command
+### `RerunLinkNode`
+Link to rerun failed GitHub Actions workflow.
 
-**Example:**
-```
-└─ 🔄 Rerun workflow [run 20774607783]
-```
+**Display:** `🔄 Rerun workflow [run 123456789]`
+
+**Behavior:**
+- Only shown when CI has failures
+- Includes copy button for `gh run rerun --failed` command
 
 ---
 
-### 10. **`BlockedMessageNode`** (extends `BranchNode`)
-- **Purpose:** Shows when a PR is blocked (e.g., merge conflicts, required checks)
-- **Display:** `🚫 Blocked: <reason>`
-- **Children:** None
+### `BlockedMessageNode`
+Shows when PR is blocked.
+
+**Display:** `🚫 Blocked: <reason>`
 
 ---
 
-### 11. **`ConflictWarningNode`** (extends `BranchNode`)
-- **Purpose:** Shows merge conflict warnings
-- **Display:** `⚠️ <message>`
-- **Children:** None
+### `ConflictWarningNode`
+Shows merge conflict warnings.
+
+**Display:** `⚠️ <message>`
 
 ---
 
-## Tree Rendering: `TreeNodeVM`
+## Expansion Policies
 
-All `BranchNode` subclasses convert to `TreeNodeVM` for rendering via `to_tree_vm()`.
-
-### `TreeNodeVM` Fields
-- `node_key` - Stable key for DOM id generation (survives regeneration)
-- `label_html` - Full HTML content for the line
-- `children` - List of child `TreeNodeVM` instances
-- `collapsible` - Whether to show expand/collapse triangle
-- `default_expanded` - Initial expanded state (True = ▼, False = ▶)
-- `triangle_tooltip` - Optional tooltip for the triangle
-- `noncollapsible_icon` - Icon for non-collapsible nodes ("square" = ■, "" = blank)
+| Node Type | Default | Controlled By |
+|-----------|---------|---------------|
+| `RepoNode` | Expanded | User toggle |
+| `SectionNode` | Expanded | User toggle |
+| `BranchInfoNode` | Expanded (when has children) | Always shows children |
+| `PRStatusNode` | Collapsed if PASSED, expanded if FAILED/RUNNING | CI status |
+| `CIJobTreeNode` | Collapsed if success, expanded if failure/running | Job status |
+| `WorkflowStatusBranchNode` | Expanded (non-collapsible) | N/A |
 
 ---
 
-## Expansion Policies Summary
+## TreeNodeVM Rendering
 
-| Node Type | Default Expansion | Controlled By |
-|-----------|-------------------|---------------|
-| `RepoNode` | Always expanded | User (always has triangle) |
-| `SectionNode` | Always expanded | User (always has triangle) |
-| `BranchInfoNode` | **Always expanded** (when has children) | Shows `PRStatusNode` line |
-| `PRStatusNode` | **Collapsed for PASSED**, expanded for FAILED/RUNNING | CI status |
-| `CIJobTreeNode` | Collapsed for success, expanded for failure/running | Job status |
+All nodes convert to `TreeNodeVM` via `to_tree_vm()`.
 
----
-
-## Remote vs Local Branches
-
-### Local Branches (`show_local_branches.py`)
-- Scans git repositories on disk
-- Shows local branch modifications and commit times
-- Full CI details with error snippets from local log cache
-
-### Remote Branches (`show_remote_branches.py`)
-- Fetches PRs from GitHub API by username
-- Shows only PRs (no local-only branches)
-- Same tree structure and expansion logic as local
-- Uses shared helpers from `show_local_branches.py`:
-  - `_format_age_compact()`
-  - `_format_branch_metadata_suffix()`
-  - `_format_pr_tooltip()`
-  - `_pr_needs_attention()`
-  - `_strip_repo_prefix_for_clipboard()`
+**Fields:**
+- `node_key` - Stable DOM id (survives regeneration)
+- `label_html` - Full HTML content
+- `children` - Child `TreeNodeVM` instances
+- `collapsible` - Show expand/collapse triangle
+- `default_expanded` - Initial state (▼/▶)
+- `triangle_tooltip` - Optional tooltip
+- `noncollapsible_icon` - Icon for non-collapsible ("square" = ■)
 
 ---
 
-## Shared Helper Functions
+## Helper Functions
 
-### Formatting Helpers (exported from `show_local_branches.py`)
-- **`_format_age_compact(dt)`** - "(8h 39m ago)" format
-- **`_format_branch_metadata_suffix(commit_time_pt, commit_datetime, pr_created_at_iso)`** - "(modified ..., created ..., ... ago)"
-- **`_format_base_branch_inline(pr)`** - "→ main" or "→ release/0.8.0"
-- **`_format_commit_tooltip(commit_message)`** - Full commit message for tooltip (escaped)
-- **`_format_pr_number_link(pr)`** - "#5050" as GitHub PR link
-- **`_strip_repo_prefix_for_clipboard(branch_name)`** - Removes "ai-dynamo/" prefixes
+Exported from `show_local_branches.py`, shared with `show_remote_branches.py`:
 
-### Status Helpers
-- **`_pr_needs_attention(pr)`** - True if PR has running work or required failures
+**Formatting:**
+- `_format_age_compact(dt)` - "(8h 39m ago)"
+- `_format_branch_metadata_suffix(...)` - "(modified ..., created ..., ago)"
+- `_format_base_branch_inline(pr)` - "→ main"
+- `_format_commit_tooltip(msg)` - Escaped tooltip
+- `_format_pr_number_link(pr)` - "#5050" link
+- `_strip_repo_prefix_for_clipboard(name)` - Remove "ai-dynamo/"
 
-### CI Hierarchy Builder
-- **`_build_ci_hierarchy_nodes(repo_path, pr, github_api, ...)`** - Builds the `CIJobTreeNode` tree from GitHub check runs
+**Status:**
+- `_pr_needs_attention(pr)` - Has running work or required failures
 
----
-
-## Naming Convention
-
-When discussing these nodes:
-- **"Repo node"** or **"repository node"** → `RepoNode`
-- **"Section node"** → `SectionNode`
-- **"Branch node"** or **"branch line"** → `BranchInfoNode`
-- **"Commit message line"** or **"commit node"** → `CommitMessageNode`
-- **"Metadata line"** or **"metadata node"** → `MetadataNode`
-- **"Status node"** or **"PR status line"** → `PRStatusNode`
-- **"CI node"** or **"check node"** or **"job node"** → `CIJobTreeNode`
-- **"PR link node"** → `PRURLNode`
-- **"Rerun link node"** → `RerunLinkNode`
+**CI:**
+- `_build_ci_hierarchy_nodes(...)` - Build `CIJobTreeNode` tree
 
 ---
 
-## Visual Example (Full Tree)
+## Local vs Remote Dashboards
 
-```
-▼ dynamo/                                          ← RepoNode
-│  ├─ Branches with PRs                            ← SectionNode
-│  │  ├─ [copy] ✖ branch-name → main [SHA]        ← BranchInfoNode (closed PR)
-│  │  │  ├─ commit message (#1234)                 ← CommitMessageNode
-│  │  │  ├─ (modified ..., created ..., ago)      ← MetadataNode
-│  │  │  └─ ▶ PASSED  3 ✓26 ✗2                    ← PRStatusNode (collapsed)
-│  │  │     ├─ ✓ check-1 (6m) [log]               ← CIJobTreeNode (hidden when collapsed)
-│  │  │     └─ ✗ check-2 (2m) [log] ▶ Snippet     ← CIJobTreeNode (hidden when collapsed)
-│  │  └─ [copy] branch-2 → release/0.8.0 [SHA]    ← BranchInfoNode (open PR)
-│  │     ├─ fix: resolve memory leak (#2345)       ← CommitMessageNode
-│  │     ├─ (modified ..., created ..., ago)      ← MetadataNode
-│  │     └─ ▼ FAILED  2 ✓24 ✗1                    ← PRStatusNode (expanded)
-│  │        ├─ ✓ check-1 (5m)                      ← CIJobTreeNode
-│  │        └─ ▼ ✗ check-2 (3m) [log] ▶ Snippet   ← CIJobTreeNode (expanded)
-│  │           ├─ ✓ setup (10s)                    ← CIJobTreeNode (nested step)
-│  │           ├─ ✗ test (2m 30s)                  ← CIJobTreeNode (nested step)
-│  │           └─ ✓ cleanup (20s)                  ← CIJobTreeNode (nested step)
-│  └─ Local-only branches                          ← SectionNode
-│     └─ [copy] feature-branch [SHA]               ← BranchInfoNode (no PR, no children)
-```
+### Local (`show_local_branches.py`)
+- Scans git repos on disk
+- Shows local modifications and commit times
+- Full CI details with error snippets
+
+### Remote (`show_remote_branches.py`)
+- Fetches PRs by GitHub username
+- No local-only branches
+- Same tree structure and helpers
 
 ---
 
-## Questions for Next Time
+## Quick Reference
 
-Use this reference to:
-- Identify which node type to modify for specific UI changes
-- Understand the tree hierarchy when debugging rendering issues
-- Know which helper functions to reuse for new features
-- Clarify expansion policy requirements ("should the status node expand?" → "the PRStatusNode controls its CI children")
+**Node naming shortcuts:**
+- "Repo node" → `RepoNode`
+- "Section node" → `SectionNode`
+- "Branch node/line" → `BranchInfoNode`
+- "Commit message line" → `CommitMessageNode`
+- "Metadata line" → `MetadataNode`
+- "Status node/PR status line" → `PRStatusNode`
+- "CI/check/job node" → `CIJobTreeNode`
+- "Workflow status node" → `WorkflowStatusBranchNode`
 
-**Example queries:**
-- "Update the branch line to show..." → Modify `BranchInfoNode._format_html_content()`
-- "Change when CI checks expand..." → Modify `PRStatusNode.to_tree_vm()` or `CIJobTreeNode._subtree_needs_attention()`
-- "Add a new icon to the repo line..." → Modify `RepoNode._format_html_content()`
-
+**Common modifications:**
+- Update branch line → `BranchInfoNode._format_html_content()`
+- Change CI expansion → `PRStatusNode.to_tree_vm()` or `CIJobTreeNode._subtree_needs_attention()`
+- Add repo icon → `RepoNode._format_html_content()`

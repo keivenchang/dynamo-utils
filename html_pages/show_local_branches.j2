@@ -78,7 +78,7 @@
       </summary>
       <div style="margin-top: 10px; font-size: 12px; line-height: 1.55;">
         <div style="margin-bottom: 12px;">
-          <div style="font-weight: 600; margin-bottom: 6px; color: #24292f;">CI Status Symbols (GitHub):</div>
+          <div style="font-weight: 600; margin-bottom: 6px; color: #24292f;">CI Status Symbols:</div>
           <ul style="margin: 4px 0; padding-left: 20px;">
             <li>{{ success_required_icon_html|safe }} / {{ success_icon_html|safe }} - Passed (required/optional)</li>
             <li>{{ failure_required_icon_html|safe }} / {{ failure_optional_icon_html|safe }} - Failed (required/optional)</li>
@@ -87,30 +87,22 @@
             <li>{{ cancelled_icon_html|safe }} - Canceled</li>
             <li>{{ skipped_icon_html|safe }} - Skipped</li>
           </ul>
-          <div style="margin-top: 6px; color: #57606a; font-size: 12px;">
-            Notes:
-            <ul style="margin: 4px 0; padding-left: 20px;">
-              <li><strong>Skipped</strong> shows as a grey circle-slash.</li>
-              <li><strong>Optional failures</strong> show as a red ✗ (no circle) and do not force the top PASSED/FAILED/RUNNING pill to FAILED.</li>
-            </ul>
-          </div>
         </div>
 
         <div style="margin-bottom: 12px;">
-          <div style="font-weight: 600; margin-bottom: 6px; color: #24292f;">Job Steps (subsections):</div>
+          <div style="font-weight: 600; margin-bottom: 6px; color: #24292f;">Job Steps:</div>
           <ul style="margin: 4px 0; padding-left: 20px;">
-            <li><strong>Build and Test - dynamo</strong>: shows phase breakdown (Build Image / Rust checks / pytest...) when available.</li>
-            <li><strong>Jobs ≥10 minutes</strong> (e.g. <code>vllm (amd64)</code>, <code>sglang (arm64)</code>, <code>trtllm (amd64)</code>): shows job steps with duration ≥ 30s.</li>
-            <li>Step timing comes from the GitHub Actions job steps API and is cached; we only display steps ≥ 30s.</li>
+            <li><strong>Build and Test - dynamo</strong> shows phase breakdown (Build Image, Rust checks, pytest...)</li>
+            <li><strong>Long-running jobs</strong> (≥10 min) show steps with duration ≥30s</li>
+            <li><strong>Required jobs</strong> always show failing steps</li>
           </ul>
         </div>
 
         <div style="margin-bottom: 6px;">
           <div style="font-weight: 600; margin-bottom: 6px; color: #24292f;">Links:</div>
           <ul style="margin: 4px 0; padding-left: 20px;">
-            <li><strong>[log]</strong> opens the GitHub Actions job page.</li>
-            <li><strong>“View”</strong> in Details points to the same URL as the tree’s <strong>[log]</strong> link.</li>
-            <li><strong>[cached raw log]</strong> is a locally cached copy of the job log for failures (used for snippets/tags).</li>
+            <li><strong>[log]</strong> - GitHub Actions job page</li>
+            <li><strong>[cached raw log]</strong> - Locally cached log for snippets</li>
           </ul>
         </div>
       </div>
