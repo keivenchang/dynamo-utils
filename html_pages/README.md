@@ -7,6 +7,7 @@ This directory contains the **HTML dashboard generators** and shared dashboard U
 ```
 html_pages/
 ├── README.md
+├── TREE_NODE_REFERENCE.md  ← Node type definitions and hierarchy
 ├── common_dashboard.j2
 ├── common_dashboard_lib.py
 ├── common_github_workflow.py
@@ -14,14 +15,17 @@ html_pages/
 ├── show_commit_history.py
 ├── show_local_branches.j2
 ├── show_local_branches.py
+├── show_remote_branches.py
 ├── show_local_resources.py
 └── update_html_pages.sh
 ```
 
-- **Branches dashboard**: `show_local_branches.py` → **HTML-only**; writes `index.html` under your “nvidia” workspace root
+- **Branches dashboard**: `show_local_branches.py` → **HTML-only**; writes `index.html` under your "nvidia" workspace root
+- **Remote PRs dashboard**: `show_remote_branches.py` → **HTML-only**; writes `speedoflight/users/<user>/index.html`
 - **Commit history dashboard**: `show_commit_history.py` → **HTML-only**; writes `index.html` under a Dynamo repo clone (e.g. `dynamo_latest/`)
 - **Resource report**: `show_local_resources.py` (generated from `resource_monitor.sqlite`)
 - **Cron wrapper**: `update_html_pages.sh` (runs the generators and updates outputs atomically)
+- **Node reference**: `TREE_NODE_REFERENCE.md` (comprehensive guide to all tree node types)
 
 ### Prerequisites
 
@@ -47,8 +51,42 @@ These are **build artifacts**; don’t commit them unless you explicitly intend 
 - Local repo discovery under `--repo-path` (direct children)
 - Branches + linked PRs (GitHub)
 - CI checks per PR (GitHub check-runs)
+- **NEW (2026-01-07):** Workflow runs for branches with remotes but no PRs
 - Failure snippets and stable `[cached raw log]` links (downloaded once, cached)
-- A bottom “Statistics” section with timings and API usage breakdown
+- A bottom "Statistics" section with timings and API usage breakdown
+
+### Tree structure (updated 2026-01-07)
+
+Each branch with a PR is now rendered as:
+
+```
+[copy] [✖ closed] branch-name → base [SHA]
+├─ commit message (#PR_NUMBER)
+├─ (modified ..., created ..., ... ago)
+└─ PASSED/FAILED/RUNNING summary
+   ├─ CI check 1
+   └─ CI check 2
+```
+
+**Branches without PRs** (but with remotes) show workflow status:
+
+```
+[copy] branch-name → base [SHA]
+└─ ✅ PASSED ✓5
+   ├─ ✓ pre_merge
+   ├─ ✓ Rust pre-merge checks
+   ├─ ✓ Copyright Checks
+   ├─ ✓ DCO Commenter
+   └─ ✓ Docs link check
+```
+
+**Key changes from previous format:**
+- Branch line is cleaner: only shows name, base, and SHA
+- Commit message moved to first child line with PR# link
+- Metadata (timestamps, age) moved to second child line
+- Status line is third child (always visible)
+- **NEW:** Branches with remotes but no PRs show GitHub Actions workflow runs
+- See `TREE_NODE_REFERENCE.md` for full node definitions
 
 ### CI view (flat tree)
 
@@ -74,18 +112,19 @@ Both dashboards sort check-run / check-row lists by the **lexical display label*
 ### Example tree (local branches dashboard)
 
 ```text
-<branch name> → <base branch>
-└─ PR: <title> (#NNNN) → <base branch>
-   └─ (tree children match Details 1:1)
-      ├─ backend-status-check [REQUIRED] (…)
-      ├─ Build and Test - dynamo [REQUIRED] (…)
-      │  ├─ build: Build Image (…)
-      │  ├─ lint: Rust checks (…)
-      │  ├─ test: pytest (parallel) (…)
-      │  └─ test: pytest (serial) (…)
-      ├─ pre-commit [REQUIRED] (…)
-      ├─ CodeRabbit (…)
-      └─ …
+<branch name> → <base branch> [SHA]
+├─ <commit message first line> (#PR_NUMBER)
+├─ (modified YYYY-MM-DD HH:MM PT, created YYYY-MM-DD HH:MM, Xd Yh ago)
+└─ PASSED/FAILED/RUNNING  counts summary
+   ├─ backend-status-check [REQUIRED] (…)
+   ├─ Build and Test - dynamo [REQUIRED] (…)
+   │  ├─ build: Build Image (…)
+   │  ├─ lint: Rust checks (…)
+   │  ├─ test: pytest (parallel) (…)
+   │  └─ test: pytest (serial) (…)
+   ├─ pre-commit [REQUIRED] (…)
+   ├─ CodeRabbit (…)
+   └─ …
 ```
 
 ### Special rule: `Build and Test - dynamo` phase breakdown
@@ -126,6 +165,45 @@ python3 html_pages/show_local_branches.py \
   --repo-path ~/nvidia \
   --output ~/nvidia/index.html \
   --max-github-api-calls 100
+```
+
+---
+
+## show_remote_branches.py (remote PRs dashboard)
+
+### What it shows
+
+- Remote PRs by GitHub username (not tied to local git repos)
+- Same tree structure and UI as `show_local_branches.py`
+- Branches + PR metadata + CI checks per PR
+- Sorted by latest activity (or by branch name)
+
+### Usage
+
+```bash
+python3 show_remote_branches.py \
+  --github-user keivenchang \
+  --repo-root ~/nvidia \
+  --output speedoflight/users/keivenchang/index.html
+```
+
+### Key differences from local branches
+
+- **No local git access**: Uses PR title as commit message instead of `git log`
+- **Remote-only view**: Shows PRs created by the specified user
+- **Same node structure**: Uses `CommitMessageNode`, `MetadataNode`, `PRStatusNode`
+- **Reuses helpers**: All formatting/status logic from `show_local_branches.py`
+
+### Cron integration
+
+Add to `update_html_pages.sh`:
+
+```bash
+# Remote PRs for specific users (opt-in)
+update_html_pages.sh --show-remote-branches
+
+# Set users via environment:
+REMOTE_GITHUB_USERS="keivenchang user2" update_html_pages.sh --show-remote-branches
 ```
 
 ---
@@ -223,6 +301,14 @@ Do this:
 
 # Resource report:
 * * * * * NVIDIA_HOME=$HOME/nvidia $HOME/nvidia/dynamo-utils/cron_log.sh resource_report $HOME/nvidia/dynamo-utils/html_pages/update_html_pages.sh --show-local-resources
+
+# Remote PR dashboards (kthui, keivenchang):
+# - Working hours (8am-6pm PT / 4pm-2am UTC): every 1 minute
+* 16-23 * * * NVIDIA_HOME=$HOME/nvidia REMOTE_GITHUB_USERS="kthui keivenchang" $HOME/nvidia/dynamo-utils/cron_log.sh remote_prs_working $HOME/nvidia/dynamo-utils/html_pages/update_html_pages.sh --show-remote-branches
+* 0-1 * * * NVIDIA_HOME=$HOME/nvidia REMOTE_GITHUB_USERS="kthui keivenchang" $HOME/nvidia/dynamo-utils/cron_log.sh remote_prs_working $HOME/nvidia/dynamo-utils/html_pages/update_html_pages.sh --show-remote-branches
+
+# - Off hours (6pm-8am PT / 2am-4pm UTC): every 20 minutes
+*/20 2-15 * * * NVIDIA_HOME=$HOME/nvidia REMOTE_GITHUB_USERS="kthui keivenchang" $HOME/nvidia/dynamo-utils/cron_log.sh remote_prs_offhours $HOME/nvidia/dynamo-utils/html_pages/update_html_pages.sh --show-remote-branches
 ```
 
 ---

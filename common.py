@@ -1480,8 +1480,14 @@ class PRInfo:
     ci_status: Optional[str]
     # Head commit SHA for the PR (used to link to per-commit checks page).
     head_sha: Optional[str] = None
+    # Head branch ref (e.g. "feature/foo") and owner/login (e.g. "keivenchang") for display.
+    # These come from /pulls list payload (head.ref, head.repo.owner.login, head.label).
+    head_ref: Optional[str] = None
+    head_owner: Optional[str] = None
+    head_label: Optional[str] = None
     base_ref: Optional[str] = None
     created_at: Optional[str] = None
+    updated_at: Optional[str] = None
     has_conflicts: bool = False
     conflict_message: Optional[str] = None
     blocking_message: Optional[str] = None
@@ -2919,8 +2925,12 @@ class GitHubAPIClient:
             "is_merged": bool(pr.is_merged),
             "mergeable_state": pr.mergeable_state,
             "head_sha": pr.head_sha,
+            "head_ref": pr.head_ref,
+            "head_owner": pr.head_owner,
+            "head_label": pr.head_label,
             "base_ref": pr.base_ref,
             "created_at": pr.created_at,
+            "updated_at": pr.updated_at,
         }
 
     @staticmethod
@@ -2937,8 +2947,12 @@ class GitHubAPIClient:
                 unresolved_conversations=0,
                 ci_status=None,
                 head_sha=d.get("head_sha"),
+                head_ref=d.get("head_ref"),
+                head_owner=d.get("head_owner"),
+                head_label=d.get("head_label"),
                 base_ref=d.get("base_ref"),
                 created_at=d.get("created_at"),
+                updated_at=d.get("updated_at"),
                 has_conflicts=False,
                 conflict_message=None,
                 blocking_message=None,
@@ -3019,8 +3033,12 @@ class GitHubAPIClient:
                 "unresolved_conversations": int(pr.unresolved_conversations or 0),
                 "ci_status": pr.ci_status,
                 "head_sha": pr.head_sha,
+                "head_ref": pr.head_ref,
+                "head_owner": pr.head_owner,
+                "head_label": pr.head_label,
                 "base_ref": pr.base_ref,
                 "created_at": pr.created_at,
+                "updated_at": pr.updated_at,
                 "has_conflicts": bool(pr.has_conflicts),
                 "conflict_message": pr.conflict_message,
                 "blocking_message": pr.blocking_message,
@@ -3058,8 +3076,12 @@ class GitHubAPIClient:
                 unresolved_conversations=int(d.get("unresolved_conversations") or 0),
                 ci_status=d.get("ci_status"),
                 head_sha=d.get("head_sha"),
+                head_ref=d.get("head_ref"),
+                head_owner=d.get("head_owner"),
+                head_label=d.get("head_label"),
                 base_ref=d.get("base_ref"),
                 created_at=d.get("created_at"),
+                updated_at=d.get("updated_at"),
                 has_conflicts=bool(d.get("has_conflicts", False)),
                 conflict_message=d.get("conflict_message"),
                 blocking_message=d.get("blocking_message"),
@@ -3215,6 +3237,180 @@ class GitHubAPIClient:
                 self._save_pulls_list_disk_cache(disk)
             return items
 
+    def get_open_pr_info_for_author(
+        self,
+        owner: str,
+        repo: str,
+        *,
+        author: str,
+        ttl_s: int = DEFAULT_OPEN_PRS_TTL_S,
+        max_prs: Optional[int] = None,
+    ) -> List["PRInfo"]:
+        """Return enriched PRInfo objects for OPEN PRs authored by `author`.
+
+        This is meant to power dashboards that start from a GitHub username rather than local branches.
+        Implementation intentionally mirrors the "open PR list + batched updated_at probe + per-PR enrichment"
+        strategy used by `get_pr_info_for_branches(...)`.
+        """
+        author_lc = str(author or "").strip().lower()
+        if not author_lc:
+            return []
+
+        pr_datas = self.list_pull_requests(owner, repo, state="open", ttl_s=int(ttl_s))
+
+        # Filter by author (PR creator).
+        filtered: List[Dict[str, Any]] = []
+        for pr_data in (pr_datas or []):
+            if not isinstance(pr_data, dict):
+                continue
+            try:
+                login = str(((pr_data.get("user") or {}) if isinstance(pr_data.get("user"), dict) else {}).get("login") or "").strip().lower()
+            except Exception:
+                login = ""
+            if login == author_lc:
+                filtered.append(pr_data)
+
+        # Sort newest-first (by PR number, stable).
+        try:
+            filtered.sort(key=lambda d: int(d.get("number") or 0), reverse=True)
+        except Exception:
+            pass
+
+        if max_prs is not None:
+            try:
+                n = int(max_prs)
+                if n > 0:
+                    filtered = filtered[:n]
+            except Exception:
+                pass
+
+        if not filtered:
+            return []
+
+        # Cache-only mode: avoid per-PR enrichment fetches; populate a minimal PRInfo from pr_data.
+        if bool(getattr(self, "cache_only_mode", False)):
+            out_min: List[PRInfo] = []
+            for pr_data in filtered:
+                try:
+                    head = (pr_data.get("head") or {}) if isinstance(pr_data.get("head"), dict) else {}
+                    head_ref = head.get("ref")
+                    head_label = head.get("label")
+                    head_owner = ""
+                    try:
+                        hrepo = (head.get("repo") or {}) if isinstance(head.get("repo"), dict) else {}
+                        hown = (hrepo.get("owner") or {}) if isinstance(hrepo.get("owner"), dict) else {}
+                        head_owner = str(hown.get("login") or "").strip()
+                    except Exception:
+                        head_owner = ""
+                    pr = self._pr_info_min_from_dict(
+                        {
+                            "number": pr_data.get("number"),
+                            "title": pr_data.get("title") or "",
+                            "url": pr_data.get("html_url") or "",
+                            "state": pr_data.get("state") or "",
+                            "is_merged": pr_data.get("merged_at") is not None,
+                            "mergeable_state": pr_data.get("mergeable_state") or "unknown",
+                            "head_sha": (pr_data.get("head") or {}).get("sha"),
+                            "head_ref": head_ref,
+                            "head_label": head_label,
+                            "head_owner": head_owner,
+                            "base_ref": (pr_data.get("base") or {}).get("ref", "main"),
+                            "created_at": pr_data.get("created_at"),
+                            "updated_at": pr_data.get("updated_at"),
+                        }
+                    )
+                    if pr is not None:
+                        out_min.append(pr)
+                except Exception:
+                    continue
+            return out_min
+
+        # Optimization: if a PR has not changed (by `updated_at`), reuse cached PRInfo and do *zero*
+        # per-PR network calls. Probe updated_at via a batched search/issues call.
+        pr_nums: List[int] = []
+        for pr_data in filtered:
+            try:
+                n = int(pr_data.get("number") or 0)
+            except Exception:
+                n = 0
+            if n > 0:
+                pr_nums.append(n)
+
+        updated_map: Dict[int, str] = {}
+        try:
+            updated_map = self.get_pr_updated_at_via_search_issues(owner=owner, repo=repo, pr_numbers=pr_nums) or {}
+        except Exception:
+            updated_map = {}
+
+        def enrich_one(pr_data: Dict[str, Any]) -> Optional[PRInfo]:
+            try:
+                n = int(pr_data.get("number") or 0)
+            except Exception:
+                n = 0
+            upd = str(updated_map.get(n) or pr_data.get("updated_at") or "").strip()
+            if n and upd:
+                cached = self._get_cached_pr_info_if_unchanged(owner=owner, repo=repo, pr_number=n, updated_at=upd)
+                if cached is not None:
+                    # Backfill head branch info from the live /pulls payload, since older cached PRInfo
+                    # entries may not have these fields yet.
+                    try:
+                        head = (pr_data.get("head") or {}) if isinstance(pr_data.get("head"), dict) else {}
+                        if not getattr(cached, "head_ref", None):
+                            cached.head_ref = head.get("ref")
+                        if not getattr(cached, "head_label", None):
+                            cached.head_label = head.get("label")
+                        if not getattr(cached, "head_owner", None):
+                            hrepo = (head.get("repo") or {}) if isinstance(head.get("repo"), dict) else {}
+                            hown = (hrepo.get("owner") or {}) if isinstance(hrepo.get("owner"), dict) else {}
+                            cached.head_owner = str(hown.get("login") or "").strip() or None
+                    except Exception:
+                        pass
+                    return cached
+            # If we somehow entered cache-only mode mid-run, degrade gracefully.
+            if bool(getattr(self, "cache_only_mode", False)):
+                head = (pr_data.get("head") or {}) if isinstance(pr_data.get("head"), dict) else {}
+                return self._pr_info_min_from_dict(
+                    {
+                        "number": pr_data.get("number"),
+                        "title": pr_data.get("title") or "",
+                        "url": pr_data.get("html_url") or "",
+                        "state": pr_data.get("state") or "",
+                        "is_merged": pr_data.get("merged_at") is not None,
+                        "mergeable_state": pr_data.get("mergeable_state") or "unknown",
+                        "head_sha": (pr_data.get("head") or {}).get("sha"),
+                        "head_ref": head.get("ref"),
+                        "head_label": head.get("label"),
+                        "base_ref": (pr_data.get("base") or {}).get("ref", "main"),
+                        "created_at": pr_data.get("created_at"),
+                        "updated_at": pr_data.get("updated_at"),
+                    }
+                )
+            pr = self._pr_info_from_pr_data(owner, repo, pr_data)
+            if pr is not None and n and upd:
+                try:
+                    self._save_pr_info_cache(owner=owner, repo=repo, pr_number=n, updated_at=upd, pr=pr)
+                except Exception:
+                    pass
+            return pr
+
+        out: List[PRInfo] = []
+        with ThreadPoolExecutor(max_workers=8) as executor:
+            futs = [executor.submit(enrich_one, pr_data) for pr_data in filtered]
+            for fut in as_completed(futs):
+                try:
+                    pr = fut.result()
+                    if pr is not None:
+                        out.append(pr)
+                except Exception:
+                    continue
+
+        # Keep stable sort by PR number descending (regardless of completion order).
+        try:
+            out.sort(key=lambda p: int(getattr(p, "number", 0) or 0), reverse=True)
+        except Exception:
+            pass
+        return out
+
     def get_pr_info_for_branches(
         self,
         owner: str,
@@ -3284,6 +3480,16 @@ class GitHubAPIClient:
             for branch_name, prs in head_to_prs.items():
                 for pr_data in prs:
                     try:
+                        head = (pr_data.get("head") or {}) if isinstance(pr_data.get("head"), dict) else {}
+                        head_ref = head.get("ref")
+                        head_label = head.get("label")
+                        head_owner = ""
+                        try:
+                            hrepo = (head.get("repo") or {}) if isinstance(head.get("repo"), dict) else {}
+                            hown = (hrepo.get("owner") or {}) if isinstance(hrepo.get("owner"), dict) else {}
+                            head_owner = str(hown.get("login") or "").strip()
+                        except Exception:
+                            head_owner = ""
                         pr_info = self._pr_info_min_from_dict(
                             {
                                 "number": pr_data.get("number"),
@@ -3293,8 +3499,12 @@ class GitHubAPIClient:
                                 "is_merged": pr_data.get("merged_at") is not None,
                                 "mergeable_state": pr_data.get("mergeable_state") or "unknown",
                                 "head_sha": (pr_data.get("head") or {}).get("sha"),
+                                "head_ref": head_ref,
+                                "head_label": head_label,
+                                "head_owner": head_owner,
                                 "base_ref": (pr_data.get("base") or {}).get("ref", "main"),
                                 "created_at": pr_data.get("created_at"),
+                                "updated_at": pr_data.get("updated_at"),
                             }
                         )
                         if pr_info is not None:
@@ -3335,9 +3545,24 @@ class GitHubAPIClient:
                 if n and upd:
                     cached = self._get_cached_pr_info_if_unchanged(owner=owner, repo=repo, pr_number=n, updated_at=upd)
                     if cached is not None:
+                        # Backfill head branch info from the live /pulls payload, since older cached PRInfo
+                        # entries may not have these fields yet.
+                        try:
+                            head = (pr_data.get("head") or {}) if isinstance(pr_data.get("head"), dict) else {}
+                            if not getattr(cached, "head_ref", None):
+                                cached.head_ref = head.get("ref")
+                            if not getattr(cached, "head_label", None):
+                                cached.head_label = head.get("label")
+                            if not getattr(cached, "head_owner", None):
+                                hrepo = (head.get("repo") or {}) if isinstance(head.get("repo"), dict) else {}
+                                hown = (hrepo.get("owner") or {}) if isinstance(hrepo.get("owner"), dict) else {}
+                                cached.head_owner = str(hown.get("login") or "").strip() or None
+                        except Exception:
+                            pass
                         return cached
                 # Cache-only mode: don't attempt enrichment fetches.
                 if bool(getattr(self, "cache_only_mode", False)):
+                    head = (pr_data.get("head") or {}) if isinstance(pr_data.get("head"), dict) else {}
                     return self._pr_info_min_from_dict(
                         {
                             "number": pr_data.get("number"),
@@ -3347,8 +3572,11 @@ class GitHubAPIClient:
                             "is_merged": pr_data.get("merged_at") is not None,
                             "mergeable_state": pr_data.get("mergeable_state") or "unknown",
                             "head_sha": (pr_data.get("head") or {}).get("sha"),
+                            "head_ref": head.get("ref"),
+                            "head_label": head.get("label"),
                             "base_ref": (pr_data.get("base") or {}).get("ref", "main"),
                             "created_at": pr_data.get("created_at"),
+                            "updated_at": pr_data.get("updated_at"),
                         }
                     )
                 pr = self._pr_info_from_pr_data(owner, repo, pr_data)
@@ -3522,7 +3750,17 @@ class GitHubAPIClient:
         unresolved_count = self.count_unresolved_conversations(owner, repo, pr_number)
 
         # Now process checks data synchronously (no need to parallelize since data is already fetched)
-        head_sha = (pr_data.get("head") or {}).get("sha")
+        head = (pr_data.get("head") or {}) if isinstance(pr_data.get("head"), dict) else {}
+        head_sha = head.get("sha")
+        head_ref = head.get("ref")
+        head_label = head.get("label")
+        head_owner = ""
+        try:
+            hrepo = (head.get("repo") or {}) if isinstance(head.get("repo"), dict) else {}
+            hown = (hrepo.get("owner") or {}) if isinstance(hrepo.get("owner"), dict) else {}
+            head_owner = str(hown.get("login") or "").strip()
+        except Exception:
+            head_owner = ""
         ci_status = self.get_ci_status(owner, repo, head_sha, pr_number, checks_data=checks_data)
         failed_checks, rerun_url = self.get_failed_checks(owner, repo, head_sha, required_checks, pr_number, checks_data=checks_data)
         running_checks = self.get_running_checks(pr_number, owner, repo, required_checks, checks_data=checks_data)
@@ -3555,8 +3793,12 @@ class GitHubAPIClient:
             unresolved_conversations=unresolved_count,
             ci_status=ci_status,
             head_sha=head_sha,
+            head_ref=head_ref,
+            head_owner=head_owner or None,
+            head_label=head_label,
             base_ref=base_branch,
             created_at=pr_data.get("created_at"),
+            updated_at=pr_data.get("updated_at"),
             has_conflicts=has_conflicts,
             conflict_message=conflict_message,
             blocking_message=blocking_message,

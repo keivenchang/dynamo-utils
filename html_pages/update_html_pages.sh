@@ -19,7 +19,8 @@
 #   --show-local-branches   Update the branches dashboard ($NVIDIA_HOME/index.html)
 #   --show-commit-history   Update the commit history dashboard ($NVIDIA_HOME/dynamo_latest/index.html)
 #   --show-local-resources  Update resource_report.html
-#   --fast-test             Write index2.html outputs and run a smaller/faster commit history (10 commits)
+#   --show-remote-branches  Update remote PR dashboards for selected GitHub users (opt-in only)
+#   --fast-test             Write index2.html outputs (for all tasks that write HTML) and run a smaller/faster commit history (10 commits)
 #   --fast                  Alias for --fast-test
 #
 # Back-compat aliases (deprecated; kept for existing cron):
@@ -71,6 +72,7 @@ EOF
 RUN_SHOW_DYNAMO_BRANCHES=false
 RUN_SHOW_COMMIT_HISTORY=false
 RUN_RESOURCE_REPORT=false
+RUN_SHOW_REMOTE_BRANCHES=false
 ANY_FLAG=false
 IGNORE_LOCK=false
 
@@ -87,6 +89,8 @@ while [ "$#" -gt 0 ]; do
             RUN_SHOW_COMMIT_HISTORY=true; ANY_FLAG=true; shift ;;
         --show-local-resources)
             RUN_RESOURCE_REPORT=true; ANY_FLAG=true; shift ;;
+        --show-remote-branches)
+            RUN_SHOW_REMOTE_BRANCHES=true; ANY_FLAG=true; shift ;;
         --fast-test)
             FAST_TEST=true; shift ;;
         --fast)
@@ -167,6 +171,7 @@ BRANCHES_LOG="$DAY_LOG_DIR/show_local_branches.log"
 GIT_UPDATE_LOG="$DAY_LOG_DIR/dynamo_latest_git_update.log"
 COMMIT_HISTORY_LOG="$DAY_LOG_DIR/show_commit_history.log"
 RESOURCE_REPORT_LOG="$DAY_LOG_DIR/resource_report.log"
+REMOTE_PRS_LOG="$DAY_LOG_DIR/show_remote_branches.log"
 
 # NOTE: log retention is handled by the dedicated cleanup cron:
 #   dynamo-utils/cleanup_log_and_docker.sh
@@ -179,7 +184,13 @@ run_resource_report() {
     CACHE_ROOT="${DYNAMO_UTILS_CACHE_DIR:-$HOME/.cache/dynamo-utils}"
     RESOURCE_DB="${RESOURCE_DB:-$CACHE_ROOT/resource_monitor.sqlite}"
     # Output to the top-level nvidia directory so nginx can serve it at /
-    RESOURCE_REPORT_HTML="${RESOURCE_REPORT_HTML:-$NVIDIA_HOME/resource_report.html}"
+    if [ -z "${RESOURCE_REPORT_HTML:-}" ]; then
+        if [ "$FAST_TEST" = true ]; then
+            RESOURCE_REPORT_HTML="$NVIDIA_HOME/resource_report2.html"
+        else
+            RESOURCE_REPORT_HTML="$NVIDIA_HOME/resource_report.html"
+        fi
+    fi
 
     # Default window is 1 day. In --fast mode, shrink to the last 2 hours (requested) so cron/test
     # runs are snappier while still showing recent activity.
@@ -223,6 +234,63 @@ run_show_local_branches() {
         echo "$(date '+%Y-%m-%d %H:%M:%S') - ERROR: Failed to update $BRANCHES_OUTPUT_FILE" >> "$LOG_FILE"
         exit 1
     fi
+}
+
+run_show_remote_branches() {
+    # Optional: generate a "remote PRs for user" page (same UI as local branches page).
+    #
+    # This task is opt-in and ONLY runs when `--show-remote-branches` is passed.
+    #
+    # Users list:
+    #   REMOTE_GITHUB_USERS="keivenchang"
+    # Back-compat:
+    #   REMOTE_GITHUB_USER=keivenchang
+    #
+    # Default output root:
+    #   ~/dynamo/speedoflight/users/<user>/index.html
+    if [ "$RUN_SHOW_REMOTE_BRANCHES" != true ]; then
+        return 0
+    fi
+
+    USERS_LIST="${REMOTE_GITHUB_USERS:-${REMOTE_GITHUB_USER:-}}"
+    if [ -z "${USERS_LIST:-}" ]; then
+        # Default: a single user (requested).
+        USERS_LIST="keivenchang"
+    fi
+
+    MAX_GH_FLAG=""
+    if [ -n "${MAX_GITHUB_API_CALLS:-}" ]; then
+        MAX_GH_FLAG="--max-github-api-calls ${MAX_GITHUB_API_CALLS}"
+    fi
+
+    # Iterate space-separated list.
+    for U in $USERS_LIST; do
+        if [ -z "${U:-}" ]; then
+            continue
+        fi
+        OUT_DIR="${REMOTE_PRS_OUT_DIR:-$HOME/dynamo/speedoflight/users/${U}}"
+        OUT_FILE="${REMOTE_PRS_OUT_FILE:-$OUT_DIR/index.html}"
+        if [ "$FAST_TEST" = true ]; then
+            OUT_FILE="${REMOTE_PRS_OUT_FILE:-$OUT_DIR/index2.html}"
+        fi
+        mkdir -p "$(dirname "$OUT_FILE")"
+
+        echo "$(date '+%Y-%m-%d %H:%M:%S') - Generating remote PRs dashboard (user=${U} output=$OUT_FILE)" >> "$LOG_FILE"
+        echo "===== $(date '+%Y-%m-%d %H:%M:%S') run_show_remote_branches start (user=${U} output=$OUT_FILE) =====" >> "$REMOTE_PRS_LOG"
+
+        # Use $NVIDIA_HOME as base-dir so we can locate an existing local clone for workflow YAML inference.
+        if python3 "$SCRIPT_DIR/show_remote_branches.py" \
+            --github-user "${U}" \
+            --sort "${REMOTE_PRS_SORT:-latest}" \
+            --base-dir "$NVIDIA_HOME" \
+            --output "$OUT_FILE" \
+            $MAX_GH_FLAG >> "$REMOTE_PRS_LOG" 2>&1; then
+            echo "$(date '+%Y-%m-%d %H:%M:%S') - Updated $OUT_FILE" >> "$LOG_FILE"
+        else
+            echo "$(date '+%Y-%m-%d %H:%M:%S') - ERROR: Failed to update $OUT_FILE" >> "$LOG_FILE"
+            exit 1
+        fi
+    done
 }
 
 run_show_commit_history() {
@@ -274,6 +342,9 @@ run_show_commit_history() {
 
 if [ "$RUN_SHOW_DYNAMO_BRANCHES" = true ]; then
     run_show_local_branches
+fi
+if [ "$RUN_SHOW_REMOTE_BRANCHES" = true ]; then
+    run_show_remote_branches
 fi
 if [ "$RUN_SHOW_COMMIT_HISTORY" = true ]; then
     run_show_commit_history

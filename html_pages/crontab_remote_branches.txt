@@ -1,0 +1,18 @@
+# Remote PR dashboards for specific users
+# Updates more frequently during working hours (8am-6pm PT = 4pm-2am UTC)
+# Working hours: every 1 minute
+# Off hours: every 20 minutes
+
+# Working hours (8am-6pm PT / 4pm-2am UTC): every 1 minute for kthui,keivenchang
+* 16-23 * * * NVIDIA_HOME=$HOME/nvidia REMOTE_GITHUB_USERS="kthui keivenchang" $HOME/nvidia/dynamo-utils/cron_log.sh remote_prs_working $HOME/nvidia/dynamo-utils/html_pages/update_html_pages.sh --show-remote-branches
+* 0-1 * * * NVIDIA_HOME=$HOME/nvidia REMOTE_GITHUB_USERS="kthui keivenchang" $HOME/nvidia/dynamo-utils/cron_log.sh remote_prs_working $HOME/nvidia/dynamo-utils/html_pages/update_html_pages.sh --show-remote-branches
+
+# Off hours (6pm-8am PT / 2am-4pm UTC): every 20 minutes for kthui,keivenchang
+*/20 2-15 * * * NVIDIA_HOME=$HOME/nvidia REMOTE_GITHUB_USERS="kthui keivenchang" $HOME/nvidia/dynamo-utils/cron_log.sh remote_prs_offhours $HOME/nvidia/dynamo-utils/html_pages/update_html_pages.sh --show-remote-branches
+
+# Note: Times are in UTC
+# PT to UTC conversion:
+#   8am PT = 4pm UTC (16:00)
+#   6pm PT = 2am UTC (02:00) next day
+# Working hours span: 16:00-23:59 UTC same day, 00:00-01:59 UTC next day
+

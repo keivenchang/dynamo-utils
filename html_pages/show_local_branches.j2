@@ -2,7 +2,7 @@
 {% set refresh_seconds = 300 %}
 {% set refresh_check_interval_ms = 15000 %}
 
-{% block title %}Local Branch Info{% endblock %}
+{% block title %}{{ page_title|default("Local Branch Info", true) }}{% endblock %}
 {% block favicon %}<link rel="icon" type="image/svg+xml" href="favicon.svg">{% endblock %}
 
 {% block css %}
@@ -56,7 +56,7 @@
 {# Error snippet toggle JS is shared in common_dashboard.j2 #}
 
 {% block header_title %}
-<span>Local Branch Info</span>
+<span>{{ header_title|default("Local Branch Info", true) }}</span>
 <span class="header-meta">Page generated: {{ generated_time }} <span id="page-age" class="page-age"></span></span>
 {% endblock %}
 {% block header_subtitle %}{% endblock %}
@@ -97,10 +97,10 @@
         </div>
 
         <div style="margin-bottom: 12px;">
-          <div style="font-weight: 600; margin-bottom: 6px; color: #24292f;">Subsections:</div>
+          <div style="font-weight: 600; margin-bottom: 6px; color: #24292f;">Job Steps (subsections):</div>
           <ul style="margin: 4px 0; padding-left: 20px;">
             <li><strong>Build and Test - dynamo</strong>: shows phase breakdown (Build Image / Rust checks / pytest...) when available.</li>
-            <li><strong>Long-running Actions jobs</strong> (e.g. <code>sglang (arm64)</code>, <code>trtllm (amd64)</code>): shows job steps with duration ≥ 30s.</li>
+            <li><strong>Jobs ≥10 minutes</strong> (e.g. <code>vllm (amd64)</code>, <code>sglang (arm64)</code>, <code>trtllm (amd64)</code>): shows job steps with duration ≥ 30s.</li>
             <li>Step timing comes from the GitHub Actions job steps API and is cached; we only display steps ≥ 30s.</li>
           </ul>
         </div>
@@ -117,5 +117,78 @@
     </details>
   </div>
 
-  <pre>{{ tree_html | safe }}</pre>
+  {# Optional sort control for pages that provide an alternate ordering (used by remote PR dashboard). #}
+  {% set _tree_alt = (tree_html_alt or "") %}
+  {% if _tree_alt.strip() %}
+    <div class="container" style="margin-bottom: 6px; padding: 8px 12px; background-color: #ffffff; border: 1px solid #d0d7de; border-radius: 6px;">
+      <span style="color: #57606a; font-size: 12px; font-weight: 600; margin-right: 8px;">Sort:</span>
+      <label style="margin-right: 12px; cursor: pointer; user-select: none;">
+        <input type="radio" name="tree-sort" value="latest" style="vertical-align: middle; margin-right: 4px;">
+        <span style="vertical-align: middle;">latest</span>
+      </label>
+      <label style="margin-right: 12px; cursor: pointer; user-select: none;">
+        <input type="radio" name="tree-sort" value="branch" style="vertical-align: middle; margin-right: 4px;">
+        <span style="vertical-align: middle;">branch</span>
+      </label>
+    </div>
+
+    <pre id="tree-pre-latest">{{ tree_html | safe }}</pre>
+    <pre id="tree-pre-branch" style="display: none;">{{ _tree_alt | safe }}</pre>
+
+    <script>
+      // Toggle between pre-rendered orderings (keeps the exact same look/feel as local branches).
+      window.__dashboardOnReadyQueue = window.__dashboardOnReadyQueue || [];
+      window.__dashboardOnReadyQueue.push(function() {
+        try {
+          var radios = document.querySelectorAll('input[name="tree-sort"]');
+          var preLatest = document.getElementById('tree-pre-latest');
+          var preBranch = document.getElementById('tree-pre-branch');
+          if (!radios || !radios.length || !preLatest || !preBranch) return;
+
+          function _setRadio(val) {
+            try {
+              radios.forEach(function(r) { r.checked = (String(r.value||'') === String(val||'')); });
+            } catch (e) {}
+          }
+          function _getRadio() {
+            try {
+              var v = 'latest';
+              radios.forEach(function(r) { if (r.checked) v = String(r.value || 'latest'); });
+              return v;
+            } catch (e) { return 'latest'; }
+          }
+
+          // Set default (server-provided), then allow URL to override.
+          try {
+            var defv = String({{ (tree_sort_default or "latest")|tojson }});
+            if (defv) _setRadio(defv);
+          } catch (e) {}
+          try {
+            if (window.DashboardUrlState && typeof window.DashboardUrlState.get === 'function') {
+              var v = window.DashboardUrlState.get('sort');
+              if (v) _setRadio(String(v));
+            }
+          } catch (e) {}
+
+          function apply() {
+            try {
+              var v = String(_getRadio() || 'latest');
+              var showBranch = (v === 'branch');
+              preLatest.style.display = showBranch ? 'none' : 'block';
+              preBranch.style.display = showBranch ? 'block' : 'none';
+              try {
+                if (window.DashboardUrlState && typeof window.DashboardUrlState.set === 'function') {
+                  window.DashboardUrlState.set('sort', v);
+                }
+              } catch (e) {}
+            } catch (e) {}
+          }
+          radios.forEach(function(r) { r.addEventListener('change', apply); });
+          apply();
+        } catch (e) {}
+      });
+    </script>
+  {% else %}
+    <pre>{{ tree_html | safe }}</pre>
+  {% endif %}
 {% endblock %}

@@ -372,8 +372,29 @@ def expected_check_names_from_workflows(
     Notes:
     - This intentionally does NOT try to fully emulate GitHub's runtime naming rules.
     - We primarily return workflow job display names (`jobs.*.name`, falling back to job id).
+    - Small exception (requested UX): expand common matrix arch templates into concrete names
+      so dashboards can show placeholders like `operator (amd64)` / `operator (arm64)` instead of
+      `operator (${{ matrix.platform.arch }})`.
     - `cap` is a safety guard to avoid exploding the UI on repos with many jobs/workflows.
     """
+    _MATRIX_ARCH_RE = re.compile(r"\$\{\{\s*matrix\.(?:platform\.)?arch\s*\}\}", re.IGNORECASE)
+
+    def _expand_matrix_arch(name: str) -> List[str]:
+        """Expand `${{ matrix.(platform.)arch }}` into amd64/arm64 variants (best-effort)."""
+        s = str(name or "").strip()
+        if not s:
+            return []
+        if not _MATRIX_ARCH_RE.search(s):
+            return [s]
+        # Expand into two common arches. This intentionally does not try to enumerate all GH matrix values.
+        out = []
+        for arch in ("amd64", "arm64"):
+            out.append(_MATRIX_ARCH_RE.sub(arch, s))
+        # Deduplicate while preserving order.
+        seen2: set[str] = set()
+        out2 = [x for x in out if x and not (x in seen2 or seen2.add(x))]  # type: ignore[misc]
+        return out2 or [s]
+
     wfs = load_workflow_defs(repo_root)
     if not wfs:
         return []
@@ -390,10 +411,11 @@ def expected_check_names_from_workflows(
             nm = str(getattr(jd, "display_name", "") or "").strip()
             if not nm:
                 nm = str(job_id or "").strip()
-            if nm and nm not in seen:
-                seen.add(nm)
-                out.append(nm)
-                if int(cap or 0) > 0 and len(out) >= int(cap):
-                    return out
+            for nm2 in _expand_matrix_arch(nm):
+                if nm2 and nm2 not in seen:
+                    seen.add(nm2)
+                    out.append(nm2)
+                    if int(cap or 0) > 0 and len(out) >= int(cap):
+                        return out
     return out
 
