@@ -2176,37 +2176,24 @@ class PRStatusNode(BranchNode):
     def to_tree_vm(self) -> TreeNodeVM:
         """Show the PASSED/FAILED/RUNNING status line, collapsed for PASSED.
         
-        Policy: collapse when the displayed status is PASSED (no required failures, no pending/in-progress).
-        This matches the visual status label, not pr.ci_status (which can be stale).
+        Policy: collapse when PASSED (no required failures), expand when FAILED (has required failures).
+        We ignore RUNNING state and optional failures - if it displays "PASSED", it collapses.
         """
         kids = [c.to_tree_vm() for c in (self.children or []) if isinstance(c, BranchNode)]
         
-        # Determine expansion based on the SAME logic as the display status:
-        # - FAILED: has required failures -> expand
-        # - RUNNING: has pending/in-progress checks -> expand
-        # - PASSED: everything else -> collapse
-        
-        # Check for required failures
+        # Simple rule: expand ONLY if there are required failures
+        # This matches the display logic: PASSED = no required failures
         pr = getattr(self, "pr", None)
         required_failed = any(
             bool(getattr(fc, "is_required", False))
             for fc in (getattr(pr, "failed_checks", None) or [])
         )
         
-        # Check for in-progress or pending checks (from children CIJobTreeNodes)
-        has_pending_or_running = False
-        for c in (self.children or []):
-            if isinstance(c, CIJobTreeNode):
-                status = getattr(c, "status", "")
-                if status in ("in_progress", "pending"):
-                    has_pending_or_running = True
-                    break
+        # Expand only for FAILED (has required failures)
+        auto_expand_checks = required_failed
         
-        # Expand if FAILED or RUNNING, collapse if PASSED
-        auto_expand_checks = required_failed or has_pending_or_running
-        
-        # If we're in a failure/running state but we have no child nodes (e.g. cache-only run or missing check rows),
-        # inject a tiny placeholder so the triangle still renders and users can expand to see something.
+        # If we have required failures but no child nodes (cache-only run),
+        # inject a placeholder so the triangle still renders
         if (not kids) and bool(auto_expand_checks):
             kids = [
                 TreeNodeVM(
