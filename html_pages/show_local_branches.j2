@@ -177,8 +177,8 @@
               preLatest.style.display = showBranch ? 'none' : 'block';
               preBranch.style.display = showBranch ? 'block' : 'none';
               try {
-                if (window.DashboardUrlState && typeof window.DashboardUrlState.set === 'function') {
-                  window.DashboardUrlState.set('sort', v);
+                if (window.DashboardUrlState && typeof window.DashboardUrlState.setDefault === 'function') {
+                  window.DashboardUrlState.setDefault('sort', v, 'latest');
                 }
               } catch (e) {}
             } catch (e) {}

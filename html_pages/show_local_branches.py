@@ -2273,23 +2273,6 @@ class PRStatusNode(BranchNode):
 
         return lines
 
-    def to_tree_vm(self) -> TreeNodeVM:
-        # Default expansion: only when something needs attention in the CI subtree.
-        kids = [c.to_tree_vm() for c in (self.children or []) if isinstance(c, BranchNode)]
-        default_expanded = any(
-            CIJobTreeNode._subtree_needs_attention(c)
-            for c in (self.children or [])
-            if isinstance(c, CIJobTreeNode)
-        )
-        return TreeNodeVM(
-            node_key=f"PRStatus:{self.context_key}:{getattr(self.pr, 'number', '')}",
-            label_html=self._format_html_content(),
-            children=kids,
-            collapsible=bool(kids),  # Only collapsible if we have children
-            default_expanded=bool(default_expanded),
-            triangle_tooltip="CI tree (flat; mirrors Details)" if kids else None,
-        )
-
 
 @dataclass
 class BlockedMessageNode(BranchNode):
@@ -2336,6 +2319,77 @@ class RerunLinkNode(BranchNode):
         )
 
 
+#
+# Git repository helper functions (shared with show_remote_branches.py)
+#
+
+def looks_like_git_repo_dir(p: Path) -> bool:
+    """Lightweight git repo detection without invoking GitPython.
+    
+    Supports normal repos ('.git' directory) and worktrees/submodules ('.git' file).
+    """
+    try:
+        if not p.is_dir():
+            return False
+        git_marker = p / ".git"
+        return git_marker.is_dir() or git_marker.is_file()
+    except Exception:
+        return False
+
+
+def gitdir_from_git_file(p: Path) -> Optional[Path]:
+    """Handle worktrees where .git is a file containing 'gitdir: <path>'."""
+    try:
+        txt = (p / ".git").read_text(encoding="utf-8", errors="ignore").strip()
+        if not txt.startswith("gitdir:"):
+            return None
+        rest = txt.split("gitdir:", 1)[1].strip()
+        if not rest:
+            return None
+        gd = Path(rest)
+        if not gd.is_absolute():
+            gd = (p / gd).resolve()
+        return gd if gd.is_dir() else None
+    except Exception:
+        return None
+
+
+def origin_url_from_git_config(repo_dir: Path) -> str:
+    """Extract origin URL from .git/config without loading GitPython."""
+    try:
+        git_dir = repo_dir / ".git"
+        if git_dir.is_file():
+            gd = gitdir_from_git_file(repo_dir)
+            if gd:
+                git_dir = gd
+        config = git_dir / "config"
+        if not config.is_file():
+            return ""
+        txt = config.read_text(encoding="utf-8", errors="ignore")
+        m = re.search(r'\[remote\s+"origin"\].*?url\s*=\s*(.+?)(?:\n|\r\n|\r|$)', txt, re.IGNORECASE | re.DOTALL)
+        if m:
+            return m.group(1).strip()
+        return ""
+    except Exception:
+        return ""
+
+
+def find_local_clone_of_repo(base_dir: Path, *, repo_slug: str) -> Optional[Path]:
+    """Find a local clone of a specific repo (e.g. 'ai-dynamo/dynamo') under base_dir.
+    
+    Returns the first matching repo directory, or None if not found.
+    """
+    if not base_dir.is_dir():
+        return None
+    for d in base_dir.iterdir():
+        if not looks_like_git_repo_dir(d):
+            continue
+        url = origin_url_from_git_config(d)
+        if repo_slug in url:
+            return d
+    return None
+
+
 class LocalRepoScanner:
     """Scanner for local repository branches"""
 
@@ -2377,18 +2431,8 @@ class LocalRepoScanner:
 
     @staticmethod
     def _looks_like_git_repo_dir(p: Path) -> bool:
-        """
-        Lightweight git repo detection without invoking GitPython.
-
-        Supports normal repos ('.git' directory) and worktrees/submodules ('.git' file).
-        """
-        try:
-            if not p.is_dir():
-                return False
-            git_marker = p / ".git"
-            return git_marker.is_dir() or git_marker.is_file()
-        except Exception:
-            return False
+        """Lightweight git repo detection (delegates to module-level function)."""
+        return looks_like_git_repo_dir(p)
 
     def scan_repositories(self, base_dir: Path) -> BranchNode:
         """Scan all git repositories under `base_dir` (direct children only) and build tree structure."""

@@ -54,6 +54,10 @@ from show_local_branches import (  # noqa: E402
     _pr_needs_attention,
     _strip_repo_prefix_for_clipboard,
     generate_html,
+    looks_like_git_repo_dir,
+    gitdir_from_git_file,
+    origin_url_from_git_config,
+    find_local_clone_of_repo,
 )
 
 
@@ -75,97 +79,6 @@ class RemotePRStatusNode(PRStatusNode):
     Policy: collapsed for PASSED, expanded for FAILED/RUNNING (same as local).
     """
     # No override needed - PRStatusNode.to_tree_vm() already implements the correct logic.
-
-
-def _looks_like_git_repo_dir(p: Path) -> bool:
-    try:
-        if not p.is_dir():
-            return False
-        git_marker = p / ".git"
-        return git_marker.is_dir() or git_marker.is_file()
-    except Exception:
-        return False
-
-
-def _gitdir_from_git_file(p: Path) -> Optional[Path]:
-    """Handle worktrees where .git is a file containing 'gitdir: <path>'."""
-    try:
-        txt = (p / ".git").read_text(encoding="utf-8", errors="ignore").strip()
-        if not txt.startswith("gitdir:"):
-            return None
-        rest = txt.split("gitdir:", 1)[1].strip()
-        if not rest:
-            return None
-        gd = Path(rest)
-        if not gd.is_absolute():
-            gd = (p / gd).resolve()
-        return gd
-    except Exception:
-        return None
-
-
-def _origin_url_from_git_config(repo_dir: Path) -> str:
-    """Best-effort parse of origin URL from .git/config without GitPython."""
-    try:
-        repo_dir = Path(repo_dir)
-        git_path = repo_dir / ".git"
-        config_path: Optional[Path] = None
-        if git_path.is_dir():
-            config_path = git_path / "config"
-        elif git_path.is_file():
-            gd = _gitdir_from_git_file(repo_dir)
-            if gd is not None:
-                config_path = gd / "config"
-        if config_path is None or (not config_path.exists()):
-            return ""
-        lines = config_path.read_text(encoding="utf-8", errors="ignore").splitlines()
-        in_origin = False
-        for ln in lines:
-            s = ln.strip()
-            if s.startswith("["):
-                in_origin = (s.lower() == '[remote "origin"]')
-                continue
-            if not in_origin:
-                continue
-            if s.lower().startswith("url"):
-                try:
-                    _k, v = s.split("=", 1)
-                    return (v or "").strip()
-                except Exception:
-                    continue
-        return ""
-    except Exception:
-        return ""
-
-
-def _find_local_clone_of_repo(base_dir: Path, *, repo_slug: str) -> Optional[Path]:
-    """Find a local git clone whose origin URL mentions `repo_slug` (e.g. 'ai-dynamo/dynamo')."""
-    base_dir = Path(base_dir)
-    candidates = []
-    try:
-        if _looks_like_git_repo_dir(base_dir):
-            candidates.append(base_dir)
-    except Exception:
-        pass
-    try:
-        for d in base_dir.iterdir():
-            try:
-                if d.is_dir() and _looks_like_git_repo_dir(d):
-                    candidates.append(d)
-            except Exception:
-                continue
-    except Exception:
-        pass
-
-    repo_slug_lc = str(repo_slug or "").strip().lower()
-    for d in candidates:
-        try:
-            url = _origin_url_from_git_config(d).lower()
-            if repo_slug_lc and repo_slug_lc in url:
-                return d
-        except Exception:
-            continue
-    return None
 
 
 def main() -> int:
@@ -203,7 +116,7 @@ def main() -> int:
     # Determine local repo root for workflow YAML inference (best-effort).
     repo_root = Path(args.repo_root).resolve() if args.repo_root is not None else None
     if repo_root is None:
-        repo_root = _find_local_clone_of_repo(base_dir, repo_slug=f"{owner}/{repo}")
+        repo_root = find_local_clone_of_repo(base_dir, repo_slug=f"{owner}/{repo}")
     if repo_root is None:
         # Degrade gracefully: YAML inference will be unavailable, but PR/CI rows still render from APIs.
         repo_root = base_dir

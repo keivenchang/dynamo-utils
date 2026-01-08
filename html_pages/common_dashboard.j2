@@ -666,6 +666,24 @@
           _replaceUrl(params);
         } catch (e) {}
       },
+      // Like set(), but remove the key from the URL when the value matches the default.
+      // This keeps URLs short and avoids showing default values.
+      setDefault: function(key, value, defaultVal) {
+        if (_restoring) return;
+        try {
+          var k = String(key || '');
+          if (!k) return;
+          var params = _parseParams();
+          var v = String(value == null ? '' : value);
+          var d = String(defaultVal == null ? '' : defaultVal);
+          if (v === d) {
+            params.delete(k);
+          } else {
+            params.set(k, v);
+          }
+          _replaceUrl(params);
+        } catch (e) {}
+      },
       resetView: function(opts) {
         // Remove known dashboard-state query params and restore defaults.
         // Default behavior reloads the page after clearing URL so non-control state (e.g. default-expanded trees)
