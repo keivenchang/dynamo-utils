@@ -2174,25 +2174,43 @@ class PRStatusNode(BranchNode):
         return base_html
 
     def to_tree_vm(self) -> TreeNodeVM:
-        """Show the PASSED/FAILED/RUNNING status line, but keep checks collapsed by default.
-
-        This avoids noisy default expansion for green PRs; the branch line controls whether the PR subtree
-        is shown at all.
+        """Show the PASSED/FAILED/RUNNING status line, collapsed for PASSED.
+        
+        Policy: collapse when the displayed status is PASSED (no required failures, no pending/in-progress).
+        This matches the visual status label, not pr.ci_status (which can be stale).
         """
         kids = [c.to_tree_vm() for c in (self.children or []) if isinstance(c, BranchNode)]
-        st = str(getattr(getattr(self, "pr", None), "ci_status", "") or "").strip().lower()
+        
+        # Determine expansion based on the SAME logic as the display status:
+        # - FAILED: has required failures -> expand
+        # - RUNNING: has pending/in-progress checks -> expand
+        # - PASSED: everything else -> collapse
+        
+        # Check for required failures
+        pr = getattr(self, "pr", None)
         required_failed = any(
             bool(getattr(fc, "is_required", False))
-            for fc in (getattr(getattr(self, "pr", None), "failed_checks", None) or [])
+            for fc in (getattr(pr, "failed_checks", None) or [])
         )
-        auto_expand_checks = bool(st in {"failed", "running"}) or bool(required_failed)
-
+        
+        # Check for in-progress or pending checks (from children CIJobTreeNodes)
+        has_pending_or_running = False
+        for c in (self.children or []):
+            if isinstance(c, CIJobTreeNode):
+                status = getattr(c, "status", "")
+                if status in ("in_progress", "pending"):
+                    has_pending_or_running = True
+                    break
+        
+        # Expand if FAILED or RUNNING, collapse if PASSED
+        auto_expand_checks = required_failed or has_pending_or_running
+        
         # If we're in a failure/running state but we have no child nodes (e.g. cache-only run or missing check rows),
         # inject a tiny placeholder so the triangle still renders and users can expand to see something.
         if (not kids) and bool(auto_expand_checks):
             kids = [
                 TreeNodeVM(
-                    node_key=f"PRStatus-empty:{self.context_key}:{getattr(getattr(self, 'pr', None), 'number', '')}",
+                    node_key=f"PRStatus-empty:{self.context_key}:{getattr(pr, 'number', '')}",
                     label_html='<span style="color: #57606a; font-size: 12px;">(no check details cached)</span>',
                     children=[],
                     collapsible=False,
@@ -2201,7 +2219,7 @@ class PRStatusNode(BranchNode):
             ]
 
         return TreeNodeVM(
-            node_key=f"PRStatus:{self.context_key}:{getattr(getattr(self, 'pr', None), 'number', '')}",
+            node_key=f"PRStatus:{self.context_key}:{getattr(pr, 'number', '')}",
             label_html=self._format_html_content(),
             children=kids,
             collapsible=bool(kids),
