@@ -5,23 +5,24 @@
 """
 Shared node classes and helper functions for branch/PR dashboards.
 
-This module contains the common tree node classes and utility functions
-used by both show_local_branches.py and show_remote_branches.py to avoid
-tight coupling and code duplication.
+This module contains common tree node classes and utility functions used by both
+show_local_branches.py and show_remote_branches.py to avoid code duplication.
 
-IMPORTANT NOTES:
-- PRStatusNode and _build_ci_hierarchy_nodes in this file are INCOMPLETE STUBS
-- For production use, import these from show_local_branches.py instead
-- show_remote_branches.py correctly imports the complete implementations from show_local_branches.py
-- This ensures IDENTICAL rendering logic between local and remote branches
-
-Complete implementations:
-- BranchNode, BranchInfoNode, CommitMessageNode, MetadataNode, PRNode, RepoNode
+Complete Implementations (ready to use):
+- BranchNode: Base class for all tree nodes
+- BranchInfoNode: Branch line with copy button, label, SHA, metadata
+- CommitMessageNode: Commit message display
+- MetadataNode: Branch metadata (modified, created, age)
+- PRNode: PR summary line with status pill and links
+- CIJobTreeNode: CI job node with status icon, duration, logs
+- RepoNode: Repository directory node (collapsible)
+- SectionNode: Section header for grouping
 - Helper functions: _format_age_compact, _html_copy_button, generate_html, etc.
 
-Stub implementations (DO NOT USE):
-- PRStatusNode (missing status pill generation)
-- _build_ci_hierarchy_nodes (missing proper caching and data handling)
+IMPORTANT: PRStatusNode and _build_ci_hierarchy_nodes
+- These have been REMOVED from this file (incomplete stubs)
+- Import them from show_local_branches.py for production use
+- This ensures IDENTICAL rendering logic between local and remote branches
 """
 
 from __future__ import annotations
@@ -739,200 +740,11 @@ class MetadataNode(BranchNode):
         )
 
 
-class PRStatusNode(BranchNode):
-    """PR status node that builds CI hierarchy from GitHub checks."""
-    
-    def __init__(
-        self,
-        label: str,
-        *,
-        pr: Optional[PRInfo] = None,
-        github_api: Optional[GitHubAPIClient] = None,
-        refresh_checks: bool = False,
-        branch_commit_dt: Optional[datetime] = None,
-        allow_fetch_checks: bool = True,
-        context_key: str = "",
-        children: Optional[List[BranchNode]] = None,
-    ):
-        super().__init__(label=label, children=children, expanded=False)
-        self.pr = pr
-        self.github_api = github_api
-        self.refresh_checks = refresh_checks
-        self.branch_commit_dt = branch_commit_dt
-        self.allow_fetch_checks = allow_fetch_checks
-        self.context_key = context_key
-    
-    def to_tree_vm(self) -> TreeNodeVM:
-        """Convert to TreeNodeVM, building CI hierarchy from children."""
-        # The children should already be CI job nodes added by the caller
-        # We need to convert them to TreeNodeVM and apply the centralized pipeline
-        
-        # Get repo path for workflow YAML parsing
-        # Try to get from self.pr.repo_path or use default
-        repo_path = Path("/home/keivenc/dynamo/dynamo_latest")  # Default fallback
-        try:
-            pr = getattr(self, "pr", None)
-            if pr and hasattr(pr, "repo_path"):
-                repo_path = Path(pr.repo_path)
-        except Exception:
-            pass
-        
-        # Build node_items list for the pipeline
-        node_items = []
-        for child in (self.children or []):
-            if isinstance(child, CIJobTreeNode):
-                # Get the job name (without kind prefix for grouping)
-                job_name = child.job_id
-                # Try to extract the base name (after the prefix)
-                match = re.search(r"^(?:test|build|lint|deploy|check):\s*(.+)$", job_name)
-                if match:
-                    job_name = match.group(1).strip()
-                
-                # Convert to TreeNodeVM
-                vm = child.to_tree_vm()
-                node_items.append((job_name, vm))
-            else:
-                # For non-CI nodes, just convert to TreeNodeVM
-                node_items.append((child.label, child.to_tree_vm()))
-        
-        # Apply the centralized pipeline
-        kids = process_ci_tree_pipeline(
-            nodes=[],
-            repo_root=repo_path,
-            node_items=node_items,
-        )
-        
-        # Determine expansion state based on CI status
-        should_expand = False
-        if self.pr:
-            # Check if there are any required failures
-            has_required_failure = False
-            try:
-                failed_checks = getattr(self.pr, "failed_checks", None) or []
-                has_required_failure = any(getattr(fc, "required", False) for fc in failed_checks)
-            except Exception:
-                pass
-            
-            # Get rollup status
-            rollup_status = str(getattr(self.pr, "rollup_status", "") or "").strip()
-            if not rollup_status:
-                rollup_status = CIStatus.UNKNOWN
-            
-            should_expand = ci_should_expand_by_default(
-                rollup_status=rollup_status,
-                has_required_failure=has_required_failure,
-            )
-        
-        return TreeNodeVM(
-            node_key=f"pr_status:{id(self)}",
-            label_html="",  # Status nodes typically have no label
-            children=kids,
-            collapsible=True,
-            default_expanded=should_expand,
-        )
-
 
 #
-# CI hierarchy builder (shared by both local and remote)
+# CI hierarchy builder (STUB - DO NOT USE)
+# Import _build_ci_hierarchy_nodes from show_local_branches.py for production use
 #
-
-def _build_ci_hierarchy_nodes(
-    repo_path: Path,
-    pr: PRInfo,
-    *,
-    github_api: GitHubAPIClient,
-    page_root_dir: Path,
-    checks_ttl_s: int,
-    skip_fetch: bool = False,
-    context_key: str = "",
-) -> List[CIJobTreeNode]:
-    """
-    Build CI hierarchy nodes from PR check runs.
-    
-    Returns a list of CIJobTreeNode objects representing the CI jobs for this PR.
-    The caller is responsible for adding these to a PRStatusNode and applying the
-    centralized pipeline.
-    """
-    nodes = []
-    
-    if skip_fetch:
-        return nodes
-    
-    # Fetch check runs for this PR
-    try:
-        check_rows = github_api.get_pr_check_runs(
-            owner=DYNAMO_OWNER,
-            repo=DYNAMO_REPO,
-            pr_number=int(getattr(pr, "number", 0) or 0),
-            ttl_seconds=checks_ttl_s,
-        )
-    except Exception:
-        return nodes
-    
-    # Build CI job nodes from check runs
-    for row in (check_rows or []):
-        try:
-            job_name = str(getattr(row, "name", "") or "").strip()
-            if not job_name:
-                continue
-            
-            # Classify the CI kind (test, build, lint, etc.)
-            kind = classify_ci_kind(job_name)
-            
-            # Build display name (with kind prefix if not "check")
-            display_name = disambiguate_check_run_name(job_name)
-            job_id = display_name
-            if kind and kind != "check":
-                job_id = f"{kind}: {display_name}"
-            
-            # Status
-            status_str = str(getattr(row, "status", "") or "").lower()
-            conclusion = str(getattr(row, "conclusion", "") or "").lower()
-            if conclusion == "success":
-                status = CIStatus.SUCCESS
-            elif conclusion == "failure":
-                status = CIStatus.FAILED
-            elif conclusion in {"cancelled", "skipped"}:
-                status = CIStatus.SKIPPED
-            elif status_str == "in_progress":
-                status = CIStatus.IN_PROGRESS
-            else:
-                status = CIStatus.UNKNOWN
-            
-            # Duration
-            duration_str = ""
-            try:
-                duration_s = int(getattr(row, "duration_seconds", 0) or 0)
-                if duration_s > 0:
-                    if duration_s < 60:
-                        duration_str = f"{duration_s}s"
-                    else:
-                        duration_str = f"{duration_s // 60}m {duration_s % 60}s"
-            except Exception:
-                pass
-            
-            # Log URL
-            log_url = str(getattr(row, "html_url", "") or "").strip()
-            
-            # Required
-            is_required = bool(getattr(row, "required", False))
-            
-            # Create CI job node
-            node = CIJobTreeNode(
-                job_id=job_id,
-                display_name=display_name,
-                status=status,
-                duration=duration_str,
-                log_url=log_url,
-                is_required=is_required,
-                page_root_dir=page_root_dir,
-                context_key=context_key,
-            )
-            nodes.append(node)
-        except Exception:
-            continue
-    
-    return nodes
 
 
 #
@@ -970,8 +782,6 @@ def generate_html(
         raise RuntimeError("Jinja2 is required for HTML generation")
     
     # Get current time in both UTC and PDT
-    from datetime import datetime
-    from zoneinfo import ZoneInfo
     now_utc = datetime.now(ZoneInfo('UTC'))
     now_pdt = datetime.now(ZoneInfo('America/Los_Angeles'))
     
@@ -990,9 +800,6 @@ def generate_html(
         autoescape=select_autoescape(["html", "j2"]),
     )
     template = env.get_template("show_local_branches.j2")
-    
-    # Import status icon helper from common_dashboard_lib
-    from common_dashboard_lib import status_icon_html
     
     # Render (matching show_local_branches.py parameters)
     return template.render(
