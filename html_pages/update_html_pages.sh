@@ -19,7 +19,7 @@
 #   --show-local-branches   Update the branches dashboard ($NVIDIA_HOME/index.html)
 #   --show-commit-history   Update the commit history dashboard ($NVIDIA_HOME/dynamo_latest/index.html)
 #   --show-local-resources  Update resource_report.html
-#   --show-remote-branches  Update remote PR dashboards for selected GitHub users (opt-in only)
+#   --show-remote-branches  Update remote PR dashboards for selected GitHub users (IDENTICAL UI to local branches)
 #   --fast-test             Write index2.html outputs (for all tasks that write HTML) and run a smaller/faster commit history (10 commits)
 #   --fast                  Alias for --fast-test
 #
@@ -266,8 +266,8 @@ run_show_local_branches() {
 }
 
 run_show_remote_branches() {
-    # Optional: generate a "remote PRs for user" page (same UI as local branches page).
-    #
+    # Optional: generate a "remote PRs for user" page (IDENTICAL UI to local branches).
+    # Shows UserNode (GitHub user) → branches with full CI hierarchy.
     # This task is opt-in and ONLY runs when `--show-remote-branches` is passed.
     #
     # Users list:

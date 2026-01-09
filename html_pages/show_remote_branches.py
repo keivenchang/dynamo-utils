@@ -5,12 +5,20 @@
 """
 Generate a "remote" branches/PR dashboard for a GitHub user.
 
-Goal: same look & feel as `show_local_branches.py`, but the entrypoint is:
-  GitHub username -> open PRs -> same PR/CI subtree rendering.
+Goal: IDENTICAL look & feel as `show_local_branches.py`, but organized by GitHub username
+instead of local repository directory.
 
-This intentionally reuses:
-- `PRNode`, `PRURLNode`, `PRStatusNode`, `SectionNode`, `_build_ci_hierarchy_nodes`, `generate_html`
-  from `show_local_branches.py`
+Structure:
+- UserNode (GitHub user) → BranchInfoNode (remote branch) → CommitMessageNode, MetadataNode,
+  PRNode, PRStatusNode (PASSED/FAILED pill) → CIJobTreeNode (CI jobs with hierarchy)
+
+This intentionally reuses core components from `show_local_branches.py`:
+- `PRNode`, `PRURLNode`, `PRStatusNode`, `_build_ci_hierarchy_nodes`
+- These have the complete implementations (versions in common_branch_nodes.py are stubs)
+- Ensures IDENTICAL rendering logic for status pills, CI hierarchy, and all formatting
+
+Other shared utilities:
+- `BranchInfoNode`, `CommitMessageNode`, `MetadataNode`, `generate_html` from `common_branch_nodes.py`
 - `GitHubAPIClient` from `common.py`
 """
 

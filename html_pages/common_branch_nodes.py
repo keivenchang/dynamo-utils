@@ -8,6 +8,20 @@ Shared node classes and helper functions for branch/PR dashboards.
 This module contains the common tree node classes and utility functions
 used by both show_local_branches.py and show_remote_branches.py to avoid
 tight coupling and code duplication.
+
+IMPORTANT NOTES:
+- PRStatusNode and _build_ci_hierarchy_nodes in this file are INCOMPLETE STUBS
+- For production use, import these from show_local_branches.py instead
+- show_remote_branches.py correctly imports the complete implementations from show_local_branches.py
+- This ensures IDENTICAL rendering logic between local and remote branches
+
+Complete implementations:
+- BranchNode, BranchInfoNode, CommitMessageNode, MetadataNode, PRNode, RepoNode
+- Helper functions: _format_age_compact, _html_copy_button, generate_html, etc.
+
+Stub implementations (DO NOT USE):
+- PRStatusNode (missing status pill generation)
+- _build_ci_hierarchy_nodes (missing proper caching and data handling)
 """
 
 from __future__ import annotations

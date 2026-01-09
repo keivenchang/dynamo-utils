@@ -47,6 +47,11 @@ This document explains the cron schedule for `show_remote_branches.py` updates.
    - Next day: 00:00-01:59 UTC
 4. GitHub API calls are limited by `MAX_GITHUB_API_CALLS` env var (if set)
 5. Uses same caching as local branches (`~/.cache/dynamo-utils/`)
+6. **Remote branches now have IDENTICAL structure to local branches** (as of 2026-01-08):
+   - Full CI job hierarchy with parent-child relationships
+   - Collapsible UserNode for each GitHub user
+   - Same PASSED/FAILED status pills and job details
+   - Reuses exact same rendering logic from `show_local_branches.py`
 
 ## Installation
 

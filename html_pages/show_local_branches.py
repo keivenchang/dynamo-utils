@@ -5,6 +5,22 @@
 """
 Show dynamo branches with PR information using a node-based tree structure.
 Supports parallel data gathering for improved performance.
+
+Structure:
+- RepoNode (local directory) → BranchInfoNode (branch) → CommitMessageNode, MetadataNode,
+  PRNode, PRStatusNode (PASSED/FAILED pill) → CIJobTreeNode (CI jobs with hierarchy)
+
+This is the reference implementation for branch/PR dashboards. show_remote_branches.py
+imports PRStatusNode and _build_ci_hierarchy_nodes from this file to ensure IDENTICAL
+rendering logic.
+
+Key Features:
+- Client-side sorting (by modified date, created date, or branch name)
+- Collapsible repository directories with URL state persistence
+- Full CI job hierarchy with parent-child relationships
+- Workflow status for branches with remotes but no PRs
+- Cached GitHub API calls with smart TTL
+- Failure snippets with raw log caching
 """
 
 import argparse
