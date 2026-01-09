@@ -2884,8 +2884,9 @@ class GitHubAPIClient:
             "seconds_until_reset": seconds_until,
         }
 
-    def _pr_checks_cache_key(self, owner: str, repo: str, pr_number: int) -> str:
-        return f"{owner}/{repo}#{int(pr_number)}"
+    def _pr_checks_cache_key(self, owner: str, repo: str, pr_number: int, commit_sha: Optional[str] = None) -> str:
+        sha_suffix = f":{commit_sha[:7]}" if commit_sha else ""
+        return f"{owner}/{repo}#{int(pr_number)}{sha_suffix}"
 
     def _pulls_list_cache_key(self, owner: str, repo: str, state: str) -> str:
         return f"{owner}/{repo}:{state}"
@@ -3929,6 +3930,7 @@ class GitHubAPIClient:
         repo: str,
         pr_number: int,
         *,
+        commit_sha: Optional[str] = None,
         required_checks: Optional[set] = None,
         ttl_s: int = 300,
         skip_fetch: bool = False,
@@ -3937,9 +3939,12 @@ class GitHubAPIClient:
 
         Note: the raw-log links are time-limited, but the checks rows themselves are cheap to cache
         for a short TTL to speed repeated HTML generation.
+        
+        Args:
+            commit_sha: Optional commit SHA to cache per-commit. If not provided, caches per-PR only.
         """
         required_checks = required_checks or set()
-        key = self._pr_checks_cache_key(owner, repo, pr_number)
+        key = self._pr_checks_cache_key(owner, repo, pr_number, commit_sha=commit_sha)
         now = int(datetime.now(timezone.utc).timestamp())
         # Cache schema version. Bump this when the serialized shape/semantics change.
         # v2 adds status-context checks (GET /commits/<sha>/status) in addition to check-runs.

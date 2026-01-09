@@ -815,6 +815,7 @@ def _build_ci_hierarchy_nodes(
         DYNAMO_OWNER,
         DYNAMO_REPO,
         int(pr.number),
+        commit_sha=str(getattr(pr, "head_sha", None) or ""),
         required_checks=required_set,
         ttl_s=int(checks_ttl_s),
         skip_fetch=bool(skip_fetch),
