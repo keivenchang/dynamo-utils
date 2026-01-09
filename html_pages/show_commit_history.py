@@ -1682,29 +1682,16 @@ class CommitHistoryGenerator:
                     )
                 node_items.append((name, node))
 
-            # Second pass: best-effort grouping by workflow `jobs.*.needs` (YAML).
+            # Use centralized CI tree processing pipeline
             children: List[TreeNodeVM]
             try:
-                from common_github_workflow import group_ci_nodes_by_workflow_needs  # local import
-                from common_dashboard_lib import mark_success_with_descendant_failures  # local import
-                from common_dashboard_lib import reorder_children_by_arch  # local import
-                from common_dashboard_lib import expand_nodes_with_in_progress_descendants  # local import
-                from common_dashboard_lib import expand_nodes_with_required_failure_descendants  # local import
-
-                children = list(
-                    group_ci_nodes_by_workflow_needs(
-                        repo_root=Path(repo_path),
-                        items=[(nm, n) for (nm, n) in (node_items or [])],
-                    )
-                    or []
+                from common_dashboard_lib import process_ci_tree_pipeline
+                
+                children = process_ci_tree_pipeline(
+                    nodes=[],
+                    repo_root=Path(repo_path),
+                    node_items=[(nm, n) for (nm, n) in (node_items or [])],
                 )
-                children = mark_success_with_descendant_failures(list(children or []))
-                children = reorder_children_by_arch(list(children or []))
-                # Post-pass (requested UX): if workflow grouping moved nodes under parents, ensure
-                # any ancestor of a REQUIRED failure is expanded by default.
-                children = expand_nodes_with_required_failure_descendants(list(children or []))
-                # Also expand any ancestor of an in-progress/pending job so running work is visible by default.
-                children = expand_nodes_with_in_progress_descendants(list(children or []))
             except Exception:
                 children = [n for (_nm, n) in (node_items or [])]
 

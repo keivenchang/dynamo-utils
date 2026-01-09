@@ -103,18 +103,42 @@ python3 html_pages/show_local_branches.py \
 
 Shows PRs by GitHub username (not tied to local repos).
 
-### Features
+### Features (Updated 2026-01-08)
 
 - Fetches PRs via GitHub API
-- Same tree structure and UI as local branches
+- **IDENTICAL tree structure and UI as local branches** *(FIXED)*
 - Sorted by latest activity or branch name
-- Reuses all formatting/status helpers
+- **Full CI job hierarchy with parent-child relationships** *(FIXED)*
+- Reuses all formatting/status helpers from `show_local_branches.py`
 
-### Key Differences
+### Tree Structure
+
+**Identical to local branches, but with `UserNode` instead of `RepoNode`:**
+```
+UserNode (github-username)
+└─ BranchInfoNode (remote-branch)
+   ├─ CommitMessageNode (PR title)
+   ├─ MetadataNode (modified, created, age)
+   ├─ PRNode (PR link)
+   └─ PRStatusNode (PASSED/FAILED pill)
+      ├─ CIJobTreeNode (backend-status-check)
+      │  ├─ CIJobTreeNode (vllm (amd64))
+      │  └─ CIJobTreeNode (trtllm (amd64))
+      ├─ CIJobTreeNode (DCO [REQUIRED])
+      └─ ...
+```
+
+### Key Differences from Local Branches
 
 - Uses PR title (no local `git log` access)
 - Shows only PRs created by specified user
 - No local-only branches section
+- **Root node:** `UserNode` (GitHub user) instead of `RepoNode` (directory)
+
+### Implementation Notes
+
+- Imports `PRStatusNode` and `_build_ci_hierarchy_nodes` from `show_local_branches.py` to ensure **identical rendering logic**
+- The versions in `common_branch_nodes.py` are incomplete stubs and should NOT be used
 
 ### Usage
 

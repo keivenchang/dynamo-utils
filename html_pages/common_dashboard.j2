@@ -229,11 +229,9 @@
 </head>
 <body>
   <div class="header">
-    <h1>{% block header_title %}{% endblock %}</h1>
-    {% block header_subtitle %}{% endblock %}
-  </div>
-
-  {% block content %}{% endblock %}
+    <h1>{%- block header_title -%}{%- endblock -%}</h1>
+    {%- block header_subtitle -%}{%- endblock -%}
+  </div>{%- block content -%}{%- endblock -%}
 
   {% if page_stats %}
   <div class="footer">

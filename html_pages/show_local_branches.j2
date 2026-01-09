@@ -58,11 +58,10 @@
 {% block header_title %}
 <span>{{ header_title|default("Local Branch Info", true) }}</span>
 <span class="header-meta">Page generated: {{ generated_time }} <span id="page-age" class="page-age"></span></span>
-{% endblock %}
-{% block header_subtitle %}{% endblock %}
-
-{% block content %}
-  <!-- Legend/Help Section (keep consistent with commit history) -->
+{%- endblock -%}
+{%- block header_subtitle -%}{%- endblock -%}
+{%- block content %}
+<!-- Legend/Help Section (keep consistent with commit history) -->
   <div class="container legend" style="margin-bottom: 0px; padding: 12px; background-color: #f6f8fa;">
     <details data-url-state="1" data-url-key="legend">
       <summary>
@@ -108,16 +107,13 @@
       </div>
     </details>
   </div>
-
   {# Optional sort control for pages that provide sortable branches #}
-  {% set _tree_alt = (tree_html_alt or "") %}
-  {% if tree_sortable is defined and tree_sortable %}
+  {%- set _tree_alt = (tree_html_alt or "") %}
+  {%- if tree_sortable is defined and tree_sortable %}
     <style>
       .sortable-branch {
-        padding-bottom: 1.5em;
       }
       .sortable-branch:first-child {
-        margin-top: -1.5em;
       }
     </style>
     <div class="container" style="margin-bottom: 6px; padding: 4px 0;">
@@ -136,7 +132,7 @@
       </label>
     </div>
 
-    <pre id="tree-pre-sortable">{{ tree_html | safe }}</pre>
+    <div id="tree-pre-sortable" style="font-family: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace; font-size: 13px; line-height: 1.5; white-space: pre;">{{ tree_html | safe }}</div>
 
     <script>
       // Client-side reordering of sortable branch containers

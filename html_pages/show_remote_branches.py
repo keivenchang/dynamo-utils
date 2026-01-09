@@ -35,7 +35,11 @@ if str(_THIS_DIR) not in sys.path:
 
 from common import GitHubAPIClient  # noqa: E402
 from html_pages.common_dashboard_runtime import prune_dashboard_raw_logs, prune_partial_raw_log_caches  # noqa: E402
-from show_local_branches import (  # noqa: E402
+
+# Import shared branch/PR node classes and helpers
+# NOTE: PRStatusNode and _build_ci_hierarchy_nodes are imported from show_local_branches.py
+# because the versions in common_branch_nodes.py are incomplete stubs.
+from common_branch_nodes import (  # noqa: E402
     DYNAMO_OWNER,
     DYNAMO_REPO,
     DYNAMO_REPO_SLUG,
@@ -44,10 +48,9 @@ from show_local_branches import (  # noqa: E402
     CommitMessageNode,
     MetadataNode,
     PRNode,
-    PRStatusNode,
     PRURLNode,
+    RepoNode,
     SectionNode,
-    _build_ci_hierarchy_nodes,
     _format_age_compact,
     _format_branch_metadata_suffix,
     _format_base_branch_inline,
@@ -59,6 +62,55 @@ from show_local_branches import (  # noqa: E402
     origin_url_from_git_config,
     find_local_clone_of_repo,
 )
+from common_dashboard_lib import TreeNodeVM  # noqa: E402
+from dataclasses import dataclass  # noqa: E402
+from typing import Optional as Opt  # noqa: E402
+import html as html_module  # noqa: E402
+
+# Import PRStatusNode and _build_ci_hierarchy_nodes from show_local_branches.py
+# These have the correct, complete implementations:
+# - PRStatusNode: Generates the PASSED/FAILED/RUNNING pill and applies the centralized CI pipeline
+# - _build_ci_hierarchy_nodes: Builds CIJobTreeNode objects from PR check runs
+import sys as _sys_for_import
+_local_branches_path = Path(__file__).parent / "show_local_branches.py"
+if str(_local_branches_path.parent) not in _sys_for_import.path:
+    _sys_for_import.path.insert(0, str(_local_branches_path.parent))
+from show_local_branches import PRStatusNode, _build_ci_hierarchy_nodes  # noqa: E402
+
+
+@dataclass
+class UserNode(BranchNode):
+    """User node (like RepoNode but for GitHub users) - collapsible directory containing branches."""
+    user_id: Opt[str] = None
+    repo_slug: Opt[str] = None
+    
+    def __init__(self, label: str = "", user_id: Opt[str] = None, repo_slug: Opt[str] = None, **kwargs):
+        super().__init__(label=label, **kwargs)
+        self.user_id = user_id
+        self.repo_slug = repo_slug
+    
+    def _format_html_content(self) -> str:
+        # Make user node clickable (link to GitHub user page)
+        user_link = f'<a href="https://github.com/{html_module.escape(self.user_id or "")}" target="_blank" style="color: #0969da; text-decoration: none; font-weight: 600;">{html_module.escape(self.label or "")}</a>'
+        
+        # Add repo info if available
+        if self.repo_slug:
+            repo_info = f' <span style="color: #666; font-size: 12px;">({html_module.escape(self.repo_slug)})</span>'
+            return f"{user_link}{repo_info}"
+        return user_link
+    
+    def to_tree_vm(self) -> TreeNodeVM:
+        """User nodes are collapsible directories (like RepoNode)."""
+        # Use a simple, URL-friendly key based on the user ID
+        key = f"user:{self.user_id or self.label}"
+        has_children = bool(self.children)
+        return TreeNodeVM(
+            node_key=key,
+            label_html=self._format_html_content(),
+            children=[c.to_tree_vm() for c in (self.children or [])],
+            collapsible=bool(has_children),
+            default_expanded=True,
+        )
 
 
 class RemoteBranchInfoNode(BranchInfoNode):
@@ -84,12 +136,6 @@ class RemotePRStatusNode(PRStatusNode):
 def main() -> int:
     parser = argparse.ArgumentParser(description="Show remote PRs for a GitHub user (HTML-only)")
     parser.add_argument("--github-user", required=True, help="GitHub username (author of PRs)")
-    parser.add_argument(
-        "--sort",
-        choices=["latest", "branch"],
-        default="latest",
-        help="Sort order: latest (default) or branch (by head branch name)",
-    )
     parser.add_argument("--owner", default=DYNAMO_OWNER, help=f"GitHub owner/org (default: {DYNAMO_OWNER})")
     parser.add_argument("--repo", default=DYNAMO_REPO, help=f"GitHub repo (default: {DYNAMO_REPO})")
     parser.add_argument("--repo-root", type=Path, default=None, help="Path to a local clone of the repo (for workflow YAML inference)")
@@ -194,7 +240,18 @@ def main() -> int:
             return None
 
     def build_root(prs_ordered: List[object]) -> BranchNode:
-        r = BranchNode(label="")
+        """Build tree: root -> UserNode -> branches (same structure as local: root -> RepoNode -> branches)."""
+        root = BranchNode(label="")
+        
+        # Create a user node (like RepoNode for local branches)
+        user_node = UserNode(
+            label=f"{user}",
+            user_id=user,
+            repo_slug=f"{owner}/{repo}",
+        )
+        root.add_child(user_node)
+        
+        # Add each PR as a branch under the user node (matching local branch structure)
         for pr in (prs_ordered or []):
             branch_name = _branch_display_for_pr(pr)
             sha7 = ""
@@ -225,7 +282,7 @@ def main() -> int:
                 commit_datetime=updated_dt,
                 commit_message=commit_msg,
             )
-            r.add_child(branch_node)
+            user_node.add_child(branch_node)  # Add to user_node, not root
 
             pr_node = PRNode(label="", pr=pr)
             branch_node.add_child(pr_node)
@@ -244,12 +301,13 @@ def main() -> int:
             # CI hierarchy as children of the PR status line.
             try:
                 for ci_node in _build_ci_hierarchy_nodes(
-                    Path(repo_root),
+                    repo_root,
                     pr,
                     github_api=gh,
                     page_root_dir=page_root_dir,
                     checks_ttl_s=int(GitHubAPIClient.compute_checks_cache_ttl_s(None, refresh=bool(args.refresh_checks))),
                     skip_fetch=(not bool(allow_fetch_checks)),
+                    validate_raw_logs=True,
                 ):
                     try:
                         if hasattr(ci_node, "context_key"):
@@ -273,17 +331,13 @@ def main() -> int:
                     pr_node.add_child(BranchNode(label=str(msg)))
             except Exception:
                 pass
-        return r
+        return root
 
     prs_list = list(prs or [])
-    prs_latest = prs_list
-    prs_branch = prs_list
+    # Sort PRs (server-side, like local branches)
+    # Default: by most recent activity (updated_at, then created_at)
     try:
-        prs_branch = sorted(prs_list, key=lambda p: _branch_display_for_pr(p).lower())
-    except Exception:
-        prs_branch = list(prs_list)
-    try:
-        prs_latest = sorted(
+        prs_list = sorted(
             prs_list,
             key=lambda p: (
                 (_dt_from_iso(getattr(p, "updated_at", None) or "") or _dt_from_iso(getattr(p, "created_at", None) or "") or datetime.min.replace(tzinfo=ZoneInfo("UTC"))),
@@ -292,81 +346,7 @@ def main() -> int:
             reverse=True,
         )
     except Exception:
-        prs_latest = list(prs_list)
-
-    # Generate branch-level tree blocks with sort metadata
-    # Each PR gets rendered once, wrapped in a container with data attributes for sorting
-    from common_dashboard_lib import render_tree_pre_lines  # local import
-    
-    # Build a mapping of PR number to rendered node
-    root_for_render = build_root(prs_latest)
-    pr_nodes = {}  # pr_number -> BranchNode
-    for child in root_for_render.children:
-        # Try to extract PR number from the node
-        # The node structure has the PR embedded, let's find it
-        try:
-            # Look for PRNode or PRStatusNode children that have a 'pr' attribute
-            def find_pr(node):
-                if hasattr(node, 'pr') and hasattr(node.pr, 'number'):
-                    return node.pr
-                for c in (getattr(node, 'children', None) or []):
-                    pr = find_pr(c)
-                    if pr:
-                        return pr
-                return None
-            
-            pr = find_pr(child)
-            if pr and hasattr(pr, 'number'):
-                pr_nodes[int(pr.number)] = child
-        except Exception:
-            pass
-    
-    # Render each PR as a separate block with sort keys
-    tree_blocks = []
-    for pr in prs_latest:
-        pr_num = int(getattr(pr, "number", 0) or 0)
-        if pr_num not in pr_nodes:
-            continue
-            
-        child = pr_nodes[pr_num]
-        branch_name = _branch_display_for_pr(pr)
-        updated_dt = _dt_from_iso(str(getattr(pr, "updated_at", "") or ""))
-        created_dt = _dt_from_iso(str(getattr(pr, "created_at", "") or ""))
-        
-        # For sorting by "modified", fallback to created_dt if updated_dt is unavailable (cache-only mode).
-        sort_modified_dt = updated_dt if updated_dt else created_dt
-        
-        # Sort keys:
-        # - Latest modified: by update time (desc), then PR number (desc)
-        latest_modified_key = f"{-(sort_modified_dt.timestamp() if sort_modified_dt else 0):.6f}_{-pr_num}"
-        # - Latest created: by creation time (desc), then PR number (desc)
-        latest_created_key = f"{-(created_dt.timestamp() if created_dt else 0):.6f}_{-pr_num}"
-        # - Branch name: by branch name (case-insensitive), then PR number (desc)  
-        branch_key = f"{branch_name.lower()}_{-pr_num}"
-        
-        # Render this branch's tree
-        block_html = "\n".join(render_tree_pre_lines([child.to_tree_vm()]))
-        
-        tree_blocks.append({
-            'html': block_html,
-            'sort_latest': latest_modified_key,  # Keep for backward compatibility
-            'sort_modified': latest_modified_key,
-            'sort_created': latest_created_key,
-            'sort_branch': branch_key,
-            'pr_num': pr_num,
-        })
-    
-    # Generate wrapped HTML
-    tree_html_wrapped = ""
-    for i, block in enumerate(tree_blocks):
-        tree_html_wrapped += f'<div class="sortable-branch" data-sort-latest="{block["sort_latest"]}" data-sort-modified="{block["sort_modified"]}" data-sort-created="{block["sort_created"]}" data-sort-branch="{block["sort_branch"]}" data-pr-num="{block["pr_num"]}">'
-        tree_html_wrapped += block['html']
-        tree_html_wrapped += "</div>\n"
-
-    if not prs:
-        root_latest = build_root([])
-        root_latest.add_child(BranchNode(label=f"(no open PRs found for {user} in {owner}/{repo})"))
-        tree_html_wrapped = "\n".join(render_tree_pre_lines([root_latest.children[0].to_tree_vm()]))
+        pass
 
     elapsed_s = max(0.0, time.monotonic() - t0)
     page_stats = [
@@ -394,17 +374,13 @@ def main() -> int:
     except Exception:
         pass
 
-    # If the CLI requested a particular sort, reflect it as the default (JS still allows switching).
-    tree_sort_default = str(args.sort or "latest").strip().lower()
+    # Generate HTML (same as local branches - no client-side sorting)
     html = generate_html(
-        build_root(prs_latest) if prs_latest else build_root([]),
+        build_root(prs_list) if prs_list else build_root([]),
         page_stats=page_stats,
         page_title=f"Remote PR Info ({user})",
         header_title=f"Remote PR Info ({user})",
-        tree_html_override=tree_html_wrapped,
-        tree_html_alt=None,  # No longer need alternate tree
-        tree_sort_default=tree_sort_default,
-        tree_sortable=True,  # Enable client-side sorting
+        tree_sortable=False,  # No sort controls, render triangles normally
     )
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(html, encoding="utf-8")

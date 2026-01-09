@@ -56,11 +56,10 @@ def sort_github_check_runs_by_name(check_runs: List[Dict[str, object]]) -> List[
 
 
 def sort_pr_check_rows_by_name(rows: List[object]) -> List[object]:
-    """Return PR check rows sorted by display label (stable): 'kind: name' (e.g. lint/test/build)."""
-    def _label(name: str) -> str:
-        k = classify_ci_kind(name)
-        return f"{k}: {name}" if k and k != "check" else name
-
+    """Return PR check rows sorted by display name (with kind prefix), then job_id.
+    
+    This matches the display order in the HTML where jobs show as "kind: jobname".
+    """
     def _key(r: object) -> Tuple[str, str]:
         nm = ""
         url = ""
@@ -72,8 +71,17 @@ def sort_pr_check_rows_by_name(rows: List[object]) -> List[object]:
             url = str(getattr(r, "url", "") or "").strip()
         except Exception:
             url = ""
+        
+        # Sort by the same display format we show in HTML: "kind: name"
+        # (or just "name" for generic "check" kind)
+        k = classify_ci_kind(nm)
+        if k and k != "check":
+            display_name = f"{k}: {nm}"
+        else:
+            display_name = nm
+        
         jid = extract_actions_job_id_from_url(url)
-        return (_label(nm).lower(), str(jid or url))
+        return (display_name.lower(), str(jid or url))
 
     try:
         return sorted(list(rows or []), key=_key)
@@ -214,6 +222,7 @@ class TreeNodeVM:
     - noncollapsible_icon: optional icon for non-collapsible nodes (keeps alignment with triangles).
       Supported values: "square" (renders ■). Default: "" (renders a blank placeholder).
     - node_key: a stable key for the logical node (used for debugging/caching, not DOM ids).
+    - skip_dedup: if True, always render this node even if it appears multiple times (for CommitMessageNode, MetadataNode).
     """
 
     node_key: str
@@ -223,6 +232,7 @@ class TreeNodeVM:
     default_expanded: bool = False
     triangle_tooltip: Optional[str] = None
     noncollapsible_icon: str = ""
+    skip_dedup: bool = False
 
 
 def _dom_id_from_node_key(node_key: str) -> str:
@@ -423,63 +433,160 @@ def expand_nodes_with_in_progress_descendants(nodes: List[TreeNodeVM]) -> List[T
     return out
 
 
-def reorder_children_by_arch(nodes: List[TreeNodeVM]) -> List[TreeNodeVM]:
-    """Reorder children so arch-specific matrix jobs are grouped by arch.
-
-    Requested UX:
-    - if a parent has many arch-qualified children like `vllm (amd64)` / `vllm (arm64)`,
-      group them as:
-        - non-arch children first (preserve relative order)
-        - all `(amd64)` children
-        - all `(arm64)` children
-
-    This is a post-pass and is safe to run after workflow `needs` grouping.
+def group_tree_by_arch(nodes: List[TreeNodeVM]) -> List[TreeNodeVM]:
+    """No-op pass - arch grouping removed.
+    
+    Previously grouped nodes by architecture, but this has been removed.
+    The function is kept for pipeline compatibility.
+    Arch styling (colors) is applied elsewhere during node creation.
     """
-    _ARCH_RE = re.compile(r"\((amd64|arm64)\)", re.IGNORECASE)
+    return nodes
 
-    def _arch_rank(label_html: str) -> int:
+
+def sort_tree_by_name(nodes: List[TreeNodeVM]) -> List[TreeNodeVM]:
+    """Sort TreeNodeVM by display name recursively at all levels (root + children).
+    
+    This should be called LAST in the pipeline to ensure pure alphabetical order
+    at all levels while preserving hierarchy, failure marking, and expansion state.
+    
+    Sorts by the same logic as sort_github_check_runs_by_name: kind prefix + name + job_id.
+    """
+    def _extract_sort_key_from_label(label_html: str) -> Tuple[str, str]:
+        """Extract (display_name, job_id) from label HTML for sorting."""
         h = str(label_html or "")
-        m = _ARCH_RE.search(h)
-        if not m:
-            return 0  # non-arch first
-        arch = str(m.group(1) or "").strip().lower()
-        if arch == "amd64":
-            return 1
-        if arch == "arm64":
-            return 2
-        return 3
-
+        
+        # Try to extract the job name from the monospace span
+        import re
+        match = re.search(r'<span style="font-family:\s*SFMono-Regular[^"]*">([^<]+)</span>', h)
+        if match:
+            name = match.group(1).strip()
+        else:
+            # Fallback: try to find any substantial text
+            matches = re.findall(r'<span[^>]*>([^<]+)</span>', h)
+            name = ""
+            for m in matches:
+                text = m.strip()
+                if len(text) > 3 and not all(c in '✓✗◇×⚠' for c in text):
+                    name = text
+                    break
+        
+        # Extract job ID from the href if present
+        job_id = ""
+        match = re.search(r'/job/(\d+)', h)
+        if match:
+            job_id = match.group(1)
+        
+        return (name.lower(), job_id)
+    
     def walk(n: TreeNodeVM) -> TreeNodeVM:
-        new_children = [walk(ch) for ch in (n.children or [])]
-
-        # Only reorder when we actually have both arch groups present.
-        ranks = [_arch_rank(ch.label_html) for ch in new_children]
-        has_amd = any(r == 1 for r in ranks)
-        has_arm = any(r == 2 for r in ranks)
-        if has_amd and has_arm:
-            # Stable bucket order; preserve relative ordering within each bucket.
-            buckets = {0: [], 1: [], 2: [], 3: []}
-            for ch in new_children:
-                buckets[_arch_rank(ch.label_html)].append(ch)
-            new_children = buckets[0] + buckets[1] + buckets[2] + buckets[3]
-
+        # Recursively sort children
+        sorted_children = [walk(ch) for ch in (n.children or [])]
+        
+        # Sort at this level
+        try:
+            sorted_children = sorted(sorted_children, key=lambda ch: _extract_sort_key_from_label(ch.label_html))
+        except Exception:
+            pass  # Keep original order if sorting fails
+        
         return TreeNodeVM(
             node_key=str(n.node_key or ""),
             label_html=str(n.label_html or ""),
-            children=new_children,
+            children=sorted_children,
             collapsible=bool(n.collapsible),
             default_expanded=bool(n.default_expanded),
             triangle_tooltip=n.triangle_tooltip,
             noncollapsible_icon=getattr(n, "noncollapsible_icon", ""),
         )
+    
+    # Walk each node to sort its children recursively
+    result = [walk(n) for n in (nodes or [])]
+    
+    # Also sort the root level
+    try:
+        result = sorted(result, key=lambda n: _extract_sort_key_from_label(n.label_html))
+    except Exception:
+        pass  # Keep original order if sorting fails
+    
+    return result
 
-    out: List[TreeNodeVM] = []
-    for n in (nodes or []):
-        try:
-            out.append(walk(n))
-        except Exception:
-            out.append(n)
-    return out
+
+def process_ci_tree_pipeline(
+    nodes: List[TreeNodeVM],
+    repo_root: Path,
+    node_items: List[Tuple[str, TreeNodeVM]],
+) -> List[TreeNodeVM]:
+    """
+    Centralized CI tree node processing pipeline.
+    
+    This pipeline transforms flat CI job lists into a hierarchical tree with
+    proper grouping, sorting, and expansion state. Passes execute in order:
+    
+    PASS 1: group_ci_nodes_by_workflow_needs()
+            - Parses .github/workflows/*.yml to find job dependencies
+            - Builds parent-child relationships based on `jobs.*.needs`
+            - Multiple parents can share the same child node
+    
+    PASS 2: mark_success_with_descendant_failures()
+            - Changes success to warning for parents with failed children
+            - Helps identify successful parents that contain hidden failures
+    
+    PASS 3: expand_nodes_with_required_failure_descendants()
+            - Auto-expands parent nodes that contain REQUIRED failures
+            - Ensures critical failures are visible by default
+    
+    PASS 4: expand_nodes_with_in_progress_descendants()
+            - Auto-expands parent nodes that contain running/pending jobs
+            - Ensures active work is visible by default
+    
+    PASS 5: sort_tree_by_name()
+            - Sorts by the displayed text (e.g., "build: Build sglang")
+            - Applied to all levels (root + children)
+            - Preserves hierarchy, failure marking, and expansion state
+    
+    PASS 6: group_tree_by_arch()
+            - No-op (arch grouping removed)
+            - Kept for pipeline compatibility
+            - Arch colors (dark yellow for arm64, blue for amd64) applied during node creation
+    
+    Args:
+        nodes: Initial list of TreeNodeVM nodes (may be empty if using node_items)
+        repo_root: Path to the repository root for workflow YAML parsing
+        node_items: List of (name, TreeNodeVM) tuples for workflow grouping
+    
+    Returns:
+        Processed list of TreeNodeVM nodes
+    """
+    try:
+        from common_github_workflow import group_ci_nodes_by_workflow_needs
+        
+        # PASS 1: group_ci_nodes_by_workflow_needs()
+        children = list(
+            group_ci_nodes_by_workflow_needs(
+                repo_root=repo_root,
+                items=node_items,
+            )
+            or []
+        )
+        
+        # PASS 2: mark_success_with_descendant_failures()
+        children = mark_success_with_descendant_failures(list(children or []))
+        
+        # PASS 3: expand_nodes_with_required_failure_descendants()
+        children = expand_nodes_with_required_failure_descendants(list(children or []))
+        
+        # PASS 4: expand_nodes_with_in_progress_descendants()
+        children = expand_nodes_with_in_progress_descendants(list(children or []))
+        
+        # PASS 5: sort_tree_by_name()
+        children = sort_tree_by_name(list(children or []))
+        
+        # PASS 6: group_tree_by_arch()
+        children = group_tree_by_arch(list(children or []))
+        
+        return children
+    except Exception:
+        # Fallback to original nodes if pipeline fails
+        return nodes or [n for (_nm, n) in (node_items or [])]
 
 
 def _hash10(s: str) -> str:
@@ -567,6 +674,10 @@ def render_tree_pre_lines(root_nodes: List[TreeNodeVM]) -> List[str]:
     render_call_id = _TREE_RENDER_CALL_SEQ
     next_dom_id = 0
     used_ids: Dict[str, int] = {}
+    
+    # Track displayed nodes to show references for duplicates
+    displayed_nodes: Dict[str, str] = {}  # node_key -> label_html (first occurrence)
+    last_reference_text: Optional[str] = None  # Track last reference text to avoid consecutive duplicates
 
     def alloc_children_id(node_key: str) -> str:
         nonlocal next_dom_id
@@ -600,7 +711,8 @@ def render_tree_pre_lines(root_nodes: List[TreeNodeVM]) -> List[str]:
         except Exception:
             return ""
         try:
-            m = re.search(r"\b(?:PRStatus|CI):([^:>]+):", txt)
+            # Match PRStatus:, CI:, or repo: patterns
+            m = re.search(r"\b(?:PRStatus|CI|repo):([^:>]+)", txt)
             if not m:
                 return ""
             repo = str(m.group(1) or "").strip()
@@ -617,6 +729,67 @@ def render_tree_pre_lines(root_nodes: List[TreeNodeVM]) -> List[str]:
         parent_children_id: Optional[str],
         node_key_path: str,
     ) -> None:
+        nonlocal last_reference_text
+        
+        # Check if this node should be deduplicated
+        # Skip deduplication for certain node types (CommitMessageNode, MetadataNode)
+        should_dedup = not getattr(node, 'skip_dedup', False)
+        
+        # Check if this node was already displayed (duplicate/shared child)
+        node_key = str(node.node_key or "")
+        if should_dedup and node_key and node_key in displayed_nodes:
+            # Subsequent occurrence: render as text-only reference
+            if not is_root:
+                connector = "└─" if is_last else "├─"
+                current_prefix = prefix + connector + " "
+            else:
+                current_prefix = ""
+            
+            # Extract the display name from the stored first occurrence
+            first_label = displayed_nodes[node_key]
+            # Try to extract job name from the stored HTML
+            import re
+            ref_text = str(getattr(node, 'job_id', '') or getattr(node, 'label', '') or '')
+            # If that's empty, try to parse it from the HTML - look for the monospace font span
+            if not ref_text and first_label:
+                # Extract text from <span style="font-family: SFMono-Regular...">job_name</span>
+                match = re.search(r'<span style="font-family:\s*SFMono-Regular[^"]*">([^<]+)</span>', first_label)
+                if match:
+                    ref_text = match.group(1).strip()
+                # If that didn't work, try simpler pattern
+                if not ref_text:
+                    # Look for any span with substantial text (not just symbols)
+                    matches = re.findall(r'<span[^>]*>([^<]+)</span>', first_label)
+                    for m in matches:
+                        text = m.strip()
+                        # Skip if it's just symbols or very short
+                        if len(text) > 3 and not all(c in '✓✗◇×⚠' for c in text):
+                            ref_text = text
+                            break
+            if not ref_text:
+                ref_text = 'node'
+            
+            # Check if this exact reference text was just shown (consecutive duplicate)
+            if last_reference_text == ref_text:
+                # Skip consecutive duplicates with the same reference text
+                return
+            
+            ref_html = f'<span style="display: inline-block; width: 12px; margin-right: 2px;"></span><span style="color: #57606a; font-size: 12px;">↑ {ref_text} (see above)</span>'
+            out.append(current_prefix + ref_html)
+            # Mark this reference text as the last one shown
+            last_reference_text = ref_text
+            return
+        
+        # This is not a reference, so reset last_reference_text tracking
+        # But ONLY reset if we actually render something (to preserve tracking across non-rendered nodes)
+        
+        # First occurrence: track it and render normally
+        if node_key:
+            # Store both the HTML and the display name for reference
+            displayed_nodes[node_key] = node.label_html or ""
+            # Reset last reference text when we render a full node
+            last_reference_text = None
+        
         # Tree connector
         if not is_root:
             connector = "└─" if is_last else "├─"
@@ -640,6 +813,8 @@ def render_tree_pre_lines(root_nodes: List[TreeNodeVM]) -> List[str]:
                     url_key = f"t.{repo_tok}.{sha7}.{_hash10(nk)[:6]}"
                 elif sha7:
                     url_key = f"t.{sha7}.{_hash10(nk)[:6]}"
+                elif repo_tok:
+                    url_key = f"t.{repo_tok}.{_hash10(nk)[:6]}"
                 else:
                     url_key = f"t.{_hash10(nk)[:10]}"
                 tri = _triangle_html(
@@ -1573,9 +1748,11 @@ def check_line_html(
         """Format the job text with arch styling.
 
         - If the job contains an explicit arch token:
-          - `(arm64)` / `(aarch64)` -> keep the original token `(arm64)` and append `; aarch64` (pink)
-          - `(amd64)`              -> keep the original token `(amd64)` and append `; x86_64` (blue)
+          - `(arm64)` / `(aarch64)` -> keep the original token `(arm64)` and append `; aarch64`
+          - `(amd64)`              -> keep the original token `(amd64)` and append `; x86_64`
         - Otherwise, keep normal styling (no special casing).
+        
+        Note: Color styling is applied to the entire line, not within this function.
         """
         raw = str(raw_text or "")
         # Only rewrite when we see an explicit arch token (avoid surprising renames).
@@ -1589,17 +1766,31 @@ def check_line_html(
             # Normalize to "(arm64)" and append "; aarch64" immediately after the token.
             raw2 = re.sub(r"\(\s*(arm64|aarch64)\s*\)", "(arm64)", raw, flags=re.IGNORECASE)
             raw2 = re.sub(r"\(\s*arm64\s*\)(?!\s*;\s*aarch64\b)", "(arm64); aarch64", raw2, flags=re.IGNORECASE)
-            # Light lavender (requested)
-            return f'<span style="color: #c084fc;">{html.escape(raw2)}</span>'
+            return html.escape(raw2)
         if arch == "amd64":
             raw2 = re.sub(r"\(\s*amd64\s*\)", "(amd64)", raw, flags=re.IGNORECASE)
             raw2 = re.sub(r"\(\s*amd64\s*\)(?!\s*;\s*x86_64\b)", "(amd64); x86_64", raw2, flags=re.IGNORECASE)
-            # Blue
-            return f'<span style="color: #0969da;">{html.escape(raw2)}</span>'
+            return html.escape(raw2)
         return html.escape(raw)
+    
+    # Detect architecture for line-wide color styling
+    def _get_arch_color(text: str) -> str:
+        """Return the color for the entire line based on architecture."""
+        m = re.search(r"\((arm64|aarch64|amd64)\)", str(text or ""), flags=re.IGNORECASE)
+        if not m:
+            return ""  # No special color
+        arch = str(m.group(1) or "").strip().lower()
+        if arch in {"arm64", "aarch64"}:
+            return "#b8860b"  # Dark yellow/gold for arm64
+        if arch == "amd64":
+            return "#0969da"  # Blue for amd64
+        return ""
 
+    line_color = _get_arch_color(job_id or "")
+    color_style = f' color: {line_color};' if line_color else ''
+    
     id_html = (
-        '<span style="font-family: SFMono-Regular, Consolas, Liberation Mono, Menlo, monospace; font-size: 12px;">'
+        f'<span style="font-family: SFMono-Regular, Consolas, Liberation Mono, Menlo, monospace; font-size: 12px;{color_style}">'
         + _format_arch_text(job_id or "")
         + "</span>"
     )

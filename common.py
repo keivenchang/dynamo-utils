@@ -118,7 +118,7 @@ def classify_ci_kind(name: str) -> str:
     s = str(name or "").lower()
     if re.search(r"\b(build|docker|image|container|package|wheel|compile)\b", s):
         return "build"
-    if re.search(r"\b(test|pytest|unit|integration|e2e|smoke|status-check)\b", s):
+    if re.search(r"\b(test|pytest|unit|integration|e2e|smoke)\b", s):
         return "test"
     # Treat Rust style/tooling checks as "lint" so they get a consistent prefix in dashboards.
     if re.search(r"\b(rust|cargo|clippy|rustfmt|fmt)\b", s):
@@ -4649,10 +4649,56 @@ class GitHubAPIClient:
         - Branch protection endpoints often require admin perms and can return 403.
         - We want REQUIRED to keep working even when our internal REST budget is exhausted:
           this uses `gh` subprocess calls (separate from this client's REST budget).
+        
+        Caching:
+        - Results are cached for 1 hour (3600 seconds) to avoid repeated GraphQL calls.
+        - Uses both memory and disk cache for persistence across runs.
+        
+        Pagination:
+        - Fetches up to 500 checks per page, with up to 5 pages (2500 total checks).
+        - This ensures all checks are captured even for PRs with many status checks.
         """
         try:
             prn = int(pr_number)
         except Exception:
+            return set()
+        
+        # Check cache first (1 hour TTL)
+        cache_key = f"required_checks:{owner}/{repo}:pr{prn}"
+        ttl_s = 3600  # 1 hour
+        now = int(time.time())
+        
+        # 1) Memory cache
+        try:
+            if not hasattr(self, "_required_checks_pr_mem_cache"):
+                self._required_checks_pr_mem_cache = {}
+            ent = self._required_checks_pr_mem_cache.get(cache_key)
+            if isinstance(ent, dict):
+                ts = int(ent.get("ts", 0) or 0)
+                val = ent.get("val")
+                if isinstance(val, set) and ts and ((now - ts) <= ttl_s or bool(getattr(self, "cache_only_mode", False))):
+                    return val
+        except Exception:
+            pass
+        
+        # 2) Disk cache
+        try:
+            disk = self._load_required_checks_disk_cache()
+            ent = disk.get(cache_key) if isinstance(disk, dict) else None
+            if isinstance(ent, dict):
+                ts = int(ent.get("ts", 0) or 0)
+                val = ent.get("val")
+                if isinstance(val, list) and ts and ((now - ts) <= ttl_s or bool(getattr(self, "cache_only_mode", False))):
+                    out = set(val)
+                    if not hasattr(self, "_required_checks_pr_mem_cache"):
+                        self._required_checks_pr_mem_cache = {}
+                    self._required_checks_pr_mem_cache[cache_key] = {"ts": ts, "val": out}
+                    return out
+        except Exception:
+            pass
+        
+        # Cache-only mode: do not fetch network; return empty if we have nothing.
+        if bool(getattr(self, "cache_only_mode", False)):
             return set()
 
         try:
@@ -4673,17 +4719,21 @@ class GitHubAPIClient:
             if not pr_node_id:
                 return set()
 
-            # Keep this readable (and correct) rather than trying to hand-balance braces in one line.
+            # Paginated query: fetch up to 100 checks per page (GitHub's limit), up to 25 pages (2500 total).
             # NOTE: `isRequired` needs an explicit `pullRequestId`, otherwise GitHub errors.
-            query = """\
-query($owner:String!,$name:String!,$number:Int!,$prid:ID!) {
+            query_template = """\
+query($owner:String!,$name:String!,$number:Int!,$prid:ID!,$after:String) {
   repository(owner: $owner, name: $name) {
     pullRequest(number: $number) {
       commits(last: 1) {
         nodes {
           commit {
             statusCheckRollup {
-              contexts(first: 100) {
+              contexts(first: 100, after: $after) {
+                pageInfo {
+                  hasNextPage
+                  endCursor
+                }
                 nodes {
                   __typename
                   ... on CheckRun { name isRequired(pullRequestId: $prid) }
@@ -4699,17 +4749,19 @@ query($owner:String!,$name:String!,$number:Int!,$prid:ID!) {
 }
 """
 
-            try:
-                # NOTE: we intentionally use `gh` here because it handles GraphQL auth and
-                # enterprise oddities; required-ness is not reliably available via REST without
-                # admin branch-protection permissions.
-                res = subprocess.run(
-                    [
+            all_required: set = set()
+            after_cursor = None
+            max_pages = 25  # 25 pages * 100 checks/page = 2500 total checks
+            
+            for page_num in range(max_pages):
+                try:
+                    # Build gh command with pagination cursor
+                    cmd = [
                         "gh",
                         "api",
                         "graphql",
                         "-f",
-                        f"query={query}",
+                        f"query={query_template}",
                         "-f",
                         f"owner={owner}",
                         "-f",
@@ -4718,44 +4770,90 @@ query($owner:String!,$name:String!,$number:Int!,$prid:ID!) {
                         f"number={int(prn)}",
                         "-f",
                         f"prid={pr_node_id}",
-                    ],
-                    capture_output=True,
-                    text=True,
-                    timeout=15,
-                    check=False,
-                )
-                if res.returncode != 0:
-                    return set()
-                data = {}
-                try:
-                    data = json.loads(res.stdout or "{}") or {}
-                except Exception:
+                    ]
+                    
+                    # Only add after cursor if we have one (null/None on first page)
+                    if after_cursor:
+                        cmd.extend(["-f", f"after={after_cursor}"])
+                    else:
+                        # Explicitly pass null for first page
+                        cmd.extend(["-f", "after=null"])
+                    
+                    # NOTE: we intentionally use `gh` here because it handles GraphQL auth and
+                    # enterprise oddities; required-ness is not reliably available via REST without
+                    # admin branch-protection permissions.
+                    res = subprocess.run(
+                        cmd,
+                        capture_output=True,
+                        text=True,
+                        timeout=15,
+                        check=False,
+                    )
+                    if res.returncode != 0:
+                        break
+                    
                     data = {}
-                nodes = (
-                    (((((data.get("data") or {}).get("repository") or {}).get("pullRequest") or {}).get("commits") or {}).get("nodes") or [])
-                )
-                if not (isinstance(nodes, list) and nodes):
-                    return set()
-                commit0 = nodes[0].get("commit") if isinstance(nodes[0], dict) else None
-                scr = commit0.get("statusCheckRollup") if isinstance(commit0, dict) else None
-                ctxs = (scr.get("contexts") or {}) if isinstance(scr, dict) else {}
-                ctx_nodes = ctxs.get("nodes") if isinstance(ctxs, dict) else None
-                if not isinstance(ctx_nodes, list):
-                    return set()
-                out: set = set()
-                for n in ctx_nodes:
-                    if not isinstance(n, dict):
-                        continue
-                    if n.get("isRequired") is not True:
-                        continue
-                    nm = str(n.get("name") or n.get("context") or "").strip()
-                    if nm:
-                        out.add(nm)
-                return out
+                    try:
+                        data = json.loads(res.stdout or "{}") or {}
+                    except Exception:
+                        break
+                    
+                    nodes = (
+                        (((((data.get("data") or {}).get("repository") or {}).get("pullRequest") or {}).get("commits") or {}).get("nodes") or [])
+                    )
+                    if not (isinstance(nodes, list) and nodes):
+                        break
+                    
+                    commit0 = nodes[0].get("commit") if isinstance(nodes[0], dict) else None
+                    scr = commit0.get("statusCheckRollup") if isinstance(commit0, dict) else None
+                    ctxs = (scr.get("contexts") or {}) if isinstance(scr, dict) else {}
+                    
+                    # Extract required checks from this page
+                    ctx_nodes = ctxs.get("nodes") if isinstance(ctxs, dict) else None
+                    if isinstance(ctx_nodes, list):
+                        for n in ctx_nodes:
+                            if not isinstance(n, dict):
+                                continue
+                            if n.get("isRequired") is not True:
+                                continue
+                            nm = str(n.get("name") or n.get("context") or "").strip()
+                            if nm:
+                                all_required.add(nm)
+                    
+                    # Check if there are more pages
+                    page_info = ctxs.get("pageInfo") if isinstance(ctxs, dict) else None
+                    if not isinstance(page_info, dict):
+                        break
+                    
+                    has_next = page_info.get("hasNextPage")
+                    if not has_next:
+                        break
+                    
+                    after_cursor = page_info.get("endCursor")
+                    if not after_cursor:
+                        break
+                
+                except Exception:
+                    break
+            
+            # Cache the results (1 hour TTL)
+            try:
+                if not hasattr(self, "_required_checks_pr_mem_cache"):
+                    self._required_checks_pr_mem_cache = {}
+                self._required_checks_pr_mem_cache[cache_key] = {"ts": now, "val": all_required}
+                
+                # Also save to disk cache
+                disk = self._load_required_checks_disk_cache()
+                if not isinstance(disk, dict):
+                    disk = {}
+                disk[cache_key] = {"ts": now, "val": sorted(all_required)}
+                self._save_required_checks_disk_cache(disk)
             except Exception:
-                return set()
+                pass
+            
+            return all_required
         except Exception:
-                return set()
+            return set()
 
     def _required_checks_cache_key(self, owner: str, repo: str, base_ref: str) -> str:
         return f"{owner}/{repo}:required_checks:{str(base_ref or '').strip()}"

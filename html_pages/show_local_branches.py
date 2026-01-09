@@ -1123,51 +1123,9 @@ def _build_ci_hierarchy_nodes(
     except Exception:
         pass
 
-    # Post-pass: if a parent has both (amd64) and (arm64) children, group them by arch:
-    # - non-arch children first
-    # - all (amd64)
-    # - all (arm64)
-    try:
-        _ARCH_RE = re.compile(r"\((amd64|arm64)\)", re.IGNORECASE)
-
-        def _arch_rank(job_id: str) -> int:
-            s = str(job_id or "")
-            m = _ARCH_RE.search(s)
-            if not m:
-                return 0
-            a = str(m.group(1) or "").strip().lower()
-            if a == "amd64":
-                return 1
-            if a == "arm64":
-                return 2
-            return 3
-
-        def walk(n: BranchNode) -> None:
-            kids = list(getattr(n, "children", None) or [])
-            for ch in kids:
-                if isinstance(ch, BranchNode):
-                    walk(ch)
-            # Only reorder CIJobTreeNode children; preserve other tree sections.
-            if not isinstance(n, CIJobTreeNode):
-                return
-            kids2 = [k for k in kids if isinstance(k, CIJobTreeNode)]
-            if not kids2:
-                return
-            ranks = [_arch_rank(getattr(k, "job_id", "")) for k in kids2]
-            if not (any(r == 1 for r in ranks) and any(r == 2 for r in ranks)):
-                return
-            buckets = {0: [], 1: [], 2: [], 3: []}
-            for k in kids2:
-                buckets[_arch_rank(getattr(k, "job_id", ""))].append(k)
-            # Keep any non-CIJobTreeNode children (rare) at the front in original order.
-            non_ci = [k for k in kids if not isinstance(k, CIJobTreeNode)]
-            n.children = non_ci + buckets[0] + buckets[1] + buckets[2] + buckets[3]
-
-        for top in (out or []):
-            if isinstance(top, BranchNode):
-                walk(top)
-    except Exception:
-        pass
+    # NOTE: Workflow grouping, arch grouping, failure marking, expansion, and sorting
+    # are now handled by the centralized pipeline in PRStatusNode.to_tree_vm()
+    # (via process_ci_tree_pipeline in common_dashboard_lib.py)
 
     # If CI failed and we can identify a GitHub Actions run_id, include an explicit restart link.
     #
@@ -1260,7 +1218,9 @@ class RepoNode(BranchNode):
         UX: if a repo directory is a symlink, users asked to avoid showing/expanding any nested info
         (branches/PRs/CI) since it is often just a pointer into another location.
         """
-        key = f"{self.__class__.__name__}:{self.label}"
+        # Use a simple, URL-friendly key based on the repo directory name
+        repo_name = str(self.label or "").rstrip('/')
+        key = f"repo:{repo_name}"
         try:
             p = Path(self.path) if self.path is not None else None
             if p is not None and p.is_symlink():
@@ -1275,7 +1235,7 @@ class RepoNode(BranchNode):
         except Exception:
             pass
 
-        # Default behavior for normal (non-symlink) repos: collapsible when it has children.
+        # Default behavior: collapsible directory with branches as children
         has_children = bool(self.children)
         return TreeNodeVM(
             node_key=key,
@@ -1851,6 +1811,7 @@ class CommitMessageNode(BranchNode):
             children=[],
             collapsible=False,
             default_expanded=False,
+            skip_dedup=True,  # Always display commit messages, never deduplicate
         )
 
 
@@ -1878,6 +1839,7 @@ class MetadataNode(BranchNode):
             children=[],
             collapsible=False,
             default_expanded=False,
+            skip_dedup=True,  # Always display metadata, never deduplicate
         )
 
 
@@ -2653,7 +2615,7 @@ class LocalRepoScanner:
 
         # Fetch PR information in parallel
         if branches_with_prs and is_dynamo_repo:
-            pr_section = SectionNode(label="Branches with PRs")
+            # Branches with PRs - add directly to repo_node (no section wrapper)
             # NOTE: Avoid per-branch GitHub API calls. We list open PRs once per repo (cached),
             # then match PRs to branch names locally.
             try:
@@ -2791,16 +2753,12 @@ class LocalRepoScanner:
 
                     # With CI hierarchy embedded, we no longer render separate flat running/failed check lines here.
 
-                pr_section.add_child(branch_node)
+                repo_node.add_child(branch_node)
 
-            if pr_section.children:
-                repo_node.add_child(pr_section)
-
-            # Also show tracked branches that do NOT have an open PR.
+            # Branches without PRs - add directly to repo_node (no section wrapper)
             #
             # This is important for clones like dynamo3/ where you may have many remote-tracking
             # branches locally, but only a subset has active PRs at any given time.
-            branches_section = SectionNode(label="Branches")
             for branch_name, info in sorted(branches_with_prs.items(), key=lambda kv: kv[0]):
                 prs = pr_infos_by_branch.get(branch_name) or []
                 if prs:
@@ -2890,14 +2848,11 @@ class LocalRepoScanner:
                     # If workflow fetching fails, just skip it
                     pass
                 
-                branches_section.add_child(branch_node)
-
-            if branches_section.children:
-                repo_node.add_child(branches_section)
+                repo_node.add_child(branch_node)
 
         # For non-dynamo repos: show branches but skip PR/CI lookup (treat as "any other repo").
+        # Add directly to repo_node (no section wrapper)
         if not is_dynamo_repo:
-            all_branches_section = SectionNode(label="Branches")
 
             combined = []
             for branch_name, info in branches_with_prs.items():
@@ -2913,7 +2868,7 @@ class LocalRepoScanner:
             combined.extend(local_only_branches)
 
             for b in sorted(combined, key=lambda x: x.get("name", "")):
-                all_branches_section.add_child(
+                repo_node.add_child(
                     BranchInfoNode(
                         label=b.get("name", ""),
                         sha=b.get("sha"),
@@ -2923,12 +2878,8 @@ class LocalRepoScanner:
                     )
                 )
 
-            if all_branches_section.children:
-                repo_node.add_child(all_branches_section)
-
-        # Add local-only branches (branches without any matching remote/tracking ref).
+        # Add local-only branches - add directly to repo_node (no section wrapper)
         if local_only_branches and is_dynamo_repo:
-            local_section = SectionNode(label="Local-only branches")
 
             for branch_info in local_only_branches:
                 branch_node = BranchInfoNode(
@@ -2939,9 +2890,7 @@ class LocalRepoScanner:
                     commit_datetime=branch_info.get('commit_dt'),
                     commit_message=branch_info.get('commit_message'),
                 )
-                local_section.add_child(branch_node)
-
-            repo_node.add_child(local_section)
+                repo_node.add_child(branch_node)
 
         # If the current checkout didn't show up in the PR/local sections (common when on main),
         # add a single line for it so repos like dynamo_latest/ and dynamo_ci/ are informative.

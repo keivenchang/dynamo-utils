@@ -60,11 +60,12 @@ fi
 
 usage() {
     cat <<'EOF' >&2
-Usage: update_html_pages.sh [--show-local-branches] [--show-commit-history] [--show-local-resources] [--fast-test|--fast] [--run-ignore-lock]
+Usage: update_html_pages.sh [--show-local-branches] [--show-commit-history] [--show-local-resources] [--fast-test|--fast] [--dry-run] [--run-ignore-lock]
 
 If no args are provided, ALL tasks run.
 
 Flags:
+  --dry-run           Show what would be executed without actually running commands
   --run-ignore-lock   Bypass the /tmp lock (no flock). Useful for manual runs when a stale lock exists.
 EOF
 }
@@ -75,6 +76,7 @@ RUN_RESOURCE_REPORT=false
 RUN_SHOW_REMOTE_BRANCHES=false
 ANY_FLAG=false
 IGNORE_LOCK=false
+DRY_RUN=false
 
 USER_NAME="${USER:-${LOGNAME:-}}"
 if [ -z "$USER_NAME" ]; then
@@ -95,6 +97,8 @@ while [ "$#" -gt 0 ]; do
             FAST_TEST=true; shift ;;
         --fast)
             FAST_TEST=true; shift ;;
+        --dry-run)
+            DRY_RUN=true; shift ;;
         --run-ignore-lock)
             IGNORE_LOCK=true; shift ;;
 
@@ -118,6 +122,7 @@ if [ "$ANY_FLAG" = false ]; then
     RUN_SHOW_DYNAMO_BRANCHES=true
     RUN_SHOW_COMMIT_HISTORY=true
     RUN_RESOURCE_REPORT=true
+    RUN_SHOW_REMOTE_BRANCHES=true
 fi
 
 # Compute branches output path after parsing flags so `--fast/--fast-test` is honored.
@@ -199,6 +204,15 @@ run_resource_report() {
         RESOURCE_DAYS="0.0833333"  # 2h / 24h
     fi
 
+    if [ "$DRY_RUN" = true ]; then
+        echo "[DRY-RUN] Would generate resource report:"
+        echo "[DRY-RUN]   Output: $RESOURCE_REPORT_HTML"
+        echo "[DRY-RUN]   Resource DB: $RESOURCE_DB"
+        echo "[DRY-RUN]   Days window: $RESOURCE_DAYS"
+        echo "[DRY-RUN]   Command: python3 $SCRIPT_DIR/show_local_resources.py --db-path $RESOURCE_DB --output $RESOURCE_REPORT_HTML --days $RESOURCE_DAYS --prune-db-days 4 --db-checkpoint-truncate --title 'keivenc-linux Resource Report'"
+        return 0
+    fi
+
     if [ -f "$RESOURCE_DB" ]; then
         echo "$(date '+%Y-%m-%d %H:%M:%S') - Generating resource report" >> "$LOG_FILE"
         echo "===== $(date '+%Y-%m-%d %H:%M:%S') run_resource_report start =====" >> "$RESOURCE_REPORT_LOG"
@@ -219,6 +233,13 @@ run_resource_report() {
     fi
 }
 
+# Dry-run echo helper
+dry_echo() {
+    if [ "$DRY_RUN" = true ]; then
+        echo "[DRY-RUN] $*"
+    fi
+}
+
 run_show_local_branches() {
     cd "$NVIDIA_HOME" || exit 1
     REFRESH_CLOSED_FLAG="${REFRESH_CLOSED_PRS:+--refresh-closed-prs}"
@@ -226,6 +247,14 @@ run_show_local_branches() {
     if [ -n "${MAX_GITHUB_API_CALLS:-}" ]; then
         MAX_GH_FLAG="--max-github-api-calls ${MAX_GITHUB_API_CALLS}"
     fi
+    
+    if [ "$DRY_RUN" = true ]; then
+        echo "[DRY-RUN] Would generate branches dashboard:"
+        echo "[DRY-RUN]   Output: $BRANCHES_OUTPUT_FILE"
+        echo "[DRY-RUN]   Command: python3 $SCRIPT_DIR/show_local_branches.py --repo-path $NVIDIA_HOME --output $BRANCHES_OUTPUT_FILE $REFRESH_CLOSED_FLAG $MAX_GH_FLAG"
+        return 0
+    fi
+    
     echo "$(date '+%Y-%m-%d %H:%M:%S') - Generating branches dashboard" >> "$LOG_FILE"
     echo "===== $(date '+%Y-%m-%d %H:%M:%S') run_show_local_branches start (output=$BRANCHES_OUTPUT_FILE) =====" >> "$BRANCHES_LOG"
     if python3 "$SCRIPT_DIR/show_local_branches.py" --repo-path "$NVIDIA_HOME" --output "$BRANCHES_OUTPUT_FILE" $REFRESH_CLOSED_FLAG $MAX_GH_FLAG >> "$BRANCHES_LOG" 2>&1; then
@@ -248,9 +277,6 @@ run_show_remote_branches() {
     #
     # Default output root:
     #   ~/dynamo/speedoflight/users/<user>/index.html
-    if [ "$RUN_SHOW_REMOTE_BRANCHES" != true ]; then
-        return 0
-    fi
 
     USERS_LIST="${REMOTE_GITHUB_USERS:-${REMOTE_GITHUB_USER:-}}"
     if [ -z "${USERS_LIST:-}" ]; then
@@ -261,6 +287,24 @@ run_show_remote_branches() {
     MAX_GH_FLAG=""
     if [ -n "${MAX_GITHUB_API_CALLS:-}" ]; then
         MAX_GH_FLAG="--max-github-api-calls ${MAX_GITHUB_API_CALLS}"
+    fi
+
+    if [ "$DRY_RUN" = true ]; then
+        echo "[DRY-RUN] Would generate remote PRs dashboards for users: $USERS_LIST"
+        for U in $USERS_LIST; do
+            if [ -z "${U:-}" ]; then
+                continue
+            fi
+            OUT_DIR="${REMOTE_PRS_OUT_DIR:-$HOME/dynamo/speedoflight/users/${U}}"
+            OUT_FILE="${REMOTE_PRS_OUT_FILE:-$OUT_DIR/index.html}"
+            if [ "$FAST_TEST" = true ]; then
+                OUT_FILE="${REMOTE_PRS_OUT_FILE:-$OUT_DIR/index2.html}"
+            fi
+            echo "[DRY-RUN]   User: $U"
+            echo "[DRY-RUN]     Output: $OUT_FILE"
+            echo "[DRY-RUN]     Command: python3 $SCRIPT_DIR/show_remote_branches.py --github-user $U --base-dir $NVIDIA_HOME/dynamo_latest --output $OUT_FILE $MAX_GH_FLAG"
+        done
+        return 0
     fi
 
     # Iterate space-separated list.
@@ -278,11 +322,10 @@ run_show_remote_branches() {
         echo "$(date '+%Y-%m-%d %H:%M:%S') - Generating remote PRs dashboard (user=${U} output=$OUT_FILE)" >> "$LOG_FILE"
         echo "===== $(date '+%Y-%m-%d %H:%M:%S') run_show_remote_branches start (user=${U} output=$OUT_FILE) =====" >> "$REMOTE_PRS_LOG"
 
-        # Use $NVIDIA_HOME as base-dir so we can locate an existing local clone for workflow YAML inference.
+        # Use dynamo_latest as base-dir so we can locate the repo clone for workflow YAML inference.
         if python3 "$SCRIPT_DIR/show_remote_branches.py" \
             --github-user "${U}" \
-            --sort "${REMOTE_PRS_SORT:-latest}" \
-            --base-dir "$NVIDIA_HOME" \
+            --base-dir "$NVIDIA_HOME/dynamo_latest" \
             --output "$OUT_FILE" \
             $MAX_GH_FLAG >> "$REMOTE_PRS_LOG" 2>&1; then
             echo "$(date '+%Y-%m-%d %H:%M:%S') - Updated $OUT_FILE" >> "$LOG_FILE"
@@ -300,6 +343,19 @@ run_show_commit_history() {
         COMMIT_HISTORY_BASENAME="index2.html"
     fi
     COMMIT_HISTORY_HTML="$DYNAMO_REPO/$COMMIT_HISTORY_BASENAME"
+
+    if [ "$DRY_RUN" = true ]; then
+        MAX_COMMITS=50
+        if [ "$FAST_TEST" = true ]; then
+            MAX_COMMITS=10
+        fi
+        echo "[DRY-RUN] Would generate commit history dashboard:"
+        echo "[DRY-RUN]   Output: $COMMIT_HISTORY_HTML"
+        echo "[DRY-RUN]   Max commits: $MAX_COMMITS"
+        echo "[DRY-RUN]   Command: cd $DYNAMO_REPO && git checkout main && git pull origin main"
+        echo "[DRY-RUN]   Command: python3 $SCRIPT_DIR/show_commit_history.py --repo-path . --max-commits $MAX_COMMITS --output $COMMIT_HISTORY_HTML"
+        return 0
+    fi
 
     if [ ! -d "$DYNAMO_REPO/.git" ]; then
         echo "$(date '+%Y-%m-%d %H:%M:%S') - ERROR: Not a git repository: $DYNAMO_REPO" >> "$LOG_FILE"

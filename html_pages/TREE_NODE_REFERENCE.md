@@ -344,11 +344,15 @@ Exported from `show_local_branches.py`, shared with `show_remote_branches.py`:
 - Scans git repos on disk
 - Shows local modifications and commit times
 - Full CI details with error snippets
+- **Root hierarchy:** `RepoNode` (directory) → `BranchInfoNode` (branch) → `CommitMessageNode`, `MetadataNode`, `PRNode`, `PRStatusNode` (PASSED/FAILED pill) → `CIJobTreeNode` (CI jobs)
 
 ### Remote (`show_remote_branches.py`)
 - Fetches PRs by GitHub username
 - No local-only branches
-- Same tree structure and helpers
+- **Same tree structure** as local branches
+- **Root hierarchy:** `UserNode` (GitHub user) → `BranchInfoNode` (branch) → `CommitMessageNode`, `MetadataNode`, `PRNode`, `PRStatusNode` (PASSED/FAILED pill) → `CIJobTreeNode` (CI jobs)
+- **Key difference:** Uses `UserNode` instead of `RepoNode` as the collapsible root
+- **Implementation:** Imports `PRStatusNode` and `_build_ci_hierarchy_nodes` from `show_local_branches.py` to ensure identical rendering logic
 
 ---
 

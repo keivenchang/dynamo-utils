@@ -253,17 +253,10 @@ def group_ci_nodes_by_workflow_needs(
 
     wf_by_path: Dict[str, WorkflowDef] = {str(w.workflow_path): w for w in wfs if w and w.workflow_path}
 
-    def _parent_score(job_id: str) -> int:
-        """Higher score means 'more appropriate' parent when multiple parents want the same children."""
-        s = str(job_id or "").strip().lower()
-        if s == "backend-status-check":
-            return 100
-        if "status-check" in s or s.endswith("-status-check"):
-            return 50
-        return 0
-
-    # Build best parent assignment per child node, then attach once (prevents "lost" nodes).
-    child_best: Dict[int, Tuple[int, TNode]] = {}
+    # Build parent-to-children mappings. Multiple parents can share the same child.
+    # Track which children are attached to any parent to exclude them from top-level.
+    parent_to_children: Dict[int, List[TNode]] = {}
+    all_children_ids: Set[int] = set()
 
     for (_nm, parent_node, meta) in node_meta:
         if not meta:
@@ -286,25 +279,13 @@ def group_ci_nodes_by_workflow_needs(
         if not needs:
             continue
 
-        p_score = _parent_score(str(parent_job_id))
-
+        # Attach ALL children to this parent (no scoring/exclusion)
         for child_job_id in needs:
             for child_node in by_wf_job.get((str(wf_path), str(child_job_id)), []):
                 if child_node is canonical_parent:
                     continue
-                cid = id(child_node)
-                prior = child_best.get(cid)
-                if prior is None or int(p_score) > int(prior[0]):
-                    child_best[cid] = (int(p_score), canonical_parent)
-
-    # Attach children to chosen parents.
-    parent_to_children: Dict[int, List[TNode]] = {}
-    for cid, (_score, pnode) in child_best.items():
-        try:
-            parent_to_children.setdefault(id(pnode), []).append(next(n for (_nm, n, _m) in node_meta if id(n) == cid))
-        except Exception:
-            # Best-effort: if we can't locate the node instance, skip attaching.
-            pass
+                parent_to_children.setdefault(id(canonical_parent), []).append(child_node)
+                all_children_ids.add(id(child_node))
 
     for (_nm, pnode, _meta) in node_meta:
         kids = parent_to_children.get(id(pnode))
@@ -332,7 +313,7 @@ def group_ci_nodes_by_workflow_needs(
     # Emit top-level nodes in original order, skipping those assigned as children.
     out: List[TNode] = []
     for (_nm, node, _meta) in node_meta:
-        if id(node) in child_best:
+        if id(node) in all_children_ids:
             continue
         out.append(node)
     return out
