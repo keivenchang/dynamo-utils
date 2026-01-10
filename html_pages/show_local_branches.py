@@ -884,39 +884,8 @@ def _build_ci_hierarchy_nodes(
                 )
                 seen_norm.add(n0)
 
-        # Expected checks inferred from workflow YAML (PyYAML assumed present).
-        try:
-            from common_github_workflow import expected_check_names_from_workflows, workflow_paths_for_present_checks  # local import
-
-            present_names = [
-                str(getattr(r, "name", "") or "").strip()
-                for r in (rows or [])
-                if str(getattr(r, "name", "") or "").strip()
-            ]
-            wf_paths = workflow_paths_for_present_checks(repo_root=Path(repo_path), check_names=list(present_names or []))
-            expected_from_yml = expected_check_names_from_workflows(
-                repo_root=Path(repo_path),
-                workflow_paths=(wf_paths or None) if wf_paths else None,
-                cap=200,
-            )
-            for nm0 in (expected_from_yml or []):
-                n0 = common.normalize_check_name(str(nm0 or ""))
-                if n0 and n0 not in seen_norm:
-                    rows.append(
-                        GHPRCheckRow(
-                            name=str(nm0),
-                            status_raw="pending",
-                            duration="",
-                            url="",
-                            run_id="",
-                            job_id="",
-                            description="expected",
-                            is_required=(common.normalize_check_name(nm0) in required_norm),
-                        )
-                    )
-                    seen_norm.add(n0)
-        except Exception:
-            pass
+        # Note: Expected checks (◇) inference from workflow YAML has been removed.
+        # Only actual check runs from the API are displayed.
     except Exception:
         pass
 
@@ -1167,34 +1136,8 @@ def _build_ci_hierarchy_nodes(
             f"Missing [cached raw log] for {len(missing_failed_raw_logs)} failed GitHub Actions job(s): {examples}"
         )
 
-    # DISABLED: Second pass: best-effort grouping by workflow `jobs.*.needs` (YAML).
-    # This is now handled by the centralized pipeline in PRStatusNode.to_tree_vm()
-    # try:
-    #     from common_github_workflow import group_ci_nodes_by_workflow_needs  # local import
-    #
-    #     out = list(
-    #         group_ci_nodes_by_workflow_needs(
-    #             repo_root=Path(repo_path),
-    #             items=[
-    #                 (
-    #                     # IMPORTANT: use the actual check/job name for workflow matching.
-    #                     #
-    #                     # `display_name` is for UI disambiguation (and may be a placeholder symbol like "◇"),
-    #                     # and must NOT be used as the workflow grouping key.
-    #                     re.sub(r"^[a-z]+:\\s+", "", str(getattr(n, "job_id", "") or ""), flags=re.IGNORECASE),
-    #                     n,
-    #                 )
-    #                 for n in (out or [])
-    #             ],
-    #         )
-    #         or []
-    #     )
-    # except Exception:
-    #     pass
-
-    # NOTE: Workflow grouping, arch grouping, failure marking, expansion, and sorting
-    # are now handled by the centralized pipeline in PRStatusNode.to_tree_vm()
-    # (via process_ci_tree_pipeline in common_dashboard_lib.py)
+    # NOTE: Sorting, failure marking, and expansion are handled by the centralized
+    # pipeline in PRStatusNode.to_tree_vm() (via process_ci_tree_pipeline in common_dashboard_lib.py)
 
     # If CI failed and we can identify a GitHub Actions run_id, include an explicit restart link.
     #

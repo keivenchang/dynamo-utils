@@ -9,7 +9,6 @@ This file intentionally groups previously-split helper modules into one place to
 - avoid UI drift between dashboards
 - reduce small-module sprawl
 - keep <pre>-safe tree rendering + check-line rendering consistent
-- keep workflow parsing separate (see common_github_workflow.py)
 """
 
 from __future__ import annotations
@@ -518,72 +517,56 @@ def process_ci_tree_pipeline(
     """
     Centralized CI tree node processing pipeline.
     
-    This pipeline transforms flat CI job lists into a hierarchical tree with
-    proper grouping, sorting, and expansion state. Passes execute in order:
+    This pipeline transforms flat CI job lists with proper sorting and expansion state.
+    Passes execute in order:
     
-    PASS 1: group_ci_nodes_by_workflow_needs()
-            - Parses .github/workflows/*.yml to find job dependencies
-            - Builds parent-child relationships based on `jobs.*.needs`
-            - Multiple parents can share the same child node
-    
-    PASS 2: mark_success_with_descendant_failures()
+    PASS 1: mark_success_with_descendant_failures()
             - Changes success to warning for parents with failed children
             - Helps identify successful parents that contain hidden failures
     
-    PASS 3: expand_nodes_with_required_failure_descendants()
+    PASS 2: expand_nodes_with_required_failure_descendants()
             - Auto-expands parent nodes that contain REQUIRED failures
             - Ensures critical failures are visible by default
     
-    PASS 4: expand_nodes_with_in_progress_descendants()
+    PASS 3: expand_nodes_with_in_progress_descendants()
             - Auto-expands parent nodes that contain running/pending jobs
             - Ensures active work is visible by default
     
-    PASS 5: sort_tree_by_name()
+    PASS 4: sort_tree_by_name()
             - Sorts by the displayed text (e.g., "build: Build sglang")
             - Applied to all levels (root + children)
             - Preserves hierarchy, failure marking, and expansion state
     
-    PASS 6: group_tree_by_arch()
+    PASS 5: group_tree_by_arch()
             - No-op (arch grouping removed)
             - Kept for pipeline compatibility
             - Arch colors (dark yellow for arm64, blue for amd64) applied during node creation
     
     Args:
         nodes: Initial list of TreeNodeVM nodes (may be empty if using node_items)
-        repo_root: Path to the repository root for workflow YAML parsing
-        node_items: List of (name, TreeNodeVM) tuples for workflow grouping
+        repo_root: Path to the repository root (unused, kept for compatibility)
+        node_items: List of (name, TreeNodeVM) tuples
     
     Returns:
         Processed list of TreeNodeVM nodes
     """
     try:
-        # DEBUGGING: DISABLED PASS 1 (workflow grouping) to create a flat list
-        # This will show all checks at the same level with no parent/child relationships
-        # from common_github_workflow import group_ci_nodes_by_workflow_needs
-        # children = list(
-        #     group_ci_nodes_by_workflow_needs(
-        #         repo_root=repo_root,
-        #         items=node_items,
-        #     )
-        #     or []
-        # )
-        
-        # Start with flat list from node_items (no grouping)
+        # Start with flat list from node_items
         children = [n for (_nm, n) in (node_items or [])]
         
-        # PASS 2: mark_success_with_descendant_failures()
+        # PASS 1: mark_success_with_descendant_failures()
         children = mark_success_with_descendant_failures(list(children or []))
         
-        # PASS 3: expand_nodes_with_required_failure_descendants()
+        # PASS 2: expand_nodes_with_required_failure_descendants()
         children = expand_nodes_with_required_failure_descendants(list(children or []))
         
-        # PASS 4: expand_nodes_with_in_progress_descendants()
+        # PASS 3: expand_nodes_with_in_progress_descendants()
         children = expand_nodes_with_in_progress_descendants(list(children or []))
         
-        # PASS 5: sort_tree_by_name()
+        # PASS 4: sort_tree_by_name()
         children = sort_tree_by_name(list(children or []))
         
-        # PASS 6: group_tree_by_arch() - no-op
+        # PASS 5: group_tree_by_arch() - no-op
         children = group_tree_by_arch(list(children or []))
         
         return children

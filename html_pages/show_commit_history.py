@@ -1407,7 +1407,6 @@ class CommitHistoryGenerator:
             # the local-branches tree UX (and makes missing required checks visible).
             try:
                 from common_dashboard_lib import EXPECTED_CHECK_PLACEHOLDER_SYMBOL  # local import
-                from common_github_workflow import expected_check_names_from_workflows, workflow_paths_for_present_checks  # local import
                 from common import normalize_check_name  # local import
 
                 present_norm = {
@@ -1445,39 +1444,8 @@ class CommitHistoryGenerator:
                         )
                         seen_norm.add(n0)
 
-                # Best-effort: also inject "expected" checks inferred from workflow YAML jobs, even if
-                # GitHub hasn't returned them yet (e.g., queued/not-started or missing contexts).
-                #
-                # To keep this bounded and relevant, we only consider workflows that match at least one
-                # present check name for this commit.
-                try:
-                    if not api_present_names:
-                        wf_paths = []
-                    else:
-                        wf_paths = workflow_paths_for_present_checks(repo_root=Path(repo_path), check_names=list(api_present_names or []))
-                    expected_from_yml = expected_check_names_from_workflows(
-                        repo_root=Path(repo_path),
-                        workflow_paths=(wf_paths or None) if wf_paths else None,
-                        cap=200,
-                    )
-                    for nm0 in (expected_from_yml or []):
-                        n0 = normalize_check_name(str(nm0 or ""))
-                        if n0 and n0 not in seen_norm:
-                            check_runs.append(
-                                {
-                                    "name": str(nm0),
-                                    "status": "queued",  # renders as the pending/not-started icon
-                                    "conclusion": "",
-                                    "html_url": "",
-                                    "details_url": "",
-                                    "is_required": (n0 in required_norm),
-                                    "_expected_placeholder": True,
-                                    "_expected_placeholder_symbol": EXPECTED_CHECK_PLACEHOLDER_SYMBOL,
-                                }
-                            )
-                            seen_norm.add(n0)
-                except Exception:
-                    pass
+                # Note: Expected checks (◇) inference from workflow YAML has been removed.
+                # Only actual check runs from the API are displayed.
             except Exception:
                 pass
             check_runs = sort_github_check_runs_by_name(check_runs)  # shared ordering
