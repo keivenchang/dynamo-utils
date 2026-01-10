@@ -557,16 +557,19 @@ def process_ci_tree_pipeline(
         Processed list of TreeNodeVM nodes
     """
     try:
-        from common_github_workflow import group_ci_nodes_by_workflow_needs
+        # DEBUGGING: DISABLED PASS 1 (workflow grouping) to create a flat list
+        # This will show all checks at the same level with no parent/child relationships
+        # from common_github_workflow import group_ci_nodes_by_workflow_needs
+        # children = list(
+        #     group_ci_nodes_by_workflow_needs(
+        #         repo_root=repo_root,
+        #         items=node_items,
+        #     )
+        #     or []
+        # )
         
-        # PASS 1: group_ci_nodes_by_workflow_needs()
-        children = list(
-            group_ci_nodes_by_workflow_needs(
-                repo_root=repo_root,
-                items=node_items,
-            )
-            or []
-        )
+        # Start with flat list from node_items (no grouping)
+        children = [n for (_nm, n) in (node_items or [])]
         
         # PASS 2: mark_success_with_descendant_failures()
         children = mark_success_with_descendant_failures(list(children or []))
@@ -580,7 +583,7 @@ def process_ci_tree_pipeline(
         # PASS 5: sort_tree_by_name()
         children = sort_tree_by_name(list(children or []))
         
-        # PASS 6: group_tree_by_arch()
+        # PASS 6: group_tree_by_arch() - no-op
         children = group_tree_by_arch(list(children or []))
         
         return children
@@ -1718,6 +1721,7 @@ def check_line_html(
     display_name: str = "",
     status_norm: str,
     is_required: bool,
+    may_be_required: bool = False,
     duration: str = "",
     log_url: str = "",
     raw_log_href: str = "",
@@ -1795,6 +1799,10 @@ def check_line_html(
         + "</span>"
     )
     req_html = required_badge_html(is_required=is_required, status_norm=status_norm)
+    
+    # Add [may be REQUIRED] badge if this should be required but isn't marked as such
+    if may_be_required and not is_required:
+        req_html += ' <span style="color: #57606a; font-weight: 400;">[may be REQUIRED]</span>'
 
     name_html = ""
     if (not is_expected_placeholder) and display_name and display_name != job_id:

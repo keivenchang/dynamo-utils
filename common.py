@@ -1514,6 +1514,10 @@ class GHPRCheckRow:
     job_id: str = ""
     description: str = ""
     is_required: bool = False
+    # Workflow name (e.g., "NVIDIA Dynamo Github Validation") - populated for GitHub Actions checks
+    workflow_name: str = ""
+    # Event type (e.g., "pull_request", "push") - populated for GitHub Actions checks
+    event: str = ""
 
     @property
     def status_norm(self) -> str:
@@ -3950,7 +3954,8 @@ class GitHubAPIClient:
         # v2 adds status-context checks (GET /commits/<sha>/status) in addition to check-runs.
         # v3 added name-level dedupe (later reverted) and persisted `run_id`.
         # v4 persists both `run_id` and `job_id` per row so UIs can disambiguate duplicates.
-        CACHE_VER = 4
+        # v5 adds `workflow_name` and `event` fields for full check display names.
+        CACHE_VER = 5
 
         # 1) memory cache
         try:
@@ -3979,6 +3984,8 @@ class GitHubAPIClient:
                                     job_id=str(r.get("job_id", "") or ""),
                                     description=str(r.get("description", "") or ""),
                                     is_required=(name in required_checks) or bool(r.get("is_required", False)),
+                                    workflow_name=str(r.get("workflow_name", "") or ""),
+                                    event=str(r.get("event", "") or ""),
                                 )
                             )
                         except Exception:
@@ -4018,6 +4025,8 @@ class GitHubAPIClient:
                                     job_id=str(r.get("job_id", "") or ""),
                                     description=str(r.get("description", "") or ""),
                                     is_required=(name in required_checks) or bool(r.get("is_required", False)),
+                                    workflow_name=str(r.get("workflow_name", "") or ""),
+                                    event=str(r.get("event", "") or ""),
                                 )
                             )
                         except Exception:
@@ -4099,6 +4108,10 @@ class GitHubAPIClient:
             # De-dupe exact duplicates only (same name+url). If the same check name appears multiple
             # times with different run/job URLs (reruns), we keep them all so UIs can show each.
             seen: set[tuple[str, str]] = set()
+            
+            # Build a cache of workflow names and events by run_id to avoid repeated API calls
+            workflow_info_cache: Dict[str, tuple[str, str]] = {}  # run_id -> (workflow_name, event)
+            
             for cr in check_runs:
                 if not isinstance(cr, dict):
                     continue
@@ -4148,6 +4161,35 @@ class GitHubAPIClient:
                     seen.add(key2)
                 run_id = parse_actions_run_id_from_url(url)
                 job_id = parse_actions_job_id_from_url(url)
+                
+                # Extract workflow name and event from check run
+                workflow_name = ""
+                event = ""
+                try:
+                    # Try to get workflow name and event from check_suite
+                    check_suite = cr.get("check_suite") or {}
+                    if isinstance(check_suite, dict):
+                        # The check_suite might have a workflow_runs array or we can get it from the app
+                        app = check_suite.get("app") or {}
+                        if isinstance(app, dict) and app.get("slug") == "github-actions":
+                            # This is a GitHub Actions check
+                            # We need to fetch the workflow run to get the workflow name
+                            if run_id and run_id not in workflow_info_cache:
+                                try:
+                                    run_data = self.get(f"/repos/{owner}/{repo}/actions/runs/{run_id}", timeout=5) or {}
+                                    if isinstance(run_data, dict):
+                                        workflow_info_cache[run_id] = (
+                                            str(run_data.get("name", "") or "").strip(),
+                                            str(run_data.get("event", "") or "").strip()
+                                        )
+                                except Exception:
+                                    workflow_info_cache[run_id] = ("", "")
+                            
+                            if run_id in workflow_info_cache:
+                                workflow_name, event = workflow_info_cache[run_id]
+                except Exception:
+                    pass
+                
                 out.append(
                     GHPRCheckRow(
                         name=name,
@@ -4158,6 +4200,8 @@ class GitHubAPIClient:
                         job_id=job_id,
                         description=description,
                         is_required=is_req,
+                        workflow_name=workflow_name,
+                        event=event,
                     )
                 )
                 rows_dicts.append(
@@ -4170,6 +4214,8 @@ class GitHubAPIClient:
                         "job_id": job_id,
                         "description": description,
                         "is_required": is_req,
+                        "workflow_name": workflow_name,
+                        "event": event,
                     }
                 )
 
@@ -4205,6 +4251,7 @@ class GitHubAPIClient:
                 seen.add(key2)
                 run_id = parse_actions_run_id_from_url(target)
                 job_id = parse_actions_job_id_from_url(target)
+                # Status contexts don't have workflow names
                 out.append(
                     GHPRCheckRow(
                         name=name,
@@ -4215,6 +4262,8 @@ class GitHubAPIClient:
                         job_id=job_id,
                         description=desc,
                         is_required=is_req,
+                        workflow_name="",
+                        event="",
                     )
                 )
                 rows_dicts.append(
@@ -4227,6 +4276,8 @@ class GitHubAPIClient:
                         "job_id": job_id,
                         "description": desc,
                         "is_required": is_req,
+                        "workflow_name": "",
+                        "event": "",
                     }
                 )
 

@@ -336,6 +336,35 @@ def _aggregate_status(statuses: Iterable[str]) -> str:
     return best
 
 
+def _is_known_required_check(check_name: str) -> bool:
+    """Check if a job name matches one of the known required checks.
+    
+    The 5 known required checks are:
+    - backend-status-check
+    - DCO
+    - copyright-checks
+    - dynamo-status-check
+    - pre-commit
+    """
+    check_lower = str(check_name or "").lower()
+    
+    # Exact matches for short names (to avoid false positives like "dco-comment")
+    if check_lower == "dco":
+        return True
+    if check_lower == "pre-commit":
+        return True
+    
+    # Substring matches for longer, more specific names
+    if "backend-status-check" in check_lower:
+        return True
+    if "copyright-checks" in check_lower:
+        return True
+    if "dynamo-status-check" in check_lower:
+        return True
+    
+    return False
+
+
 def _duration_str_to_seconds(s: str) -> float:
     """Best-effort parse of durations like '43m 33s', '30m33s', '2s', '1h 4m'."""
     try:
@@ -482,6 +511,7 @@ class CIJobTreeNode(BranchNode):
     # Extracted from the local raw log file when available (highlighting handled in the shared dashboard UI helpers).
     error_snippet_text: str = ""
     is_required: bool = False
+    may_be_required: bool = False  # True if this should be required but isn't marked as such by API
     failed_check: Optional[FailedCheck] = None
     # Stable context key (repo/branch/SHA/PR) to make DOM ids stable across regenerations.
     context_key: str = ""
@@ -652,6 +682,7 @@ class CIJobTreeNode(BranchNode):
             display_name=display_name_eff,
             status_norm=effective_status,
             is_required=bool(self.is_required),
+            may_be_required=bool(self.may_be_required),
             duration=self.duration,
             log_url=job_url,
             raw_log_href=self.raw_log_href,
@@ -659,7 +690,7 @@ class CIJobTreeNode(BranchNode):
             error_snippet_text=(self.error_snippet_text or ""),
             # For success nodes, this will control the suffix style (required vs optional failure).
             required_failure=bool(desc_required_failure),
-        warning_present=bool(effective_status == CIStatus.SUCCESS and (desc_required_failure or desc_optional_failure)),
+            warning_present=bool(effective_status == CIStatus.SUCCESS and (desc_required_failure or desc_optional_failure)),
         )
 
     def render_html(self, prefix: str = "", is_last: bool = True, is_root: bool = True) -> List[str]:
@@ -805,12 +836,14 @@ def _build_ci_hierarchy_nodes(
         return []
     # Ensure required-ness is correct even if PRInfo cache is stale.
     # This uses `gh` (GraphQL statusCheckRollup isRequired), not our REST budget.
-    required_set: Set[str] = set(getattr(pr, "required_checks", []) or [])
-    if not required_set:
-        try:
-            required_set = set(github_api.get_required_checks(DYNAMO_OWNER, DYNAMO_REPO, int(pr.number)) or set())
-        except Exception:
-            required_set = set()
+    # ALWAYS fetch fresh required checks - don't trust cached pr.required_checks.
+    required_set: Set[str] = set()
+    try:
+        required_set = set(github_api.get_required_checks(DYNAMO_OWNER, DYNAMO_REPO, int(pr.number)) or set())
+    except Exception:
+        # Fallback to cached pr.required_checks if API call fails
+        required_set = set(getattr(pr, "required_checks", []) or [])
+    
     rows = github_api.get_pr_checks_rows(
         DYNAMO_OWNER,
         DYNAMO_REPO,
@@ -820,6 +853,7 @@ def _build_ci_hierarchy_nodes(
         ttl_s=int(checks_ttl_s),
         skip_fetch=bool(skip_fetch),
     )
+    
     if not rows:
         return []
 
@@ -1002,10 +1036,24 @@ def _build_ci_hierarchy_nodes(
                 display_name = EXPECTED_CHECK_PLACEHOLDER_SYMBOL
         except Exception:
             pass
+        
+        # Build the full verbatim job name with workflow name and event type
+        # Format: "Workflow Name / check-name (event)"
+        # Example: "NVIDIA Dynamo Github Validation / dynamo-status-check (pull_request)"
+        full_job_name = nm
+        try:
+            workflow_name = str(getattr(r, "workflow_name", "") or "").strip()
+            event = str(getattr(r, "event", "") or "").strip()
+            if workflow_name and event:
+                full_job_name = f"{workflow_name} / {nm} ({event})"
+            elif workflow_name:
+                full_job_name = f"{workflow_name} / {nm}"
+        except Exception:
+            pass
 
         node = CIJobTreeNode(
             label="",
-            job_id=nm,
+            job_id=full_job_name,  # Use full verbatim name as job_id
             display_name=str(display_name or ""),
             status=str(st or "unknown"),
             duration=str(getattr(r, "duration", "") or ""),
@@ -1016,8 +1064,11 @@ def _build_ci_hierarchy_nodes(
             # error tags/snippet to avoid duplication (the failing step will carry it).
             error_snippet_text=str(snippet or ""),
             is_required=bool(getattr(r, "is_required", False)),
+            may_be_required=(_is_known_required_check(nm) and not bool(getattr(r, "is_required", False))),
             children=[],
         )
+
+
 
         # Shared subsections:
         # - Build and Test - dynamo: phases (a special-case subsection; steps API)
@@ -1099,7 +1150,7 @@ def _build_ci_hierarchy_nodes(
                         raw_log_href="",
                         raw_log_size_bytes=0,
                         error_snippet_text=str(step_snip or ""),
-                        is_required=bool(getattr(r, "is_required", False)),
+                        is_required=False,  # Steps/children are never marked as required - only parent jobs
                         children=[],
                     )
                 )
@@ -1116,29 +1167,30 @@ def _build_ci_hierarchy_nodes(
             f"Missing [cached raw log] for {len(missing_failed_raw_logs)} failed GitHub Actions job(s): {examples}"
         )
 
-    # Second pass: best-effort grouping by workflow `jobs.*.needs` (YAML).
-    try:
-        from common_github_workflow import group_ci_nodes_by_workflow_needs  # local import
-
-        out = list(
-            group_ci_nodes_by_workflow_needs(
-                repo_root=Path(repo_path),
-                items=[
-                    (
-                        # IMPORTANT: use the actual check/job name for workflow matching.
-                        #
-                        # `display_name` is for UI disambiguation (and may be a placeholder symbol like "◇"),
-                        # and must NOT be used as the workflow grouping key.
-                        re.sub(r"^[a-z]+:\\s+", "", str(getattr(n, "job_id", "") or ""), flags=re.IGNORECASE),
-                        n,
-                    )
-                    for n in (out or [])
-                ],
-            )
-            or []
-        )
-    except Exception:
-        pass
+    # DISABLED: Second pass: best-effort grouping by workflow `jobs.*.needs` (YAML).
+    # This is now handled by the centralized pipeline in PRStatusNode.to_tree_vm()
+    # try:
+    #     from common_github_workflow import group_ci_nodes_by_workflow_needs  # local import
+    #
+    #     out = list(
+    #         group_ci_nodes_by_workflow_needs(
+    #             repo_root=Path(repo_path),
+    #             items=[
+    #                 (
+    #                     # IMPORTANT: use the actual check/job name for workflow matching.
+    #                     #
+    #                     # `display_name` is for UI disambiguation (and may be a placeholder symbol like "◇"),
+    #                     # and must NOT be used as the workflow grouping key.
+    #                     re.sub(r"^[a-z]+:\\s+", "", str(getattr(n, "job_id", "") or ""), flags=re.IGNORECASE),
+    #                     n,
+    #                 )
+    #                 for n in (out or [])
+    #             ],
+    #         )
+    #         or []
+    #     )
+    # except Exception:
+    #     pass
 
     # NOTE: Workflow grouping, arch grouping, failure marking, expansion, and sorting
     # are now handled by the centralized pipeline in PRStatusNode.to_tree_vm()
@@ -1487,6 +1539,8 @@ class BranchInfoNode(BranchNode):
         cls = "current" if self.is_current else ""
         if is_merged:
             cls = (cls + " merged-branch").strip()
+        elif is_closed:
+            cls = (cls + " closed-branch").strip()
         lbl = html.escape(str(self.label or ""))
         
         if cls:
@@ -1925,185 +1979,116 @@ class PRStatusNode(BranchNode):
                 )
                 # For closed/merged PRs, default stable TTL (30d) is already long; no need to override here.
 
-                required_set = set(getattr(self.pr, "required_checks", []) or [])
-                # Refresh required checks directly so FAIL/PASS is correct even when PRInfo cache is stale
-                # or we are in "no REST budget" mode. This call uses `gh` GraphQL and is cached on disk.
-                if self.github_api and (not required_set):
-                    try:
-                        required_set = set(
-                            self.github_api.get_required_checks(DYNAMO_OWNER, DYNAMO_REPO, int(self.pr.number)) or set()
-                        )
-                    except Exception:
-                        required_set = required_set
-                rows = (
-                    self.github_api.get_pr_checks_rows(
-                        DYNAMO_OWNER,
-                        DYNAMO_REPO,
-                        int(self.pr.number),
-                        required_checks=required_set,
-                        ttl_s=ttl_s,
-                        skip_fetch=(not bool(self.allow_fetch_checks)),
-                    )
-                    if self.github_api
-                    else []
+                # NEW APPROACH: Compute summary directly from our CI children nodes (the actual rendered tree).
+                # This ensures the tooltip always matches what's displayed.
+                tree_sum = self.compute_summary_from_children()
+                tree_counts = tree_sum.get("counts", {})
+                tree_names = tree_sum.get("names", {})
+
+                counts = {
+                    "success_required": int(tree_counts.get("success_required", 0)),
+                    "success_optional": int(tree_counts.get("success_optional", 0)),
+                    "failure_required": int(tree_counts.get("failure_required", 0)),
+                    "failure_optional": int(tree_counts.get("failure_optional", 0)),
+                    "in_progress": int(tree_counts.get("in_progress", 0)),
+                    "pending": int(tree_counts.get("pending", 0)),
+                    "cancelled": int(tree_counts.get("cancelled", 0)),
+                    "other": int(tree_counts.get("other", 0)),
+                }
+
+                passed_required_jobs = list(tree_names.get("success_required", []))
+                passed_optional_jobs = list(tree_names.get("success_optional", []))
+                failed_required_jobs = list(tree_names.get("failure_required", []))
+                failed_optional_jobs = list(tree_names.get("failure_optional", []))
+                progress_required_jobs = list(tree_names.get("in_progress_required", []))
+                progress_optional_jobs = list(tree_names.get("in_progress_optional", []))
+                pending_jobs = list(tree_names.get("pending", []))
+                cancelled_jobs = list(tree_names.get("cancelled", []))
+                other_jobs = list(tree_names.get("other", []))
+
+                # Rebuild the "Status:" line for HTML using the shared compact renderer
+                # so it matches the GitHub column in commit history.
+                ci_summary_html = compact_ci_summary_html(
+                    success_required=int(counts["success_required"]),
+                    success_optional=int(counts["success_optional"]),
+                    failure_required=int(counts["failure_required"]),
+                    failure_optional=int(counts["failure_optional"]),
+                    in_progress_required=int(counts["in_progress"]),
+                    in_progress_optional=0,
+                    pending=int(counts["pending"]),
+                    cancelled=int(counts["cancelled"]),
                 )
 
-                # Display checks output if available
-                if rows:
-                    # Details list should mirror the PR's check rows as returned by GitHub (no extra
-                    # workflow/run metadata fetches, and no YAML parsing).
-                    rows = list(rows)
-                    # Sort by job name for stable/scan-friendly output.
-                    rows = sort_pr_check_rows_by_name(list(rows))
-
-                    # Compact CI summary counts (styled to match show_commit_history.j2):
-                    #   - green:  REQ+OPT✓  (passed; required count bold)
-                    #   - red:    N✗   (required failures, rendered as a red badge)
-                    #   - red:    N✗   (optional failures)
-                    #   - amber:  N⏳   (in progress)
-                    #   - grey:   N⏸   (pending/queued/skipping)
-                    #   - grey:   N✖️  (cancelled)
-                    counts = {
-                        "success_required": 0,
-                        "success_optional": 0,
-                        "failure_required": 0,
-                        "failure_optional": 0,
-                        "in_progress": 0,
-                        "pending": 0,
-                        "cancelled": 0,
-                        "other": 0,
-                    }
-
-                    # Build a hover tooltip (same style as show_commit_history) by collecting
-                    # check names into buckets. This lets us distinguish required vs optional passes.
-                    passed_required_jobs: list[str] = []
-                    passed_optional_jobs: list[str] = []
-                    failed_required_jobs: list[str] = []
-                    failed_optional_jobs: list[str] = []
-                    progress_required_jobs: list[str] = []
-                    progress_optional_jobs: list[str] = []
-                    pending_jobs: list[str] = []
-                    cancelled_jobs: list[str] = []
-                    other_jobs: list[str] = []
-
-                    # Determine which checks are required (branch protection).
-                    # Prefer the full required_checks list from PRInfo; fall back to "is_required" flags on known checks.
-                    if not required_set:
-                        try:
-                            required_set = {
-                                c.name
-                                for c in (list(getattr(self.pr, "failed_checks", []) or []) + list(getattr(self.pr, "running_checks", []) or []))
-                                if getattr(c, "is_required", False)
-                            }
-                        except Exception:
-                            required_set = set()
-
-                    # Shared summary (common.py) so show_commit_history + show_local_branches stay consistent.
-                    summary = summarize_pr_check_rows(rows)
-
-                    # Map summary buckets into the local display buckets.
-                    counts["success_required"] = int(summary.counts.success_required)
-                    counts["success_optional"] = int(summary.counts.success_optional)
-                    counts["failure_required"] = int(summary.counts.failure_required)
-                    counts["failure_optional"] = int(summary.counts.failure_optional)
-                    counts["in_progress"] = int(summary.counts.in_progress_required + summary.counts.in_progress_optional)
-                    counts["pending"] = int(summary.counts.pending)
-                    counts["cancelled"] = int(summary.counts.cancelled)
-                    counts["other"] = int(summary.counts.other)
-
-                    passed_required_jobs = list(summary.names.success_required)
-                    passed_optional_jobs = list(summary.names.success_optional)
-                    failed_required_jobs = list(summary.names.failure_required)
-                    failed_optional_jobs = list(summary.names.failure_optional)
-                    progress_required_jobs = list(summary.names.in_progress_required)
-                    progress_optional_jobs = list(summary.names.in_progress_optional)
-                    pending_jobs = list(summary.names.pending)
-                    cancelled_jobs = list(summary.names.cancelled)
-                    other_jobs = list(summary.names.other)
-
-                    # Rebuild the "Status:" line for HTML using the shared compact renderer
-                    # so it matches the GitHub column in commit history.
-                    ci_summary_html = compact_ci_summary_html(
-                        success_required=int(counts["success_required"]),
-                        success_optional=int(counts["success_optional"]),
-                        failure_required=int(counts["failure_required"]),
-                        failure_optional=int(counts["failure_optional"]),
-                        in_progress_required=int(counts["in_progress"]),
-                        in_progress_optional=0,
-                        pending=int(counts["pending"]),
-                        cancelled=int(counts["cancelled"]),
+                # Tooltip HTML (match show_commit_history look/labels).
+                tooltip_parts: list[str] = []
+                if passed_required_jobs:
+                    tooltip_parts.append(
+                        f'<strong style="color: #2da44e;">{status_icon_html(status_norm="success", is_required=True)} Passed (required):</strong> '
+                        + ", ".join(sorted(html_module.escape(n) for n in passed_required_jobs))
                     )
+                if passed_optional_jobs:
+                    tooltip_parts.append(
+                        f'<strong style="color: #2da44e;">{status_icon_html(status_norm="success", is_required=False)} Passed (optional):</strong> '
+                        + ", ".join(sorted(html_module.escape(n) for n in passed_optional_jobs))
+                    )
+                if failed_required_jobs:
+                    tooltip_parts.append(
+                        '<strong style="color: #c83a3a;"><span style="display: inline-flex; align-items: center; justify-content: center; width: 14px; height: 14px; margin-right: 6px; border-radius: 999px; background-color: #c83a3a; color: #ffffff; font-size: 11px; font-weight: 900; line-height: 1;">✗</span>Failed (required):</strong> '
+                        + ", ".join(sorted(html_module.escape(n) for n in failed_required_jobs))
+                    )
+                if failed_optional_jobs:
+                    tooltip_parts.append(
+                        f'<strong style="color: #c83a3a;">{status_icon_html(status_norm="failure", is_required=False)} Failed (optional):</strong> '
+                        + ", ".join(sorted(html_module.escape(n) for n in failed_optional_jobs))
+                    )
+                if progress_required_jobs:
+                    tooltip_parts.append(
+                        '<strong style="color: #8c959f;">⏳ In Progress (required):</strong> '
+                        + ", ".join(sorted(html_module.escape(n) for n in progress_required_jobs))
+                    )
+                if progress_optional_jobs:
+                    tooltip_parts.append(
+                        '<strong style="color: #8c959f;">⏳ In Progress (optional):</strong> '
+                        + ", ".join(sorted(html_module.escape(n) for n in progress_optional_jobs))
+                    )
+                if pending_jobs:
+                    tooltip_parts.append(
+                        '<strong style="color: #8c959f;">⏸ Pending:</strong> '
+                        + ", ".join(sorted(html_module.escape(n) for n in pending_jobs))
+                    )
+                if cancelled_jobs:
+                    tooltip_parts.append(
+                        '<strong style="color: #8c959f;">✖️ Canceled:</strong> '
+                        + ", ".join(sorted(html_module.escape(n) for n in cancelled_jobs))
+                    )
+                if other_jobs:
+                    tooltip_parts.append(
+                        '<strong style="color: #8c959f;">Other:</strong> '
+                        + ", ".join(sorted(html_module.escape(n) for n in other_jobs))
+                    )
+                tooltip_html = "<br>".join(tooltip_parts)
 
-                    # Tooltip HTML (match show_commit_history look/labels).
-                    tooltip_parts: list[str] = []
-                    if passed_required_jobs:
-                        tooltip_parts.append(
-                            f'<strong style="color: #2da44e;">{status_icon_html(status_norm="success", is_required=True)} Passed (required):</strong> '
-                            + ", ".join(sorted(html_module.escape(n) for n in passed_required_jobs))
+                status_parts = []
+                if ci_summary_html:
+                    ci_summary = str(ci_summary_html)
+                    if tooltip_html:
+                        ci_summary = (
+                            '<span class="gh-status-tooltip" style="margin-left: 2px;">'
+                            f'<span style="white-space: nowrap; font-weight: 600; font-size: 12px;">{ci_summary}</span>'
+                            f'<span class="tooltiptext">{tooltip_html}</span>'
+                            '</span>'
                         )
-                    if passed_optional_jobs:
-                        tooltip_parts.append(
-                            f'<strong style="color: #2da44e;">{status_icon_html(status_norm="success", is_required=False)} Passed (optional):</strong> '
-                            + ", ".join(sorted(html_module.escape(n) for n in passed_optional_jobs))
-                        )
-                    if failed_required_jobs:
-                        tooltip_parts.append(
-                            '<strong style="color: #c83a3a;"><span style="display: inline-flex; align-items: center; justify-content: center; width: 14px; height: 14px; margin-right: 6px; border-radius: 999px; background-color: #c83a3a; color: #ffffff; font-size: 11px; font-weight: 900; line-height: 1;">✗</span>Failed (required):</strong> '
-                            + ", ".join(sorted(html_module.escape(n) for n in failed_required_jobs))
-                        )
-                    if failed_optional_jobs:
-                        tooltip_parts.append(
-                            f'<strong style="color: #c83a3a;">{status_icon_html(status_norm="failure", is_required=False)} Failed (optional):</strong> '
-                            + ", ".join(sorted(html_module.escape(n) for n in failed_optional_jobs))
-                        )
-                    if progress_required_jobs:
-                        tooltip_parts.append(
-                            '<strong style="color: #8c959f;">⏳ In Progress (required):</strong> '
-                            + ", ".join(sorted(html_module.escape(n) for n in progress_required_jobs))
-                        )
-                    if progress_optional_jobs:
-                        tooltip_parts.append(
-                            '<strong style="color: #8c959f;">⏳ In Progress (optional):</strong> '
-                            + ", ".join(sorted(html_module.escape(n) for n in progress_optional_jobs))
-                        )
-                    if pending_jobs:
-                        tooltip_parts.append(
-                            '<strong style="color: #8c959f;">⏸ Pending:</strong> '
-                            + ", ".join(sorted(html_module.escape(n) for n in pending_jobs))
-                        )
-                    if cancelled_jobs:
-                        tooltip_parts.append(
-                            '<strong style="color: #8c959f;">✖️ Canceled:</strong> '
-                            + ", ".join(sorted(html_module.escape(n) for n in cancelled_jobs))
-                        )
-                    if other_jobs:
-                        tooltip_parts.append(
-                            '<strong style="color: #8c959f;">Other:</strong> '
-                            + ", ".join(sorted(html_module.escape(n) for n in other_jobs))
-                        )
-                    tooltip_html = "<br>".join(tooltip_parts)
-
-                    status_parts = []
-                    if ci_summary_html:
-                        ci_summary = str(ci_summary_html)
-                        if tooltip_html:
-                            ci_summary = (
-                                '<span class="gh-status-tooltip" style="margin-left: 2px;">'
-                                f'<span style="white-space: nowrap; font-weight: 600; font-size: 12px;">{ci_summary}</span>'
-                                f'<span class="tooltiptext">{tooltip_html}</span>'
-                                '</span>'
-                            )
-                        # Roll up the top-level PR status:
-                        # - FAILED iff a REQUIRED check failed
-                        # - WARN if only non-required checks failed
-                        # - RUNNING if anything is in progress/pending
-                        # - PASSED otherwise
-                        #
-                        # IMPORTANT: determining "required" purely from branch protection can be unreliable
-                        # (branch protection is often not accessible). Use PRInfo.failed_checks' `is_required`
-                        # flags for the FAIL decision.
-                        # Top-level pill should reflect REQUIRED checks only:
-                        # - FAILED iff a required check failed
+                    # Roll up the top-level PR status:
+                    # - FAILED iff a REQUIRED check failed
+                    # - WARN if only non-required checks failed
+                    # - RUNNING if anything is in progress/pending
+                    # - PASSED otherwise
+                    #
+                    # IMPORTANT: determining "required" purely from branch protection can be unreliable
+                    # (branch protection is often not accessible). Use PRInfo.failed_checks' `is_required`
+                    # flags for the FAIL decision.
+                    # Top-level pill should reflect REQUIRED checks only:
+                    # - FAILED iff a required check failed
                         # - RUNNING if anything is in progress/pending
                         # - PASSED otherwise (even if optional checks failed)
                         if counts["failure_required"] > 0:
@@ -2152,6 +2137,87 @@ class PRStatusNode(BranchNode):
 
         return base_html
 
+    def compute_summary_from_children(self) -> dict:
+        """Compute CI summary directly from child CIJobTreeNode objects.
+        
+        This ensures the tooltip reflects the actual rendered tree, not cached API data.
+        Counts only immediate children (top-level jobs), not nested children (steps).
+        
+        Returns a dict with 'counts' and 'names' matching GitHubChecksSummary structure.
+        """
+        counts = {
+            "success_required": 0,
+            "success_optional": 0,
+            "failure_required": 0,
+            "failure_optional": 0,
+            "in_progress": 0,
+            "pending": 0,
+            "cancelled": 0,
+            "other": 0,
+        }
+        
+        names = {
+            "success_required": [],
+            "success_optional": [],
+            "failure_required": [],
+            "failure_optional": [],
+            "in_progress_required": [],
+            "in_progress_optional": [],
+            "pending": [],
+            "cancelled": [],
+            "other": [],
+        }
+        
+        # Only count immediate children (top-level jobs), not recurse into steps
+        for child in (self.children or []):
+            if not isinstance(child, CIJobTreeNode):
+                continue
+                
+            name = str(getattr(child, "job_id", "") or getattr(child, "display_name", "") or "").strip()
+            status = str(getattr(child, "status", "unknown")).strip().lower()
+            is_req = bool(getattr(child, "is_required", False))
+            
+            if status == "success":
+                if is_req:
+                    counts["success_required"] += 1
+                    if name:
+                        names["success_required"].append(name)
+                else:
+                    counts["success_optional"] += 1
+                    if name:
+                        names["success_optional"].append(name)
+            elif status == "failure":
+                if is_req:
+                    counts["failure_required"] += 1
+                    if name:
+                        names["failure_required"].append(name)
+                else:
+                    counts["failure_optional"] += 1
+                    if name:
+                        names["failure_optional"].append(name)
+            elif status in ("in_progress", "running"):
+                counts["in_progress"] += 1
+                if is_req:
+                    if name:
+                        names["in_progress_required"].append(name)
+                else:
+                    if name:
+                        names["in_progress_optional"].append(name)
+            elif status == "pending":
+                counts["pending"] += 1
+                if name:
+                    names["pending"].append(name)
+            elif status in ("cancelled", "canceled"):
+                counts["cancelled"] += 1
+                if name:
+                    names["cancelled"].append(name)
+            else:
+                counts["other"] += 1
+                if name:
+                    names["other"].append(name)
+        
+        return {"counts": counts, "names": names}
+
     def to_tree_vm(self) -> TreeNodeVM:
         """Show the PASSED/FAILED/RUNNING status line, collapsed for PASSED.
         
@@ -2188,7 +2254,59 @@ class PRStatusNode(BranchNode):
             key=_sort_key_for_ci_node
         )
         
-        kids = [c.to_tree_vm() for c in sorted_children if isinstance(c, BranchNode)]
+        # Convert BranchNode children to TreeNodeVM and build node_items list for pipeline
+        node_items: List[Tuple[str, TreeNodeVM]] = []
+        for child in sorted_children:
+            if not isinstance(child, BranchNode):
+                continue
+            # Skip special nodes (they'll be added back at the end)
+            node_type = type(child).__name__
+            is_special = node_type in ('RerunLinkNode', 'ConflictWarningNode', 'BlockedMessageNode')
+            if is_special:
+                continue
+            
+            # Convert to TreeNodeVM
+            child_vm = child.to_tree_vm()
+            
+            # Extract name for pipeline
+            if isinstance(child, CIJobTreeNode):
+                name = getattr(child, 'display_name', '') or getattr(child, 'job_id', '') or getattr(child, 'label', '')
+            else:
+                name = getattr(child, 'label', '')
+            
+            node_items.append((str(name or ""), child_vm))
+        
+        # Apply centralized CI tree processing pipeline
+        kids: List[TreeNodeVM] = []
+        try:
+            from pathlib import Path
+            from common_dashboard_lib import process_ci_tree_pipeline
+            
+            # Determine repo_root for workflow parsing
+            repo_root = Path("/home/keivenc/dynamo/dynamo_latest")  # Fallback
+            try:
+                # Try to get repo_root from context
+                gh = getattr(self, "github_api", None)
+                if gh and hasattr(gh, "repo_root"):
+                    repo_root = Path(gh.repo_root)
+            except Exception:
+                pass
+            
+            kids = process_ci_tree_pipeline(
+                nodes=[],
+                repo_root=repo_root,
+                node_items=node_items,
+            )
+        except Exception:
+            # Fallback: just convert without pipeline
+            kids = [n for (_nm, n) in node_items]
+        
+        # Add back special nodes at the end
+        for child in sorted_children:
+            node_type = type(child).__name__
+            is_special = node_type in ('RerunLinkNode', 'ConflictWarningNode', 'BlockedMessageNode')
+            if is_special and isinstance(child, BranchNode):
+                kids.append(child.to_tree_vm())
         
         # Determine if we should expand by checking for required failures.
         # We need to check BOTH pr.failed_checks (from GitHub API) AND the actual children
@@ -2698,9 +2816,7 @@ class LocalRepoScanner:
                     allow_fetch_checks = (branch_name in allow_fetch_branch_names) if allow_fetch_branch_names else True
                     if bool(getattr(self, "cache_only_github", False)):
                         allow_fetch_checks = False
-                    # PR title line (no children; acts as a header).
-                    branch_node.add_child(PRNode(label="", pr=pr))
-
+                    
                     pr_state_lc = (getattr(pr, "state", "") or "").lower()
                     # Prefer the branch head commit time for "last push" heuristic.
                     branch_dt = info.get("commit_dt")
@@ -2708,7 +2824,8 @@ class LocalRepoScanner:
                         branch_dt,
                         refresh=bool(self.refresh_closed_prs),
                     )
-
+                    
+                    # Create status node first (will contain CI children)
                     status_node = PRStatusNode(
                         label="",
                         pr=pr,
@@ -2718,6 +2835,10 @@ class LocalRepoScanner:
                         allow_fetch_checks=bool(allow_fetch_checks),
                         context_key=f"{repo_dir.name}:{branch_name}:{info.get('sha','')}",
                     )
+                    
+                    # PR title line (no children; acts as a header).
+                    branch_node.add_child(PRNode(label="", pr=pr))
+
                     branch_node.add_child(status_node)
 
                     # Add CI hierarchy as children of the PR status line (cached; long TTL when no recent pushes).
