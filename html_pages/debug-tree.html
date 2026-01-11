@@ -1,0 +1,338 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Tree Demo 2</title>
+    <link rel="stylesheet" href="tree-view.css?v=2">
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            background: #f6f8fa;
+            padding: 40px 20px;
+            margin: 0;
+        }
+        
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            background: white;
+            padding: 40px;
+            border-radius: 12px;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+        }
+        
+        h1 {
+            margin: 0 0 30px 0;
+            color: #24292f;
+        }
+        
+        .controls {
+            margin-bottom: 24px;
+            padding: 16px;
+            background: #f6f8fa;
+            border-radius: 8px;
+        }
+        
+        button {
+            padding: 8px 16px;
+            margin-right: 10px;
+            border: 1px solid #d0d7de;
+            background: white;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 14px;
+        }
+        
+        button:hover {
+            background: #f3f4f6;
+        }
+        
+        /* Additional styling for content (not part of vanilla tree CSS) */
+        .tree {
+            font-size: 14px;
+            color: #24292f;
+        }
+        
+        .tree ul {
+            list-style: none;
+        }
+        
+        /* Status badges */
+        .badge {
+            display: inline-block;
+            padding: 3px 8px;
+            border-radius: 6px;
+            font-size: 11px;
+            font-weight: 600;
+            text-transform: uppercase;
+        }
+        
+        .badge-pass {
+            background: #dafbe1;
+            color: #1a7f37;
+        }
+        
+        .badge-fail {
+            background: #ffebe9;
+            color: #cf222e;
+        }
+        
+        .badge-required {
+            background: #cf222e;
+            color: white;
+        }
+        
+        /* Node types */
+        .node-user {
+            font-weight: 600;
+            color: #0969da;
+            font-size: 15px;
+        }
+        
+        .node-branch {
+            font-weight: 500;
+            color: #1f2328;
+        }
+        
+        .node-check {
+            color: #1f2328;
+        }
+        
+        .node-expected {
+            color: #8c959f;
+            font-style: italic;
+        }
+        
+        .pr-link {
+            color: #0969da;
+            text-decoration: none;
+        }
+        
+        .pr-link:hover {
+            text-decoration: underline;
+        }
+        
+        /* Leaf nodes (no children) */
+        .tree li.leaf::after {
+            background: transparent;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🌳 Tree Demo 2</h1>
+        
+        <div class="controls">
+            <button onclick="expandAll()">Expand All</button>
+            <button onclick="collapseAll()">Collapse All</button>
+        </div>
+        
+        <ul class="tree">
+            <li>
+                <details open>
+                    <summary>
+                        <span class="tree-content">
+                            <span class="node-user">keivenchang</span>
+                        </span>
+                    </summary>
+                    <ul>
+                        <li>
+                            <details open>
+                                <summary>
+                                    <span class="tree-content">
+                                        <span class="node-branch">keivenchang/DIS-1249__sanity-check</span>
+                                    </span>
+                                </summary>
+                                <ul>
+                                    <li class="leaf">
+                                        <span class="tree-content">
+                                            <span>feat: sanity check.py cuda version use nvcc</span>
+                                            <a href="https://github.com/ai-dynamo/dynamo/pull/5335" class="pr-link" target="_blank">(#5335)</a>
+                                        </span>
+                                    </li>
+                                    <li class="leaf">
+                                        <span class="tree-content">
+                                            <span style="color: #6e7781; font-size: 13px;">(modified: 2026-01-10 22:02 PT, age: 12h)</span>
+                                        </span>
+                                    </li>
+                                    <li>
+                                        <details open>
+                                            <summary>
+                                                <span class="tree-content">
+                                                    <span class="badge badge-fail">FAIL</span>
+                                                    <span style="font-weight: 500;">CI Status</span>
+                                                </span>
+                                            </summary>
+                                            <ul>
+                                                <li class="leaf">
+                                                    <span class="tree-content">
+                                                        <span class="badge badge-pass">PASS</span>
+                                                        <span class="node-check">backend-status-check</span>
+                                                        <span class="badge badge-required">REQUIRED</span>
+                                                    </span>
+                                                </li>
+                                                <li class="leaf">
+                                                    <span class="tree-content">
+                                                        <span class="badge badge-fail">FAIL</span>
+                                                        <span class="node-check">dynamo-status-check</span>
+                                                        <span class="badge badge-required">REQUIRED</span>
+                                                    </span>
+                                                </li>
+                                                <li class="leaf">
+                                                    <span class="tree-content">
+                                                        <span class="badge badge-pass">PASS</span>
+                                                        <span class="node-check">pre-commit</span>
+                                                        <span class="badge badge-required">REQUIRED</span>
+                                                    </span>
+                                                </li>
+                                                <li class="leaf">
+                                                    <span class="tree-content">
+                                                        <span class="badge badge-pass">PASS</span>
+                                                        <span class="node-check">DCO</span>
+                                                        <span class="badge badge-required">REQUIRED</span>
+                                                    </span>
+                                                </li>
+                                                <li class="leaf">
+                                                    <span class="tree-content">
+                                                        <span class="badge badge-pass">PASS</span>
+                                                        <span class="node-check">copyright-checks</span>
+                                                        <span class="badge badge-required">REQUIRED</span>
+                                                    </span>
+                                                </li>
+                                                <li class="leaf">
+                                                    <span class="tree-content">
+                                                        <span class="node-expected">◇ post-merge-ci / Post-Merge CI (expected)</span>
+                                                    </span>
+                                                </li>
+                                                <li class="leaf">
+                                                    <span class="tree-content">
+                                                        <span class="node-expected">◇ docs-link-check / lychee (expected)</span>
+                                                    </span>
+                                                </li>
+                                                <li>
+                                                    <details open>
+                                                        <summary>
+                                                            <span class="tree-content">
+                                                                <span class="badge badge-pass">PASS</span>
+                                                                <span class="node-check">Build and Test - dynamo</span>
+                                                            </span>
+                                                        </summary>
+                                                        <ul>
+                                                            <li class="leaf">
+                                                                <span class="tree-content">
+                                                                    <span class="badge badge-pass">PASS</span>
+                                                                    <span>Setup environment</span>
+                                                                </span>
+                                                            </li>
+                                                            <li class="leaf">
+                                                                <span class="tree-content">
+                                                                    <span class="badge badge-pass">PASS</span>
+                                                                    <span>Run tests</span>
+                                                                </span>
+                                                            </li>
+                                                            <li class="leaf">
+                                                                <span class="tree-content">
+                                                                    <span class="badge badge-pass">PASS</span>
+                                                                    <span>Upload artifacts</span>
+                                                                </span>
+                                                            </li>
+                                                        </ul>
+                                                    </details>
+                                                </li>
+                                            </ul>
+                                        </details>
+                                    </li>
+                                </ul>
+                            </details>
+                        </li>
+                        <li>
+                            <details>
+                                <summary>
+                                    <span class="tree-content">
+                                        <span class="node-branch">keivenchang/DIS-1200__refactor-dockerfiles</span>
+                                    </span>
+                                </summary>
+                                <ul>
+                                    <li class="leaf">
+                                        <span class="tree-content">
+                                            <span>Simplify runtime stage to minimal install</span>
+                                            <a href="https://github.com/ai-dynamo/dynamo/pull/5050" class="pr-link" target="_blank">(#5050)</a>
+                                        </span>
+                                    </li>
+                                    <li class="leaf">
+                                        <span class="tree-content">
+                                            <span style="color: #6e7781; font-size: 13px;">(modified: 2026-01-09 10:01 PT, age: 2d)</span>
+                                        </span>
+                                    </li>
+                                    <li>
+                                        <details>
+                                            <summary>
+                                                <span class="tree-content">
+                                                    <span class="badge badge-pass">PASS</span>
+                                                    <span style="font-weight: 500;">CI Status</span>
+                                                </span>
+                                            </summary>
+                                            <ul>
+                                                <li class="leaf">
+                                                    <span class="tree-content">
+                                                        <span class="badge badge-pass">PASS</span>
+                                                        <span class="node-check">backend-status-check</span>
+                                                        <span class="badge badge-required">REQUIRED</span>
+                                                    </span>
+                                                </li>
+                                                <li class="leaf">
+                                                    <span class="tree-content">
+                                                        <span class="badge badge-pass">PASS</span>
+                                                        <span class="node-check">dynamo-status-check</span>
+                                                        <span class="badge badge-required">REQUIRED</span>
+                                                    </span>
+                                                </li>
+                                                <li class="leaf">
+                                                    <span class="tree-content">
+                                                        <span class="badge badge-pass">PASS</span>
+                                                        <span class="node-check">pre-commit</span>
+                                                        <span class="badge badge-required">REQUIRED</span>
+                                                    </span>
+                                                </li>
+                                                <li class="leaf">
+                                                    <span class="tree-content">
+                                                        <span class="badge badge-pass">PASS</span>
+                                                        <span class="node-check">DCO</span>
+                                                        <span class="badge badge-required">REQUIRED</span>
+                                                    </span>
+                                                </li>
+                                                <li class="leaf">
+                                                    <span class="tree-content">
+                                                        <span class="badge badge-pass">PASS</span>
+                                                        <span class="node-check">copyright-checks</span>
+                                                        <span class="badge badge-required">REQUIRED</span>
+                                                    </span>
+                                                </li>
+                                            </ul>
+                                        </details>
+                                    </li>
+                                </ul>
+                            </details>
+                        </li>
+                    </ul>
+                </details>
+            </li>
+        </ul>
+    </div>
+    
+    <script>
+        function expandAll() {
+            document.querySelectorAll('details').forEach(el => {
+                el.setAttribute('open', '');
+            });
+        }
+        
+        function collapseAll() {
+            document.querySelectorAll('details').forEach(el => {
+                el.removeAttribute('open');
+            });
+        }
+    </script>
+</body>
+</html>

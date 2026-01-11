@@ -835,6 +835,163 @@ def render_tree_pre_lines(root_nodes: List[TreeNodeVM]) -> List[str]:
     displayed_nodes: Dict[str, str] = {}  # node_key -> label_html (first occurrence)
     last_reference_text: Optional[str] = None  # Track last reference text to avoid consecutive duplicates
 
+
+def render_tree_divs(root_nodes: List[TreeNodeVM]) -> str:
+    """Render a forest as nested <ul>/<li>/<details>/<summary> elements using iamkate.com tree pattern.
+    
+    Returns HTML string with proper tree structure and CSS classes.
+    Based on: https://iamkate.com/code/tree-views/
+    """
+    global _TREE_RENDER_CALL_SEQ
+    try:
+        _TREE_RENDER_CALL_SEQ += 1
+    except NameError:
+        _TREE_RENDER_CALL_SEQ = 1
+    render_call_id = _TREE_RENDER_CALL_SEQ
+    next_dom_id = 0
+    used_ids: Dict[str, int] = {}
+    
+    # Track displayed nodes to show references for duplicates
+    displayed_nodes: Dict[str, str] = {}
+    last_reference_text: Optional[str] = None
+
+    def alloc_children_id(node_key: str) -> str:
+        nonlocal next_dom_id
+        base = _dom_id_from_node_key(node_key)
+        if base:
+            n = int(used_ids.get(base, 0) or 0) + 1
+            used_ids[base] = n
+            if n == 1:
+                return base
+            return f"{base}_{n}"
+        next_dom_id += 1
+        return f"tree_children_{render_call_id:x}_{next_dom_id:x}"
+
+    def _sha7_from_key(s: str) -> str:
+        import re
+        try:
+            m = re.findall(r"\b[0-9a-f]{7,40}\b", str(s or ""), re.IGNORECASE)
+            if not m:
+                return ""
+            return str(m[-1])[:7].lower()
+        except Exception:
+            return ""
+
+    def _repo_token_from_key(s: str) -> str:
+        import re
+        try:
+            txt = str(s or "")
+            m = re.search(r"\b(?:PRStatus|CI|repo):([^:>]+)", txt)
+            if not m:
+                return ""
+            repo = str(m.group(1) or "").strip()
+            repo = re.sub(r"[^a-zA-Z0-9._-]+", "-", repo).strip("-").lower()
+            return repo[:32]
+        except Exception:
+            return ""
+
+    def render_node(node: TreeNodeVM, parent_children_id: Optional[str], node_key_path: str, is_last: bool = True) -> str:
+        """Render a single node as <li> with optional <details>/<summary> for collapsible nodes.
+        
+        Based on https://iamkate.com/code/tree-views/ pattern.
+        """
+        nonlocal last_reference_text
+        
+        # Check for deduplication
+        should_dedup = not getattr(node, 'skip_dedup', False)
+        node_key = str(node.node_key or "")
+        
+        if should_dedup and node_key and node_key in displayed_nodes:
+            # Duplicate node - show reference
+            ref_text = 'node'  # Simplified for now
+            if last_reference_text == ref_text:
+                return ""
+            ref_html = f'<span style="color: #57606a; font-size: 12px;">↑ {html.escape(ref_text)} (see above)</span>'
+            last_reference_text = ref_text
+            return f'<li class="leaf">{ref_html}</li>\n'
+        
+        # Reset last reference text when rendering actual node
+        last_reference_text = None
+        
+        # Store node for deduplication
+        if node_key:
+            displayed_nodes[node_key] = node.label_html or ""
+        
+        has_children = node.collapsible and node.children
+        
+        # Add 'leaf' class for nodes without children
+        li_class = '' if has_children else ' class="leaf"'
+        li_class_attr = li_class if li_class else ''
+        
+        parts = []
+        parts.append(f'<li{li_class_attr}>\n')
+        
+        if has_children:
+            # Collapsible node with children - use <details>/<summary>
+            nk = str(node.node_key or "")
+            full_key = (str(node_key_path or "") + ">" + nk).strip(">")
+            children_id = alloc_children_id(full_key)
+            sha7 = _sha7_from_key(full_key) or _sha7_from_key(nk)
+            repo = _repo_token_from_key(full_key) or _repo_token_from_key(nk)
+            
+            url_key_attr = ""
+            if repo and sha7:
+                url_key_attr = f' data-url-key="t.{html.escape(repo)}.{html.escape(sha7)}"'
+            elif sha7:
+                url_key_attr = f' data-url-key="t.{html.escape(sha7)}"'
+            
+            parent_attr = f' data-parent-children-id="{html.escape(parent_children_id)}"' if parent_children_id else ''
+            expanded = bool(node.default_expanded)
+            open_attr = ' open' if expanded else ''
+            title_attr = f' title="{html.escape(node.triangle_tooltip)}"' if node.triangle_tooltip else ''
+            
+            parts.append(f'<details{open_attr} id="{html.escape(children_id)}"{parent_attr}{url_key_attr}>\n')
+            parts.append(f'<summary{title_attr}>\n')
+            parts.append(node.label_html or "")
+            parts.append('</summary>\n')
+            parts.append('<ul>\n')
+            
+            for i, child in enumerate(node.children):
+                is_last_child = (i == len(node.children) - 1)
+                parts.append(render_node(child, children_id, full_key, is_last_child))
+            
+            parts.append('</ul>\n')
+            parts.append('</details>\n')
+        else:
+            # Leaf node - just render the label
+            parts.append(node.label_html or "")
+        
+        parts.append('</li>\n')
+        return "".join(parts)
+    
+    out_parts = ['<ul class="tree">\n']
+    for i, node in enumerate(root_nodes):
+        is_last = (i == len(root_nodes) - 1)
+        out_parts.append(render_node(node, None, "", is_last))
+    out_parts.append('</ul>')
+    
+    return "".join(out_parts)
+
+
+def render_tree_pre_lines(root_nodes: List[TreeNodeVM]) -> List[str]:
+    """Render a forest into lines suitable to be joined with \n and placed inside <pre>."""
+
+    out: List[str] = []
+    # Prefer stable ids derived from node_key so URL state survives page refreshes.
+    # Fall back to a per-render counter when keys collide or are missing.
+    global _TREE_RENDER_CALL_SEQ
+    try:
+        _TREE_RENDER_CALL_SEQ += 1
+    except NameError:
+        _TREE_RENDER_CALL_SEQ = 1
+    render_call_id = _TREE_RENDER_CALL_SEQ
+    next_dom_id = 0
+    used_ids: Dict[str, int] = {}
+    
+    # Track displayed nodes to show references for duplicates
+    displayed_nodes: Dict[str, str] = {}  # node_key -> label_html (first occurrence)
+    last_reference_text: Optional[str] = None  # Track last reference text to avoid consecutive duplicates
+
     def alloc_children_id(node_key: str) -> str:
         nonlocal next_dom_id
         base = _dom_id_from_node_key(node_key)
@@ -1825,10 +1982,12 @@ def _error_snippet_toggle_html(*, dom_id_seed: str, snippet_text: str) -> str:
         f'onclick="toggleErrorSnippet(\'{html.escape(err_id, quote=True)}\', this)">▶ Snippet</span>'
         f'<span id="{html.escape(err_id, quote=True)}" style="display: none;">'
         f"<br>"
-        # Full-width snippet box (within the <pre> container) so it expands to available screen width.
-        f'<span style="display: block; width: 100%; max-width: 100%; box-sizing: border-box; margin-left: 16px; '
+        # Full-width snippet box (within the tree container) using <pre> for proper formatting.
+        f'<pre style="display: block; width: 100%; max-width: 100%; box-sizing: border-box; margin: 0 0 0 16px; '
         f'border: 1px solid #d0d7de; background: #f6f8fa; '
-        f'border-radius: 6px; padding: 6px 8px; white-space: pre-wrap; overflow-wrap: anywhere; color: #24292f;">'
+        f'border-radius: 6px; padding: 6px 8px; overflow-x: auto; color: #24292f; '
+        f'font-family: ui-monospace, SFMono-Regular, SF Mono, Menlo, Consolas, Liberation Mono, monospace; '
+        f'font-size: 12px; line-height: 1.45;">'
         f'<span style="display: flex; align-items: center; justify-content: flex-start; margin-bottom: 4px;">'
         f'<button type="button" '
         f'onclick="event.stopPropagation(); try {{ collapseErrorSnippet(\'{html.escape(err_id, quote=True)}\'); }} catch (e) {{}}" '
@@ -1838,7 +1997,7 @@ def _error_snippet_toggle_html(*, dom_id_seed: str, snippet_text: str) -> str:
         f'title="Close snippet">×</button>'
         f"</span>"
         f"{shown}"
-        f"</span>"
+        f"</pre>"
         f"</span>"
     )
 
@@ -1976,32 +2135,20 @@ def check_line_html(
     # - after [cached raw log] when present (preferred), OR
     # - on its own (e.g. for step subsections) when we have a snippet but no dedicated raw-log link.
     #
-    # UX invariant (recurring issue):
-    # - If a job FAILED and we have a log link (live or cached), always render a "▶ Snippet" toggle,
-    #   even if snippet extraction produced an empty string. Otherwise users interpret the absence of
-    #   the toggle as "snippets are broken/missing" rather than "(no snippet found)".
-    #
-    # The expanded body will show "(no snippet found)" (see `_error_snippet_toggle_html()`).
+    # UX invariant:
+    # - Only show snippet toggle when we actually have snippet text.
+    # - Don't show "(no snippet found)" placeholder - just hide the toggle entirely.
     snippet_text = str(error_snippet_text or "")
     has_snippet_text = bool(snippet_text.strip())
-    st_lc = str(status_norm or "").strip().lower()
-    # "failure-like": completed but not success. Avoid in-progress/pending (no stable snippet yet).
-    has_log_link = bool((raw_log_href or "").strip() or (log_url or "").strip())
-    want_snippet_toggle = has_snippet_text or (has_log_link and st_lc not in {"success", "in_progress", "pending", "skipped"})
 
-    if want_snippet_toggle:
-        # Always render a "▶ Snippet" toggle when we consider snippets relevant (failure-like + log link),
-        # even if extraction produced an empty string. The expanded panel will show "(no snippet found)".
-        #
-        # This avoids the confusing UX where the snippet button appears/disappears across refreshes due
-        # to cache timing or extractor heuristics.
-        if has_snippet_text:
-            cats = _snippet_categories(snippet_text)
-            for c in cats[:3]:
-                links += _tag_pill_html(text=c, monospace=False, kind="category")
-            cmd = _snippet_first_command(snippet_text)
-            if cmd:
-                links += _tag_pill_html(text=cmd, monospace=True, kind="command")
+    if has_snippet_text:
+        # Show category pills and command pill
+        cats = _snippet_categories(snippet_text)
+        for c in cats[:3]:
+            links += _tag_pill_html(text=c, monospace=False, kind="category")
+        cmd = _snippet_first_command(snippet_text)
+        if cmd:
+            links += _tag_pill_html(text=cmd, monospace=True, kind="command")
         # Include URL/context so the snippet id is stable and unique across the page.
         links += _error_snippet_toggle_html(
             dom_id_seed=f"{job_id}|{display_name}|{raw_log_href}|{log_url}",

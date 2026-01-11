@@ -23,6 +23,7 @@
 #   --show-remote-branches  Update remote PR dashboards for selected GitHub users
 #   --fast-debug            Write debug.html outputs (for all tasks that write HTML) and run a smaller/faster commit history (10 commits)
 #   --fast                  Alias for --fast-debug
+#   --use-div-trees         Use <div>-based tree rendering instead of <pre> (experimental)
 #
 # Back-compat aliases (deprecated; kept for existing cron):
 #   --run-show-dynamo-branches  (alias for --show-local-branches)
@@ -61,7 +62,7 @@ fi
 
 usage() {
     cat <<'EOF' >&2
-Usage: update_html_pages.sh [--show-local-branches] [--show-commit-history] [--show-remote-branches] [--show-remote-history] [--show-local-resources] [--fast-debug|--fast] [--dry-run] [--run-ignore-lock]
+Usage: update_html_pages.sh [--show-local-branches] [--show-commit-history] [--show-remote-branches] [--show-remote-history] [--show-local-resources] [--fast-debug|--fast] [--use-div-trees] [--dry-run] [--run-ignore-lock]
 
 If no args are provided, ALL tasks run.
 
@@ -75,6 +76,7 @@ RUN_SHOW_DYNAMO_BRANCHES=false
 RUN_SHOW_COMMIT_HISTORY=false
 RUN_RESOURCE_REPORT=false
 RUN_SHOW_REMOTE_BRANCHES=false
+USE_DIV_TREES=false
 ANY_FLAG=false
 IGNORE_LOCK=false
 DRY_RUN=false
@@ -100,6 +102,8 @@ while [ "$#" -gt 0 ]; do
             FAST_DEBUG=true; shift ;;
         --fast)
             FAST_DEBUG=true; shift ;;
+        --use-div-trees)
+            USE_DIV_TREES=true; shift ;;
         --dry-run)
             DRY_RUN=true; shift ;;
         --run-ignore-lock)
@@ -321,16 +325,26 @@ run_show_remote_branches() {
             OUT_FILE="${REMOTE_PRS_OUT_FILE:-$OUT_DIR/debug.html}"
         fi
         mkdir -p "$(dirname "$OUT_FILE")"
+        
+        # Copy shared tree-view.css and debug-tree.html to speedoflight
+        cp -f "$SCRIPT_DIR/tree-view.css" "$HOME/dynamo/speedoflight/tree-view.css" 2>/dev/null || true
+        cp -f "$SCRIPT_DIR/debug-tree.html" "$HOME/dynamo/speedoflight/users/keivenchang/debug-tree.html" 2>/dev/null || true
 
         echo "$(date '+%Y-%m-%d %H:%M:%S') - Generating remote PRs dashboard (user=${U} output=$OUT_FILE)" >> "$LOG_FILE"
         echo "===== $(date '+%Y-%m-%d %H:%M:%S') run_show_remote_branches start (user=${U} output=$OUT_FILE) =====" >> "$REMOTE_PRS_LOG"
 
         # Use dynamo_latest as base-dir so we can locate the repo clone for workflow YAML inference.
+        DIV_TREE_FLAG=""
+        if [ "$USE_DIV_TREES" = "true" ]; then
+            DIV_TREE_FLAG="--use-div-trees"
+        fi
+        
         if python3 "$SCRIPT_DIR/show_remote_branches.py" \
             --github-user "${U}" \
             --base-dir "$NVIDIA_HOME/dynamo_latest" \
             --output "$OUT_FILE" \
-            $MAX_GH_FLAG >> "$REMOTE_PRS_LOG" 2>&1; then
+            $MAX_GH_FLAG \
+            $DIV_TREE_FLAG >> "$REMOTE_PRS_LOG" 2>&1; then
             echo "$(date '+%Y-%m-%d %H:%M:%S') - Updated $OUT_FILE" >> "$LOG_FILE"
         else
             echo "$(date '+%Y-%m-%d %H:%M:%S') - ERROR: Failed to update $OUT_FILE" >> "$LOG_FILE"
