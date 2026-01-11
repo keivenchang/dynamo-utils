@@ -29,63 +29,8 @@ from common_types import CIStatus
 # ======================================================================================
 
 
-def sort_github_check_runs_by_name(check_runs: List[Dict[str, object]]) -> List[Dict[str, object]]:
-    """Return check runs sorted by job name (stable), then job id/url for disambiguation."""
-    def _label(name: str) -> str:
-        k = classify_ci_kind(name)
-        return f"{k}: {name}" if k and k != "check" else name
-
-    def _key(cr: Dict[str, object]) -> Tuple[str, str, str]:
-        try:
-            name = str(cr.get("name", "") or "").strip()
-        except Exception:
-            name = ""
-        try:
-            url = str(cr.get("html_url", "") or cr.get("details_url", "") or "").strip()
-        except Exception:
-            url = ""
-        jid = extract_actions_job_id_from_url(url)
-        return (_label(name).lower(), str(jid or ""), url)
-
-    try:
-        xs = [cr for cr in (check_runs or []) if isinstance(cr, dict)]
-        return sorted(xs, key=_key)
-    except Exception:
-        return [cr for cr in (check_runs or []) if isinstance(cr, dict)]
-
-
-def sort_pr_check_rows_by_name(rows: List[object]) -> List[object]:
-    """Return PR check rows sorted by display name (with kind prefix), then job_id.
-    
-    This matches the display order in the HTML where jobs show as "kind: jobname".
-    """
-    def _key(r: object) -> Tuple[str, str]:
-        nm = ""
-        url = ""
-        try:
-            nm = str(getattr(r, "name", "") or "").strip()
-        except Exception:
-            nm = ""
-        try:
-            url = str(getattr(r, "url", "") or "").strip()
-        except Exception:
-            url = ""
-        
-        # Sort by the same display format we show in HTML: "kind: name"
-        # (or just "name" for generic "check" kind)
-        k = classify_ci_kind(nm)
-        if k and k != "check":
-            display_name = f"{k}: {nm}"
-        else:
-            display_name = nm
-        
-        jid = extract_actions_job_id_from_url(url)
-        return (display_name.lower(), str(jid or url))
-
-    try:
-        return sorted(list(rows or []), key=_key)
-    except Exception:
-        return list(rows or [])
+# Note: CI job/check sorting is now handled by PASS 4 (sort_by_name_pass)
+# in the centralized pipeline (process_ci_tree_passes). No pre-sorting needed.
 
 
 def ci_should_expand_by_default(*, rollup_status: str, has_required_failure: bool) -> bool:
@@ -250,8 +195,198 @@ def _dom_id_from_node_key(node_key: str) -> str:
         return ""
 
 
-def mark_success_with_descendant_failures(nodes: List[TreeNodeVM]) -> List[TreeNodeVM]:
-    """If a node is successful but any descendant failed, render it as ✓/✗.
+def parse_workflow_files_and_add_expected_checks_pass(
+    nodes: List[TreeNodeVM],
+    repo_root: Path,
+    commit_sha: str = "",
+) -> List[TreeNodeVM]:
+    """PASS 1: Parse .github/workflows/*.yml files and add expected check nodes.
+    
+    This pass:
+    - Reads all workflow YAML files from .github/workflows/
+    - Parses job names and creates placeholder nodes for expected checks
+    - Adds these as ◇ (hollow diamond) nodes to indicate expected but not yet run
+    - Helps identify missing checks before they run
+    - Uses commit_sha in node_key to ensure uniqueness per commit
+    
+    Args:
+        nodes: Existing list of TreeNodeVM nodes (actual check runs)
+        repo_root: Path to repository root containing .github/workflows/
+        commit_sha: Commit SHA to include in node keys (for per-commit uniqueness)
+    
+    Returns:
+        Combined list of actual + expected check nodes
+    """
+    import yaml
+    from pathlib import Path
+    
+    expected_nodes: List[TreeNodeVM] = []
+    sha_prefix = f":{commit_sha[:9]}" if commit_sha else ""
+    
+    try:
+        workflows_dir = Path(repo_root) / ".github" / "workflows"
+        if not workflows_dir.exists() or not workflows_dir.is_dir():
+            print(f"[PASS 1] No .github/workflows/ directory found at {workflows_dir}")
+            return nodes
+        
+        print(f"[PASS 1] Parsing workflow files from {workflows_dir}{' (sha=' + commit_sha[:9] + ')' if commit_sha else ''}")
+        
+        for workflow_file in workflows_dir.glob("*.yml"):
+            try:
+                with open(workflow_file, 'r') as f:
+                    workflow_data = yaml.safe_load(f)
+                
+                if not workflow_data or 'jobs' not in workflow_data:
+                    continue
+                
+                workflow_name = workflow_file.stem
+                jobs = workflow_data.get('jobs', {})
+                
+                print(f"[PASS 1]   Workflow: {workflow_name} ({len(jobs)} jobs)")
+                
+                for job_id, job_data in jobs.items():
+                    job_name = job_data.get('name', job_id)
+                    full_name = f"{workflow_name} / {job_name}"
+                    
+                    # Create a placeholder node with ◇ symbol
+                    # Include commit SHA in node_key for per-commit uniqueness
+                    node = TreeNodeVM(
+                        node_key=f"expected{sha_prefix}:{workflow_name}:{job_id}",
+                        label_html=f'<span style="color: #999;">◇ {full_name} (expected)</span>',
+                        children=[],
+                        collapsible=False,
+                        default_expanded=False,
+                    )
+                    expected_nodes.append(node)
+                    print(f"[PASS 1]     - Added expected check: {full_name}")
+            
+            except Exception as e:
+                print(f"[PASS 1]   Error parsing {workflow_file}: {e}")
+                continue
+        
+        print(f"[PASS 1] Found {len(expected_nodes)} expected checks")
+        
+    except Exception as e:
+        print(f"[PASS 1] Error in workflow parsing pass: {e}")
+        return nodes
+    
+    # Combine expected nodes + actual nodes
+    return expected_nodes + nodes
+
+
+def fetch_workflows_from_api_and_add_expected_checks_pass(
+    nodes: List[TreeNodeVM],
+    repo_root: Path,
+    github_api=None,
+    owner: str = "ai-dynamo",
+    repo: str = "dynamo",
+) -> List[TreeNodeVM]:
+    """PASS 2: Fetch workflow information from GitHub API and add expected check nodes.
+    
+    This pass:
+    - Uses GitHub REST API to list workflows (/repos/{owner}/{repo}/actions/workflows)
+    - For each workflow, fetches jobs from a recent workflow run
+    - Creates placeholder nodes for expected checks based on API data
+    - Adds these as ◇ (hollow diamond) nodes to indicate expected but not yet run
+    - Compares with PASS 1 to verify consistency between YAML and API
+    
+    Args:
+        nodes: Existing list of TreeNodeVM nodes (from PASS 1)
+        repo_root: Path to repository root (unused, kept for consistency)
+        github_api: GitHubAPIClient instance for API calls
+        owner: GitHub repository owner (default: ai-dynamo)
+        repo: GitHub repository name (default: dynamo)
+    
+    Returns:
+        Combined list of PASS 1 nodes + API-fetched nodes
+    """
+    expected_nodes: List[TreeNodeVM] = []
+    
+    if github_api is None:
+        print("[PASS 2] No GitHub API client provided, skipping API workflow fetch")
+        return nodes
+    
+    try:
+        print(f"[PASS 2] Fetching workflows from GitHub API for {owner}/{repo}")
+        
+        # Fetch list of workflows
+        workflows_url = f"https://api.github.com/repos/{owner}/{repo}/actions/workflows"
+        workflows_resp = github_api._rest_get(workflows_url)
+        
+        if not workflows_resp or 'workflows' not in workflows_resp:
+            print(f"[PASS 2] No workflows found in API response")
+            return nodes
+        
+        workflows = workflows_resp.get('workflows', [])
+        print(f"[PASS 2] Found {len(workflows)} workflows from API")
+        
+        for workflow in workflows:
+            workflow_name = workflow.get('name', 'Unknown')
+            workflow_id = workflow.get('id')
+            workflow_path = workflow.get('path', '')
+            
+            print(f"[PASS 2]   Workflow: {workflow_name} (id={workflow_id}, path={workflow_path})")
+            
+            # Fetch a recent workflow run to get job names
+            try:
+                runs_url = f"https://api.github.com/repos/{owner}/{repo}/actions/workflows/{workflow_id}/runs"
+                runs_resp = github_api._rest_get(f"{runs_url}?per_page=1")
+                
+                if not runs_resp or 'workflow_runs' not in runs_resp:
+                    print(f"[PASS 2]     No runs found for workflow {workflow_name}")
+                    continue
+                
+                runs = runs_resp.get('workflow_runs', [])
+                if not runs:
+                    print(f"[PASS 2]     No runs found for workflow {workflow_name}")
+                    continue
+                
+                run_id = runs[0].get('id')
+                
+                # Fetch jobs for this run
+                jobs_url = f"https://api.github.com/repos/{owner}/{repo}/actions/runs/{run_id}/jobs"
+                jobs_resp = github_api._rest_get(jobs_url)
+                
+                if not jobs_resp or 'jobs' not in jobs_resp:
+                    print(f"[PASS 2]     No jobs found for run {run_id}")
+                    continue
+                
+                jobs = jobs_resp.get('jobs', [])
+                print(f"[PASS 2]     Found {len(jobs)} jobs from API")
+                
+                for job in jobs:
+                    job_name = job.get('name', 'Unknown Job')
+                    full_name = f"{workflow_name} / {job_name}"
+                    
+                    # Create a placeholder node with ◇ symbol (API source)
+                    node = TreeNodeVM(
+                        node_key=f"expected-api:{workflow_id}:{job.get('id')}",
+                        label_html=f'<span style="color: #66c;">◇ {full_name} (expected from API)</span>',
+                        children=[],
+                        collapsible=False,
+                        default_expanded=False,
+                    )
+                    expected_nodes.append(node)
+                    print(f"[PASS 2]       - Added expected check from API: {full_name}")
+                
+            except Exception as e:
+                print(f"[PASS 2]     Error fetching jobs for workflow {workflow_name}: {e}")
+                continue
+        
+        print(f"[PASS 2] Found {len(expected_nodes)} expected checks from API")
+        
+    except Exception as e:
+        print(f"[PASS 2] Error in API workflow fetch pass: {e}")
+        import traceback
+        traceback.print_exc()
+        return nodes
+    
+    # Combine PASS 1 nodes + API nodes
+    return nodes + expected_nodes
+
+
+def mark_success_with_descendant_failures_pass(nodes: List[TreeNodeVM]) -> List[TreeNodeVM]:
+    """PASS 3: If a node is successful but any descendant failed, render it as ✓/✗.
 
     Policy: only show the suffix icon when a descendant is in a failure state.
     """
@@ -332,8 +467,8 @@ def mark_success_with_descendant_failures(nodes: List[TreeNodeVM]) -> List[TreeN
     return out
 
 
-def expand_nodes_with_required_failure_descendants(nodes: List[TreeNodeVM]) -> List[TreeNodeVM]:
-    """Expand any node that has a REQUIRED failure anywhere in its descendant subtree.
+def expand_required_failure_descendants_pass(nodes: List[TreeNodeVM]) -> List[TreeNodeVM]:
+    """PASS 3: Expand any node that has a REQUIRED failure anywhere in its descendant subtree.
 
     This is intentionally a *post-pass* so it can run after any logic that mutates/moves nodes
     (e.g. workflow `jobs.*.needs` grouping).
@@ -385,8 +520,8 @@ def expand_nodes_with_required_failure_descendants(nodes: List[TreeNodeVM]) -> L
     return out
 
 
-def expand_nodes_with_in_progress_descendants(nodes: List[TreeNodeVM]) -> List[TreeNodeVM]:
-    """Expand any node that has an in-progress/pending descendant anywhere in its subtree.
+def expand_in_progress_descendants_pass(nodes: List[TreeNodeVM]) -> List[TreeNodeVM]:
+    """PASS 4: Expand any node that has an in-progress/pending descendant anywhere in its subtree.
 
     This is a post-pass (like required-failure expansion) so it works after workflow grouping.
     """
@@ -432,8 +567,8 @@ def expand_nodes_with_in_progress_descendants(nodes: List[TreeNodeVM]) -> List[T
     return out
 
 
-def group_tree_by_arch(nodes: List[TreeNodeVM]) -> List[TreeNodeVM]:
-    """No-op pass - arch grouping removed.
+def group_by_arch_pass(nodes: List[TreeNodeVM]) -> List[TreeNodeVM]:
+    """PASS 6: No-op pass - arch grouping removed.
     
     Previously grouped nodes by architecture, but this has been removed.
     The function is kept for pipeline compatibility.
@@ -442,13 +577,13 @@ def group_tree_by_arch(nodes: List[TreeNodeVM]) -> List[TreeNodeVM]:
     return nodes
 
 
-def sort_tree_by_name(nodes: List[TreeNodeVM]) -> List[TreeNodeVM]:
-    """Sort TreeNodeVM by display name recursively at all levels (root + children).
+def sort_by_name_pass(nodes: List[TreeNodeVM]) -> List[TreeNodeVM]:
+    """PASS 5: Sort TreeNodeVM by display name recursively at all levels (root + children).
     
     This should be called LAST in the pipeline to ensure pure alphabetical order
     at all levels while preserving hierarchy, failure marking, and expansion state.
     
-    Sorts by the same logic as sort_github_check_runs_by_name: kind prefix + name + job_id.
+    Sorts by: kind prefix + name + job_id (same display format as shown in HTML).
     """
     def _extract_sort_key_from_label(label_html: str) -> Tuple[str, str]:
         """Extract (display_name, job_id) from label HTML for sorting."""
@@ -509,10 +644,14 @@ def sort_tree_by_name(nodes: List[TreeNodeVM]) -> List[TreeNodeVM]:
     return result
 
 
-def process_ci_tree_pipeline(
+def process_ci_tree_passes(
     nodes: List[TreeNodeVM],
     repo_root: Path,
     node_items: List[Tuple[str, TreeNodeVM]],
+    github_api=None,
+    owner: str = "ai-dynamo",
+    repo: str = "dynamo",
+    commit_sha: str = "",
 ) -> List[TreeNodeVM]:
     """
     Centralized CI tree node processing pipeline.
@@ -520,32 +659,47 @@ def process_ci_tree_pipeline(
     This pipeline transforms flat CI job lists with proper sorting and expansion state.
     Passes execute in order:
     
-    PASS 1: mark_success_with_descendant_failures()
+    PASS 1: parse_workflow_files_and_add_expected_checks_pass()
+            - Parses .github/workflows/*.yml files
+            - Adds expected check placeholder nodes (◇ symbol)
+            - Helps identify missing checks before they run
+            - Uses commit_sha for per-commit node uniqueness
+    
+    PASS 2: fetch_workflows_from_api_and_add_expected_checks_pass()
+            - Fetches workflow information from GitHub API
+            - Adds expected check placeholder nodes (◇ symbol, blue color)
+            - Compares API data with YAML parsing from PASS 1
+    
+    PASS 3: mark_success_with_descendant_failures_pass()
             - Changes success to warning for parents with failed children
             - Helps identify successful parents that contain hidden failures
     
-    PASS 2: expand_nodes_with_required_failure_descendants()
+    PASS 4: expand_required_failure_descendants_pass()
             - Auto-expands parent nodes that contain REQUIRED failures
             - Ensures critical failures are visible by default
     
-    PASS 3: expand_nodes_with_in_progress_descendants()
+    PASS 5: expand_in_progress_descendants_pass()
             - Auto-expands parent nodes that contain running/pending jobs
             - Ensures active work is visible by default
     
-    PASS 4: sort_tree_by_name()
+    PASS 6: sort_by_name_pass()
             - Sorts by the displayed text (e.g., "build: Build sglang")
             - Applied to all levels (root + children)
             - Preserves hierarchy, failure marking, and expansion state
     
-    PASS 5: group_tree_by_arch()
+    PASS 7: group_by_arch_pass()
             - No-op (arch grouping removed)
             - Kept for pipeline compatibility
             - Arch colors (dark yellow for arm64, blue for amd64) applied during node creation
     
     Args:
         nodes: Initial list of TreeNodeVM nodes (may be empty if using node_items)
-        repo_root: Path to the repository root (unused, kept for compatibility)
+        repo_root: Path to the repository root (for .github/workflows/ parsing)
         node_items: List of (name, TreeNodeVM) tuples
+        github_api: Optional GitHubAPIClient for API-based workflow fetching
+        owner: GitHub repository owner (default: ai-dynamo)
+        repo: GitHub repository name (default: dynamo)
+        commit_sha: Commit SHA for per-commit node uniqueness (important for commit history)
     
     Returns:
         Processed list of TreeNodeVM nodes
@@ -554,20 +708,36 @@ def process_ci_tree_pipeline(
         # Start with flat list from node_items
         children = [n for (_nm, n) in (node_items or [])]
         
-        # PASS 1: mark_success_with_descendant_failures()
-        children = mark_success_with_descendant_failures(list(children or []))
+        # PASS 1: parse workflow files and add expected checks (from YAML)
+        children = parse_workflow_files_and_add_expected_checks_pass(
+            list(children or []), 
+            repo_root,
+            commit_sha=commit_sha,
+        )
         
-        # PASS 2: expand_nodes_with_required_failure_descendants()
-        children = expand_nodes_with_required_failure_descendants(list(children or []))
+        # PASS 2: fetch workflows from API and add expected checks
+        children = fetch_workflows_from_api_and_add_expected_checks_pass(
+            list(children or []), 
+            repo_root,
+            github_api=github_api,
+            owner=owner,
+            repo=repo,
+        )
         
-        # PASS 3: expand_nodes_with_in_progress_descendants()
-        children = expand_nodes_with_in_progress_descendants(list(children or []))
+        # PASS 3: mark success with descendant failures
+        # children = mark_success_with_descendant_failures_pass(list(children or []))
         
-        # PASS 4: sort_tree_by_name()
-        children = sort_tree_by_name(list(children or []))
+        # PASS 4: expand nodes with required failure descendants
+        # children = expand_required_failure_descendants_pass(list(children or []))
         
-        # PASS 5: group_tree_by_arch() - no-op
-        children = group_tree_by_arch(list(children or []))
+        # PASS 5: expand nodes with in-progress descendants
+        # children = expand_in_progress_descendants_pass(list(children or []))
+        
+        # PASS 6: sort tree by name
+        # children = sort_by_name_pass(list(children or []))
+        
+        # PASS 7: group tree by arch (no-op)
+        # children = group_by_arch_pass(list(children or []))
         
         return children
     except Exception:

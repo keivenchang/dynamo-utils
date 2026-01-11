@@ -49,7 +49,6 @@ from common_dashboard_lib import (
     disambiguate_check_run_name,
     extract_actions_job_id_from_url,
     render_tree_pre_lines,
-    sort_github_check_runs_by_name,
     required_badge_html,
     mandatory_badge_html,
     status_icon_html,
@@ -963,8 +962,8 @@ class CommitHistoryGenerator:
             pr_number = sha_to_pr_number.get(sha_full)
             required_list = pr_to_required_checks.get(pr_number, []) if pr_number else []
             required_norm = {_normalize_check_name(n) for n in (required_list or []) if n}
-            # Keep check run ordering stable for both tree + tooltips.
-            for check in sort_github_check_runs_by_name(gha.get('check_runs', []) or []):
+            # Note: Sorting is now handled by PASS 4 (sort_by_name_pass) in the centralized pipeline.
+            for check in (gha.get('check_runs', []) or []):
                 try:
                     check_name = check.get('name', '')
                     check['is_required'] = _is_required_check_name(check_name, required_norm)
@@ -1448,7 +1447,7 @@ class CommitHistoryGenerator:
                 # Only actual check runs from the API are displayed.
             except Exception:
                 pass
-            check_runs = sort_github_check_runs_by_name(check_runs)  # shared ordering
+            # Note: Sorting is now handled by PASS 4 (sort_by_name_pass) in the centralized pipeline.
             if not check_runs:
                 # Always render a stable placeholder so every commit row can show the dropdown.
                 root = TreeNodeVM(
@@ -1653,12 +1652,16 @@ class CommitHistoryGenerator:
             # Use centralized CI tree processing pipeline
             children: List[TreeNodeVM]
             try:
-                from common_dashboard_lib import process_ci_tree_pipeline
+                from common_dashboard_lib import process_ci_tree_passes
                 
-                children = process_ci_tree_pipeline(
+                children = process_ci_tree_passes(
                     nodes=[],
                     repo_root=Path(repo_path),
                     node_items=[(nm, n) for (nm, n) in (node_items or [])],
+                    github_api=self.github_client,
+                    owner="ai-dynamo",
+                    repo="dynamo",
+                    commit_sha=sha_full,
                 )
             except Exception:
                 children = [n for (_nm, n) in (node_items or [])]

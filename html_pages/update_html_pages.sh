@@ -13,15 +13,16 @@
 #   MAX_GITHUB_API_CALLS - If set, pass --max-github-api-calls to the Python generators
 #                         (useful to keep cron runs predictable; defaults remain script-side).
 #   DYNAMO_UTILS_TRACE  - If set (non-empty), enable shell tracing (set -x). Off by default to avoid noisy logs / secrets.
-#   DYNAMO_UTILS_TESTING - (deprecated) If set, behave like --fast-test (write index2.html and fewer commits).
+#   DYNAMO_UTILS_TESTING - (deprecated) If set, behave like --fast-debug (write debug.html and fewer commits).
 #
 # Args (optional; can be combined):
 #   --show-local-branches   Update the branches dashboard ($NVIDIA_HOME/index.html)
 #   --show-commit-history   Update the commit history dashboard ($NVIDIA_HOME/dynamo_latest/index.html)
 #   --show-local-resources  Update resource_report.html
 #   --show-remote-branches  Update remote PR dashboards for selected GitHub users (IDENTICAL UI to local branches)
-#   --fast-test             Write index2.html outputs (for all tasks that write HTML) and run a smaller/faster commit history (10 commits)
-#   --fast                  Alias for --fast-test
+#   --show-remote-branches  Update remote PR dashboards for selected GitHub users
+#   --fast-debug            Write debug.html outputs (for all tasks that write HTML) and run a smaller/faster commit history (10 commits)
+#   --fast                  Alias for --fast-debug
 #
 # Back-compat aliases (deprecated; kept for existing cron):
 #   --run-show-dynamo-branches  (alias for --show-local-branches)
@@ -52,15 +53,15 @@ UTILS_DIR="$(dirname "$SCRIPT_DIR")"
 NVIDIA_HOME="${NVIDIA_HOME:-$(dirname "$UTILS_DIR")}"
 
 LOGS_DIR="$NVIDIA_HOME/logs"
-FAST_TEST="${FAST_TEST:-false}"
-# Back-compat: treat env var like --fast-test/--fast.
+FAST_DEBUG="${FAST_DEBUG:-false}"
+# Back-compat: treat env var like --fast-debug/--fast.
 if [ -n "${DYNAMO_UTILS_TESTING:-}" ]; then
-    FAST_TEST=true
+    FAST_DEBUG=true
 fi
 
 usage() {
     cat <<'EOF' >&2
-Usage: update_html_pages.sh [--show-local-branches] [--show-commit-history] [--show-local-resources] [--fast-test|--fast] [--dry-run] [--run-ignore-lock]
+Usage: update_html_pages.sh [--show-local-branches] [--show-commit-history] [--show-remote-branches] [--show-remote-history] [--show-local-resources] [--fast-debug|--fast] [--dry-run] [--run-ignore-lock]
 
 If no args are provided, ALL tasks run.
 
@@ -89,14 +90,16 @@ while [ "$#" -gt 0 ]; do
             RUN_SHOW_DYNAMO_BRANCHES=true; ANY_FLAG=true; shift ;;
         --show-commit-history)
             RUN_SHOW_COMMIT_HISTORY=true; ANY_FLAG=true; shift ;;
+        --show-remote-history)
+            RUN_SHOW_REMOTE_BRANCHES=true; ANY_FLAG=true; shift ;;
         --show-local-resources)
             RUN_RESOURCE_REPORT=true; ANY_FLAG=true; shift ;;
         --show-remote-branches)
             RUN_SHOW_REMOTE_BRANCHES=true; ANY_FLAG=true; shift ;;
-        --fast-test)
-            FAST_TEST=true; shift ;;
+        --fast-debug)
+            FAST_DEBUG=true; shift ;;
         --fast)
-            FAST_TEST=true; shift ;;
+            FAST_DEBUG=true; shift ;;
         --dry-run)
             DRY_RUN=true; shift ;;
         --run-ignore-lock)
@@ -125,10 +128,10 @@ if [ "$ANY_FLAG" = false ]; then
     RUN_SHOW_REMOTE_BRANCHES=true
 fi
 
-# Compute branches output path after parsing flags so `--fast/--fast-test` is honored.
+# Compute branches output path after parsing flags so `--fast/--fast-debug` is honored.
 BRANCHES_BASENAME="${BRANCHES_BASENAME:-index.html}"
-if [ "$FAST_TEST" = true ]; then
-    BRANCHES_BASENAME="index2.html"
+if [ "$FAST_DEBUG" = true ]; then
+    BRANCHES_BASENAME="debug.html"
 fi
 BRANCHES_OUTPUT_FILE="$NVIDIA_HOME/$BRANCHES_BASENAME"
 
@@ -190,8 +193,8 @@ run_resource_report() {
     RESOURCE_DB="${RESOURCE_DB:-$CACHE_ROOT/resource_monitor.sqlite}"
     # Output to the top-level nvidia directory so nginx can serve it at /
     if [ -z "${RESOURCE_REPORT_HTML:-}" ]; then
-        if [ "$FAST_TEST" = true ]; then
-            RESOURCE_REPORT_HTML="$NVIDIA_HOME/resource_report2.html"
+        if [ "$FAST_DEBUG" = true ]; then
+            RESOURCE_REPORT_HTML="$NVIDIA_HOME/resource_report_debug.html"
         else
             RESOURCE_REPORT_HTML="$NVIDIA_HOME/resource_report.html"
         fi
@@ -200,7 +203,7 @@ run_resource_report() {
     # Default window is 1 day. In --fast mode, shrink to the last 2 hours (requested) so cron/test
     # runs are snappier while still showing recent activity.
     RESOURCE_DAYS="1"
-    if [ "$FAST_TEST" = true ]; then
+    if [ "$FAST_DEBUG" = true ]; then
         RESOURCE_DAYS="0.0833333"  # 2h / 24h
     fi
 
@@ -297,8 +300,8 @@ run_show_remote_branches() {
             fi
             OUT_DIR="${REMOTE_PRS_OUT_DIR:-$HOME/dynamo/speedoflight/users/${U}}"
             OUT_FILE="${REMOTE_PRS_OUT_FILE:-$OUT_DIR/index.html}"
-            if [ "$FAST_TEST" = true ]; then
-                OUT_FILE="${REMOTE_PRS_OUT_FILE:-$OUT_DIR/index2.html}"
+            if [ "$FAST_DEBUG" = true ]; then
+                OUT_FILE="${REMOTE_PRS_OUT_FILE:-$OUT_DIR/debug.html}"
             fi
             echo "[DRY-RUN]   User: $U"
             echo "[DRY-RUN]     Output: $OUT_FILE"
@@ -314,8 +317,8 @@ run_show_remote_branches() {
         fi
         OUT_DIR="${REMOTE_PRS_OUT_DIR:-$HOME/dynamo/speedoflight/users/${U}}"
         OUT_FILE="${REMOTE_PRS_OUT_FILE:-$OUT_DIR/index.html}"
-        if [ "$FAST_TEST" = true ]; then
-            OUT_FILE="${REMOTE_PRS_OUT_FILE:-$OUT_DIR/index2.html}"
+        if [ "$FAST_DEBUG" = true ]; then
+            OUT_FILE="${REMOTE_PRS_OUT_FILE:-$OUT_DIR/debug.html}"
         fi
         mkdir -p "$(dirname "$OUT_FILE")"
 
@@ -339,14 +342,14 @@ run_show_remote_branches() {
 run_show_commit_history() {
     DYNAMO_REPO="$NVIDIA_HOME/dynamo_latest"
     COMMIT_HISTORY_BASENAME="${COMMIT_HISTORY_BASENAME:-index.html}"
-    if [ "$FAST_TEST" = true ]; then
-        COMMIT_HISTORY_BASENAME="index2.html"
+    if [ "$FAST_DEBUG" = true ]; then
+        COMMIT_HISTORY_BASENAME="debug.html"
     fi
     COMMIT_HISTORY_HTML="$DYNAMO_REPO/$COMMIT_HISTORY_BASENAME"
 
     if [ "$DRY_RUN" = true ]; then
         MAX_COMMITS=50
-        if [ "$FAST_TEST" = true ]; then
+        if [ "$FAST_DEBUG" = true ]; then
             MAX_COMMITS=10
         fi
         echo "[DRY-RUN] Would generate commit history dashboard:"
@@ -382,7 +385,7 @@ run_show_commit_history() {
     fi
 
     MAX_COMMITS="${MAX_COMMITS:-100}"
-    if [ "$FAST_TEST" = true ]; then
+    if [ "$FAST_DEBUG" = true ]; then
         MAX_COMMITS=10
     fi
 

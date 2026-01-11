@@ -56,7 +56,7 @@ from common_dashboard_lib import (
     compact_ci_summary_html,
     disambiguate_check_run_name,
     extract_actions_job_id_from_url,
-    process_ci_tree_pipeline,
+    process_ci_tree_passes,
     render_tree_pre_lines,
     required_badge_html,
     status_icon_html,
@@ -526,6 +526,7 @@ class BranchInfoNode(BranchNode):
         commit_datetime: Optional[datetime] = None,
         commit_message: Optional[str] = None,
         created_at: Optional[datetime] = None,
+        pr: Optional[PRInfo] = None,
         children: Optional[List[BranchNode]] = None,
     ):
         super().__init__(label=label, children=children, expanded=False, is_current=is_current)
@@ -535,6 +536,7 @@ class BranchInfoNode(BranchNode):
         self.commit_datetime = commit_datetime
         self.commit_message = commit_message
         self.created_at = created_at
+        self.pr = pr
     
     def to_tree_vm(self) -> TreeNodeVM:
         """Convert to TreeNodeVM with structured children (commit message + metadata + other)."""
@@ -570,7 +572,7 @@ class BranchInfoNode(BranchNode):
         
         # 1. Commit message (if available)
         if self.commit_message:
-            kids.append(CommitMessageNode(label=self.commit_message, pr=None).to_tree_vm())
+            kids.append(CommitMessageNode(label=self.commit_message, pr=self.pr).to_tree_vm())
         
         # 2. Metadata (modified, created, age)
         metadata_suffix = _format_branch_metadata_suffix(
@@ -703,11 +705,11 @@ class CommitMessageNode(BranchNode):
         if msg:
             parts.append(f'<span style="color: #1f2328;">{html_module.escape(msg)}</span>')
         
-        # PR number link (if available)
+        # PR number link (if available) - with parentheses like git log
         if self.pr:
             pr_link = _format_pr_number_link(self.pr)
             if pr_link:
-                parts.append(pr_link)
+                parts.append(f'({pr_link})')
         
         label_html = " ".join(parts) if parts else ""
         

@@ -66,7 +66,6 @@ from common_dashboard_lib import (
     compact_ci_summary_html,
     disambiguate_check_run_name,
     extract_actions_job_id_from_url,
-    sort_pr_check_rows_by_name,
     render_tree_pre_lines,
     required_badge_html,
     status_icon_html,
@@ -889,8 +888,8 @@ def _build_ci_hierarchy_nodes(
     except Exception:
         pass
 
-    # Sort by job name for stable/scan-friendly output (same order as Details list).
-    rows = sort_pr_check_rows_by_name(list(rows))
+    # Note: Sorting is now handled by PASS 4 (sort_by_name_pass) in the centralized pipeline.
+    # No need to pre-sort rows here.
 
     # If the same check name appears multiple times (reruns), append a stable unique id
     # so users can tell them apart.
@@ -1137,7 +1136,7 @@ def _build_ci_hierarchy_nodes(
         )
 
     # NOTE: Sorting, failure marking, and expansion are handled by the centralized
-    # pipeline in PRStatusNode.to_tree_vm() (via process_ci_tree_pipeline in common_dashboard_lib.py)
+    # pipeline in PRStatusNode.to_tree_vm() (via process_ci_tree_passes in common_dashboard_lib.py)
 
     # If CI failed and we can identify a GitHub Actions run_id, include an explicit restart link.
     #
@@ -2223,7 +2222,7 @@ class PRStatusNode(BranchNode):
         kids: List[TreeNodeVM] = []
         try:
             from pathlib import Path
-            from common_dashboard_lib import process_ci_tree_pipeline
+            from common_dashboard_lib import process_ci_tree_passes
             
             # Determine repo_root for workflow parsing
             repo_root = Path("/home/keivenc/dynamo/dynamo_latest")  # Fallback
@@ -2235,10 +2234,13 @@ class PRStatusNode(BranchNode):
             except Exception:
                 pass
             
-            kids = process_ci_tree_pipeline(
+            kids = process_ci_tree_passes(
                 nodes=[],
                 repo_root=repo_root,
                 node_items=node_items,
+                github_api=gh,
+                owner="ai-dynamo",
+                repo="dynamo",
             )
         except Exception:
             # Fallback: just convert without pipeline

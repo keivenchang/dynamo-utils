@@ -145,7 +145,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Show remote PRs for a GitHub user (HTML-only)")
     parser.add_argument("--github-user", required=True, help="GitHub username (author of PRs)")
     parser.add_argument("--owner", default=DYNAMO_OWNER, help=f"GitHub owner/org (default: {DYNAMO_OWNER})")
-    parser.add_argument("--repo", default=DYNAMO_REPO, help=f"GitHub repo (default: {DYNAMO_REPO})")
+    parser.add_argument("--github-repo", default=DYNAMO_REPO, help=f"GitHub repo (default: {DYNAMO_REPO})")
     parser.add_argument("--repo-root", type=Path, default=None, help="Path to a local clone of the repo (for workflow YAML inference)")
     parser.add_argument("--base-dir", type=Path, default=Path.cwd(), help="Directory to search for a local clone (default: cwd)")
     parser.add_argument("--output", type=Path, default=None, help="Output HTML path (default: <base-dir>/remote_prs_<user>.html)")
@@ -158,7 +158,7 @@ def main() -> int:
 
     user = str(args.github_user or "").strip()
     owner = str(args.owner or "").strip()
-    repo = str(args.repo or "").strip()
+    repo = str(args.github_repo or "").strip()
     base_dir = Path(args.base_dir).resolve()
 
     output = args.output
@@ -279,7 +279,12 @@ def main() -> int:
                 commit_url = ""
 
             # Use PR title as commit message (since we don't have local git access for remote).
+            # Strip PR number prefix if present (e.g., "#5335 feat: ..." -> "feat: ...")
+            # The CommitMessageNode will append the PR number as a link.
             commit_msg = str(getattr(pr, "title", "") or "").strip()
+            # Remove leading "#1234 " pattern if present
+            import re
+            commit_msg = re.sub(r'^#\d+\s+', '', commit_msg)
 
             branch_node = RemoteBranchInfoNode(
                 label=branch_name,
@@ -288,12 +293,10 @@ def main() -> int:
                 commit_url=commit_url or None,
                 commit_time_pt=commit_time_pt,
                 commit_datetime=updated_dt,
-                commit_message=commit_msg,
+                commit_message=commit_msg,  # Show commit message (PR title) with (#PR) appended
+                pr=pr,
             )
             user_node.add_child(branch_node)  # Add to user_node, not root
-
-            pr_node = PRNode(label="", pr=pr)
-            branch_node.add_child(pr_node)
 
             status_node = RemotePRStatusNode(
                 label="",
@@ -304,7 +307,7 @@ def main() -> int:
                 allow_fetch_checks=bool(allow_fetch_checks),
                 context_key=f"remote:{owner}/{repo}:{branch_name}:{sha7}:pr{getattr(pr, 'number', '')}",
             )
-            branch_node.add_child(status_node)  # Add directly to branch_node, not pr_node
+            branch_node.add_child(status_node)  # Add directly to branch_node
 
             # CI hierarchy as children of the PR status line.
             try:
@@ -326,17 +329,17 @@ def main() -> int:
             except Exception:
                 pass
 
-            # Conflict/blocking messages (same policy as local page).
+            # Conflict/blocking messages (add directly to branch_node).
             try:
                 msg = getattr(pr, "conflict_message", None)
                 if msg:
-                    pr_node.add_child(BranchNode(label=str(msg)))
+                    branch_node.add_child(BranchNode(label=str(msg)))
             except Exception:
                 pass
             try:
                 msg = getattr(pr, "blocking_message", None)
                 if msg:
-                    pr_node.add_child(BranchNode(label=str(msg)))
+                    branch_node.add_child(BranchNode(label=str(msg)))
             except Exception:
                 pass
         return root
