@@ -1,0 +1,2403 @@
+#!/usr/bin/env python3
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+"""
+Show dynamo branches with PR information using a node-based tree structure.
+Supports parallel data gathering for improved performance.
+
+Structure:
+- RepoNode (local directory) → BranchInfoNode (branch) → CommitMessageNode, MetadataNode,
+  PRNode, PRStatusNode (PASSED/FAILED pill) → CIJobNode (CI jobs with hierarchy)
+
+IMPORTANT: Architecture Rule
+---------------------------
+⚠️ show_local_branches.py and show_remote_branches.py should NEVER import from each other!
+   - ALL shared code lives in: common_branch_nodes.py, common_dashboard_lib.py, common.py
+   - ✅ REFACTORED: PRStatusNode and _build_ci_hierarchy_nodes now in common_branch_nodes.py
+
+This is the reference implementation for branch/PR dashboards. show_remote_branches.py
+imports the same shared components from common_branch_nodes.py to ensure IDENTICAL
+rendering logic.
+
+Key Features:
+- Client-side sorting (by modified date, created date, or branch name)
+- Collapsible repository directories with URL state persistence
+- Full CI job hierarchy with parent-child relationships
+- Workflow status for branches with remotes but no PRs
+- Cached GitHub API calls with smart TTL
+- Failure snippets with raw log caching
+
+NOTE: The actual implementation of PRStatusNode, _build_ci_hierarchy_nodes, and related
+classes/functions are in common_branch_nodes.py. This file only imports them.
+"""
+
+import argparse
+import hashlib
+import html
+import json
+import os
+import re
+import stat
+import subprocess
+import sys
+import time
+import urllib.parse
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+import functools
+from pathlib import Path
+from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
+from zoneinfo import ZoneInfo
+
+# Ensure we can import sibling utilities (common.py) from the parent dynamo-utils directory
+_THIS_DIR = Path(__file__).resolve().parent
+_UTILS_DIR = _THIS_DIR.parent
+if str(_UTILS_DIR) not in sys.path:
+    sys.path.insert(0, str(_UTILS_DIR))
+if str(_THIS_DIR) not in sys.path:
+    sys.path.insert(0, str(_THIS_DIR))
+
+try:
+    import git  # type: ignore[import-not-found]
+except Exception:  # pragma: no cover
+    git = None  # type: ignore[assignment]
+
+# Shared dashboard helpers (UI + workflow graph)
+from common_dashboard_lib import (
+    CIStatus,
+    EXPECTED_CHECK_PLACEHOLDER_SYMBOL,
+    PASS_PLUS_STYLE,
+    TreeNodeVM,
+    check_line_html,
+    ci_should_expand_by_default,
+    compact_ci_summary_html,
+    disambiguate_check_run_name,
+    extract_actions_job_id_from_url,
+    render_tree_divs,
+    required_badge_html,
+    status_icon_html,
+)
+
+# Dashboard runtime (HTML-only) helpers
+from common_dashboard_runtime import (
+    atomic_write_text,
+    materialize_job_raw_log_text_local_link,
+    prune_dashboard_raw_logs,
+    prune_partial_raw_log_caches,
+)
+
+# Log/snippet helpers (shared library: `dynamo-utils/ci_log_errors/`)
+from ci_log_errors import extract_error_snippet_from_log_file
+
+# Jinja2 is optional (keep CLI usable in minimal envs).
+try:
+    from jinja2 import Environment, FileSystemLoader, select_autoescape
+    HAS_JINJA2 = True
+except Exception:  # pragma: no cover
+    HAS_JINJA2 = False
+    Environment = None  # type: ignore[assignment]
+    FileSystemLoader = None  # type: ignore[assignment]
+    select_autoescape = None  # type: ignore[assignment]
+
+# Import GitHub utilities from common module
+import common
+from common import (
+    FailedCheck,
+    GHPRCheckRow,
+    GitHubAPIClient,
+    PhaseTimer,
+    PRInfo,
+    classify_ci_kind,
+    dynamo_utils_cache_dir,
+    summarize_pr_check_rows,
+)
+
+# Import shared node classes and refactored functions from common_branch_nodes
+from common_branch_nodes import (
+    BlockedMessageNode,
+    BranchInfoNode,
+    BranchNode,
+    CIJobNode,
+    CommitMessageNode,
+    ConflictWarningNode,
+    MetadataNode,
+    PRNode,
+    PRStatusNode,
+    PRURLNode,
+    RawLogValidationError,
+    RepoNode,
+    RerunLinkNode,
+    SectionNode,
+    _assume_completed_for_check_row,
+    _duration_str_to_seconds,
+    _is_known_required_check,
+    generate_html,
+)
+
+_COPY_BTN_STYLE = (
+    "padding: 1px 4px; font-size: 10px; line-height: 1; background-color: transparent; color: #57606a; "
+    "border: 1px solid #d0d7de; border-radius: 5px; cursor: pointer; display: inline-flex; "
+    "align-items: center; vertical-align: baseline; margin-right: 4px;"
+)
+
+#
+# Repo constants (avoid scattering hardcoded strings)
+#
+
+DYNAMO_OWNER = "ai-dynamo"
+DYNAMO_REPO = "dynamo"
+DYNAMO_REPO_SLUG = f"{DYNAMO_OWNER}/{DYNAMO_REPO}"
+
+
+
+@functools.lru_cache(maxsize=1)
+def _copy_icon_svg(*, size_px: int = 12) -> str:
+    """Return the shared 'copy' icon SVG (2-squares), sourced from copy_icon_paths.svg."""
+    try:
+        p = (Path(__file__).resolve().parent / "copy_icon_paths.svg").resolve()
+        paths = p.read_text(encoding="utf-8").strip()
+    except Exception:
+        paths = ""
+    return (
+        f'<svg width="{int(size_px)}" height="{int(size_px)}" viewBox="0 0 16 16" fill="currentColor" '
+        f'style="display: inline-block; vertical-align: middle;">{paths}</svg>'
+    )
+
+
+# Keep a module-level constant for existing call sites / template rendering.
+_COPY_ICON_SVG = _copy_icon_svg(size_px=12)
+
+
+def _format_epoch_pt(epoch_s: Optional[int]) -> Optional[str]:
+    """Format an epoch as 'YYYY-mm-dd HH:MM:SS PT'."""
+    if epoch_s is None:
+        return None
+    try:
+        dt = datetime.fromtimestamp(int(epoch_s), tz=timezone.utc).astimezone(ZoneInfo("America/Los_Angeles"))
+        return dt.strftime("%Y-%m-%d %H:%M:%S %Z")
+    except Exception:
+        return None
+
+
+def _format_seconds_delta_short(seconds: Optional[int]) -> Optional[str]:
+    if seconds is None:
+        return None
+    try:
+        return GitHubAPIClient._format_seconds_delta(int(seconds))
+    except Exception:
+        return None
+
+
+def _parse_rate_limit_resources(rate_limit_payload: Dict[str, object]) -> Dict[str, Dict[str, object]]:
+    """Parse /rate_limit payload into a stable dict: {resource_name: {limit, remaining, used, reset_epoch,...}}."""
+    out: Dict[str, Dict[str, object]] = {}
+    resources = (rate_limit_payload or {}).get("resources")  # type: ignore[assignment]
+    if not isinstance(resources, dict):
+        return out
+    now = int(time.time())
+    for name, info in resources.items():
+        if not isinstance(name, str) or not isinstance(info, dict):
+            continue
+        try:
+            limit = info.get("limit")
+            remaining = info.get("remaining")
+            used = info.get("used")
+            reset_epoch = info.get("reset")
+            limit_i = int(limit) if limit is not None else None
+            remaining_i = int(remaining) if remaining is not None else None
+            used_i = int(used) if used is not None else None
+            reset_i = int(reset_epoch) if reset_epoch is not None else None
+        except Exception:
+            continue
+        seconds_until = (reset_i - now) if reset_i is not None else None
+        out[name] = {
+            "limit": limit_i,
+            "remaining": remaining_i,
+            "used": used_i,
+            "reset_epoch": reset_i,
+            "reset_pt": _format_epoch_pt(reset_i),
+            "seconds_until_reset": seconds_until,
+            "until_reset": _format_seconds_delta_short(seconds_until),
+        }
+    return out
+
+
+def _rate_limit_history_path() -> Path:
+    # Keep this under the shared dynamo-utils cache dir so it persists across runs (host/container).
+    return dynamo_utils_cache_dir() / "dashboards" / "show_local_branches" / "gh_rate_limit_history.jsonl"
+
+
+def _load_rate_limit_history(path: Path, *, max_points: int = 288) -> List[Dict[str, object]]:
+    """Load jsonl history (best-effort). Keeps at most max_points newest entries."""
+    try:
+        if not path.exists():
+            return []
+        lines = path.read_text().splitlines()
+        out: List[Dict[str, object]] = []
+        for line in lines[-max_points:]:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                obj = json.loads(line)
+                if isinstance(obj, dict):
+                    out.append(obj)
+            except Exception:
+                continue
+        return out[-max_points:]
+    except Exception:
+        return []
+
+
+def _append_rate_limit_history(path: Path, sample: Dict[str, object], *, max_points: int = 288) -> List[Dict[str, object]]:
+    """Append a single sample to history and compact to max_points (best-effort). Returns updated history."""
+    hist = _load_rate_limit_history(path, max_points=max_points)
+    hist.append(sample)
+    hist = hist[-max_points:]
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = str(path) + ".tmp"
+        with open(tmp, "w") as f:
+            for row in hist:
+                f.write(json.dumps(row, sort_keys=True) + "\n")
+        os.replace(tmp, path)
+    except Exception:
+        pass
+    return hist
+
+
+def _sparkline_svg_for_percent(points: List[float], *, width: int = 180, height: int = 34) -> str:
+    """Render a tiny inline SVG sparkline for a [0..1] percent series."""
+    if not points:
+        return ""
+    # Clamp + keep only finite-ish.
+    series = []
+    for p in points:
+        try:
+            v = float(p)
+            if v != v:  # NaN
+                continue
+            series.append(max(0.0, min(1.0, v)))
+        except Exception:
+            continue
+    if len(series) < 2:
+        return ""
+
+    pad = 2
+    w = max(int(width), 60)
+    h = max(int(height), 20)
+    x_step = (w - 2 * pad) / float(max(1, len(series) - 1))
+
+    pts = []
+    for i, v in enumerate(series):
+        x = pad + i * x_step
+        # invert y (1.0 at top)
+        y = pad + (1.0 - v) * (h - 2 * pad)
+        pts.append(f"{x:.2f},{y:.2f}")
+    pts_str = " ".join(pts)
+    return (
+        f'<svg width="{w}" height="{h}" viewBox="0 0 {w} {h}" '
+        f'xmlns="http://www.w3.org/2000/svg" style="vertical-align: middle;">'
+        f'<rect x="0" y="0" width="{w}" height="{h}" rx="4" fill="#ffffff" stroke="#d0d7de" />'
+        f'<polyline fill="none" stroke="#0969da" stroke-width="1.5" points="{pts_str}" />'
+        f"</svg>"
+    )
+
+
+def _html_copy_button(*, clipboard_text: str, title: str) -> str:
+    """Return a show_commit_history-style copy button that calls copyFromClipboardAttr(this)."""
+    text_escaped = html.escape(clipboard_text, quote=True)
+    title_escaped = html.escape(title, quote=True)
+    return (
+        f'<button data-clipboard-text="{text_escaped}" onclick="copyFromClipboardAttr(this)" '
+        f'style="{_COPY_BTN_STYLE}" '
+        f'title="{title_escaped}" '
+        f'onmouseover="this.style.backgroundColor=\'#f3f4f6\'; this.style.borderColor=\'#8c959f\';" '
+        f'onmouseout="this.style.backgroundColor=\'transparent\'; this.style.borderColor=\'#d0d7de\';">'
+        f"{_COPY_ICON_SVG}"
+        f"</button>"
+    )
+
+
+def _html_small_link(*, url: str, label: str) -> str:
+    url_escaped = html.escape(url, quote=True)
+    label_escaped = html.escape(label)
+    return (
+        f' <a href="{url_escaped}" target="_blank" '
+        f'style="color: #0969da; font-size: 11px; margin-left: 5px; text-decoration: none;">{label_escaped}</a>'
+    )
+
+def _format_utc_datetime_from_iso(iso_utc: str) -> Optional[str]:
+    """Format a GitHub ISO timestamp (UTC) as UTC time string (YYYY-MM-DD HH:MM)."""
+    try:
+        dt = datetime.fromisoformat(iso_utc.replace("Z", "+00:00"))
+        # Ensure tz-aware
+        if getattr(dt, "tzinfo", None) is None:
+            dt = dt.replace(tzinfo=ZoneInfo("UTC"))
+        dt_utc = dt.astimezone(ZoneInfo("UTC"))
+        return dt_utc.strftime("%Y-%m-%d %H:%M")
+    except Exception:
+        return None
+
+
+#
+# GitHub CI hierarchy helpers (workflow needs graph + PR checks)
+#
+
+
+def _aggregate_status(statuses: Iterable[str]) -> str:
+    priority = {"failure": 5, "cancelled": 4, "in_progress": 3, "pending": 2, "success": 1, "unknown": 0}
+    best = "unknown"
+    best_p = -1
+    for s in statuses:
+        p = priority.get(s, 0)
+        if p > best_p:
+            best_p = p
+            best = s
+    return best
+
+
+
+
+
+
+
+
+@dataclass
+class BranchNode:
+    """Base class for tree nodes"""
+    label: str
+    children: List["BranchNode"] = field(default_factory=list)
+
+    def add_child(self, child: "BranchNode") -> "BranchNode":
+        """Add a child node and return it for chaining"""
+        self.children.append(child)
+        return child
+
+    def render(self, prefix: str = "", is_last: bool = True, is_root: bool = True) -> List[str]:
+        """Render the tree node and its children as text lines"""
+        lines = []
+
+        # Determine the connector
+        if not is_root:
+            connector = "└─" if is_last else "├─"
+            current_prefix = prefix + connector + " "
+        else:
+            current_prefix = ""
+
+        # Build the line content
+        line_content = self._format_content()
+        # Only render if there's actual content (not just whitespace/prefix)
+        # Example: "└─ keivenchang/DIS-442 [935d949] ⭐"
+        if line_content.strip():
+            lines.append(current_prefix + line_content)
+
+        # Render children
+        # Example child: "   └─ 📖 PR#3676: feat: add TensorRT-LLM Prometheus metrics support"
+        for i, child in enumerate(self.children):
+            is_last_child = i == len(self.children) - 1
+            if is_root:
+                child_prefix = ""
+            else:
+                child_prefix = prefix + ("   " if is_last else "│  ")
+            lines.extend(child.render(child_prefix, is_last_child, False))
+
+        return lines
+
+    def render_html(self, prefix: str = "", is_last: bool = True, is_root: bool = True) -> List[str]:
+        """Render the tree node and its children as HTML lines"""
+        lines = []
+
+        # Determine the connector
+        if not is_root:
+            connector = "└─" if is_last else "├─"
+            current_prefix = prefix + connector + " "
+        else:
+            current_prefix = ""
+
+        # Build the line content
+        line_content = self._format_html_content()
+        # Only render if there's actual content (not just whitespace/prefix)
+        # Example: "└─ keivenchang/DIS-442 [935d949] ⭐"
+        if line_content.strip():
+            lines.append(current_prefix + line_content)
+
+        # Render children
+        # Example child: "   └─ 📖 PR#3676: feat: add TensorRT-LLM Prometheus metrics support"
+        for i, child in enumerate(self.children):
+            is_last_child = i == len(self.children) - 1
+            if is_root:
+                child_prefix = ""
+            else:
+                child_prefix = prefix + ("   " if is_last else "│  ")
+            lines.extend(child.render_html(child_prefix, is_last_child, False))
+
+        return lines
+
+    def to_tree_vm(self) -> TreeNodeVM:
+        """Convert this node subtree into a TreeNodeVM tree (shared renderer)."""
+        # Default behavior: **collapsible** node when it has children.
+        #
+        # UX: users expect a triangle (▶/▼) to expand/collapse branch sections and PR details.
+        # If we mark these nodes as non-collapsible, the renderer will not show a triangle,
+        # which looks broken/misaligned.
+        key = f"{self.__class__.__name__}:{self.label}"
+        has_children = bool(self.children)
+        return TreeNodeVM(
+            node_key=key,
+            label_html=self._format_html_content(),
+            children=[c.to_tree_vm() for c in (self.children or [])],
+            collapsible=bool(has_children),
+            # Preserve historical behavior: expanded by default, but now user-toggleable.
+            default_expanded=True,
+        )
+
+    def _format_content(self) -> str:
+        """Format the node content for text output (override in subclasses)"""
+        return self.label
+
+    def _format_html_content(self) -> str:
+        """Format the node content for HTML output (override in subclasses)"""
+        return self.label
+
+
+@dataclass
+class CIJobNode(BranchNode):
+    """A CI node rendered as a tree child under a PR."""
+
+    job_id: str = ""
+    display_name: str = ""
+    status: str = "unknown"
+    duration: str = ""
+    url: str = ""
+    raw_log_href: str = ""
+    raw_log_size_bytes: int = 0
+    # Extracted from the local raw log file when available (highlighting handled in the shared dashboard UI helpers).
+    error_snippet_text: str = ""
+    is_required: bool = False
+    may_be_required: bool = False  # True if this should be required but isn't marked as such by API
+    failed_check: Optional[FailedCheck] = None
+    # Stable context key (repo/branch/SHA/PR) to make DOM ids stable across regenerations.
+    context_key: str = ""
+
+    @dataclass(frozen=True)
+    class _Rollup:
+        status: str
+        has_required_failure: bool
+        has_optional_failure: bool
+
+    @staticmethod
+    def _is_success_like(node: "CIJobNode") -> bool:
+        """Heuristic: treat certain "unknown" jobs as success-like (collapsed/green).
+
+        In practice, `gh pr checks` sometimes yields empty/unknown status for skipped jobs,
+        and they often show a duration of 0. We consider these "success-like" so fully
+        green/skipped subtrees collapse by default.
+        """
+        if node.status in {CIStatus.SUCCESS, CIStatus.SKIPPED}:
+            return True
+        if node.status != CIStatus.UNKNOWN:
+            return False
+        dur = (node.duration or "").strip().lower()
+        return dur in {"0", "0s", "0m", "0m0s", "0h", "0h0m", "0h0m0s"}
+
+    @staticmethod
+    def _subtree_rollup(node: "CIJobNode") -> "CIJobNode._Rollup":
+        """Compute a 'worst descendant' status for icon rendering."""
+        # Success-like entire subtree => success rollup.
+        if CIJobNode._subtree_all_success(node):
+            return CIJobNode._Rollup(status=CIStatus.SUCCESS.value, has_required_failure=False, has_optional_failure=False)
+
+        has_required_failure = False
+        has_optional_failure = False
+        statuses: List[str] = []
+
+        def walk(n: "CIJobNode") -> None:
+            nonlocal has_required_failure, has_optional_failure
+            st = getattr(n, "status", CIStatus.UNKNOWN) or CIStatus.UNKNOWN
+            is_req = bool(getattr(n, "is_required", False))
+            if st == CIStatus.FAILURE and is_req:
+                has_required_failure = True
+                statuses.append(CIStatus.FAILURE.value)
+            elif st == CIStatus.FAILURE and not is_req:
+                # Optional failures should not turn the parent red (FAIL), but they SHOULD be visible.
+                has_optional_failure = True
+                statuses.append(CIStatus.FAILURE.value)
+            elif st == CIStatus.SKIPPED:
+                # Skipped is success-like for rollup purposes (do not make parents look "worse").
+                statuses.append(CIStatus.SUCCESS.value)
+            else:
+                statuses.append(str(st))
+            for ch in (getattr(n, "children", None) or []):
+                if isinstance(ch, CIJobNode):
+                    walk(ch)
+
+        walk(node)
+
+        # Worst-first priority for status rollup.
+        priority = [
+            CIStatus.FAILURE.value,
+            CIStatus.IN_PROGRESS.value,
+            CIStatus.PENDING.value,
+            CIStatus.CANCELLED.value,
+            CIStatus.UNKNOWN.value,
+            CIStatus.SUCCESS.value,
+        ]
+        for s in priority:
+            if s in statuses:
+                return CIJobNode._Rollup(
+                    status=s,
+                    has_required_failure=has_required_failure,
+                    has_optional_failure=has_optional_failure,
+                )
+        return CIJobNode._Rollup(status="unknown", has_required_failure=has_required_failure, has_optional_failure=has_optional_failure)
+
+    @staticmethod
+    def _subtree_needs_attention(node: "CIJobNode") -> bool:
+        """Return True if this subtree should be expanded by default.
+
+        Policy (per UX request):
+        - expand for required failures (red ✗)
+        - expand if ANY descendant is running/pending (so active work is visible)
+        - do NOT auto-expand for optional failures only
+        """
+        # All-success-like subtree: no need to expand.
+        if CIJobNode._subtree_all_success(node):
+            return False
+
+        # Optional failures (warnings) alone should not force expansion.
+        # We therefore expand only if we see a required failure.
+        if getattr(node, "status", CIStatus.UNKNOWN) == CIStatus.FAILURE and bool(getattr(node, "is_required", False)):
+            return True
+
+        # Expand if ANY descendant is in progress or pending/queued, regardless of optional failures.
+        try:
+            def walk_running(n: "CIJobNode") -> bool:
+                st = str(getattr(n, "status", "") or "").strip().lower()
+                if st in {CIStatus.IN_PROGRESS.value, CIStatus.PENDING.value, "running", "building"}:
+                    return True
+                for ch in (getattr(n, "children", None) or []):
+                    if isinstance(ch, CIJobNode) and walk_running(ch):
+                        return True
+                return False
+
+            if walk_running(node):
+                return True
+        except Exception:
+            pass
+
+        # Shared rule: expand only for required failures or non-completed states.
+        roll = CIJobNode._subtree_rollup(node)
+        if ci_should_expand_by_default(rollup_status=str(roll.status or ""), has_required_failure=bool(roll.has_required_failure)):
+            return True
+        # Otherwise, no auto-expand (even if some leaf steps are "unknown").
+        return False
+
+    @staticmethod
+    def _subtree_all_success(node: "CIJobNode") -> bool:
+        """Return True iff this node and all descendants are in a success-like state.
+
+        Note: Some GitHub statuses come back as "unknown" from `gh pr checks` parsing.
+        If the node is unknown but all its children are success-like, we treat the subtree
+        as success-like for *default expand/collapse* purposes.
+        """
+        # Any non-success/unknown state should be visible by default.
+        if node.status not in {CIStatus.SUCCESS, CIStatus.SKIPPED, CIStatus.UNKNOWN}:
+            return False
+        if node.children:
+            # Only collapse if every descendant is success-like.
+            for child in node.children:
+                if not isinstance(child, CIJobNode):
+                    return False
+                if not CIJobNode._subtree_all_success(child):
+                    return False
+            # If children are all success-like, this node is success-like regardless of its own unknown-ness.
+            return True
+        # Leaf nodes: allow "unknown but 0 duration" to behave like skipped (success-like).
+        return CIJobNode._is_success_like(node)
+
+    def _format_content(self) -> str:
+        jid = self.job_id
+        name_part = f" — {self.display_name}" if (self.display_name and self.display_name != self.job_id) else ""
+        dur_part = f" ({self.duration})" if self.duration else ""
+        return f"{jid}{name_part}{dur_part}"
+
+    def _format_html_content(self) -> str:
+        # Prefer FailedCheck URLs when available (they include raw log + error summary)
+        job_url = ""
+        if self.failed_check is not None:
+            job_url = str(getattr(self.failed_check, "job_url", "") or "")
+        if not job_url:
+            job_url = self.url or ""
+        # Icon policy:
+        # - show this node's *own* status
+        # - if the node is successful but any descendant failed, append a failure marker (✓/✗)
+        roll = self._subtree_rollup(self) if self.children else None
+        desc_required_failure = bool(roll.has_required_failure) if roll is not None else False
+        desc_optional_failure = bool(roll.has_optional_failure) if roll is not None else False
+        effective_status = self.status
+
+        jid = self.job_id
+        display_name_eff = self.display_name
+
+        # Error toggle is appended in to_tree_vm() so it can inject a newline safely in <pre>.
+        return check_line_html(
+            job_id=jid,
+            display_name=display_name_eff,
+            status_norm=effective_status,
+            is_required=bool(self.is_required),
+            may_be_required=bool(self.may_be_required),
+            duration=self.duration,
+            log_url=job_url,
+            raw_log_href=self.raw_log_href,
+            raw_log_size_bytes=int(self.raw_log_size_bytes or 0),
+            error_snippet_text=(self.error_snippet_text or ""),
+            # For success nodes, this will control the suffix style (required vs optional failure).
+            required_failure=bool(desc_required_failure),
+            warning_present=bool(effective_status == CIStatus.SUCCESS and (desc_required_failure or desc_optional_failure)),
+        )
+
+    def render_html(self, prefix: str = "", is_last: bool = True, is_root: bool = True) -> List[str]:
+        """Render CI subtree with an expand/collapse triangle.
+
+        Default:
+        - success (green): collapsed
+        - failure (red): expanded
+        - other: expanded (so in-progress/pending stays visible)
+        """
+        lines: List[str] = []
+
+        if not is_root:
+            connector = "└─" if is_last else "├─"
+            current_prefix = prefix + connector + " "
+        else:
+            current_prefix = ""
+
+        # Unique DOM id per *render occurrence* (include prefix so duplicates don't collide).
+        dom_hash = hashlib.sha1((prefix + "|" + self.job_id + "|" + (self.url or "")).encode("utf-8")).hexdigest()[:10]
+        children_id = f"ci_children_{dom_hash}"
+
+        has_children = bool(self.children)
+        # Default expansion rule:
+        # - collapse for all-green and warning-only subtrees
+        # - expand only when something needs attention (required failure, pending/running/cancelled/unknown)
+        default_expanded = self._subtree_needs_attention(self)
+
+        # Use margin (not literal spaces) so we don't create "double spaces" in the rendered text.
+        if has_children:
+            triangle_char = "▼" if default_expanded else "▶"
+            triangle = (
+                f'<span style="display: inline-block; width: 12px; margin-right: 2px; color: #0969da; '
+                f'cursor: pointer; user-select: none;" '
+                f'onclick="toggleCiChildren(\'{children_id}\', this)">{triangle_char}</span>'
+            )
+        else:
+            triangle = '<span style="display: inline-block; width: 12px; margin-right: 2px;"></span>'
+
+        # Error snippet toggle is rendered by shared `check_line_html()` when a local [raw log] exists.
+        line_content = self._format_html_content()
+        if line_content.strip():
+            lines.append(current_prefix + triangle + line_content)
+
+        if has_children and lines:
+            # IMPORTANT: wrap children starting at the *end of the parent line* so the newline
+            # between parent and first child is hidden when collapsed (prevents blank lines).
+            disp = "inline" if default_expanded else "none"
+            lines[-1] = lines[-1] + f'<span id="{children_id}" style="display: {disp};">'
+
+            child_lines: List[str] = []
+            for i, child in enumerate(self.children):
+                is_last_child = i == len(self.children) - 1
+                if is_root:
+                    child_prefix = ""
+                else:
+                    child_prefix = prefix + ("   " if is_last else "│  ")
+                child_lines.extend(child.render_html(child_prefix, is_last_child, False))
+
+            if child_lines:
+                child_lines[-1] = child_lines[-1] + "</span>"
+                lines.extend(child_lines)
+            else:
+                # No children rendered; close immediately.
+                lines[-1] = lines[-1] + "</span>"
+
+        return lines
+
+    def to_tree_vm(self) -> TreeNodeVM:
+        # Mirror the existing expand/collapse policy and include the error toggle HTML in the label.
+        has_children = bool(self.children)
+        default_expanded = self._subtree_needs_attention(self) if has_children else False
+
+        return TreeNodeVM(
+            node_key=f"CI:{self.context_key}:{self.job_id}:{self.url}",
+            label_html=self._format_html_content(),
+            children=[c.to_tree_vm() for c in (self.children or []) if isinstance(c, BranchNode)],
+            collapsible=True,  # show triangle placeholder for alignment, even on leaves
+            default_expanded=bool(default_expanded),
+            triangle_tooltip=None,
+        )
+
+
+def _fetch_branch_workflow_runs(
+    branch_name: str,
+    github_api: Optional[GitHubAPIClient] = None,
+    *,
+    owner: str = DYNAMO_OWNER,
+    repo: str = DYNAMO_REPO,
+    skip_fetch: bool = False,
+) -> List[Dict[str, Any]]:
+    """Fetch recent workflow runs for a branch (without a PR).
+    
+    Returns a list of workflow run dicts with keys: name, status, conclusion, html_url, created_at.
+    """
+    if not github_api or skip_fetch:
+        return []
+    
+    try:
+        # Use GitHub REST API to fetch workflow runs for this branch
+        url = f"https://api.github.com/repos/{owner}/{repo}/actions/runs"
+        params = {
+            "branch": branch_name,
+            "per_page": 10,  # Fetch recent 10 runs
+        }
+        
+        response = github_api._rest_get(url, params=params, ttl_s=300)
+        if not response or not isinstance(response, dict):
+            return []
+        
+        workflow_runs = response.get("workflow_runs", [])
+        if not workflow_runs:
+            return []
+        
+        # Extract relevant info
+        results = []
+        for run in workflow_runs[:5]:  # Limit to 5 most recent
+            results.append({
+                "name": run.get("name", ""),
+                "status": run.get("status", ""),
+                "conclusion": run.get("conclusion", ""),
+                "html_url": run.get("html_url", ""),
+                "created_at": run.get("created_at", ""),
+                "id": run.get("id", ""),
+            })
+        return results
+    except Exception:
+        return []
+
+
+@dataclass
+class RepoNode(BranchNode):
+    """Repository node"""
+    path: Optional[Path] = None
+    error: Optional[str] = None
+    remote_url: Optional[str] = None
+    # Historical: we used to warn and stop scanning repos that weren't ai-dynamo/dynamo.
+    # Keep the field for backward compatibility, but we no longer treat "non-dynamo" as an error.
+    is_correct_repo: bool = True
+
+    def _format_content(self) -> str:
+        # If the repository directory itself is a symlink, show the target for clarity.
+        link_suffix = ""
+        try:
+            p = Path(self.path) if self.path is not None else None
+            if p is not None and p.is_symlink():
+                tgt = ""
+                try:
+                    tgt = os.readlink(p)
+                except Exception:
+                    tgt = ""
+                if tgt:
+                    link_suffix = f" -> {tgt}"
+        except Exception:
+            link_suffix = ""
+
+        if self.error:
+            return f"\033[1m{self.label}\033[0m{link_suffix}\n  \033[91m⚠️  {self.error}\033[0m"
+        return f"\033[1m{self.label}\033[0m{link_suffix}"
+
+    def _format_html_content(self) -> str:
+        # Make repo name clickable (relative URL to the directory)
+        # Remove trailing slash from label for URL
+        repo_dirname = self.label.rstrip('/')
+        repo_link = f'<a href="{repo_dirname}/" class="repo-name">{self.label}</a>'
+
+        # If the repository directory itself is a symlink, show the target for clarity.
+        #
+        # Keep this compact; show the raw link target (often relative) and include the resolved
+        # absolute target as a tooltip.
+        link_suffix = ""
+        try:
+            p = Path(self.path) if self.path is not None else None
+            if p is not None and p.is_symlink():
+                tgt = ""
+                try:
+                    tgt = os.readlink(p)
+                except Exception:
+                    tgt = ""
+                resolved = ""
+                try:
+                    resolved = str(p.resolve())
+                except Exception:
+                    resolved = ""
+                if tgt:
+                    title = f' title="{html.escape(resolved, quote=True)}"' if resolved else ""
+                    link_suffix = (
+                        f' <span style="color: #57606a; font-size: 12px; user-select: none;"{title}>'
+                        f'→ {html.escape(str(tgt), quote=False)}'
+                        f"</span>"
+                    )
+        except Exception:
+            link_suffix = ""
+
+        if self.error:
+            return f'{repo_link}{link_suffix}\n<span class="error">⚠️  {self.error}</span>'
+        return f"{repo_link}{link_suffix}"
+
+    def to_tree_vm(self) -> TreeNodeVM:
+        """Repo nodes are normally expandable, but symlink repos should be inert (no expansion).
+
+        UX: if a repo directory is a symlink, users asked to avoid showing/expanding any nested info
+        (branches/PRs/CI) since it is often just a pointer into another location.
+        """
+        # Use a simple, URL-friendly key based on the repo directory name
+        repo_name = str(self.label or "").rstrip('/')
+        key = f"repo:{repo_name}"
+        try:
+            p = Path(self.path) if self.path is not None else None
+            if p is not None and p.is_symlink():
+                return TreeNodeVM(
+                    node_key=key,
+                    label_html=self._format_html_content(),
+                    children=[],
+                    collapsible=False,
+                    default_expanded=False,
+                    noncollapsible_icon="square",
+                )
+        except Exception:
+            pass
+
+        # Default behavior: collapsible directory with branches as children
+        has_children = bool(self.children)
+        return TreeNodeVM(
+            node_key=key,
+            label_html=self._format_html_content(),
+            children=[c.to_tree_vm() for c in (self.children or [])],
+            collapsible=bool(has_children),
+            default_expanded=True,
+        )
+
+
+@dataclass
+class SectionNode(BranchNode):
+    """Section node (e.g., 'Branches with PRs', 'Local-only branches')"""
+    pass
+
+
+# ======================================================================================
+# Shared branch/PR formatting helpers (reusable in show_remote_branches.py)
+# ======================================================================================
+
+def _format_age_compact(dt: Optional[datetime]) -> Optional[str]:
+    """Return a compact '(… ago)' string for the commit datetime."""
+    if dt is None:
+        return None
+    try:
+        now = datetime.now(ZoneInfo("UTC"))
+        if getattr(dt, "tzinfo", None) is None:
+            dt = dt.replace(tzinfo=ZoneInfo("UTC"))
+        delta_s = max(0, int((now - dt.astimezone(ZoneInfo("UTC"))).total_seconds()))
+    except Exception:
+        return None
+
+    if delta_s < 60:
+        return f"({delta_s}s ago)"
+    if delta_s < 3600:
+        return f"({delta_s // 60}m ago)"
+    if delta_s < 86400:
+        h = delta_s // 3600
+        m = (delta_s % 3600) // 60
+        return f"({h}h {m}m ago)" if m else f"({h}h ago)"
+    d = delta_s // 86400
+    h = (delta_s % 86400) // 3600
+    return f"({d}d {h}h ago)" if h else f"({d}d ago)"
+
+
+def _format_branch_metadata_suffix(
+    *,
+    commit_time_pt: Optional[str],
+    commit_datetime: Optional[datetime],
+    pr_created_at_iso: Optional[str],
+) -> str:
+    """Format the '(modified ..., created ..., ... ago)' suffix for branch lines.
+    
+    Returns HTML span with grey text, or empty string if no metadata is available.
+    """
+    try:
+        age = _format_age_compact(commit_datetime)
+        age_plain = age[1:-1] if (age and age.startswith("(") and age.endswith(")")) else (age or "")
+        
+        pr_created_pt: Optional[str] = None
+        if pr_created_at_iso:
+            pr_created_pt = _format_utc_datetime_from_iso(pr_created_at_iso)
+        
+        modified_pt = str(commit_time_pt or "").strip()
+        parts: List[str] = []
+        if modified_pt:
+            parts.append(f"modified {html.escape(modified_pt)}")
+        if pr_created_pt:
+            parts.append(f"created {html.escape(pr_created_pt)}")
+        if age_plain:
+            parts.append(html.escape(age_plain))
+        
+        if parts:
+            return f' <span style="color: #666; font-size: 11px;">({", ".join(parts)})</span>'
+        return ""
+    except Exception:
+        return ""
+
+
+def _format_commit_tooltip(commit_message: Optional[str]) -> str:
+    """Format the full commit message as a tooltip string.
+    
+    Returns the commit message with minor cleanup (strip trailers, limit length).
+    """
+    if not commit_message:
+        return ""
+    try:
+        # Strip common Git trailers like "Signed-off-by:", "Co-authored-by:", etc.
+        lines = [ln for ln in str(commit_message).splitlines() if ln.strip()]
+        clean_lines = []
+        for ln in lines:
+            # Stop at trailers (case-insensitive)
+            lower = ln.strip().lower()
+            if any(lower.startswith(t) for t in [
+                "signed-off-by:",
+                "co-authored-by:",
+                "reviewed-by:",
+                "tested-by:",
+                "acked-by:",
+                "fixes:",
+                "closes:",
+                "resolves:",
+            ]):
+                break
+            clean_lines.append(ln.rstrip())
+        
+        msg = "\n".join(clean_lines).strip()
+        # Limit to ~500 chars for tooltip readability
+        if len(msg) > 500:
+            msg = msg[:497] + "..."
+        return msg
+    except Exception:
+        return ""
+
+
+def _format_pr_number_link(pr: Optional[PRInfo]) -> str:
+    """Format the PR number as a clickable GitHub link like '#5050'.
+    
+    Returns HTML link, or empty string if no PR number.
+    """
+    if pr is None:
+        return ""
+    try:
+        n = int(getattr(pr, "number", 0) or 0)
+        if n <= 0:
+            return ""
+        url = f"https://github.com/{DYNAMO_REPO_SLUG}/pull/{n}"
+        return f' <a href="{url}" target="_blank" style="color: #0969da; text-decoration: none;">#{n}</a>'
+    except Exception:
+        return ""
+
+
+def _format_base_branch_inline(pr: Optional[PRInfo]) -> str:
+    """Format the base branch as inline text like '→ main' or '→ release/0.8.0'.
+    
+    Returns HTML span with grey arrow, or empty string if no base.
+    """
+    if pr is None:
+        return ""
+    try:
+        base = str(getattr(pr, "base_ref", "") or "").strip()
+        if not base:
+            return ""
+        return f' <span style="color: #57606a; font-size: 12px;">→ {html.escape(base)}</span>'
+    except Exception:
+        return ""
+
+
+def _strip_repo_prefix_for_clipboard(branch_name: str) -> str:
+    """Remove common repo prefixes from branch name for cleaner clipboard copy."""
+    clip = str(branch_name or "")
+    try:
+        if clip.startswith("ai-dynamo/"):
+            clip = clip[len("ai-dynamo/"):]
+        if clip.startswith("ai-dynamo:"):
+            clip = clip[len("ai-dynamo:"):]
+    except Exception:
+        pass
+    return clip
+
+
+def _pr_needs_attention(pr: Optional[PRInfo]) -> bool:
+    """Check if a PR needs attention (running work or required failures).
+    
+    Policy: do NOT expand for optional failures only.
+    """
+    if pr is None:
+        return False
+    try:
+        ci_status = str(getattr(pr, "ci_status", "") or "").strip().lower()
+        running = bool(ci_status == "running") or bool(getattr(pr, "running_checks", None) or [])
+        required_failed = any(
+            bool(getattr(fc, "is_required", False))
+            for fc in (getattr(pr, "failed_checks", None) or [])
+        )
+        return bool(running or required_failed)
+    except Exception:
+        return False
+
+
+@dataclass
+class BranchInfoNode(BranchNode):
+    """Branch information node"""
+    sha: Optional[str] = None
+    is_current: bool = False
+    commit_url: Optional[str] = None
+    commit_time_pt: Optional[str] = None
+    commit_datetime: Optional[datetime] = None
+    commit_message: Optional[str] = None  # Full commit message for tooltip
+
+    @staticmethod
+    def _format_age(dt: Optional[datetime]) -> Optional[str]:
+        """Legacy wrapper for _format_age_compact (for backward compat)."""
+        return _format_age_compact(dt)
+
+    def to_tree_vm(self) -> TreeNodeVM:
+        """Convert branch to TreeNodeVM with separate child nodes for metadata.
+
+        New structure:
+        - Branch line: copy button + [closed mark] + label + → base + [SHA]
+        - Child 1: Commit message (PR#)
+        - Child 2: (modified ..., created ..., ... ago)
+        - Child 3+: PRStatusNode and CI details
+        """
+        key = f"{self.__class__.__name__}:{self.label}"
+        children2 = list(self.children or [])
+        pr_nodes = [c for c in children2 if isinstance(c, PRNode)]
+
+        # No PR child: simple rendering (local-only branch).
+        if len(pr_nodes) != 1:
+            return TreeNodeVM(
+                node_key=key,
+                label_html=self._format_html_content(),
+                children=[c.to_tree_vm() for c in children2],
+                collapsible=bool(children2),
+                default_expanded=False,
+            )
+
+        # Single PR child: build structured children.
+        pr_node = pr_nodes[0]
+        pr = getattr(pr_node, "pr", None)
+        
+        # Check PR state.
+        pr_state_lc = str(getattr(pr, "state", "") or "").strip().lower() if pr is not None else ""
+        is_closed = bool(pr_state_lc and pr_state_lc != "open" and not bool(getattr(pr, "is_merged", False)))
+        is_merged = bool(getattr(pr, "is_merged", False)) if pr is not None else False
+
+        # Build branch line: copy + closed + name + → base + [SHA]
+        clip = _strip_repo_prefix_for_clipboard(self.label or "")
+        copy_btn = _html_copy_button(clipboard_text=clip, title="Click to copy branch name")
+
+        cls = "current" if self.is_current else ""
+        if is_merged:
+            cls = (cls + " merged-branch").strip()
+        elif is_closed:
+            cls = (cls + " closed-branch").strip()
+        lbl = html.escape(str(self.label or ""))
+        
+        if cls:
+            name_html = f'<span class="{cls}">{lbl}</span>'
+        else:
+            name_html = f'<span>{lbl}</span>'
+
+        base_inline = _format_base_branch_inline(pr)
+        sha_str = f' [{self.sha}]' if self.sha else ""
+
+        closed_mark = (
+            '<span style="color: #8c959f; margin-right: 6px; user-select: none;" title="PR is closed">✖</span>'
+            if is_closed
+            else ""
+        )
+
+        branch_label = f"{copy_btn}{closed_mark}{name_html}{base_inline}{sha_str}"
+
+        # Build children: commit message + metadata + PR status + original children
+        new_children: List[BranchNode] = []
+
+        # Child 1: Commit message with PR# link
+        pr_number = int(getattr(pr, "number", 0) or 0) if pr is not None else 0
+        if self.commit_message or pr_number > 0:
+            new_children.append(
+                CommitMessageNode(
+                    label="",
+                    commit_message=self.commit_message,
+                    pr_number=pr_number if pr_number > 0 else None,
+                )
+            )
+
+        # Child 2: Metadata (modified, created, age)
+        pr_created_iso = str(getattr(pr, "created_at", "") or "") if pr is not None else ""
+        if self.commit_time_pt or self.commit_datetime or pr_created_iso:
+            new_children.append(
+                MetadataNode(
+                    label="",
+                    commit_time_pt=self.commit_time_pt,
+                    commit_datetime=self.commit_datetime,
+                    pr_created_at_iso=pr_created_iso,
+                )
+            )
+
+        # Child 3+: PRStatusNode and other children (exclude the PRNode itself)
+        for c in children2:
+            if c is not pr_node:
+                new_children.append(c)
+
+        # Always expand to show metadata children and PRStatusNode.
+        return TreeNodeVM(
+            node_key=key,
+            label_html=branch_label,
+            children=[c.to_tree_vm() for c in new_children],
+            collapsible=bool(new_children),
+            default_expanded=bool(new_children),
+        )
+
+    def _format_content(self) -> str:
+        sha_str = f" [{self.sha}]" if self.sha else ""
+        time_str = f" {self.commit_time_pt}" if self.commit_time_pt else ""
+        age = self._format_age(self.commit_datetime)
+        # If the branch has a PR child, also show PR created time in the branch line.
+        pr_created_pt: Optional[str] = None
+        for ch in (self.children or []):
+            pr = getattr(ch, "pr", None)
+            created_at = getattr(pr, "created_at", None) if pr is not None else None
+            if created_at:
+                pr_created_pt = _format_utc_datetime_from_iso(created_at)
+                break
+        if pr_created_pt and age:
+            age_plain = age[1:-1] if (age.startswith("(") and age.endswith(")")) else age
+            age_str = f" (created {pr_created_pt}, {age_plain})"
+        elif age:
+            age_str = f" {age}"
+        else:
+            age_str = ""
+        if self.is_current:
+            return f"\033[1m{self.label}\033[0m{sha_str}{time_str}{age_str}"
+        return f"{self.label}{sha_str}{time_str}{age_str}"
+
+    def _format_html_content(self) -> str:
+        sha_str = ""
+        if self.sha:
+            if self.commit_url:
+                sha_str = f' [<a href="{self.commit_url}" target="_blank">{self.sha}</a>]'
+            else:
+                sha_str = f' [{self.sha}]'
+        time_str = (
+            f' <span style="color: #666; font-size: 11px;">{html.escape(self.commit_time_pt)}</span>'
+            if self.commit_time_pt
+            else ""
+        )
+        age = self._format_age(self.commit_datetime)
+
+        # Prefer the first PR's created time (PT) if present, and show the commit age bold.
+        pr_created_pt: Optional[str] = None
+        for ch in (self.children or []):
+            pr = getattr(ch, "pr", None)
+            created_at = getattr(pr, "created_at", None) if pr is not None else None
+            if created_at:
+                pr_created_pt = _format_utc_datetime_from_iso(created_at)
+                break
+
+        if pr_created_pt and age:
+            age_plain = age[1:-1] if (age.startswith("(") and age.endswith(")")) else age
+            age_str = (
+                f' <span style="color: #666; font-size: 11px;">(created {html.escape(pr_created_pt)}, '
+                f'<span style="font-weight: 700; color: #24292f;">{html.escape(age_plain)}</span>)</span>'
+            )
+        elif age:
+            age_str = f' <span style="color: #666; font-size: 11px;">{html.escape(age)}</span>'
+        else:
+            age_str = ""
+
+        # Gray out branch name if its PR is already merged.
+        # (BranchInfoNode children include PRNode nodes when present.)
+        is_merged_branch = any(
+            (getattr(ch, "pr", None) is not None) and bool(getattr(getattr(ch, "pr", None), "is_merged", False))
+            for ch in (self.children or [])
+        )
+
+        # Copy should be the "human" branch path (avoid repo prefixes that can leak into display names).
+        clip = str(self.label or "")
+        try:
+            if clip.startswith("ai-dynamo/"):
+                clip = clip[len("ai-dynamo/") :]
+            if clip.startswith("ai-dynamo:"):
+                clip = clip[len("ai-dynamo:") :]
+        except Exception:
+            clip = str(self.label or "")
+        copy_btn = _html_copy_button(clipboard_text=clip, title="Click to copy branch name")
+
+        cls = "current" if self.is_current else ""
+        if is_merged_branch:
+            cls = (cls + " merged-branch").strip()
+
+        if cls:
+            return f'{copy_btn}<span class="{cls}">{self.label}</span>{sha_str}{time_str}{age_str}'
+        return f'{copy_btn}{self.label}{sha_str}{time_str}{age_str}'
+
+
+def _tree_has_current_branch(node: BranchNode) -> bool:
+    """Return True if any BranchInfoNode in this subtree is marked as current.
+
+    This prevents rendering the current branch twice (once inside a section like "Branches"
+    and again as a top-level fallback line).
+    """
+    if isinstance(node, BranchInfoNode) and bool(getattr(node, "is_current", False)):
+        return True
+    for child in getattr(node, "children", []) or []:
+        if _tree_has_current_branch(child):
+            return True
+    return False
+
+
+@dataclass
+class PRNode(BranchNode):
+    """Pull request node"""
+    pr: Optional[PRInfo] = None
+
+    def _format_content(self) -> str:
+        if not self.pr:
+            return ""
+        state_lc = (self.pr.state or "").lower()
+        if self.pr.is_merged:
+            emoji = '🔀'
+        elif state_lc == 'open':
+            emoji = '📖'
+        else:
+            # Closed PR (not merged): mark explicitly.
+            emoji = '✖'
+
+        # Truncate title at 80 characters
+        title = self.pr.title[:80] + '...' if len(self.pr.title) > 80 else self.pr.title
+
+        # Add base branch (new format)
+        base_str = f" → {self.pr.base_ref} branch" if self.pr.base_ref else ""
+        # Prefer standard GitHub-style formatting: "title (#1234)" over "PR#1234: title"
+        pr_suffix = f"(#{self.pr.number})"
+        if pr_suffix not in title:
+            title = f"{title} {pr_suffix}"
+        closed_str = " [CLOSED]" if (state_lc and state_lc != "open" and not self.pr.is_merged) else ""
+        return f"{emoji} {title}{base_str}{closed_str}".strip()
+
+    def _format_html_content(self) -> str:
+        if not self.pr:
+            return ""
+        pr_url = str(self.pr.url or "").strip()
+        gh_icon = ""
+        if pr_url:
+            # Match the GitHub icon used in show_commit_history.j2
+            gh_icon = (
+                f'<a href="{html.escape(pr_url, quote=True)}" target="_blank" '
+                f'style="text-decoration: none; color: #24292f; margin-right: 4px;" '
+                f'title="Open on GitHub">'
+                f'<svg height="14" width="14" viewBox="0 0 16 16" fill="currentColor" '
+                f'style="display: inline-block; vertical-align: middle;">'
+                f'<path fill-rule="evenodd" clip-rule="evenodd" '
+                f'd="M8 0C3.58 0 0 8C0 11.54 2.29 14.53 5.47 15.59C5.87 15.66 6.02 15.42 6.02 15.21C6.02 15.02 6.01 14.39 6.01 13.72C4 14.09 3.48 13.23 3.32 12.78C3.23 12.55 2.84 11.84 2.5 11.65C2.22 11.5 1.82 11.13 2.49 11.12C3.12 11.11 3.57 11.7 3.72 11.94C4.44 13.15 5.59 12.81 6.05 12.6C6.12 12.08 6.33 11.73 6.56 11.53C4.78 11.33 2.92 10.64 2.92 7.58C2.92 6.71 3.23 5.99 3.74 5.43C3.66 5.23 3.38 4.41 3.82 3.31C3.82 3.31 4.49 3.1 6.02 4.13C6.66 3.95 7.34 3.86 8.02 3.86C8.7 3.86 9.38 3.95 10.02 4.13C11.55 3.09 12.22 3.31 12.22 3.31C12.66 4.41 12.38 5.23 12.3 5.43C12.81 5.99 13.12 6.7 13.12 7.58C13.12 10.65 11.25 11.33 9.47 11.53C9.76 11.78 10.01 12.26 10.01 13.01C10.01 14.08 10 14.94 10 15.21C10 15.42 10.15 15.67 10.55 15.59C13.71 14.53 16 11.53 16 8C16 3.58 12.42 0 8 0Z"></path>'
+                f'</svg></a>'
+            )
+        state_lc = (self.pr.state or "").lower()
+        if self.pr.is_merged:
+            emoji = '🔀'
+        elif state_lc == 'open':
+            emoji = ''
+        else:
+            # Closed PR (not merged): show a CLOSED pill and gray out the title line.
+            emoji = ''
+
+        # Build parts list for the label
+        parts = []
+        
+        # Status pill - get summary from the PR's check_rows
+        try:
+            summary = summarize_pr_check_rows(getattr(self.pr, "check_rows", None) or [])
+            counts = summary.counts
+            status_html = compact_ci_summary_html(
+                success_required=int(counts.get("success_required", 0) or 0),
+                success_optional=int(counts.get("success_optional", 0) or 0),
+                failure_required=int(counts.get("failure_required", 0) or 0),
+                failure_optional=int(counts.get("failure_optional", 0) or 0),
+                in_progress_required=int(counts.get("in_progress", 0) or 0),
+                in_progress_optional=0,
+                pending=int(counts.get("pending", 0) or 0),
+                cancelled=int(counts.get("cancelled", 0) or 0),
+            )
+            if status_html:
+                parts.append(status_html)
+        except Exception:
+            pass
+
+        # Truncate title at 80 characters
+        title = self.pr.title[:80] + '...' if len(self.pr.title) > 80 else self.pr.title
+
+        base_html = ""
+        if self.pr.base_ref:
+            base_html = f' <span style="font-weight: 700;">→ {html.escape(self.pr.base_ref)}</span> branch'
+
+        # Prefer standard GitHub-style formatting: "title (#1234)" over "PR#1234: title"
+        pr_suffix = f"(#{self.pr.number})"
+        if pr_suffix not in title:
+            title = f"{title} {pr_suffix}"
+
+        # Make the "(#1234)" part a link to the PR (in addition to the GitHub icon).
+        title_html: str
+        if pr_url and self.pr.number:
+            pr_url_esc = html.escape(pr_url, quote=True)
+            suffix_html = (
+                f'(<a href="{pr_url_esc}" target="_blank" '
+                f'style="color: #0969da; text-decoration: none;" '
+                f'title="Open PR #{int(self.pr.number)}">#{int(self.pr.number)}</a>)'
+            )
+            try:
+                before, after = str(title).rsplit(pr_suffix, 1)
+                title_html = f"{html.escape(before)}{suffix_html}{html.escape(after)}"
+            except Exception:
+                title_html = html.escape(title).replace(html.escape(pr_suffix), suffix_html)
+        else:
+            title_html = html.escape(title)
+
+        # Assemble the final label
+        # Gray out merged PRs
+        is_closed = bool(state_lc and state_lc != "open" and not self.pr.is_merged)
+        if self.pr.is_merged:
+            # For merged PRs: keep grey style; link is still the GitHub icon.
+            title_part = f'<span style="color: #999;">{emoji} {gh_icon}{title_html}{base_html}</span>'
+        elif is_closed:
+            # For CLOSED PRs, avoid repeated "Open on GitHub" link: the "(#1234)" suffix is already a link.
+            # Also omit the CLOSED pill here because the merged branch line renders it at the start.
+            title_part = f'<span style="color: #999;">{title_html}{base_html}</span>'
+        else:
+            # For open PRs: title is plain text; GitHub icon is the link.
+            prefix = f"{emoji} " if emoji else ""
+            title_part = f'{prefix}{gh_icon}{title_html}{base_html}'
+        
+        parts.append(title_part)
+        
+        return " ".join(parts)
+
+    def _format_html_inline_title(self) -> str:
+        """Inline PR title for the merged branch line (NO GitHub icon)."""
+        if not self.pr:
+            return ""
+        pr_url = str(self.pr.url or "").strip()
+        state_lc = (self.pr.state or "").lower()
+        is_closed = bool(state_lc and state_lc != "open" and not self.pr.is_merged)
+
+        title = self.pr.title[:80] + '...' if len(self.pr.title) > 80 else self.pr.title
+        base_html = ""
+        if self.pr.base_ref:
+            base_html = f' <span style="font-weight: 700;">→ {html.escape(self.pr.base_ref)}</span> branch'
+
+        pr_suffix = f"(#{self.pr.number})"
+        if pr_suffix not in title:
+            title = f"{title} {pr_suffix}"
+
+        title_html: str
+        if pr_url and self.pr.number:
+            pr_url_esc = html.escape(pr_url, quote=True)
+            suffix_html = (
+                f'(<a href="{pr_url_esc}" target="_blank" '
+                f'style="color: #0969da; text-decoration: none;" '
+                f'title="Open PR #{int(self.pr.number)}">#{int(self.pr.number)}</a>)'
+            )
+            try:
+                before, after = str(title).rsplit(pr_suffix, 1)
+                title_html = f"{html.escape(before)}{suffix_html}{html.escape(after)}"
+            except Exception:
+                title_html = html.escape(title).replace(html.escape(pr_suffix), suffix_html)
+        else:
+            title_html = html.escape(title)
+
+        if is_closed or bool(self.pr.is_merged):
+            return f'<span style="color: #999;">{title_html}{base_html}</span>'
+        return f"{title_html}{base_html}"
+
+
+@dataclass
+class PRURLNode(BranchNode):
+    """PR URL node"""
+    url: Optional[str] = None
+
+    def _format_content(self) -> str:
+        # (HTML-only) URL is already visible in the PR title line.
+        # Matches v1 behavior where URL is shown as a separate line
+        if not self.url:
+            return ""
+        return f"URL: {self.url}"
+
+    def _format_html_content(self) -> str:
+        # URL is already in the PR link for HTML, so this can be omitted
+        return ""
+
+
+@dataclass
+class CommitMessageNode(BranchNode):
+    """Commit message line with PR number link."""
+    commit_message: Optional[str] = None
+    pr_number: Optional[int] = None
+
+    def _format_html_content(self) -> str:
+        msg = str(self.commit_message or "").strip()
+        if not msg:
+            return ""
+        
+        # Extract first line only for display
+        first_line = msg.split('\n')[0].strip()
+        # Truncate if too long
+        if len(first_line) > 100:
+            first_line = first_line[:97] + "..."
+        
+        pr_link = ""
+        if self.pr_number and self.pr_number > 0:
+            pr_url = f"https://github.com/{DYNAMO_REPO_SLUG}/pull/{self.pr_number}"
+            pr_link = f' <a href="{pr_url}" target="_blank" style="color: #0969da; text-decoration: none;">(#{self.pr_number})</a>'
+        
+        return f'<span style="color: #666; font-size: 12px;">{html.escape(first_line)}{pr_link}</span>'
+
+    def to_tree_vm(self) -> TreeNodeVM:
+        """Non-collapsible leaf node."""
+        return TreeNodeVM(
+            node_key=f"CommitMsg:{self.label}",
+            label_html=self._format_html_content(),
+            children=[],
+            collapsible=False,
+            default_expanded=False,
+            skip_dedup=True,  # Always display commit messages, never deduplicate
+        )
+
+
+@dataclass
+class MetadataNode(BranchNode):
+    """Branch metadata line (modified, created, age)."""
+    commit_time_pt: Optional[str] = None
+    commit_datetime: Optional[datetime] = None
+    pr_created_at_iso: Optional[str] = None
+
+    def _format_html_content(self) -> str:
+        suffix = _format_branch_metadata_suffix(
+            commit_time_pt=self.commit_time_pt,
+            commit_datetime=self.commit_datetime,
+            pr_created_at_iso=self.pr_created_at_iso,
+        )
+        # Strip the leading space and return just the content
+        return suffix.strip()
+
+    def to_tree_vm(self) -> TreeNodeVM:
+        """Non-collapsible leaf node."""
+        return TreeNodeVM(
+            node_key=f"Metadata:{self.label}",
+            label_html=self._format_html_content(),
+            children=[],
+            collapsible=False,
+            default_expanded=False,
+            skip_dedup=True,  # Always display metadata, never deduplicate
+        )
+
+
+
+def looks_like_git_repo_dir(p: Path) -> bool:
+    """Lightweight git repo detection without invoking GitPython.
+    
+    Supports normal repos ('.git' directory) and worktrees/submodules ('.git' file).
+    """
+    try:
+        if not p.is_dir():
+            return False
+        git_marker = p / ".git"
+        return git_marker.is_dir() or git_marker.is_file()
+    except Exception:
+        return False
+
+
+def gitdir_from_git_file(p: Path) -> Optional[Path]:
+    """Handle worktrees where .git is a file containing 'gitdir: <path>'."""
+    try:
+        txt = (p / ".git").read_text(encoding="utf-8", errors="ignore").strip()
+        if not txt.startswith("gitdir:"):
+            return None
+        rest = txt.split("gitdir:", 1)[1].strip()
+        if not rest:
+            return None
+        gd = Path(rest)
+        if not gd.is_absolute():
+            gd = (p / gd).resolve()
+        return gd if gd.is_dir() else None
+    except Exception:
+        return None
+
+
+def origin_url_from_git_config(repo_dir: Path) -> str:
+    """Extract origin URL from .git/config without loading GitPython."""
+    try:
+        git_dir = repo_dir / ".git"
+        if git_dir.is_file():
+            gd = gitdir_from_git_file(repo_dir)
+            if gd:
+                git_dir = gd
+        config = git_dir / "config"
+        if not config.is_file():
+            return ""
+        txt = config.read_text(encoding="utf-8", errors="ignore")
+        m = re.search(r'\[remote\s+"origin"\].*?url\s*=\s*(.+?)(?:\n|\r\n|\r|$)', txt, re.IGNORECASE | re.DOTALL)
+        if m:
+            return m.group(1).strip()
+        return ""
+    except Exception:
+        return ""
+
+
+def find_local_clone_of_repo(base_dir: Path, *, repo_slug: str) -> Optional[Path]:
+    """Find a local clone of a specific repo (e.g. 'ai-dynamo/dynamo') under base_dir.
+    
+    Returns the first matching repo directory, or None if not found.
+    """
+    if not base_dir.is_dir():
+        return None
+    for d in base_dir.iterdir():
+        if not looks_like_git_repo_dir(d):
+            continue
+        url = origin_url_from_git_config(d)
+        if repo_slug in url:
+            return d
+    return None
+
+
+class LocalRepoScanner:
+    """Scanner for local repository branches"""
+
+    def __init__(
+        self,
+        token: Optional[str] = None,
+        refresh_closed_prs: bool = False,
+        *,
+        max_branches: Optional[int] = None,
+        max_checks_fetch: Optional[int] = None,
+        allow_anonymous_github: bool = False,
+        max_github_api_calls: int = 100,
+    ):
+        require_auth = not bool(allow_anonymous_github)
+        self.github_api = GitHubAPIClient(
+            token=token,
+            require_auth=require_auth,
+            allow_anonymous_fallback=bool(allow_anonymous_github),
+            max_rest_calls=int(max_github_api_calls),
+        )
+        self.refresh_closed_prs = bool(refresh_closed_prs)
+        self.max_branches = int(max_branches) if max_branches is not None else None
+        self.max_checks_fetch = int(max_checks_fetch) if max_checks_fetch is not None else None
+        self.cache_only_github: bool = False
+
+    @staticmethod
+    def _is_world_readable_executable_dir(p: Path) -> bool:
+        """
+        True iff `p` is a directory with world-readable + world-executable permissions (o+r and o+x).
+
+        For directories, readable enables listing and executable enables traversal.
+        """
+        try:
+            st = p.stat()
+        except Exception:
+            return False
+        mode = st.st_mode
+        return bool(mode & stat.S_IROTH) and bool(mode & stat.S_IXOTH)
+
+    @staticmethod
+    def _looks_like_git_repo_dir(p: Path) -> bool:
+        """Lightweight git repo detection (delegates to module-level function)."""
+        return looks_like_git_repo_dir(p)
+
+    def scan_repositories(self, base_dir: Path) -> BranchNode:
+        """Scan all git repositories under `base_dir` (direct children only) and build tree structure."""
+        root = BranchNode(label="")
+
+        # Discover git repos among direct children (and include base_dir itself if it's a repo).
+        #
+        # We intentionally do NOT walk the whole tree because this workspace can be huge (targets, caches, etc.).
+        candidate_dirs: list[Path] = []
+        if self._looks_like_git_repo_dir(base_dir) and self._is_world_readable_executable_dir(base_dir):
+            candidate_dirs.append(base_dir)
+
+        for d in base_dir.iterdir():
+            if not d.is_dir():
+                continue
+            if not self._is_world_readable_executable_dir(d):
+                continue
+            if not self._looks_like_git_repo_dir(d):
+                continue
+            candidate_dirs.append(d)
+
+        repo_dirs = sorted(candidate_dirs, key=lambda p: p.name)
+
+        # Scan each repository in parallel
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            future_to_dir = {
+                executor.submit(self._scan_repository, repo_dir, base_dir): repo_dir
+                for repo_dir in repo_dirs
+            }
+
+            for future in as_completed(future_to_dir):
+                repo_node = future.result()
+                if repo_node:
+                    root.add_child(repo_node)
+
+        # Sort children by name
+        root.children.sort(key=lambda n: n.label)
+
+        return root
+
+    def _scan_repository(self, repo_dir: Path, page_root_dir: Path) -> Optional[RepoNode]:
+        """Scan a single repository"""
+        repo_name = f"{repo_dir.name}/"
+        repo_node = RepoNode(label=repo_name, path=repo_dir)
+
+        # Symlink repos are intentionally treated as "pointers": show the repo line (with → target),
+        # but do not scan/render any nested info (branches/PR/CI). Also render as non-expandable in the UI.
+        try:
+            if Path(repo_dir).is_symlink():
+                return repo_node
+        except Exception:
+            pass
+
+        if git is None:
+            repo_node.error = "GitPython is required. Install with: pip install gitpython"
+            return repo_node
+
+        try:
+            repo = git.Repo(repo_dir)
+        except Exception as e:
+            repo_node.error = f"Not a valid git repository: {e}"
+            return repo_node
+
+        # Capture origin URL (if present). We no longer treat "non-dynamo" repos as an error; we
+        # just skip PR/CI lookups that are wired to ai-dynamo/dynamo.
+        is_dynamo_repo = False
+        try:
+            remote = repo.remote('origin')
+            remote_url = next(remote.urls)
+            repo_node.remote_url = remote_url
+
+            is_dynamo_repo = (DYNAMO_REPO_SLUG in remote_url)
+        except Exception:
+            repo_node.error = "No origin remote found"
+            return repo_node
+
+        # Get current branch
+        try:
+            current_branch = repo.active_branch.name
+        except Exception:
+            current_branch = None
+
+        # Always capture current HEAD SHA (for display even when we skip "main" branches, or when detached).
+        try:
+            head_commit = repo.head.commit
+            head_sha = head_commit.hexsha[:7]
+            head_commit_dt = getattr(head_commit, "committed_datetime", None)
+        except Exception:
+            head_sha = None
+            head_commit_dt = None
+
+        def _format_pt_time(dt) -> Optional[str]:
+            try:
+                if dt is None:
+                    return None
+                # GitPython often returns tz-aware datetimes; if not, assume UTC.
+                if getattr(dt, "tzinfo", None) is None:
+                    dt = dt.replace(tzinfo=ZoneInfo("UTC"))
+                pt = dt.astimezone(ZoneInfo("America/Los_Angeles"))
+                return f"{pt.strftime('%Y-%m-%d %H:%M')} PT"
+            except Exception:
+                return None
+
+        # Collect branch information
+        branches_with_prs = {}
+        local_only_branches = []
+
+        # Get remote branches
+        try:
+            remote = repo.remote('origin')
+            remote.fetch()
+        except Exception:
+            pass
+
+        # Scan all local branches
+        for branch in repo.branches:  # type: ignore[attr-defined]
+            branch_name = branch.name
+
+            # Skip main branches
+            if branch_name in ['main', 'master']:
+                continue
+
+            # Check if branch has remote tracking or matching remote branch
+            try:
+                tracking_branch = branch.tracking_branch()
+                has_remote = tracking_branch is not None
+            except Exception:
+                has_remote = False
+
+            # Also check if a remote branch exists with the same name (even if not tracking)
+            if not has_remote:
+                try:
+                    remote_branches = [ref.name for ref in repo.remote().refs]  # type: ignore[attr-defined]
+                    # Check for origin/branch_name
+                    if f'origin/{branch_name}' in remote_branches:
+                        has_remote = True
+                except Exception:
+                    pass
+
+            # Get commit SHA
+            try:
+                sha = branch.commit.hexsha[:7]
+                commit_dt = getattr(branch.commit, "committed_datetime", None)
+                commit_msg = str(getattr(branch.commit, "message", "") or "").strip()
+            except Exception:
+                sha = None
+                commit_dt = None
+                commit_msg = ""
+
+            is_current = (branch_name == current_branch)
+
+            if has_remote:
+                # Get PR info in parallel (will be gathered later)
+                branches_with_prs[branch_name] = {
+                    'sha': sha,
+                    'is_current': is_current,
+                    'branch': branch,
+                    'commit_time_pt': _format_pt_time(commit_dt),
+                    'commit_dt': commit_dt,
+                    'commit_message': commit_msg,
+                }
+            else:
+                local_only_branches.append({
+                    'name': branch_name,
+                    'sha': sha,
+                    'is_current': is_current,
+                    'commit_time_pt': _format_pt_time(commit_dt),
+                    'commit_dt': commit_dt,
+                    'commit_message': commit_msg,
+                })
+
+        # Fetch PR information in parallel
+        if branches_with_prs and is_dynamo_repo:
+            # Branches with PRs - add directly to repo_node (no section wrapper)
+            # NOTE: Avoid per-branch GitHub API calls. We list open PRs once per repo (cached),
+            # then match PRs to branch names locally.
+            try:
+                pr_infos_by_branch = self.github_api.get_pr_info_for_branches(
+                    DYNAMO_OWNER,
+                    DYNAMO_REPO,
+                    branches_with_prs.keys(),
+                    include_closed=True,
+                    refresh_closed=self.refresh_closed_prs,
+                )
+            except Exception as e:
+                self.logger.warning("Error fetching PR info: %s", e)
+                pr_infos_by_branch = {}
+
+            branch_results = []
+            for branch_name, info in branches_with_prs.items():
+                prs = pr_infos_by_branch.get(branch_name) or []
+                if prs:
+                    branch_results.append((branch_name, info, prs))
+
+            # Small-mode caps:
+            # - Display at most N branches with PRs (choose most-recent by commit_dt).
+            # - Only allow network fetch of checks/CI hierarchy for the top K (most recent) branches.
+            #
+            # This keeps the page fast and keeps GitHub/gh calls bounded.
+            branch_results_sorted = sorted(
+                branch_results,
+                key=lambda t: (
+                    (t[1].get("commit_dt") or datetime.min.replace(tzinfo=ZoneInfo("UTC"))),
+                    str(t[0] or ""),
+                ),
+                reverse=True,
+            )
+
+            if self.max_branches is not None and self.max_branches > 0:
+                branch_results_sorted = branch_results_sorted[: int(self.max_branches)]
+
+            allow_fetch_branch_names: Set[str] = set()
+            if bool(getattr(self, "cache_only_github", False)):
+                allow_fetch_branch_names = set()
+            elif self.max_checks_fetch is not None and self.max_checks_fetch > 0:
+                allow_fetch_branch_names = {bn for (bn, _info, _prs) in branch_results_sorted[: int(self.max_checks_fetch)]}
+
+            # Build branch nodes (newest first)
+            for branch_name, info, prs in branch_results_sorted:
+                commit_url = f"https://github.com/{DYNAMO_REPO_SLUG}/commit/{info['sha']}" if info['sha'] else None
+                branch_node = BranchInfoNode(
+                    label=branch_name,
+                    sha=info['sha'],
+                    is_current=info['is_current'],
+                    commit_url=commit_url,
+                    commit_time_pt=info.get('commit_time_pt'),
+                    commit_datetime=info.get('commit_dt'),
+                    commit_message=info.get('commit_message'),
+                )
+
+                # Add PR nodes (flattened):
+                # branch
+                # ├─ PR title line (GitHub link)
+                # └─ PASSED/FAILED/RUNNING
+                #    └─ checks...
+                for pr in prs:
+                    allow_fetch_checks = (branch_name in allow_fetch_branch_names) if allow_fetch_branch_names else True
+                    if bool(getattr(self, "cache_only_github", False)):
+                        allow_fetch_checks = False
+                    
+                    pr_state_lc = (getattr(pr, "state", "") or "").lower()
+                    # Prefer the branch head commit time for "last push" heuristic.
+                    branch_dt = info.get("commit_dt")
+                    checks_ttl_s = GitHubAPIClient.compute_checks_cache_ttl_s(
+                        branch_dt,
+                        refresh=bool(self.refresh_closed_prs),
+                    )
+                    
+                    # Create status node first (will contain CI children)
+                    status_node = PRStatusNode(
+                        label="",
+                        pr=pr,
+                        github_api=self.github_api,
+                        refresh_checks=bool(self.refresh_closed_prs),
+                        branch_commit_dt=branch_dt,
+                        allow_fetch_checks=bool(allow_fetch_checks),
+                        context_key=f"{repo_dir.name}:{branch_name}:{info.get('sha','')}",
+                    )
+                    
+                    # PR title line (no children; acts as a header).
+                    branch_node.add_child(PRNode(label="", pr=pr))
+
+                    branch_node.add_child(status_node)
+
+                    # Add CI hierarchy as children of the PR status line (cached; long TTL when no recent pushes).
+                    try:
+                        for ci_node in _build_ci_hierarchy_nodes(
+                            repo_dir,
+                            pr,
+                            github_api=self.github_api,
+                            page_root_dir=page_root_dir,
+                            checks_ttl_s=int(checks_ttl_s),
+                            skip_fetch=(not bool(allow_fetch_checks)),
+                        ):
+                            try:
+                                if isinstance(ci_node, CIJobNode):
+                                    ci_node.context_key = str(status_node.context_key or "")
+                            except Exception:
+                                pass
+                            status_node.add_child(ci_node)
+                    except RawLogValidationError:
+                        # Hard fail: for failed Actions jobs we require `[raw log]` links.
+                        raise
+                    except Exception as e:
+                        # Don't silently drop the tree UI; surface the error so it's actionable.
+                        try:
+                            status_node.add_child(
+                                BranchNode(
+                                    label=f'<span style="color: #c83a3a;">✗ CI hierarchy error: {html.escape(str(e))}</span>'
+                                )
+                            )
+                        except Exception:
+                            pass
+                        try:
+                            self.logger.warning(
+                                "[show_local_branches] CI hierarchy error for PR #%s: %s",
+                                getattr(pr, "number", "?"),
+                                e,
+                            )
+                        except Exception:
+                            pass
+
+                    # Add conflict warning if applicable
+                    if pr.conflict_message:
+                        conflict_node = ConflictWarningNode(label=pr.conflict_message)
+                        status_node.add_child(conflict_node)
+
+                    # Add blocking message if applicable
+                    if pr.blocking_message:
+                        blocked_node = BlockedMessageNode(label=pr.blocking_message)
+                        status_node.add_child(blocked_node)
+
+                    # With CI hierarchy embedded, we no longer render separate flat running/failed check lines here.
+
+                repo_node.add_child(branch_node)
+
+            # Branches without PRs - add directly to repo_node (no section wrapper)
+            #
+            # This is important for clones like dynamo3/ where you may have many remote-tracking
+            # branches locally, but only a subset has active PRs at any given time.
+            for branch_name, info in sorted(branches_with_prs.items(), key=lambda kv: kv[0]):
+                prs = pr_infos_by_branch.get(branch_name) or []
+                if prs:
+                    continue
+                commit_url = f"https://github.com/{DYNAMO_REPO_SLUG}/commit/{info['sha']}" if info.get("sha") else None
+                branch_node = BranchInfoNode(
+                    label=branch_name,
+                    sha=info.get("sha"),
+                    is_current=bool(info.get("is_current", False)),
+                    commit_url=commit_url,
+                    commit_time_pt=info.get("commit_time_pt"),
+                    commit_datetime=info.get("commit_dt"),
+                    commit_message=info.get("commit_message"),
+                )
+                
+                # Fetch workflow runs for this branch (since it has no PR)
+                try:
+                    skip_fetch = bool(getattr(self, "cache_only_github", False))
+                    workflow_runs = _fetch_branch_workflow_runs(
+                        branch_name,
+                        github_api=self.github_api,
+                        skip_fetch=skip_fetch,
+                    )
+                    
+                    if workflow_runs:
+                        # Create a simple workflow status node
+                        # Count statuses
+                        completed_success = sum(1 for r in workflow_runs if r.get("status") == "completed" and r.get("conclusion") == "success")
+                        completed_failure = sum(1 for r in workflow_runs if r.get("status") == "completed" and r.get("conclusion") == "failure")
+                        in_progress = sum(1 for r in workflow_runs if r.get("status") in ("in_progress", "queued"))
+                        
+                        # Determine overall status
+                        if completed_failure > 0:
+                            status_icon = "❌"
+                            status_text = "FAILED"
+                        elif in_progress > 0:
+                            status_icon = "⏳"
+                            status_text = "RUNNING"
+                        elif completed_success > 0:
+                            status_icon = "✅"
+                            status_text = "PASSED"
+                        else:
+                            status_icon = "⚪"
+                            status_text = "UNKNOWN"
+                        
+                        # Build summary like PRStatusNode
+                        summary_parts = [f"{status_icon} {status_text}"]
+                        if completed_success > 0:
+                            summary_parts.append(f"✓{completed_success}")
+                        if completed_failure > 0:
+                            summary_parts.append(f"✗{completed_failure}")
+                        
+                        workflow_status_label = " ".join(summary_parts)
+                        workflow_status_node = BranchNode(label=workflow_status_label)
+                        
+                        # Add individual workflow runs as children
+                        for run in workflow_runs:
+                            run_name = run.get("name", "Workflow")
+                            run_status = run.get("status", "")
+                            run_conclusion = run.get("conclusion", "")
+                            run_url = run.get("html_url", "")
+                            
+                            if run_status == "completed":
+                                if run_conclusion == "success":
+                                    run_icon = "✓"
+                                    run_color = "#2da44e"
+                                elif run_conclusion == "failure":
+                                    run_icon = "✗"
+                                    run_color = "#c83a3a"
+                                else:
+                                    run_icon = "○"
+                                    run_color = "#57606a"
+                            elif run_status in ("in_progress", "queued"):
+                                run_icon = "⏳"
+                                run_color = "#bf8700"
+                            else:
+                                run_icon = "?"
+                                run_color = "#57606a"
+                            
+                            run_link = f'<a href="{html.escape(run_url)}" target="_blank" style="color: {run_color};">{html.escape(run_name)}</a>' if run_url else html.escape(run_name)
+                            run_label = f'<span style="color: {run_color};">{run_icon}</span> {run_link}'
+                            
+                            workflow_status_node.add_child(BranchNode(label=run_label))
+                        
+                        branch_node.add_child(workflow_status_node)
+                except Exception:
+                    # If workflow fetching fails, just skip it
+                    pass
+                
+                repo_node.add_child(branch_node)
+
+        # For non-dynamo repos: show branches but skip PR/CI lookup (treat as "any other repo").
+        # Add directly to repo_node (no section wrapper)
+        if not is_dynamo_repo:
+
+            combined = []
+            for branch_name, info in branches_with_prs.items():
+                combined.append(
+                    {
+                        "name": branch_name,
+                        "sha": info.get("sha"),
+                        "is_current": bool(info.get("is_current")),
+                        "commit_time_pt": info.get("commit_time_pt"),
+                        "commit_dt": info.get("commit_dt"),
+                    }
+                )
+            combined.extend(local_only_branches)
+
+            for b in sorted(combined, key=lambda x: x.get("name", "")):
+                repo_node.add_child(
+                    BranchInfoNode(
+                        label=b.get("name", ""),
+                        sha=b.get("sha"),
+                        is_current=bool(b.get("is_current", False)),
+                        commit_time_pt=b.get("commit_time_pt"),
+                        commit_datetime=b.get("commit_dt"),
+                    )
+                )
+
+        # Add local-only branches - add directly to repo_node (no section wrapper)
+        if local_only_branches and is_dynamo_repo:
+
+            for branch_info in local_only_branches:
+                branch_node = BranchInfoNode(
+                    label=branch_info['name'],
+                    sha=branch_info['sha'],
+                    is_current=branch_info['is_current'],
+                    commit_time_pt=branch_info.get('commit_time_pt'),
+                    commit_datetime=branch_info.get('commit_dt'),
+                    commit_message=branch_info.get('commit_message'),
+                )
+                repo_node.add_child(branch_node)
+
+        # If the current checkout didn't show up in the PR/local sections (common when on main),
+        # add a single line for it so repos like dynamo_latest/ and dynamo_ci/ are informative.
+        has_current_line = _tree_has_current_branch(repo_node)
+        if not has_current_line:
+            current_label = current_branch or "HEAD"
+            commit_url = f"https://github.com/{DYNAMO_REPO_SLUG}/commit/{head_sha}" if (head_sha and is_dynamo_repo) else None
+            repo_node.add_child(
+                BranchInfoNode(
+                    label=current_label,
+                    sha=head_sha,
+                    is_current=True,
+                    commit_url=commit_url,
+                    commit_time_pt=_format_pt_time(head_commit_dt),
+                    commit_datetime=head_commit_dt,
+                )
+            )
+
+        # Add "no branches" message if needed
+        if not repo_node.children:
+            no_branches = BranchNode(label="No branches with PRs or local-only branches")
+            repo_node.add_child(no_branches)
+
+        return repo_node
+
+
+def generate_html(
+    root: BranchNode,
+    *,
+    page_stats: Optional[List[tuple[str, str]]] = None,
+    page_title: Optional[str] = None,
+    header_title: Optional[str] = None,
+    tree_html_override: Optional[str] = None,
+    tree_html_alt: Optional[str] = None,
+    tree_sort_default: Optional[str] = None,
+    tree_sortable: bool = False,
+) -> str:
+    """Generate HTML output from tree"""
+    # Get current time in both UTC and PDT
+    now_utc = datetime.now(ZoneInfo('UTC'))
+    now_pdt = datetime.now(ZoneInfo('America/Los_Angeles'))
+
+    # Format timestamps
+    utc_str = now_utc.strftime('%Y-%m-%d %H:%M:%S UTC')
+    pdt_str = now_pdt.strftime('%Y-%m-%d %H:%M:%S %Z')
+
+    tree_html = str(tree_html_override or "").rstrip()
+    if not tree_html:
+        # Render all children (skip root) into div-based tree (modern collapsible UI)
+        tree_vms = [child.to_tree_vm() for child in root.children]
+        tree_html = render_tree_divs(tree_vms)
+    else:
+        tree_html = tree_html + ("\n" if not tree_html.endswith("\n") else "")
+
+    if not HAS_JINJA2:
+        raise RuntimeError(
+            "Jinja2 is required for HTML output. Install with: pip install jinja2"
+        )
+
+    # Help type-checkers: these are set only when HAS_JINJA2 is True.
+    assert Environment is not None
+    assert FileSystemLoader is not None
+    assert select_autoescape is not None
+
+    env = Environment(
+        loader=FileSystemLoader(str(_THIS_DIR)),
+        autoescape=select_autoescape(["html", "xml"]),
+    )
+    template = env.get_template("show_local_branches.j2")
+    return template.render(
+        generated_time=pdt_str,
+        page_title=str(page_title) if page_title is not None else None,
+        header_title=str(header_title) if header_title is not None else None,
+        copy_icon_svg=_COPY_ICON_SVG,
+        tree_html=tree_html,
+        tree_html_alt=(str(tree_html_alt) if tree_html_alt is not None else ""),
+        tree_sort_default=(str(tree_sort_default) if tree_sort_default is not None else ""),
+        tree_sortable=bool(tree_sortable),
+        page_stats=page_stats,
+        success_icon_html=status_icon_html(status_norm="success", is_required=False),
+        success_required_icon_html=status_icon_html(status_norm="success", is_required=True),
+        failure_required_icon_html=status_icon_html(status_norm="failure", is_required=True),
+        failure_optional_icon_html=status_icon_html(status_norm="failure", is_required=False),
+        in_progress_icon_html=status_icon_html(status_norm="in_progress", is_required=False),
+        pending_icon_html=status_icon_html(status_norm="pending", is_required=False),
+        cancelled_icon_html=status_icon_html(status_norm="cancelled", is_required=False),
+        skipped_icon_html=status_icon_html(status_norm="skipped", is_required=False),
+    )
+def main():
+    phase_t = PhaseTimer()
+
+    parser = argparse.ArgumentParser(
+        description='Show local branches with PR information (HTML-only)'
+    )
+    # Keep backward compatibility with the historical positional `base_dir`, but prefer --repo-path.
+    parser.add_argument(
+        'base_dir',
+        type=Path,
+        nargs='?',
+        default=None,
+        help='[deprecated] Base directory to search for git repos (direct children only). Prefer --repo-path.'
+    )
+    parser.add_argument(
+        '--repo-path',
+        type=Path,
+        default=None,
+        help='Path to the base directory to scan (direct children only) (default: current directory)'
+    )
+    parser.add_argument(
+        '--token',
+        help='GitHub personal access token (or set GH_TOKEN/GITHUB_TOKEN env var)'
+    )
+    parser.add_argument(
+        '--allow-anonymous-github',
+        action='store_true',
+        help='Allow anonymous GitHub REST calls (60/hr core rate limit). By default we require auth to avoid rate limiting.'
+    )
+    parser.add_argument(
+        '--refresh-closed-prs',
+        action='store_true',
+        help='Refresh cached closed/merged PR mappings (more GitHub API calls)'
+    )
+    parser.add_argument(
+        '--output',
+        type=Path,
+        help='Output HTML file path (default: <repo-path>/index.html)'
+    )
+    parser.add_argument(
+        '--max-branches',
+        type=int,
+        default=None,
+        help='If set, cap the number of branches-with-PRs shown per repo (newest first)'
+    )
+    parser.add_argument(
+        '--max-checks-fetch',
+        type=int,
+        default=None,
+        help='If set, only allow network fetch of checks/CI hierarchy for the top N newest branches-with-PRs (others are cache-only)'
+    )
+    parser.add_argument(
+        '--max-github-api-calls',
+        type=int,
+        default=100,
+        help='Hard cap on GitHub REST API network calls per invocation (cached reads do not count). Default: 100.'
+    )
+    args = parser.parse_args()
+
+    base_dir = (args.repo_path or args.base_dir or Path.cwd()).resolve()
+
+    # Prune locally-served raw logs to avoid unbounded growth and delete any partial/unverified artifacts.
+    # We only render `[raw log]` links when the local file exists (or was materialized),
+    # so pruning won't produce dead links on a freshly generated page.
+    try:
+        with phase_t.phase("prune"):
+            _ = prune_dashboard_raw_logs(page_root_dir=base_dir, max_age_days=30)
+            _ = prune_partial_raw_log_caches(page_root_dirs=[base_dir])
+    except Exception:
+        pass
+
+    # Scan repositories
+    scanner = LocalRepoScanner(
+        token=args.token,
+        refresh_closed_prs=bool(args.refresh_closed_prs),
+        max_branches=args.max_branches,
+        max_checks_fetch=args.max_checks_fetch,
+        allow_anonymous_github=bool(args.allow_anonymous_github),
+        max_github_api_calls=int(args.max_github_api_calls),
+    )
+    # Cache-only fallback if exhausted.
+    try:
+        scanner.github_api.check_core_rate_limit_or_raise()
+    except Exception as e:
+        # Switch to cache-only mode (no new network calls; use existing caches).
+        scanner.cache_only_github = True
+        try:
+            scanner.github_api.set_cache_only_mode(True)
+        except Exception:
+            pass
+        # Also disable refresh knobs in cache-only mode.
+        scanner.refresh_closed_prs = False
+        # Record reason (displayed in Statistics section).
+        cache_only_reason = str(e)
+    else:
+        cache_only_reason = ""
+
+    generation_t0 = time.monotonic()
+    root = None
+    with phase_t.phase("scan"):
+        root = scanner.scan_repositories(base_dir)
+
+    # Output (HTML-only)
+    assert root is not None
+    # Page statistics (shown in an expandable block at the bottom of the HTML).
+    #
+    # Note: we want the HTML page to show a *breakdown* (timing.prune/scan/render/write/total).
+    # That means we need to measure render/write first, then re-render once so the stats reflect
+    # those timings. This is intentionally low-tech and stable.
+    elapsed_s = max(0.0, time.monotonic() - generation_t0)
+    rest_calls = 0
+    rest_ok = 0
+    rest_err = 0
+    rest_err_by_status_s = ""
+    try:
+        stats = scanner.github_api.get_rest_call_stats() if scanner.github_api else {}
+        rest_calls = int(stats.get("total") or 0)
+        rest_ok = int(stats.get("success_total") or 0)
+        rest_err = int(stats.get("error_total") or 0)
+    except Exception:
+        rest_calls = 0
+        rest_ok = 0
+        rest_err = 0
+        stats = {}
+
+    try:
+        es = scanner.github_api.get_rest_error_stats() if scanner.github_api else {}
+        by_status = (es or {}).get("by_status") if isinstance(es, dict) else {}
+        if isinstance(by_status, dict) and by_status:
+            items = list(by_status.items())[:8]
+            rest_err_by_status_s = ", ".join([f"{k}={v}" for k, v in items])
+    except Exception:
+        rest_err_by_status_s = ""
+
+    pr_count = 0
+    try:
+        def _count_prs(node: BranchNode) -> int:
+            n = 0
+            if isinstance(node, PRNode) and getattr(node, "pr", None) is not None:
+                n += 1
+            for ch in (getattr(node, "children", None) or []):
+                n += _count_prs(ch)
+            return n
+
+        pr_count = _count_prs(root)
+    except Exception:
+        pr_count = 0
+
+    page_stats: List[tuple[str, Optional[str]]] = [
+        ("Generation time", f"{elapsed_s:.2f}s"),
+        ("Repos scanned", str(len(getattr(root, 'children', []) or []))),
+        ("PRs shown", str(pr_count)),
+    ]
+
+    # Keep all page-stats augmentation in one scope block.
+    if True:
+        def _upsert_stat(k: str, v: str) -> None:
+            try:
+                for i, (kk, _vv) in enumerate(page_stats):
+                    if kk == k:
+                        page_stats[i] = (k, v)
+                        return
+            except Exception:
+                pass
+            page_stats.append((k, v))
+
+        def _sort_stats() -> None:
+            # Keep logical order for human scanning; only sort timing.* rows.
+            try:
+                timing = sorted(
+                    [(k, v) for (k, v) in page_stats if str(k).startswith("timing.")],
+                    key=lambda kv: kv[0],
+                )
+                other = [(k, v) for (k, v) in page_stats if not str(k).startswith("timing.")]
+                page_stats[:] = other + timing
+            except Exception:
+                pass
+
+        # GitHub API stats (structured; rendered with <pre> blocks in Statistics).
+        try:
+            from common_dashboard_lib import github_api_stats_rows  # local import
+
+            mode = "cache-only" if bool(getattr(scanner, "cache_only_github", False)) else "normal"
+            api_rows = github_api_stats_rows(
+                github_api=scanner.github_api,
+                max_github_api_calls=int(args.max_github_api_calls),
+                mode=mode,
+                mode_reason=cache_only_reason or "",
+                top_n=15,
+            )
+            page_stats.extend(list(api_rows or []))
+        except Exception:
+            pass
+
+        # Include relevant knobs if set (helps explain “why so many API calls?”).
+        if args.max_branches is not None:
+            page_stats.append(("max_branches", str(args.max_branches)))
+        if args.max_checks_fetch is not None:
+            page_stats.append(("max_checks_fetch", str(args.max_checks_fetch)))
+        if bool(args.refresh_closed_prs):
+            page_stats.append(("refresh_closed_prs", "true"))
+
+        _sort_stats()
+
+        # Render once to measure render time.
+        with phase_t.phase("render"):
+            _ = generate_html(root, page_stats=page_stats)
+
+        # Update the page stats with the timing breakdown before producing the final HTML.
+        try:
+            tdict = phase_t.as_dict(include_total=True)
+            # Make "Generation time" reflect total wall time so it matches the timing breakdown.
+            elapsed_total = float(tdict.get("total") or 0.0)
+            _upsert_stat("Generation time", f"{elapsed_total:.2f}s")
+            for k in ["prune", "scan", "render", "write", "total"]:
+                if k in tdict:
+                    _upsert_stat(f"timing.{k}", f"{float(tdict.get(k) or 0.0):.2f}s")
+        except Exception:
+            pass
+        _sort_stats()
+
+        # Final render + atomic write to destination (single visible update).
+        out_path = args.output
+        if out_path is None:
+            out_path = base_dir / "index.html"
+        with phase_t.phase("render_final"):
+            html_output2 = generate_html(root, page_stats=page_stats)
+        with phase_t.phase("write"):
+            atomic_write_text(out_path, html_output2, encoding="utf-8")
+
+    # No stdout/stderr run-stats; the HTML Statistics section contains the breakdowns.
+
+
+if __name__ == '__main__':
+    main()

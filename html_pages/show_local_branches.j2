@@ -38,6 +38,11 @@
     }
     .indent { margin-left: 20px; }
     .error { color: #c83a3a; }
+    
+    /* Add spacing between repository sections */
+    .repo-node {
+      margin-bottom: 1em;
+    }
 
     /* Status indicator pill (same look as show_commit_history.j2) */
     .status-indicator {
@@ -59,8 +64,6 @@
     .status-building { background-color: #bf8700; border-color: #9a6a00; } /* RUNNING */
     .status-unknown { background-color: #8c959f; border-color: #6e7781; }
 {% endblock %}
-
-{# Error snippet toggle JS is shared in common_dashboard.j2 #}
 
 {% block header_title %}
 <span>{{ header_title|default("Local Branch Info", true) }}</span>
@@ -148,7 +151,7 @@
       </label>
     </div>
 
-    <div id="tree-pre-sortable" style="font-family: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace; font-size: 13px; line-height: 1.5; white-space: pre;">{{ tree_html | safe }}</div>
+    <div id="tree-sortable-container" style="font-family: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace; font-size: 13px; line-height: 1.5; white-space: pre;">{{ tree_html | safe }}</div>
 
     <script>
       // Client-side reordering of sortable branch containers
@@ -156,75 +159,62 @@
       window.__dashboardOnReadyQueue.push(function() {
         try {
           var radios = document.querySelectorAll('input[name="tree-sort"]');
-          var preEl = document.getElementById('tree-pre-sortable');
-          if (!radios || !radios.length || !preEl) return;
+          var containerEl = document.getElementById('tree-sortable-container');
+          if (!radios || !radios.length || !containerEl) return;
 
           function _setRadio(val) {
-            try {
-              radios.forEach(function(r) { r.checked = (String(r.value||'') === String(val||'')); });
-            } catch (e) {}
+            radios.forEach(function(r) { r.checked = (String(r.value||'') === String(val||'')); });
           }
           function _getRadio() {
-            try {
-              var v = 'modified';
-              radios.forEach(function(r) { if (r.checked) v = String(r.value || 'modified'); });
-              return v;
-            } catch (e) { return 'modified'; }
+            var v = 'modified';
+            radios.forEach(function(r) { if (r.checked) v = String(r.value || 'modified'); });
+            return v;
           }
 
-          // Set default (server-provided), then allow URL to override.
-          try {
-            var defv = String({{ (tree_sort_default or "modified")|tojson }});
-            if (defv === 'latest') defv = 'modified';  // Map legacy 'latest' to 'modified'
-            if (defv) _setRadio(defv);
-          } catch (e) {}
-          try {
-            if (window.DashboardUrlState && typeof window.DashboardUrlState.get === 'function') {
-              var v = window.DashboardUrlState.get('sort');
-              if (v) {
-                if (v === 'latest') v = 'modified';  // Map legacy 'latest' to 'modified'
-                _setRadio(String(v));
-              }
+          // Set default from server, then allow URL to override
+          var defv = String({{ (tree_sort_default or "modified")|tojson }});
+          if (defv === 'latest') defv = 'modified';  // Map legacy 'latest' to 'modified'
+          if (defv) _setRadio(defv);
+          
+          if (window.DashboardUrlState && window.DashboardUrlState.get) {
+            var v = window.DashboardUrlState.get('sort');
+            if (v) {
+              if (v === 'latest') v = 'modified';  // Map legacy 'latest' to 'modified'
+              _setRadio(String(v));
             }
-          } catch (e) {}
+          }
 
           function apply() {
-            try {
-              var sortMode = String(_getRadio() || 'modified');
-              var sortAttr = 'data-sort-' + sortMode;
+            var sortMode = String(_getRadio() || 'modified');
+            var sortAttr = 'data-sort-' + sortMode;
+            
+            // Get all sortable branch containers
+            var branches = Array.from(containerEl.querySelectorAll('.sortable-branch'));
+            if (!branches.length) return;
+            
+            // Sort by appropriate data attribute
+            branches.sort(function(a, b) {
+              var aKey = String(a.getAttribute(sortAttr) || '');
+              var bKey = String(b.getAttribute(sortAttr) || '');
               
-              // Get all sortable branch containers
-              var branches = Array.from(preEl.querySelectorAll('.sortable-branch'));
-              if (!branches.length) return;
+              // For timestamp-based sorts, use numeric comparison
+              if (sortMode === 'modified' || sortMode === 'created') {
+                var aNum = parseFloat(aKey.split('_')[0] || '0');
+                var bNum = parseFloat(bKey.split('_')[0] || '0');
+                return aNum - bNum;  // Ascending (negative timestamps = most recent first)
+              }
               
-              // Sort them by the appropriate data attribute
-              branches.sort(function(a, b) {
-                var aKey = String(a.getAttribute(sortAttr) || '');
-                var bKey = String(b.getAttribute(sortAttr) || '');
-                
-                // For timestamp-based sorts (modified, created), use numeric comparison
-                if (sortMode === 'modified' || sortMode === 'created') {
-                  var aNum = parseFloat(aKey.split('_')[0] || '0');
-                  var bNum = parseFloat(bKey.split('_')[0] || '0');
-                  return aNum - bNum;  // Ascending (negative timestamps, so most recent first)
-                }
-                
-                // For branch name, use string comparison
-                return aKey.localeCompare(bKey);
-              });
-              
-              // Reattach in sorted order
-              branches.forEach(function(br) {
-                preEl.appendChild(br);
-              });
-              
-              // Update URL state
-              try {
-                if (window.DashboardUrlState && typeof window.DashboardUrlState.setDefault === 'function') {
-                  window.DashboardUrlState.setDefault('sort', sortMode, 'modified');
-                }
-              } catch (e) {}
-            } catch (e) {}
+              // For branch name, use string comparison
+              return aKey.localeCompare(bKey);
+            });
+            
+            // Reattach in sorted order
+            branches.forEach(function(br) { containerEl.appendChild(br); });
+            
+            // Update URL state
+            if (window.DashboardUrlState && window.DashboardUrlState.setDefault) {
+              window.DashboardUrlState.setDefault('sort', sortMode, 'modified');
+            }
           }
           radios.forEach(function(r) { r.addEventListener('change', apply); });
           apply();
@@ -232,9 +222,9 @@
       });
     </script>
   {% elif _tree_alt.strip() %}
-    {# Legacy dual-tree approach (kept for backward compatibility if needed) #}
-    {# Make IDs unique in the alternate tree by adding 'alt_' prefix to avoid conflicts with the main tree. #}
-    {% set _tree_alt_unique = _tree_alt.replace('id="tree_children_k_', 'id="alt_tree_children_k_').replace('data-children-id="tree_children_k_', 'data-children-id="alt_tree_children_k_').replace('data-parent-children-id="tree_children_k_', 'data-parent-children-id="alt_tree_children_k_').replace('onclick="toggleTreeChildren(\'tree_children_k_', 'onclick="toggleTreeChildren(\'alt_tree_children_k_').replace('id="err_snip_', 'id="alt_err_snip_').replace('data-error-id="err_snip_', 'data-error-id="alt_err_snip_').replace('onclick="toggleErrorSnippet(\'err_snip_', 'onclick="toggleErrorSnippet(\'alt_err_snip_') %}
+    {# Dual-tree approach for sortable views (using div containers) #}
+    {# Make IDs unique in the alternate tree by adding 'alt_' prefix to avoid ID conflicts. #}
+    {% set _tree_alt_unique = _tree_alt.replace('details[', 'details[id^="alt_').replace('data-snippet-key="', 'data-snippet-key="alt_') %}
     <div class="container" style="margin-bottom: 6px; padding: 4px 0;">
       <span style="color: #57606a; font-size: 12px; font-weight: 600; margin-right: 8px;">Sort:</span>
       <label style="margin-right: 12px; cursor: pointer; user-select: none;">
@@ -247,67 +237,57 @@
       </label>
     </div>
 
-    <pre id="tree-pre-latest">{{ tree_html | safe }}</pre>
-    <pre id="tree-pre-branch" style="display: none;">{{ _tree_alt_unique | safe }}</pre>
+    <div id="tree-div-latest">{{ tree_html | safe }}</div>
+    <div id="tree-div-branch" style="display: none;">{{ _tree_alt_unique | safe }}</div>
 
     <script>
-      // Toggle between pre-rendered orderings (keeps the exact same look/feel as local branches).
+      // Toggle between pre-rendered orderings
       window.__dashboardOnReadyQueue = window.__dashboardOnReadyQueue || [];
       window.__dashboardOnReadyQueue.push(function() {
         try {
           var radios = document.querySelectorAll('input[name="tree-sort"]');
-          var preLatest = document.getElementById('tree-pre-latest');
-          var preBranch = document.getElementById('tree-pre-branch');
-          if (!radios || !radios.length || !preLatest || !preBranch) return;
+          var divLatest = document.getElementById('tree-div-latest');
+          var divBranch = document.getElementById('tree-div-branch');
+          if (!radios || !radios.length || !divLatest || !divBranch) return;
 
           function _setRadio(val) {
-            try {
-              radios.forEach(function(r) { r.checked = (String(r.value||'') === String(val||'')); });
-            } catch (e) {}
+            radios.forEach(function(r) { r.checked = (String(r.value||'') === String(val||'')); });
           }
           function _getRadio() {
-            try {
-              var v = 'latest';
-              radios.forEach(function(r) { if (r.checked) v = String(r.value || 'latest'); });
-              return v;
-            } catch (e) { return 'latest'; }
+            var v = 'latest';
+            radios.forEach(function(r) { if (r.checked) v = String(r.value || 'latest'); });
+            return v;
           }
 
-          // Set default (server-provided), then allow URL to override.
+          // Set default from server, then allow URL to override
           try {
             var defv = String({{ (tree_sort_default or "latest")|tojson }});
             if (defv) _setRadio(defv);
           } catch (e) {}
           try {
-            if (window.DashboardUrlState && typeof window.DashboardUrlState.get === 'function') {
+            if (window.DashboardUrlState && window.DashboardUrlState.get) {
               var v = window.DashboardUrlState.get('sort');
               if (v) _setRadio(String(v));
             }
           } catch (e) {}
 
           function apply() {
-            try {
-              var v = String(_getRadio() || 'latest');
-              var showBranch = (v === 'branch');
-              preLatest.style.display = showBranch ? 'none' : 'block';
-              preBranch.style.display = showBranch ? 'block' : 'none';
-              
-              // Re-apply URL state to the newly visible tree
-              try {
-                if (window.DashboardUrlState && window.DashboardUrlState._applyTreeToggles) {
-                  // Wait a tick for display changes to take effect
-                  setTimeout(function() {
-                    try { window.DashboardUrlState._applyTreeToggles(); } catch (e) {}
-                  }, 10);
-                }
-              } catch (e) {}
-              
-              try {
-                if (window.DashboardUrlState && typeof window.DashboardUrlState.setDefault === 'function') {
-                  window.DashboardUrlState.setDefault('sort', v, 'latest');
-                }
-              } catch (e) {}
-            } catch (e) {}
+            var v = String(_getRadio() || 'latest');
+            var showBranch = (v === 'branch');
+            divLatest.style.display = showBranch ? 'none' : 'block';
+            divBranch.style.display = showBranch ? 'block' : 'none';
+            
+            // Re-apply URL state to newly visible tree
+            if (window.DashboardUrlState && window.DashboardUrlState._applyTreeToggles) {
+              setTimeout(function() {
+                try { window.DashboardUrlState._applyTreeToggles(); } catch (e) {}
+              }, 10);
+            }
+            
+            // Update URL state
+            if (window.DashboardUrlState && window.DashboardUrlState.setDefault) {
+              window.DashboardUrlState.setDefault('sort', v, 'latest');
+            }
           }
           radios.forEach(function(r) { r.addEventListener('change', apply); });
           apply();
@@ -315,10 +295,7 @@
       });
     </script>
   {% else %}
-    {% if use_div_trees is defined and use_div_trees %}
-      {{ tree_html | safe }}
-    {% else %}
-      <pre>{{ tree_html | safe }}</pre>
-    {% endif %}
+    {# Always use div-based collapsible trees (modern UI) #}
+    {{ tree_html | safe }}
   {% endif %}
 {% endblock %}

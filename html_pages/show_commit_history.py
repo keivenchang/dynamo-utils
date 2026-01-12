@@ -1661,11 +1661,8 @@ class CommitHistoryGenerator:
                     node_items = [(node.node_key, node) for node in dummy_nodes]
                 
                 children = run_all_passes(
-                    node_items=[(nm, n) for (nm, n) in (node_items or [])],
+                    ci_nodes=[n for (nm, n) in (node_items or [])],
                     repo_root=Path(repo_path),
-                    github_api=self.github_client,
-                    owner="ai-dynamo",
-                    repo="dynamo",
                     commit_sha=sha_full,
                 )
             except Exception:

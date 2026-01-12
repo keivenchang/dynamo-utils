@@ -413,15 +413,22 @@ def _format_branch_metadata_suffix(
 
 
 def _format_commit_tooltip(commit_message: Optional[str]) -> str:
-    """Format commit message for use in a title/tooltip attribute."""
+    """Format commit message for use in a title/tooltip attribute.
+    
+    Multi-line messages are truncated to first 3 lines with "..." if longer.
+    """
     msg = str(commit_message or "").strip()
     if not msg:
         return ""
-    # Escape HTML entities and truncate for tooltip
-    msg_esc = html_module.escape(msg)
-    if len(msg_esc) > 200:
-        msg_esc = msg_esc[:200] + "..."
-    return msg_esc
+    
+    # Split into lines and keep first 3
+    lines = msg.split('\n')
+    if len(lines) > 3:
+        lines = lines[:3] + ['...']
+    
+    # Rejoin and escape HTML entities
+    msg_truncated = '\n'.join(lines)
+    return html_module.escape(msg_truncated)
 
 
 def _format_pr_number_link(pr: Optional[PRInfo]) -> str:
@@ -779,8 +786,13 @@ class BranchInfoNode(BranchNode):
             
             # Build label with commit message styled, then PR number (if available), then raw metadata HTML
             commit_parts = []
+            
+            # Format commit message: first line only
+            msg_lines = self.commit_message.split('\n')
+            msg_display = msg_lines[0] if msg_lines else self.commit_message
+            
             # Style the commit message text
-            commit_parts.append(f'<span style="color: #1f2328;">{html_module.escape(self.commit_message)}</span>')
+            commit_parts.append(f'<span style="color: #1f2328;">{html_module.escape(msg_display)}</span>')
             
             # Add PR number link (if available) - with parentheses like git log
             if self.pr:
@@ -1956,25 +1968,17 @@ class PRStatusNode(BranchNode):
             except Exception:
                 pass
             
-            # Check environment variable to disable YAML tree for debugging
-            import os
-            attach_yaml_tree = os.environ.get("ATTACH_YAML_TREE", "0") == "1"  # Default to False for now
-            
             # Filter out special nodes for pipeline processing
             ci_branch_nodes = [
                 child for child in sorted_children
                 if isinstance(child, BranchNode) and type(child).__name__ not in ('RerunLinkNode', 'ConflictWarningNode', 'BlockedMessageNode')
             ]
             
-            print(f"[PRStatusNode] Passing {len(ci_branch_nodes)} BranchNodes to pipeline (attach_yaml_tree={attach_yaml_tree})")
+            print(f"[PRStatusNode] Passing {len(ci_branch_nodes)} BranchNodes to pipeline")
             
             kids = run_all_passes(
                 ci_nodes=ci_branch_nodes,  # Pass List[BranchNode] directly!
                 repo_root=repo_root,
-                github_api=gh,
-                owner="ai-dynamo",
-                repo="dynamo",
-                attach_yaml_tree=attach_yaml_tree,
             )
         except Exception as e:
             print(f"[PRStatusNode] Error in pipeline: {e}")
