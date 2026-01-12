@@ -500,6 +500,65 @@ Notes:
 - Tests in tests/ directory
 
 ### 3.5.3 Error Handling and Anti-Patterns
+
+**CRITICAL: NEVER SILENTLY CATCH AND IGNORE EXCEPTIONS**
+
+This is a cardinal sin in software development - it makes debugging impossible and hides bugs until production:
+
+```python
+# ❌ NEVER DO THIS:
+try:
+    something()
+except Exception:
+    pass  # Silent failure!
+
+# ❌ NEVER DO THIS:
+try:
+    something()
+except Exception as e:
+    print(f"Error: {e}")  # Print and continue = silent failure!
+    continue
+
+# ❌ NEVER DO THIS:
+try:
+    something()
+except Exception:
+    return []  # Return empty result on error = silent failure!
+```
+
+**ALWAYS FAIL EARLY AND LOUDLY**
+
+```python
+# ✅ DO THIS - Let exceptions propagate:
+result = something()  # If it fails, let it crash!
+
+# ✅ DO THIS - Only catch specific exceptions you can handle:
+try:
+    result = parse_config(file)
+except FileNotFoundError:
+    # Specific exception we know how to handle
+    result = DEFAULT_CONFIG
+# Other exceptions propagate up!
+
+# ✅ DO THIS - Re-raise after logging if you can't handle it:
+try:
+    result = something()
+except Exception as e:
+    logger.error(f"Failed to do something: {e}")
+    raise  # Re-raise so caller knows it failed!
+```
+
+**Why this matters:**
+- Silent failures make debugging impossible
+- They hide bugs until production
+- They corrupt data by continuing with partial/invalid state
+- They waste hours of debugging time looking in the wrong places
+
+**If you're tempted to catch and ignore:**
+1. Ask: "Can I actually handle this error gracefully?"
+2. If yes: Handle it specifically
+3. If no: DON'T CATCH IT - let it fail fast!
+
 Regex / parsing changes (common source of subtle bugs):
 - Be very careful with escaping:
   - In Python raw strings, `\s` is whitespace; `\\s` is a literal backslash + `s` (often wrong).
