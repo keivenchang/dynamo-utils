@@ -167,6 +167,10 @@ class TreeNodeVM:
       Supported values: "square" (renders ■). Default: "" (renders a blank placeholder).
     - node_key: a stable key for the logical node (used for debugging/caching, not DOM ids).
     - skip_dedup: if True, always render this node even if it appears multiple times (for CommitMessageNode, MetadataNode).
+    - job_name: the CI job name for hierarchy matching (e.g., "backend-status-check", "vllm", "changed-files").
+    - workflow_name: the workflow name this job belongs to (e.g., "container-validation-backends", "pre-merge").
+    - variant: optional variant/matrix value (e.g., "amd64", "arm64", "cuda-13") for disambiguating similar jobs.
+    - pr_number: PR number this node belongs to (for building CI nodes in pipeline). Can be negative for dummy PRs.
     """
 
     node_key: str
@@ -177,6 +181,10 @@ class TreeNodeVM:
     triangle_tooltip: Optional[str] = None
     noncollapsible_icon: str = ""
     skip_dedup: bool = False
+    job_name: str = ""  # CI job name for hierarchy matching (e.g., "backend-status-check")
+    workflow_name: str = ""  # Workflow this job belongs to (e.g., "container-validation-backends")
+    variant: str = ""  # Optional variant (e.g., "amd64", "arm64") for matrix jobs
+    pr_number: Optional[int] = None  # PR number for building CI nodes (negative = dummy PR)
 
 
 def _dom_id_from_node_key(node_key: str) -> str:
@@ -195,41 +203,143 @@ def _dom_id_from_node_key(node_key: str) -> str:
         return ""
 
 
-def parse_workflow_files_and_add_expected_checks_pass(
-    nodes: List[TreeNodeVM],
+def parse_workflow_yaml_and_build_mapping_pass(
+    flat_nodes: List[TreeNodeVM],
     repo_root: Path,
     commit_sha: str = "",
 ) -> List[TreeNodeVM]:
-    """PASS 1: Parse .github/workflows/*.yml files and add expected check nodes.
+    """PASS 1: Parse YAML to annotate nodes with parent/child metadata.
     
-    This pass:
-    - Reads all workflow YAML files from .github/workflows/
-    - Parses job names and creates placeholder nodes for expected checks
-    - Adds these as ◇ (hollow diamond) nodes to indicate expected but not yet run
-    - Helps identify missing checks before they run
-    - Uses commit_sha in node_key to ensure uniqueness per commit
+    This pass reads .github/workflows/*.yml files and annotates each node with
+    information about which jobs it depends on (children) and which jobs depend on it (parents).
+    The nodes remain flat and disconnected - actual connections are made in PASS 2.
+    
+    Workflow YAML structure:
+        job_id:
+            name: "display name (possibly with ${{ matrix.var }})"
+            needs: [other_job_id1, other_job_id2]
+    
+    Example:
+        backend-status-check:
+            needs: [changed-files, vllm, sglang, trtllm, operator]
+        vllm:
+            name: vllm (${{ matrix.platform.arch }})
+            needs: [changed-files]
+    
+    This creates metadata:
+        - "backend-status-check" should have children: [vllm (${{ matrix.platform.arch }}), sglang (${{ ...}}), ...]
+        - "vllm (${{ matrix.platform.arch }})" should have parent: backend-status-check
     
     Args:
-        nodes: Existing list of TreeNodeVM nodes (actual check runs)
+        flat_nodes: Flat list of TreeNodeVM nodes (actual check runs from GitHub API)
         repo_root: Path to repository root containing .github/workflows/
-        commit_sha: Commit SHA to include in node keys (for per-commit uniqueness)
+        commit_sha: Commit SHA for logging
     
     Returns:
-        Combined list of actual + expected check nodes
+        The same flat list of nodes, now annotated with metadata about parents/children
     """
     import yaml
     from pathlib import Path
     
-    expected_nodes: List[TreeNodeVM] = []
-    sha_prefix = f":{commit_sha[:9]}" if commit_sha else ""
+    print(f"[PASS 1] Parsing YAML to annotate nodes with parent/child metadata")
+    print(f"[PASS 1] repo_root={repo_root}")
+    
+    global _workflow_parent_child_mapping
+    global _workflow_job_name_to_id
+    _workflow_parent_child_mapping = {}  # Reset: job_name -> list of child job_names
+    _workflow_job_name_to_id = {}  # Reset: job_name -> job_id
+    
+    workflows_dir = Path(repo_root) / ".github" / "workflows"
+    if not workflows_dir.exists() or not workflows_dir.is_dir():
+        print(f"[PASS 1] No workflows directory found")
+        return flat_nodes
+    
+    # Parse YAML files to extract needs: relationships
+    for workflow_file in workflows_dir.glob("*.yml"):
+        with open(workflow_file, 'r') as f:
+            workflow_data = yaml.safe_load(f)
+        
+        if not workflow_data or 'jobs' not in workflow_data:
+            continue
+        
+        jobs = workflow_data.get('jobs', {})
+        
+        # Build a map of job_id -> job_name for resolving needs
+        # Job ID is the key in YAML (e.g., "vllm"), job name is the display name (e.g., "vllm (${{ matrix.platform.arch }})")
+        job_id_to_name = {}
+        for job_id, job_data in jobs.items():
+            if isinstance(job_data, dict):
+                job_name = job_data.get('name', job_id)
+                job_id_to_name[job_id] = job_name
+                # Store reverse mapping for display purposes
+                _workflow_job_name_to_id[job_name] = job_id
+                # Track which file this job comes from
+                _workflow_job_to_file[job_name] = workflow_file.name
+        
+        # Now process needs relationships using job names
+        for job_id, job_data in jobs.items():
+            if not isinstance(job_data, dict):
+                continue
+            
+            job_name = job_data.get('name', job_id)
+            needs = job_data.get('needs', [])
+            
+            # Normalize needs to list
+            if isinstance(needs, str):
+                needs = [needs]
+            elif not isinstance(needs, list):
+                needs = []
+            
+            if needs:
+                # Resolve job IDs to job names in the needs list
+                # e.g., needs: ['vllm'] → ['vllm (${{ matrix.platform.arch }})']
+                resolved_needs = []
+                for need_id in needs:
+                    need_name = job_id_to_name.get(need_id, need_id)
+                    resolved_needs.append(need_name)
+                
+                # Store the mapping: this job_name needs these child job_names
+                _workflow_parent_child_mapping[job_name] = resolved_needs
+                print(f"[PASS 1]   {job_name} needs: {resolved_needs}")
+    
+    print(f"[PASS 1] Found {len(_workflow_parent_child_mapping)} parent-child relationships")
+    print(f"[PASS 1] Returning {len(flat_nodes)} nodes (unchanged, will be connected in PASS 3)")
+    return flat_nodes
+
+
+# Global to store the parent-child mapping from PASS 1.1
+_workflow_parent_child_mapping: Dict[str, List[str]] = {}
+# Global to store job_name -> job_id mapping from PASS 1.1
+_workflow_job_name_to_id: Dict[str, str] = {}
+# Global to store job_name -> workflow filename mapping from PASS 1.1
+_workflow_job_to_file: Dict[str, str] = {}
+
+
+def debug_print_workflow_hierarchy(repo_root: Path) -> None:
+    """Debug function: Parse YAML and print the hierarchy without any CI data.
+    
+    This is useful for understanding what the expected hierarchy should be
+    based solely on the workflow YAML files, without needing actual CI runs.
+    """
+    import yaml
+    from pathlib import Path
+    
+    print("=" * 80)
+    print("DEBUG: WORKFLOW HIERARCHY (from .github/workflows/*.yml)")
+    print("=" * 80)
+    print()
+    
+    # Parse YAML files
+    parent_child_mapping: Dict[str, List[str]] = {}
     
     try:
         workflows_dir = Path(repo_root) / ".github" / "workflows"
         if not workflows_dir.exists() or not workflows_dir.is_dir():
-            print(f"[PASS 1] No .github/workflows/ directory found at {workflows_dir}")
-            return nodes
+            print(f"No workflows directory found at {workflows_dir}")
+            return
         
-        print(f"[PASS 1] Parsing workflow files from {workflows_dir}{' (sha=' + commit_sha[:9] + ')' if commit_sha else ''}")
+        print(f"Reading workflows from: {workflows_dir}")
+        print()
         
         for workflow_file in workflows_dir.glob("*.yml"):
             try:
@@ -239,39 +349,671 @@ def parse_workflow_files_and_add_expected_checks_pass(
                 if not workflow_data or 'jobs' not in workflow_data:
                     continue
                 
-                workflow_name = workflow_file.stem
+                workflow_name = workflow_data.get('name', workflow_file.stem)
                 jobs = workflow_data.get('jobs', {})
                 
-                print(f"[PASS 1]   Workflow: {workflow_name} ({len(jobs)} jobs)")
+                print(f"Workflow: {workflow_name}")
                 
                 for job_id, job_data in jobs.items():
-                    job_name = job_data.get('name', job_id)
-                    full_name = f"{workflow_name} / {job_name}"
+                    if not isinstance(job_data, dict):
+                        continue
                     
-                    # Create a placeholder node with ◇ symbol
-                    # Include commit SHA in node_key for per-commit uniqueness
-                    node = TreeNodeVM(
-                        node_key=f"expected{sha_prefix}:{workflow_name}:{job_id}",
-                        label_html=f'<span style="color: #999;">◇ {full_name} (expected)</span>',
-                        children=[],
-                        collapsible=False,
-                        default_expanded=False,
-                    )
-                    expected_nodes.append(node)
-                    print(f"[PASS 1]     - Added expected check: {full_name}")
+                    job_name = job_data.get('name', job_id)
+                    needs = job_data.get('needs', [])
+                    
+                    # Track which file this job comes from
+                    _workflow_job_to_file[job_name] = workflow_file.name
+                    
+                    # Track job_id -> job_name mapping
+                    _workflow_job_name_to_id[job_name] = job_id
+                    
+                    # Normalize needs to list
+                    if isinstance(needs, str):
+                        needs = [needs]
+                    elif not isinstance(needs, list):
+                        needs = []
+                    
+                    if needs:
+                        parent_child_mapping[job_name] = needs
+                        print(f"  - {job_name}")
+                        print(f"      needs: {needs}")
+                
+                print()
             
             except Exception as e:
-                print(f"[PASS 1]   Error parsing {workflow_file}: {e}")
+                print(f"Error parsing {workflow_file}: {e}")
                 continue
         
-        print(f"[PASS 1] Found {len(expected_nodes)} expected checks")
+        print()
+        print("=" * 80)
+        print("HIERARCHY STRUCTURE:")
+        print("=" * 80)
+        print()
+        
+        # Find all children
+        all_children = set()
+        for parent, children in parent_child_mapping.items():
+            all_children.update(children)
+        
+        # Find root jobs (not children of anyone)
+        root_jobs = [job for job in parent_child_mapping.keys() if job not in all_children]
+        
+        def print_tree(job_name: str, indent: int = 0, visited: set = None):
+            if visited is None:
+                visited = set()
+            
+            if job_name in visited:
+                print("  " * indent + f"↑ {job_name} (see above)")
+                return
+            
+            visited.add(job_name)
+            
+            deps = parent_child_mapping.get(job_name, [])
+            
+            if deps:
+                print("  " * indent + f"{job_name}")
+                for i, dep in enumerate(deps):
+                    is_last = (i == len(deps) - 1)
+                    connector = "└─" if is_last else "├─"
+                    print("  " * indent + connector + " ", end="")
+                    
+                    # Check if this dependency has template variables (matrix expansion)
+                    if "${{" in dep:
+                        print(f"{dep} [MATRIX - will expand to multiple jobs]")
+                    else:
+                        print_tree(dep, indent + 1, visited.copy())
+            else:
+                print("  " * indent + f"{job_name}")
+        
+        if root_jobs:
+            print("ROOT JOBS (parents that are not children of anyone):")
+            print()
+            for job in sorted(root_jobs):
+                print_tree(job)
+                print()
+        
+        # Print standalone jobs
+        standalone = [j for j in parent_child_mapping.keys() if j not in all_children and not parent_child_mapping.get(j)]
+        if standalone:
+            print()
+            print("STANDALONE JOBS (no dependencies):")
+            for job in sorted(standalone):
+                print(f"  - {job}")
+        
+        print()
+        print("=" * 80)
         
     except Exception as e:
-        print(f"[PASS 1] Error in workflow parsing pass: {e}")
+        print(f"Error: {e}")
+        import traceback
+        traceback.print_exc()
+
+
+def build_hierarchy_from_mapping_pass(
+    flat_nodes: List[TreeNodeVM],
+) -> List[TreeNodeVM]:
+    """PASS 3: Rebuild nodes by creating parent-child CONNECTIONS from metadata.
+    
+    This pass takes the flat list of nodes (annotated in PASS 1.1 with parent/child metadata)
+    and rebuilds them into NEW TreeNodeVM instances with actual children connected.
+    
+    Process:
+    1. For each node that has children (in the mapping), create a NEW TreeNodeVM with those children
+    2. Return only the root nodes (nodes that are not children of anyone)
+    3. All nodes are reconstructed - we don't modify existing nodes
+    
+    Example flow:
+        PASS 1.1 creates mapping:
+            "backend-status-check" needs: ["vllm (${{ matrix.platform.arch }})", "sglang (${{ ...}})"]
+        
+        PASS 1.2 builds:
+            backend-status-check (NEW node)
+            └─ vllm (${{ matrix.platform.arch }}) (NEW node, child of backend-status-check)
+            └─ sglang (${{ matrix.platform.arch }}) (NEW node, child of backend-status-check)
+    
+    Handles matrix expansion: YAML job names like "sglang (${{ matrix.platform.arch }})"
+    are matched to all actual job instances like "sglang (amd64)", "sglang (arm64)", etc.
+    
+    Uses node_key (unique identifier) for all matching and deduplication.
+    Never parses HTML labels for identity - only uses node_key.
+    
+    Args:
+        flat_nodes: Flat list of TreeNodeVM nodes from PASS 1.1
+    
+    Returns:
+        List of NEW TreeNodeVM root nodes with children properly connected
+    """
+    import re
+    
+    print(f"[PASS 3] Building hierarchy from {len(flat_nodes)} flat nodes")
+    print(f"[PASS 3] Using {len(_workflow_parent_child_mapping)} parent-child relationships")
+    
+    if not _workflow_parent_child_mapping:
+        print(f"[PASS 3] No mapping available, returning nodes unchanged")
+        return flat_nodes
+    
+    # Build maps using job_name field (explicit field, no parsing needed)
+    nodes_by_job_name: Dict[str, List[TreeNodeVM]] = {}  # job_name -> List[TreeNodeVM] (multiple instances for matrix jobs)
+    node_by_node_key: Dict[str, TreeNodeVM] = {}  # node_key -> TreeNodeVM (for fast lookup)
+    
+    for tree_node in flat_nodes:
+        # Store by node_key for fast lookup
+        node_by_node_key[tree_node.node_key] = tree_node
+        
+        # Use the explicit job_name field (no parsing!)
+        if tree_node.job_name:
+            # Store all instances (for matrix expansion)
+            if tree_node.job_name not in nodes_by_job_name:
+                nodes_by_job_name[tree_node.job_name] = []
+            nodes_by_job_name[tree_node.job_name].append(tree_node)
+            print(f"[PASS 3]   Mapped job '{tree_node.job_name}' (node_key: {tree_node.node_key[:50]}...)")
+    
+    print(f"[PASS 3] Built job name map with {len(nodes_by_job_name)} unique job names")
+    print(f"[PASS 3] Total node instances: {sum(len(v) for v in nodes_by_job_name.values())}")
+    
+    def extract_base_job_name(yaml_job_name: str) -> str:
+        """Extract base job name from YAML, removing matrix template variables.
+        
+        Examples:
+            "sglang (${{ matrix.platform.arch }})" -> "sglang"
+            "deploy-test-sglang (${{ matrix.profile }})" -> "deploy-test-sglang"
+            "backend-status-check" -> "backend-status-check"
+        """
+        # Remove any matrix template variables and surrounding parentheses/spaces
+        base = re.sub(r'\s*\(\$\{\{[^}]+\}\}\)\s*$', '', yaml_job_name).strip()
+        return base
+    
+    # ============================================================================
+    # WORKFLOW HIERARCHY MATCHING LOGIC
+    # ============================================================================
+    # 
+    # The YAML workflows define jobs with matrix templates, and parent-child
+    # relationships via `needs:`. This function matches YAML job names to actual
+    # CI job instances, handling matrix expansion.
+    # 
+    # Example hierarchy from .github/workflows/container-validation-backends.yml:
+    # 
+    #   backend-status-check:
+    #     needs: ['changed-files', 'vllm', 'sglang', 'trtllm', 'operator']
+    # 
+    #   vllm (${{ matrix.platform.arch }}):    # Matrix job definition
+    #     needs: ['changed-files']
+    #     strategy:
+    #       matrix:
+    #         platform:
+    #           - { arch: amd64, runner: gpu-l40-amd64 }
+    #           - { arch: arm64, runner: cpu-arm-r8g-4xlarge }
+    # 
+    #   operator (${{ matrix.platform.arch }}):
+    #     needs: ['changed-files']
+    #     strategy:
+    #       matrix:
+    #         platform:
+    #           - { arch: amd64, runner: cpu-amd-m5-2xlarge }
+    #           - { arch: arm64, runner: cpu-arm-r8g-4xlarge }
+    # 
+    #   sglang (${{ matrix.platform.arch }}):
+    #     needs: ['changed-files']
+    #     strategy:
+    #       matrix:
+    #         platform:
+    #           - { arch: amd64, runner: gpu-l40-amd64 }
+    #           - { arch: arm64, runner: cpu-arm-r8g-4xlarge }
+    # 
+    #   trtllm (${{ matrix.platform.arch }}):
+    #     needs: ['changed-files']
+    #     strategy:
+    #       matrix:
+    #         platform:
+    #           - { arch: amd64, runner: gpu-l40-amd64 }
+    #           - { arch: arm64, runner: cpu-arm-r8g-4xlarge }
+    # 
+    # This creates the hierarchy:
+    # 
+    #   backend-status-check
+    #   ├─ changed-files
+    #   ├─ vllm (amd64)           # Expanded from vllm (${{ matrix.platform.arch }})
+    #   ├─ vllm (arm64)           # Expanded from vllm (${{ matrix.platform.arch }})
+    #   ├─ sglang (amd64)         # Expanded from sglang (${{ matrix.platform.arch }})
+    #   ├─ sglang (arm64)         # Expanded from sglang (${{ matrix.platform.arch }})
+    #   ├─ trtllm (amd64)         # Expanded from trtllm (${{ matrix.platform.arch }})
+    #   ├─ trtllm (arm64)         # Expanded from trtllm (${{ matrix.platform.arch }})
+    #   ├─ operator (amd64)       # Expanded from operator (${{ matrix.platform.arch }})
+    #   └─ operator (arm64)       # Expanded from operator (${{ matrix.platform.arch }})
+    # 
+    # Other hierarchies in the codebase:
+    # 
+    #   deploy-operator:
+    #     needs: ['changed-files', 'operator', 'vllm', 'sglang', 'trtllm']
+    #   
+    #   deploy-test-vllm (${{ matrix.profile }}):
+    #     needs: ['changed-files', 'deploy-operator', 'vllm']
+    #   
+    #   deploy-test-sglang (${{ matrix.profile }}):
+    #     needs: ['changed-files', 'deploy-operator', 'sglang']
+    #   
+    #   deploy-test-trtllm (${{ matrix.profile }}):
+    #     needs: ['changed-files', 'deploy-operator', 'trtllm']
+    #   
+    #   cleanup:
+    #     needs: ['changed-files', 'deploy-operator', 'deploy-test-trtllm', 
+    #             'deploy-test-sglang', 'deploy-test-vllm', 'deploy-test-vllm-disagg-router']
+    # 
+    # Note: In the `needs:` list, job names are referenced by their BASE name only
+    # (e.g., 'vllm', not 'vllm (${{ matrix.platform.arch }})'). The function below
+    # handles three matching cases:
+    # 
+    #   1. Exact match: "backend-status-check" → "backend-status-check"
+    #   2. Base name referencing matrix: "vllm" → ["vllm (amd64)", "vllm (arm64)"]
+    #   3. Matrix template: "vllm (${{ matrix.platform.arch }})" → ["vllm (amd64)", "vllm (arm64)"]
+    # 
+    # ============================================================================
+    
+    def find_matching_nodes(yaml_job_name: str) -> List[TreeNodeVM]:
+        """Find all TreeNodeVM instances that match a YAML job name (handles matrix expansion).
+        
+        Handles four cases:
+        1. Matrix job with template: "sglang (${{ matrix.platform.arch }})" → matches "sglang (amd64)", "sglang (arm64)"
+        2. Plain name referring to matrix job: "sglang" → matches "sglang (amd64)", "sglang (arm64)"
+        3. Non-matrix job: "backend-status-check" → exact match
+        4. Disambiguated duplicates: "changed-files" → matches "changed-files [id]" (picks first instance to avoid duplication)
+        """
+        # First try exact match
+        if yaml_job_name in nodes_by_job_name:
+            exact_matches = nodes_by_job_name[yaml_job_name]
+            print(f"[PASS 3]   Exact match for '{yaml_job_name}': {len(exact_matches)} instance(s)")
+            return exact_matches
+        
+        # Extract base name (removes matrix template if present)
+        base_name = extract_base_job_name(yaml_job_name)
+        
+        # Check if this is a matrix job (contains template variable) or plain name that might refer to matrix jobs
+        print(f"[PASS 3]   Looking for matches to '{yaml_job_name}' (base: '{base_name}')")
+        
+        # Find all nodes whose job_name starts with the base name followed by " (" or " ["
+        # This handles:
+        # - Matrix expansion: "vllm" → matches "vllm (amd64)", "vllm (arm64)"
+        # - Disambiguated duplicates: "changed-files" → matches "changed-files [59975299307]"
+        matching_nodes = []
+        disambiguated_nodes = []  # Nodes with [id] suffix
+        
+        for job_name, node_list in nodes_by_job_name.items():
+            # Check for matrix expansion: base_name (variant)
+            if job_name.startswith(base_name + " ("):
+                matching_nodes.extend(node_list)
+                print(f"[PASS 3]     Matched: '{job_name}' ({len(node_list)} instance(s))")
+            # Check for disambiguated duplicates: base_name [id]
+            elif job_name.startswith(base_name + " ["):
+                disambiguated_nodes.extend(node_list)
+                print(f"[PASS 3]     Matched (disambiguated): '{job_name}' ({len(node_list)} instance(s))")
+        
+        # For matrix jobs, return all variants (each should be a separate parent)
+        if matching_nodes:
+            return matching_nodes
+        
+        # For disambiguated duplicates, return ONLY the first one to avoid creating duplicate hierarchies
+        # (All instances represent the same logical job, just from different workflow runs)
+        if disambiguated_nodes:
+            print(f"[PASS 3]     Using first instance of {len(disambiguated_nodes)} disambiguated nodes to avoid duplication")
+            return [disambiguated_nodes[0]]
+        
+        # No pattern match found - might be a non-matrix job that just doesn't exist yet
+        print(f"[PASS 3]   Warning: No matches found for '{yaml_job_name}'")
+        return []
+    
+    # Determine which jobs are children (appear in any needs: list)
+    all_children: set = set()
+    for parent_name, child_names in _workflow_parent_child_mapping.items():
+        all_children.update(child_names)
+    
+    print(f"[PASS 3] Found {len(all_children)} jobs that are children of others")
+    
+    # Track which TreeNodeVMs we've already processed (by node_key for uniqueness)
+    processed_node_keys: set = set()
+    
+    def build_node_recursive(yaml_job_name: str) -> List[TreeNodeVM]:
+        """Recursively build TreeNodeVM instances with their children.
+        
+        Returns a list because matrix jobs expand to multiple nodes.
+        """
+        # Find ALL matching TreeNodeVM instances (handles matrix expansion)
+        matching_nodes = find_matching_nodes(yaml_job_name)
+        
+        if not matching_nodes:
+            print(f"[PASS 3]   Warning: No TreeNodeVM found for job '{yaml_job_name}'")
+            return []
+        
+        result_nodes = []
+        
+        for base_tree_node in matching_nodes:
+            # Check if already processed (by node_key - the unique identifier)
+            if base_tree_node.node_key in processed_node_keys:
+                continue  # Already processed
+            
+            processed_node_keys.add(base_tree_node.node_key)
+            
+            # Check if this node has children (based on mapping)
+            child_job_names = _workflow_parent_child_mapping.get(yaml_job_name, [])
+            
+            if not child_job_names:
+                # Leaf node - return as-is
+                result_nodes.append(base_tree_node)
+                continue
+            
+            # Build children recursively (flatten the list of lists)
+            children_tree_nodes = []
+            for child_name in child_job_names:
+                child_nodes = build_node_recursive(child_name)
+                children_tree_nodes.extend(child_nodes)
+            
+            # Create new TreeNodeVM with children
+            if children_tree_nodes:
+                print(f"[PASS 3]   Built parent: {base_tree_node.job_name} with {len(children_tree_nodes)} children")
+                new_node = TreeNodeVM(
+                    node_key=base_tree_node.node_key,
+                    label_html=base_tree_node.label_html,
+                    children=children_tree_nodes,
+                    collapsible=True,
+                    default_expanded=base_tree_node.default_expanded or any(
+                        "✗" in c.label_html or "FAIL" in c.label_html for c in children_tree_nodes
+                    ),
+                    triangle_tooltip=base_tree_node.triangle_tooltip,
+                    noncollapsible_icon=base_tree_node.noncollapsible_icon,
+                    job_name=base_tree_node.job_name,
+                    workflow_name=base_tree_node.workflow_name,
+                    variant=base_tree_node.variant,
+                )
+                result_nodes.append(new_node)
+            else:
+                result_nodes.append(base_tree_node)
+        
+        return result_nodes
+    
+    # Build the tree starting with root nodes
+    hierarchical_nodes: List[TreeNodeVM] = []
+    
+    # Add parent nodes (jobs that have children but are not children themselves)
+    for parent_name in _workflow_parent_child_mapping.keys():
+        if parent_name not in all_children:
+            # This is a root parent
+            tree_nodes = build_node_recursive(parent_name)
+            hierarchical_nodes.extend(tree_nodes)
+    
+    # Add standalone nodes (not in any parent-child relationship)
+    for tree_node in flat_nodes:
+        if tree_node.node_key not in processed_node_keys:
+            hierarchical_nodes.append(tree_node)
+            processed_node_keys.add(tree_node.node_key)
+    
+    print(f"[PASS 3] Returning {len(hierarchical_nodes)} root nodes (after matrix expansion)")
+    return hierarchical_nodes
+
+
+def expand_matrix_templates_pass(
+    nodes: List[TreeNodeVM],
+    repo_root: Path,
+) -> List[TreeNodeVM]:
+    """PASS 4: Expand matrix template variables in job names.
+    
+    This pass expands YAML template variables like "${{ matrix.var }}" into their actual values
+    by reading the matrix definitions from workflow files.
+    
+    Example:
+        Input: "vllm (${{ matrix.platform.arch }})" with matrix: { arch: [amd64, arm64] }
+        Output: ["vllm (amd64)", "vllm (arm64)"]
+    
+    For Cartesian products:
+        Input: "${{ matrix.A }} ${{ matrix.B }} whatever" with A=[a1, a2], B=[b1, b2]
+        Output: ["a1 b1 whatever", "a1 b2 whatever", "a2 b1 whatever", "a2 b2 whatever"]
+    
+    Args:
+        nodes: List of TreeNodeVM nodes (may contain template variables in job_name)
+        repo_root: Path to repository root containing .github/workflows/
+    
+    Returns:
+        Expanded list of TreeNodeVM nodes with template variables replaced
+    """
+    import yaml
+    import re
+    from pathlib import Path
+    from itertools import product
+    
+    print(f"[PASS 4] Expanding matrix templates")
+    
+    # Build a mapping of job names to their matrix definitions
+    job_matrix_map: Dict[str, Dict[str, List[str]]] = {}
+    
+    workflows_dir = Path(repo_root) / ".github" / "workflows"
+    if not workflows_dir.exists() or not workflows_dir.is_dir():
+        print(f"[PASS 4] No workflows directory found")
         return nodes
     
-    # Combine expected nodes + actual nodes
-    return expected_nodes + nodes
+    # Parse YAML files to extract matrix definitions
+    for workflow_file in workflows_dir.glob("*.yml"):
+        with open(workflow_file, 'r') as f:
+            workflow_data = yaml.safe_load(f)
+        
+        if not workflow_data or 'jobs' not in workflow_data:
+            continue
+        
+        jobs = workflow_data.get('jobs', {})
+        for job_id, job_data in jobs.items():
+            if not isinstance(job_data, dict):
+                continue
+            
+            job_name = job_data.get('name', job_id)
+            strategy = job_data.get('strategy', {})
+            
+            if not strategy or not isinstance(strategy, dict):
+                continue
+            
+            matrix_def = strategy.get('matrix', {})
+            if not matrix_def or not isinstance(matrix_def, dict):
+                continue
+            
+            # Extract matrix variables and their values
+            matrix_vars: Dict[str, List[str]] = {}
+            
+            for key, value in matrix_def.items():
+                if key in ('include', 'exclude'):
+                    # Skip special matrix keys
+                    continue
+                
+                if isinstance(value, list) and value:
+                    # Check if this is a list of dicts (like platform: [{arch: amd64}, {arch: arm64}])
+                    if all(isinstance(v, dict) for v in value):
+                        # List of dicts: platform: [{arch: amd64}, {arch: arm64}]
+                        # Extract all subkeys from the dicts
+                        # This handles: matrix.platform.arch
+                        for item in value:
+                            if isinstance(item, dict):
+                                for subkey, subvalue in item.items():
+                                    full_key = f"{key}.{subkey}"
+                                    if full_key not in matrix_vars:
+                                        matrix_vars[full_key] = []
+                                    matrix_vars[full_key].append(str(subvalue))
+                    else:
+                        # Simple list: framework: [vllm, trtllm, sglang]
+                        matrix_vars[key] = [str(v) for v in value]
+            
+            if matrix_vars:
+                job_matrix_map[job_name] = matrix_vars
+                print(f"[PASS 4]   Found matrix for '{job_name}': {matrix_vars}")
+    
+    if not job_matrix_map:
+        print(f"[PASS 4] No matrix definitions found")
+        return nodes
+    
+    print(f"[PASS 4] Found {len(job_matrix_map)} jobs with matrix definitions")
+    
+    # Recursively expand nodes in the tree (including children)
+    def expand_node_recursive(node: TreeNodeVM) -> List[TreeNodeVM]:
+        """Recursively expand a node and its children."""
+        job_name = node.job_name or ""
+        
+        # Check if this job name contains template variables
+        template_pattern = r'\$\{\{\s*matrix\.(\w+(?:\.\w+)?)\s*\}\}'
+        matches = list(re.finditer(template_pattern, job_name))
+        
+        if not matches:
+            # No templates in this node, but recursively expand children
+            expanded_children = []
+            for child in (node.children or []):
+                expanded_children.extend(expand_node_recursive(child))
+            
+            # Return node with expanded children
+            if expanded_children != node.children:
+                return [TreeNodeVM(
+                    node_key=node.node_key,
+                    label_html=node.label_html,
+                    children=expanded_children,
+                    collapsible=node.collapsible,
+                    default_expanded=node.default_expanded,
+                    triangle_tooltip=node.triangle_tooltip,
+                    noncollapsible_icon=node.noncollapsible_icon,
+                    job_name=node.job_name,
+                    workflow_name=node.workflow_name,
+                    variant=node.variant,
+                )]
+            else:
+                return [node]
+        
+        # Find the base job name (without matrix suffix) to look up in job_matrix_map
+        base_job_name = re.sub(r'\s*\(\$\{\{[^}]+\}\}\)\s*$', '', job_name).strip()
+        
+        # Try to find matrix definition - try exact match first
+        matrix_def = job_matrix_map.get(job_name)
+        if not matrix_def:
+            # Try to find by matching
+            for key in job_matrix_map:
+                if key == job_name or key == base_job_name:
+                    matrix_def = job_matrix_map[key]
+                    break
+        
+        if not matrix_def:
+            print(f"[PASS 4]   Warning: No matrix found for job '{job_name}', keeping as-is")
+            return [node]
+        
+        # Extract variable names from templates
+        var_names = [m.group(1) for m in matches]
+        
+        # Get values for each variable
+        var_values_lists: List[List[str]] = []
+        for var_name in var_names:
+            if var_name in matrix_def:
+                var_values_lists.append(matrix_def[var_name])
+            else:
+                print(f"[PASS 4]   Warning: Variable '{var_name}' not found in matrix for '{job_name}'")
+                var_values_lists.append(["${{"+ f" matrix.{var_name} " + "}}"])  # Keep as template if not found
+        
+        # Generate all combinations (Cartesian product)
+        combinations = list(product(*var_values_lists))
+        
+        print(f"[PASS 4]   Expanding '{job_name}' into {len(combinations)} variants")
+        
+        # Create a node for each combination
+        expanded_nodes = []
+        for combo in combinations:
+            # Replace templates with actual values
+            expanded_job_name = job_name
+            expanded_label = node.label_html if node.label_html else ""
+            for var_name, value in zip(var_names, combo):
+                # Try with and without spaces in template
+                for template in [
+                    "${{" + f" matrix.{var_name} " + "}}",
+                    "${{" + f"matrix.{var_name}" + "}}"
+                ]:
+                    expanded_job_name = expanded_job_name.replace(template, value)
+                    expanded_label = expanded_label.replace(template, value)
+            
+            print(f"[PASS 4]     → {expanded_job_name}")
+            
+            # Clean up the label to avoid redundancy like "vllm (vllm (amd64))" → "vllm (amd64)"
+            # The label_html contains HTML, so we need to apply regex to the text content
+            import re as re_module
+            final_label = expanded_label
+            # Pattern: "abc (abc (xyz))" → "abc (xyz)"
+            # This works on the text inside the HTML tags
+            final_label = re_module.sub(
+                r'(\w+(?:-\w+)*)\s*\(\1\s*\(([^)]+)\)\)',
+                r'\1 (\2)',
+                final_label
+            )
+            
+            # Recursively expand children
+            expanded_children = []
+            for child in (node.children or []):
+                expanded_children.extend(expand_node_recursive(child))
+            
+            # Create new node with expanded name
+            expanded_node = TreeNodeVM(
+                node_key=node.node_key.replace(job_name, expanded_job_name) if job_name in node.node_key else node.node_key,
+                label_html=final_label,  # Use the simplified label
+                children=expanded_children,
+                collapsible=node.collapsible,
+                default_expanded=node.default_expanded,
+                triangle_tooltip=node.triangle_tooltip,
+                noncollapsible_icon=node.noncollapsible_icon,
+                job_name=expanded_job_name,
+                workflow_name=node.workflow_name,
+                variant=", ".join(combo) if combo else node.variant,
+            )
+            expanded_nodes.append(expanded_node)
+        
+        return expanded_nodes
+    
+    # Expand all root nodes and their children recursively
+    all_expanded: List[TreeNodeVM] = []
+    for node in nodes:
+        all_expanded.extend(expand_node_recursive(node))
+    
+    # Filter out nodes that still have unexpanded template variables
+    # These are nodes where we couldn't find matrix definitions
+    def has_template_vars(node: TreeNodeVM) -> bool:
+        """Check if node or its label still contains template variables."""
+        template_pattern = r'\$\{\{\s*matrix\.'
+        if re.search(template_pattern, node.job_name or ""):
+            return True
+        if re.search(template_pattern, node.label_html or ""):
+            return True
+        return False
+    
+    def filter_unexpanded(node: TreeNodeVM) -> Optional[TreeNodeVM]:
+        """Recursively filter out nodes with unexpanded templates."""
+        if has_template_vars(node):
+            print(f"[PASS 4]   Filtering out unexpanded node: {node.job_name}")
+            return None
+        
+        # Recursively filter children
+        filtered_children = []
+        for child in (node.children or []):
+            filtered_child = filter_unexpanded(child)
+            if filtered_child:
+                filtered_children.append(filtered_child)
+        
+        # Return node with filtered children
+        return TreeNodeVM(
+            node_key=node.node_key,
+            label_html=node.label_html,
+            children=filtered_children,
+            collapsible=node.collapsible,
+            default_expanded=node.default_expanded,
+            triangle_tooltip=node.triangle_tooltip,
+            noncollapsible_icon=node.noncollapsible_icon,
+            job_name=node.job_name,
+            workflow_name=node.workflow_name,
+            variant=node.variant,
+        )
+        
+    # Filter all nodes
+    filtered_nodes = []
+    for node in all_expanded:
+        filtered_node = filter_unexpanded(node)
+        if filtered_node:
+            filtered_nodes.append(filtered_node)
+    
+    print(f"[PASS 4] Expanded {len(nodes)} nodes to {len(all_expanded)} nodes, filtered to {len(filtered_nodes)} nodes")
+    return filtered_nodes
 
 
 def fetch_workflows_from_api_and_add_expected_checks_pass(
@@ -281,7 +1023,7 @@ def fetch_workflows_from_api_and_add_expected_checks_pass(
     owner: str = "ai-dynamo",
     repo: str = "dynamo",
 ) -> List[TreeNodeVM]:
-    """PASS 2: Fetch workflow information from GitHub API and add expected check nodes.
+    """PASS 3: Fetch workflow information from GitHub API and add expected check nodes.
     
     This pass:
     - Uses GitHub REST API to list workflows (/repos/{owner}/{repo}/actions/workflows)
@@ -303,29 +1045,29 @@ def fetch_workflows_from_api_and_add_expected_checks_pass(
     expected_nodes: List[TreeNodeVM] = []
     
     if github_api is None:
-        print("[PASS 2] No GitHub API client provided, skipping API workflow fetch")
+        print("[PASS 3] No GitHub API client provided, skipping API workflow fetch")
         return nodes
     
     try:
-        print(f"[PASS 2] Fetching workflows from GitHub API for {owner}/{repo}")
+        print(f"[PASS 3] Fetching workflows from GitHub API for {owner}/{repo}")
         
         # Fetch list of workflows
         workflows_url = f"https://api.github.com/repos/{owner}/{repo}/actions/workflows"
         workflows_resp = github_api._rest_get(workflows_url)
         
         if not workflows_resp or 'workflows' not in workflows_resp:
-            print(f"[PASS 2] No workflows found in API response")
+            print(f"[PASS 3] No workflows found in API response")
             return nodes
         
         workflows = workflows_resp.get('workflows', [])
-        print(f"[PASS 2] Found {len(workflows)} workflows from API")
+        print(f"[PASS 3] Found {len(workflows)} workflows from API")
         
         for workflow in workflows:
             workflow_name = workflow.get('name', 'Unknown')
             workflow_id = workflow.get('id')
             workflow_path = workflow.get('path', '')
             
-            print(f"[PASS 2]   Workflow: {workflow_name} (id={workflow_id}, path={workflow_path})")
+            print(f"[PASS 3]   Workflow: {workflow_name} (id={workflow_id}, path={workflow_path})")
             
             # Fetch a recent workflow run to get job names
             try:
@@ -333,12 +1075,12 @@ def fetch_workflows_from_api_and_add_expected_checks_pass(
                 runs_resp = github_api._rest_get(f"{runs_url}?per_page=1")
                 
                 if not runs_resp or 'workflow_runs' not in runs_resp:
-                    print(f"[PASS 2]     No runs found for workflow {workflow_name}")
+                    print(f"[PASS 3]     No runs found for workflow {workflow_name}")
                     continue
                 
                 runs = runs_resp.get('workflow_runs', [])
                 if not runs:
-                    print(f"[PASS 2]     No runs found for workflow {workflow_name}")
+                    print(f"[PASS 3]     No runs found for workflow {workflow_name}")
                     continue
                 
                 run_id = runs[0].get('id')
@@ -348,11 +1090,11 @@ def fetch_workflows_from_api_and_add_expected_checks_pass(
                 jobs_resp = github_api._rest_get(jobs_url)
                 
                 if not jobs_resp or 'jobs' not in jobs_resp:
-                    print(f"[PASS 2]     No jobs found for run {run_id}")
+                    print(f"[PASS 3]     No jobs found for run {run_id}")
                     continue
                 
                 jobs = jobs_resp.get('jobs', [])
-                print(f"[PASS 2]     Found {len(jobs)} jobs from API")
+                print(f"[PASS 3]     Found {len(jobs)} jobs from API")
                 
                 for job in jobs:
                     job_name = job.get('name', 'Unknown Job')
@@ -367,16 +1109,16 @@ def fetch_workflows_from_api_and_add_expected_checks_pass(
                         default_expanded=False,
                     )
                     expected_nodes.append(node)
-                    print(f"[PASS 2]       - Added expected check from API: {full_name}")
+                    print(f"[PASS 3]       - Added expected check from API: {full_name}")
                 
             except Exception as e:
-                print(f"[PASS 2]     Error fetching jobs for workflow {workflow_name}: {e}")
+                print(f"[PASS 3]     Error fetching jobs for workflow {workflow_name}: {e}")
                 continue
         
-        print(f"[PASS 2] Found {len(expected_nodes)} expected checks from API")
+        print(f"[PASS 3] Found {len(expected_nodes)} expected checks from API")
         
     except Exception as e:
-        print(f"[PASS 2] Error in API workflow fetch pass: {e}")
+        print(f"[PASS 3] Error in API workflow fetch pass: {e}")
         import traceback
         traceback.print_exc()
         return nodes
@@ -644,105 +1386,404 @@ def sort_by_name_pass(nodes: List[TreeNodeVM]) -> List[TreeNodeVM]:
     return result
 
 
+
+
+def create_dummy_nodes_from_yaml_pass(nodes: List[TreeNodeVM]) -> List[TreeNodeVM]:
+    """PASS 2: Create dummy nodes from YAML when no input nodes are provided.
+    
+    This pass is only used for debugging/visualization of the YAML structure.
+    If nodes are provided, they pass through unchanged.
+    If no nodes are provided AND YAML was parsed, creates minimal TreeNodeVM nodes
+    for all jobs found in the workflow files.
+    
+    Args:
+        nodes: Input nodes (may be empty)
+    
+    Returns:
+        Original nodes if non-empty, or dummy nodes created from YAML
+    """
+    if nodes:
+        return nodes
+    
+    if not _workflow_parent_child_mapping:
+        return nodes
+    
+    print("[PASS 2] Creating dummy nodes from YAML structure")
+    
+    # Collect all job names mentioned in the YAML
+    all_job_names = set()
+    for parent, children in _workflow_parent_child_mapping.items():
+        all_job_names.add(parent)
+        all_job_names.update(children)
+    
+    print(f"[PASS 2] Job-to-file mapping has {len(_workflow_job_to_file)} entries")
+    print(f"[PASS 2] Total unique job names from mapping: {len(all_job_names)}")
+    
+    # Debug: show first 10 entries
+    for i, (job_name, workflow_file) in enumerate(sorted(_workflow_job_to_file.items())):
+        if i < 10:
+            print(f"[PASS 2]   {job_name} -> {workflow_file}")
+    
+    # Helper function to format arch text with colors
+    def _format_arch_text_for_placeholder(text: str) -> str:
+        """Format job name with architecture colors and annotations."""
+        import html as html_module
+        raw = str(text or "")
+        # Detect arch token
+        m = re.search(r"\((arm64|aarch64|amd64)\)", raw, flags=re.IGNORECASE)
+        if not m:
+            return html_module.escape(raw)
+        
+        arch = str(m.group(1) or "").strip().lower()
+        # Determine color
+        if arch in {"arm64", "aarch64"}:
+            color = "#b8860b"  # Dark yellow/gold for arm64
+            # Normalize to "(arm64)" and append "; aarch64"
+            raw2 = re.sub(r"\(\s*(arm64|aarch64)\s*\)", "(arm64)", raw, flags=re.IGNORECASE)
+            raw2 = re.sub(r"\(\s*arm64\s*\)(?!\s*;\s*aarch64\b)", "(arm64); aarch64", raw2, flags=re.IGNORECASE)
+            return f'<span style="color: {color};">{html_module.escape(raw2)}</span>'
+        elif arch == "amd64":
+            color = "#0969da"  # Blue for amd64
+            raw2 = re.sub(r"\(\s*amd64\s*\)", "(amd64)", raw, flags=re.IGNORECASE)
+            raw2 = re.sub(r"\(\s*amd64\s*\)(?!\s*;\s*x86_64\b)", "(amd64); x86_64", raw2, flags=re.IGNORECASE)
+            return f'<span style="color: {color};">{html_module.escape(raw2)}</span>'
+        return html_module.escape(raw)
+    
+    # Create minimal TreeNodeVM for each job
+    skeleton_nodes = []
+    for job_name in sorted(all_job_names):
+        # Get job_id if available
+        job_id = _workflow_job_name_to_id.get(job_name, "")
+        
+        # Get workflow filename if available
+        workflow_file = _workflow_job_to_file.get(job_name, "")
+        
+        # Format: job_id (job_name) if they differ, otherwise just job_name
+        # job_id is in fixed-width font, job_name (description) is in normal font with gray color
+        # Apply arch formatting to get colors and "; aarch64" / "; x86_64" suffixes
+        if job_id and job_id != job_name:
+            formatted_job_id = _format_arch_text_for_placeholder(job_id)
+            display_text = f'<span style="font-family: monospace;">{formatted_job_id}</span> <span style="color: #57606a;">({job_name})</span>'
+        else:
+            formatted_job_name = _format_arch_text_for_placeholder(job_name)
+            display_text = f'<span style="font-family: monospace;">{formatted_job_name}</span>'
+        
+        # Add workflow file annotation with full path
+        if workflow_file:
+            file_path = f'.github/workflows/{workflow_file}'
+            file_annotation = f'<span style="color: #888;">[defined in {file_path}]</span>'
+        else:
+            file_annotation = '<span style="color: #888;">[defined in YAML]</span>'
+        
+        node = TreeNodeVM(
+            node_key=f"skeleton:{job_name}",
+            label_html=f'{display_text} {file_annotation}',
+            children=[],
+            collapsible=False,
+            default_expanded=False,
+            job_name=job_name,  # IMPORTANT: Set job_name for matching in PASS 1.2
+            workflow_name="",
+            variant="",
+        )
+        skeleton_nodes.append(node)
+    
+    print(f"[PASS 2] Created {len(skeleton_nodes)} dummy nodes from YAML")
+    return skeleton_nodes
+
+
+def convert_branch_nodes_to_tree_vm_pass(ci_nodes: List) -> List[TreeNodeVM]:
+    """PASS 1: Convert BranchNode objects to TreeNodeVM.
+    
+    Takes a list of BranchNode objects (from build_ci_nodes_from_pr or mock_build_ci_nodes)
+    and converts them to TreeNodeVM for rendering.
+    
+    Args:
+        ci_nodes: List of BranchNode objects for a single PR
+        
+    Returns:
+        List of TreeNodeVM objects representing actual CI info from GitHub
+    """
+    print(f"[PASS 1] Converting {len(ci_nodes)} BranchNode objects to TreeNodeVM")
+    
+    ci_info_nodes: List[TreeNodeVM] = []
+    for idx, ci_node in enumerate(ci_nodes):
+        try:
+            # Get PR number if available
+            pr_number = getattr(ci_node, 'pr_number', None)
+            
+            # Convert BranchNode to TreeNodeVM
+            node_vm = ci_node.to_tree_vm()
+            
+            # Get job name for debugging
+            from common_branch_nodes import CIJobTreeNode
+            if isinstance(ci_node, CIJobTreeNode):
+                job_id = getattr(ci_node, 'job_id', '')
+                status = getattr(ci_node, 'status', '')
+                print(f"[PASS 1]   [{idx}] {job_id} (status={status}, pr_number={pr_number})")
+            
+            ci_info_nodes.append(node_vm)
+        except Exception as e:
+            print(f"[PASS 1]   Error converting node {idx}: {e}")
+            import traceback
+            traceback.print_exc()
+    
+    print(f"[PASS 1] Converted {len(ci_info_nodes)} nodes to TreeNodeVM")
+    return ci_info_nodes
+
+
+def merge_ci_info_into_workflow_pass(
+    ci_info_nodes: List[TreeNodeVM],
+    workflow_nodes: List[TreeNodeVM],
+) -> List[TreeNodeVM]:
+    """PASS 6: Merge actual CI info with workflow structure.
+    
+    Takes the workflow structure (from YAML) and replaces placeholder nodes
+    with actual CI info nodes where matching job names exist.
+    
+    Example inputs:
+    
+    ci_info_nodes (from GitHub API - job names as reported by CI):
+        - "vllm (amd64)"                              [status=success, duration=1h16m, has log URL]
+        - "vllm (arm64)"                              [status=success, duration=23m, has log URL]
+        - "deploy-test-vllm (${{ matrix.profile }})"  [status=skipped, unexpanded name!]
+        - "changed-files"                             [status=success]
+        - "Build and Test - dynamo"                   [status=failure]
+    
+    workflow_nodes (from YAML after expansion - hierarchical with dependencies):
+        - backend-status-check
+            ├─ changed-files
+            ├─ vllm (amd64)                      [expanded from "vllm (${{ matrix.platform.arch }})"]
+            ├─ vllm (arm64)                      [expanded from "vllm (${{ matrix.platform.arch }})"]
+            ├─ sglang (amd64)
+            └─ sglang (arm64)
+        - dynamo-status-check
+            ├─ changed-files
+            └─ Build and Test - dynamo
+        - deploy-test-vllm (disagg_router)       [expanded from "deploy-test-vllm (${{ matrix.profile }})"]
+        - deploy-test-vllm (agg)                 [expanded from "deploy-test-vllm (${{ matrix.profile }})"]
+    
+    Merge process:
+        1. Match by job_name:
+           - "vllm (amd64)" CI matches workflow's "vllm (amd64)" → replace placeholder with real CI
+           - "changed-files" CI matches workflow's "changed-files" → replace placeholder with real CI
+           - "Build and Test - dynamo" CI matches workflow's → replace with real CI
+        
+        2. Unmatched (different names):
+           - "deploy-test-vllm (${{ matrix.profile }})" from CI doesn't match any expanded workflow node
+           - "deploy-test-vllm (disagg_router)" in workflow doesn't match the unexpanded CI name
+           → Keep the unmatched CI node as-is (append to results to preserve real CI data)
+        
+        3. Result structure (merged):
+           - backend-status-check [MERGED: real CI status/duration]
+               ├─ changed-files [MERGED: real CI]
+               ├─ vllm (amd64) [MERGED: real CI with status=success, duration=1h16m]
+               ├─ vllm (arm64) [MERGED: real CI with status=success, duration=23m]
+               ├─ sglang (amd64) [PLACEHOLDER: no matching CI]
+               └─ sglang (arm64) [PLACEHOLDER: no matching CI]
+           - dynamo-status-check [MERGED: real CI]
+               ├─ changed-files [MERGED: real CI]
+               └─ Build and Test - dynamo [MERGED: real CI with status=failure]
+           - deploy-test-vllm (disagg_router) [PLACEHOLDER: no matching CI]
+           - deploy-test-vllm (agg) [PLACEHOLDER: no matching CI]
+           - deploy-test-vllm (${{ matrix.profile }}) [UNMATCHED CI: kept as-is with real data]
+    
+    Args:
+        ci_info_nodes: Actual CI info from GitHub (flat list, job names as reported by CI)
+        workflow_nodes: Workflow structure from YAML (hierarchical, job names expanded)
+        
+    Returns:
+        Merged tree with actual CI info embedded in workflow structure + unmatched CI nodes appended
+    """
+    print(f"[PASS 6] Merging {len(ci_info_nodes)} CI info nodes into {len(workflow_nodes)} workflow nodes")
+    
+    # Build a lookup map: job_name -> CI info node
+    ci_lookup = {}
+    for idx, ci_node in enumerate(ci_info_nodes):
+        # Try to get job_name from the node, or extract from node_key
+        job_name = getattr(ci_node, 'job_name', '') or ''
+        
+        if not job_name:
+            # Extract job name from node_key (format: "ci:JOB_NAME:...")
+            node_key = getattr(ci_node, 'node_key', '') or ''
+            if node_key.startswith('ci:'):
+                parts = node_key.split(':', 2)
+                if len(parts) >= 2:
+                    job_name = parts[1]
+        
+        if idx < 5:  # Debug: show first 5 nodes
+            node_key = getattr(ci_node, 'node_key', '') or ''
+            print(f"[PASS 6]   CI node [{idx}]: extracted job_name='{job_name}'")
+        
+        if job_name:
+            ci_lookup[job_name] = ci_node
+            if idx < 10:  # Show first 10 indexed
+                print(f"[PASS 6]   Indexed: {job_name}")
+    
+    print(f"[PASS 6] Built lookup with {len(ci_lookup)} entries")
+    
+    # Track which CI nodes were matched
+    matched_ci_nodes = set()
+    
+    def merge_recursive(workflow_node: TreeNodeVM, depth: int = 0) -> TreeNodeVM:
+        """Recursively merge workflow structure with actual CI info."""
+        workflow_job_name = getattr(workflow_node, 'job_name', '') or ''
+        indent = "  " * depth
+        
+        if depth < 3:  # Debug: show first few levels
+            num_children = len(workflow_node.children or [])
+            print(f"[PASS 6] {indent}Processing: {workflow_job_name or '(no job_name)'} with {num_children} children")
+        
+        # First, recursively process children
+        merged_children = [merge_recursive(child, depth + 1) for child in (workflow_node.children or [])]
+        
+        # If we have actual CI info for this job, merge it WITH the workflow children
+        if workflow_job_name and workflow_job_name in ci_lookup:
+            actual_ci_node = ci_lookup[workflow_job_name]
+            matched_ci_nodes.add(workflow_job_name)  # Mark as matched
+            print(f"[PASS 6] {indent}✓ Merged: {workflow_job_name} (actual CI + {len(merged_children)} workflow children)")
+            
+            # Return the actual CI node BUT keep the workflow structure's children
+            # This preserves the hierarchy while using real CI status/duration
+            return TreeNodeVM(
+                node_key=actual_ci_node.node_key,
+                label_html=actual_ci_node.label_html,
+                children=merged_children,  # Use workflow children (recursively merged)
+                collapsible=actual_ci_node.collapsible,
+                default_expanded=actual_ci_node.default_expanded,
+                triangle_tooltip=actual_ci_node.triangle_tooltip,
+                noncollapsible_icon=actual_ci_node.noncollapsible_icon,
+                job_name=actual_ci_node.job_name,
+                workflow_name=actual_ci_node.workflow_name,
+                variant=actual_ci_node.variant,
+                pr_number=actual_ci_node.pr_number,
+            )
+        
+        # Otherwise, keep the workflow placeholder with its merged children
+        if depth < 3:
+            print(f"[PASS 6] {indent}○ Keeping placeholder: {workflow_job_name or '(no job_name)'}")
+        
+        return TreeNodeVM(
+            node_key=workflow_node.node_key,
+            label_html=workflow_node.label_html,
+            children=merged_children,
+            collapsible=workflow_node.collapsible,
+            default_expanded=workflow_node.default_expanded,
+            triangle_tooltip=workflow_node.triangle_tooltip,
+            noncollapsible_icon=workflow_node.noncollapsible_icon,
+            job_name=workflow_node.job_name,
+            workflow_name=workflow_node.workflow_name,
+            variant=workflow_node.variant,
+            pr_number=workflow_node.pr_number,
+        )
+    
+    merged_nodes = [merge_recursive(node) for node in workflow_nodes]
+    
+    # Add any CI nodes that weren't matched to the workflow
+    # These are real CI jobs that ran but don't have a definition in the YAML
+    # (or have unexpanded names that don't match the expanded workflow)
+    unmatched_ci = []
+    for job_name, ci_node in ci_lookup.items():
+        if job_name not in matched_ci_nodes:
+            print(f"[PASS 6] ⚠ Unmatched CI node (keeping as-is): {job_name}")
+            unmatched_ci.append(ci_node)
+    
+    if unmatched_ci:
+        print(f"[PASS 6] Appending {len(unmatched_ci)} unmatched CI nodes to preserve real CI data")
+        merged_nodes.extend(unmatched_ci)
+    
+    # VALIDATION: Check if status-check jobs have children
+    # Status check jobs (backend-status-check, dynamo-status-check, etc.) should always have children
+    # because they aggregate the results of their dependent jobs via the "needs:" field in YAML.
+    print(f"[PASS 6] Running validation for status-check jobs...")
+    
+    status_check_count = 0
+    def validate_status_check_children(nodes: List[TreeNodeVM], depth: int = 0) -> None:
+        """Recursively validate that status-check jobs have children."""
+        nonlocal status_check_count
+        indent = "  " * depth
+        for i, node in enumerate(nodes):
+            job_name = str(getattr(node, "job_name", "") or "")
+            
+            if "status-check" in job_name.lower():
+                status_check_count += 1
+                children = list(getattr(node, "children", None) or [])
+                if not children:
+                    print(f"[PASS 6] {indent}⚠️ ⚠️ ⚠️  WARNING: Status check job '{job_name}' has NO CHILDREN! ⚠️ ⚠️ ⚠️")
+                    print(f"[PASS 6] {indent}           This is a BUG - status checks should aggregate dependent jobs.")
+                    print(f"[PASS 6] {indent}           Expected children from YAML 'needs:' field (e.g., vllm, sglang, trtllm, operator)")
+                else:
+                    child_names = [str(getattr(c, "job_name", "") or "")[:30] for c in children if getattr(c, "job_name", "")]
+                    print(f"[PASS 6] {indent}✓ Status check '{job_name}' has {len(children)} children: {', '.join(child_names[:8])}")
+            
+            # Recurse into children (no depth limit - search the whole tree)
+            children = list(getattr(node, "children", None) or [])
+            if children:
+                validate_status_check_children(children, depth + 1)
+    
+    validate_status_check_children(merged_nodes)
+    print(f"[PASS 6] Validation complete. Found {status_check_count} status-check jobs.")
+    
+    print(f"[PASS 6] Merge complete, returning {len(merged_nodes)} root nodes")
+    return merged_nodes
+
+
 def process_ci_tree_passes(
-    nodes: List[TreeNodeVM],
+    ci_nodes: List,  # List[BranchNode] from common_branch_nodes
     repo_root: Path,
-    node_items: List[Tuple[str, TreeNodeVM]],
     github_api=None,
     owner: str = "ai-dynamo",
     repo: str = "dynamo",
     commit_sha: str = "",
+    attach_yaml_tree: bool = False,  # Disabled by default for now
 ) -> List[TreeNodeVM]:
     """
     Centralized CI tree node processing pipeline.
     
-    This pipeline transforms flat CI job lists with proper sorting and expansion state.
-    Passes execute in order:
-    
-    PASS 1: parse_workflow_files_and_add_expected_checks_pass()
-            - Parses .github/workflows/*.yml files
-            - Adds expected check placeholder nodes (◇ symbol)
-            - Helps identify missing checks before they run
-            - Uses commit_sha for per-commit node uniqueness
-    
-    PASS 2: fetch_workflows_from_api_and_add_expected_checks_pass()
-            - Fetches workflow information from GitHub API
-            - Adds expected check placeholder nodes (◇ symbol, blue color)
-            - Compares API data with YAML parsing from PASS 1
-    
-    PASS 3: mark_success_with_descendant_failures_pass()
-            - Changes success to warning for parents with failed children
-            - Helps identify successful parents that contain hidden failures
-    
-    PASS 4: expand_required_failure_descendants_pass()
-            - Auto-expands parent nodes that contain REQUIRED failures
-            - Ensures critical failures are visible by default
-    
-    PASS 5: expand_in_progress_descendants_pass()
-            - Auto-expands parent nodes that contain running/pending jobs
-            - Ensures active work is visible by default
-    
-    PASS 6: sort_by_name_pass()
-            - Sorts by the displayed text (e.g., "build: Build sglang")
-            - Applied to all levels (root + children)
-            - Preserves hierarchy, failure marking, and expansion state
-    
-    PASS 7: group_by_arch_pass()
-            - No-op (arch grouping removed)
-            - Kept for pipeline compatibility
-            - Arch colors (dark yellow for arm64, blue for amd64) applied during node creation
+    Simple orchestrator that calls passes in sequence.
+    NOTE: This function is called ONCE PER PR, not for all PRs at once.
     
     Args:
-        nodes: Initial list of TreeNodeVM nodes (may be empty if using node_items)
+        ci_nodes: List of BranchNode objects for a SINGLE PR (from build_ci_nodes_from_pr or mock_build_ci_nodes)
         repo_root: Path to the repository root (for .github/workflows/ parsing)
-        node_items: List of (name, TreeNodeVM) tuples
         github_api: Optional GitHubAPIClient for API-based workflow fetching
         owner: GitHub repository owner (default: ai-dynamo)
         repo: GitHub repository name (default: dynamo)
-        commit_sha: Commit SHA for per-commit node uniqueness (important for commit history)
+        commit_sha: Commit SHA for per-commit node uniqueness
+        attach_yaml_tree: Enable/disable YAML tree attachment (default: False for now)
     
     Returns:
-        Processed list of TreeNodeVM nodes
+        Processed list of TreeNodeVM nodes, optionally with canonical YAML tree attached.
     """
-    try:
-        # Start with flat list from node_items
-        children = [n for (_nm, n) in (node_items or [])]
-        
-        # PASS 1: parse workflow files and add expected checks (from YAML)
-        children = parse_workflow_files_and_add_expected_checks_pass(
-            list(children or []), 
-            repo_root,
-            commit_sha=commit_sha,
-        )
-        
-        # PASS 2: fetch workflows from API and add expected checks
-        children = fetch_workflows_from_api_and_add_expected_checks_pass(
-            list(children or []), 
-            repo_root,
-            github_api=github_api,
-            owner=owner,
-            repo=repo,
-        )
-        
-        # PASS 3: mark success with descendant failures
-        # children = mark_success_with_descendant_failures_pass(list(children or []))
-        
-        # PASS 4: expand nodes with required failure descendants
-        # children = expand_required_failure_descendants_pass(list(children or []))
-        
-        # PASS 5: expand nodes with in-progress descendants
-        # children = expand_in_progress_descendants_pass(list(children or []))
-        
-        # PASS 6: sort tree by name
-        # children = sort_by_name_pass(list(children or []))
-        
-        # PASS 7: group tree by arch (no-op)
-        # children = group_by_arch_pass(list(children or []))
-        
-        return children
-    except Exception:
-        # Fallback to original nodes if pipeline fails
-        return nodes or [n for (_nm, n) in (node_items or [])]
+    print(f"[process_ci_tree_passes] Starting with {len(ci_nodes)} CI nodes (per-PR)")
+    print(f"[process_ci_tree_passes] attach_yaml_tree={attach_yaml_tree}")
+    
+    # PASS 1: Convert BranchNode to TreeNodeVM (actual CI info from GitHub)
+    ci_info_nodes = convert_branch_nodes_to_tree_vm_pass(ci_nodes)
+    
+    # If YAML tree attachment is disabled, return early
+    if not attach_yaml_tree:
+        print(f"[process_ci_tree_passes] YAML tree attachment disabled; returning {len(ci_info_nodes)} nodes")
+        return ci_info_nodes
+    
+    # PASS 2: Parse workflow YAML and build mapping
+    # TODO: This should be cached since it's the same for all PRs
+    parse_workflow_yaml_and_build_mapping_pass([], repo_root, commit_sha=commit_sha)
+    
+    # PASS 3: Create dummy nodes from YAML
+    workflow_nodes = create_dummy_nodes_from_yaml_pass([])
+    
+    # PASS 4: Build hierarchy from mapping
+    workflow_nodes = build_hierarchy_from_mapping_pass(workflow_nodes)
+    
+    # PASS 5: Expand matrix templates
+    workflow_nodes = expand_matrix_templates_pass(workflow_nodes, repo_root)
+    
+    print(f"[PASS 2-5] Built workflow structure with {len(workflow_nodes)} root nodes (from YAML)")
+    
+    # PASS 6: Merge actual CI info into workflow structure
+    merged_nodes = merge_ci_info_into_workflow_pass(ci_info_nodes, workflow_nodes)
+    
+    return merged_nodes
 
 
 def _hash10(s: str) -> str:
@@ -897,25 +1938,14 @@ def render_tree_divs(root_nodes: List[TreeNodeVM]) -> str:
         """
         nonlocal last_reference_text
         
-        # Check for deduplication
-        should_dedup = not getattr(node, 'skip_dedup', False)
+        # Check for circular reference (would cause infinite recursion)
         node_key = str(node.node_key or "")
-        
-        if should_dedup and node_key and node_key in displayed_nodes:
-            # Duplicate node - show reference
-            ref_text = 'node'  # Simplified for now
-            if last_reference_text == ref_text:
-                return ""
-            ref_html = f'<span style="color: #57606a; font-size: 12px;">↑ {html.escape(ref_text)} (see above)</span>'
-            last_reference_text = ref_text
-            return f'<li class="leaf">{ref_html}</li>\n'
+        if node_key and node_key in node_key_path:
+            # Circular reference - skip to prevent infinite recursion
+            return ""
         
         # Reset last reference text when rendering actual node
         last_reference_text = None
-        
-        # Store node for deduplication
-        if node_key:
-            displayed_nodes[node_key] = node.label_html or ""
         
         has_children = node.collapsible and node.children
         
@@ -1044,64 +2074,14 @@ def render_tree_pre_lines(root_nodes: List[TreeNodeVM]) -> List[str]:
     ) -> None:
         nonlocal last_reference_text
         
-        # Check if this node should be deduplicated
-        # Skip deduplication for certain node types (CommitMessageNode, MetadataNode)
-        should_dedup = not getattr(node, 'skip_dedup', False)
-        
-        # Check if this node was already displayed (duplicate/shared child)
+        # Check for circular reference (would cause infinite recursion)
         node_key = str(node.node_key or "")
-        if should_dedup and node_key and node_key in displayed_nodes:
-            # Subsequent occurrence: render as text-only reference
-            if not is_root:
-                connector = "└─" if is_last else "├─"
-                current_prefix = prefix + connector + " "
-            else:
-                current_prefix = ""
-            
-            # Extract the display name from the stored first occurrence
-            first_label = displayed_nodes[node_key]
-            # Try to extract job name from the stored HTML
-            import re
-            ref_text = str(getattr(node, 'job_id', '') or getattr(node, 'label', '') or '')
-            # If that's empty, try to parse it from the HTML - look for the monospace font span
-            if not ref_text and first_label:
-                # Extract text from <span style="font-family: SFMono-Regular...">job_name</span>
-                match = re.search(r'<span style="font-family:\s*SFMono-Regular[^"]*">([^<]+)</span>', first_label)
-                if match:
-                    ref_text = match.group(1).strip()
-                # If that didn't work, try simpler pattern
-                if not ref_text:
-                    # Look for any span with substantial text (not just symbols)
-                    matches = re.findall(r'<span[^>]*>([^<]+)</span>', first_label)
-                    for m in matches:
-                        text = m.strip()
-                        # Skip if it's just symbols or very short
-                        if len(text) > 3 and not all(c in '✓✗◇×⚠' for c in text):
-                            ref_text = text
-                            break
-            if not ref_text:
-                ref_text = 'node'
-            
-            # Check if this exact reference text was just shown (consecutive duplicate)
-            if last_reference_text == ref_text:
-                # Skip consecutive duplicates with the same reference text
-                return
-            
-            ref_html = f'<span style="display: inline-block; width: 12px; margin-right: 2px;"></span><span style="color: #57606a; font-size: 12px;">↑ {ref_text} (see above)</span>'
-            out.append(current_prefix + ref_html)
-            # Mark this reference text as the last one shown
-            last_reference_text = ref_text
+        if node_key and node_key in node_key_path:
+            # Circular reference - skip to prevent infinite recursion
             return
         
-        # This is not a reference, so reset last_reference_text tracking
-        # But ONLY reset if we actually render something (to preserve tracking across non-rendered nodes)
-        
-        # First occurrence: track it and render normally
-        if node_key:
-            # Store both the HTML and the display name for reference
-            displayed_nodes[node_key] = node.label_html or ""
-            # Reset last reference text when we render a full node
-            last_reference_text = None
+        # Reset last reference text when rendering actual node
+        last_reference_text = None
         
         # Tree connector
         if not is_root:
