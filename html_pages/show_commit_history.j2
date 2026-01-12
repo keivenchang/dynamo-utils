@@ -1077,7 +1077,7 @@ window.__dashboardOnReadyQueue.push(function() {
                     style="padding: 0 6px; height: 18px; line-height: 16px; font-size: 14px; border: 1px solid #d0d7de; border-radius: 999px; background: #ffffff; color: #57606a; cursor: pointer;"
                     title="Close GitHub checks">×</button>
           </div>
-          <pre style="margin: 0; padding: 0 0 0 14px; background: transparent; border: 0; border-radius: 0; overflow: visible; white-space: pre-wrap; overflow-wrap: anywhere; font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace; font-size: 12px; line-height: 1;">{{ commit.github_checks_tree_html | safe }}</pre>
+          <div style="margin: 0; padding: 0 0 0 14px;">{{ commit.github_checks_tree_html | safe }}</div>
 </div>
 </td>
 </tr>
@@ -1094,7 +1094,7 @@ window.__dashboardOnReadyQueue.push(function() {
                     style="padding: 0 6px; height: 18px; line-height: 16px; font-size: 14px; border: 1px solid #d0d7de; border-radius: 999px; background: #ffffff; color: #57606a; cursor: pointer;"
                     title="Close GitLab pipeline">×</button>
           </div>
-          <pre style="margin: 0; padding: 0 0 0 14px; background: transparent; border: 0; border-radius: 0; overflow: visible; white-space: pre-wrap; overflow-wrap: anywhere; font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace; font-size: 12px; line-height: 1;">{{ commit.gitlab_checks_tree_html | safe }}</pre>
+          <div style="margin: 0; padding: 0 0 0 14px;">{{ commit.gitlab_checks_tree_html | safe }}</div>
 </div>
 </td>
 </tr>

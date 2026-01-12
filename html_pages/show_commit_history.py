@@ -48,7 +48,7 @@ from common_dashboard_lib import (
     compact_ci_summary_html,
     disambiguate_check_run_name,
     extract_actions_job_id_from_url,
-    render_tree_pre_lines,
+    render_tree_divs,
     required_badge_html,
     mandatory_badge_html,
     status_icon_html,
@@ -1462,16 +1462,15 @@ class CommitHistoryGenerator:
                             node_key=f"gha-empty:{sha_full}",
                             label_html='<span style="color: #57606a; font-size: 12px;">(no check data cached/fetched for this SHA)</span>',
                             children=[],
-                            collapsible=True,
-                            default_expanded=False,
+                            collapsible=False,
                         )
                     ],
-                    collapsible=False,
-                    noncollapsible_icon="square",
+                    collapsible=True,
+                    default_expanded=True,
                     triangle_tooltip="GitHub checks",
                 )
-                # Add a trailing blank line to visually separate the expanded block from the next row's SHA.
-                return ("\n".join(render_tree_pre_lines([root])).rstrip() + "\n\n")
+                # Return the div-based tree HTML
+                return render_tree_divs([root])
             # Always allow raw-log fetch when missing (subject to `common.py` rules: only cache when
             # job status is completed; size caps; etc).
             allow_raw_logs = True
@@ -1501,7 +1500,10 @@ class CommitHistoryGenerator:
                 except Exception:
                     pass
 
-            node_items: List[Tuple[str, TreeNodeVM]] = []
+            # Build CIJobNode objects (not TreeNodeVM) so run_all_passes can process them
+            from common_branch_nodes import CIJobNode  # local import
+            
+            ci_job_nodes: List[CIJobNode] = []
             for cr in check_runs:
                 if not isinstance(cr, dict):
                     continue
@@ -1515,6 +1517,8 @@ class CommitHistoryGenerator:
                 dur = "" if is_expected_placeholder else format_gh_check_run_duration(cr)
 
                 raw_href = ""
+                raw_size = 0
+                snippet = ""
                 if st == "failure" and str(cr.get("status", "") or "").lower() == "completed":
                     allow_fetch = bool(allow_raw_logs) and int(raw_log_prefetch_budget.get("n", 0) or 0) > 0
                     try:
@@ -1536,137 +1540,51 @@ class CommitHistoryGenerator:
                     if allow_fetch:
                         raw_log_prefetch_budget["n"] = int(raw_log_prefetch_budget.get("n", 0) or 0) - 1
 
-                raw_size = 0
                 if raw_href:
                     try:
                         raw_size = int((Path(self.repo_path) / raw_href).stat().st_size)
                     except Exception:
                         raw_size = 0
-                snippet = snippet_for_raw_href(raw_href) if raw_href else ""
+                    snippet = snippet_for_raw_href(raw_href) if raw_href else ""
 
-                # Optional failures: keep the leaf status as "failure",
-                # but do not treat it as a required failure for rollups.
-                required_failure = bool(is_req and st == "failure")
-                st_eff = st
+                # Disambiguate name if there are duplicates (adds [job ID] suffix)
+                disambiguated_name = disambiguate_check_run_name(name, url, name_counts=name_counts)
 
-                kind = classify_ci_kind(name)
-                job_id = f"{kind}: {name}" if kind and kind != "check" else name
+                # Create CIJobNode with minimal fields - let run_all_passes handle the rest
+                node = CIJobNode(
+                    job_id=disambiguated_name,  # Use disambiguated name with [job ID] if duplicate
+                    display_name=name,  # Keep original name for YAML matching
+                    status=st,
+                    duration=dur,
+                    log_url=url,
+                    is_required=is_req,
+                    children=[],
+                    page_root_dir=Path(self.repo_path),
+                    context_key=f"{sha_full}:{name}",
+                    github_api=self.github_client,
+                    raw_log_href=raw_href,
+                    raw_log_size_bytes=raw_size,
+                    error_snippet_text=snippet,
+                )
+                # Set core_job_name for YAML matching (same pattern as build_ci_nodes_from_pr)
+                node.core_job_name = name  # Original name without disambiguation
+                ci_job_nodes.append(node)
 
-                # Shared subsections:
-                # - Build and Test - dynamo: phases (a special-case subsection; steps API)
-                # - other long-running Actions jobs: long steps (>= 30s)
-                subsection_children: List[TreeNodeVM] = []
-                try:
-                    from common_dashboard_lib import ci_subsection_tuples_for_job  # local import
-                    from common_dashboard_lib import step_window_snippet_from_cached_raw_log  # local import
-
-                    dur_s = _duration_str_to_seconds(str(dur or ""))
-                    raw_path_for_sub = (Path(self.repo_path) / raw_href) if raw_href else None
-                    sub3 = ci_subsection_tuples_for_job(
-                        github_api=self.github_client,
-                        job_name=name,
-                        job_url=url,
-                        raw_log_path=raw_path_for_sub,
-                        duration_seconds=float(dur_s or 0.0),
-                        is_required=bool(is_req),
-                        long_job_threshold_s=10.0 * 60.0,
-                        step_min_s=30.0,
-                    )
-
-                    for (sub_name, sub_dur, sub_status) in (sub3 or []):
-                        if name == "Build and Test - dynamo":
-                            kind2 = classify_ci_kind(str(sub_name))
-                            sub_id = f"{kind2}: {sub_name}" if kind2 and kind2 != "check" else str(sub_name)
-                            node_key = f"gha-phase:{sha_full}:{sub_name}"
-                        else:
-                            sub_id = str(sub_name)
-                            node_key = f"gha-step:{sha_full}:{name}:{sub_name}"
-
-                        # If this is a failing step, try to scope the snippet to the step window.
-                        step_snip = ""
-                        try:
-                            if name != "Build and Test - dynamo" and str(sub_status or "") == "failure" and raw_path_for_sub:
-                                jid = extract_actions_job_id_from_url(url)
-                                job_det = (
-                                    self.github_client.get_actions_job_details_cached(
-                                        owner="ai-dynamo", repo="dynamo", job_id=jid, ttl_s=7 * 24 * 3600
-                                    )
-                                    if jid
-                                    else None
-                                )
-                                if isinstance(job_det, dict):
-                                    step_snip = step_window_snippet_from_cached_raw_log(
-                                        job=job_det, step_name=str(sub_name), raw_log_path=raw_path_for_sub
-                                    )
-                        except Exception:
-                            step_snip = ""
-
-                        subsection_children.append(
-                            TreeNodeVM(
-                                node_key=node_key,
-                                label_html=check_line_html(
-                                    job_id=sub_id,
-                                    display_name="",
-                                    status_norm=str(sub_status or "unknown"),
-                                    is_required=is_req,
-                                    duration=str(sub_dur or ""),
-                                    log_url=url,
-                                    error_snippet_text=str(step_snip or ""),
-                                ),
-                                children=[],
-                                collapsible=True,
-                                default_expanded=False,
-                            )
-                        )
-                except Exception:
-                    subsection_children = []
-
-                leaf_name = disambiguate_check_run_name(name, url, name_counts=name_counts)
-                disp = ""
-                try:
-                    if is_expected_placeholder:
-                        disp = str(cr.get("_expected_placeholder_symbol") or "")
-                except Exception:
-                    disp = ""
-                node = TreeNodeVM(
-                        node_key=f"gha:{sha_full}:{leaf_name}:{extract_actions_job_id_from_url(url) or url}",
-                        label_html=check_line_html(
-                            job_id=job_id if leaf_name == name else f"{job_id} [{leaf_name}]",
-                            display_name=str(disp or ""),
-                            status_norm=st_eff,
-                            is_required=is_req,
-                            duration=dur,
-                            log_url=url,
-                            raw_log_href=raw_href,
-                            raw_log_size_bytes=int(raw_size or 0),
-                            error_snippet_text=snippet,
-                            required_failure=required_failure,
-                            warning_present=False,
-                        ),
-                        children=subsection_children,
-                        collapsible=True,
-                        default_expanded=_subtree_needs_attention(node=None, rollup_status=st, has_required_failure=required_failure),  # type: ignore[arg-type]
-                    )
-                node_items.append((name, node))
-
-            # Use centralized CI tree processing pipeline
+            # Use centralized CI tree processing pipeline - it handles YAML augmentation, grouping, sorting
             children: List[TreeNodeVM]
             try:
-                from common_dashboard_lib import run_all_passes, create_dummy_nodes_from_yaml_pass
-                
-                # If no CI nodes, create dummy nodes from YAML for visualization
-                if not node_items:
-                    print("[CommitStatusNode] No CI nodes, creating dummy nodes from YAML")
-                    dummy_nodes = create_dummy_nodes_from_yaml_pass([])
-                    node_items = [(node.node_key, node) for node in dummy_nodes]
+                from common_dashboard_lib import run_all_passes
                 
                 children = run_all_passes(
-                    ci_nodes=[n for (nm, n) in (node_items or [])],
+                    ci_nodes=ci_job_nodes,
                     repo_root=Path(repo_path),
                     commit_sha=sha_full,
                 )
-            except Exception:
-                children = [n for (_nm, n) in (node_items or [])]
+            except Exception as e:
+                import logging
+                logging.getLogger(__name__).warning(f"run_all_passes failed for {sha_full[:7]}: {e}")
+                # Fallback: convert CI nodes to TreeVM directly
+                children = [node.to_tree_vm() for node in ci_job_nodes]
 
             root = TreeNodeVM(
                 node_key=f"gha-root:{sha_full}",
@@ -1676,12 +1594,12 @@ class CommitHistoryGenerator:
                     f'target="_blank" style="color: #0969da; font-size: 11px; text-decoration: none;">[checks]</a>'
                 ),
                 children=children,
-                collapsible=False,
-                noncollapsible_icon="square",
+                collapsible=True,
+                default_expanded=True,
                 triangle_tooltip="GitHub checks",
             )
-            # Add a trailing blank line to visually separate the expanded block from the next row's SHA.
-            return ("\n".join(render_tree_pre_lines([root])).rstrip() + "\n\n")
+            # Return the div-based tree HTML
+            return render_tree_divs([root])
 
         def _build_gitlab_checks_tree_html(*, sha_full: str, sha_short: str) -> str:
             nodes: List[TreeNodeVM] = []
@@ -1764,11 +1682,11 @@ class CommitHistoryGenerator:
                         f'<span style="color: #57606a; font-size: 12px;">({html.escape(status)})</span>'
                     ),
                     children=children,
-                    collapsible=False,
-                    noncollapsible_icon="square",
+                    collapsible=True,
+                    default_expanded=True,
                     triangle_tooltip="GitLab pipeline jobs",
                 )
-                return ("\n".join(render_tree_pre_lines([root])).rstrip() + "\n")
+                return render_tree_divs([root])
 
             # Always return a placeholder tree so the GitLab dropdown doesn't disappear.
             root = TreeNodeVM(
@@ -1783,15 +1701,14 @@ class CommitHistoryGenerator:
                         node_key=f"gl-empty:{sha_full}",
                         label_html='<span style="color: #57606a; font-size: 12px;">(no pipeline/job data found or cached for this SHA)</span>',
                         children=[],
-                        collapsible=True,
-                        default_expanded=False,
+                        collapsible=False,
                     )
                 ],
-                collapsible=False,
-                noncollapsible_icon="square",
+                collapsible=True,
+                default_expanded=True,
                 triangle_tooltip="GitLab pipeline (if available)",
             )
-            return ("\n".join(render_tree_pre_lines([root])).rstrip() + "\n")
+            return render_tree_divs([root])
 
         # Attach per-commit trees to commit dictionaries for the template to embed (split GH vs GL).
         #

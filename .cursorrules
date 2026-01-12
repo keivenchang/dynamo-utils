@@ -147,10 +147,11 @@ DO NOT use these BS words in docs/comments:
 
 ### 2.3.1 Command Chaining
 - Chain multiple commands in one go whenever possible using && or ;
-- Use parentheses for grouping: (a && b); (c || d)
+- Use parentheses for grouping, like this: (command1 && command2); (command3 || command4)
 - Examples:
-  - cd dir && command
-  - cmd1; cmd2; cmd3
+  - (cd dir && command1 && echo "=====" && command2 && echo "=====" && ...)
+  - (grep keyword1 file && echo "=====" && grep keyword2 file && echo =====" && grep keyword3 file && ...)
+  - command1; must_run_command2; must_run_command3
   - (cd dir1 && cargo fmt); (cd dir2 && cargo fmt)
 - Reduces latency and improves efficiency
 - Be careful with shell quoting in long one-liners (especially nested quotes). Prefer simpler, verifiable commands (or write a small script) over clever quoting.
