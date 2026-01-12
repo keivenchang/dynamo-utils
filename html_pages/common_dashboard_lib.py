@@ -184,6 +184,7 @@ class TreeNodeVM:
     skip_dedup: bool = False
     job_name: str = ""  # CI job name for hierarchy matching (e.g., "backend-status-check")
     core_job_name: str = ""  # Core job name without workflow prefix/event suffix for matching
+    short_job_name: str = ""  # Short YAML job name (e.g., "build-test") from augmentation
     workflow_name: str = ""  # Workflow this job belongs to (e.g., "container-validation-backends")
     variant: str = ""  # Optional variant (e.g., "amd64", "arm64") for matrix jobs
     pr_number: Optional[int] = None  # PR number for building CI nodes (negative = dummy PR)
@@ -307,7 +308,13 @@ def parse_workflow_yaml_and_build_mapping_pass(
     
     print(f"[PASS 1] Found {len(_workflow_parent_child_mapping)} parent-child relationships")
     print(f"[PASS 1] Returning {len(flat_nodes)} nodes (unchanged, will be connected in PASS 3)")
-    return flat_nodes
+    
+    # Return the populated mappings along with the nodes
+    return flat_nodes, {
+        'parent_child_mapping': dict(_workflow_parent_child_mapping),
+        'job_name_to_id': dict(_workflow_job_name_to_id),
+        'job_to_file': dict(_workflow_job_to_file),
+    }
 
 
 # Global to store the parent-child mapping from PASS 1.1
@@ -1818,32 +1825,32 @@ def run_all_passes(
         logger.info(f"[run_all_passes] YAML tree attachment disabled; returning {len(ci_info_nodes)} nodes")
         return ci_info_nodes
     
-    # COMMENTED OUT: YAML merge approach (keeping for reference in case we want to revert)
-    # # PHASE A: Build canonical YAML tree (independent of actual CI jobs)
-    # # These passes populate global mappings (_workflow_parent_child_mapping, _workflow_job_name_to_id, _workflow_job_to_file)
-    # parse_workflow_yaml_and_build_mapping_pass([], repo_root, commit_sha=commit_sha) # PASS 2
-    # workflow_nodes = create_dummy_nodes_from_yaml_pass([]) # PASS 3
-    # workflow_nodes = build_hierarchy_from_mapping_pass(workflow_nodes) # PASS 4
-    # workflow_nodes = expand_matrix_templates_pass(workflow_nodes, repo_root) # PASS 5
-    # logger.info(f"[PASS 2-5] Built workflow structure with {len(workflow_nodes)} root nodes (from YAML)")
-    # 
-    # # PASS 6: Merge actual CI info into the workflow structure
-    # merged_nodes = merge_ci_info_into_workflow_pass(ci_info_nodes, workflow_nodes)
-    # # Note: merge_ci_info_into_workflow_pass already calls validate_status_check_children
+    # PASS 2: Parse YAML workflows to build mappings (job names, dependencies, etc.)
+    # This populates global mappings and returns them for use in subsequent passes
+    _, yaml_mappings = parse_workflow_yaml_and_build_mapping_pass([], repo_root, commit_sha=commit_sha)
     
-    # NEW APPROACH: Ad-hoc grouping of specific jobs
-    # PASS 2: Group backend jobs (vllm, sglang, trtllm, operator) under backend-status-check
-    # PASS 3: Group deploy-* jobs under deploy stage
-    grouped_nodes = group_backend_jobs_pass(ci_info_nodes)
-    grouped_nodes = group_jobs_by_prefix_pass(grouped_nodes, prefix="deploy-", parent_name="deploy", parent_label="deploy")
+    # PASS 3: Augment CI nodes with YAML information (short names, dependencies)
+    augmented_nodes = augment_ci_with_yaml_info_pass(ci_nodes, yaml_mappings)
     
-    # PASS 4: Sort nodes by name
+    # PASS 4-7: Move jobs under parent nodes
+    grouped_nodes = augmented_nodes
+    grouped_nodes = move_jobs_by_prefix_pass(grouped_nodes, prefix="vllm", parent_name="backend-status-check", parent_label="backend-status-check")
+    grouped_nodes = move_jobs_by_prefix_pass(grouped_nodes, prefix="sglang", parent_name="backend-status-check", parent_label="backend-status-check")
+    grouped_nodes = move_jobs_by_prefix_pass(grouped_nodes, prefix="trtllm", parent_name="backend-status-check", parent_label="backend-status-check")
+    grouped_nodes = move_jobs_by_prefix_pass(grouped_nodes, prefix="operator", parent_name="backend-status-check", parent_label="backend-status-check")
+    grouped_nodes = move_jobs_by_prefix_pass(grouped_nodes, prefix="deploy-", parent_name="deploy", parent_label="deploy")
+    grouped_nodes = move_jobs_by_prefix_pass(grouped_nodes, prefix="build-test", parent_name="dynamo-status-check", parent_label="dynamo-status-check")
+    
+    # PASS 8: Sort nodes by name
     sorted_nodes = sort_nodes_by_name_pass(grouped_nodes)
     
-    # PASS 5: Expand nodes with required failures in descendants
+    # PASS 9: Expand nodes with required failures in descendants
     final_nodes = expand_required_failure_descendants_pass(sorted_nodes)
     
-    logger.info(f"[PASS 2-5] Ad-hoc grouping, sort, and expand complete, returning {len(final_nodes)} root nodes")
+    # PASS 10: Verify the final tree structure
+    verify_tree_structure_pass(final_nodes, ci_nodes)
+    
+    logger.info(f"[PASS 2-10] YAML parse, augment, group, sort, expand, and verify complete, returning {len(final_nodes)} root nodes")
     return final_nodes
 
 
@@ -1897,124 +1904,212 @@ def annotate_nodes_with_dependencies_pass(nodes: List[TreeNodeVM]) -> List[TreeN
     return annotated_nodes
 
 
-def group_backend_jobs_pass(nodes: List[TreeNodeVM]) -> List[TreeNodeVM]:
-    """PASS 2: Group backend jobs (vllm, sglang, trtllm, operator) under backend-status-check.
+def augment_ci_with_yaml_info_pass(
+    original_ci_nodes: List,  # List[BranchNode] - original CIJobNode objects
+    yaml_mappings: Dict[str, Dict],  # Mappings from YAML parsing
+) -> List[TreeNodeVM]:
+    """PASS 3: Augment CI nodes with YAML information (short names, dependencies).
     
-    This pass finds:
-    - backend-status-check (becomes the parent)
-    - vllm, sglang, trtllm, operator jobs (all variants)
-    
-    And groups them under backend-status-check.
+    This pass builds a mapping from long check name to short YAML job_id,
+    then updates each CIJobNode with short_job_name and yaml_dependencies.
     
     Args:
-        nodes: List of TreeNodeVM nodes (root level)
+        original_ci_nodes: Original CIJobNode objects (before conversion to TreeNodeVM)
+        yaml_mappings: Dict with keys 'parent_child_mapping', 'job_name_to_id', 'job_to_file'
         
     Returns:
-        List of TreeNodeVM nodes with backend jobs grouped under backend-status-check
+        List of TreeNodeVM nodes with augmented information
     """
     import logging
     logger = logging.getLogger(__name__)
     
-    logger.info(f"[PASS 2] Grouping backend jobs (processing {len(nodes)} root nodes)")
+    logger.info(f"[PASS 3] Augmenting {len(original_ci_nodes)} CI nodes with YAML info")
     
-    # Find backend-status-check and backend jobs
-    backend_status_check = None
-    backend_jobs = []
-    other_jobs = []
+    # Extract mappings
+    parent_child_mapping = yaml_mappings.get('parent_child_mapping', {})
+    job_name_to_id = yaml_mappings.get('job_name_to_id', {})
     
-    backend_job_prefixes = ['vllm', 'sglang', 'trtllm', 'operator']
+    # Build a hash map: long_name (from check) -> (short_name, dependencies)
+    # The job_name_to_id has keys like "Build and Test - dynamo" and values like "build-test"
+    long_to_short = {}
+    for yaml_job_name, yaml_job_id in job_name_to_id.items():
+        # yaml_job_name is the 'name:' field from YAML (e.g., "Build and Test - dynamo")
+        # yaml_job_id is the job key from YAML (e.g., "build-test")
+        dependencies = parent_child_mapping.get(yaml_job_name, [])
+        long_to_short[yaml_job_name] = (yaml_job_id, dependencies)
+        logger.debug(f"[PASS 3] Mapping: '{yaml_job_name}' -> '{yaml_job_id}'")
     
-    for node in nodes:
-        job_name = str(getattr(node, "job_name", "") or "")
-        
-        if job_name == "backend-status-check":
-            backend_status_check = node
-        elif any(job_name.startswith(prefix) for prefix in backend_job_prefixes):
-            backend_jobs.append(node)
-        else:
-            other_jobs.append(node)
+    logger.info(f"[PASS 3] Built mapping with {len(long_to_short)} entries")
     
-    if not backend_jobs:
-        logger.info(f"[PASS 2] No backend jobs found, returning nodes unchanged")
-        return nodes
+    # Traverse through each CI node and update
+    from common_branch_nodes import CIJobNode
+    augmented_count = 0
+    for node in original_ci_nodes:
+        if isinstance(node, CIJobNode) and hasattr(node, 'core_job_name'):
+            core_name = node.core_job_name
+            
+            # Direct lookup in the hash map
+            if core_name in long_to_short:
+                short_name, dependencies = long_to_short[core_name]
+                node.short_job_name = short_name
+                node.yaml_dependencies = dependencies
+                augmented_count += 1
+                logger.debug(f"[PASS 3] Augmented '{core_name}' -> short='{short_name}', deps={dependencies}")
+            else:
+                logger.debug(f"[PASS 3] No match for '{core_name}'")
     
-    logger.info(f"[PASS 2] Found {len(backend_jobs)} backend jobs to group")
+    logger.info(f"[PASS 3] Augmented {augmented_count}/{len(original_ci_nodes)} CI nodes with YAML info")
     
-    if backend_status_check:
-        # Add backend jobs as children to existing backend-status-check
-        logger.info(f"[PASS 2] Adding {len(backend_jobs)} backend jobs to existing backend-status-check")
-        existing_children = list(getattr(backend_status_check, "children", None) or [])
-        combined_children = existing_children + backend_jobs
-        
-        updated_backend_status_check = TreeNodeVM(
-            node_key=backend_status_check.node_key,
-            label_html=backend_status_check.label_html,
-            children=combined_children,
-            collapsible=True,
-            default_expanded=backend_status_check.default_expanded,
-            triangle_tooltip=backend_status_check.triangle_tooltip,
-            noncollapsible_icon=backend_status_check.noncollapsible_icon,
-            job_name=backend_status_check.job_name,
-            core_job_name=backend_status_check.core_job_name,
-            workflow_name=backend_status_check.workflow_name,
-            variant=backend_status_check.variant,
-            pr_number=backend_status_check.pr_number,
-        )
-        
-        # Return other jobs + updated backend-status-check
-        result = other_jobs + [updated_backend_status_check]
+    # Convert the augmented CIJobNodes to TreeNodeVM
+    augmented_tree_nodes = []
+    for node in original_ci_nodes:
+        augmented_tree_nodes.append(node.to_tree_vm())
+    
+    return augmented_tree_nodes
+
+
+def verify_tree_structure_pass(tree_nodes: List[TreeNodeVM], original_ci_nodes: List) -> None:
+    """PASS 10: Verify the final tree structure for common issues.
+    
+    This pass checks for:
+    - Duplicate short names
+    - Missing short names for important jobs
+    - Minimum number of required jobs
+    
+    Args:
+        tree_nodes: Final tree structure to verify
+        original_ci_nodes: Original CI nodes to check augmentation
+    """
+    import logging
+    logger = logging.getLogger(__name__)
+    from common_branch_nodes import CIJobNode
+    
+    logger.info(f"[PASS 10] Verifying tree structure ({len(tree_nodes)} root nodes)")
+    
+    # Collect all nodes (including nested)
+    all_nodes = []
+    def collect_nodes(nodes):
+        for node in nodes:
+            all_nodes.append(node)
+            if node.children:
+                collect_nodes(node.children)
+    collect_nodes(tree_nodes)
+    
+    # Check 1: Count required jobs
+    required_count = 0
+    for node in all_nodes:
+        # Check in label_html for REQUIRED badge
+        if '[REQUIRED]' in str(node.label_html or ''):
+            required_count += 1
+    
+    if required_count < 5:
+        logger.warning(f"[PASS 10] ⚠️  Only {required_count} required jobs found (expected at least 5)")
     else:
-        # Create a new backend-status-check parent node
-        logger.info(f"[PASS 2] Creating new backend-status-check parent with {len(backend_jobs)} children")
-        backend_status_check = TreeNodeVM(
-            node_key="ci:backend-status-check",
-            label_html='<span style="font-weight: 600; color: #0969da;">backend-status-check</span>',
-            children=backend_jobs,
-            collapsible=True,
-            default_expanded=False,
-            triangle_tooltip="Backend status check jobs",
-            job_name="backend-status-check",
-        )
-        result = other_jobs + [backend_status_check]
+        logger.info(f"[PASS 10] ✓ Found {required_count} required jobs")
     
-    logger.info(f"[PASS 2] Backend grouping complete, returning {len(result)} root nodes")
-    return result
+    # Check 2: Verify short names were set for original CI nodes
+    ci_nodes_with_short_names = 0
+    ci_nodes_without_short_names = []
+    
+    for node in original_ci_nodes:
+        if isinstance(node, CIJobNode):
+            if hasattr(node, 'short_job_name') and node.short_job_name:
+                ci_nodes_with_short_names += 1
+            elif hasattr(node, 'core_job_name'):
+                ci_nodes_without_short_names.append(node.core_job_name)
+    
+    if ci_nodes_without_short_names:
+        logger.warning(f"[PASS 10] ⚠️  {len(ci_nodes_without_short_names)} CI nodes missing short names:")
+        for name in ci_nodes_without_short_names[:10]:  # Show first 10
+            logger.warning(f"[PASS 10]    - '{name}'")
+        if len(ci_nodes_without_short_names) > 10:
+            logger.warning(f"[PASS 10]    ... and {len(ci_nodes_without_short_names) - 10} more")
+    else:
+        logger.info(f"[PASS 10] ✓ All {ci_nodes_with_short_names} CI nodes have short names")
+    
+    # Check 3: Look for duplicate short names
+    short_name_counts = {}
+    for node in original_ci_nodes:
+        if isinstance(node, CIJobNode) and hasattr(node, 'short_job_name') and node.short_job_name:
+            short_name = node.short_job_name
+            core_name = getattr(node, 'core_job_name', '')
+            if short_name not in short_name_counts:
+                short_name_counts[short_name] = []
+            short_name_counts[short_name].append(core_name)
+    
+    duplicates = {k: v for k, v in short_name_counts.items() if len(v) > 1}
+    if duplicates:
+        logger.warning(f"[PASS 10] ⚠️  Found {len(duplicates)} duplicate short names:")
+        for short_name, core_names in list(duplicates.items())[:5]:  # Show first 5
+            logger.warning(f"[PASS 10]    - '{short_name}' used by: {core_names}")
+        if len(duplicates) > 5:
+            logger.warning(f"[PASS 10]    ... and {len(duplicates) - 5} more duplicates")
+    else:
+        logger.info(f"[PASS 10] ✓ No duplicate short names found")
+    
+    # Check 4: Verify specific important jobs have short names
+    important_jobs = ["Build and Test - dynamo", "dynamo-status-check", "backend-status-check"]
+    for important_job in important_jobs:
+        found = False
+        for node in original_ci_nodes:
+            if isinstance(node, CIJobNode) and hasattr(node, 'core_job_name'):
+                if important_job in node.core_job_name:
+                    if hasattr(node, 'short_job_name') and node.short_job_name:
+                        logger.info(f"[PASS 10] ✓ '{important_job}' has short name: '{node.short_job_name}'")
+                        found = True
+                        break
+        if not found:
+            logger.warning(f"[PASS 10] ⚠️  '{important_job}' not found or missing short name")
+    
+    logger.info(f"[PASS 10] Verification complete")
 
 
-def group_jobs_by_prefix_pass(
+
+
+def move_jobs_by_prefix_pass(
     nodes: List[TreeNodeVM],
     prefix: str,
     parent_name: str,
     parent_label: str,
 ) -> List[TreeNodeVM]:
-    """Generic pass to group jobs by prefix under a parent stage node.
+    """Generic pass to move jobs matching a prefix under a parent node.
     
     This pass finds all root-level nodes whose job_name starts with the given prefix,
-    removes them from the root level, and creates a new parent node that contains
-    all these jobs as children.
+    removes them from the root level, and either creates a new parent node or adds them
+    to an existing parent node with the same name.
     
     Args:
         nodes: List of TreeNodeVM nodes (root level)
-        prefix: Job name prefix to match (e.g., "deploy-")
-        parent_name: Name for the parent node (e.g., "deploy")
+        prefix: Job name prefix to match (e.g., "deploy-", "build-test")
+        parent_name: Name for the parent node (e.g., "deploy", "dynamo-status-check")
         parent_label: HTML label for the parent node (e.g., "deploy")
         
     Returns:
-        List of TreeNodeVM nodes with matching jobs grouped under a parent
+        List of TreeNodeVM nodes with matching jobs moved under a parent
     """
     import logging
     logger = logging.getLogger(__name__)
     
     logger.info(f"[PASS] Grouping {prefix}* jobs (processing {len(nodes)} root nodes)")
     
-    # Separate matching jobs from other jobs
+    # Separate matching jobs from other jobs, and check if parent already exists
     matching_jobs = []
     other_jobs = []
+    existing_parent = None
     
     for node in nodes:
-        job_name = str(getattr(node, "job_name", "") or "")
-        if job_name.startswith(prefix):
+        job_name = node.job_name
+        core_name = node.core_job_name
+        short_name = node.short_job_name
+        
+        if job_name == parent_name:
+            # Found existing parent node - we'll add to it
+            existing_parent = node
+            logger.info(f"[PASS] Found existing parent node '{parent_name}'")
+        elif job_name.startswith(prefix) or core_name.startswith(prefix) or short_name.startswith(prefix):
+            # Match by job_name, core_job_name, or short_job_name prefix
             matching_jobs.append(node)
+            logger.debug(f"[PASS] Matched job '{short_name or core_name or job_name}' with prefix '{prefix}'")
         else:
             other_jobs.append(node)
     
@@ -2024,20 +2119,38 @@ def group_jobs_by_prefix_pass(
     
     logger.info(f"[PASS] Found {len(matching_jobs)} {prefix}* jobs to group")
     
-    # Create a parent stage node
-    parent_node = TreeNodeVM(
-        node_key=f"stage:{parent_name}",
-        label_html=f'<span style="font-weight: 600; color: #0969da;">{parent_label}</span>',
-        children=matching_jobs,
-        collapsible=True,
-        default_expanded=False,
-        triangle_tooltip=f"{parent_name.capitalize()} stage jobs",
-        job_name=parent_name,
-    )
+    if existing_parent:
+        # Add matching jobs to existing parent's children
+        existing_children = list(existing_parent.children or [])
+        updated_parent = TreeNodeVM(
+            node_key=existing_parent.node_key,
+            label_html=existing_parent.label_html,
+            children=existing_children + matching_jobs,
+            collapsible=existing_parent.collapsible,
+            default_expanded=existing_parent.default_expanded,
+            triangle_tooltip=existing_parent.triangle_tooltip,
+            noncollapsible_icon=existing_parent.noncollapsible_icon,
+            job_name=existing_parent.job_name,
+            raw_html_content=getattr(existing_parent, 'raw_html_content', ''),
+        )
+        result = other_jobs + [updated_parent]
+        logger.info(f"[PASS] Added {len(matching_jobs)} jobs to existing parent '{parent_name}'")
+    else:
+        # Create a new parent node
+        parent_node = TreeNodeVM(
+            node_key=f"stage:{parent_name}",
+            label_html=f'<span style="font-weight: 600; color: #0969da;">{parent_label}</span>',
+            children=matching_jobs,
+            collapsible=True,
+            default_expanded=False,
+            triangle_tooltip=f"{parent_name.capitalize()} stage jobs",
+            job_name=parent_name,
+        )
+        result = other_jobs + [parent_node]
+        logger.info(f"[PASS] Created new parent '{parent_name}' with {len(matching_jobs)} jobs")
     
-    # Return other jobs + the parent node
-    result = other_jobs + [parent_node]
-    logger.info(f"[PASS] Created {parent_name} stage with {len(matching_jobs)} children, returning {len(result)} root nodes")
+    # Return result
+    logger.info(f"[PASS] Grouping complete, returning {len(result)} root nodes")
     return result
 
 
@@ -3356,6 +3469,8 @@ def check_line_html(
     error_snippet_text: str = "",
     required_failure: bool = False,
     warning_present: bool = False,
+    short_job_name: str = "",  # Short YAML job name (e.g., "build-test")
+    yaml_dependencies: Optional[List[str]] = None,  # List of dependencies from YAML
 ) -> str:
     # Expected placeholder checks:
     # - Use the placeholder symbol as the *icon* (instead of the generic pending dot),
@@ -3417,12 +3532,15 @@ def check_line_html(
             return "#0969da"  # Blue for amd64
         return ""
 
-    line_color = _get_arch_color(job_id or "")
+    line_color = _get_arch_color(short_job_name or job_id or "")
     color_style = f' color: {line_color};' if line_color else ''
+    
+    # Use short_job_name if available, otherwise fall back to job_id
+    display_text = short_job_name if short_job_name else job_id
     
     id_html = (
         f'<span style="font-family: SFMono-Regular, Consolas, Liberation Mono, Menlo, monospace; font-size: 12px;{color_style}">'
-        + _format_arch_text(job_id or "")
+        + _format_arch_text(display_text or "")
         + "</span>"
     )
     req_html = required_badge_html(is_required=is_required, status_norm=status_norm)
@@ -3431,9 +3549,21 @@ def check_line_html(
     if may_be_required and not is_required:
         req_html += ' <span style="color: #57606a; font-weight: 400;">[may be REQUIRED]</span>'
 
+    # Show display_name with double quotes if we have both and they're different
     name_html = ""
-    if (not is_expected_placeholder) and display_name and display_name != job_id:
-        name_html = f'<span style="color: #57606a; font-size: 12px;"> — {_format_arch_text(display_name)}</span>'
+    if (not is_expected_placeholder) and short_job_name and display_name and short_job_name != display_name:
+        # Show as: short_job_name "display_name" (both in same font)
+        name_html = f'<span style="color: #57606a; font-family: SFMono-Regular, Consolas, Liberation Mono, Menlo, monospace; font-size: 12px;"> "{_format_arch_text(display_name)}"</span>'
+    
+    # Add dependencies tooltip if available
+    deps_title = ""
+    if yaml_dependencies:
+        deps_list = ", ".join(yaml_dependencies)
+        deps_title = f' title="needs: {deps_list}"'
+    
+    # Wrap the job name in a span with dependencies tooltip
+    if deps_title:
+        id_html = f'<span{deps_title}>{id_html}</span>'
 
     dur_html = f'<span style="color: #57606a; font-size: 12px;"> ({html.escape(duration)})</span>' if duration else ""
 

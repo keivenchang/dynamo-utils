@@ -136,6 +136,12 @@ from common_branch_nodes import (
     generate_html,
 )
 
+_COPY_BTN_STYLE = (
+    "padding: 1px 4px; font-size: 10px; line-height: 1; background-color: transparent; color: #57606a; "
+    "border: 1px solid #d0d7de; border-radius: 5px; cursor: pointer; display: inline-flex; "
+    "align-items: center; vertical-align: baseline; margin-right: 4px;"
+)
+
 #
 # Repo constants (avoid scattering hardcoded strings)
 #

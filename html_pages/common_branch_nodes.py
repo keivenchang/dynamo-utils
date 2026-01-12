@@ -610,6 +610,8 @@ class CIJobNode(BranchNode):
         raw_log_href: str = "",  # Pre-materialized raw log href (relative path)
         raw_log_size_bytes: int = 0,  # Pre-materialized raw log size
         error_snippet_text: str = "",  # Pre-extracted error snippet
+        short_job_name: str = "",  # Short job name from YAML (e.g., "build-test")
+        yaml_dependencies: Optional[List[str]] = None,  # List of job names this depends on (needs:)
     ):
         super().__init__(label="", children=children, expanded=expanded, status=status)
         self.job_id = str(job_id or "")
@@ -623,6 +625,8 @@ class CIJobNode(BranchNode):
         self.raw_log_href = str(raw_log_href or "")
         self.raw_log_size_bytes = int(raw_log_size_bytes or 0)
         self.error_snippet_text = str(error_snippet_text or "")
+        self.short_job_name = str(short_job_name or "")
+        self.yaml_dependencies = list(yaml_dependencies or [])
     
     def to_tree_vm(self) -> TreeNodeVM:
         """Convert this CI job node to a TreeNodeVM using check_line_html."""
@@ -640,6 +644,8 @@ class CIJobNode(BranchNode):
             raw_log_href=self.raw_log_href,
             raw_log_size_bytes=self.raw_log_size_bytes,
             error_snippet_text=self.error_snippet_text,
+            short_job_name=self.short_job_name,
+            yaml_dependencies=self.yaml_dependencies,
         )
         
         # Build children: existing children + snippet node (if present)
@@ -662,6 +668,7 @@ class CIJobNode(BranchNode):
             default_expanded=self.expanded,
             job_name=self.job_id,  # Set job_name for hierarchy matching and validation
             core_job_name=getattr(self, 'core_job_name', ''),  # Propagate core_job_name for matching in merge
+            short_job_name=getattr(self, 'short_job_name', ''),  # Propagate short_job_name from augmentation
         )
 
 
@@ -1380,7 +1387,7 @@ def build_ci_nodes_from_pr(
 
         node = CIJobNode(
             job_id=full_job_name,  # Use full verbatim name as job_id for display
-            display_name=str(display_name or ""),
+            display_name=nm,  # Use the original check name as display_name (e.g., "Build and Test - dynamo")
             status=str(st or "unknown"),
             duration=str(getattr(r, "duration", "") or ""),
             log_url=job_url,
