@@ -212,7 +212,7 @@ def parse_workflow_yaml_and_build_mapping_pass(
     repo_root: Path,
     commit_sha: str = "",
 ) -> List[TreeNodeVM]:
-    """PASS 1: Parse YAML to annotate nodes with parent/child metadata.
+    """Parse YAML to annotate nodes with parent/child metadata.
     
     This pass reads .github/workflows/*.yml files and annotates each node with
     information about which jobs it depends on (children) and which jobs depend on it (parents).
@@ -462,9 +462,9 @@ def debug_print_workflow_hierarchy(repo_root: Path) -> None:
 def build_hierarchy_from_mapping_pass(
     flat_nodes: List[TreeNodeVM],
 ) -> List[TreeNodeVM]:
-    """PASS 3: Rebuild nodes by creating parent-child CONNECTIONS from metadata.
+    """Rebuild nodes by creating parent-child CONNECTIONS from metadata.
     
-    This pass takes the flat list of nodes (annotated in PASS 1.1 with parent/child metadata)
+    This pass takes the flat list of nodes (annotated with parent/child metadata)
     and rebuilds them into NEW TreeNodeVM instances with actual children connected.
     
     Process:
@@ -766,7 +766,7 @@ def expand_matrix_templates_pass(
     nodes: List[TreeNodeVM],
     repo_root: Path,
 ) -> List[TreeNodeVM]:
-    """PASS 4: Expand matrix template variables in job names.
+    """Expand matrix template variables in job names.
     
     This pass expands YAML template variables like "${{ matrix.var }}" into their actual values
     by reading the matrix definitions from workflow files.
@@ -1037,7 +1037,7 @@ def fetch_workflows_from_api_and_add_expected_checks_pass(
     owner: str = "ai-dynamo",
     repo: str = "dynamo",
 ) -> List[TreeNodeVM]:
-    """PASS 3: Fetch workflow information from GitHub API and add expected check nodes.
+    """Fetch workflow information from GitHub API and add expected check nodes.
     
     This pass:
     - Uses GitHub REST API to list workflows (/repos/{owner}/{repo}/actions/workflows)
@@ -1142,7 +1142,7 @@ def fetch_workflows_from_api_and_add_expected_checks_pass(
 
 
 def mark_success_with_descendant_failures_pass(nodes: List[TreeNodeVM]) -> List[TreeNodeVM]:
-    """PASS 3: If a node is successful but any descendant failed, render it as ✓/✗.
+    """If a node is successful but any descendant failed, render it as ✓/✗.
 
     Policy: only show the suffix icon when a descendant is in a failure state.
     """
@@ -1224,7 +1224,7 @@ def mark_success_with_descendant_failures_pass(nodes: List[TreeNodeVM]) -> List[
 
 
 def expand_required_failure_descendants_pass(nodes: List[TreeNodeVM]) -> List[TreeNodeVM]:
-    """PASS 9: Expand any node that has a REQUIRED failure anywhere in its descendant subtree.
+    """Expand any node that has a REQUIRED failure anywhere in its descendant subtree.
 
     This is intentionally a *post-pass* so it can run after any logic that mutates/moves nodes
     (e.g. workflow `jobs.*.needs` grouping).
@@ -1280,7 +1280,7 @@ def expand_required_failure_descendants_pass(nodes: List[TreeNodeVM]) -> List[Tr
 
 
 def expand_in_progress_descendants_pass(nodes: List[TreeNodeVM]) -> List[TreeNodeVM]:
-    """PASS 4: Expand any node that has an in-progress/pending descendant anywhere in its subtree.
+    """Expand any node that has an in-progress/pending descendant anywhere in its subtree.
 
     This is a post-pass (like required-failure expansion) so it works after workflow grouping.
     """
@@ -1327,7 +1327,7 @@ def expand_in_progress_descendants_pass(nodes: List[TreeNodeVM]) -> List[TreeNod
 
 
 def group_by_arch_pass(nodes: List[TreeNodeVM]) -> List[TreeNodeVM]:
-    """PASS 6: No-op pass - arch grouping removed.
+    """No-op pass - arch grouping removed.
     
     Previously grouped nodes by architecture, but this has been removed.
     The function is kept for pipeline compatibility.
@@ -1337,7 +1337,7 @@ def group_by_arch_pass(nodes: List[TreeNodeVM]) -> List[TreeNodeVM]:
 
 
 def sort_by_name_pass(nodes: List[TreeNodeVM]) -> List[TreeNodeVM]:
-    """PASS 5: Sort TreeNodeVM by display name recursively at all levels (root + children).
+    """Sort TreeNodeVM by display name recursively at all levels (root + children).
     
     This should be called LAST in the pipeline to ensure pure alphabetical order
     at all levels while preserving hierarchy, failure marking, and expansion state.
@@ -1412,7 +1412,7 @@ def sort_by_name_pass(nodes: List[TreeNodeVM]) -> List[TreeNodeVM]:
 
 
 def create_dummy_nodes_from_yaml_pass(nodes: List[TreeNodeVM]) -> List[TreeNodeVM]:
-    """PASS 2: Create dummy nodes from YAML when no input nodes are provided.
+    """Create dummy nodes from YAML when no input nodes are provided.
     
     This pass is only used for debugging/visualization of the YAML structure.
     If nodes are provided, they pass through unchanged.
@@ -1515,7 +1515,7 @@ def create_dummy_nodes_from_yaml_pass(nodes: List[TreeNodeVM]) -> List[TreeNodeV
 
 
 def convert_branch_nodes_to_tree_vm_pass(ci_nodes: List) -> List[TreeNodeVM]:
-    """PASS 1: Convert BranchNode objects to TreeNodeVM.
+    """Convert BranchNode objects to TreeNodeVM.
     
     Takes a list of BranchNode objects (from build_ci_nodes_from_pr or mock_build_ci_nodes)
     and converts them to TreeNodeVM for rendering.
@@ -1551,7 +1551,7 @@ def merge_ci_info_into_workflow_pass(
     ci_info_nodes: List[TreeNodeVM],
     workflow_nodes: List[TreeNodeVM],
 ) -> List[TreeNodeVM]:
-    """PASS 6: Merge actual CI info with workflow structure.
+    """Merge actual CI info with workflow structure.
     
     Takes the workflow structure (from YAML) and replaces placeholder nodes
     with actual CI info nodes where matching job names exist.
@@ -1832,7 +1832,7 @@ def run_all_passes(
     # PASS 3: Augment CI nodes with YAML information (short names, dependencies)
     augmented_nodes = augment_ci_with_yaml_info_pass(ci_nodes, yaml_mappings)
     
-    # PASS 4-7: Move jobs under parent nodes
+    # PASS 4: Move jobs under parent nodes
     grouped_nodes = augmented_nodes
     grouped_nodes = move_jobs_by_prefix_pass(grouped_nodes, prefix="vllm", parent_name="backend-status-check", parent_label="backend-status-check")
     grouped_nodes = move_jobs_by_prefix_pass(grouped_nodes, prefix="sglang", parent_name="backend-status-check", parent_label="backend-status-check")
@@ -1841,24 +1841,24 @@ def run_all_passes(
     grouped_nodes = move_jobs_by_prefix_pass(grouped_nodes, prefix="deploy-", parent_name="deploy", parent_label="deploy")
     grouped_nodes = move_jobs_by_prefix_pass(grouped_nodes, prefix="build-test", parent_name="dynamo-status-check", parent_label="dynamo-status-check")
     
-    # PASS 8: Sort nodes by name
+    # PASS 5: Sort nodes by name
     sorted_nodes = sort_nodes_by_name_pass(grouped_nodes)
     
-    # PASS 9: Expand nodes with required failures in descendants
+    # PASS 6: Expand nodes with required failures in descendants
     final_nodes = expand_required_failure_descendants_pass(sorted_nodes)
     
-    # PASS 10: Move required jobs to the top (alphabetically sorted)
+    # PASS 7: Move required jobs to the top (alphabetically sorted)
     final_nodes = move_required_jobs_to_top_pass(final_nodes)
     
-    # PASS 11: Verify the final tree structure
+    # PASS 8: Verify the final tree structure
     verify_tree_structure_pass(final_nodes, ci_nodes)
     
-    logger.info(f"[PASS 2-11] YAML parse, augment, group, sort, expand, move required, and verify complete, returning {len(final_nodes)} root nodes")
+    logger.info(f"[PASS 2-8] YAML parse, augment, group, sort, expand, move required, and verify complete, returning {len(final_nodes)} root nodes")
     return final_nodes
 
 
 def annotate_nodes_with_dependencies_pass(nodes: List[TreeNodeVM]) -> List[TreeNodeVM]:
-    """PASS 2: Annotate CI nodes with their dependencies from YAML.
+    """Annotate CI nodes with their dependencies from YAML.
     
     For each node, look up its job name in the YAML mapping and add a tooltip
     showing what it depends on (needs:).
@@ -1911,7 +1911,7 @@ def augment_ci_with_yaml_info_pass(
     original_ci_nodes: List,  # List[BranchNode] - original CIJobNode objects
     yaml_mappings: Dict[str, Dict],  # Mappings from YAML parsing
 ) -> List[TreeNodeVM]:
-    """PASS 3: Augment CI nodes with YAML information (short names, dependencies).
+    """Augment CI nodes with YAML information (short names, dependencies).
     
     This pass builds a mapping from long check name to short YAML job_id,
     then updates each CIJobNode with short_job_name and yaml_dependencies.
@@ -1972,7 +1972,7 @@ def augment_ci_with_yaml_info_pass(
 
 
 def move_required_jobs_to_top_pass(nodes: List[TreeNodeVM]) -> List[TreeNodeVM]:
-    """PASS 10: Move all REQUIRED jobs to the top, keeping alphabetical order within each group.
+    """Move all REQUIRED jobs to the top, keeping alphabetical order within each group.
     
     This pass separates required and non-required jobs, sorts each group alphabetically,
     then returns required jobs first followed by non-required jobs.
@@ -2014,7 +2014,7 @@ def move_required_jobs_to_top_pass(nodes: List[TreeNodeVM]) -> List[TreeNodeVM]:
 
 
 def verify_tree_structure_pass(tree_nodes: List[TreeNodeVM], original_ci_nodes: List) -> None:
-    """PASS 10: Verify the final tree structure for common issues.
+    """Verify the final tree structure for common issues.
     
     This pass checks for:
     - Duplicate short names
@@ -2200,7 +2200,7 @@ def move_jobs_by_prefix_pass(
 
 
 def sort_nodes_by_name_pass(nodes: List[TreeNodeVM]) -> List[TreeNodeVM]:
-    """PASS 8: Sort nodes alphabetically by job name (recursively).
+    """Sort nodes alphabetically by job name (recursively).
     
     Sorts nodes at each level by their job_name or label_html for consistent display.
     Special nodes (like status-check jobs) can be preserved at specific positions if needed.
