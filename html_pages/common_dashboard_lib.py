@@ -1847,10 +1847,13 @@ def run_all_passes(
     # PASS 9: Expand nodes with required failures in descendants
     final_nodes = expand_required_failure_descendants_pass(sorted_nodes)
     
-    # PASS 10: Verify the final tree structure
+    # PASS 10: Move required jobs to the top (alphabetically sorted)
+    final_nodes = move_required_jobs_to_top_pass(final_nodes)
+    
+    # PASS 11: Verify the final tree structure
     verify_tree_structure_pass(final_nodes, ci_nodes)
     
-    logger.info(f"[PASS 2-10] YAML parse, augment, group, sort, expand, and verify complete, returning {len(final_nodes)} root nodes")
+    logger.info(f"[PASS 2-11] YAML parse, augment, group, sort, expand, move required, and verify complete, returning {len(final_nodes)} root nodes")
     return final_nodes
 
 
@@ -1966,6 +1969,48 @@ def augment_ci_with_yaml_info_pass(
         augmented_tree_nodes.append(node.to_tree_vm())
     
     return augmented_tree_nodes
+
+
+def move_required_jobs_to_top_pass(nodes: List[TreeNodeVM]) -> List[TreeNodeVM]:
+    """PASS 10: Move all REQUIRED jobs to the top, keeping alphabetical order within each group.
+    
+    This pass separates required and non-required jobs, sorts each group alphabetically,
+    then returns required jobs first followed by non-required jobs.
+    
+    Args:
+        nodes: List of TreeNodeVM nodes (root level)
+        
+    Returns:
+        List with required jobs at top, then non-required jobs, each group alphabetically sorted
+    """
+    import logging
+    logger = logging.getLogger(__name__)
+    
+    logger.info(f"[PASS 10] Moving required jobs to top ({len(nodes)} root nodes)")
+    
+    required_jobs = []
+    non_required_jobs = []
+    
+    for node in nodes:
+        # Check if the node's label contains [REQUIRED]
+        label = node.label_html
+        if '[REQUIRED]' in label:
+            required_jobs.append(node)
+        else:
+            non_required_jobs.append(node)
+    
+    # Sort each group alphabetically by short_job_name or job_name
+    def sort_key(node):
+        name = node.short_job_name or node.job_name or node.label_html
+        return name.lower()
+    
+    required_jobs.sort(key=sort_key)
+    non_required_jobs.sort(key=sort_key)
+    
+    result = required_jobs + non_required_jobs
+    
+    logger.info(f"[PASS 10] Moved {len(required_jobs)} required jobs to top, {len(non_required_jobs)} non-required after")
+    return result
 
 
 def verify_tree_structure_pass(tree_nodes: List[TreeNodeVM], original_ci_nodes: List) -> None:
@@ -3615,7 +3660,8 @@ def check_line_html(
         if cmd:
             links += _tag_pill_html(text=cmd, monospace=True, kind="command", snippet_key=snippet_key)
 
-    return f"{icon} {id_html}{req_html}{name_html}{dur_html}{links}"
+    # Format: [REQUIRED] short-name "long-name" (duration) [log] ...
+    return f"{icon} {req_html}{id_html}{name_html}{dur_html}{links}"
 
 
 def render_gl_job_line_html(*, status_norm: str, name: str, url: str = "", duration: str = "") -> str:
