@@ -637,7 +637,7 @@ def augment_ci_with_yaml_info_pass(
                 node.yaml_dependencies = dependencies
                 augmented_count += 1
                 logger.debug(f"[augment_ci_with_yaml_info_pass] Augmented '{core_name}' -> short='{short_name}', deps={dependencies}")
-            else:
+        else:
                 logger.debug(f"[augment_ci_with_yaml_info_pass] No match for '{core_name}'")
     
     logger.info(f"[augment_ci_with_yaml_info_pass] Augmented {augmented_count}/{len(original_ci_nodes)} CI nodes with YAML info")
@@ -871,9 +871,9 @@ def _compute_parent_status_from_children(children: List[TreeNodeVM]) -> str:
     
     Args:
         children: List of child TreeNodeVM nodes
-        
+    
     Returns:
-        Status string: 'success', 'failure', 'pending', 'running', or 'unknown'
+        Status string: 'success', 'failure', 'pending', 'in_progress', or 'unknown'
     """
     if not children:
         return "unknown"
@@ -903,7 +903,7 @@ def _compute_parent_status_from_children(children: List[TreeNodeVM]) -> str:
     elif success_count == len(children):
         return "success"
     elif has_running:
-        return "running"
+        return "in_progress"  # Return 'in_progress' to match CIStatus.IN_PROGRESS
     elif has_pending:
         return "pending"
     else:
@@ -1386,7 +1386,7 @@ def render_tree_pre_lines(root_nodes: List[TreeNodeVM]) -> List[str]:
         node_key = str(node.node_key or "")
         if node_key and node_key in node_key_path:
             # Circular reference - skip to prevent infinite recursion
-                return
+            return
             
         # Reset last reference text when rendering actual node
         last_reference_text = None
