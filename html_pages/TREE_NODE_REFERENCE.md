@@ -64,7 +64,7 @@ RepoNode (repository directory)
 Abstract base for all tree nodes. Not used directly.
 
 **Key methods:**
-- `to_tree_vm()` - Convert to `TreeNodeVM` for rendering
+  - `to_tree_vm()` - Convert to `TreeNodeVM` for rendering
 - `_format_html_content()` - Generate HTML for the node
 
 ---
@@ -92,7 +92,7 @@ Groups branches by category.
 
 **Common sections:**
 - "Branches with PRs" - branches with open/closed PRs
-- "Branches" - branches with remotes but no PRs (shows workflow status)
+  - "Branches" - branches with remotes but no PRs (shows workflow status)
 - "Local-only branches" - no remote tracking
 
 **Children:** `BranchInfoNode` instances
@@ -103,10 +103,10 @@ Groups branches by category.
 Individual git branch with metadata.
 
 **Display:**
-```
+  ```
 [copy] [✖] branch-name → base [SHA]
 ├─ commit message (#PR)
-├─ (modified PT, created UTC, age)
+  ├─ (modified PT, created UTC, age)
 └─ Status (PR or Workflow)
 ```
 
@@ -145,7 +145,7 @@ First line of commit message with PR link.
 **Behavior:**
 - Truncates to 100 chars if too long
 - PR number is clickable GitHub link
-- Grey text for subtle appearance
+  - Grey text for subtle appearance
 
 ---
 
@@ -180,7 +180,7 @@ Aggregate CI status for PRs.
 **Shows:**
 - Review status (✅ Approved, 🔴 Changes Requested)
 - Unresolved conversation count
-- GitHub icon links to commit checks page
+  - GitHub icon links to commit checks page
 
 **Children:** `CIJobTreeNode` instances
 
