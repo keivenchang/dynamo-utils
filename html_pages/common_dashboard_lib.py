@@ -893,7 +893,8 @@ def _compute_parent_status_from_children(children: List[TreeNodeVM]) -> str:
             success_count += 1
         elif '⏳' in label or 'running' in label.lower() or 'progress' in label.lower():
             has_running = True
-        elif 'pending' in label.lower():
+        elif 'pending' in label.lower() or ('border-radius: 999px; background-color: #8c959f' in label and '•' in label):
+            # Pending has a gray circle background with white dot
             has_pending = True
     
     # Apply rules
