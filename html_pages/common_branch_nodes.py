@@ -22,7 +22,7 @@ Complete Implementations (all in this file):
 - MetadataNode: Branch metadata (modified, created, age)
 - PRNode: PR summary line with status pill and links
 - PRStatusNode: PR status information with collapsible CI hierarchy
-- CIJobTreeNode: CI job node with status icon, duration, logs
+- CIJobNode: CI job node with status icon, duration, logs
 - RepoNode: Repository directory node (collapsible)
 - SectionNode: Section header for grouping
 - BlockedMessageNode, ConflictWarningNode, RerunLinkNode: Special status nodes
@@ -63,10 +63,11 @@ from common_dashboard_lib import (
     compact_ci_summary_html,
     disambiguate_check_run_name,
     extract_actions_job_id_from_url,
-    process_ci_tree_passes,
+    run_all_passes,
     render_tree_pre_lines,
     required_badge_html,
     status_icon_html,
+    _create_snippet_tree_node,
 )
 
 # Dashboard runtime (HTML-only) helpers
@@ -106,71 +107,74 @@ def mock_build_ci_nodes(
     *,
     page_root_dir: Optional[Path] = None,
 ) -> List[BranchNode]:
-    """Build mock CI job nodes for dummy PRs (negative PR numbers).
+    """Build mock CI job nodes for dummy PRs (PR number >= 100000000).
     
-    Creates fake CIJobTreeNode objects for testing/visualization without hitting the
+    Creates fake CIJobNode objects for testing/visualization without hitting the
     GitHub API. Useful for:
     - Testing YAML hierarchy visualization
     - Debugging dashboard layouts
     - CI/CD pipeline testing
     
-    Returns List[BranchNode] where each item is a CIJobTreeNode with fake but
+    Returns List[BranchNode] where each item is a CIJobNode with fake but
     realistic-looking CI job data (success, pending, failure statuses).
     
     Args:
-        pr: PRInfo object (must have pr.number < 0 for dummy PRs) - FIRST param for consistency
+        pr: PRInfo object (must have pr.number >= 100000000 for mock PRs) - FIRST param for consistency
         repo_path: Path to the repository root
         page_root_dir: Root directory (unused, for signature compatibility)
         
     Returns:
-        List[BranchNode]: Flat list of mock CIJobTreeNode objects.
+        List[BranchNode]: Flat list of mock CIJobNode objects.
         Currently returns 3 fake jobs (success, pending, failure).
         
     Raises:
-        ValueError: If pr.number >= 0 (use build_ci_nodes_from_pr for real PRs)
+        ValueError: If pr.number < 100000000 (use build_ci_nodes_from_pr for real PRs)
     """
     if not pr or not getattr(pr, "number", None):
         return []
     
     pr_number = int(pr.number)
-    if pr_number >= 0:
-        raise ValueError(f"mock_build_ci_nodes called with non-negative PR number {pr_number}. Use build_ci_nodes instead.")
+    if pr_number < 100000000:
+        raise ValueError(f"mock_build_ci_nodes called with non-mock PR number {pr_number}. Mock PRs must have number >= 100000000. Use build_ci_nodes_from_pr for real PRs.")
     
     # Create a few mock CI jobs for visualization
     mock_jobs = []
     
-    # Mock job 1: Success
+    # Mock job 1: Success (required)
     mock_jobs.append(
-        CIJobTreeNode(
+        CIJobNode(
             job_id="mock-success",
             display_name="Mock CI Check (success)",
             status="success",
             duration="2m 34s",
             log_url="",
+            is_required=True,  # Mark as required
             children=[],
         )
     )
     
-    # Mock job 2: Pending
+    # Mock job 2: Pending (optional)
     mock_jobs.append(
-        CIJobTreeNode(
+        CIJobNode(
             job_id="mock-pending",
             display_name="Mock CI Check (pending)",
             status="pending",
             duration="",
             log_url="",
+            is_required=False,  # Mark as optional
             children=[],
         )
     )
     
-    # Mock job 3: Failure
+    # Mock job 3: Failure (required)
     mock_jobs.append(
-        CIJobTreeNode(
+        CIJobNode(
             job_id="mock-failure",
             display_name="Mock CI Check (failure)",
             status="failure",
             duration="5m 12s",
             log_url="",
+            is_required=True,  # Mark as required
             children=[],
         )
     )
@@ -209,13 +213,13 @@ def mock_get_open_pr_info_for_author(
     
     now = datetime.now(timezone.utc)
     
-    # Template for realistic PR titles
+    # Template for realistic PR titles with MOCK branch names
     pr_templates = [
-        ("feat: Add matrix expansion support for CI workflows", "feature/ci-matrix-expansion", "pending", "APPROVED", 0),
-        ("fix: Update backend status check hierarchy", "bugfix/backend-hierarchy", "success", "REVIEW_REQUIRED", 2),
-        ("refactor: Simplify process_ci_tree_passes pipeline", "refactor/tree-passes", "failure", "APPROVED", 0),
-        ("docs: Update YAML workflow documentation", "docs/workflow-yaml", "success", "APPROVED", 1),
-        ("test: Add integration tests for matrix expansion", "test/matrix-integration", "pending", "CHANGES_REQUESTED", 3),
+        ("feat: Add matrix expansion support for CI workflows", "mock/feature/ci-matrix-expansion", "pending", "APPROVED", 0),
+        ("fix: Update backend status check hierarchy", "mock/bugfix/backend-hierarchy", "success", "REVIEW_REQUIRED", 2),
+        ("refactor: Simplify process_ci_tree_passes pipeline", "mock/refactor/tree-passes", "failure", "APPROVED", 0),
+        ("docs: Update YAML workflow documentation", "mock/docs/workflow-yaml", "success", "APPROVED", 1),
+        ("test: Add integration tests for matrix expansion", "mock/test/matrix-integration", "pending", "CHANGES_REQUESTED", 3),
     ]
     
     prs = []
@@ -231,8 +235,8 @@ def mock_get_open_pr_info_for_author(
         sha_seed = f"{owner}/{repo}/{branch}/{i}"
         sha = hashlib.sha1(sha_seed.encode()).hexdigest()
         
-        # Use NEGATIVE PR numbers for dummy PRs (-1, -2, -3, ...)
-        pr_number = -(i + 1)
+        # Use PR numbers starting at 100000000 for mock PRs (easy to identify as mock)
+        pr_number = 100000000 + i
         
         pr = PRInfo(
             number=pr_number,
@@ -421,7 +425,10 @@ def _format_commit_tooltip(commit_message: Optional[str]) -> str:
 
 
 def _format_pr_number_link(pr: Optional[PRInfo]) -> str:
-    """Format a PR number as a clickable link with icon."""
+    """Format a PR number as a clickable link with icon.
+    
+    Handles both real PRs (number > 0, < 100000000) and mock PRs (number >= 100000000).
+    """
     if pr is None:
         return ""
     try:
@@ -583,7 +590,7 @@ class BranchNode:
         )
 
 
-class CIJobTreeNode(BranchNode):
+class CIJobNode(BranchNode):
     """A CI job tree node that renders as a check line with status icon, duration, and logs."""
     
     def __init__(
@@ -599,6 +606,10 @@ class CIJobTreeNode(BranchNode):
         expanded: bool = False,
         page_root_dir: Optional[Path] = None,
         context_key: str = "",
+        github_api=None,  # GitHubAPIClient for raw log materialization
+        raw_log_href: str = "",  # Pre-materialized raw log href (relative path)
+        raw_log_size_bytes: int = 0,  # Pre-materialized raw log size
+        error_snippet_text: str = "",  # Pre-extracted error snippet
     ):
         super().__init__(label="", children=children, expanded=expanded, status=status)
         self.job_id = str(job_id or "")
@@ -608,37 +619,17 @@ class CIJobTreeNode(BranchNode):
         self.is_required = bool(is_required)
         self.page_root_dir = page_root_dir
         self.context_key = str(context_key or "")
+        self.github_api = github_api
+        self.raw_log_href = str(raw_log_href or "")
+        self.raw_log_size_bytes = int(raw_log_size_bytes or 0)
+        self.error_snippet_text = str(error_snippet_text or "")
     
     def to_tree_vm(self) -> TreeNodeVM:
         """Convert this CI job node to a TreeNodeVM using check_line_html."""
-        # Materialize raw log if available
-        raw_log_href = ""
-        raw_log_size_bytes = 0
-        error_snippet_text = ""
+        # Use pre-materialized raw log data (set during build_ci_nodes_from_pr)
+        # No need to re-materialize here - it's already been done
         
-        if self.log_url and self.page_root_dir:
-            try:
-                raw_log_local = materialize_job_raw_log_text_local_link(
-                    page_root_dir=self.page_root_dir,
-                    log_url=self.log_url,
-                    context_key=self.context_key,
-                )
-                if raw_log_local and raw_log_local.get("local_path"):
-                    local_path_str = str(raw_log_local.get("local_path") or "")
-                    if local_path_str:
-                        raw_log_href = str(raw_log_local.get("relative_url") or "")
-                        log_path_obj = Path(local_path_str)
-                        if log_path_obj.exists():
-                            raw_log_size_bytes = log_path_obj.stat().st_size
-                            # Extract error snippet
-                            if extract_error_snippet_from_log_file:
-                                snippet = extract_error_snippet_from_log_file(log_path_obj)
-                                if snippet and snippet.strip():
-                                    error_snippet_text = snippet.strip()
-            except Exception:
-                pass
-        
-        # Use shared check_line_html to generate the HTML
+        # Use shared check_line_html to generate the HTML (without snippet inline)
         label_html = check_line_html(
             job_id=self.job_id,
             display_name=self.display_name,
@@ -646,12 +637,23 @@ class CIJobTreeNode(BranchNode):
             is_required=self.is_required,
             duration=self.duration,
             log_url=self.log_url,
-            raw_log_href=raw_log_href,
-            raw_log_size_bytes=raw_log_size_bytes,
-            error_snippet_text=error_snippet_text,
+            raw_log_href=self.raw_log_href,
+            raw_log_size_bytes=self.raw_log_size_bytes,
+            error_snippet_text=self.error_snippet_text,
         )
         
+        # Build children: existing children + snippet node (if present)
         kids = [c.to_tree_vm() for c in (self.children or [])]
+        
+        # Add snippet as a child node if we have snippet text
+        if self.error_snippet_text and self.error_snippet_text.strip():
+            snippet_node = _create_snippet_tree_node(
+                dom_id_seed=f"{self.job_id}|{self.display_name}|{self.raw_log_href}|{self.log_url}",
+                snippet_text=self.error_snippet_text,
+            )
+            if snippet_node:
+                kids.append(snippet_node)
+        
         return TreeNodeVM(
             node_key=f"ci:{self.job_id}:{id(self)}",
             label_html=label_html,
@@ -659,6 +661,7 @@ class CIJobTreeNode(BranchNode):
             collapsible=True,
             default_expanded=self.expanded,
             job_name=self.job_id,  # Set job_name for hierarchy matching and validation
+            core_job_name=getattr(self, 'core_job_name', ''),  # Propagate core_job_name for matching in merge
         )
 
 
@@ -735,11 +738,11 @@ class BranchInfoNode(BranchNode):
         clipboard_text = _strip_repo_prefix_for_clipboard(self.label)
         parts.append(_html_copy_button(clipboard_text=clipboard_text, title=f"Copy branch name: {clipboard_text}"))
         
-        # Branch name (bold if current)
+        # Branch name (fixed font, bold if current, otherwise bold anyway for consistency)
         if self.is_current:
-            parts.append(f'<span style="font-weight: 600;">{html_module.escape(self.label)}</span>')
+            parts.append(f'<span style="font-family: monospace; font-weight: 700;">{html_module.escape(self.label)}</span>')
         else:
-            parts.append(html_module.escape(self.label))
+            parts.append(f'<span style="font-family: monospace; font-weight: 700;">{html_module.escape(self.label)}</span>')
         
         # SHA link (if available)
         if self.sha and self.commit_url:
@@ -755,23 +758,47 @@ class BranchInfoNode(BranchNode):
         
         label_html = " ".join(parts)
         
-        # Build children: commit message, metadata, then other children
+        # Build children: commit message with metadata inline, then other children
         kids = []
         
-        # 1. Commit message (if available)
+        # 1. Commit message with metadata on same line (if available)
         if self.commit_message:
-            kids.append(CommitMessageNode(label=self.commit_message, pr=self.pr).to_tree_vm())
+            # Get metadata suffix (already contains HTML tags)
+            metadata_suffix = _format_branch_metadata_suffix(
+                commit_time_pt=self.commit_time_pt,
+                commit_datetime=self.commit_datetime,
+                created_at=self.created_at,
+            )
+            
+            # Build label with commit message styled, then PR number (if available), then raw metadata HTML
+            commit_parts = []
+            # Style the commit message text
+            commit_parts.append(f'<span style="color: #1f2328;">{html_module.escape(self.commit_message)}</span>')
+            
+            # Add PR number link (if available) - with parentheses like git log
+            if self.pr:
+                pr_link = _format_pr_number_link(self.pr)
+                if pr_link:
+                    commit_parts.append(f'({pr_link})')
+            
+            if metadata_suffix:
+                # Metadata already has HTML tags AND parentheses, append as-is
+                commit_parts.append(metadata_suffix)
+            
+            combined_label = " ".join(commit_parts)
+            
+            # Create a TreeNodeVM directly instead of using CommitMessageNode
+            # to avoid double-escaping the HTML in metadata
+            kids.append(TreeNodeVM(
+                node_key=f"commit_msg_metadata:{id(self)}",
+                label_html=combined_label,
+                children=[],
+                collapsible=False,
+                default_expanded=False,
+                skip_dedup=True,
+            ))
         
-        # 2. Metadata (modified, created, age)
-        metadata_suffix = _format_branch_metadata_suffix(
-            commit_time_pt=self.commit_time_pt,
-            commit_datetime=self.commit_datetime,
-            created_at=self.created_at,
-        )
-        if metadata_suffix:
-            kids.append(MetadataNode(label=metadata_suffix).to_tree_vm())
-        
-        # 3. Other children
+        # 2. Other children (PR status, CI checks, etc.)
         for c in (self.children or []):
             kids.append(c.to_tree_vm())
         
@@ -1129,13 +1156,13 @@ def build_ci_nodes_from_pr(
 ) -> List[BranchNode]:
     """Build a flat list of CI job nodes from a PR's GitHub check runs.
     
-    Fetches check-run data from GitHub API and creates CIJobTreeNode objects containing:
+    Fetches check-run data from GitHub API and creates CIJobNode objects containing:
     - Full verbatim job names (e.g., "Workflow Name / check-name (event)")
     - Status (success/failure/pending/running/cancelled)
     - Duration, URLs, error snippets, log caching
     - Required vs optional (from branch protection rules)
     
-    Returns List[BranchNode] where each item is actually a CIJobTreeNode with
+    Returns List[BranchNode] where each item is actually a CIJobNode with
     specific CI job information from the GitHub Actions API.
     
     Args:
@@ -1148,7 +1175,7 @@ def build_ci_nodes_from_pr(
         validate_raw_logs: Validate raw logs if True
         
     Returns:
-        List[BranchNode]: Flat list of CIJobTreeNode objects (no hierarchy).
+        List[BranchNode]: Flat list of CIJobNode objects (no hierarchy).
         Each node contains specific CI job details from GitHub API.
         
     Raises:
@@ -1158,12 +1185,12 @@ def build_ci_nodes_from_pr(
         return []
     
     pr_number = int(pr.number)
-    if pr_number < 0:
-        raise ValueError(f"build_ci_nodes_from_pr called with negative PR number {pr_number}. Use mock_build_ci_nodes instead.")
+    if pr_number >= 100000000:
+        raise ValueError(f"build_ci_nodes_from_pr called with mock PR number {pr_number}. Use mock_build_ci_nodes instead.")
     
     pr_number = int(pr.number)
-    if pr_number < 0:
-        raise ValueError(f"build_ci_nodes called with negative PR number {pr_number}. Use mock_build_ci_nodes instead.")
+    if pr_number >= 100000000:
+        raise ValueError(f"build_ci_nodes called with mock PR number {pr_number}. Use mock_build_ci_nodes instead.")
     
     # Ensure required-ness is correct even if PRInfo cache is stale.
     # This uses `gh` (GraphQL statusCheckRollup isRequired), not our REST budget.
@@ -1351,15 +1378,29 @@ def build_ci_nodes_from_pr(
         except Exception:
             pass
 
-        node = CIJobTreeNode(
-            job_id=full_job_name,  # Use full verbatim name as job_id
+        node = CIJobNode(
+            job_id=full_job_name,  # Use full verbatim name as job_id for display
             display_name=str(display_name or ""),
             status=str(st or "unknown"),
             duration=str(getattr(r, "duration", "") or ""),
             log_url=job_url,
             is_required=bool(getattr(r, "is_required", False)),
             children=[],
+            page_root_dir=page_root_dir,  # Pass page_root_dir for raw log and snippet extraction
+            context_key=f"{pr_number}:{full_job_name}",  # Unique context for caching
+            github_api=github_api,  # Pass github_api for raw log materialization
+            raw_log_href=raw_href,  # Pass pre-materialized raw log data
+            raw_log_size_bytes=raw_size,
+            error_snippet_text=snippet,
         )
+        # Store the core job name (without workflow prefix/event suffix) for matching in merge
+        node.core_job_name = nm  # This is the original "name" from the check row
+        
+        # DEBUG: Verify it was set
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.debug(f"[build_ci_nodes_from_pr] Set core_job_name='{nm}' on node with job_id='{full_job_name[:50]}'")
+
 
 
 
@@ -1433,7 +1474,7 @@ def build_ci_nodes_from_pr(
                 if (step_snip or "").strip():
                     node.error_snippet_text = ""
                 node.children.append(
-                    CIJobTreeNode(
+                    CIJobNode(
                         job_id=sub_id,
                         display_name="",
                         status=str(sub_status or "unknown"),
@@ -1457,7 +1498,7 @@ def build_ci_nodes_from_pr(
         )
 
     # NOTE: Sorting, failure marking, and expansion are handled by the centralized
-    # pipeline in PRStatusNode.to_tree_vm() (via process_ci_tree_passes in common_dashboard_lib.py)
+    # pipeline in PRStatusNode.to_tree_vm() (via run_all_passes in common_dashboard_lib.py)
 
     # If CI failed and we can identify a GitHub Actions run_id, include an explicit restart link.
     #
@@ -1718,7 +1759,7 @@ class PRStatusNode(BranchNode):
         return base_html
 
     def compute_summary_from_children(self) -> dict:
-        """Compute CI summary directly from child CIJobTreeNode objects.
+        """Compute CI summary directly from child CIJobNode objects.
         
         This ensures the tooltip reflects the actual rendered tree, not cached API data.
         Counts only immediate children (top-level jobs), not nested children (steps).
@@ -1750,7 +1791,7 @@ class PRStatusNode(BranchNode):
         
         # Only count immediate children (top-level jobs), not recurse into steps
         for child in (self.children or []):
-            if not isinstance(child, CIJobTreeNode):
+            if not isinstance(child, CIJobNode):
                 continue
                 
             name = str(getattr(child, "job_id", "") or getattr(child, "display_name", "") or "").strip()
@@ -1820,7 +1861,7 @@ class PRStatusNode(BranchNode):
                 return (1, "")  # Special nodes sort last
             
             # Get the display name for sorting
-            if isinstance(node, CIJobTreeNode):
+            if isinstance(node, CIJobNode):
                 # Use display_name if present, otherwise job_id, otherwise label
                 name = getattr(node, 'display_name', '') or getattr(node, 'job_id', '') or getattr(node, 'label', '')
             else:
@@ -1867,9 +1908,9 @@ class PRStatusNode(BranchNode):
                     pass
                 
                 # Build CI nodes based on PR number
-                if pr_number < 0:
-                    # Negative PR number = dummy PR, use mock
-                    print(f"[PRStatusNode] Building mock CI nodes for dummy PR #{pr_number}")
+                if pr_number >= 100000000:
+                    # Mock PR number (>= 100000000) = dummy PR, use mock
+                    print(f"[PRStatusNode] Building mock CI nodes for mock PR #{pr_number}")
                     ci_nodes = mock_build_ci_nodes(pr, repo_root, page_root_dir=page_root_dir)
                 elif pr_number > 0 and gh:
                     # Real PR, use real API
@@ -1898,7 +1939,7 @@ class PRStatusNode(BranchNode):
         kids: List[TreeNodeVM] = []
         try:
             from pathlib import Path
-            from common_dashboard_lib import process_ci_tree_passes
+            from common_dashboard_lib import run_all_passes
             
             # Determine repo_root for workflow parsing
             repo_root = Path("/home/keivenc/dynamo/dynamo_latest")  # Fallback
@@ -1920,7 +1961,7 @@ class PRStatusNode(BranchNode):
             
             print(f"[PRStatusNode] Passing {len(ci_branch_nodes)} BranchNodes to pipeline (attach_yaml_tree={attach_yaml_tree})")
             
-            kids = process_ci_tree_passes(
+            kids = run_all_passes(
                 ci_nodes=ci_branch_nodes,  # Pass List[BranchNode] directly!
                 repo_root=repo_root,
                 github_api=gh,
@@ -1954,9 +1995,9 @@ class PRStatusNode(BranchNode):
             for fc in (getattr(pr, "failed_checks", None) or [])
         )
         
-        # Also check children (CIJobTreeNode objects) for required failures
+        # Also check children (CIJobNode objects) for required failures
         required_failed_from_children = any(
-            isinstance(child, CIJobTreeNode) 
+            isinstance(child, CIJobNode) 
             and getattr(child, "status", "") == "failure" 
             and getattr(child, "is_required", False)
             for child in sorted_children
@@ -2004,9 +2045,9 @@ class PRStatusNode(BranchNode):
         # - any running/pending descendants
         # NOTE: helper nodes (e.g. rerun link) should not force expansion.
         default_expanded = any(
-            CIJobTreeNode._subtree_needs_attention(c)
+            CIJobNode._subtree_needs_attention(c)
             for c in (self.children or [])
-            if isinstance(c, CIJobTreeNode)
+            if isinstance(c, CIJobNode)
         )
 
         # Unique DOM id per render occurrence.

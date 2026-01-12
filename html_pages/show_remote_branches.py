@@ -10,12 +10,16 @@ instead of local repository directory.
 
 Structure:
 - UserNode (GitHub user) → BranchInfoNode (remote branch) → CommitMessageNode, MetadataNode,
-  PRNode, PRStatusNode (PASSED/FAILED pill) → CIJobTreeNode (CI jobs with hierarchy)
+  PRNode, PRStatusNode (PASSED/FAILED pill) → CIJobNode (CI jobs with hierarchy)
 
-This intentionally reuses core components from `show_local_branches.py`:
-- `PRNode`, `PRURLNode`, `PRStatusNode`, `_build_ci_hierarchy_nodes`
-- These have the complete implementations (versions in common_branch_nodes.py are stubs)
-- Ensures IDENTICAL rendering logic for status pills, CI hierarchy, and all formatting
+IMPORTANT: Architecture Rule
+---------------------------
+⚠️ show_remote_branches.py and show_local_branches.py should NEVER import from each other!
+   - ALL shared code lives in: common_branch_nodes.py, common_dashboard_lib.py, common.py
+   - ✅ REFACTORED: PRStatusNode and _build_ci_hierarchy_nodes now in common_branch_nodes.py
+
+This ensures IDENTICAL rendering logic for status pills, CI hierarchy, and all formatting
+between local and remote branch dashboards.
 
 Other shared utilities:
 - `BranchInfoNode`, `CommitMessageNode`, `MetadataNode`, `generate_html` from `common_branch_nodes.py`
@@ -45,45 +49,43 @@ from common import GitHubAPIClient  # noqa: E402
 from html_pages.common_dashboard_runtime import prune_dashboard_raw_logs, prune_partial_raw_log_caches  # noqa: E402
 
 # Import shared branch/PR node classes and helpers
-# NOTE: PRStatusNode and _build_ci_hierarchy_nodes are imported from show_local_branches.py
-# because the versions in common_branch_nodes.py are incomplete stubs.
+# All shared code now lives in common_branch_nodes.py (no more cross-imports!)
 from common_branch_nodes import (  # noqa: E402
     DYNAMO_OWNER,
     DYNAMO_REPO,
     DYNAMO_REPO_SLUG,
     BranchNode,
     BranchInfoNode,
+    BlockedMessageNode,
+    CIJobNode,
     CommitMessageNode,
+    ConflictWarningNode,
     MetadataNode,
     PRNode,
+    PRStatusNode,
     PRURLNode,
+    RawLogValidationError,
     RepoNode,
+    RerunLinkNode,
     SectionNode,
+    _assume_completed_for_check_row,
+    _duration_str_to_seconds,
     _format_age_compact,
     _format_branch_metadata_suffix,
     _format_base_branch_inline,
+    _is_known_required_check,
     _pr_needs_attention,
     _strip_repo_prefix_for_clipboard,
-    generate_html,
-    looks_like_git_repo_dir,
-    gitdir_from_git_file,
-    origin_url_from_git_config,
     find_local_clone_of_repo,
+    generate_html,
+    gitdir_from_git_file,
+    looks_like_git_repo_dir,
+    origin_url_from_git_config,
 )
 from common_dashboard_lib import TreeNodeVM  # noqa: E402
 from dataclasses import dataclass  # noqa: E402
 from typing import Optional as Opt  # noqa: E402
 import html as html_module  # noqa: E402
-
-# Import PRStatusNode and _build_ci_hierarchy_nodes from show_local_branches.py
-# These have the correct, complete implementations:
-# - PRStatusNode: Generates the PASSED/FAILED/RUNNING pill and applies the centralized CI pipeline
-# - _build_ci_hierarchy_nodes: Builds CIJobTreeNode objects from PR check runs
-import sys as _sys_for_import
-_local_branches_path = Path(__file__).parent / "show_local_branches.py"
-if str(_local_branches_path.parent) not in _sys_for_import.path:
-    _sys_for_import.path.insert(0, str(_local_branches_path.parent))
-from show_local_branches import PRStatusNode, _build_ci_hierarchy_nodes  # noqa: E402
 
 
 @dataclass
@@ -146,7 +148,7 @@ def main() -> int:
     parser.add_argument("--github-user", required=True, help="GitHub username (author of PRs)")
     parser.add_argument("--owner", default=DYNAMO_OWNER, help=f"GitHub owner/org (default: {DYNAMO_OWNER})")
     parser.add_argument("--github-repo", default=DYNAMO_REPO, help=f"GitHub repo (default: {DYNAMO_REPO})")
-    parser.add_argument("--repo-root", type=Path, default=None, help="Path to a local clone of the repo (for workflow YAML inference)")
+    parser.add_argument("--repo-root", type=Path, default=None, help="Path to a local clone of the repo (for workflow YAML parsing)")
     parser.add_argument("--base-dir", type=Path, default=Path.cwd(), help="Directory to search for a local clone (default: cwd)")
     parser.add_argument("--output", type=Path, default=None, help="Output HTML path (default: <base-dir>/remote_prs_<user>.html)")
     parser.add_argument("--token", help="GitHub personal access token (or login with gh so ~/.config/gh/hosts.yml exists)")
@@ -154,7 +156,17 @@ def main() -> int:
     parser.add_argument("--max-github-api-calls", type=int, default=100, help="Hard cap on GitHub REST API network calls per invocation")
     parser.add_argument("--max-prs", type=int, default=50, help="Cap PRs shown (default: 50)")
     parser.add_argument("--refresh-checks", action="store_true", help="Force-refresh checks cache TTLs (more GitHub calls)")
+    parser.add_argument("--use-text-trees", action="store_true", help="Use old text-based tree rendering instead of interactive <div> (legacy)")
+    parser.add_argument("--create-dummy-prs", action="store_true", help="Create 2 dummy PRs to visualize YAML structure (for testing)")
+    parser.add_argument("--debug", action="store_true", help="Enable debug logging")
     args = parser.parse_args()
+    
+    # Configure logging
+    import logging
+    if args.debug:
+        logging.basicConfig(level=logging.DEBUG, format='[%(levelname)s] %(message)s')
+    else:
+        logging.basicConfig(level=logging.INFO, format='[%(levelname)s] %(message)s')
 
     user = str(args.github_user or "").strip()
     owner = str(args.owner or "").strip()
@@ -203,7 +215,18 @@ def main() -> int:
             pass
 
     t0 = time.monotonic()
-    prs = gh.get_open_pr_info_for_author(owner, repo, author=user, max_prs=int(args.max_prs))
+    
+    # Create dummy PRs mode: use mock PRInfo objects for testing YAML structure
+    if args.create_dummy_prs:
+        from common_branch_nodes import mock_get_open_pr_info_for_author
+        prs = mock_get_open_pr_info_for_author(
+            owner=owner,
+            repo=repo,
+            author=user,
+            num_prs=2,
+        )
+    else:
+        prs = gh.get_open_pr_info_for_author(owner, repo, author=user, max_prs=int(args.max_prs))
 
     root = BranchNode(label="")
 
@@ -309,25 +332,8 @@ def main() -> int:
             )
             branch_node.add_child(status_node)  # Add directly to branch_node
 
-            # CI hierarchy as children of the PR status line.
-            try:
-                for ci_node in _build_ci_hierarchy_nodes(
-                    repo_root,
-                    pr,
-                    github_api=gh,
-                    page_root_dir=page_root_dir,
-                    checks_ttl_s=int(GitHubAPIClient.compute_checks_cache_ttl_s(None, refresh=bool(args.refresh_checks))),
-                    skip_fetch=(not bool(allow_fetch_checks)),
-                    validate_raw_logs=True,
-                ):
-                    try:
-                        if hasattr(ci_node, "context_key"):
-                            setattr(ci_node, "context_key", str(status_node.context_key or ""))
-                    except Exception:
-                        pass
-                    status_node.add_child(ci_node)
-            except Exception:
-                pass
+            # CI nodes will be built later in the pipeline passes (build_ci_nodes / mock_build_ci_nodes)
+            # No longer building CI hierarchy here - moved to common_dashboard_lib.py passes
 
             # Conflict/blocking messages (add directly to branch_node).
             try:
@@ -392,6 +398,7 @@ def main() -> int:
         page_title=f"Remote PR Info ({user})",
         header_title=f"Remote PR Info ({user})",
         tree_sortable=False,  # No sort controls, render triangles normally
+        use_div_trees=not args.use_text_trees,  # Default to div trees unless --use-text-trees is specified
     )
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(html, encoding="utf-8")

@@ -30,7 +30,7 @@ from common_types import CIStatus
 
 
 # Note: CI job/check sorting is now handled by PASS 4 (sort_by_name_pass)
-# in the centralized pipeline (process_ci_tree_passes). No pre-sorting needed.
+# in the centralized pipeline (run_passes). No pre-sorting needed.
 
 
 def ci_should_expand_by_default(*, rollup_status: str, has_required_failure: bool) -> bool:
@@ -171,6 +171,7 @@ class TreeNodeVM:
     - workflow_name: the workflow name this job belongs to (e.g., "container-validation-backends", "pre-merge").
     - variant: optional variant/matrix value (e.g., "amd64", "arm64", "cuda-13") for disambiguating similar jobs.
     - pr_number: PR number this node belongs to (for building CI nodes in pipeline). Can be negative for dummy PRs.
+    - raw_html_content: optional raw HTML content rendered after the label (e.g., snippet <pre> blocks).
     """
 
     node_key: str
@@ -182,9 +183,11 @@ class TreeNodeVM:
     noncollapsible_icon: str = ""
     skip_dedup: bool = False
     job_name: str = ""  # CI job name for hierarchy matching (e.g., "backend-status-check")
+    core_job_name: str = ""  # Core job name without workflow prefix/event suffix for matching
     workflow_name: str = ""  # Workflow this job belongs to (e.g., "container-validation-backends")
     variant: str = ""  # Optional variant (e.g., "amd64", "arm64") for matrix jobs
     pr_number: Optional[int] = None  # PR number for building CI nodes (negative = dummy PR)
+    raw_html_content: str = ""  # Optional raw HTML content rendered after the label
 
 
 def _dom_id_from_node_key(node_key: str) -> str:
@@ -668,66 +671,71 @@ def build_hierarchy_from_mapping_pass(
     
     print(f"[PASS 3] Found {len(all_children)} jobs that are children of others")
     
-    # Track which TreeNodeVMs we've already processed (by node_key for uniqueness)
-    processed_node_keys: set = set()
+    # Track which parent-child pairs we've already processed to avoid infinite recursion
+    # (We don't deduplicate nodes themselves, as shared children need to appear under multiple parents)
+    processing_stack: List[str] = []
     
     def build_node_recursive(yaml_job_name: str) -> List[TreeNodeVM]:
         """Recursively build TreeNodeVM instances with their children.
         
         Returns a list because matrix jobs expand to multiple nodes.
         """
-        # Find ALL matching TreeNodeVM instances (handles matrix expansion)
-        matching_nodes = find_matching_nodes(yaml_job_name)
-        
-        if not matching_nodes:
-            print(f"[PASS 3]   Warning: No TreeNodeVM found for job '{yaml_job_name}'")
+        # Prevent infinite recursion by checking if we're already processing this job
+        if yaml_job_name in processing_stack:
+            print(f"[PASS 3]   Warning: Circular dependency detected for '{yaml_job_name}', skipping")
             return []
         
-        result_nodes = []
+        processing_stack.append(yaml_job_name)
         
-        for base_tree_node in matching_nodes:
-            # Check if already processed (by node_key - the unique identifier)
-            if base_tree_node.node_key in processed_node_keys:
-                continue  # Already processed
+        try:
+            # Find ALL matching TreeNodeVM instances (handles matrix expansion)
+            matching_nodes = find_matching_nodes(yaml_job_name)
             
-            processed_node_keys.add(base_tree_node.node_key)
+            if not matching_nodes:
+                print(f"[PASS 3]   Warning: No TreeNodeVM found for job '{yaml_job_name}'")
+                return []
             
-            # Check if this node has children (based on mapping)
-            child_job_names = _workflow_parent_child_mapping.get(yaml_job_name, [])
+            result_nodes = []
             
-            if not child_job_names:
-                # Leaf node - return as-is
-                result_nodes.append(base_tree_node)
-                continue
-            
-            # Build children recursively (flatten the list of lists)
-            children_tree_nodes = []
-            for child_name in child_job_names:
-                child_nodes = build_node_recursive(child_name)
-                children_tree_nodes.extend(child_nodes)
-            
-            # Create new TreeNodeVM with children
-            if children_tree_nodes:
-                print(f"[PASS 3]   Built parent: {base_tree_node.job_name} with {len(children_tree_nodes)} children")
-                new_node = TreeNodeVM(
-                    node_key=base_tree_node.node_key,
-                    label_html=base_tree_node.label_html,
-                    children=children_tree_nodes,
-                    collapsible=True,
-                    default_expanded=base_tree_node.default_expanded or any(
-                        "✗" in c.label_html or "FAIL" in c.label_html for c in children_tree_nodes
-                    ),
-                    triangle_tooltip=base_tree_node.triangle_tooltip,
-                    noncollapsible_icon=base_tree_node.noncollapsible_icon,
-                    job_name=base_tree_node.job_name,
-                    workflow_name=base_tree_node.workflow_name,
-                    variant=base_tree_node.variant,
-                )
-                result_nodes.append(new_node)
-            else:
-                result_nodes.append(base_tree_node)
+            for base_tree_node in matching_nodes:
+                # Check if this node has children (based on mapping)
+                child_job_names = _workflow_parent_child_mapping.get(yaml_job_name, [])
+                
+                if not child_job_names:
+                    # Leaf node - return as-is
+                    result_nodes.append(base_tree_node)
+                    continue
+                
+                # Build children recursively (flatten the list of lists)
+                children_tree_nodes = []
+                for child_name in child_job_names:
+                    child_nodes = build_node_recursive(child_name)
+                    children_tree_nodes.extend(child_nodes)
+                
+                # Create new TreeNodeVM with children
+                if children_tree_nodes:
+                    print(f"[PASS 3]   Built parent: {base_tree_node.job_name} with {len(children_tree_nodes)} children")
+                    new_node = TreeNodeVM(
+                        node_key=base_tree_node.node_key,
+                        label_html=base_tree_node.label_html,
+                        children=children_tree_nodes,
+                        collapsible=True,
+                        default_expanded=base_tree_node.default_expanded or any(
+                            "✗" in c.label_html or "FAIL" in c.label_html for c in children_tree_nodes
+                        ),
+                        triangle_tooltip=base_tree_node.triangle_tooltip,
+                        noncollapsible_icon=base_tree_node.noncollapsible_icon,
+                        job_name=base_tree_node.job_name,
+                        workflow_name=base_tree_node.workflow_name,
+                        variant=base_tree_node.variant,
+                    )
+                    result_nodes.append(new_node)
+                else:
+                    result_nodes.append(base_tree_node)
         
-        return result_nodes
+            return result_nodes
+        finally:
+            processing_stack.pop()
     
     # Build the tree starting with root nodes
     hierarchical_nodes: List[TreeNodeVM] = []
@@ -739,11 +747,9 @@ def build_hierarchy_from_mapping_pass(
             tree_nodes = build_node_recursive(parent_name)
             hierarchical_nodes.extend(tree_nodes)
     
-    # Add standalone nodes (not in any parent-child relationship)
-    for tree_node in flat_nodes:
-        if tree_node.node_key not in processed_node_keys:
-            hierarchical_nodes.append(tree_node)
-            processed_node_keys.add(tree_node.node_key)
+    # Note: We no longer add standalone nodes here because shared children (like 'changed-files')
+    # need to appear under multiple parents. The tree structure is now built purely from the
+    # parent-child relationships defined in the workflow YAML.
     
     print(f"[PASS 3] Returning {len(hierarchical_nodes)} root nodes (after matrix expansion)")
     return hierarchical_nodes
@@ -1003,6 +1009,7 @@ def expand_matrix_templates_pass(
             job_name=node.job_name,
             workflow_name=node.workflow_name,
             variant=node.variant,
+            raw_html_content=node.raw_html_content,
         )
         
     # Filter all nodes
@@ -1210,7 +1217,7 @@ def mark_success_with_descendant_failures_pass(nodes: List[TreeNodeVM]) -> List[
 
 
 def expand_required_failure_descendants_pass(nodes: List[TreeNodeVM]) -> List[TreeNodeVM]:
-    """PASS 3: Expand any node that has a REQUIRED failure anywhere in its descendant subtree.
+    """PASS 9: Expand any node that has a REQUIRED failure anywhere in its descendant subtree.
 
     This is intentionally a *post-pass* so it can run after any logic that mutates/moves nodes
     (e.g. workflow `jobs.*.needs` grouping).
@@ -1248,17 +1255,20 @@ def expand_required_failure_descendants_pass(nodes: List[TreeNodeVM]) -> List[Tr
                 default_expanded=bool(new_default_expanded),
                 triangle_tooltip=n.triangle_tooltip,
                 noncollapsible_icon=getattr(n, "noncollapsible_icon", ""),
+                job_name=getattr(n, "job_name", ""),
+                core_job_name=getattr(n, "core_job_name", ""),
+                workflow_name=getattr(n, "workflow_name", ""),
+                variant=getattr(n, "variant", ""),
+                pr_number=getattr(n, "pr_number", None),
+                raw_html_content=getattr(n, "raw_html_content", ""),
             ),
             has_req,
         )
 
     out: List[TreeNodeVM] = []
     for n in (nodes or []):
-        try:
-            n2, _ = walk(n)
-            out.append(n2)
-        except Exception:
-            out.append(n)
+        n2, _ = walk(n)
+        out.append(n2)
     return out
 
 
@@ -1372,6 +1382,12 @@ def sort_by_name_pass(nodes: List[TreeNodeVM]) -> List[TreeNodeVM]:
             default_expanded=bool(n.default_expanded),
             triangle_tooltip=n.triangle_tooltip,
             noncollapsible_icon=getattr(n, "noncollapsible_icon", ""),
+            job_name=getattr(n, "job_name", ""),
+            core_job_name=getattr(n, "core_job_name", ""),
+            workflow_name=getattr(n, "workflow_name", ""),
+            variant=getattr(n, "variant", ""),
+            pr_number=getattr(n, "pr_number", None),
+            raw_html_content=getattr(n, "raw_html_content", ""),
         )
     
     # Walk each node to sort its children recursively
@@ -1459,11 +1475,11 @@ def create_dummy_nodes_from_yaml_pass(nodes: List[TreeNodeVM]) -> List[TreeNodeV
         workflow_file = _workflow_job_to_file.get(job_name, "")
         
         # Format: job_id (job_name) if they differ, otherwise just job_name
-        # job_id is in fixed-width font, job_name (description) is in normal font with gray color
+        # job_id is in fixed-width font, job_name (description) is in normal font with lighter gray color
         # Apply arch formatting to get colors and "; aarch64" / "; x86_64" suffixes
         if job_id and job_id != job_name:
             formatted_job_id = _format_arch_text_for_placeholder(job_id)
-            display_text = f'<span style="font-family: monospace;">{formatted_job_id}</span> <span style="color: #57606a;">({job_name})</span>'
+            display_text = f'<span style="font-family: monospace;">{formatted_job_id}</span> <span style="color: #8c959f;">({job_name})</span>'
         else:
             formatted_job_name = _format_arch_text_for_placeholder(job_name)
             display_text = f'<span style="font-family: monospace;">{formatted_job_name}</span>'
@@ -1503,31 +1519,24 @@ def convert_branch_nodes_to_tree_vm_pass(ci_nodes: List) -> List[TreeNodeVM]:
     Returns:
         List of TreeNodeVM objects representing actual CI info from GitHub
     """
-    print(f"[PASS 1] Converting {len(ci_nodes)} BranchNode objects to TreeNodeVM")
+    import logging
+    logger = logging.getLogger(__name__)
+    
+    logger.info(f"Converting {len(ci_nodes)} BranchNode objects to TreeNodeVM")
     
     ci_info_nodes: List[TreeNodeVM] = []
     for idx, ci_node in enumerate(ci_nodes):
-        try:
-            # Get PR number if available
-            pr_number = getattr(ci_node, 'pr_number', None)
-            
-            # Convert BranchNode to TreeNodeVM
-            node_vm = ci_node.to_tree_vm()
-            
-            # Get job name for debugging
-            from common_branch_nodes import CIJobTreeNode
-            if isinstance(ci_node, CIJobTreeNode):
-                job_id = getattr(ci_node, 'job_id', '')
-                status = getattr(ci_node, 'status', '')
-                print(f"[PASS 1]   [{idx}] {job_id} (status={status}, pr_number={pr_number})")
-            
-            ci_info_nodes.append(node_vm)
-        except Exception as e:
-            print(f"[PASS 1]   Error converting node {idx}: {e}")
-            import traceback
-            traceback.print_exc()
+        # Convert BranchNode to TreeNodeVM (core_job_name is now set in to_tree_vm())
+        node_vm = ci_node.to_tree_vm()
+        
+        # Debug: Check if core_job_name was propagated
+        if idx < 5:
+            core_name = getattr(node_vm, 'core_job_name', '<none>')
+            logger.debug(f"  [{idx}] TreeNodeVM has core_job_name='{core_name}'")
+        
+        ci_info_nodes.append(node_vm)
     
-    print(f"[PASS 1] Converted {len(ci_info_nodes)} nodes to TreeNodeVM")
+    logger.info(f"Converted {len(ci_info_nodes)} nodes to TreeNodeVM")
     return ci_info_nodes
 
 
@@ -1594,32 +1603,47 @@ def merge_ci_info_into_workflow_pass(
     Returns:
         Merged tree with actual CI info embedded in workflow structure + unmatched CI nodes appended
     """
-    print(f"[PASS 6] Merging {len(ci_info_nodes)} CI info nodes into {len(workflow_nodes)} workflow nodes")
+    import logging
+    logger = logging.getLogger(__name__)
     
-    # Build a lookup map: job_name -> CI info node
+    logger.info(f"Merging {len(ci_info_nodes)} CI info nodes into {len(workflow_nodes)} workflow nodes")
+    
+    # DEBUG: Print first 5 CI nodes to see what names we have
+    logger.debug(f"CI info nodes (first 5):")
+    for idx, ci_node in enumerate(ci_info_nodes[:5]):
+        core_name = getattr(ci_node, 'core_job_name', '<none>')
+        job_name = getattr(ci_node, 'job_name', '<none>')
+        node_key = getattr(ci_node, 'node_key', '<none>')
+        logger.debug(f"  [{idx}] core_job_name={core_name!r}, job_name={job_name!r}, node_key={node_key[:50] if node_key != '<none>' else node_key}...")
+    
+    # DEBUG: Print first 5 workflow nodes to see what names they have
+    logger.debug(f"Workflow nodes (first 5):")
+    for idx, wf_node in enumerate(workflow_nodes[:5]):
+        job_name = getattr(wf_node, 'job_name', '<none>')
+        node_key = getattr(wf_node, 'node_key', '<none>')
+        logger.debug(f"  [{idx}] job_name={job_name!r}, node_key={node_key[:50] if node_key != '<none>' else node_key}...")
+    
+    # Build a lookup map: core_job_name -> CI info node
+    # Use core_job_name (e.g., "Build and Test - dynamo") instead of full verbatim name
     ci_lookup = {}
     for idx, ci_node in enumerate(ci_info_nodes):
-        # Try to get job_name from the node, or extract from node_key
-        job_name = getattr(ci_node, 'job_name', '') or ''
+        # Try to get core_job_name (set during build_ci_nodes_from_pr)
+        core_job_name = getattr(ci_node, 'core_job_name', '') or ''
         
-        if not job_name:
-            # Extract job name from node_key (format: "ci:JOB_NAME:...")
-            node_key = getattr(ci_node, 'node_key', '') or ''
-            if node_key.startswith('ci:'):
-                parts = node_key.split(':', 2)
-                if len(parts) >= 2:
-                    job_name = parts[1]
+        # Fallback: try job_name if core_job_name not set
+        if not core_job_name:
+            core_job_name = getattr(ci_node, 'job_name', '') or ''
         
-        if idx < 5:  # Debug: show first 5 nodes
-            node_key = getattr(ci_node, 'node_key', '') or ''
-            print(f"[PASS 6]   CI node [{idx}]: extracted job_name='{job_name}'")
-        
-        if job_name:
-            ci_lookup[job_name] = ci_node
+        if core_job_name:
+            ci_lookup[core_job_name] = ci_node
             if idx < 10:  # Show first 10 indexed
-                print(f"[PASS 6]   Indexed: {job_name}")
+                logger.debug(f"  Indexed: {core_job_name}")
     
-    print(f"[PASS 6] Built lookup with {len(ci_lookup)} entries")
+    logger.info(f"Built lookup with {len(ci_lookup)} entries")
+    
+    # DEBUG: Print lookup keys
+    if ci_lookup:
+        logger.debug(f"Lookup keys (first 10): {list(ci_lookup.keys())[:10]}")
     
     # Track which CI nodes were matched
     matched_ci_nodes = set()
@@ -1642,12 +1666,36 @@ def merge_ci_info_into_workflow_pass(
             matched_ci_nodes.add(workflow_job_name)  # Mark as matched
             print(f"[PASS 6] {indent}✓ Merged: {workflow_job_name} (actual CI + {len(merged_children)} workflow children)")
             
-            # Return the actual CI node BUT keep the workflow structure's children
-            # This preserves the hierarchy while using real CI status/duration
+            # Add dependency tooltip to the label if this job has dependencies
+            label_html = actual_ci_node.label_html
+            dependencies = _workflow_parent_child_mapping.get(workflow_job_name, [])
+            if dependencies:
+                deps_str = ", ".join(dependencies)
+                # Find the job name span and add title attribute to it
+                # The job name is in a monospace span like: <span style="font-family: SFMono-Regular, ...">job-name</span>
+                import re
+                # Match the monospace span that contains the job name
+                pattern = r'(<span style="font-family: SFMono-Regular[^>]*>)([^<]+)(</span>)'
+                replacement = r'\1<span title="Depends on: ' + html.escape(deps_str) + r'">\2</span>\3'
+                label_html = re.sub(pattern, replacement, label_html, count=1)
+                if depth < 3:
+                    print(f"[PASS 6] {indent}  (added tooltip: needs {deps_str})")
+            
+            # Combine children:
+            # 1. Actual CI node's children (substeps from raw logs: "build: Build Image", "test: pytest", etc.)
+            # 2. Workflow children (dependency hierarchy from YAML `needs:` field)
+            actual_ci_children = list(getattr(actual_ci_node, "children", None) or [])
+            combined_children = actual_ci_children + merged_children
+            
+            if depth < 3 and actual_ci_children:
+                print(f"[PASS 6] {indent}  (preserving {len(actual_ci_children)} CI substeps + {len(merged_children)} workflow deps)")
+            
+            # Return the actual CI node BUT combine substeps + workflow hierarchy
+            # This preserves both the job's internal steps AND the workflow dependencies
             return TreeNodeVM(
                 node_key=actual_ci_node.node_key,
-                label_html=actual_ci_node.label_html,
-                children=merged_children,  # Use workflow children (recursively merged)
+                label_html=label_html,  # Use potentially modified label with tooltip
+                children=combined_children,  # Combine CI substeps + workflow dependencies
                 collapsible=actual_ci_node.collapsible,
                 default_expanded=actual_ci_node.default_expanded,
                 triangle_tooltip=actual_ci_node.triangle_tooltip,
@@ -1656,6 +1704,7 @@ def merge_ci_info_into_workflow_pass(
                 workflow_name=actual_ci_node.workflow_name,
                 variant=actual_ci_node.variant,
                 pr_number=actual_ci_node.pr_number,
+                raw_html_content=actual_ci_node.raw_html_content,  # Preserve raw HTML content (e.g., snippets)
             )
         
         # Otherwise, keep the workflow placeholder with its merged children
@@ -1674,6 +1723,7 @@ def merge_ci_info_into_workflow_pass(
             workflow_name=workflow_node.workflow_name,
             variant=workflow_node.variant,
             pr_number=workflow_node.pr_number,
+            raw_html_content=workflow_node.raw_html_content,  # Preserve raw HTML content
         )
     
     merged_nodes = [merge_recursive(node) for node in workflow_nodes]
@@ -1727,7 +1777,7 @@ def merge_ci_info_into_workflow_pass(
     return merged_nodes
 
 
-def process_ci_tree_passes(
+def run_all_passes(
     ci_nodes: List,  # List[BranchNode] from common_branch_nodes
     repo_root: Path,
     github_api=None,
@@ -1754,36 +1804,295 @@ def process_ci_tree_passes(
     Returns:
         Processed list of TreeNodeVM nodes, optionally with canonical YAML tree attached.
     """
-    print(f"[process_ci_tree_passes] Starting with {len(ci_nodes)} CI nodes (per-PR)")
-    print(f"[process_ci_tree_passes] attach_yaml_tree={attach_yaml_tree}")
+    import logging
+    logger = logging.getLogger(__name__)
+    
+    logger.info(f"[run_all_passes] Starting with {len(ci_nodes)} CI nodes (per-PR)")
+    logger.debug(f"[run_all_passes] attach_yaml_tree={attach_yaml_tree}")
     
     # PASS 1: Convert BranchNode to TreeNodeVM (actual CI info from GitHub)
     ci_info_nodes = convert_branch_nodes_to_tree_vm_pass(ci_nodes)
     
-    # If YAML tree attachment is disabled, return early
+    # If YAML tree attachment is disabled, skip YAML processing
     if not attach_yaml_tree:
-        print(f"[process_ci_tree_passes] YAML tree attachment disabled; returning {len(ci_info_nodes)} nodes")
+        logger.info(f"[run_all_passes] YAML tree attachment disabled; returning {len(ci_info_nodes)} nodes")
         return ci_info_nodes
     
-    # PASS 2: Parse workflow YAML and build mapping
-    # TODO: This should be cached since it's the same for all PRs
-    parse_workflow_yaml_and_build_mapping_pass([], repo_root, commit_sha=commit_sha)
+    # COMMENTED OUT: YAML merge approach (keeping for reference in case we want to revert)
+    # # PHASE A: Build canonical YAML tree (independent of actual CI jobs)
+    # # These passes populate global mappings (_workflow_parent_child_mapping, _workflow_job_name_to_id, _workflow_job_to_file)
+    # parse_workflow_yaml_and_build_mapping_pass([], repo_root, commit_sha=commit_sha) # PASS 2
+    # workflow_nodes = create_dummy_nodes_from_yaml_pass([]) # PASS 3
+    # workflow_nodes = build_hierarchy_from_mapping_pass(workflow_nodes) # PASS 4
+    # workflow_nodes = expand_matrix_templates_pass(workflow_nodes, repo_root) # PASS 5
+    # logger.info(f"[PASS 2-5] Built workflow structure with {len(workflow_nodes)} root nodes (from YAML)")
+    # 
+    # # PASS 6: Merge actual CI info into the workflow structure
+    # merged_nodes = merge_ci_info_into_workflow_pass(ci_info_nodes, workflow_nodes)
+    # # Note: merge_ci_info_into_workflow_pass already calls validate_status_check_children
     
-    # PASS 3: Create dummy nodes from YAML
-    workflow_nodes = create_dummy_nodes_from_yaml_pass([])
+    # NEW APPROACH: Ad-hoc grouping of specific jobs
+    # PASS 2: Group backend jobs (vllm, sglang, trtllm, operator) under backend-status-check
+    # PASS 3: Group deploy-* jobs under deploy stage
+    grouped_nodes = group_backend_jobs_pass(ci_info_nodes)
+    grouped_nodes = group_jobs_by_prefix_pass(grouped_nodes, prefix="deploy-", parent_name="deploy", parent_label="deploy")
     
-    # PASS 4: Build hierarchy from mapping
-    workflow_nodes = build_hierarchy_from_mapping_pass(workflow_nodes)
+    # PASS 4: Sort nodes by name
+    sorted_nodes = sort_nodes_by_name_pass(grouped_nodes)
     
-    # PASS 5: Expand matrix templates
-    workflow_nodes = expand_matrix_templates_pass(workflow_nodes, repo_root)
+    # PASS 5: Expand nodes with required failures in descendants
+    final_nodes = expand_required_failure_descendants_pass(sorted_nodes)
     
-    print(f"[PASS 2-5] Built workflow structure with {len(workflow_nodes)} root nodes (from YAML)")
+    logger.info(f"[PASS 2-5] Ad-hoc grouping, sort, and expand complete, returning {len(final_nodes)} root nodes")
+    return final_nodes
+
+
+def annotate_nodes_with_dependencies_pass(nodes: List[TreeNodeVM]) -> List[TreeNodeVM]:
+    """PASS 2: Annotate CI nodes with their dependencies from YAML.
     
-    # PASS 6: Merge actual CI info into workflow structure
-    merged_nodes = merge_ci_info_into_workflow_pass(ci_info_nodes, workflow_nodes)
+    For each node, look up its job name in the YAML mapping and add a tooltip
+    showing what it depends on (needs:).
     
-    return merged_nodes
+    The tooltip appears on hover after 1.5 seconds, keeping the UI clean.
+    """
+    print(f"[PASS 2] Annotating {len(nodes)} nodes with dependencies from YAML")
+    
+    annotated_nodes = []
+    for node in nodes:
+        job_name = node.job_name
+        
+        # Look up dependencies in the YAML mapping
+        dependencies = _workflow_parent_child_mapping.get(job_name, [])
+        
+        if dependencies:
+            # Add a small indicator and wrap in a span with tooltip
+            dep_list = ", ".join(dependencies)
+            indicator = f' <span style="color: #0969da; font-size: 11px; cursor: help;" title="Needs: {dep_list}">⚡</span>'
+            new_label = node.label_html + indicator
+            
+            # Create new node with annotated label
+            annotated_node = TreeNodeVM(
+                node_key=node.node_key,
+                label_html=new_label,
+                children=node.children,
+                collapsible=node.collapsible,
+                default_expanded=node.default_expanded,
+                triangle_tooltip=node.triangle_tooltip,
+                noncollapsible_icon=node.noncollapsible_icon,
+                skip_dedup=node.skip_dedup,
+                job_name=node.job_name,
+                core_job_name=node.core_job_name,
+                workflow_name=node.workflow_name,
+                variant=node.variant,
+                pr_number=node.pr_number,
+            )
+            annotated_nodes.append(annotated_node)
+            print(f"[PASS 2]   {job_name} needs: {', '.join(dependencies)}")
+        else:
+            # No dependencies, keep as-is
+            annotated_nodes.append(node)
+    
+    annotated_count = sum(1 for n in annotated_nodes if _workflow_parent_child_mapping.get(n.job_name))
+    print(f"[PASS 2] Annotated {annotated_count} nodes with dependencies")
+    return annotated_nodes
+
+
+def group_backend_jobs_pass(nodes: List[TreeNodeVM]) -> List[TreeNodeVM]:
+    """PASS 2: Group backend jobs (vllm, sglang, trtllm, operator) under backend-status-check.
+    
+    This pass finds:
+    - backend-status-check (becomes the parent)
+    - vllm, sglang, trtllm, operator jobs (all variants)
+    
+    And groups them under backend-status-check.
+    
+    Args:
+        nodes: List of TreeNodeVM nodes (root level)
+        
+    Returns:
+        List of TreeNodeVM nodes with backend jobs grouped under backend-status-check
+    """
+    import logging
+    logger = logging.getLogger(__name__)
+    
+    logger.info(f"[PASS 2] Grouping backend jobs (processing {len(nodes)} root nodes)")
+    
+    # Find backend-status-check and backend jobs
+    backend_status_check = None
+    backend_jobs = []
+    other_jobs = []
+    
+    backend_job_prefixes = ['vllm', 'sglang', 'trtllm', 'operator']
+    
+    for node in nodes:
+        job_name = str(getattr(node, "job_name", "") or "")
+        
+        if job_name == "backend-status-check":
+            backend_status_check = node
+        elif any(job_name.startswith(prefix) for prefix in backend_job_prefixes):
+            backend_jobs.append(node)
+        else:
+            other_jobs.append(node)
+    
+    if not backend_jobs:
+        logger.info(f"[PASS 2] No backend jobs found, returning nodes unchanged")
+        return nodes
+    
+    logger.info(f"[PASS 2] Found {len(backend_jobs)} backend jobs to group")
+    
+    if backend_status_check:
+        # Add backend jobs as children to existing backend-status-check
+        logger.info(f"[PASS 2] Adding {len(backend_jobs)} backend jobs to existing backend-status-check")
+        existing_children = list(getattr(backend_status_check, "children", None) or [])
+        combined_children = existing_children + backend_jobs
+        
+        updated_backend_status_check = TreeNodeVM(
+            node_key=backend_status_check.node_key,
+            label_html=backend_status_check.label_html,
+            children=combined_children,
+            collapsible=True,
+            default_expanded=backend_status_check.default_expanded,
+            triangle_tooltip=backend_status_check.triangle_tooltip,
+            noncollapsible_icon=backend_status_check.noncollapsible_icon,
+            job_name=backend_status_check.job_name,
+            core_job_name=backend_status_check.core_job_name,
+            workflow_name=backend_status_check.workflow_name,
+            variant=backend_status_check.variant,
+            pr_number=backend_status_check.pr_number,
+        )
+        
+        # Return other jobs + updated backend-status-check
+        result = other_jobs + [updated_backend_status_check]
+    else:
+        # Create a new backend-status-check parent node
+        logger.info(f"[PASS 2] Creating new backend-status-check parent with {len(backend_jobs)} children")
+        backend_status_check = TreeNodeVM(
+            node_key="ci:backend-status-check",
+            label_html='<span style="font-weight: 600; color: #0969da;">backend-status-check</span>',
+            children=backend_jobs,
+            collapsible=True,
+            default_expanded=False,
+            triangle_tooltip="Backend status check jobs",
+            job_name="backend-status-check",
+        )
+        result = other_jobs + [backend_status_check]
+    
+    logger.info(f"[PASS 2] Backend grouping complete, returning {len(result)} root nodes")
+    return result
+
+
+def group_jobs_by_prefix_pass(
+    nodes: List[TreeNodeVM],
+    prefix: str,
+    parent_name: str,
+    parent_label: str,
+) -> List[TreeNodeVM]:
+    """Generic pass to group jobs by prefix under a parent stage node.
+    
+    This pass finds all root-level nodes whose job_name starts with the given prefix,
+    removes them from the root level, and creates a new parent node that contains
+    all these jobs as children.
+    
+    Args:
+        nodes: List of TreeNodeVM nodes (root level)
+        prefix: Job name prefix to match (e.g., "deploy-")
+        parent_name: Name for the parent node (e.g., "deploy")
+        parent_label: HTML label for the parent node (e.g., "deploy")
+        
+    Returns:
+        List of TreeNodeVM nodes with matching jobs grouped under a parent
+    """
+    import logging
+    logger = logging.getLogger(__name__)
+    
+    logger.info(f"[PASS] Grouping {prefix}* jobs (processing {len(nodes)} root nodes)")
+    
+    # Separate matching jobs from other jobs
+    matching_jobs = []
+    other_jobs = []
+    
+    for node in nodes:
+        job_name = str(getattr(node, "job_name", "") or "")
+        if job_name.startswith(prefix):
+            matching_jobs.append(node)
+        else:
+            other_jobs.append(node)
+    
+    if not matching_jobs:
+        logger.info(f"[PASS] No {prefix}* jobs found, returning nodes unchanged")
+        return nodes
+    
+    logger.info(f"[PASS] Found {len(matching_jobs)} {prefix}* jobs to group")
+    
+    # Create a parent stage node
+    parent_node = TreeNodeVM(
+        node_key=f"stage:{parent_name}",
+        label_html=f'<span style="font-weight: 600; color: #0969da;">{parent_label}</span>',
+        children=matching_jobs,
+        collapsible=True,
+        default_expanded=False,
+        triangle_tooltip=f"{parent_name.capitalize()} stage jobs",
+        job_name=parent_name,
+    )
+    
+    # Return other jobs + the parent node
+    result = other_jobs + [parent_node]
+    logger.info(f"[PASS] Created {parent_name} stage with {len(matching_jobs)} children, returning {len(result)} root nodes")
+    return result
+
+
+def sort_nodes_by_name_pass(nodes: List[TreeNodeVM]) -> List[TreeNodeVM]:
+    """PASS 8: Sort nodes alphabetically by job name (recursively).
+    
+    Sorts nodes at each level by their job_name or label_html for consistent display.
+    Special nodes (like status-check jobs) can be preserved at specific positions if needed.
+    
+    Args:
+        nodes: List of TreeNodeVM nodes to sort
+        
+    Returns:
+        Sorted list of TreeNodeVM nodes (children are also recursively sorted)
+    """
+    def sort_key(node: TreeNodeVM) -> tuple:
+        """Generate sort key for a node.
+        
+        Returns:
+            Tuple of (priority, name) where priority determines order:
+            - 0: Regular jobs (sorted alphabetically)
+        """
+        job_name = str(getattr(node, "job_name", "") or "")
+        # Use job_name if available, otherwise extract from label_html
+        name = job_name if job_name else str(getattr(node, "label_html", "") or "")
+        return (0, name.lower())
+    
+    # Sort current level
+    sorted_nodes = sorted(nodes, key=sort_key)
+    
+    # Recursively sort children
+    result = []
+    for node in sorted_nodes:
+        children = list(getattr(node, "children", None) or [])
+        if children:
+            sorted_children = sort_nodes_by_name_pass(children)
+            # Create new node with sorted children
+            result.append(TreeNodeVM(
+                node_key=node.node_key,
+                label_html=node.label_html,
+                children=sorted_children,
+                collapsible=node.collapsible,
+                default_expanded=node.default_expanded,
+                triangle_tooltip=node.triangle_tooltip,
+                noncollapsible_icon=node.noncollapsible_icon,
+                skip_dedup=node.skip_dedup,
+                job_name=node.job_name,
+                workflow_name=node.workflow_name,
+                variant=node.variant,
+                pr_number=node.pr_number,
+            ))
+        else:
+            result.append(node)
+    
+    return result
 
 
 def _hash10(s: str) -> str:
@@ -1948,15 +2257,17 @@ def render_tree_divs(root_nodes: List[TreeNodeVM]) -> str:
         last_reference_text = None
         
         has_children = node.collapsible and node.children
+        has_raw_content = node.collapsible and node.raw_html_content
+        is_collapsible = has_children or has_raw_content
         
         # Add 'leaf' class for nodes without children
-        li_class = '' if has_children else ' class="leaf"'
+        li_class = '' if is_collapsible else ' class="leaf"'
         li_class_attr = li_class if li_class else ''
         
         parts = []
         parts.append(f'<li{li_class_attr}>\n')
         
-        if has_children:
+        if is_collapsible:
             # Collapsible node with children - use <details>/<summary>
             nk = str(node.node_key or "")
             full_key = (str(node_key_path or "") + ">" + nk).strip(">")
@@ -1964,32 +2275,54 @@ def render_tree_divs(root_nodes: List[TreeNodeVM]) -> str:
             sha7 = _sha7_from_key(full_key) or _sha7_from_key(nk)
             repo = _repo_token_from_key(full_key) or _repo_token_from_key(nk)
             
+            # Generate unique URL key using hash of full path
+            import hashlib
+            full_key_hash = hashlib.sha256(full_key.encode()).hexdigest()[:7]
+            
             url_key_attr = ""
             if repo and sha7:
-                url_key_attr = f' data-url-key="t.{html.escape(repo)}.{html.escape(sha7)}"'
+                url_key_attr = f' data-url-key="t.{html.escape(repo)}.{html.escape(full_key_hash)}"'
             elif sha7:
-                url_key_attr = f' data-url-key="t.{html.escape(sha7)}"'
+                url_key_attr = f' data-url-key="t.{html.escape(full_key_hash)}"'
+            else:
+                # Fallback: use just the hash
+                url_key_attr = f' data-url-key="t.{html.escape(full_key_hash)}"'
             
             parent_attr = f' data-parent-children-id="{html.escape(parent_children_id)}"' if parent_children_id else ''
             expanded = bool(node.default_expanded)
             open_attr = ' open' if expanded else ''
             title_attr = f' title="{html.escape(node.triangle_tooltip)}"' if node.triangle_tooltip else ''
+            default_expanded_attr = f' data-default-expanded="{"1" if expanded else "0"}"'
             
-            parts.append(f'<details{open_attr} id="{html.escape(children_id)}"{parent_attr}{url_key_attr}>\n')
-            parts.append(f'<summary{title_attr}>\n')
+            # Add snippet-key attribute for snippet nodes (so category pills can target them)
+            snippet_key_attr = ""
+            if nk.startswith("snippet:"):
+                snippet_key = nk[len("snippet:"):]  # Remove "snippet:" prefix
+                snippet_key_attr = f' data-snippet-key="{html.escape(snippet_key)}"'
+            
+            parts.append(f'<details{open_attr} id="{html.escape(children_id)}"{parent_attr}{url_key_attr}{snippet_key_attr} data-url-state="1">\n')
+            parts.append(f'<summary{title_attr}{default_expanded_attr}>\n')
             parts.append(node.label_html or "")
             parts.append('</summary>\n')
-            parts.append('<ul>\n')
+            # Render raw HTML content if present (e.g., snippet <pre> blocks)
+            if node.raw_html_content:
+                parts.append(node.raw_html_content)
             
-            for i, child in enumerate(node.children):
-                is_last_child = (i == len(node.children) - 1)
-                parts.append(render_node(child, children_id, full_key, is_last_child))
+            # Only render <ul> if there are actual children
+            if node.children:
+                parts.append('<ul>\n')
+                for i, child in enumerate(node.children):
+                    is_last_child = (i == len(node.children) - 1)
+                    parts.append(render_node(child, children_id, full_key, is_last_child))
+                parts.append('</ul>\n')
             
-            parts.append('</ul>\n')
             parts.append('</details>\n')
         else:
             # Leaf node - just render the label
             parts.append(node.label_html or "")
+            # Render raw HTML content if present (e.g., snippet <pre> blocks for non-collapsible nodes)
+            if node.raw_html_content:
+                parts.append(node.raw_html_content)
         
         parts.append('</li>\n')
         return "".join(parts)
@@ -2842,12 +3175,14 @@ def github_api_stats_rows(
     return rows
 
 
-def _tag_pill_html(*, text: str, monospace: bool = False, kind: str = "category") -> str:
+def _tag_pill_html(*, text: str, monospace: bool = False, kind: str = "category", snippet_key: str = "") -> str:
     """Render a small tag/pill for inline display next to links.
 
     kind:
       - "category": light red pill (high-level error category)
       - "command": gray pill (detected command; not the root cause)
+    
+    snippet_key: Optional snippet key to enable click-to-expand functionality
     """
     t = (text or "").strip()
     if not t:
@@ -2862,11 +3197,21 @@ def _tag_pill_html(*, text: str, monospace: bool = False, kind: str = "category"
         border = "#ffb8b8"
         bg = "#ffebe9"
         fg = "#8b1a1a"
+    
+    # Add onclick handler if snippet_key is provided
+    onclick_attr = ""
+    cursor_style = ""
+    if snippet_key:
+        # Use preventDefault to stop the summary toggle, then manually handle expansion
+        onclick_attr = f' onclick="event.stopPropagation(); event.preventDefault(); try {{ expandSnippetByKey(\'{html.escape(snippet_key, quote=True)}\'); }} catch (e) {{}}"'
+        cursor_style = " cursor: pointer;"
+    
     return (
         f' <span style="display: inline-block; vertical-align: baseline; '
         f'border: 1px solid {border}; background: {bg}; color: {fg}; '
         f'border-radius: 999px; padding: 1px 6px; font-size: 10px; '
-        f'font-weight: 600; line-height: 1; font-family: {font};">'
+        f'font-weight: 600; line-height: 1; font-family: {font};{cursor_style}"'
+        f'{onclick_attr}>'
         f"{html.escape(t)}</span>"
     )
 
@@ -2906,21 +3251,15 @@ def _snippet_first_command(snippet_text: str) -> str:
     return first
 
 
-def _error_snippet_toggle_html(*, dom_id_seed: str, snippet_text: str) -> str:
-    # Stable snippet id so URLs can target it across page regenerations.
-    # Fall back to a unique suffix if collisions occur within a single document.
-    base = f"err_snip_{_hash10(str(dom_id_seed or ''))}"
-    global _ERROR_SNIP_USED
-    try:
-        _ERROR_SNIP_USED = _ERROR_SNIP_USED  # type: ignore[name-defined]
-    except Exception:
-        _ERROR_SNIP_USED = {}  # type: ignore[assignment]
-    try:
-        n = int(_ERROR_SNIP_USED.get(base, 0) or 0) + 1  # type: ignore[attr-defined]
-        _ERROR_SNIP_USED[base] = n  # type: ignore[index]
-    except Exception:
-        n = 1
-    err_id = base if n == 1 else f"{base}_{n}"
+def _create_snippet_tree_node(*, dom_id_seed: str, snippet_text: str) -> Optional[TreeNodeVM]:
+    """Create a TreeNodeVM for an error snippet (as a collapsible child node).
+    
+    Returns a snippet node with a special node_key that starts with "snippet:" so it can be
+    identified and targeted by category pill click handlers.
+    """
+    if not snippet_text or not snippet_text.strip():
+        return None
+    
     # Compact URL key, SHA-first, but prefer the *full numeric Actions job id* when available:
     #   s.<sha7>.j<jobid>
     # Fallback:
@@ -2948,37 +3287,33 @@ def _error_snippet_toggle_html(*, dom_id_seed: str, snippet_text: str) -> str:
         url_key = f"s.{sha7}.j{jobid}" if sha7 else f"s.j{jobid}"
     else:
         url_key = f"s.{sha7}.{suffix}" if sha7 else f"s.{suffix}"
+    
+    # Use snippet: prefix in node_key to mark this as a snippet node
+    snippet_node_key = f"snippet:{url_key}"
+    
+    # Format snippet HTML
     shown = _format_snippet_html(snippet_text or "")
     if not shown:
         shown = '<span style="color: #57606a;">(no snippet found)</span>'
-    toggle_id = f"{err_id}__toggle"
-    return (
-        f' <span style="cursor: pointer; color: #0969da; font-size: 11px; margin-left: 5px; '
-        f'text-decoration: none; font-weight: 500; user-select: none;" '
-        f'id="{html.escape(toggle_id, quote=True)}" '
-        f'data-default-expanded="0" '
-        f'data-error-id="{html.escape(err_id, quote=True)}" '
-        f'data-url-key="{html.escape(url_key, quote=True)}" '
-        f'onclick="toggleErrorSnippet(\'{html.escape(err_id, quote=True)}\', this)">▶ Snippet</span>'
-        f'<span id="{html.escape(err_id, quote=True)}" style="display: none;">'
-        f"<br>"
-        # Full-width snippet box (within the tree container) using <pre> for proper formatting.
-        f'<pre style="display: block; width: 100%; max-width: 100%; box-sizing: border-box; margin: 0 0 0 16px; '
-        f'border: 1px solid #d0d7de; background: #f6f8fa; '
+    
+    # Create the snippet content as a <pre> block (rendered as raw HTML after the summary)
+    snippet_content = (
+        f'<pre style="display: block; width: 100%; max-width: 100%; box-sizing: border-box; margin: 4px 0 8px 0; '
+        f'border: 1px solid #d0d7de; background: #fffbea; '
         f'border-radius: 6px; padding: 6px 8px; overflow-x: auto; color: #24292f; '
         f'font-family: ui-monospace, SFMono-Regular, SF Mono, Menlo, Consolas, Liberation Mono, monospace; '
         f'font-size: 12px; line-height: 1.45;">'
-        f'<span style="display: flex; align-items: center; justify-content: flex-start; margin-bottom: 4px;">'
-        f'<button type="button" '
-        f'onclick="event.stopPropagation(); try {{ collapseErrorSnippet(\'{html.escape(err_id, quote=True)}\'); }} catch (e) {{}}" '
-        f'style="padding: 0 6px; height: 18px; line-height: 16px; font-size: 14px; '
-        f'border: 1px solid #d0d7de; border-radius: 999px; background: #ffffff; '
-        f'color: #57606a; cursor: pointer;" '
-        f'title="Close snippet">×</button>'
-        f"</span>"
         f"{shown}"
         f"</pre>"
-        f"</span>"
+    )
+    
+    return TreeNodeVM(
+        node_key=snippet_node_key,  # Special prefix to identify snippet nodes
+        label_html='<span style="color: #0969da; font-size: 11px;">Snippet</span>',
+        raw_html_content=snippet_content,
+        children=[],
+        collapsible=True,  # Make it collapsible so it gets a triangle
+        default_expanded=False,
     )
 
 
@@ -3111,29 +3446,44 @@ def check_line_html(
         label = f"[cached raw log {size_s}]" if size_s else "[cached raw log]"
         links += _small_link_html(url=raw_log_href, label=label)
 
-    # Error tags/snippet can be shown either:
-    # - after [cached raw log] when present (preferred), OR
-    # - on its own (e.g. for step subsections) when we have a snippet but no dedicated raw-log link.
-    #
-    # UX invariant:
-    # - Only show snippet toggle when we actually have snippet text.
-    # - Don't show "(no snippet found)" placeholder - just hide the toggle entirely.
+    # Show category pills if snippet exists (snippets are now rendered as child nodes)
     snippet_text = str(error_snippet_text or "")
     has_snippet_text = bool(snippet_text.strip())
 
     if has_snippet_text:
-        # Show category pills and command pill
+        # Generate snippet key (same logic as _create_snippet_tree_node)
+        dom_id_seed = f"{job_id}|{display_name}|{raw_log_href}|{log_url}"
+        try:
+            seed_s = str(dom_id_seed or "")
+        except Exception:
+            seed_s = ""
+        try:
+            m = re.findall(r"\b[0-9a-f]{7,40}\b", seed_s, flags=re.IGNORECASE)
+            sha7 = (str(m[-1])[:7].lower() if m else "")
+        except Exception:
+            sha7 = ""
+        jobid = ""
+        try:
+            m2 = re.search(r"/job/([0-9]{5,})", seed_s)
+            jobid = str(m2.group(1)) if m2 else ""
+        except Exception:
+            jobid = ""
+        try:
+            suffix = _hash10(seed_s)[:6]
+        except Exception:
+            suffix = "x"
+        if jobid:
+            snippet_key = f"s.{sha7}.j{jobid}" if sha7 else f"s.j{jobid}"
+        else:
+            snippet_key = f"s.{sha7}.{suffix}" if sha7 else f"s.{suffix}"
+        
+        # Show category pills and command pill with snippet key for click handling
         cats = _snippet_categories(snippet_text)
         for c in cats[:3]:
-            links += _tag_pill_html(text=c, monospace=False, kind="category")
+            links += _tag_pill_html(text=c, monospace=False, kind="category", snippet_key=snippet_key)
         cmd = _snippet_first_command(snippet_text)
         if cmd:
-            links += _tag_pill_html(text=cmd, monospace=True, kind="command")
-        # Include URL/context so the snippet id is stable and unique across the page.
-        links += _error_snippet_toggle_html(
-            dom_id_seed=f"{job_id}|{display_name}|{raw_log_href}|{log_url}",
-            snippet_text=snippet_text,
-        )
+            links += _tag_pill_html(text=cmd, monospace=True, kind="command", snippet_key=snippet_key)
 
     return f"{icon} {id_html}{req_html}{name_html}{dur_html}{links}"
 

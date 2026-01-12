@@ -1652,12 +1652,17 @@ class CommitHistoryGenerator:
             # Use centralized CI tree processing pipeline
             children: List[TreeNodeVM]
             try:
-                from common_dashboard_lib import process_ci_tree_passes
+                from common_dashboard_lib import run_all_passes, create_dummy_nodes_from_yaml_pass
                 
-                children = process_ci_tree_passes(
-                    nodes=[],
-                    repo_root=Path(repo_path),
+                # If no CI nodes, create dummy nodes from YAML for visualization
+                if not node_items:
+                    print("[CommitStatusNode] No CI nodes, creating dummy nodes from YAML")
+                    dummy_nodes = create_dummy_nodes_from_yaml_pass([])
+                    node_items = [(node.node_key, node) for node in dummy_nodes]
+                
+                children = run_all_passes(
                     node_items=[(nm, n) for (nm, n) in (node_items or [])],
+                    repo_root=Path(repo_path),
                     github_api=self.github_client,
                     owner="ai-dynamo",
                     repo="dynamo",

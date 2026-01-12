@@ -315,6 +315,10 @@
       });
     </script>
   {% else %}
-    <pre>{{ tree_html | safe }}</pre>
+    {% if use_div_trees is defined and use_div_trees %}
+      {{ tree_html | safe }}
+    {% else %}
+      <pre>{{ tree_html | safe }}</pre>
+    {% endif %}
   {% endif %}
 {% endblock %}

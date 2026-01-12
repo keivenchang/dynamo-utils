@@ -62,7 +62,7 @@ fi
 
 usage() {
     cat <<'EOF' >&2
-Usage: update_html_pages.sh [--show-local-branches] [--show-commit-history] [--show-remote-branches] [--show-remote-history] [--show-local-resources] [--fast-debug|--fast] [--use-div-trees] [--dry-run] [--run-ignore-lock]
+Usage: update_html_pages.sh [--show-local-branches] [--show-commit-history] [--show-remote-branches] [--show-remote-history] [--show-local-resources] [--fast-debug|--fast] [--dry-run] [--run-ignore-lock]
 
 If no args are provided, ALL tasks run.
 
@@ -76,7 +76,6 @@ RUN_SHOW_DYNAMO_BRANCHES=false
 RUN_SHOW_COMMIT_HISTORY=false
 RUN_RESOURCE_REPORT=false
 RUN_SHOW_REMOTE_BRANCHES=false
-USE_DIV_TREES=false
 ANY_FLAG=false
 IGNORE_LOCK=false
 DRY_RUN=false
@@ -102,8 +101,6 @@ while [ "$#" -gt 0 ]; do
             FAST_DEBUG=true; shift ;;
         --fast)
             FAST_DEBUG=true; shift ;;
-        --use-div-trees)
-            USE_DIV_TREES=true; shift ;;
         --dry-run)
             DRY_RUN=true; shift ;;
         --run-ignore-lock)
@@ -334,17 +331,13 @@ run_show_remote_branches() {
         echo "===== $(date '+%Y-%m-%d %H:%M:%S') run_show_remote_branches start (user=${U} output=$OUT_FILE) =====" >> "$REMOTE_PRS_LOG"
 
         # Use dynamo_latest as base-dir so we can locate the repo clone for workflow YAML inference.
-        DIV_TREE_FLAG=""
-        if [ "$USE_DIV_TREES" = "true" ]; then
-            DIV_TREE_FLAG="--use-div-trees"
-        fi
+        # Div trees are now default (no flag needed)
         
         if python3 "$SCRIPT_DIR/show_remote_branches.py" \
             --github-user "${U}" \
             --base-dir "$NVIDIA_HOME/dynamo_latest" \
             --output "$OUT_FILE" \
-            $MAX_GH_FLAG \
-            $DIV_TREE_FLAG >> "$REMOTE_PRS_LOG" 2>&1; then
+            $MAX_GH_FLAG >> "$REMOTE_PRS_LOG" 2>&1; then
             echo "$(date '+%Y-%m-%d %H:%M:%S') - Updated $OUT_FILE" >> "$LOG_FILE"
         else
             echo "$(date '+%Y-%m-%d %H:%M:%S') - ERROR: Failed to update $OUT_FILE" >> "$LOG_FILE"

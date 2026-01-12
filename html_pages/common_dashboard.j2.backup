@@ -223,90 +223,6 @@
     .auto-refresh-banner button:hover {
       background: #eef1f4;
     }
-
-    /* Tree view styling based on https://iamkate.com/code/tree-views/ */
-    .tree {
-      --spacing: 1.3rem;
-      --radius: 8px;
-      font-size: 14px;
-      color: #24292f;
-      line-height: var(--spacing);
-      list-style: none;
-      padding-left: 0;
-    }
-    .tree li {
-      display: block;
-      position: relative;
-      padding-left: calc(2 * var(--spacing) - var(--radius) - 2px);
-      min-height: var(--spacing);
-      margin-bottom: 2px;
-    }
-    .tree ul {
-      margin-left: calc(var(--radius) - var(--spacing));
-      padding-left: 0;
-      list-style: none;
-    }
-    .tree ul li {
-      border-left: 2px solid #ddd;
-    }
-    .tree ul li:last-child {
-      border-color: transparent;
-    }
-    .tree ul li::before {
-      content: '';
-      display: block;
-      position: absolute;
-      top: calc(var(--spacing) / -2);
-      left: -2px;
-      width: calc(var(--spacing) + 2px);
-      height: calc(var(--spacing) - 2px);
-      border: solid #ddd;
-      border-width: 0 0 2px 2px;
-    }
-    .tree summary {
-      display: block;
-      cursor: pointer;
-      line-height: var(--spacing);
-      min-height: var(--spacing);
-      margin-bottom: 2px;
-    }
-    .tree summary::marker,
-    .tree summary::-webkit-details-marker {
-      display: none;
-    }
-    .tree summary:focus {
-      outline: none;
-    }
-    .tree summary:focus-visible {
-      outline: 1px dotted #000;
-    }
-    .tree li::after,
-    .tree summary::before {
-      content: '';
-      display: block;
-      position: absolute;
-      top: calc(var(--spacing) / 2 - var(--radius) - 2px);
-      left: calc(var(--spacing) - var(--radius) - 1px);
-      width: calc(2 * var(--radius));
-      height: calc(2 * var(--radius));
-      border-radius: 50%;
-      background: transparent;
-    }
-    .tree summary::before {
-      z-index: 1;
-      background: #e6f3ff;  /* Very light blue for collapsed triangle */
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      color: #0969da;  /* Darker blue triangle icon */
-      font-size: 12px;  /* Bigger triangle icon */
-      content: '▶';
-    }
-    .tree details[open] > summary::before {
-      background: #0969da;  /* Darker blue for expanded triangle */
-      color: white;  /* White triangle icon */
-      content: '▼';
-    }
   </style>
 
   {% block head_script %}{% endblock %}
@@ -358,35 +274,90 @@
     });
   });
 
-  // Expand snippet by clicking category pill
-  function expandSnippetByKey(snippetKey) {
-    if (!snippetKey) return;
-    
-    setTimeout(function() {
-      var snippetEl = document.querySelector('details[data-snippet-key="' + snippetKey + '"]');
-      if (!snippetEl) return;
-      
-      // Expand all parent details elements
-      var parent = snippetEl.parentElement;
-      while (parent) {
-        if (parent.tagName === 'DETAILS') {
-          parent.open = true;
+  // Shared tree toggle JS (static; used by <pre>-tree output)
+  function toggleTreeChildren(childrenId, toggleEl) {
+    var el = document.getElementById(childrenId);
+    if (!el) return;
+    var hidden = (el.style.display === 'none' || el.style.display === '');
+    el.style.display = hidden ? 'inline' : 'none';
+    if (toggleEl) {
+      toggleEl.textContent = hidden ? '▼' : '▶';
+    }
+    try {
+      if (window.DashboardUrlState && typeof window.DashboardUrlState.setBool === 'function') {
+        var defExp = false;
+        try { defExp = (toggleEl && toggleEl.getAttribute('data-default-expanded') === '1'); } catch (e) {}
+        var urlKey = '';
+        try { urlKey = String((toggleEl && toggleEl.getAttribute('data-url-key')) || ''); } catch (e) { urlKey = ''; }
+        if (!urlKey) {
+          urlKey = 't.' + String(childrenId || '');
         }
-        parent = parent.parentElement;
+        if (typeof window.DashboardUrlState.setBoolDefault === 'function') {
+          window.DashboardUrlState.setBoolDefault(urlKey, hidden, defExp);
+        } else {
+          window.DashboardUrlState.setBool(urlKey, hidden);
+        }
       }
-      
-      // Expand the snippet itself
-      snippetEl.open = true;
-      
-      // Scroll to snippet
-      setTimeout(function() {
-        try {
-          snippetEl.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
-        } catch (e) {
-          snippetEl.scrollIntoView(false);
+    } catch (e) {}
+  }
+
+  // Shared "Snippet" toggle (used by [raw log] leaves)
+  function toggleErrorSnippet(errorId, toggleEl) {
+    var el = document.getElementById(errorId);
+    if (!el) return;
+    var hidden = (el.style.display === 'none' || el.style.display === '');
+    el.style.display = hidden ? 'inline' : 'none';
+    if (toggleEl) {
+      toggleEl.textContent = hidden ? '▼ Hide snippet' : '▶ Snippet';
+    }
+    try {
+      if (window.DashboardUrlState && typeof window.DashboardUrlState.setBool === 'function') {
+        var defExp = false;
+        try { defExp = (toggleEl && toggleEl.getAttribute('data-default-expanded') === '1'); } catch (e) {}
+        var urlKey = '';
+        try { urlKey = String((toggleEl && toggleEl.getAttribute('data-url-key')) || ''); } catch (e) { urlKey = ''; }
+        if (!urlKey) {
+          urlKey = 's.' + String(errorId || '');
         }
-      }, 50);
-    }, 10);
+        if (typeof window.DashboardUrlState.setBoolDefault === 'function') {
+          window.DashboardUrlState.setBoolDefault(urlKey, hidden, defExp);
+        } else {
+          window.DashboardUrlState.setBool(urlKey, hidden);
+        }
+      }
+    } catch (e) {}
+  }
+
+  // Collapse snippet from the in-snippet "X" button (also resets toggle triangle + URL state).
+  function collapseErrorSnippet(errorId) {
+    var el = document.getElementById(errorId);
+    if (!el) return;
+    el.style.display = 'none';
+
+    var toggleEl = document.getElementById(String(errorId || '') + '__toggle');
+    if (!toggleEl) {
+      try { toggleEl = document.querySelector('[data-error-id=\"' + String(errorId || '') + '\"]'); } catch (e) {}
+    }
+    if (toggleEl) {
+      toggleEl.textContent = '▶ Snippet';
+    }
+
+    try {
+      if (window.DashboardUrlState && typeof window.DashboardUrlState.setBool === 'function') {
+        var defExp = false;
+        try { defExp = (toggleEl && toggleEl.getAttribute('data-default-expanded') === '1'); } catch (e) {}
+        var urlKey = '';
+        try { urlKey = String((toggleEl && toggleEl.getAttribute('data-url-key')) || ''); } catch (e) { urlKey = ''; }
+        if (!urlKey) {
+          urlKey = 's.' + String(errorId || '');
+        }
+        if (typeof window.DashboardUrlState.setBoolDefault === 'function') {
+          window.DashboardUrlState.setBoolDefault(urlKey, false, defExp);
+        } else {
+          window.DashboardUrlState.setBool(urlKey, false);
+        }
+      }
+    } catch (e) {}
   }
 
   // Shared copy-to-clipboard helpers
@@ -609,23 +580,37 @@
     }
 
     function _applyTreeAndSnippetTogglesFromParams(params) {
-      // Apply URL state to <details> elements
+      // Apply per-toggle URL keys (compact, SHA-first).
       try {
-        var allDetails = document.querySelectorAll('details[data-url-key]');
-        allDetails.forEach(function(detailsEl) {
+        // Tree nodes (triangles)
+        var tris = document.querySelectorAll('[data-children-id][data-url-key]');
+        tris.forEach(function(tg) {
           try {
-            var urlKey = String(detailsEl.getAttribute('data-url-key') || '');
-            if (!urlKey) return;
-            
-            // If URL has this key, use that state; otherwise use default
-            if (params.has(urlKey)) {
-              var wantOpen = _isTruthyParam(params.get(urlKey));
-              detailsEl.open = wantOpen;
-            } else {
-              // Use default expanded state
-              var defExp = (detailsEl.querySelector('summary[data-default-expanded="1"]') !== null);
-              detailsEl.open = defExp;
-            }
+            var urlKey = String(tg.getAttribute('data-url-key') || '');
+            if (!urlKey || !params.has(urlKey)) return;
+            var wantOpen = _isTruthyParam(params.get(urlKey));
+            var cid = String(tg.getAttribute('data-children-id') || '');
+            if (!cid) return;
+            var el = document.getElementById(cid);
+            if (!el) return;
+            el.style.display = wantOpen ? 'inline' : 'none';
+            tg.textContent = wantOpen ? '▼' : '▶';
+          } catch (e) {}
+        });
+
+        // Snippets
+        var snToggles = document.querySelectorAll('[data-error-id][data-url-key]');
+        snToggles.forEach(function(tg) {
+          try {
+            var urlKey = String(tg.getAttribute('data-url-key') || '');
+            if (!urlKey || !params.has(urlKey)) return;
+            var wantOpen = _isTruthyParam(params.get(urlKey));
+            var errId = String(tg.getAttribute('data-error-id') || '');
+            if (!errId) return;
+            var el = document.getElementById(errId);
+            if (!el) return;
+            el.style.display = wantOpen ? 'inline' : 'none';
+            tg.textContent = wantOpen ? '▼ Hide snippet' : '▶ Snippet';
           } catch (e) {}
         });
       } catch (e) {}
@@ -701,11 +686,15 @@
         } catch (e) {}
       },
       resetView: function(opts) {
-        // Remove all dashboard state params and reload the page
+        // Remove known dashboard-state query params and restore defaults.
+        // Default behavior reloads the page after clearing URL so non-control state (e.g. default-expanded trees)
+        // is also restored.
         try {
+          var o = opts || {};
+          var doReload = (o.reload !== false);
           var params = _parseParams();
 
-          // Remove dashboard state params
+          // Remove dashboard state params.
           var toDelete = [];
           params.forEach(function(v, k) {
             var ks = String(k || '');
@@ -721,7 +710,7 @@
           });
           toDelete.forEach(function(k) { try { params.delete(k); } catch (e) {} });
 
-          // Also remove any known control keys we recorded defaults for
+          // Also remove any known control keys we recorded defaults for.
           try {
             Object.keys(_defaults || {}).forEach(function(k) {
               try { params.delete(String(k || '')); } catch (e) {}
@@ -730,8 +719,133 @@
 
           _replaceUrl(params);
 
-          // Always reload to ensure clean state
-          try { window.location.reload(); } catch (e) {}
+          if (doReload) {
+            try { window.location.reload(); } catch (e) {}
+          } else {
+            // Best-effort restore of known controls without reload.
+            _restoring = true;
+            try {
+              var nodes = document.querySelectorAll('[data-url-state="1"]');
+              nodes.forEach(function(el) {
+                var key = _controlKey(el);
+                if (!key || !_defaults.hasOwnProperty(key)) return;
+                var dv = _defaults[key];
+                if (el.tagName && el.tagName.toLowerCase() === 'details') {
+                  el.open = _isTruthyParam(dv);
+                  try { el.dispatchEvent(new Event('toggle')); } catch (e) {}
+                  return;
+                }
+                if (el.tagName && el.tagName.toLowerCase() === 'select') {
+                  el.value = String(dv || '');
+                  try { el.dispatchEvent(new Event('change')); } catch (e) {}
+                  return;
+                }
+                var t = (el.getAttribute('type') || '').toLowerCase();
+                if (t === 'checkbox') {
+                  el.checked = _isTruthyParam(dv);
+                  try { el.dispatchEvent(new Event('change')); } catch (e) {}
+                  return;
+                }
+              });
+
+              // Restore tree toggles to their default expanded/collapsed state.
+              // BUT: keep nodes expanded if they contain currently-visible error snippets.
+              try {
+                // First, find all visible snippets
+                var visibleSnippets = new Set();
+                document.querySelectorAll('span[id^="err_snip_"]:not([id$="__toggle"])').forEach(function(snip) {
+                  if (snip.style.display !== 'none') {
+                    // This snippet is visible, find its parent tree node
+                    var parent = snip.parentElement;
+                    while (parent) {
+                      if (parent.id && parent.id.startsWith('tree_children_k_')) {
+                        visibleSnippets.add(parent.id);
+                      }
+                      parent = parent.parentElement;
+                    }
+                  }
+                });
+                
+                var triNodes = document.querySelectorAll('[data-children-id]');
+                triNodes.forEach(function(tg) {
+                  var cid = tg.getAttribute('data-children-id');
+                  if (!cid) return;
+                  var defExp = (tg.getAttribute('data-default-expanded') === '1');
+                  var cont = document.getElementById(cid);
+                  if (!cont) return;
+                  
+                  // If this container or any child has visible snippets, keep it expanded
+                  var hasVisibleSnippet = visibleSnippets.has(cid);
+                  var shouldExpand = defExp || hasVisibleSnippet;
+                  
+                  cont.style.display = shouldExpand ? 'inline' : 'none';
+                  tg.textContent = shouldExpand ? '▼' : '▶';
+                });
+              } catch (e) {}
+
+              // Restore snippets to default-collapsed, UNLESS they were manually expanded
+              // (i.e., have a URL param that is '1').
+              try {
+                var snipToggles = document.querySelectorAll('[data-error-id][data-url-key]');
+                snipToggles.forEach(function(tg) {
+                  var urlKey = String(tg.getAttribute('data-url-key') || '');
+                  var errId = String(tg.getAttribute('data-error-id') || '');
+                  var el = document.getElementById(errId);
+                  if (!urlKey || !el) return;
+
+                  // If the snippet was explicitly expanded in the URL, keep it expanded.
+                  // Otherwise, collapse it.
+                  var wasExpandedInUrl = params.has(urlKey) && _isTruthyParam(params.get(urlKey));
+                  if (wasExpandedInUrl) {
+                    el.style.display = 'inline';
+                    tg.textContent = '▼ Hide snippet';
+                  } else {
+                    el.style.display = 'none';
+                    tg.textContent = '▶ Snippet';
+                  }
+                });
+              } catch (e) {}
+
+              // Commit-history specific: collapse expanded rows (GitHub/GitLab trees + docker details).
+              // These are not part of the <pre> tree renderer, so we must reset them explicitly.
+              try {
+                // Docker details rows
+                document.querySelectorAll('tr[id^="docker-row-"]').forEach(function(tr) {
+                  tr.style.display = 'none';
+                });
+                // GitHub tree rows
+                document.querySelectorAll('tr[id^="github-tree-row-"]').forEach(function(tr) {
+                  tr.style.display = 'none';
+                });
+                // GitLab tree rows
+                document.querySelectorAll('tr[id^="gitlab-tree-row-"]').forEach(function(tr) {
+                  tr.style.display = 'none';
+                });
+                // Reset the toggle glyphs
+                document.querySelectorAll('[id^="docker-toggle-"]').forEach(function(el) { el.textContent = '▶'; });
+                document.querySelectorAll('[id^="github-tree-toggle-"]').forEach(function(el) { el.textContent = '▶'; });
+                document.querySelectorAll('[id^="gitlab-tree-toggle-"]').forEach(function(el) { el.textContent = '▶'; });
+              } catch (e) {}
+            } finally {
+              _restoring = false;
+            }
+            
+            // Restore sort radio buttons AFTER _restoring is false so the change event can update URL/display.
+            try {
+              var sortRadios = document.querySelectorAll('input[name="tree-sort"]');
+              if (sortRadios && sortRadios.length) {
+                sortRadios.forEach(function(r) {
+                  // Default is 'modified' (was 'latest' before)
+                  r.checked = (String(r.value || '') === 'modified');
+                });
+                // Trigger change event to update the display
+                var checkedRadio = Array.from(sortRadios).find(function(r) { return r.checked; });
+                if (checkedRadio) {
+                  try { checkedRadio.dispatchEvent(new Event('change')); } catch (e) {}
+                }
+              }
+            } catch (e) {}
+          }
         } catch (e) {}
       },
       init: function() {
