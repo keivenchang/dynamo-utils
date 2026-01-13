@@ -45,6 +45,7 @@ from common_dashboard_lib import (
     build_and_test_dynamo_phases_from_actions_job,
     check_line_html,
     ci_should_expand_by_default,
+    ci_status_icon_context,
     compact_ci_summary_html,
     disambiguate_check_run_name,
     extract_actions_job_id_from_url,
@@ -2099,16 +2100,9 @@ class CommitHistoryGenerator:
             gha_in_progress_count=gha_in_progress_count,
             gha_other_count=gha_other_count,
             gha_per_commit_stats=gha_per_commit_stats,
-                page_stats=page_stats,
-                # Icons (shared look; keep templates free of raw unicode status glyphs)
-                success_icon_html=status_icon_html(status_norm="success", is_required=False),
-                success_required_icon_html=status_icon_html(status_norm="success", is_required=True),
-                failure_required_icon_html=status_icon_html(status_norm="failure", is_required=True),
-                failure_optional_icon_html=status_icon_html(status_norm="failure", is_required=False),
-                in_progress_icon_html=status_icon_html(status_norm="in_progress", is_required=False),
-                pending_icon_html=status_icon_html(status_norm="pending", is_required=False),
-                cancelled_icon_html=status_icon_html(status_norm="cancelled", is_required=False),
-                skipped_icon_html=status_icon_html(status_norm="skipped", is_required=False),
+            page_stats=page_stats,
+            # Icons (shared look; legend/tooltips/status bar must match across dashboards)
+            **ci_status_icon_context(),
             pass_plus_style=PASS_PLUS_STYLE,
         )
         tpl_render_s = max(0.0, time.monotonic() - t0_tpl)

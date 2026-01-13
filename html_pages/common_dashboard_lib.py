@@ -76,6 +76,34 @@ COLOR_GREEN = "#2da44e"
 COLOR_RED = "#c83a3a"
 COLOR_GREY = "#8c959f"
 
+# Shared SVG icon primitives (fixed-size; avoids emoji/font-size drift between legend/status bar).
+def _octicon_svg(*, path_d: str, name: str, width: int = 12, height: int = 12) -> str:
+    """Return a fixed-size Octicon-like SVG (16x16 viewBox) using currentColor fill."""
+    pd = str(path_d or "").strip()
+    if not pd:
+        return ""
+    nm = html.escape(str(name or "octicon"), quote=True)
+    return (
+        f'<svg aria-hidden="true" viewBox="0 0 16 16" version="1.1" '
+        f'width="{int(width)}" height="{int(height)}" data-view-component="true" '
+        f'class="octicon {nm}" fill="currentColor">'
+        f'<path fill-rule="evenodd" d="{pd}"></path></svg>'
+    )
+
+
+def ci_status_icon_context() -> Dict[str, str]:
+    """Template context: consistent icon HTML used by all dashboards (legend, tooltips, status bar)."""
+    return {
+        "success_icon_html": status_icon_html(status_norm="success", is_required=False),
+        "success_required_icon_html": status_icon_html(status_norm="success", is_required=True),
+        "failure_required_icon_html": status_icon_html(status_norm="failure", is_required=True),
+        "failure_optional_icon_html": status_icon_html(status_norm="failure", is_required=False),
+        "in_progress_icon_html": status_icon_html(status_norm="in_progress", is_required=False),
+        "pending_icon_html": status_icon_html(status_norm="pending", is_required=False),
+        "cancelled_icon_html": status_icon_html(status_norm="cancelled", is_required=False),
+        "skipped_icon_html": status_icon_html(status_norm="skipped", is_required=False),
+    }
+
 # CI UX: show "expected but not yet reported" checks.
 #
 # GitHub required-ness APIs only return contexts that already exist on the commit. For checks that are
@@ -683,17 +711,23 @@ def augment_ci_with_yaml_info_pass(
     augmented_count = 0
     
     for node in original_ci_nodes:
-        if isinstance(node, CIJobNode) and hasattr(node, 'core_job_name'):
-            core_name = node.core_job_name
-            
+        core_name = ""
+        if isinstance(node, CIJobNode) and hasattr(node, "core_job_name"):
+            core_name = str(getattr(node, "core_job_name", "") or "")
+
             # Direct lookup in the hash map
             if core_name in long_to_short:
                 short_name, dependencies = long_to_short[core_name]
                 node.short_job_name = short_name
                 node.yaml_dependencies = dependencies
                 augmented_count += 1
-                logger.debug(f"[augment_ci_with_yaml_info_pass] Augmented '{core_name}' -> short='{short_name}', deps={dependencies}")
-        else:
+                logger.debug(
+                    f"[augment_ci_with_yaml_info_pass] Augmented '{core_name}' -> short='{short_name}', deps={dependencies}"
+                )
+                continue
+
+        # Debug only: do not crash on non-CI nodes / missing core names.
+        if core_name:
             logger.debug(f"[augment_ci_with_yaml_info_pass] No match for '{core_name}'")
     
     logger.info(f"[augment_ci_with_yaml_info_pass] Augmented {augmented_count}/{len(original_ci_nodes)} CI nodes with YAML info")
@@ -973,7 +1007,7 @@ def _compute_parent_status_from_children(children: List[TreeNodeVM]) -> str:
         # Also check for red color (#c83a3a) which indicates failure
         if '✗' in label or 'failure' in label.lower() or '#c83a3a' in label:
             has_failure = True
-        elif '✓' in label or 'success' in label.lower() or 'check-circle-fill' in label:
+        elif 'success' in label.lower() or 'octicon-check' in label:
             success_count += 1
         elif '⏳' in label or 'running' in label.lower() or 'progress' in label.lower():
             has_running = True
@@ -1033,7 +1067,7 @@ def move_jobs_by_prefix_pass(
         core_name = node.core_job_name
         short_name = node.short_job_name
         
-        if job_name == parent_name:
+        if job_name == parent_name or core_name == parent_name or short_name == parent_name:
             # Found existing parent node - we'll add to it
             existing_parent = node
             logger.info(f"[move_jobs_by_prefix_pass] Found existing parent node '{parent_name}'")
@@ -1958,7 +1992,7 @@ def required_badge_html(*, is_required: bool, status_norm: str) -> str:
     s = (status_norm or "").strip().lower()
     if s == CIStatus.FAILURE:
         color = COLOR_RED
-        weight = "700"
+        weight = "400"
     elif s == CIStatus.SUCCESS:
         color = COLOR_GREEN
         weight = "400"
@@ -1995,13 +2029,19 @@ def status_icon_html(
     required_failure: bool = False,
     warning_present: bool = False,
 ) -> str:
-    """Shared status icon HTML (match show_local_branches)."""
+    """Shared status icon HTML (match all dashboards).
+
+    Conventions:
+    - REQUIRED success: green filled circle-check
+    - REQUIRED failure: red filled circle X
+    - non-required success: small check
+    - non-required failure: small X
+    """
     s = (status_norm or "").strip().lower()
 
     if s == CIStatus.SUCCESS:
-        # UX: required successes use the green circle-check (like GitHub's required checks),
-        # optional successes use a simpler green check (no circle).
         if bool(is_required):
+            # REQUIRED: filled green circle-check.
             out = (
                 f'<span style="color: {COLOR_GREEN}; display: inline-flex; vertical-align: text-bottom;">'
                 '<svg aria-hidden="true" viewBox="0 0 16 16" version="1.1" width="12" height="12" '
@@ -2011,20 +2051,29 @@ def status_icon_html(
                 "</path></svg></span>"
             )
         else:
-            out = f'<span style="color: {COLOR_GREEN}; font-weight: 900;">✓</span>'
+            # Optional success: small check icon (preferred).
+            out = (
+                f'<span style="color: {COLOR_GREEN}; display: inline-flex; vertical-align: text-bottom;">'
+                f'{_octicon_svg(path_d="M13.78 4.22a.75.75 0 00-1.06 0L6.75 10.19 3.28 6.72a.75.75 0 10-1.06 1.06l4 4a.75.75 0 001.06 0l7.5-7.5a.75.75 0 000-1.06z", name="octicon-check")}'
+                "</span>"
+            )
         if bool(warning_present):
             # Descendant failures: show a red X appended to the success icon.
-            # - required_failure=True => show the required-failure circle-X
-            # - required_failure=False => show the optional-failure bare X
             out += '<span style="color: #57606a; font-size: 11px; margin: 0 2px;">/</span>'
             if bool(required_failure):
+                # REQUIRED descendant failure: filled red circle X.
                 out += (
                     '<span style="display: inline-flex; align-items: center; justify-content: center; '
                     f'width: 12px; height: 12px; margin-left: 2px; border-radius: 999px; background-color: {COLOR_RED}; '
                     'color: #ffffff; font-size: 10px; font-weight: 900; line-height: 1;">✗</span>'
                 )
             else:
-                out += f'<span style="color: {COLOR_RED}; font-size: 13px; font-weight: 900; line-height: 1; margin-left: 2px;">✗</span>'
+                # Optional descendant failure: small X.
+                out += (
+                    f'<span style="color: {COLOR_RED}; display: inline-flex; vertical-align: text-bottom; margin-left: 2px;">'
+                    f'{_octicon_svg(path_d="M3.72 3.72a.75.75 0 011.06 0L8 6.94l3.22-3.22a.75.75 0 111.06 1.06L9.06 8l3.22 3.22a.75.75 0 11-1.06 1.06L8 9.06l-3.22 3.22a.75.75 0 11-1.06-1.06L6.94 8 3.72 4.78a.75.75 0 010-1.06z", name="octicon-x")}'
+                    "</span>"
+                )
         return out
     if s in {CIStatus.SKIPPED, CIStatus.NEUTRAL}:
         # GitHub-like "skipped": grey circle with a slash.
@@ -2037,14 +2086,19 @@ def status_icon_html(
             "</path></svg></span>"
         )
     if s == CIStatus.FAILURE:
-        if is_required or required_failure:
+        if bool(is_required or required_failure):
+            # REQUIRED: filled red circle X.
             return (
                 '<span style="display: inline-flex; align-items: center; justify-content: center; '
                 f'width: 12px; height: 12px; border-radius: 999px; background-color: {COLOR_RED}; '
                 'color: #ffffff; font-size: 10px; font-weight: 900; line-height: 1;">✗</span>'
             )
-        # Optional failures: red X, no circle.
-        return f'<span style="color: {COLOR_RED}; font-weight: 900;">✗</span>'
+        # Optional failure: small X.
+        return (
+            f'<span style="color: {COLOR_RED}; display: inline-flex; vertical-align: text-bottom;">'
+            f'{_octicon_svg(path_d="M3.72 3.72a.75.75 0 011.06 0L8 6.94l3.22-3.22a.75.75 0 111.06 1.06L9.06 8l3.22 3.22a.75.75 0 11-1.06 1.06L8 9.06l-3.22 3.22a.75.75 0 11-1.06-1.06L6.94 8 3.72 4.78a.75.75 0 010-1.06z", name="octicon-x")}'
+            "</span>"
+        )
     if s == CIStatus.IN_PROGRESS:
         return f'<span style="color: {COLOR_GREY};">⏳</span>'
     if s == CIStatus.PENDING:
