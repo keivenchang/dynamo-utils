@@ -50,6 +50,11 @@ CAT_CI_FILTER_UNCOVERED_RE: Pattern[str] = re.compile(
     re.IGNORECASE,
 )
 
+CAT_INVALID_TASK_TYPE_RE: Pattern[str] = re.compile(
+    r"\binvalid\s+or\s+missing\s+task\s+type\s*:",
+    re.IGNORECASE,
+)
+
 CAT_COPYRIGHT_HEADER_ERROR_RE: Pattern[str] = re.compile(
     r"(?:"
     r"\bcopyright-checks\b"
@@ -229,6 +234,7 @@ CAT_RULES: List[Tuple[str, Pattern[str]]] = [
     ("docker-build-error", re.compile(CAT_DOCKER_BUILD_ERROR_RE.pattern, re.IGNORECASE)),
     ("build-status-check-error", CAT_BUILD_STATUS_CHECK_ERROR_RE),
     ("ci-filter-coverage-error", CAT_CI_FILTER_UNCOVERED_RE),
+    ("invalid-task-type", CAT_INVALID_TASK_TYPE_RE),
     ("huggingface-auth-error", CAT_HUGGINGFACE_AUTH_ERROR_RE),
     ("copyright-header-error", CAT_COPYRIGHT_HEADER_ERROR_RE),
     ("helm-error", CAT_HELM_ERROR_RE),
@@ -288,6 +294,8 @@ SNIPPET_ANCHOR_LINE_RE: Pattern[str] = re.compile(
     r"|\bInvalid/Missing\s+Header:\b"
     r"|\binvalid/missing\s+header:\b"
     r"|\bcopyright\s+checkers\s+detected\s+missing\s+or\s+invalid\s+copyright\s+headers\b"
+    # Conventional commits / task type policy checks.
+    r"|\binvalid\s+or\s+missing\s+task\s+type\s*:"
     # HuggingFace auth / missing token warnings
     r"|\bHF_TOKEN\s+not\s+found\s+in\s+environment\b"
     r")",

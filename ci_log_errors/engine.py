@@ -26,7 +26,7 @@ CI / tooling:
 - 59652435193.log => ci-filter-coverage-error
 - 58887254616.log => broken-links
 - 57945094461.log => copyright-header-error
-- 56859612414.log =>  # invalid/missing task type (commit message policy)
+- 56859612414.log => invalid-task-type  # invalid/missing task type (commit message policy)
 - 59030172010.log => helm-error, k8s-error
 
 Docker:
@@ -189,6 +189,7 @@ from .regexes import (
     CAT_HELM_ERROR_RE,
     CAT_HUGGINGFACE_AUTH_ERROR_RE,
     CAT_HTTP_TIMEOUT_RE,
+    CAT_INVALID_TASK_TYPE_RE,
     CAT_K8S_ERROR_RE,
     CAT_K8S_PODS_TIMED_OUT_RE,
     CAT_KUBECTL_PORTFORWARD_TIMEOUT_RE,
@@ -1167,6 +1168,10 @@ def categorize_error_log_lines(lines: Sequence[str]) -> List[str]:
         # CI filters coverage validation (workflows/.github/filters.yaml)
         if CAT_CI_FILTER_UNCOVERED_RE.search(text):
             add("ci-filter-coverage-error")
+
+        # Commit message policy (conventional commits / task type).
+        if CAT_INVALID_TASK_TYPE_RE.search(text):
+            add("invalid-task-type")
 
         # HuggingFace auth/token failures (missing/invalid HF_TOKEN or gated model access).
         #
