@@ -146,12 +146,14 @@ class LocalRepoNode(RepoNode):
     repo_path: Optional[str] = None
     error: Optional[str] = None
     remote_url: Optional[str] = None
+    rel_path: Optional[str] = None  # Relative path for folder icon link
     
     def __init__(self, label: str, *, repo_path: Optional[Path] = None, **kwargs):
         super().__init__(label=label, **kwargs)
         self.repo_path = str(repo_path) if repo_path is not None else None
         self.error = None
         self.remote_url = None
+        self.rel_path = None
     
     def _format_html_content(self) -> str:
         """Format repo node with symlink target if applicable."""
@@ -166,17 +168,34 @@ class LocalRepoNode(RepoNode):
             pass
         
         label_html = html_module.escape(self.label)
+        
         if self.error:
             error_html = f' <span style="color: #c83a3a; font-size: 11px;">(Error: {html_module.escape(self.error)})</span>'
             return f'<span style="font-weight: 600;">{label_html}</span>{link_suffix}{error_html}'
         return f'<span style="font-weight: 600;">{label_html}</span>{link_suffix}'
     
     def to_tree_vm(self) -> TreeNodeVM:
-        """Convert local repo node to TreeNodeVM."""
+        """Convert local repo node to TreeNodeVM with optional folder icon link."""
         kids = [c.to_tree_vm() for c in (self.children or [])]
+        
+        # Create folder icon that links to the directory (appears before the triangle)
+        folder_icon = ""
+        if self.rel_path:
+            # Use folder SVG icon that links to the directory
+            folder_icon = (
+                f'<a href="{html_module.escape(self.rel_path)}/" '
+                f'onclick="event.preventDefault(); window.location.href=this.href;" '
+                f'style="text-decoration: none; margin-right: 4px;" '
+                f'title="Open directory: {html_module.escape(self.rel_path)}">'
+                f'<svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg" style="vertical-align: middle;">'
+                f'<path fill="#54aeff" d="M1.75 2.5a.25.25 0 00-.25.25v10.5c0 .138.112.25.25.25h12.5a.25.25 0 00.25-.25v-8.5a.25.25 0 00-.25-.25h-6.5a.75.75 0 01-.75-.75V2.75a.25.25 0 00-.25-.25z"/>'
+                f'</svg>'
+                f'</a>'
+            )
+        
         return TreeNodeVM(
             node_key=f"repo:{self.label}",
-            label_html=self._format_html_content(),
+            label_html=folder_icon + self._format_html_content(),
             children=kids,
             collapsible=bool(kids),
             default_expanded=True,
@@ -372,7 +391,8 @@ def _html_copy_button(*, clipboard_text: str, title: str) -> str:
     text_escaped = html.escape(clipboard_text, quote=True)
     title_escaped = html.escape(title, quote=True)
     return (
-        f'<button data-clipboard-text="{text_escaped}" onclick="copyFromClipboardAttr(this)" '
+        f'<button data-clipboard-text="{text_escaped}" '
+        f'onclick="event.preventDefault(); copyFromClipboardAttr(this);" '
         f'style="{_COPY_BTN_STYLE}" '
         f'title="{title_escaped}" '
         f'onmouseover="this.style.backgroundColor=\'#f3f4f6\'; this.style.borderColor=\'#8c959f\';" '
@@ -581,6 +601,13 @@ class LocalRepoScanner:
         """Scan a single repository"""
         repo_name = f"{repo_dir.name}/"
         repo_node = LocalRepoNode(label=repo_name, repo_path=repo_dir)
+        
+        # Store the relative path for the folder icon link
+        try:
+            rel_path = os.path.relpath(repo_dir, page_root_dir)
+            repo_node.rel_path = rel_path
+        except (ValueError, OSError):
+            repo_node.rel_path = None
 
         # <pre>Symlink repos: show repo line (with → target) but don't scan/render nested info
         # (branches/PR/CI). Render as non-expandable in the UI.</pre>

@@ -329,7 +329,7 @@ def _html_copy_button(*, clipboard_text: str, title: str) -> str:
         "margin-right: 4px;"
     )
     return (
-        f'<button data-clipboard-text="{text_esc}" onclick="copyFromClipboardAttr(this)" '
+        f'<button data-clipboard-text="{text_esc}" onclick="event.preventDefault(); copyFromClipboardAttr(this);" '
         f'style="{btn_style}" '
         f'title="{title_esc}" '
         f'onmouseover="this.style.backgroundColor=\'#f3f4f6\'; this.style.borderColor=\'#8c959f\';" '
