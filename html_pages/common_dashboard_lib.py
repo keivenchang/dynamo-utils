@@ -15,14 +15,32 @@ from __future__ import annotations
 
 import hashlib
 import html
+import logging
+import os
 import re
+import sys
+import yaml
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING
 from datetime import datetime, timezone
 
 from common import GitHubAPIClient, classify_ci_kind
 from common_types import CIStatus
+
+# Avoid circular import by importing CIJobNode only for type checking
+if TYPE_CHECKING:
+    from common_branch_nodes import CIJobNode
+
+# Initialize module logger
+logger = logging.getLogger(__name__)
+
+# ======================================================================================
+# YAML Parsing Cache (Performance Optimization)
+# ======================================================================================
+# Cache parsed YAML data to avoid re-parsing on every commit
+# Key: (repo_root, workflows_dir_mtime) -> (parent_child_mapping, job_name_to_id, job_to_file)
+_yaml_parse_cache: Dict[Tuple[str, float], Tuple[Dict, Dict, Dict]] = {}
 
 # ======================================================================================
 # Shared ordering + default-expand policies
@@ -218,6 +236,10 @@ def parse_workflow_yaml_and_build_mapping_pass(
     information about which jobs it depends on (children) and which jobs depend on it (parents).
     The nodes remain flat and disconnected - actual connections are made in PASS 2.
     
+    PERFORMANCE: Results are cached per repo_root + workflows_dir mtime to avoid
+    re-parsing YAML files on every commit. Cache is automatically invalidated when
+    workflow files change.
+    
     Workflow YAML structure:
         job_id:
             name: "display name (possibly with ${{ matrix.var }})"
@@ -242,21 +264,50 @@ def parse_workflow_yaml_and_build_mapping_pass(
     Returns:
         The same flat list of nodes, now annotated with metadata about parents/children
     """
-    import yaml
-    from pathlib import Path
-    
-    print(f"[parse_workflow_yaml_and_build_mapping_pass] Parsing YAML to annotate nodes with parent/child metadata")
-    print(f"[parse_workflow_yaml_and_build_mapping_pass] repo_root={repo_root}")
-    
     global _workflow_parent_child_mapping
     global _workflow_job_name_to_id
-    _workflow_parent_child_mapping = {}  # Reset: job_name -> list of child job_names
-    _workflow_job_name_to_id = {}  # Reset: job_name -> job_id
+    global _workflow_job_to_file
+    global _yaml_parse_cache
     
     workflows_dir = Path(repo_root) / ".github" / "workflows"
     if not workflows_dir.exists() or not workflows_dir.is_dir():
-        print(f"[parse_workflow_yaml_and_build_mapping_pass] No workflows directory found")
-        return flat_nodes
+        logger.debug(f"[parse_workflow_yaml_and_build_mapping_pass] No workflows directory found")
+        return flat_nodes, {
+            'parent_child_mapping': {},
+            'job_name_to_id': {},
+            'job_to_file': {},
+        }
+    
+    # Cache key: (repo_root, workflows_dir mtime)
+    # Use mtime of the workflows directory to detect changes to any YAML file
+    try:
+        workflows_dir_mtime = os.path.getmtime(workflows_dir)
+    except OSError:
+        workflows_dir_mtime = 0.0
+    
+    cache_key = (str(repo_root), workflows_dir_mtime)
+    
+    # Check cache
+    if cache_key in _yaml_parse_cache:
+        # Cache hit! Reuse parsed data
+        cached_data = _yaml_parse_cache[cache_key]
+        _workflow_parent_child_mapping = cached_data[0].copy()
+        _workflow_job_name_to_id = cached_data[1].copy()
+        _workflow_job_to_file = cached_data[2].copy()
+        logger.debug(f"[parse_workflow_yaml_and_build_mapping_pass] Using cached YAML data (repo_root={repo_root})")
+        logger.debug(f"[parse_workflow_yaml_and_build_mapping_pass] Found {len(_workflow_parent_child_mapping)} parent-child relationships")
+        return flat_nodes, {
+            'parent_child_mapping': dict(_workflow_parent_child_mapping),
+            'job_name_to_id': dict(_workflow_job_name_to_id),
+            'job_to_file': dict(_workflow_job_to_file),
+        }
+    
+    # Cache miss - parse YAML files
+    logger.debug(f"[parse_workflow_yaml_and_build_mapping_pass] Parsing YAML to annotate nodes with parent/child metadata")
+    logger.debug(f"[parse_workflow_yaml_and_build_mapping_pass] repo_root={repo_root}")
+    
+    _workflow_parent_child_mapping = {}  # Reset: job_name -> list of child job_names
+    _workflow_job_name_to_id = {}  # Reset: job_name -> job_id
     
     # Parse YAML files to extract needs: relationships
     for workflow_file in workflows_dir.glob("*.yml"):
@@ -304,10 +355,17 @@ def parse_workflow_yaml_and_build_mapping_pass(
                 
                 # Store the mapping: this job_name needs these child job_names
                 _workflow_parent_child_mapping[job_name] = resolved_needs
-                print(f"[parse_workflow_yaml_and_build_mapping_pass]   {job_name} needs: {resolved_needs}")
+                logger.debug(f"[parse_workflow_yaml_and_build_mapping_pass]   {job_name} needs: {resolved_needs}")
     
-    print(f"[parse_workflow_yaml_and_build_mapping_pass] Found {len(_workflow_parent_child_mapping)} parent-child relationships")
-    print(f"[parse_workflow_yaml_and_build_mapping_pass] Returning {len(flat_nodes)} nodes (unchanged, will be connected in PASS 3)")
+    # Store in cache
+    _yaml_parse_cache[cache_key] = (
+        _workflow_parent_child_mapping.copy(),
+        _workflow_job_name_to_id.copy(),
+        _workflow_job_to_file.copy(),
+    )
+    
+    logger.debug(f"[parse_workflow_yaml_and_build_mapping_pass] Found {len(_workflow_parent_child_mapping)} parent-child relationships")
+    logger.debug(f"[parse_workflow_yaml_and_build_mapping_pass] Returning {len(flat_nodes)} nodes (unchanged, will be connected in PASS 3)")
     
     # Return the populated mappings along with the nodes
     return flat_nodes, {
@@ -376,8 +434,8 @@ def expand_required_failure_descendants_pass(nodes: List[TreeNodeVM]) -> List[Tr
 
     out: List[TreeNodeVM] = []
     for n in (nodes or []):
-            n2, _ = walk(n)
-            out.append(n2)
+        n2, _ = walk(n)
+        out.append(n2)
     return out
 
 
@@ -401,7 +459,7 @@ def create_dummy_nodes_from_yaml_pass(nodes: List[TreeNodeVM]) -> List[TreeNodeV
     if not _workflow_parent_child_mapping:
         return nodes
     
-    print("[create_dummy_nodes_from_yaml_pass] Creating dummy nodes from YAML structure")
+    logger.debug("[create_dummy_nodes_from_yaml_pass] Creating dummy nodes from YAML structure")
     
     # Collect all job names mentioned in the YAML
     all_job_names = set()
@@ -409,13 +467,13 @@ def create_dummy_nodes_from_yaml_pass(nodes: List[TreeNodeVM]) -> List[TreeNodeV
         all_job_names.add(parent)
         all_job_names.update(children)
     
-    print(f"[create_dummy_nodes_from_yaml_pass] Job-to-file mapping has {len(_workflow_job_to_file)} entries")
-    print(f"[create_dummy_nodes_from_yaml_pass] Total unique job names from mapping: {len(all_job_names)}")
+    logger.debug(f"[create_dummy_nodes_from_yaml_pass] Job-to-file mapping has {len(_workflow_job_to_file)} entries")
+    logger.debug(f"[create_dummy_nodes_from_yaml_pass] Total unique job names from mapping: {len(all_job_names)}")
     
     # Debug: show first 10 entries
     for i, (job_name, workflow_file) in enumerate(sorted(_workflow_job_to_file.items())):
         if i < 10:
-            print(f"[create_dummy_nodes_from_yaml_pass]   {job_name} -> {workflow_file}")
+            logger.debug(f"[create_dummy_nodes_from_yaml_pass]   {job_name} -> {workflow_file}")
     
     # Helper function to format arch text with colors
     def _format_arch_text_for_placeholder(text: str) -> str:
@@ -438,7 +496,7 @@ def create_dummy_nodes_from_yaml_pass(nodes: List[TreeNodeVM]) -> List[TreeNodeV
         elif arch == "amd64":
             color = "#0969da"  # Blue for amd64
             raw2 = re.sub(r"\(\s*amd64\s*\)", "(amd64)", raw, flags=re.IGNORECASE)
-            raw2 = re.sub(r"\(\s*amd64\s*\)(?!\s*;\s*x86_64\b)", "(amd64); x86_64", raw2, flags=re.IGNORECASE)
+            raw2 = re.sub(r"\(\s*amd64\s*\)(?!\s*;\s*x86_64\b)", "(amd64); x86_64 ", raw2, flags=re.IGNORECASE)  # Extra space for alignment
             return f'<span style="color: {color};">{html_module.escape(raw2)}</span>'
         return html_module.escape(raw)
     
@@ -477,10 +535,10 @@ def create_dummy_nodes_from_yaml_pass(nodes: List[TreeNodeVM]) -> List[TreeNodeV
             job_name=job_name,  # IMPORTANT: Set job_name for matching in PASS 1.2
             workflow_name="",
             variant="",
-        )
+        )        
         skeleton_nodes.append(node)
     
-    print(f"[create_dummy_nodes_from_yaml_pass] Created {len(skeleton_nodes)} dummy nodes from YAML")
+    logger.debug(f"[create_dummy_nodes_from_yaml_pass] Created {len(skeleton_nodes)} dummy nodes from YAML")
     return skeleton_nodes
 
 
@@ -496,9 +554,6 @@ def convert_branch_nodes_to_tree_vm_pass(ci_nodes: List) -> List[TreeNodeVM]:
     Returns:
         List of TreeNodeVM objects representing actual CI info from GitHub
     """
-    import logging
-    logger = logging.getLogger(__name__)
-    
     logger.info(f"Converting {len(ci_nodes)} BranchNode objects to TreeNodeVM")
     
     ci_info_nodes: List[TreeNodeVM] = []
@@ -536,9 +591,6 @@ def run_all_passes(
     Returns:
         Processed list of TreeNodeVM nodes with YAML augmentation applied.
     """
-    import logging
-    logger = logging.getLogger(__name__)
-    
     logger.info(f"[run_all_passes] Starting with {len(ci_nodes)} CI nodes (per-PR)")
     
     # PASS 1: Convert BranchNode to TreeNodeVM (actual CI info from GitHub)
@@ -553,21 +605,27 @@ def run_all_passes(
     
     # PASS 4: Move jobs under parent nodes
     grouped_nodes = augmented_nodes
-    grouped_nodes = move_jobs_by_prefix_pass(grouped_nodes, prefix="vllm", parent_name="backend-status-check", parent_label="backend-status-check")
-    grouped_nodes = move_jobs_by_prefix_pass(grouped_nodes, prefix="sglang", parent_name="backend-status-check", parent_label="backend-status-check")
-    grouped_nodes = move_jobs_by_prefix_pass(grouped_nodes, prefix="trtllm", parent_name="backend-status-check", parent_label="backend-status-check")
-    grouped_nodes = move_jobs_by_prefix_pass(grouped_nodes, prefix="operator", parent_name="backend-status-check", parent_label="backend-status-check")
-    grouped_nodes = move_jobs_by_prefix_pass(grouped_nodes, prefix="deploy-", parent_name="deploy", parent_label="deploy")
-    grouped_nodes = move_jobs_by_prefix_pass(grouped_nodes, prefix="build-test", parent_name="dynamo-status-check", parent_label="dynamo-status-check")
+    grouped_nodes = move_jobs_by_prefix_pass(grouped_nodes, prefix="vllm", parent_name="backend-status-check")
+    grouped_nodes = move_jobs_by_prefix_pass(grouped_nodes, prefix="sglang", parent_name="backend-status-check")
+    grouped_nodes = move_jobs_by_prefix_pass(grouped_nodes, prefix="trtllm", parent_name="backend-status-check")
+    grouped_nodes = move_jobs_by_prefix_pass(grouped_nodes, prefix="operator", parent_name="backend-status-check")
+
+    # Group other jobs under parent nodes
+    grouped_nodes = move_jobs_by_prefix_pass(grouped_nodes, prefix="deploy-", parent_name="deploy")
+    grouped_nodes = move_jobs_by_prefix_pass(grouped_nodes, prefix="build-test", parent_name="dynamo-status-check")
     grouped_nodes = move_jobs_by_prefix_pass(grouped_nodes, prefix="Post-Merge CI / ", parent_name="post-merge-ci", parent_label="Post-Merge CI", create_if_has_children=True)
     
     # Group fast jobs under _fast parent
-    grouped_nodes = move_jobs_by_prefix_pass(grouped_nodes, prefix="clippy", parent_name="_fast", parent_label="Jobs that tend to run fast", create_if_has_children=True)
-    grouped_nodes = move_jobs_by_prefix_pass(grouped_nodes, prefix="lychee", parent_name="_fast", parent_label="Jobs that tend to run fast", create_if_has_children=True)
-    grouped_nodes = move_jobs_by_prefix_pass(grouped_nodes, prefix="event_file", parent_name="_fast", parent_label="Jobs that tend to run fast", create_if_has_children=True)
-    grouped_nodes = move_jobs_by_prefix_pass(grouped_nodes, prefix="broken-links-check", parent_name="_fast", parent_label="Jobs that tend to run fast", create_if_has_children=True)
-    grouped_nodes = move_jobs_by_prefix_pass(grouped_nodes, prefix="build-docs", parent_name="_fast", parent_label="Jobs that tend to run fast", create_if_has_children=True)
-    grouped_nodes = move_jobs_by_prefix_pass(grouped_nodes, prefix="changed-files", parent_name="_fast", parent_label="Jobs that tend to run fast", create_if_has_children=True)
+    _FAST = "_fast"
+    _FAST_LABEL = "Jobs that tend to run fast"
+    grouped_nodes = move_jobs_by_prefix_pass(grouped_nodes, prefix="clean", parent_name=_FAST, parent_label=_FAST_LABEL, create_if_has_children=True)
+    grouped_nodes = move_jobs_by_prefix_pass(grouped_nodes, prefix="clippy", parent_name=_FAST, parent_label=_FAST_LABEL, create_if_has_children=True)
+    grouped_nodes = move_jobs_by_prefix_pass(grouped_nodes, prefix="trigger-ci", parent_name=_FAST, parent_label=_FAST_LABEL, create_if_has_children=True)
+    grouped_nodes = move_jobs_by_prefix_pass(grouped_nodes, prefix="lychee", parent_name=_FAST, parent_label=_FAST_LABEL, create_if_has_children=True)
+    grouped_nodes = move_jobs_by_prefix_pass(grouped_nodes, prefix="event_file", parent_name=_FAST, parent_label=_FAST_LABEL, create_if_has_children=True)
+    grouped_nodes = move_jobs_by_prefix_pass(grouped_nodes, prefix="broken-links-check", parent_name=_FAST, parent_label=_FAST_LABEL, create_if_has_children=True)
+    grouped_nodes = move_jobs_by_prefix_pass(grouped_nodes, prefix="build-docs", parent_name=_FAST, parent_label=_FAST_LABEL, create_if_has_children=True)
+    grouped_nodes = move_jobs_by_prefix_pass(grouped_nodes, prefix="changed-files", parent_name=_FAST, parent_label=_FAST_LABEL, create_if_has_children=True)
     
     # PASS 5: Sort nodes by name
     sorted_nodes = sort_nodes_by_name_pass(grouped_nodes)
@@ -601,8 +659,7 @@ def augment_ci_with_yaml_info_pass(
     Returns:
         List of TreeNodeVM nodes with augmented information
     """
-    import logging
-    logger = logging.getLogger(__name__)
+    from common_branch_nodes import CIJobNode
     
     logger.info(f"[augment_ci_with_yaml_info_pass] Augmenting {len(original_ci_nodes)} CI nodes with YAML info")
     
@@ -623,7 +680,6 @@ def augment_ci_with_yaml_info_pass(
     logger.info(f"[augment_ci_with_yaml_info_pass] Built mapping with {len(long_to_short)} entries")
     
     # Traverse through each CI node and update
-    from common_branch_nodes import CIJobNode
     augmented_count = 0
     
     for node in original_ci_nodes:
@@ -637,7 +693,7 @@ def augment_ci_with_yaml_info_pass(
                 node.yaml_dependencies = dependencies
                 augmented_count += 1
                 logger.debug(f"[augment_ci_with_yaml_info_pass] Augmented '{core_name}' -> short='{short_name}', deps={dependencies}")
-        else:
+            else:
                 logger.debug(f"[augment_ci_with_yaml_info_pass] No match for '{core_name}'")
     
     logger.info(f"[augment_ci_with_yaml_info_pass] Augmented {augmented_count}/{len(original_ci_nodes)} CI nodes with YAML info")
@@ -664,9 +720,6 @@ def move_required_jobs_to_top_pass(nodes: List[TreeNodeVM]) -> List[TreeNodeVM]:
     Returns:
         List with required jobs at top, then non-required jobs, each group alphabetically sorted
     """
-    import logging
-    logger = logging.getLogger(__name__)
-    
     logger.info(f"[move_required_jobs_to_top] Processing {len(nodes)} root nodes")
     
     required_jobs = []
@@ -710,8 +763,6 @@ def verify_tree_structure_pass(tree_nodes: List[TreeNodeVM], original_ci_nodes: 
         tree_nodes: Final tree structure to verify
         original_ci_nodes: Original CI nodes to check augmentation
     """
-    import logging
-    logger = logging.getLogger(__name__)
     from common_branch_nodes import CIJobNode
     
     logger.info(f"[verify_tree_structure_pass] Verifying tree structure ({len(tree_nodes)} root nodes)")
@@ -725,16 +776,32 @@ def verify_tree_structure_pass(tree_nodes: List[TreeNodeVM], original_ci_nodes: 
                 collect_nodes(node.children)
     collect_nodes(tree_nodes)
     
-    # Check 1: Count required jobs
+    # Check 1: Count required jobs and verify critical required jobs
     required_count = 0
+    required_jobs_found = set()
     for node in all_nodes:
         # Check in label_html for REQUIRED badge
         if '[REQUIRED]' in str(node.label_html or ''):
             required_count += 1
+            job_name = node.short_job_name or node.job_name or ''
+            if job_name:
+                required_jobs_found.add(job_name)
     
-    if required_count < 5:
-        logger.warning(f"[verify_tree_structure_pass] ⚠️  Only {required_count} required jobs found (expected at least 5)")
+    # Check for critical required jobs
+    CRITICAL_REQUIRED_JOBS = {"backend-status-check", "dynamo-status-check"}
+    missing_critical = CRITICAL_REQUIRED_JOBS - required_jobs_found
+    
+    if missing_critical:
+        print(f"[verify_tree_structure_pass] ❌ CRITICAL: Missing required jobs: {missing_critical}", file=sys.stderr)
+        logger.error(f"[verify_tree_structure_pass] ❌ CRITICAL: Missing required jobs: {missing_critical}")
     else:
+        print(f"[verify_tree_structure_pass] ✓ Found all critical required jobs: {CRITICAL_REQUIRED_JOBS}", file=sys.stderr)
+        logger.info(f"[verify_tree_structure_pass] ✓ Found all critical required jobs: {CRITICAL_REQUIRED_JOBS}")
+    
+    if required_count < 2:
+        logger.warning(f"[verify_tree_structure_pass] ⚠️  Only {required_count} required jobs found (expected at least 2: backend-status-check, dynamo-status-check)")
+    else:
+        print(f"[verify_tree_structure_pass] ✓ Found {required_count} required jobs (including backend-status-check, dynamo-status-check)", file=sys.stderr)
         logger.info(f"[verify_tree_structure_pass] ✓ Found {required_count} required jobs")
     
     # Check 2: Verify short names were set for original CI nodes
@@ -887,9 +954,10 @@ def _compute_parent_status_from_children(children: List[TreeNodeVM]) -> str:
     for child in children:
         label = str(getattr(child, 'label_html', '') or '')
         # Check for status indicators in the label HTML
-        if '✗' in label or 'failure' in label.lower():
+        # Also check for red color (#c83a3a) which indicates failure
+        if '✗' in label or 'failure' in label.lower() or '#c83a3a' in label:
             has_failure = True
-        elif '✓' in label or 'success' in label.lower():
+        elif '✓' in label or 'success' in label.lower() or 'check-circle-fill' in label:
             success_count += 1
         elif '⏳' in label or 'running' in label.lower() or 'progress' in label.lower():
             has_running = True
@@ -914,7 +982,7 @@ def move_jobs_by_prefix_pass(
     nodes: List[TreeNodeVM],
     prefix: str,
     parent_name: str,
-    parent_label: str,
+    parent_label: str = "",
     create_if_has_children: bool = False,
 ) -> List[TreeNodeVM]:
     """Generic pass to move jobs matching a prefix under a parent node.
@@ -927,14 +995,15 @@ def move_jobs_by_prefix_pass(
         nodes: List of TreeNodeVM nodes (root level)
         prefix: Job name prefix to match (e.g., "deploy-", "build-test")
         parent_name: Name for the parent node (e.g., "deploy", "dynamo-status-check")
-        parent_label: HTML label for the parent node (e.g., "deploy")
+        parent_label: Display label for the parent node (default: same as parent_name)
         create_if_has_children: Only create parent if matching children exist (default: False, always group if matches)
     
     Returns:
         List of TreeNodeVM nodes with matching jobs moved under a parent
     """
-    import logging
-    logger = logging.getLogger(__name__)
+    # Default parent_label to parent_name if not specified
+    if not parent_label:
+        parent_label = parent_name
     
     logger.info(f"[move_jobs_by_prefix_pass] Grouping {prefix}* jobs (processing {len(nodes)} root nodes)")
     
@@ -970,58 +1039,95 @@ def move_jobs_by_prefix_pass(
     
     logger.info(f"[move_jobs_by_prefix_pass] Found {len(matching_jobs)} {prefix}* jobs to group")
     
-    # Compute parent status from children
-    parent_status = _compute_parent_status_from_children(matching_jobs)
+    # Check if existing parent is required (check for [REQUIRED] in label_html)
+    is_parent_required = False
+    if existing_parent:
+        is_parent_required = '[REQUIRED]' in str(existing_parent.label_html or '')
     
-    # Generate status icon for parent
-    parent_icon = status_icon_html(status_norm=parent_status, is_required=False)
+    # Check if the parent job is synthetic (not defined in YAML)
+    # Real jobs are defined in YAML and should stay blue
+    # Synthetic parents are created only for grouping and should be gray
+    is_synthetic = True  # Default to synthetic
+    
+    # Check if parent_name exists in YAML either as job_id or job_name
+    # _workflow_job_to_file: maps job_name -> file
+    # _workflow_job_name_to_id: maps job_name -> job_id
+    # So we need to check: parent_name in job_to_file OR parent_name in name_to_id.values()
+    if parent_name in _workflow_job_to_file:
+        # Found as a job name
+        is_synthetic = False
+    elif parent_name in _workflow_job_name_to_id.values():
+        # Found as a job ID
+        is_synthetic = False
+    
+    if existing_parent:
+        if not is_synthetic:
+            logger.debug(f"[move_jobs_by_prefix_pass] Parent '{parent_name}' is REAL (found in YAML)")
+        else:
+            logger.debug(f"[move_jobs_by_prefix_pass] Parent '{parent_name}' is SYNTHETIC (not in YAML)")
+    else:
+        if not is_synthetic:
+            logger.debug(f"[move_jobs_by_prefix_pass] Creating parent '{parent_name}' as REAL (found in YAML)")
+        else:
+            logger.debug(f"[move_jobs_by_prefix_pass] Creating parent '{parent_name}' as SYNTHETIC (not in YAML)")
     
     # Generate label with short name and long description (if different)
+    # Use bold gray for synthetic nodes, blue for real nodes
+    label_color = "#57606a" if is_synthetic else "#0969da"
+    label_weight = "font-weight: 600;" if is_synthetic else ""
+    logger.debug(f"[move_jobs_by_prefix_pass] Parent '{parent_name}' color={label_color}, weight={label_weight}")
+    
     if parent_name != parent_label:
         # Format: short_name "long description"
         parent_label_html = (
-            f'<span style="color: #0969da;">{parent_name}</span>'
+            f'<span style="color: {label_color}; {label_weight}">{parent_name}</span>'
             f'<span style="color: #57606a; font-family: SFMono-Regular, Consolas, Liberation Mono, Menlo, monospace; font-size: 12px;"> "{parent_label}"</span>'
         )
     else:
         # Just the label
-        parent_label_html = f'<span style="color: #0969da;">{parent_label}</span>'
+        parent_label_html = f'<span style="color: {label_color}; {label_weight}">{parent_label}</span>'
     
     if existing_parent:
         # Add matching jobs to existing parent's children
         existing_children = list(existing_parent.children or [])
         all_children = existing_children + matching_jobs
         
-        # Recompute status with all children
-        parent_status = _compute_parent_status_from_children(all_children)
-        parent_icon = status_icon_html(status_norm=parent_status, is_required=False)
+        # DO NOT recompute parent status - preserve the original status from the API/existing node
+        # The parent node has its own intrinsic status that should not change
         
-        updated_parent = TreeNodeVM(
-            node_key=existing_parent.node_key,
-            label_html=f'{parent_icon} {parent_label_html}',
+        # Use dataclasses.replace to preserve ALL fields from existing parent (including label_html with status icon)
+        from dataclasses import replace
+        updated_parent = replace(
+            existing_parent,
             children=all_children,
-            collapsible=existing_parent.collapsible,
-            default_expanded=existing_parent.default_expanded,
-            triangle_tooltip=existing_parent.triangle_tooltip,
-            noncollapsible_icon=existing_parent.noncollapsible_icon,
-            job_name=existing_parent.job_name,
-            raw_html_content=getattr(existing_parent, 'raw_html_content', ''),
         )
         result = other_jobs + [updated_parent]
-        logger.info(f"[move_jobs_by_prefix_pass] Added {len(matching_jobs)} jobs to existing parent '{parent_name}'")
+        logger.info(f"[move_jobs_by_prefix_pass] Added {len(matching_jobs)} jobs to existing parent '{parent_name}' (preserving original status)")
     else:
-        # Create a new parent node with status icon
+        # Create a new synthetic parent node (not from API)
+        # Use "unknown" status since synthetic parents don't have their own status
+        parent_status = "unknown"
+        
+        # Hardcode known required parent jobs (these are blocking jobs defined in YAML)
+        KNOWN_REQUIRED_PARENTS = {"backend-status-check", "dynamo-status-check"}
+        is_parent_required = parent_name in KNOWN_REQUIRED_PARENTS
+        
+        parent_icon = status_icon_html(status_norm=parent_status, is_required=is_parent_required)
+        req_badge = required_badge_html(is_required=is_parent_required, status_norm=parent_status) if is_parent_required else ''
+        
+        # Create a new parent node
         parent_node = TreeNodeVM(
             node_key=f"stage:{parent_name}",
-            label_html=f'{parent_icon} {parent_label_html}',
+            label_html=f'{parent_icon}{req_badge}{parent_label_html}',
             children=matching_jobs,
             collapsible=True,
             default_expanded=False,
-            triangle_tooltip=f"{parent_name.capitalize()} stage jobs",
+            triangle_tooltip=f"{parent_name} jobs",
             job_name=parent_name,
+            short_job_name=parent_name,
         )
         result = other_jobs + [parent_node]
-        logger.info(f"[move_jobs_by_prefix_pass] Created new parent '{parent_name}' with {len(matching_jobs)} jobs, status: {parent_status}")
+        logger.info(f"[move_jobs_by_prefix_pass] Created new synthetic parent '{parent_name}' with {len(matching_jobs)} jobs (status=unknown, required={is_parent_required})")
     
     # Return result
     logger.info(f"[move_jobs_by_prefix_pass] Grouping complete, returning {len(result)} root nodes")
@@ -2362,7 +2468,7 @@ def check_line_html(
             return html.escape(raw2)
         if arch == "amd64":
             raw2 = re.sub(r"\(\s*amd64\s*\)", "(amd64)", raw, flags=re.IGNORECASE)
-            raw2 = re.sub(r"\(\s*amd64\s*\)(?!\s*;\s*x86_64\b)", "(amd64); x86_64", raw2, flags=re.IGNORECASE)
+            raw2 = re.sub(r"\(\s*amd64\s*\)(?!\s*;\s*x86_64\b)", "(amd64); x86_64 ", raw2, flags=re.IGNORECASE)  # Extra space for alignment
             return html.escape(raw2)
         return html.escape(raw)
     

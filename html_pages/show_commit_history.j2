@@ -877,28 +877,28 @@ window.__dashboardOnReadyQueue.push(function() {
 {%- for check in gha_status.get('check_runs', []) -%}
 {%- if check.conclusion == 'success' -%}
 {%- if check.is_required -%}
-{%- set _ = passed_required_jobs.append(check.name) -%}
+{%- set _ = passed_required_jobs.append(check.short_name) -%}
 {%- else -%}
-{%- set _ = passed_optional_jobs.append(check.name) -%}
+{%- set _ = passed_optional_jobs.append(check.short_name) -%}
 {%- endif -%}
 {%- elif check.conclusion in ('failure', 'timed_out', 'action_required') -%}
 {%- if check.is_required -%}
-{%- set _ = failed_required_jobs.append(check.name) -%}
+{%- set _ = failed_required_jobs.append(check.short_name) -%}
 {%- else -%}
-{%- set _ = failed_optional_jobs.append(check.name) -%}
+{%- set _ = failed_optional_jobs.append(check.short_name) -%}
 {%- endif -%}
 {%- elif check.status == 'in_progress' -%}
 {%- if check.is_required -%}
-{%- set _ = progress_required_jobs.append(check.name) -%}
+{%- set _ = progress_required_jobs.append(check.short_name) -%}
 {%- else -%}
-{%- set _ = progress_optional_jobs.append(check.name) -%}
+{%- set _ = progress_optional_jobs.append(check.short_name) -%}
 {%- endif -%}
 {%- elif check.status in ('queued', 'pending') -%}
-{%- set _ = pending_jobs.append(check.name) -%}
+{%- set _ = pending_jobs.append(check.short_name) -%}
 {%- elif check.conclusion == 'cancelled' -%}
-{%- set _ = cancelled_jobs.append(check.name) -%}
+{%- set _ = cancelled_jobs.append(check.short_name) -%}
 {%- else -%}
-{%- set _ = other_jobs.append(check.name) -%}
+{%- set _ = other_jobs.append(check.short_name) -%}
 {%- endif -%}
 {%- endfor -%}
 {%- endif -%}

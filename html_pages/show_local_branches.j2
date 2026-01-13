@@ -38,7 +38,7 @@
     }
     .indent { margin-left: 20px; }
     .error { color: #c83a3a; }
-    
+
     /* Add spacing between repository sections */
     .repo-node {
       margin-bottom: 1em;
@@ -163,58 +163,58 @@
           if (!radios || !radios.length || !containerEl) return;
 
           function _setRadio(val) {
-            radios.forEach(function(r) { r.checked = (String(r.value||'') === String(val||'')); });
+              radios.forEach(function(r) { r.checked = (String(r.value||'') === String(val||'')); });
           }
           function _getRadio() {
-            var v = 'modified';
-            radios.forEach(function(r) { if (r.checked) v = String(r.value || 'modified'); });
-            return v;
+              var v = 'modified';
+              radios.forEach(function(r) { if (r.checked) v = String(r.value || 'modified'); });
+              return v;
           }
 
           // Set default from server, then allow URL to override
-          var defv = String({{ (tree_sort_default or "modified")|tojson }});
-          if (defv === 'latest') defv = 'modified';  // Map legacy 'latest' to 'modified'
-          if (defv) _setRadio(defv);
+            var defv = String({{ (tree_sort_default or "modified")|tojson }});
+            if (defv === 'latest') defv = 'modified';  // Map legacy 'latest' to 'modified'
+            if (defv) _setRadio(defv);
           
           if (window.DashboardUrlState && window.DashboardUrlState.get) {
-            var v = window.DashboardUrlState.get('sort');
-            if (v) {
-              if (v === 'latest') v = 'modified';  // Map legacy 'latest' to 'modified'
-              _setRadio(String(v));
+              var v = window.DashboardUrlState.get('sort');
+              if (v) {
+                if (v === 'latest') v = 'modified';  // Map legacy 'latest' to 'modified'
+                _setRadio(String(v));
+              }
             }
-          }
 
           function apply() {
-            var sortMode = String(_getRadio() || 'modified');
-            var sortAttr = 'data-sort-' + sortMode;
-            
-            // Get all sortable branch containers
+              var sortMode = String(_getRadio() || 'modified');
+              var sortAttr = 'data-sort-' + sortMode;
+              
+              // Get all sortable branch containers
             var branches = Array.from(containerEl.querySelectorAll('.sortable-branch'));
-            if (!branches.length) return;
-            
+              if (!branches.length) return;
+              
             // Sort by appropriate data attribute
-            branches.sort(function(a, b) {
-              var aKey = String(a.getAttribute(sortAttr) || '');
-              var bKey = String(b.getAttribute(sortAttr) || '');
-              
+              branches.sort(function(a, b) {
+                var aKey = String(a.getAttribute(sortAttr) || '');
+                var bKey = String(b.getAttribute(sortAttr) || '');
+                
               // For timestamp-based sorts, use numeric comparison
-              if (sortMode === 'modified' || sortMode === 'created') {
-                var aNum = parseFloat(aKey.split('_')[0] || '0');
-                var bNum = parseFloat(bKey.split('_')[0] || '0');
+                if (sortMode === 'modified' || sortMode === 'created') {
+                  var aNum = parseFloat(aKey.split('_')[0] || '0');
+                  var bNum = parseFloat(bKey.split('_')[0] || '0');
                 return aNum - bNum;  // Ascending (negative timestamps = most recent first)
-              }
+                }
+                
+                // For branch name, use string comparison
+                return aKey.localeCompare(bKey);
+              });
               
-              // For branch name, use string comparison
-              return aKey.localeCompare(bKey);
-            });
-            
-            // Reattach in sorted order
+              // Reattach in sorted order
             branches.forEach(function(br) { containerEl.appendChild(br); });
-            
-            // Update URL state
+              
+              // Update URL state
             if (window.DashboardUrlState && window.DashboardUrlState.setDefault) {
-              window.DashboardUrlState.setDefault('sort', sortMode, 'modified');
-            }
+                  window.DashboardUrlState.setDefault('sort', sortMode, 'modified');
+                }
           }
           radios.forEach(function(r) { r.addEventListener('change', apply); });
           apply();
@@ -251,12 +251,12 @@
           if (!radios || !radios.length || !divLatest || !divBranch) return;
 
           function _setRadio(val) {
-            radios.forEach(function(r) { r.checked = (String(r.value||'') === String(val||'')); });
+              radios.forEach(function(r) { r.checked = (String(r.value||'') === String(val||'')); });
           }
           function _getRadio() {
-            var v = 'latest';
-            radios.forEach(function(r) { if (r.checked) v = String(r.value || 'latest'); });
-            return v;
+              var v = 'latest';
+              radios.forEach(function(r) { if (r.checked) v = String(r.value || 'latest'); });
+              return v;
           }
 
           // Set default from server, then allow URL to override
@@ -272,22 +272,22 @@
           } catch (e) {}
 
           function apply() {
-            var v = String(_getRadio() || 'latest');
-            var showBranch = (v === 'branch');
+              var v = String(_getRadio() || 'latest');
+              var showBranch = (v === 'branch');
             divLatest.style.display = showBranch ? 'none' : 'block';
             divBranch.style.display = showBranch ? 'block' : 'none';
-            
+              
             // Re-apply URL state to newly visible tree
-            if (window.DashboardUrlState && window.DashboardUrlState._applyTreeToggles) {
-              setTimeout(function() {
-                try { window.DashboardUrlState._applyTreeToggles(); } catch (e) {}
-              }, 10);
-            }
-            
+                if (window.DashboardUrlState && window.DashboardUrlState._applyTreeToggles) {
+                  setTimeout(function() {
+                    try { window.DashboardUrlState._applyTreeToggles(); } catch (e) {}
+                  }, 10);
+                }
+              
             // Update URL state
             if (window.DashboardUrlState && window.DashboardUrlState.setDefault) {
-              window.DashboardUrlState.setDefault('sort', v, 'latest');
-            }
+                  window.DashboardUrlState.setDefault('sort', v, 'latest');
+                }
           }
           radios.forEach(function(r) { r.addEventListener('change', apply); });
           apply();

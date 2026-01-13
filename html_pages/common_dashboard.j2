@@ -373,8 +373,8 @@
           parent.open = true;
         }
         parent = parent.parentElement;
-      }
-      
+  }
+
       // Expand the snippet itself
       snippetEl.open = true;
       
@@ -619,7 +619,7 @@
             
             // If URL has this key, use that state; otherwise use default
             if (params.has(urlKey)) {
-              var wantOpen = _isTruthyParam(params.get(urlKey));
+            var wantOpen = _isTruthyParam(params.get(urlKey));
               detailsEl.open = wantOpen;
             } else {
               // Use default expanded state
@@ -731,7 +731,7 @@
           _replaceUrl(params);
 
           // Always reload to ensure clean state
-          try { window.location.reload(); } catch (e) {}
+            try { window.location.reload(); } catch (e) {}
         } catch (e) {}
       },
       init: function() {

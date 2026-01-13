@@ -956,6 +956,18 @@ class CommitHistoryGenerator:
 
         # Annotate GitHub check runs with "is_required" using PR required-checks + fallback patterns.
         pr_to_required_checks = pr_to_required_checks or {}
+        
+        # Build a mapping of job names to short names from YAML (shared across all commits)
+        from common_dashboard_lib import parse_workflow_yaml_and_build_mapping_pass
+        try:
+            yaml_mappings = parse_workflow_yaml_and_build_mapping_pass(
+                repo_root=Path(self.repo_path),
+                commit_sha="HEAD",  # Use HEAD as a representative commit for YAML parsing
+            )
+            job_name_to_short = yaml_mappings.get('job_name_to_id', {})
+        except Exception:
+            job_name_to_short = {}
+        
         for sha_full, gha in (github_actions_status or {}).items():
             if not gha or not gha.get('check_runs'):
                 continue
@@ -967,9 +979,12 @@ class CommitHistoryGenerator:
                 try:
                     check_name = check.get('name', '')
                     check['is_required'] = _is_required_check_name(check_name, required_norm)
+                    # Add short name for tooltip display
+                    check['short_name'] = job_name_to_short.get(check_name, check_name)
                 except Exception:
                     # Best-effort; never break page generation.
                     check['is_required'] = False
+                    check['short_name'] = check.get('name', '')
 
         # Process GitLab images: deduplicate and format
         gitlab_images = {}
