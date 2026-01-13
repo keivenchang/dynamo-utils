@@ -1,7 +1,7 @@
 CLAUDE.md - NVIDIA Dynamo Projects (Operational Procedures)
 
-Operational playbooks and environment conventions for the `~/nvidia` workspace.
-For coding conventions, style guidelines, and in-container development practices, refer to `dynamo-utils/.cursorrules`.
+Operational playbooks and environment conventions for this workspace.
+For coding conventions, style guidelines, and in-container development practices, refer to `.cursorrules`.
 
 Scope / intent:
 - This file (`CLAUDE.md`) is for **host-side operations**: Docker commands, process management, CI log triage, and GitHub operations.
@@ -36,6 +36,10 @@ TABLE OF CONTENTS
   4.5 Documentation Link Check
   4.6 Analyzing CI Failures (log-grepping workflow)
   4.7 GitHub CI job dependencies (needs:)
+  4.8 Dynamo-utils dashboards (operational runbook)
+    4.8.1 Running `update_html_pages.sh`
+    4.8.2 Outputs, logs, and “it ran too quickly”
+    4.8.3 Common UI pitfalls (links/buttons inside <details>)
 
 5. GITHUB OPERATIONS
   5.1 GitHub API Access
@@ -54,8 +58,8 @@ When the user says "remember this" or "remember how to do this", document it in 
 
 ## 1.2 New Project Protocol
 When the user says "new project", always:
-1. Re-read `~/nvidia/dynamo-utils/.cursorrules`
-2. Re-read `~/nvidia/dynamo-utils/CLAUDE.md`
+1. Re-read `~/dynamo/dynamo-utils/.cursorrules`
+2. Re-read `~/dynamo/dynamo-utils/CLAUDE.md`
 
 These are the canonical project instructions. Do NOT read `.cursorrules` or `CLAUDE.md` from other project directories (dynamo1, dynamo2, dynamo3, dynamo_ci, etc.) unless explicitly instructed.
 
@@ -71,7 +75,7 @@ Always wait for the user to explicitly request a commit before running `git comm
 ## 1.5 Python Virtual Environment (Host vs Container)
 If running on the host (not inside the dev container), activate the host venv before Python operations:
 ```bash
-source ~/nvidia/venv/bin/activate
+source ~/dynamo/venv/bin/activate  # example; adjust to your machine
 ```
 
 If running inside the dev container, the Python environment is already set up.
@@ -81,28 +85,28 @@ If running inside the dev container, the Python environment is already set up.
 =============================================================================
 
 ## 2.1 All Projects Overview
-The `nvidia/` directory contains multiple projects:
+This workspace contains multiple projects:
 - `dynamo1, dynamo2, dynamo3, dynamo4`: multiple working branches of the Dynamo repository
 - `dynamo_ci`: main CI/testing repository for Dynamo
 - `dynamo-utils`: build automation scripts and utilities
 
 ## 2.2 Docker Container Naming
 When running `docker ps`, VS Code/Cursor dev container images follow this naming pattern:
-- `vsc-dynamo1-*` → `nvidia/dynamo1`
-- `vsc-dynamo2-*` → `nvidia/dynamo2`
-- `vsc-dynamo3-*` → `nvidia/dynamo3`
-- `vsc-dynamo4-*` → `nvidia/dynamo4`
-- `vsc-dynamo_ci-*` → `nvidia/dynamo_ci`
+- `vsc-dynamo1-*` → `<workspace>/dynamo1`
+- `vsc-dynamo2-*` → `<workspace>/dynamo2`
+- `vsc-dynamo3-*` → `<workspace>/dynamo3`
+- `vsc-dynamo4-*` → `<workspace>/dynamo4`
+- `vsc-dynamo_ci-*` → `<workspace>/dynamo_ci`
 
 The `vsc-` prefix indicates VS Code/Cursor dev containers, and the part after it matches the directory name.
 Container names (like `epic_satoshi`, `distracted_shockley`) are transient and should not be documented.
 
 ## 2.3 Host-Container Directory Mapping
 The `dynamo-utils` directory on the host is mapped into the container at `/workspace/_` (same repo, bind-mounted):
-- Host: `~/nvidia/dynamo-utils/`
+- Host: `<workspace>/dynamo-utils/` (e.g. `~/dynamo/dynamo-utils/`)
 - Container: `/workspace/_/`
 
-Example: `~/nvidia/dynamo-utils/notes/metrics-vllm.log` on the host appears at `/workspace/_/notes/metrics-vllm.log` inside the container.
+Example: `<workspace>/dynamo-utils/notes/metrics-vllm.log` on the host appears at `/workspace/_/notes/metrics-vllm.log` inside the container.
 
 ## 2.4 Backup File Convention
 When creating backups, use: `<filename>.<YYYY-MM-DD>.bak` (ignored by `.gitignore`).
@@ -176,7 +180,7 @@ docker exec <container_name> bash -c "mkdir -p /workspace/_/notes && curl -s loc
 ```
 
 Output:
-- Metrics saved to: `~/nvidia/dynamo-utils/notes/metrics-<framework>.log` (on host)
+- Metrics saved to: `<workspace>/dynamo-utils/notes/metrics-<framework>.log` (e.g. `~/dynamo/dynamo-utils/notes/metrics-<framework>.log`) (on host)
 - Typical size: ~200-600 lines
 
 Repeat for other frameworks:
@@ -265,7 +269,7 @@ This runs golangci-lint which includes:
 
 ### Complete Pre-Merge CI Checks
 
-**See `~/nvidia/dynamo-utils/.cursorrules`** for the complete list of pre-merge CI checks including:
+**See `.cursorrules`** for the complete list of pre-merge CI checks including:
 - Rust Format Check (cargo fmt)
 - Rust Clippy Checks (unused imports, warnings)
 - Rust Tests (unit, doc, integration)
@@ -373,7 +377,7 @@ cat /tmp/broken-links-report.json | python3 -m json.tool | head -30
 **Common broken link issues**:
 
 1. **Stale relative paths after file moves**:
-   - Error: `Broken link: [Pre-Deployment Checks](../../deploy/cloud/pre-deployment/README.md)`
+   - Error: `Broken link: Pre-Deployment Checks -> ../../deploy/pre-deployment/README.md`
    - Cause: Directory was moved/deleted (`deploy/cloud/` → `deploy/`)
    - Fix: Update relative path to match new location
    - Example: Change `../../deploy/cloud/pre-deployment/README.md` to `../../deploy/pre-deployment/README.md`
@@ -480,6 +484,42 @@ grep -n "needs:" .github/workflows/<workflow>.yml
 Note: for `html_pages/update_html_pages.sh` operational troubleshooting, keep that documentation in:
 - `dynamo-utils/html_pages/README.md`
 
+## 4.8 Dynamo-utils dashboards (operational runbook)
+
+This section is intentionally **ops-focused** (how to run, where outputs/logs land, and how to debug “it didn’t update”). For implementation details, caching internals, and dashboard UX pitfalls, prefer:
+- `README.md` → “Dashboards / log categorization pitfalls”
+- `html_pages/README.md`
+
+### 4.8.1 Running `update_html_pages.sh`
+```bash
+cd html_pages
+./update_html_pages.sh
+```
+
+Notes:
+- If running from cron, expect most output to go to files under `~/dynamo/logs/<YYYY-MM-DD>/` (not stdout).
+- Use `--run-ignore-lock` only if you’re sure another run isn’t actively writing outputs/caches.
+
+### 4.8.2 Outputs, logs, and “it ran too quickly”
+Quick “did it actually update?” checks (paths vary by environment, but these are typical on the host):
+```bash
+ls -lah ~/dynamo/index.html                     # local branches dashboard
+ls -lah ~/dynamo/dynamo_latest/index.html       # commit history dashboard
+ls -lah ~/dynamo/speedoflight/stats/index.html  # stats landing page
+```
+
+If `update_html_pages.sh` appears to “finish instantly”, check logs first (common root cause: a generator crashed early due to ImportError):
+```bash
+tail -n 200 ~/dynamo/logs/$(date +%Y-%m-%d)/cron.log
+tail -n 200 ~/dynamo/logs/$(date +%Y-%m-%d)/show_commit_history.log
+tail -n 200 ~/dynamo/logs/$(date +%Y-%m-%d)/show_local_branches.log
+```
+
+### 4.8.3 Common UI pitfalls (links/buttons inside <details>)
+When adding buttons/links inside `<summary>` / `<details>` trees, clicks may toggle the tree unintentionally.
+- Fix pattern: ensure handlers call **both** `event.preventDefault()` and `event.stopPropagation()`.
+- Keep the full implementation guidance in `html_pages/README.md` (so this file stays a runbook, not a UI dev guide).
+
 =============================================================================
 5. GITHUB OPERATIONS
 =============================================================================
@@ -538,7 +578,7 @@ gh run view <RUN_ID> --repo ai-dynamo/dynamo --json status,conclusion,url
 =============================================================================
 
 ## 6.1 Important Reminders
-- **NEVER delete `nvidia/dynamo_latest/index.html`** - This is the production HTML page for commit history
+- **NEVER delete `<workspace>/dynamo_latest/index.html`** (e.g. `~/dynamo/dynamo_latest/index.html`) - This is the production HTML page for commit history
 - Never commit sensitive information (credentials, tokens, etc.)
 - Always test changes locally before pushing
 - Use meaningful commit messages

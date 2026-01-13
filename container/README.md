@@ -1,6 +1,6 @@
 # Container utilities (`dynamo-utils/container/`)
 
-Scripts in this directory are focused on **Docker image build/test**, **retagging**, and **cleanup/monitoring** for the Dynamo repos under your `~/nvidia` workspace.
+Scripts in this directory are focused on **Docker image build/test**, **retagging**, and **cleanup/monitoring** for the Dynamo repos under your workspace (commonly `~/dynamo`).
 
 ## Directory structure
 
@@ -33,13 +33,13 @@ container/
 
 ```bash
 # Quick test (single framework)
-python3 container/build_images.py --repo-path ~/nvidia/dynamo_ci --sanity-check-only --framework sglang --force-run
+python3 container/build_images.py --repo-path ~/dynamo/dynamo_ci --sanity-check-only --framework sglang --force-run
 
 # Parallel build with skip
-python3 container/build_images.py --repo-path ~/nvidia/dynamo_ci --skip-action-if-already-passed --parallel --force-run
+python3 container/build_images.py --repo-path ~/dynamo/dynamo_ci --skip-action-if-already-passed --parallel --force-run
 
 # Full build
-python3 container/build_images.py --repo-path ~/nvidia/dynamo_ci --parallel --force-run
+python3 container/build_images.py --repo-path ~/dynamo/dynamo_ci --parallel --force-run
 ```
 
 ### Features
@@ -54,7 +54,7 @@ python3 container/build_images.py --repo-path ~/nvidia/dynamo_ci --parallel --fo
 - **HTML report generation**:
   - Automatic report generation with clickable links
   - Two versions: file paths vs absolute URLs (for email)
-  - Log file paths: `~/nvidia/dynamo_ci/logs/YYYY-MM-DD/`
+  - Log file paths: `~/dynamo/dynamo_ci/logs/YYYY-MM-DD/`
   - Report: `YYYY-MM-DD.{sha_short}.report.html`
 - **Email notifications**:
   - SMTP server: `smtp.nvidia.com:25`

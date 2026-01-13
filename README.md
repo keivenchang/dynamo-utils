@@ -25,10 +25,10 @@ This repository contains essential development tools, build scripts, and configu
 
 ## Development Environment Notes (host vs dev container)
 
-- **Host venv**: On the host machine, activate your local venv before running Python tooling (pre-commit, linters, etc.). On the keivenc setup this is typically `~/nvidia/venv/bin/activate`.
+- **Host venv**: On the host machine, activate your local venv before running Python tooling (pre-commit, linters, etc.). On common setups this is typically `<workspace>/venv/bin/activate` (e.g. `~/dynamo/venv/bin/activate`).
 - **Dev container**: Inside the dev container, the environment is typically pre-configured/activated.
 - **Path mapping (common setup)**:
-  - Host: `~/nvidia/dynamo-utils`
+  - Host: `~/dynamo/dynamo-utils`
   - Dev container: `/workspace/_`
 
 ---
@@ -41,7 +41,7 @@ dynamo-utils/
 ├── common.py                     # Shared utilities module (API clients, caching, parallelization)
 ├── common_types.py               # Shared enums/types (used by API + dashboards)
 ├── compile.sh                    # Build and install Dynamo Python packages
-├── cron_log.sh                   # Cron wrapper that writes logs to ~/nvidia/logs/YYYY-MM-DD/<job>.log
+├── cron_log.sh                   # Cron wrapper that writes logs to ~/dynamo/logs/YYYY-MM-DD/<job>.log
 ├── curl.sh                       # Test models via chat completions API
 ├── soak_fe.py                    # Frontend soak testing script
 ├── py_indent_report.py           # Python indentation gate (runs py_compile -tt + tabnanny + quick indent report)
@@ -242,7 +242,7 @@ python3 gitlab_pipeline_pr_map.py 40743226 https://gitlab-master.nvidia.com/dl/a
 
 ```bash
 # Basic backup (required parameters)
-./backup.sh --input-path ~/nvidia --output-path /mnt/sda/keivenc/dynamo
+./backup.sh --input-path ~/dynamo --output-path /mnt/sda/keivenc/dynamo
 
 # Show help
 ./backup.sh --help
@@ -273,7 +273,7 @@ python3 gitlab_pipeline_pr_map.py 40743226 https://gitlab-master.nvidia.com/dl/a
 
 ```bash
 # Backup every 6 minutes
-*/6 * * * * NVIDIA_HOME=$HOME/nvidia $HOME/nvidia/dynamo-utils/cron_log.sh backup $HOME/nvidia/dynamo-utils/backup.sh --input-path $HOME/nvidia --output-path /mnt/sda/keivenc/dynamo
+*/6 * * * * NVIDIA_HOME=$HOME/dynamo $HOME/dynamo/dynamo-utils/cron_log.sh backup $HOME/dynamo/dynamo-utils/backup.sh --input-path $HOME/dynamo --output-path /mnt/sda/keivenc/dynamo
 ```
 
 ---

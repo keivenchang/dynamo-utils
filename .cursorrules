@@ -468,7 +468,7 @@ Notes:
 - Follow PEP 8
 - Put imports at top of file (not inside functions)
 - Check indentation carefully (must be perfect)
-- **Indentation/continuation-indent MUST be mechanically verified after edits (don’t rely on eyeballing):**
+- **Indentation/continuation-indent MUST be mechanically verified after edits (don't rely on eyeballing):**
   - **Single-command indentation gate (preferred):**
     - `python3 py_indent_report.py --only-problems <touched_py_files>`
       - This **subsumes** both:
@@ -477,13 +477,15 @@ Notes:
       - Example: `python3 py_indent_report.py --only-problems dynamo-utils/html_pages/common_dashboard_lib.py`
     - Optional: `python3 py_indent_report.py --self-check` (verifies the detector catches common mistakes like mis-indented `else:` blocks).
     - **Escalation rule:** If you (the AI) keep introducing indentation errors, run `py_indent_report.py` **after each meaningful edit chunk** until the errors stop.
+    - **CRITICAL:** When fixing indentation errors, always read 20–30 lines of surrounding context and fix the whole block (not just the one flagged line). Adjacent lines often share the same mistake.
+    - **Common mistake:** Over-indenting the first “real” statement after a comment (comment/code must align).
   - If you touched many files/dirs and want a fast parse-only pass:
     - `python3 -m compileall -q <touched_dirs_or_files>`
   - **Auto-fix formatting + indentation (preferred):**
     - `ruff format <touched_paths>`
   - **Lint (and auto-fix what it can):**
     - `ruff check --fix <touched_paths>`
-  - If `.pre-commit-config.yaml` exists in the repo you’re working in, prefer:
+  - If `.pre-commit-config.yaml` exists in the repo you're working in, prefer:
     - `pre-commit run --files <touched_files>` (or `pre-commit run --all-files` for broad changes)
 - Use dataclass for dicts with >4 elements (better type inference)
 - Use simple regex for multi-line string manipulations
@@ -594,29 +596,16 @@ if hasattr(node, "optional_field"):
     value = node.optional_field  # NOT getattr()
 ```
 
-```python
-def process_file(filename: str) -> None:
-    try:
-        with open(filename, 'r') as f:
-            data = f.read()
-        process_data(data)
-    except FileNotFoundError:
-        logger.error(f"File {filename} not found")
-        raise
-```
-
-### 3.5.5 Dynamo-utils dashboards + log categorization
-
-See `dynamo-utils/README.md` (Dashboards / log categorization pitfalls) for the
-session learnings and dashboard-specific gotchas. Keep `.cursorrules` focused on
-coding conventions and mechanical checks.
-
 ### 3.5.4 Testing
 - Framework: pytest
 - Unit tests in tests/ directory
 - Use fixtures for common setup
 - Mock external services
 - Always use: pytest --basetemp=/tmp/pytest_temp tests/
+
+### 3.5.5 Dynamo-utils dashboards + log categorization
+
+See `dynamo-utils/README.md` (Dashboards / log categorization pitfalls) for dashboard-specific learnings and gotchas. Keep `.cursorrules` focused on coding conventions and mechanical checks.
 
 ## 3.6 JavaScript/TypeScript
 - camelCase for variables/functions

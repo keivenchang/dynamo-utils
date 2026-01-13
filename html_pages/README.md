@@ -92,8 +92,8 @@ See `TREE_NODE_REFERENCE.md` for complete node definitions.
 
 ```bash
 python3 html_pages/show_local_branches.py \
-  --repo-path ~/nvidia \
-  --output ~/nvidia/index.html \
+  --repo-path ~/dynamo \
+  --output ~/dynamo/index.html \
   --max-github-api-calls 100
 ```
 
@@ -145,7 +145,7 @@ UserNode (github-username)
 ```bash
 python3 show_remote_branches.py \
   --github-user keivenchang \
-  --repo-root ~/nvidia \
+  --repo-root ~/dynamo \
   --output speedoflight/users/keivenchang/index.html
 ```
 
@@ -177,15 +177,15 @@ Shows recent commits with expandable GitHub checks.
 ```bash
 # Full refresh
 python3 html_pages/show_commit_history.py \
-  --repo-path ~/nvidia/dynamo_latest \
+  --repo-path ~/dynamo/dynamo_latest \
   --max-commits 100 \
-  --output ~/nvidia/dynamo_latest/index.html
+  --output ~/dynamo/dynamo_latest/index.html
 
 # Cache-only (skip GitLab)
 python3 html_pages/show_commit_history.py \
-  --repo-path ~/nvidia/dynamo_latest \
+  --repo-path ~/dynamo/dynamo_latest \
   --skip-gitlab-fetch \
-  --output ~/nvidia/dynamo_latest/index.html
+  --output ~/dynamo/dynamo_latest/index.html
 ```
 
 ---
@@ -198,25 +198,25 @@ python3 html_pages/show_commit_history.py \
 
 ```cron
 # Full update every 30 minutes
-0,30 * * * * NVIDIA_HOME=$HOME/nvidia $HOME/nvidia/dynamo-utils/cron_log.sh update_html_pages_full $HOME/nvidia/dynamo-utils/html_pages/update_html_pages.sh --show-local-branches --show-commit-history
+0,30 * * * * NVIDIA_HOME=$HOME/dynamo $HOME/dynamo/dynamo-utils/cron_log.sh update_html_pages_full $HOME/dynamo/dynamo-utils/html_pages/update_html_pages.sh --show-local-branches --show-commit-history
 
 # Cache-heavy between full updates (every 4 minutes)
-8-59/4 * * * * NVIDIA_HOME=$HOME/nvidia SKIP_GITLAB_FETCH=1 $HOME/nvidia/dynamo-utils/cron_log.sh update_html_pages_cached $HOME/nvidia/dynamo-utils/html_pages/update_html_pages.sh --show-local-branches --show-commit-history
+8-59/4 * * * * NVIDIA_HOME=$HOME/dynamo SKIP_GITLAB_FETCH=1 $HOME/dynamo/dynamo-utils/cron_log.sh update_html_pages_cached $HOME/dynamo/dynamo-utils/html_pages/update_html_pages.sh --show-local-branches --show-commit-history
 
 # Resource report (every minute)
-* * * * * NVIDIA_HOME=$HOME/nvidia $HOME/nvidia/dynamo-utils/cron_log.sh resource_report $HOME/nvidia/dynamo-utils/html_pages/update_html_pages.sh --show-local-resources
+* * * * * NVIDIA_HOME=$HOME/dynamo $HOME/dynamo/dynamo-utils/cron_log.sh resource_report $HOME/dynamo/dynamo-utils/html_pages/update_html_pages.sh --show-local-resources
 
 # Remote PRs - working hours (8am-6pm PT): every minute
-* 16-23 * * * NVIDIA_HOME=$HOME/nvidia REMOTE_GITHUB_USERS="kthui keivenchang" $HOME/nvidia/dynamo-utils/cron_log.sh remote_prs_working $HOME/nvidia/dynamo-utils/html_pages/update_html_pages.sh --show-remote-branches
-* 0-1 * * * NVIDIA_HOME=$HOME/nvidia REMOTE_GITHUB_USERS="kthui keivenchang" $HOME/nvidia/dynamo-utils/cron_log.sh remote_prs_working $HOME/nvidia/dynamo-utils/html_pages/update_html_pages.sh --show-remote-branches
+* 16-23 * * * NVIDIA_HOME=$HOME/dynamo REMOTE_GITHUB_USERS="kthui keivenchang" $HOME/dynamo/dynamo-utils/cron_log.sh remote_prs_working $HOME/dynamo/dynamo-utils/html_pages/update_html_pages.sh --show-remote-branches
+* 0-1 * * * NVIDIA_HOME=$HOME/dynamo REMOTE_GITHUB_USERS="kthui keivenchang" $HOME/dynamo/dynamo-utils/cron_log.sh remote_prs_working $HOME/dynamo/dynamo-utils/html_pages/update_html_pages.sh --show-remote-branches
 
 # Remote PRs - off hours (6pm-8am PT): every 20 minutes
-*/20 2-15 * * * NVIDIA_HOME=$HOME/nvidia REMOTE_GITHUB_USERS="kthui keivenchang" $HOME/nvidia/dynamo-utils/cron_log.sh remote_prs_offhours $HOME/nvidia/dynamo-utils/html_pages/update_html_pages.sh --show-remote-branches
+*/20 2-15 * * * NVIDIA_HOME=$HOME/dynamo REMOTE_GITHUB_USERS="kthui keivenchang" $HOME/dynamo/dynamo-utils/cron_log.sh remote_prs_offhours $HOME/dynamo/dynamo-utils/html_pages/update_html_pages.sh --show-remote-branches
 ```
 
 ### Logs
 
-- Per-run logs: `~/nvidia/logs/YYYY-MM-DD/<job>.log`
+- Per-run logs: `~/dynamo/logs/YYYY-MM-DD/<job>.log`
 - Generator logs: `html_pages/show_*.log`
 
 ### Troubleshooting

@@ -20,23 +20,23 @@ This document explains the cron schedule for `show_remote_branches.py` updates.
 
 ```cron
 # Working hours (8am-6pm PT / 4pm-2am UTC): every 1 minute
-* 16-23 * * * NVIDIA_HOME=$HOME/nvidia REMOTE_GITHUB_USERS="kthui keivenchang" $HOME/nvidia/dynamo-utils/cron_log.sh remote_prs_working $HOME/nvidia/dynamo-utils/html_pages/update_html_pages.sh --show-remote-branches
-* 0-1 * * * NVIDIA_HOME=$HOME/nvidia REMOTE_GITHUB_USERS="kthui keivenchang" $HOME/nvidia/dynamo-utils/cron_log.sh remote_prs_working $HOME/nvidia/dynamo-utils/html_pages/update_html_pages.sh --show-remote-branches
+* 16-23 * * * NVIDIA_HOME=$HOME/dynamo REMOTE_GITHUB_USERS="kthui keivenchang" $HOME/dynamo/dynamo-utils/cron_log.sh remote_prs_working $HOME/dynamo/dynamo-utils/html_pages/update_html_pages.sh --show-remote-branches
+* 0-1 * * * NVIDIA_HOME=$HOME/dynamo REMOTE_GITHUB_USERS="kthui keivenchang" $HOME/dynamo/dynamo-utils/cron_log.sh remote_prs_working $HOME/dynamo/dynamo-utils/html_pages/update_html_pages.sh --show-remote-branches
 
 # Off hours (6pm-8am PT / 2am-4pm UTC): every 20 minutes
-*/20 2-15 * * * NVIDIA_HOME=$HOME/nvidia REMOTE_GITHUB_USERS="kthui keivenchang" $HOME/nvidia/dynamo-utils/cron_log.sh remote_prs_offhours $HOME/nvidia/dynamo-utils/html_pages/update_html_pages.sh --show-remote-branches
+*/20 2-15 * * * NVIDIA_HOME=$HOME/dynamo REMOTE_GITHUB_USERS="kthui keivenchang" $HOME/dynamo/dynamo-utils/cron_log.sh remote_prs_offhours $HOME/dynamo/dynamo-utils/html_pages/update_html_pages.sh --show-remote-branches
 ```
 
 ## Output Locations
 
-- **kthui**: `$HOME/nvidia/speedoflight/users/kthui/index.html`
-- **keivenchang**: `$HOME/nvidia/speedoflight/users/keivenchang/index.html`
+- **kthui**: `$HOME/dynamo/speedoflight/users/kthui/index.html`
+- **keivenchang**: `$HOME/dynamo/speedoflight/users/keivenchang/index.html`
 
 ## Logs
 
-- Working hours: `$HOME/nvidia/logs/YYYY-MM-DD/remote_prs_working.log`
-- Off hours: `$HOME/nvidia/logs/YYYY-MM-DD/remote_prs_offhours.log`
-- Script logs: `$HOME/nvidia/logs/YYYY-MM-DD/show_remote_branches.log`
+- Working hours: `$HOME/dynamo/logs/YYYY-MM-DD/remote_prs_working.log`
+- Off hours: `$HOME/dynamo/logs/YYYY-MM-DD/remote_prs_offhours.log`
+- Script logs: `$HOME/dynamo/logs/YYYY-MM-DD/show_remote_branches.log`
 
 ## Notes
 
