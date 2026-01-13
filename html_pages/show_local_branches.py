@@ -115,6 +115,36 @@ from common import (
     summarize_pr_check_rows,
 )
 
+def _detect_branch_merged_locally(*, repo_dir: Path, branch_sha: Optional[str]) -> bool:
+    """Best-effort local merge detection: branch tip is already contained in main/origin/main.
+
+    This helps mark branches as "merged" in the local dashboard even when GitHub PR metadata is
+    missing/stale or API calls are disabled.
+    """
+    sha = str(branch_sha or "").strip()
+    if not sha:
+        return False
+    try:
+        # Prefer origin/main when present, otherwise main.
+        has_origin_main = subprocess.run(
+            ["git", "-C", str(repo_dir), "show-ref", "--verify", "--quiet", "refs/remotes/origin/main"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        ).returncode == 0
+        base_ref = "origin/main" if has_origin_main else "main"
+        return (
+            subprocess.run(
+                ["git", "-C", str(repo_dir), "merge-base", "--is-ancestor", sha, base_ref],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+            ).returncode
+            == 0
+        )
+    except Exception:
+        return False
+
 # Import shared node classes and refactored functions from common_branch_nodes
 from common_branch_nodes import (
     BlockedMessageNode,
@@ -849,6 +879,7 @@ class LocalRepoScanner:
                     label=branch_name,
                     sha=info['sha'],
                     is_current=info['is_current'],
+                    merged_local=_detect_branch_merged_locally(repo_dir=repo_dir, branch_sha=info.get("sha")),
                     commit_url=commit_url,
                     commit_time_pt=info.get('commit_time_pt'),
                     commit_datetime=info.get('commit_dt'),
@@ -913,6 +944,7 @@ class LocalRepoScanner:
                     label=branch_name,
                     sha=info.get("sha"),
                     is_current=bool(info.get("is_current", False)),
+                    merged_local=_detect_branch_merged_locally(repo_dir=repo_dir, branch_sha=info.get("sha")),
                     commit_url=commit_url,
                     commit_time_pt=info.get("commit_time_pt"),
                     commit_datetime=info.get("commit_dt"),
@@ -957,6 +989,7 @@ class LocalRepoScanner:
                     label=branch_info['name'],
                     sha=branch_info['sha'],
                     is_current=branch_info['is_current'],
+                    merged_local=_detect_branch_merged_locally(repo_dir=repo_dir, branch_sha=branch_info.get("sha")),
                     commit_time_pt=branch_info.get('commit_time_pt'),
                     commit_datetime=branch_info.get('commit_dt'),
                     commit_message=branch_info.get('commit_message'),

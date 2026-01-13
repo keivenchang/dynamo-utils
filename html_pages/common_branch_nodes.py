@@ -726,6 +726,7 @@ class BranchInfoNode(BranchNode):
         *,
         sha: Optional[str] = None,
         is_current: bool = False,
+        merged_local: bool = False,
         commit_url: Optional[str] = None,
         commit_time_pt: Optional[str] = None,
         commit_datetime: Optional[datetime] = None,
@@ -736,6 +737,8 @@ class BranchInfoNode(BranchNode):
     ):
         super().__init__(label=label, children=children, expanded=False, is_current=is_current)
         self.sha = sha
+        # Local-only merge detection (e.g., branch tip is already in main) for pages that don't have PR metadata.
+        self.merged_local = bool(merged_local)
         self.commit_url = commit_url
         self.commit_time_pt = commit_time_pt
         self.commit_datetime = commit_datetime
@@ -752,11 +755,27 @@ class BranchInfoNode(BranchNode):
         clipboard_text = _strip_repo_prefix_for_clipboard(self.label)
         parts.append(_html_copy_button(clipboard_text=clipboard_text, title=f"Copy branch name: {clipboard_text}"))
         
-        # Branch name (fixed font, bold if current, otherwise bold anyway for consistency)
-        if self.is_current:
-            parts.append(f'<span style="font-family: monospace; font-weight: 700;">{html_module.escape(self.label)}</span>')
-        else:
-            parts.append(f'<span style="font-family: monospace; font-weight: 700;">{html_module.escape(self.label)}</span>')
+        try:
+            pr_state_lc = (getattr(self.pr, "state", "") or "").lower() if self.pr else ""
+            is_merged = bool(getattr(self.pr, "is_merged", False)) if self.pr else False
+            is_closed_not_merged = bool(self.pr) and pr_state_lc and pr_state_lc != "open" and not is_merged
+        except Exception:
+            pr_state_lc = ""
+            is_merged = False
+            is_closed_not_merged = False
+
+        # Branch state tag (do NOT style/invert the branch name itself).
+        if bool(self.merged_local) or bool(is_merged):
+            parts.append('<span class="branch-tag merged-tag">Merged</span>')
+        elif bool(is_closed_not_merged):
+            # Closed tag should be reverse black/white; reuse existing CSS class.
+            parts.append('<span class="branch-tag closed-branch">Closed</span>')
+
+        # Branch name (fixed font; keep normal style regardless of merged/closed).
+        cls_attr = ' class="current"' if self.is_current else ""
+        parts.append(
+            f'<span{cls_attr} style="font-family: monospace; font-weight: 700;">{html_module.escape(self.label)}</span>'
+        )
         
         # SHA link (if available)
         if self.sha and self.commit_url:
@@ -821,12 +840,17 @@ class BranchInfoNode(BranchNode):
         for c in (self.children or []):
             kids.append(c.to_tree_vm())
         
+        is_merged_effective = bool(self.merged_local) or bool(is_merged)
+        is_closed_effective = bool(is_closed_not_merged)
+        default_expanded = not (is_merged_effective or is_closed_effective)
+
         return TreeNodeVM(
             node_key=f"branch_info:{self.label}:{id(self)}",
             label_html=label_html,
             children=kids,
             collapsible=True,  # Make branches collapsible like local branches
-            default_expanded=True,  # Default to expanded
+            # If merged or closed, keep collapsed by default (user can still expand manually).
+            default_expanded=bool(default_expanded),
         )
 
 

@@ -28,7 +28,26 @@
     a:hover { text-decoration: underline; }
     .repo-name { font-weight: bold; margin-top: 10px; }
     .current { font-weight: bold; }
-    .merged-branch { color: #999999; }
+
+    /* Branch state tags shown before the branch name. */
+    .branch-tag {
+      display: inline-block;
+      padding: 2px 6px;
+      border-radius: 3px;
+      font-size: 10px;
+      font-weight: 600;
+      line-height: 1.1;
+      margin-right: 6px;
+      vertical-align: baseline;
+      user-select: none;
+    }
+    .merged-tag {
+      /* NVIDIA green */
+      background-color: #76b900;
+      color: #ffffff;
+      border: 1px solid #5c8f00;
+    }
+    /* "Closed" tag should be reverse black/white. */
     .closed-branch { 
       background-color: #24292f; 
       color: #ffffff; 
@@ -44,24 +63,27 @@
       margin-bottom: 1em;
     }
 
-    /* Status indicator pill (same look as show_commit_history.j2) */
+    /* Status indicator pill (match branch tags: Merged/Closed sizing). */
     .status-indicator {
       display: inline-block;
-      padding: 2px 8px;
-      border-radius: 4px;
+      padding: 2px 6px;
+      border-radius: 3px;
       margin-right: 6px;
-      vertical-align: middle;
+      vertical-align: baseline;
       font-size: 10px;
       font-weight: 600;
-      color: white;
-      text-transform: uppercase;
-      letter-spacing: 0.3px;
+      line-height: 1.1;
+      color: #ffffff;
+      /* Keep the content as authored by the generator (no forced uppercase). */
+      text-transform: none;
+      letter-spacing: normal;
       border: 1px solid transparent;
+      user-select: none;
     }
     .status-success { background-color: #2da44e; border-color: #1f7a37; }
     .status-failed { background-color: #c83a3a; border-color: #a83232; }
     .status-warning { background-color: #8c959f; border-color: #6e7781; }
-    .status-building { background-color: #bf8700; border-color: #9a6a00; } /* RUNNING */
+    .status-building { background-color: #ffc107; border-color: #e0a800; } /* RUNNING */
     .status-unknown { background-color: #8c959f; border-color: #6e7781; }
 {% endblock %}
 
