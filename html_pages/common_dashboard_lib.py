@@ -434,8 +434,8 @@ def expand_required_failure_descendants_pass(nodes: List[TreeNodeVM]) -> List[Tr
 
     out: List[TreeNodeVM] = []
     for n in (nodes or []):
-        n2, _ = walk(n)
-        out.append(n2)
+            n2, _ = walk(n)
+            out.append(n2)
     return out
 
 
@@ -637,7 +637,7 @@ def run_all_passes(
     final_nodes = move_required_jobs_to_top_pass(final_nodes)
     
     # PASS 8: Verify the final tree structure
-    verify_tree_structure_pass(final_nodes, ci_nodes)
+    verify_tree_structure_pass(final_nodes, ci_nodes, commit_sha=commit_sha)
     
     logger.info(f"[PASS 2-8] YAML parse, augment, group, sort, expand, move required, and verify complete, returning {len(final_nodes)} root nodes")
     return final_nodes
@@ -751,7 +751,7 @@ def move_required_jobs_to_top_pass(nodes: List[TreeNodeVM]) -> List[TreeNodeVM]:
     return result
 
 
-def verify_tree_structure_pass(tree_nodes: List[TreeNodeVM], original_ci_nodes: List) -> None:
+def verify_tree_structure_pass(tree_nodes: List[TreeNodeVM], original_ci_nodes: List, commit_sha: str = "") -> None:
     """Verify the final tree structure for common issues.
     
     This pass checks for:
@@ -762,10 +762,13 @@ def verify_tree_structure_pass(tree_nodes: List[TreeNodeVM], original_ci_nodes: 
     Args:
         tree_nodes: Final tree structure to verify
         original_ci_nodes: Original CI nodes to check augmentation
+        commit_sha: Commit SHA for context in error messages
     """
     from common_branch_nodes import CIJobNode
     
-    logger.info(f"[verify_tree_structure_pass] Verifying tree structure ({len(tree_nodes)} root nodes)")
+    # Format commit ref for logging
+    commit_ref = f" (commit: {commit_sha[:7]})" if commit_sha else ""
+    logger.info(f"[verify_tree_structure_pass] Verifying tree structure ({len(tree_nodes)} root nodes){commit_ref}")
     
     # Collect all nodes (including nested)
     all_nodes = []
@@ -792,17 +795,17 @@ def verify_tree_structure_pass(tree_nodes: List[TreeNodeVM], original_ci_nodes: 
     missing_critical = CRITICAL_REQUIRED_JOBS - required_jobs_found
     
     if missing_critical:
-        print(f"[verify_tree_structure_pass] ❌ CRITICAL: Missing required jobs: {missing_critical}", file=sys.stderr)
-        logger.error(f"[verify_tree_structure_pass] ❌ CRITICAL: Missing required jobs: {missing_critical}")
+        print(f"[verify_tree_structure_pass] ❌ CRITICAL: Missing required jobs: {missing_critical}{commit_ref}", file=sys.stderr)
+        logger.error(f"[verify_tree_structure_pass] ❌ CRITICAL: Missing required jobs: {missing_critical}{commit_ref}")
     else:
-        print(f"[verify_tree_structure_pass] ✓ Found all critical required jobs: {CRITICAL_REQUIRED_JOBS}", file=sys.stderr)
-        logger.info(f"[verify_tree_structure_pass] ✓ Found all critical required jobs: {CRITICAL_REQUIRED_JOBS}")
+        print(f"[verify_tree_structure_pass] ✓ Found all critical required jobs: {CRITICAL_REQUIRED_JOBS}{commit_ref}", file=sys.stderr)
+        logger.info(f"[verify_tree_structure_pass] ✓ Found all critical required jobs: {CRITICAL_REQUIRED_JOBS}{commit_ref}")
     
     if required_count < 2:
-        logger.warning(f"[verify_tree_structure_pass] ⚠️  Only {required_count} required jobs found (expected at least 2: backend-status-check, dynamo-status-check)")
+        logger.warning(f"[verify_tree_structure_pass] ⚠️  Only {required_count} required jobs found (expected at least 2: backend-status-check, dynamo-status-check){commit_ref}")
     else:
-        print(f"[verify_tree_structure_pass] ✓ Found {required_count} required jobs (including backend-status-check, dynamo-status-check)", file=sys.stderr)
-        logger.info(f"[verify_tree_structure_pass] ✓ Found {required_count} required jobs")
+        print(f"[verify_tree_structure_pass] ✓ Found {required_count} required jobs (including backend-status-check, dynamo-status-check){commit_ref}", file=sys.stderr)
+        logger.info(f"[verify_tree_structure_pass] ✓ Found {required_count} required jobs{commit_ref}")
     
     # Check 2: Verify short names were set for original CI nodes
     # Check 2: Count nodes with short names (no warnings about missing ones)
@@ -1506,9 +1509,9 @@ def render_tree_pre_lines(root_nodes: List[TreeNodeVM]) -> List[str]:
         if node_key and node_key in node_key_path:
             # Circular reference - skip to prevent infinite recursion
             return
-        
+            
         # Reset last reference text when rendering actual node
-        last_reference_text = None
+            last_reference_text = None
         
         # Tree connector
         if not is_root:
