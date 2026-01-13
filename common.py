@@ -3603,7 +3603,7 @@ class GitHubAPIClient:
                     except Exception:
                         continue
 
-        if (not include_closed) or bool(getattr(self, "cache_only_mode", False)):
+        if not include_closed:
             return result
 
         # Resolve closed/merged PRs for branches with no OPEN PR match.
@@ -3657,6 +3657,12 @@ class GitHubAPIClient:
             missing.append(b)
 
         if not missing:
+            return result
+
+        # Cache-only mode: do NOT perform any network fetches for closed PRs.
+        # We still want to leverage the on-disk/memory closed-pr cache above (so local dashboards can
+        # mark branches as merged even when max_github_api_calls=0), but we must not call GitHub here.
+        if bool(getattr(self, "cache_only_mode", False)):
             return result
 
         def fetch_branch(branch_name: str) -> Tuple[str, List[Dict[str, Any]]]:
