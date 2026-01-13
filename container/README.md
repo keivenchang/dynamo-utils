@@ -20,6 +20,7 @@ container/
 - **`build_all_targets_and_verify.sh`**: build runtime/dev/local-dev targets and run verification (run from a Dynamo repo root).
 - **`retag_images.py`**: retag images (useful for promoting images across tags).
 - **`cleanup_old_images.sh`**: prune old images/build cache.
+- **`dangerously_wipe_local_docker.sh`**: **DANGEROUS** kill all running containers and delete **all local Docker images** (requires `--wipe-out-all-docker-images`).
 - **`restart_gpu_containers.sh`**: watchdog-style monitor/restart for GPU containers.
 - **`build_images_report.html.j2`**: HTML template used by `build_images.py`.
 
