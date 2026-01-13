@@ -1080,7 +1080,7 @@ def main():
     assert root is not None
     # Page statistics (shown in an expandable block at the bottom of the HTML).
     #
-    # Note: we want the HTML page to show a *breakdown* (timing.prune/scan/render/write/total).
+    # Note: we want the HTML page to show a *breakdown* (prune/scan/render/write/total .total_secs).
     # That means we need to measure render/write first, then re-render once so the stats reflect
     # those timings. This is intentionally low-tech and stable.
     elapsed_s = max(0.0, time.monotonic() - generation_t0)
@@ -1141,14 +1141,22 @@ def main():
             page_stats.append((k, v))
 
         def _sort_stats() -> None:
-            # Keep logical order for human scanning; only sort timing.* rows.
+            # Keep logical order for human scanning; sort all stats by prefix grouping.
             try:
-                timing = sorted(
-                    [(k, v) for (k, v) in page_stats if str(k).startswith("timing.")],
-                    key=lambda kv: kv[0],
-                )
-                other = [(k, v) for (k, v) in page_stats if not str(k).startswith("timing.")]
-                page_stats[:] = other + timing
+                # Extract prefix (before first _ or .) for grouping
+                def prefix_sort_key(kv):
+                    k = str(kv[0])
+                    if "_" in k or "." in k:
+                        underscore_pos = k.find("_") if "_" in k else len(k)
+                        dot_pos = k.find(".") if "." in k else len(k)
+                        split_pos = min(underscore_pos, dot_pos)
+                        prefix = k[:split_pos]
+                    else:
+                        prefix = k
+                    return (prefix, k)
+                
+                # Sort all stats by prefix, then by full key
+                page_stats[:] = sorted(page_stats, key=prefix_sort_key)
             except Exception:
                 pass
 
@@ -1190,7 +1198,7 @@ def main():
             _upsert_stat("Generation time", f"{elapsed_total:.2f}s")
             for k in ["prune", "scan", "render", "write", "total"]:
                 if k in tdict:
-                    _upsert_stat(f"timing.{k}", f"{float(tdict.get(k) or 0.0):.2f}s")
+                    _upsert_stat(f"{k}.total_secs", f"{float(tdict.get(k) or 0.0):.2f}s")
         except Exception:
             pass
         _sort_stats()
