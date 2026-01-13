@@ -226,7 +226,7 @@ def main() -> int:
             num_prs=2,
         )
     else:
-    prs = gh.get_open_pr_info_for_author(owner, repo, author=user, max_prs=int(args.max_prs))
+        prs = gh.get_open_pr_info_for_author(owner, repo, author=user, max_prs=int(args.max_prs))
 
     root = BranchNode(label="")
 
