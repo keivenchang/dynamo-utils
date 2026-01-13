@@ -280,7 +280,7 @@ run_show_remote_branches() {
     #   REMOTE_GITHUB_USER=keivenchang
     #
     # Default output root:
-    #   ~/dynamo/speedoflight/users/<user>/index.html
+    #   ~/dynamo/speedoflight/dynamo/users/<user>/index.html
 
     USERS_LIST="${REMOTE_GITHUB_USERS:-${REMOTE_GITHUB_USER:-}}"
     if [ -z "${USERS_LIST:-}" ]; then
@@ -299,7 +299,7 @@ run_show_remote_branches() {
             if [ -z "${U:-}" ]; then
                 continue
             fi
-            OUT_DIR="${REMOTE_PRS_OUT_DIR:-$HOME/dynamo/speedoflight/users/${U}}"
+            OUT_DIR="${REMOTE_PRS_OUT_DIR:-$HOME/dynamo/speedoflight/dynamo/users/${U}}"
             OUT_FILE="${REMOTE_PRS_OUT_FILE:-$OUT_DIR/index.html}"
             if [ "$FAST_DEBUG" = true ]; then
                 OUT_FILE="${REMOTE_PRS_OUT_FILE:-$OUT_DIR/debug.html}"
@@ -316,7 +316,7 @@ run_show_remote_branches() {
         if [ -z "${U:-}" ]; then
             continue
         fi
-        OUT_DIR="${REMOTE_PRS_OUT_DIR:-$HOME/dynamo/speedoflight/users/${U}}"
+        OUT_DIR="${REMOTE_PRS_OUT_DIR:-$HOME/dynamo/speedoflight/dynamo/users/${U}}"
         OUT_FILE="${REMOTE_PRS_OUT_FILE:-$OUT_DIR/index.html}"
         if [ "$FAST_DEBUG" = true ]; then
             OUT_FILE="${REMOTE_PRS_OUT_FILE:-$OUT_DIR/debug.html}"
@@ -324,8 +324,8 @@ run_show_remote_branches() {
         mkdir -p "$(dirname "$OUT_FILE")"
         
         # Copy shared tree-view.css and debug-tree.html to speedoflight
-        cp -f "$SCRIPT_DIR/tree-view.css" "$HOME/dynamo/speedoflight/tree-view.css" 2>/dev/null || true
-        cp -f "$SCRIPT_DIR/debug-tree.html" "$HOME/dynamo/speedoflight/users/keivenchang/debug-tree.html" 2>/dev/null || true
+        cp -f "$SCRIPT_DIR/tree-view.css" "$HOME/dynamo/speedoflight/dynamo/tree-view.css" 2>/dev/null || true
+        cp -f "$SCRIPT_DIR/debug-tree.html" "$HOME/dynamo/speedoflight/dynamo/users/${U}/debug-tree.html" 2>/dev/null || true
 
         echo "$(date '+%Y-%m-%d %H:%M:%S') - Generating remote PRs dashboard (user=${U} output=$OUT_FILE)" >> "$LOG_FILE"
         echo "===== $(date '+%Y-%m-%d %H:%M:%S') run_show_remote_branches start (user=${U} output=$OUT_FILE) =====" >> "$REMOTE_PRS_LOG"
