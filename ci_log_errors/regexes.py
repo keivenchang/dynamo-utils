@@ -65,6 +65,7 @@ CAT_CUDA_ERROR_RE: Pattern[str] = re.compile(
     r"unsupported\s+cuda\s+version\s+for\s+vllm\s+installation"
     r"|\bcuda\b[^\n]{0,120}\bunsupported\b"
     r"|\bimporterror:\s*libcuda\.so\.1:\s*cannot\s+open\s+shared\s+object\s+file\b"
+    r"|'cuda'\s+not\s+found\s+in\s+`markers`\s+configuration\s+option"
     r")"
 )
 
@@ -302,7 +303,7 @@ SNIPPET_COMMAND_LINE_BLUE_RE: Pattern[str] = re.compile(
 
 SNIPPET_PYTEST_CMD_LINE_RE: Pattern[str] = re.compile(r"\bPYTEST_CMD\s*=", re.IGNORECASE)
 SNIPPET_PYTEST_ERROR_FILE_LINE_RE: Pattern[str] = re.compile(
-    r"(?:^|\s)\bERROR\s+components/src/dynamo/trtllm/tests/test_trtllm_[^\s]+\.py\b",
+    r"(?:^|\s)\bERROR\s+(?:components/src/dynamo/|tests/)[\w/]+\.py\b",
     re.IGNORECASE,
 )
 SNIPPET_PYTEST_FAILED_LINE_RE: Pattern[str] = re.compile(

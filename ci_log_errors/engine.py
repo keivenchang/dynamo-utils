@@ -37,6 +37,7 @@ Docker:
 
 Infra / system:
 - 57877945100.log => cuda-error
+- 59975400792.log => pytest-error, cuda-error  # 'cuda' not found in `markers` configuration option
 - 56700029731.log => etcd-error
 - 59347193958.log => etcd-error
 - 59418212320.log => etcd-error, pytest-error

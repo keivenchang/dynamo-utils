@@ -496,7 +496,7 @@ def create_dummy_nodes_from_yaml_pass(nodes: List[TreeNodeVM]) -> List[TreeNodeV
         elif arch == "amd64":
             color = "#0969da"  # Blue for amd64
             raw2 = re.sub(r"\(\s*amd64\s*\)", "(amd64)", raw, flags=re.IGNORECASE)
-            raw2 = re.sub(r"\(\s*amd64\s*\)(?!\s*;\s*x86_64\b)", "(amd64); x86_64 ", raw2, flags=re.IGNORECASE)  # Extra space for alignment
+            raw2 = re.sub(r"\(\s*amd64\s*\)(?!\s*;\s*x86_64\b)", "(amd64); x86_64\u00a0", raw2, flags=re.IGNORECASE)  # Non-breaking space for alignment
             return f'<span style="color: {color};">{html_module.escape(raw2)}</span>'
         return html_module.escape(raw)
     
@@ -693,8 +693,8 @@ def augment_ci_with_yaml_info_pass(
                 node.yaml_dependencies = dependencies
                 augmented_count += 1
                 logger.debug(f"[augment_ci_with_yaml_info_pass] Augmented '{core_name}' -> short='{short_name}', deps={dependencies}")
-            else:
-                logger.debug(f"[augment_ci_with_yaml_info_pass] No match for '{core_name}'")
+        else:
+            logger.debug(f"[augment_ci_with_yaml_info_pass] No match for '{core_name}'")
     
     logger.info(f"[augment_ci_with_yaml_info_pass] Augmented {augmented_count}/{len(original_ci_nodes)} CI nodes with YAML info")
     
@@ -805,42 +805,55 @@ def verify_tree_structure_pass(tree_nodes: List[TreeNodeVM], original_ci_nodes: 
         logger.info(f"[verify_tree_structure_pass] ✓ Found {required_count} required jobs")
     
     # Check 2: Verify short names were set for original CI nodes
+    # Check 2: Count nodes with short names (no warnings about missing ones)
     ci_nodes_with_short_names = 0
-    ci_nodes_without_short_names = []
     
     for node in original_ci_nodes:
         if isinstance(node, CIJobNode):
             if hasattr(node, 'short_job_name') and node.short_job_name:
                 ci_nodes_with_short_names += 1
-            elif hasattr(node, 'core_job_name'):
-                ci_nodes_without_short_names.append(node.core_job_name)
     
-    if ci_nodes_without_short_names:
-        logger.warning(f"[verify_tree_structure_pass] ⚠️  {len(ci_nodes_without_short_names)} CI nodes missing short names:")
-        for name in ci_nodes_without_short_names[:10]:  # Show first 10
-            logger.warning(f"[verify_tree_structure_pass]    - '{name}'")
-        if len(ci_nodes_without_short_names) > 10:
-            logger.warning(f"[verify_tree_structure_pass]    ... and {len(ci_nodes_without_short_names) - 10} more")
-    else:
-        logger.info(f"[verify_tree_structure_pass] ✓ All {ci_nodes_with_short_names} CI nodes have short names")
+    logger.debug(f"[verify_tree_structure_pass] {ci_nodes_with_short_names} CI nodes have short names")
     
     # Check 3: Look for duplicate short names
     short_name_counts = {}
     for node in original_ci_nodes:
         if isinstance(node, CIJobNode) and hasattr(node, 'short_job_name') and node.short_job_name:
             short_name = node.short_job_name
+            job_id = node.job_id
             core_name = getattr(node, 'core_job_name', '')
             if short_name not in short_name_counts:
                 short_name_counts[short_name] = []
-            short_name_counts[short_name].append(core_name)
+            short_name_counts[short_name].append((job_id, core_name))
     
     duplicates = {k: v for k, v in short_name_counts.items() if len(v) > 1}
     if duplicates:
-        logger.warning(f"[verify_tree_structure_pass] ⚠️  Found {len(duplicates)} duplicate short names:")
-        for short_name, core_names in list(duplicates.items())[:5]:  # Show first 5
-            logger.warning(f"[verify_tree_structure_pass]    - '{short_name}' used by: {core_names}")
-        if len(duplicates) > 5:
-            logger.warning(f"[verify_tree_structure_pass]    ... and {len(duplicates) - 5} more duplicates")
+        # Separate duplicates into "OK" (different job_ids) and "problematic" (same job_ids)
+        ok_duplicates = []
+        problem_duplicates = []
+        
+        for short_name, job_list in duplicates.items():
+            job_ids = [job_id for job_id, _ in job_list]
+            unique_job_ids = len(set(job_ids))
+            if unique_job_ids == len(job_ids):
+                # All different job_ids - already disambiguated
+                ok_duplicates.append(short_name)
+            else:
+                # Some job_ids are the same - this is a real duplicate
+                core_names = [core_name for _, core_name in job_list]
+                problem_duplicates.append((short_name, core_names))
+        
+        # Only warn about true duplicates (same job_ids)
+        if problem_duplicates:
+            logger.warning(f"[verify_tree_structure_pass] ⚠️  Found {len(problem_duplicates)} duplicate short names with SAME job_ids:")
+            for short_name, core_names in problem_duplicates[:10]:  # Show first 10
+                logger.warning(f"[verify_tree_structure_pass]    - '{short_name}' used by: {core_names}")
+            if len(problem_duplicates) > 10:
+                logger.warning(f"[verify_tree_structure_pass]    ... and {len(problem_duplicates) - 10} more duplicates")
+        else:
+            logger.info(f"[verify_tree_structure_pass] ✓ No problematic duplicate short names found")
+            if ok_duplicates:
+                logger.debug(f"[verify_tree_structure_pass]   ({len(ok_duplicates)} duplicate short names exist but all have different job_ids - OK)")
     else:
         logger.info(f"[verify_tree_structure_pass] ✓ No duplicate short names found")
     
@@ -1493,7 +1506,7 @@ def render_tree_pre_lines(root_nodes: List[TreeNodeVM]) -> List[str]:
         if node_key and node_key in node_key_path:
             # Circular reference - skip to prevent infinite recursion
             return
-            
+        
         # Reset last reference text when rendering actual node
         last_reference_text = None
         
@@ -2468,7 +2481,7 @@ def check_line_html(
             return html.escape(raw2)
         if arch == "amd64":
             raw2 = re.sub(r"\(\s*amd64\s*\)", "(amd64)", raw, flags=re.IGNORECASE)
-            raw2 = re.sub(r"\(\s*amd64\s*\)(?!\s*;\s*x86_64\b)", "(amd64); x86_64 ", raw2, flags=re.IGNORECASE)  # Extra space for alignment
+            raw2 = re.sub(r"\(\s*amd64\s*\)(?!\s*;\s*x86_64\b)", "(amd64); x86_64\u00a0", raw2, flags=re.IGNORECASE)  # Non-breaking space for alignment
             return html.escape(raw2)
         return html.escape(raw)
     

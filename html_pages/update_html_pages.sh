@@ -391,7 +391,7 @@ run_show_commit_history() {
         MAX_GH_FLAG="--max-github-api-calls ${MAX_GITHUB_API_CALLS}"
     fi
 
-    MAX_COMMITS="${MAX_COMMITS:-100}"
+    MAX_COMMITS="${MAX_COMMITS:-200}"
     if [ "$FAST_DEBUG" = true ]; then
         MAX_COMMITS=10
     fi

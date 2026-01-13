@@ -123,6 +123,10 @@
       font-family: ui-monospace, SFMono-Regular, SF Mono, Menlo, Consolas, Liberation Mono, monospace;
       word-break: break-word;
     }
+    .stats-table td.v.warn-text {
+      color: #cf222e;
+      font-weight: 600;
+    }
     .stats-table td.section {
       padding: 10px 8px 6px 8px;
       color: #24292f;
@@ -328,7 +332,7 @@
           <td class="section" colspan="2">{{ (k|string)[3:] }}</td>
           {% else %}
           <td class="k">{{ k }}</td>
-          <td class="v">
+          <td class="v{% if 'miss' in (k|string)|lower and v != '0' %} warn-text{% endif %}">
             {% if v is string and '\n' in v %}
             <pre class="stats-pre">{{ v }}</pre>
             {% else %}
