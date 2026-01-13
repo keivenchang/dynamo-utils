@@ -646,21 +646,34 @@ class BaseTask(ABC):
                 # Create .RUNNING marker
                 running_marker = self.log_file.with_suffix(f'.{MARKER_RUNNING}')
                 running_marker.touch()
+                # If we are re-running a task, ensure stale terminal markers don't linger
+                self._cleanup_marker(f'.{MARKER_PASSED}')
+                self._cleanup_marker(f'.{MARKER_FAILED}')
+                self._cleanup_marker(f'.{MARKER_KILLED}')
             elif status == TaskStatus.PASSED:
                 # Create .PASSED marker, remove .RUNNING
                 passed_marker = self.log_file.with_suffix(f'.{MARKER_PASSED}')
                 passed_marker.touch()
                 self._cleanup_marker(f'.{MARKER_RUNNING}')
+                # Ensure mutually exclusive terminal markers
+                self._cleanup_marker(f'.{MARKER_FAILED}')
+                self._cleanup_marker(f'.{MARKER_KILLED}')
             elif status == TaskStatus.FAILED:
                 # Create .FAILED marker, remove .RUNNING
                 fail_marker = self.log_file.with_suffix(f'.{MARKER_FAILED}')
                 fail_marker.touch()
                 self._cleanup_marker(f'.{MARKER_RUNNING}')
+                # Ensure mutually exclusive terminal markers
+                self._cleanup_marker(f'.{MARKER_PASSED}')
+                self._cleanup_marker(f'.{MARKER_KILLED}')
             elif status == TaskStatus.KILLED:
                 # Create .KILLED marker, remove .RUNNING
                 killed_marker = self.log_file.with_suffix(f'.{MARKER_KILLED}')
                 killed_marker.touch()
                 self._cleanup_marker(f'.{MARKER_RUNNING}')
+                # Ensure mutually exclusive terminal markers
+                self._cleanup_marker(f'.{MARKER_PASSED}')
+                self._cleanup_marker(f'.{MARKER_FAILED}')
 
         # Log based on status
         status_logs = {
@@ -1442,13 +1455,27 @@ def execute_task_sequential(
 
         return False
 
-    # Check if we should skip any task if it has already passed or if build image exists
+    # Check if we should skip any task if it has already passed.
+    # IMPORTANT: For BuildTask, a stale .PASSED marker is NOT sufficient to skip.
+    # The output image must exist (users may have pruned local images).
     if skip_action_if_already_passed:
-        # For build tasks, also check if Docker image exists
-        skip_task = task.passed_previously() or (isinstance(task, BuildTask) and task.image_exists())
+        if isinstance(task, BuildTask):
+            if task.image_exists():
+                skip_task = True
+                reason = "Docker image already exists"
+            elif task.passed_previously():
+                # Don't skip: marker may be stale if images were pruned.
+                skip_task = False
+                reason = ""
+                logger.info(f"Found .PASSED marker for {task_id} but output image is missing; rebuilding")
+            else:
+                skip_task = False
+                reason = ""
+        else:
+            skip_task = task.passed_previously()
+            reason = "Already passed previously" if skip_task else ""
 
         if skip_task:
-            reason = "Docker image already exists" if isinstance(task, BuildTask) and task.image_exists() else "Already passed previously"
             logger.info(f"⊘ Skipping {task_id}: {reason}")
             task.mark_status_as(TaskStatus.SKIPPED, reason)
             executed_tasks.add(task_id)
@@ -1781,13 +1808,28 @@ def execute_task_parallel(
 
             return False
 
-        # Check if we should skip any task if it has already passed or if build image exists
+        # Check if we should skip any task if it has already passed.
+        # IMPORTANT: For BuildTask, a stale .PASSED marker is NOT sufficient to skip.
+        # The output image must exist (users may have pruned local images).
         if skip_if_passed:
-            # For build tasks, also check if Docker image exists
-            skip_task = task.passed_previously() or (isinstance(task, BuildTask) and task.image_exists())
+            if isinstance(task, BuildTask):
+                if task.image_exists():
+                    skip_task = True
+                    reason = "Docker image already exists"
+                elif task.passed_previously():
+                    # Don't skip: marker may be stale if images were pruned.
+                    skip_task = False
+                    reason = ""
+                    with lock:
+                        logger.info(f"Found .PASSED marker for {task_id} but output image is missing; rebuilding")
+                else:
+                    skip_task = False
+                    reason = ""
+            else:
+                skip_task = task.passed_previously()
+                reason = "Already passed previously" if skip_task else ""
 
             if skip_task:
-                reason = "Docker image already exists" if isinstance(task, BuildTask) and task.image_exists() else "Already passed previously"
                 with lock:
                     logger.info(f"⊘ Skipping {task_id}: {reason}")
                 task.mark_status_as(TaskStatus.SKIPPED, reason)
