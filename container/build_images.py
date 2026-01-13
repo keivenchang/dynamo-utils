@@ -222,9 +222,14 @@ def extract_version_from_build_sh(framework: str, repo_path: Path) -> str:
 
         output = result.stdout.strip()
 
-        # Look for --tag arguments in the output
+        # First try: Parse from "Building Dynamo Image: '--tag dynamo:vX.Y.Z-...-framework-target'"
+        # This captures the actual tag that build.sh will use, including complex version strings
+        building_match = re.search(r"Building Dynamo Image:.*'--tag\s+(?:dynamo|dynamo-base):(v.+?)-(?:none|vllm|sglang|trtllm)(?:-(?:runtime|dev|local-dev))?'", output)
+        if building_match:
+            return building_match.group(1)
+
+        # Fallback: Look for --tag arguments in docker command (original simple regex)
         # Expected format: --tag dynamo:v{VERSION}-{framework}-{target}
-        # or: --tag dynamo-base:v{VERSION}-{framework}
         tag_match = re.search(r'--tag\s+(?:dynamo|dynamo-base):(v[^-\s]+)', output)
         if tag_match:
             return tag_match.group(1)
