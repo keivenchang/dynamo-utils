@@ -84,7 +84,17 @@ CAT_DOCKER_INFRA_ERROR_RE: Pattern[str] = re.compile(
     r")"
 )
 
-CAT_DOWNLOAD_ERROR_RE: Pattern[str] = re.compile(r"\bcaused by:\s*failed to download\b|\bfailed to download\b|\bdownload error\b")
+CAT_DOWNLOAD_ERROR_RE: Pattern[str] = re.compile(
+    r"(?:"
+    r"\bcaused by:\s*failed to download\b"
+    r"|\bfailed to download\b"
+    r"|\bdownload error\b"
+    # apt/apt-get / Ubuntu mirror transient failures, e.g.:
+    #   File has unexpected size (1768810 != 1768822). Mirror sync in progress? [IP: ...]
+    r"|\bfile has unexpected size\b"
+    r"|\bmirror sync in progress\b"
+    r")"
+)
 
 CAT_ETCD_ERROR_RE: Pattern[str] = re.compile(
     r"\bunable\s+to\s+create\s+lease\b|\bcheck\s+etcd\s+server\s+status\b|\betcd[^\n]{0,80}\blease\b|\blease\b[^\n]{0,80}\betcd\b"
