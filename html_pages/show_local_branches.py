@@ -33,6 +33,7 @@ classes/functions are in common_branch_nodes.py. This file only imports them.
 """
 
 import argparse
+import getpass
 import hashlib
 import html
 import json
@@ -137,6 +138,45 @@ from common_branch_nodes import (
 )
 from dataclasses import dataclass  # noqa: E402
 import html as html_module  # noqa: E402
+
+
+# Local user parent node (similar role to show_remote_branches.py's UserNode, but for local directories).
+@dataclass
+class LocalUserNode(BranchNode):
+    """Top-level local user node containing all scanned local repositories."""
+
+    user_id: Optional[str] = None
+    base_dir: Optional[str] = None
+
+    def __init__(
+        self,
+        label: str = "",
+        *,
+        user_id: Optional[str] = None,
+        base_dir: Optional[Path] = None,
+        **kwargs,
+    ):
+        super().__init__(label=label, **kwargs)
+        self.user_id = user_id
+        self.base_dir = str(base_dir) if base_dir is not None else None
+
+    def _format_html_content(self) -> str:
+        label_html = html_module.escape(self.label or "")
+        base_suffix = ""
+        if self.base_dir:
+            base_suffix = f' <span style="color: #666; font-size: 12px;">({html_module.escape(self.base_dir)})</span>'
+        return f'<span style="font-weight: 600;">{label_html}</span>{base_suffix}'
+
+    def to_tree_vm(self) -> TreeNodeVM:
+        key = f"local-user:{self.user_id or self.label or 'local'}"
+        kids = [c.to_tree_vm() for c in (self.children or [])]
+        return TreeNodeVM(
+            node_key=key,
+            label_html=self._format_html_content(),
+            children=kids,
+            collapsible=bool(kids),
+            default_expanded=True,
+        )
 
 
 # Local-specific RepoNode subclass with path and error tracking
@@ -563,6 +603,15 @@ class LocalRepoScanner:
         """Scan all git repositories under `base_dir` (direct children only) and build tree structure."""
         root = BranchNode(label="")
 
+        # Match show_remote_branches.py style: root -> UserNode -> (things).
+        # For local branches, we group all repo directories under a single local-user parent node.
+        try:
+            user_id = str(getpass.getuser() or "").strip() or "local"
+        except Exception:
+            user_id = "local"
+        user_node = LocalUserNode(label=user_id, user_id=user_id, base_dir=base_dir)
+        root.add_child(user_node)
+
         # Discover git repos among direct children (and include base_dir itself if it's a repo).
         # We intentionally do NOT walk the whole tree because this workspace can be huge.
         candidate_dirs: list[Path] = []
@@ -590,10 +639,10 @@ class LocalRepoScanner:
             for future in as_completed(future_to_dir):
                 repo_node = future.result()
                 if repo_node:
-                    root.add_child(repo_node)
+                    user_node.add_child(repo_node)
 
-        # Sort children by name
-        root.children.sort(key=lambda n: n.label)
+        # Sort repos by name (within the user node)
+        user_node.children.sort(key=lambda n: n.label)
 
         return root
 
@@ -1149,9 +1198,17 @@ def main():
     except Exception:
         pr_count = 0
 
+    repos_scanned = 0
+    try:
+        # New structure: root -> LocalUserNode -> LocalRepoNode -> ...
+        maybe_user = (getattr(root, "children", None) or [None])[0]
+        repos_scanned = len(getattr(maybe_user, "children", None) or [])
+    except Exception:
+        repos_scanned = 0
+
     page_stats: List[tuple[str, Optional[str]]] = [
         ("Generation time", f"{elapsed_s:.2f}s"),
-        ("Repos scanned", str(len(getattr(root, 'children', []) or []))),
+        ("Repos scanned", str(repos_scanned)),
         ("PRs shown", str(pr_count)),
     ]
 

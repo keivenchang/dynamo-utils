@@ -1191,6 +1191,8 @@ def _build_html(payload: Dict[str, Any]) -> str:
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <!-- Auto-reload every 5 minutes (works for both http(s):// and file:// viewing). -->
+  <meta http-equiv="refresh" content="300" />
   <title>{payload.get("title","Resource Report")}</title>
   <link rel="icon" href="{_favicon_data_url()}" type="image/svg+xml" />
   <script src="https://cdn.plot.ly/plotly-2.30.0.min.js"></script>

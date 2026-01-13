@@ -1,6 +1,8 @@
 {% extends "common_dashboard.j2" %}
-{% set refresh_seconds = 900 %}
-{% set refresh_check_interval_ms = 600000 %}
+{# Auto-reload behavior:
+   - common_dashboard.j2 polls the current file and reloads only if it changed.
+   - Match local/remote dashboards (show_local_branches.j2) which poll every 15s. #}
+{% set refresh_check_interval_ms = 15000 %}
 
 {% block title %}Dynamo Commit History (last {{ commit_count }} commits){% endblock %}
 {% block favicon %}<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect x='15' y='55' width='70' height='20' rx='3' fill='%232196f3'/><rect x='20' y='40' width='60' height='20' rx='3' fill='%234caf50'/><rect x='25' y='25' width='50' height='20' rx='3' fill='%23ff9800'/></svg>">{% endblock %}
