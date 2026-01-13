@@ -2,44 +2,56 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# Wrapper script to update HTML pages (branch status and commit history)
-# This script is designed to be run by cron and requires absolute paths
+# Cron-friendly wrapper to update HTML dashboards (local branches, remote PRs, commit history, resource report).
+# This script is designed to be run by cron.
 #
 # Environment Variables (optional):
-#   NVIDIA_HOME         - Base directory for logs and output files (default: parent of script dir)
+#   NVIDIA_HOME         - Base directory for logs and output files
+#                        (default: parent of script dir; for this repo layout that is typically ~/dynamo)
 #   SKIP_GITLAB_FETCH   - If set, skip fetching from GitLab API, use cached data only (faster).
 #                        Note: GitHub fetching is independently capped/cached by the Python scripts.
 #   REFRESH_CLOSED_PRS  - If set, refresh cached closed/merged PR mappings (more GitHub API calls)
-#   MAX_GITHUB_API_CALLS - If set, pass --max-github-api-calls to the Python generators
-#                         (useful to keep cron runs predictable; defaults remain script-side).
+#   MAX_GITHUB_API_CALLS - If set, pass --max-github-api-calls to the Python generators.
+#                          Useful to keep cron runs predictable; defaults remain script-side.
 #   DYNAMO_UTILS_TRACE  - If set (non-empty), enable shell tracing (set -x). Off by default to avoid noisy logs / secrets.
 #   DYNAMO_UTILS_TESTING - (deprecated) If set, behave like --fast-debug (write debug.html and fewer commits).
+#   MAX_COMMITS         - If set, cap commits for commit-history (default: 200; overridden by --fast/--fast-debug).
+#   DYNAMO_UTILS_CACHE_DIR - If set, overrides ~/.cache/dynamo-utils for the resource report DB lookup.
+#   RESOURCE_DB         - If set, explicit SQLite path for resource report (default: $DYNAMO_UTILS_CACHE_DIR/resource_monitor.sqlite).
+#
+# Remote PRs (optional; used by --show-remote-branches):
+#   REMOTE_GITHUB_USERS - Space-separated GitHub usernames to render.
+#                         Back-compat: REMOTE_GITHUB_USER
+#   REMOTE_PRS_OUT_DIR  - Output directory root for each user.
+#                         Default: $HOME/dynamo/speedoflight/dynamo/users/<user>/
+#   REMOTE_PRS_OUT_FILE - Full output filename override (rare; if set, used for every user).
 #
 # Args (optional; can be combined):
 #   --show-local-branches   Update the branches dashboard ($NVIDIA_HOME/index.html)
 #   --show-commit-history   Update the commit history dashboard ($NVIDIA_HOME/dynamo_latest/index.html)
-#   --show-local-resources  Update resource_report.html
+#   --show-local-resources  Update the resource report ($NVIDIA_HOME/resource_report.html)
 #   --show-remote-branches  Update remote PR dashboards for selected GitHub users (IDENTICAL UI to local branches)
-#   --show-remote-branches  Update remote PR dashboards for selected GitHub users
 #   --fast-debug            Write debug.html outputs (for all tasks that write HTML) and run a smaller/faster commit history (10 commits)
 #   --fast                  Alias for --fast-debug
-#   --use-div-trees         Use <div>-based tree rendering instead of <pre> (experimental)
+#   --dry-run               Print what would be executed without actually running commands
+#   --run-ignore-lock        Bypass the /tmp lock (no flock). Useful for manual runs when a stale lock exists.
 #
 # Back-compat aliases (deprecated; kept for existing cron):
 #   --run-show-dynamo-branches  (alias for --show-local-branches)
 #   --run-show-commit-history   (alias for --show-commit-history)
 #   --run-resource-report       (alias for --show-local-resources)
+#   --show-remote-history       (alias for --show-remote-branches)
 #
 # Behavior:
-# - If no args are provided, ALL tasks run (branches + commit-history + resource-report).
+# - If no args are provided, ALL tasks run (local branches + commit history + resource report + remote PRs).
 #
 # Cron Example:
 #   # Full fetch every 30 minutes (minute 0 and 30)
-#   0,30 * * * * NVIDIA_HOME=$HOME/nvidia /path/to/update_html_pages.sh
+#   0,30 * * * * NVIDIA_HOME=$HOME/dynamo /path/to/update_html_pages.sh
 #   # Cache-only between full runs (every 4 minutes from minute 8..56)
-#   8-59/4 * * * * NVIDIA_HOME=$HOME/nvidia SKIP_GITLAB_FETCH=1 /path/to/update_html_pages.sh
+#   8-59/4 * * * * NVIDIA_HOME=$HOME/dynamo SKIP_GITLAB_FETCH=1 /path/to/update_html_pages.sh
 #   # Resource report every minute
-#   * * * * * NVIDIA_HOME=$HOME/nvidia /path/to/update_html_pages.sh --show-local-resources
+#   * * * * * NVIDIA_HOME=$HOME/dynamo /path/to/update_html_pages.sh --show-local-resources
 
 set -euo pipefail
 if [ -n "${DYNAMO_UTILS_TRACE:-}" ]; then
@@ -62,13 +74,29 @@ fi
 
 usage() {
     cat <<'EOF' >&2
-Usage: update_html_pages.sh [--show-local-branches] [--show-commit-history] [--show-remote-branches] [--show-remote-history] [--show-local-resources] [--fast-debug|--fast] [--dry-run] [--run-ignore-lock]
+Usage: update_html_pages.sh [FLAGS]
 
 If no args are provided, ALL tasks run.
 
 Flags:
-  --dry-run           Show what would be executed without actually running commands
-  --run-ignore-lock   Bypass the /tmp lock (no flock). Useful for manual runs when a stale lock exists.
+  --show-local-branches     Write: $NVIDIA_HOME/index.html (or debug.html in --fast/--fast-debug)
+  --show-commit-history     Write: $NVIDIA_HOME/dynamo_latest/index.html (or debug.html in --fast/--fast-debug)
+  --show-local-resources    Write: $NVIDIA_HOME/resource_report.html (or resource_report_debug.html in --fast/--fast-debug)
+  --show-remote-branches    Write: $HOME/dynamo/speedoflight/dynamo/users/<user>/index.html (or debug.html in --fast/--fast-debug)
+  --show-remote-history     Alias for --show-remote-branches (back-compat)
+
+  --fast-debug              Faster run: uses debug.html outputs, commit-history max_commits=10, resource window ~2h
+  --fast                    Alias for --fast-debug
+
+  --dry-run                 Print what would be executed without actually running commands
+  --run-ignore-lock         Bypass the /tmp lock (no flock). Useful for manual runs when a stale lock exists.
+  -h, --help                Show this help and exit
+
+Notes:
+  - Logs are written under: $NVIDIA_HOME/logs/<YYYY-MM-DD>/
+    - cron.log (high-level), plus show_local_branches.log, show_commit_history.log, show_remote_branches.log, resource_report.log
+  - Lock file defaults to: /tmp/dynamo-utils.update_html_pages.$USER.lock
+    - Resource-only runs use a separate lock: /tmp/dynamo-utils.update_resource_report.$USER.lock
 EOF
 }
 
