@@ -45,6 +45,21 @@ td.col-message {
 .sha, .date, .author {
     white-space: nowrap;
 }
+/* Commit SHA styling */
+.sha a {
+    padding: 2px 6px;
+    border-radius: 3px;
+    display: inline-block;
+}
+/* Commit SHA background colors - alternates based on Image SHA */
+.sha-color-0 { background-color: #fff9c4; } /* Light yellow */
+.sha-color-1 { background-color: #f3e5f5; } /* Light purple */
+.sha-color-2 { background-color: #c8e6c9; } /* Light green */
+.sha-color-3 { background-color: #ffe0b2; } /* Light orange */
+.sha-color-4 { background-color: #e3f2fd; } /* Light blue */
+.sha-color-5 { background-color: #b2ebf2; } /* Light cyan */
+.sha-color-6 { background-color: #dcedc8; } /* Light lime */
+.sha-color-7 { background-color: #e1bee7; } /* Light lavender */
 #commits-table tr:hover {
     background-color: #f6f8fa;
 }
@@ -62,16 +77,87 @@ td.col-message {
 }
 .icon-link {
     text-decoration: none;
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
+    display: inline-block;
+    margin: 0;
+    padding: 0;
+    line-height: 1;
     vertical-align: middle;
 }
 .gitlab-icons {
     display: inline-flex;
     align-items: center;
-    gap: 2px;
+    gap: 0; /* avoid flex-gap interacting with template whitespace */
     white-space: nowrap;
+}
+.gitlab-icons .triangle-toggle,
+.gitlab-icons .triangle-toggle.disabled {
+    margin-right: 4px !important;
+}
+.gitlab-icons a.icon-link,
+.gitlab-icons span.icon-link {
+    margin: 0;
+    padding: 0;
+    line-height: 1;
+}
+.gitlab-icons a.gitlab-commit-link {
+    margin-right: 6px;
+}
+.gitlab-icons a.gitlab-registry-link {
+    margin-right: 6px;
+}
+.github-icons {
+    display: inline-flex;
+    align-items: center;
+    white-space: nowrap;
+    gap: 0; /* avoid flex-gap interacting with template whitespace */
+}
+.github-icons .triangle-toggle,
+.github-icons .triangle-toggle.disabled {
+    margin-right: 2px !important;
+}
+.github-icons a.github-commit-link {
+    margin-right: 2px;
+}
+.github-icons .gh-status-tooltip {
+    margin-left: 0 !important;
+}
+.github-icons .gh-status-tooltip > span {
+    margin-left: 0 !important;
+}
+.image-status-icon {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 12px;
+    height: 12px;
+    border-radius: 999px;
+    margin: 0;
+    padding: 0;
+    line-height: 1;
+    font-weight: 900;
+    font-size: 10px;
+    flex-shrink: 0;
+    vertical-align: middle;
+    box-sizing: border-box;
+}
+.image-status-success {
+    background-color: #2da44e;
+    color: #ffffff;
+}
+.image-status-failed {
+    background-color: #d1242f;
+    color: #ffffff;
+}
+.image-status-building {
+    background-color: #bf8700;
+    color: #ffffff;
+    font-size: 9px;
+}
+.image-status-unknown {
+    /* much more subtle than a filled gray circle */
+    background-color: transparent;
+    border: 1px solid #d0d7de;
+    opacity: 0.8;
 }
 .icon-link:hover {
     opacity: 0.9;
@@ -109,17 +195,28 @@ td.col-message {
 }
 .image-sha-badge {
     display: inline-block;
-    padding: 0px 4px;
+    padding: 0px 4px !important;
     border-radius: 4px;
     font-size: 12px;
     line-height: 1.4;
     vertical-align: middle;
-    border: none;
+    border: none !important;
     text-decoration: none;
+    box-sizing: border-box;
 }
 /* Only clickable IMAGE:... should underline on hover. */
+a.image-sha-badge {
+    border: none !important;
+    padding: 0px 4px !important;
+    box-sizing: border-box;
+    text-decoration: underline dotted;
+    text-underline-offset: 1px;
+    text-decoration-thickness: 1px;
+}
 a.image-sha-badge:hover {
-    text-decoration: underline;
+    text-decoration: underline solid;
+    text-underline-offset: 1px;
+    text-decoration-thickness: 1px;
 }
 .release-forkpoint {
     display: inline-block;
@@ -740,7 +837,7 @@ window.__dashboardOnReadyQueue.push(function() {
 <div style="font-weight: 600; margin-bottom: 6px; color: #24292f;">Images &amp; Links:</div>
 <ul style="margin: 4px 0; padding-left: 20px;">
 <li><strong>IMAGE:xxxxxx</strong> - Image SHA for container builds</li>
-<li><strong>Colors</strong> - <span class="image-sha-badge" style="background: #238636; color: #ffffff;">passed</span> / <span class="image-sha-badge" style="background: #c83a3a; color: #ffffff;">failed</span> / <span class="image-sha-badge" style="background: #ffc107; color: #111827;">building</span> / <span class="image-sha-badge" style="background: #8c959f; color: #ffffff;">unknown</span></li>
+<li><strong>Status icons</strong> - <svg height="14" width="14" viewBox="0 0 16 16" style="display:inline-block;vertical-align:middle;"><circle cx="8" cy="8" r="8" fill="#2da44e"/><path fill="#fff" d="M11.5 5.5 7 10l-2.5-2.5L3.5 8.5 7 12l5.5-5.5z"/></svg> passed / <svg height="14" width="14" viewBox="0 0 16 16" style="display:inline-block;vertical-align:middle;"><circle cx="8" cy="8" r="8" fill="#d1242f"/><path fill="#fff" d="M4.5 4.5l7 7m-7 0l7-7" stroke="#fff" stroke-width="2"/></svg> failed / <svg height="14" width="14" viewBox="0 0 16 16" style="display:inline-block;vertical-align:middle;"><path fill="#bf8700" d="M8 1C4.1 1 1 4.1 1 8s3.1 7 7 7 7-3.1 7-7-3.1-7-7-7zm0 12c-2.8 0-5-2.2-5-5s2.2-5 5-5 5 2.2 5 5-2.2 5-5 5z"/><path fill="#bf8700" d="M8 4v5l3 2"/></svg> building</li>
 <li><strong>Click IMAGE</strong> - Opens latest build report, <strong>📋</strong> shows history</li>
 <li><strong><svg height="14" width="14" viewBox="0 0 16 16" fill="#24292f" style="display: inline-block; vertical-align: middle;"><path fill-rule="evenodd" clip-rule="evenodd" d="M8 0C3.58 0 0 3.58 0 8C0 11.54 2.29 14.53 5.47 15.59C5.87 15.66 6.02 15.42 6.02 15.21C6.02 15.02 6.01 14.39 6.01 13.72C4 14.09 3.48 13.23 3.32 12.78C3.23 12.55 2.84 11.84 2.5 11.65C2.22 11.5 1.82 11.13 2.49 11.12C3.12 11.11 3.57 11.7 3.72 11.94C4.44 13.15 5.59 12.81 6.05 12.6C6.12 12.08 6.33 11.73 6.56 11.53C4.78 11.33 2.92 10.64 2.92 7.58C2.92 6.71 3.23 5.99 3.74 5.43C3.66 5.23 3.38 4.41 3.82 3.31C3.82 3.31 4.49 3.1 6.02 4.13C6.66 3.95 7.34 3.86 8.02 3.86C8.7 3.86 9.38 3.95 10.02 4.13C11.55 3.09 12.22 3.31 12.22 3.31C12.66 4.41 12.38 5.23 12.3 5.43C12.81 5.99 13.12 6.7 13.12 7.58C13.12 10.65 11.25 11.33 9.47 11.53C9.76 11.78 10.01 12.26 10.01 13.01C10.01 14.08 10 14.94 10 15.21C10 15.42 10.15 15.67 10.55 15.59C13.71 14.53 16 11.53 16 8C16 3.58 12.42 0 8 0Z"></path></svg></strong> - Opens GitHub commit/checks</li>
 <li><strong>🐳</strong> - Searches NVIDIA GitLab Docker registry</li>
@@ -760,7 +857,7 @@ window.__dashboardOnReadyQueue.push(function() {
 {# Column header layout policy: checkbox, icon, description (in that order). #}
 {# NOTE: `data-url-state="1"` opts into URL syncing (common_dashboard.j2 DashboardUrlState). #}
 {# We keep desired defaults in `data-url-default` so the JS can override browser form restoration. #}
-<th class="col-composite"><label class="col-toggle"><input class="commit-col-toggle" type="checkbox" data-col="composite" data-url-state="1" data-url-default="0" data-url-key="col.composite" onchange="toggleCommitColumn(this)"><span class="col-icon" title="Image SHA">🐳</span><span class="col-title-text">Image SHA</span></label></th>
+<th class="col-composite"><label class="col-toggle"><input class="commit-col-toggle" type="checkbox" data-col="composite" data-url-state="1" data-url-default="0" data-url-key="col.composite" onchange="toggleCommitColumn(this)"><span class="col-icon" title="Image SHA"></span><span class="col-title-text">Image SHA</span></label></th>
 <th class="col-github"><label class="col-toggle"><input class="commit-col-toggle" type="checkbox" checked data-col="github" data-url-state="1" data-url-default="1" data-url-key="col.github" onchange="toggleCommitColumn(this)"><span class="col-icon" title="GitHub Status"><svg height="14" width="14" viewBox="0 0 16 16" fill="currentColor" style="display: inline-block; vertical-align: middle;"><path fill-rule="evenodd" clip-rule="evenodd" d="M8 0C3.58 0 0 3.58 0 8C0 11.54 2.29 14.53 5.47 15.59C5.87 15.66 6.02 15.42 6.02 15.21C6.02 15.02 6.01 14.39 6.01 13.72C4 14.09 3.48 13.23 3.32 12.78C3.23 12.55 2.84 11.84 2.5 11.65C2.22 11.5 1.82 11.13 2.49 11.12C3.12 11.11 3.57 11.7 3.72 11.94C4.44 13.15 5.59 12.81 6.05 12.6C6.12 12.08 6.33 11.73 6.56 11.53C4.78 11.33 2.92 10.64 2.92 7.58C2.92 6.71 3.23 5.99 3.74 5.43C3.66 5.23 3.38 4.41 3.82 3.31C3.82 3.31 4.49 3.1 6.02 4.13C6.66 3.95 7.34 3.86 8.02 3.86C8.7 3.86 9.38 3.95 10.02 4.13C11.55 3.09 12.22 3.31 12.22 3.31C12.66 4.41 12.38 5.23 12.3 5.43C12.81 5.99 13.12 6.7 13.12 7.58C13.12 10.65 11.25 11.33 9.47 11.53C9.76 11.78 10.01 12.26 10.01 13.01C10.01 14.08 10 14.94 10 15.21C10 15.42 10.15 15.67 10.55 15.59C13.71 14.53 16 11.53 16 8C16 3.58 12.42 0 8 0Z"></path></svg></span><span class="col-title-text">GitHub Status</span></label></th>
 <th class="col-gitlab"><label class="col-toggle"><input class="commit-col-toggle" type="checkbox" data-col="gitlab" data-url-state="1" data-url-default="0" data-url-key="col.gitlab" onchange="toggleCommitColumn(this)"><span class="col-icon" title="GitLab Status">🦊</span><span class="col-title-text">GitLab Status</span></label></th>
 <th class="col-date">
@@ -782,6 +879,18 @@ window.__dashboardOnReadyQueue.push(function() {
 </thead>
 <tbody>
 
+{# Build a mapping of composite_sha to color index (0-7) #}
+{# Group commits by their Image SHA and assign a color to each group #}
+{%- set composite_sha_to_color = {} -%}
+{%- set seen_composite_shas = [] -%}
+{%- for commit in commits -%}
+  {%- if commit.composite_sha not in composite_sha_to_color -%}
+    {%- set _ = seen_composite_shas.append(commit.composite_sha) -%}
+    {%- set color_index = (seen_composite_shas|length - 1) % 8 -%}
+    {%- set _ = composite_sha_to_color.update({commit.composite_sha: color_index}) -%}
+  {%- endif -%}
+{%- endfor -%}
+
 {% for commit in commits %}
 {%- set sha_short = commit.sha_short -%}
 {%- set sha_full = commit.sha_full -%}
@@ -799,10 +908,11 @@ window.__dashboardOnReadyQueue.push(function() {
 {%- set pr_number = commit.pr_number -%}
 {%- set mr_pipeline = mr_pipelines.get(pr_number) if pr_number else none -%}
 {%- set effective_pipeline = pipeline if pipeline else mr_pipeline -%}
+{%- set sha_color_class = "sha-color-" ~ composite_sha_to_color.get(composite_sha, 0) -%}
 
 <tr>
 <td class="sha">
-<a href="{{ commit_link }}" target="_blank">{{ sha_short }}</a>
+<a href="{{ commit_link }}" target="_blank" class="{{ sha_color_class }}">{{ sha_short }}</a>
 </td>
 <td class="sha col-composite"><span class="col-body">
 {%- set log_paths_list = log_paths.get(sha_short, []) -%}
@@ -828,7 +938,7 @@ window.__dashboardOnReadyQueue.push(function() {
 {%- set latest_date, latest_path = log_paths_list[-1] -%}
 {# UX: IMAGE badge is the link. #}
 {%- set cds_label = "IMAGE:" ~ composite_sha[:6] -%}
-<a href="{{ latest_path }}" target="_blank" class="image-sha-badge" style="background: {{ commit.image_label_bg_color }}; color: {{ commit.image_label_fg_color }};" title="{%- if inherited -%}Inherited: {%- endif -%}{%- if status == 'success' -%}All local builds passed{%- elif status == 'failed' -%}Some local builds failed{%- else -%}Build in progress / no local build status{%- endif -%} - Click to view build logs">{{ cds_label }}</a>
+{%- if commit.image_status_icon -%}{{ commit.image_status_icon|safe }} {%- endif -%}<a href="{{ latest_path }}" target="_blank" class="image-sha-badge" title="{%- if inherited -%}Inherited: {%- endif -%}{%- if status == 'success' -%}All local builds passed{%- elif status == 'failed' -%}Some local builds failed{%- else -%}Build in progress / no local build status{%- endif -%} - Click to view build logs">{{ cds_label }}</a>
 {# Show history icon if multiple builds exist #}
 {%- if log_paths_list|length > 1 -%}
 <a href="#" onclick="toggleBuildHistory(event, '{{ sha_short }}'); return false;" style="text-decoration: none; margin-left: 2px; font-size: 11px; color: #656d76;" title="Show build history ({{ log_paths_list|length }} builds)">📋</a>
@@ -842,13 +952,14 @@ window.__dashboardOnReadyQueue.push(function() {
 </div>
 {%- endif -%}
 {%- else -%}
-{# No build logs: still render the IMAGE badge (not a link) with the computed status color. #}
+{# No build logs: still render the IMAGE badge (not a link) with the status icon. #}
 {%- set cds_label = "IMAGE:" ~ composite_sha[:6] -%}
-<span class="image-sha-badge" style="background: {{ commit.image_label_bg_color }}; color: {{ commit.image_label_fg_color }};" title="{%- if inherited -%}Inherited: {%- endif -%}{%- if status == 'success' -%}All local builds passed{%- elif status == 'failed' -%}Some local builds failed{%- else -%}Build in progress / no local build status{%- endif -%}">{{ cds_label }}</span>
+{%- if commit.image_status_icon -%}{{ commit.image_status_icon|safe }} {%- endif -%}<span class="image-sha-badge" title="{%- if inherited -%}Inherited: {%- endif -%}{%- if status == 'success' -%}All local builds passed{%- elif status == 'failed' -%}Some local builds failed{%- else -%}Build in progress / no local build status{%- endif -%}">{{ cds_label }}</span>
 {%- endif -%}
 </span></td>
 </td>
 <td class="sha col-github"><span class="col-body">
+<span class="github-icons">
 {# GitHub Actions status for GHA badge color #}
 {%- set gha_status = github_actions_status.get(sha_full) -%}
 {%- if gha_status and gha_status.conclusion == 'success' -%}
@@ -868,17 +979,11 @@ window.__dashboardOnReadyQueue.push(function() {
 {%- set gha_title = 'GitHub Actions: No checks' -%}
 {%- endif -%}
 {# GitHub section #}
-{%- if commit.github_checks_tree_html -%}
-<a href="#" 
-   id="github-tree-toggle-{{ sha_short }}" 
-   class="triangle-toggle" 
-   onclick="toggleCommitGitHubTree(event, '{{ sha_short }}'); return false;" 
-   style="margin-right: 4px;" 
-   title="Show GitHub checks tree">▶</a>
-{%- else -%}
-<span class="triangle-toggle disabled" style="margin-right: 4px;" title="No GitHub checks available">▶</span>
-{%- endif -%}
-<a href="https://github.com/ai-dynamo/dynamo/commit/{{ sha_full }}/checks" target="_blank" style="text-decoration: none; color: #24292f; font-weight: 600;" title="{{ gha_title }}"><svg height="14" width="14" viewBox="0 0 16 16" fill="currentColor" style="display: inline-block; vertical-align: middle;"><path fill-rule="evenodd" clip-rule="evenodd" d="M8 0C3.58 0 0 3.58 0 8C0 11.54 2.29 14.53 5.47 15.59C5.87 15.66 6.02 15.42 6.02 15.21C6.02 15.02 6.01 14.39 6.01 13.72C4 14.09 3.48 13.23 3.32 12.78C3.23 12.55 2.84 11.84 2.5 11.65C2.22 11.5 1.82 11.13 2.49 11.12C3.12 11.11 3.57 11.7 3.72 11.94C4.44 13.15 5.59 12.81 6.05 12.6C6.12 12.08 6.33 11.73 6.56 11.53C4.78 11.33 2.92 10.64 2.92 7.58C2.92 6.71 3.23 5.99 3.74 5.43C3.66 5.23 3.38 4.41 3.82 3.31C3.82 3.31 4.49 3.1 6.02 4.13C6.66 3.95 7.34 3.86 8.02 3.86C8.7 3.86 9.38 3.95 10.02 4.13C11.55 3.09 12.22 3.31 12.22 3.31C12.66 4.41 12.38 5.23 12.3 5.43C12.81 5.99 13.12 6.7 13.12 7.58C13.12 10.65 11.25 11.33 9.47 11.53C9.76 11.78 10.01 12.26 10.01 13.01C10.01 14.08 10 14.94 10 15.21C10 15.42 10.15 15.67 10.55 15.59C13.71 14.53 16 11.53 16 8C16 3.58 12.42 0 8 0Z"></path></svg></a>
+{%- if commit.github_checks_tree_html -%}<a href="#"
+   id="github-tree-toggle-{{ sha_short }}"
+   class="triangle-toggle"
+   onclick="toggleCommitGitHubTree(event, '{{ sha_short }}'); return false;"
+   title="Show GitHub checks tree">▶</a>{%- else -%}<span class="triangle-toggle disabled" title="No GitHub checks available">▶</span>{%- endif -%}<a href="https://github.com/ai-dynamo/dynamo/commit/{{ sha_full }}/checks" target="_blank" class="github-commit-link" style="text-decoration: none; color: #24292f; font-weight: 600;" title="{{ gha_title }}"><svg height="14" width="14" viewBox="0 0 16 16" fill="currentColor" style="display: inline-block; vertical-align: middle;"><path fill-rule="evenodd" clip-rule="evenodd" d="M8 0C3.58 0 0 3.58 0 8C0 11.54 2.29 14.53 5.47 15.59C5.87 15.66 6.02 15.42 6.02 15.21C6.02 15.02 6.01 14.39 6.01 13.72C4 14.09 3.48 13.23 3.32 12.78C3.23 12.55 2.84 11.84 2.5 11.65C2.22 11.5 1.82 11.13 2.49 11.12C3.12 11.11 3.57 11.7 3.72 11.94C4.44 13.15 5.59 12.81 6.05 12.6C6.12 12.08 6.33 11.73 6.56 11.53C4.78 11.33 2.92 10.64 2.92 7.58C2.92 6.71 3.23 5.99 3.74 5.43C3.66 5.23 3.38 4.41 3.82 3.31C3.82 3.31 4.49 3.1 6.02 4.13C6.66 3.95 7.34 3.86 8.02 3.86C8.7 3.86 9.38 3.95 10.02 4.13C11.55 3.09 12.22 3.31 12.22 3.31C12.66 4.41 12.38 5.23 12.3 5.43C12.81 5.99 13.12 6.7 13.12 7.58C13.12 10.65 11.25 11.33 9.47 11.53C9.76 11.78 10.01 12.26 10.01 13.01C10.01 14.08 10 14.94 10 15.21C10 15.42 10.15 15.67 10.55 15.59C13.71 14.53 16 11.53 16 8C16 3.58 12.42 0 8 0Z"></path></svg></a>
 {# Expandable per-commit checks tree (GitHub + GitLab) #}
 {# Per-commit GH checks status (split required vs optional failures, plus pending vs cancelled) #}
 {%- set commit_stats = gha_per_commit_stats.get(sha_full, {'success_required': 0, 'success_optional': 0, 'failure_required': 0, 'failure_optional': 0, 'in_progress_required': 0, 'in_progress_optional': 0, 'pending': 0, 'cancelled': 0, 'other': 0, 'total': 0}) -%}
@@ -934,7 +1039,7 @@ window.__dashboardOnReadyQueue.push(function() {
 {%- if cancelled_jobs -%}{%- set _ = tooltip_html_parts.append('<strong style="color: #8c959f;">✖️ Canceled:</strong> ' + (cancelled_jobs|sort)|join(', ')) -%}{%- endif -%}
 {%- if other_jobs -%}{%- set _ = tooltip_html_parts.append('<strong style="color: #8c959f;">Other:</strong> ' + (other_jobs|sort)|join(', ')) -%}{%- endif -%}
 {%- set tooltip_html = tooltip_html_parts|join('<br>') -%}
-<span class="gh-status-tooltip" style="margin-left: 4px;">
+<span class="gh-status-tooltip">
 <span style="white-space: nowrap; font-weight: 600; font-size: 11px;">
 {%- set success_total = (commit_stats.success_required | int) + (commit_stats.success_optional | int) -%}
 {{ compact_ci_summary_html(
@@ -951,11 +1056,11 @@ window.__dashboardOnReadyQueue.push(function() {
 <span class="tooltiptext">{{ tooltip_html|safe }}</span>
 </span>
 {%- endif -%}
-</span></td>
+</span></span></td>
 </td>
 <td class="sha col-gitlab"><span class="col-body">
 {# GitLab section #}
-<span class="gitlab-icons">
+<span class="gitlab-icons">{# keep icons adjacent; avoid whitespace nodes inside inline-flex #}
 {%- if commit.gitlab_checks_tree_html -%}
 <a href="#" 
    id="gitlab-tree-toggle-{{ sha_short }}" 
@@ -967,10 +1072,7 @@ window.__dashboardOnReadyQueue.push(function() {
 <span class="triangle-toggle disabled" style="margin-right: 4px;" title="No GitLab pipeline available">▶</span>
 {%- endif -%}
 {# Always show GitLab commit link (fox). Gray it out if we don't have pipeline context. #}
-<a href="{{ gitlab_commit_link }}" target="_blank" class="icon-link{%- if not effective_pipeline -%} icon-muted{%- endif -%}" style="color: #fc6d26; font-weight: 600;" title="View commit in GitLab">🦊</a>
-
-{# Registry search icon (whale). Always linked; gray out if no pipeline context. #}
-<a href="https://gitlab-master.nvidia.com/dl/ai-dynamo/dynamo/container_registry/85325?orderBy=PUBLISHED_AT&sort=desc&search%5B%5D={{ sha_full }}" target="_blank" class="icon-link{% if not effective_pipeline %} icon-muted{% endif %}" style="color: {% if effective_pipeline %}#2496ed{% else %}#8c959f{% endif %}; font-weight: 600;" title="{% if effective_pipeline %}Search GitLab Docker registry for this SHA{% else %}No GitLab pipeline context (search registry anyway){% endif %}">🐳</a>
+<a href="{{ gitlab_commit_link }}" target="_blank" class="icon-link gitlab-commit-link{%- if not effective_pipeline -%} icon-muted{%- endif -%}" style="color: #fc6d26; font-weight: 600;" title="View commit in GitLab">🦊</a><a href="https://gitlab-master.nvidia.com/dl/ai-dynamo/dynamo/container_registry/85325?orderBy=PUBLISHED_AT&sort=desc&search%5B%5D={{ sha_full }}" target="_blank" class="icon-link gitlab-registry-link{% if not effective_pipeline %} icon-muted{% endif %}" style="color: {% if effective_pipeline %}#2496ed{% else %}#8c959f{% endif %}; font-weight: 600;" title="{% if effective_pipeline %}Search GitLab Docker registry for this SHA{% else %}No GitLab pipeline context (search registry anyway){% endif %}">🐳</a>
 
 {# Pipeline icon (build link). Uses SHA pipeline if present, else MR pipeline as fallback. #}
 {%- if effective_pipeline and effective_pipeline.web_url -%}
@@ -1095,7 +1197,7 @@ window.__dashboardOnReadyQueue.push(function() {
 {# GitHub checks tree row (hidden by default) #}
 {%- if commit.github_checks_tree_html -%}
 <tr id="github-tree-row-{{ sha_short }}" style="display: none;">
-<td colspan="8" style="padding: 0; background-color: #ffffff;">
+<td colspan="8" style="padding: 0;">
 <div style="padding: 0; border-top: 0;">
           <div style="display: flex; align-items: center; justify-content: flex-start; padding: 6px 8px 0 8px;">
             <button type="button"
@@ -1112,7 +1214,7 @@ window.__dashboardOnReadyQueue.push(function() {
 {# GitLab checks tree row (hidden by default) #}
 {%- if commit.gitlab_checks_tree_html -%}
 <tr id="gitlab-tree-row-{{ sha_short }}" style="display: none;">
-<td colspan="8" style="padding: 0; background-color: #ffffff;">
+<td colspan="8" style="padding: 0;">
 <div style="padding: 0; border-top: 0;">
           <div style="display: flex; align-items: center; justify-content: flex-start; padding: 6px 8px 0 8px;">
             <button type="button"

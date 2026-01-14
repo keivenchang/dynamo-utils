@@ -1126,7 +1126,12 @@ class DockerUtils(BaseUtils):
         # Examples:
         #   dynamo:v0.1.0.dev.ea07d51fc-sglang-local-dev
         #   dynamo-base:v0.1.0.dev.ea07d51fc-vllm-dev
-        pattern = r'^(?:dynamo|dynamo-base):v(.+?)-([^-]+)(?:-(.+))?$'
+        #
+        # NOTE: version strings may contain hyphens (e.g., "v0.0.0-test-rc7.dev.<sha>"),
+        # so we must anchor the framework by matching known framework names rather than
+        # splitting on the first '-' after 'v'.
+        fw_alt = "|".join(re.escape(f) for f in FRAMEWORKS)
+        pattern = rf'^(?:dynamo|dynamo-base):v(.+)-({fw_alt})(?:-(.+))?$'
         match = re.match(pattern, image_name)
 
         if not match:

@@ -100,12 +100,13 @@
 
 /* Reusable triangle toggle classes for snippets and other collapsible elements */
 .triangle-toggle {
-    display: inline-flex;
+    display: inline-flex !important;
     align-items: center;
     justify-content: center;
-    width: 16px;
-    height: 16px;
-    border-radius: 50%;
+    width: 16px !important;
+    height: 16px !important;
+    padding: 0 !important;
+    border-radius: 50% !important;
     background: #e6f3ff;  /* Very light blue for collapsed */
     cursor: pointer;
     color: #0969da;  /* Darker blue icon */
@@ -113,6 +114,7 @@
     font-weight: 500;
     user-select: none;
     margin-left: 5px;
+    text-decoration: none !important;
 }
 
 .triangle-toggle.expanded {

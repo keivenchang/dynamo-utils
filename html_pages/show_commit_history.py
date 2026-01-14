@@ -157,7 +157,7 @@ class CommitHistoryGenerator:
         # We allow fetches when entries are missing or stale so the dashboard self-heals and
         # raw logs can be materialized whenever they are needed.
 
-    def _ci_log_errors_fp(self) -> str:
+    def _ci_log_errors_sha(self) -> str:
         """Fingerprint the ci_log_errors implementation (used for snippet cache invalidation)."""
         fp = str(getattr(self, "_ci_log_errors_fingerprint", "") or "")
         if fp:
@@ -233,10 +233,10 @@ class CommitHistoryGenerator:
             if not isinstance(data, dict):
                 data = {}
             # Invalidate on ci_log_errors changes.
-            want_fp = self._ci_log_errors_fp()
-            got_fp = str(data.get("ci_log_errors_fp", "") or "")
-            if got_fp != want_fp:
-                data = {"ci_log_errors_fp": want_fp, "items": {}}
+            want_sha = self._ci_log_errors_sha()
+            got_sha = str(data.get("ci_log_errors_sha", "") or "")
+            if got_sha != want_sha:
+                data = {"ci_log_errors_sha": want_sha, "items": {}}
                 self._snippet_cache_dirty = True
             # Normalize structure.
             if not isinstance(data.get("items"), dict):
@@ -285,7 +285,7 @@ class CommitHistoryGenerator:
             
             # Preserve ci_log_errors fingerprint from memory
             merged_data = {
-                "ci_log_errors_fp": mem_data.get("ci_log_errors_fp", disk_data.get("ci_log_errors_fp", "")),
+                "ci_log_errors_sha": mem_data.get("ci_log_errors_sha", disk_data.get("ci_log_errors_sha", "")),
                 "items": merged_items
             }
             
@@ -318,8 +318,11 @@ class CommitHistoryGenerator:
             self._release_cache_lock(lock_fh)
 
     def _snippet_cache_key_for_raw_log(self, raw_log_path: Path) -> str:
-        # Use filename (job_id.log) to keep keys stable even if the dashboard path changes.
-        return str(raw_log_path.name or raw_log_path)
+        # Key includes BOTH filename AND ci_log_errors fingerprint.
+        # This allows multiple code versions (e.g., QA + prod) to coexist without conflicts.
+        sha = self._ci_log_errors_sha()
+        filename = str(raw_log_path.name or raw_log_path)
+        return f"{sha}:{filename}"
 
     def _snippet_from_cached_raw_log(self, raw_log_path: Path) -> str:
         """Return an error snippet for a raw log file, using the persistent cache when possible."""
@@ -347,12 +350,23 @@ class CommitHistoryGenerator:
         if not hasattr(self, '_snippet_cache_debug'):
             self._snippet_cache_debug = {"hits": [], "misses": [], "reasons": {}}
         
+        # TTL: 365 days (in seconds)
+        TTL_SECONDS = 365 * 24 * 60 * 60
+        now_ts = int(time.time())
+        
         ent = items.get(key) if isinstance(items, dict) else None
         if isinstance(ent, dict):
             try:
                 cached_mtime = int(ent.get("mtime_ns", -1) or -1)
                 cached_size = int(ent.get("size", -1) or -1)
-                if cached_mtime == mtime_ns and cached_size == size:
+                cached_ts = int(ent.get("ts", 0) or 0)
+                
+                # Check TTL first
+                if cached_ts > 0 and (now_ts - cached_ts) > TTL_SECONDS:
+                    reason = f"expired (age={(now_ts - cached_ts) / 86400:.1f} days > 365 days TTL)"
+                    self._snippet_cache_debug["misses"].append(key)
+                    self._snippet_cache_debug["reasons"][key] = reason
+                elif cached_mtime == mtime_ns and cached_size == size:
                     sn = str(ent.get("snippet", "") or "")
                     if sn:
                         self._perf_i["snippet.cache.hit"] = int(self._perf_i.get("snippet.cache.hit", 0) or 0) + 1
@@ -379,6 +393,19 @@ class CommitHistoryGenerator:
             snippet = extract_error_snippet_from_log_file(Path(raw_log_path))
         except Exception:
             snippet = ""
+        
+        # Separate categories from snippet text
+        categories = []
+        snippet_body = snippet
+        if snippet:
+            lines = snippet.split('\n', 1)
+            first_line = lines[0] if lines else ""
+            if first_line.startswith("Categories:"):
+                # Extract categories and remove from snippet body
+                categories_str = first_line.replace("Categories:", "").strip()
+                categories = [c.strip() for c in categories_str.split(",")] if categories_str else []
+                snippet_body = lines[1] if len(lines) > 1 else ""
+        
         dt_compute = max(0.0, time.monotonic() - t1)
         self._perf["snippet.compute_secs"] = float(self._perf.get("snippet.compute_secs", 0.0) or 0.0) + float(dt_compute)
         try:
@@ -387,7 +414,8 @@ class CommitHistoryGenerator:
                     "mtime_ns": mtime_ns,
                     "size": size,
                     "ts": int(time.time()),
-                    "snippet": str(snippet or ""),
+                    "snippet": str(snippet_body or ""),
+                    "categories": categories,
                 }
                 data["items"] = items
                 self._snippet_cache_data = data
@@ -1353,78 +1381,43 @@ class CommitHistoryGenerator:
         # Marker scan time (glob+grouping) regardless of cache.
         self._perf["marker.total_secs"] = float(self._perf.get("marker.total_secs", 0.0) or 0.0) + max(0.0, time.monotonic() - t_markers)
         
-        # Now that local build status is known, color the Image SHA badge accordingly.
+        # Now that local build status is known, add status icons for IMAGE SHA badges.
         #
         # UX request:
-        # - Image SHA badge background is ALWAYS alternating greys (for scan-ability / grouping)
-        # - Image SHA text color indicates status:
-        #   - PASS: alternating greens
-        #   - FAIL: alternating reds
-        #   - no local build data: black (to contrast with the grey)
-        #
-        # Background greys (higher contrast, but still light enough so black text remains readable).
-        grey_bg_a = "#a7b3c7"  # medium grey-blue (more contrasty)
-        grey_bg_b = "#e5e7eb"  # light grey
+        # - Remove background colors from IMAGE badges
+        # - Add a fixed-size filled circle icon in front of IMAGE:...
+        #   - SUCCESS: green circle with check
+        #   - FAILED: red circle with X
+        #   - BUILDING: yellow circle with hourglass
+        #   - UNKNOWN: gray circle (no glyph)
 
-        # Text colors for PASS/FAIL (single shade; no alternation).
-        green_fg = "#2da44e"
-        red_fg = "#c83a3a"
-        neutral_fg = "#111827"
+        def _image_status_icon_html(*, status: str) -> str:
+            """Return a fixed-size (12x12) status dot for IMAGE:... that matches tree-node style.
 
-        # Image status chip colors (alternating shades for scan-ability).
-        # Use a darker + lighter pair for alternating IMAGE:... label backgrounds.
-        green_a = "#238636"  # darker green
-        green_b = "#63d887"  # lighter green
-        red_a = "#c83a3a"    # darker red
-        red_b = "#e06060"    # lighter red
-        yellow_a = "#ffc107" # darker yellow/amber (same as report.html header)
-        yellow_b = "#ffd54f" # lighter yellow
-        grey_a = "#8c959f"   # darker grey
-        grey_b = "#b1bac4"   # lighter grey
-
-        def _fg_for_bg(hex_color: str) -> str:
-            """Pick a readable foreground color for a hex background."""
-            try:
-                s = str(hex_color or "").lstrip("#")
-                if len(s) != 6:
-                    return "#111827"
-                r = int(s[0:2], 16)
-                g = int(s[2:4], 16)
-                b = int(s[4:6], 16)
-                # Relative luminance (rough sRGB).
-                lum = (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255.0
-                return "#ffffff" if lum < 0.55 else "#111827"
-            except Exception:
-                return "#111827"
+            Important: use a single span-based style (like required check/X in tree nodes) so
+            the red circle-X looks identical, and all statuses line up consistently.
+            """
+            st = str(status or STATUS_UNKNOWN)
+            st_esc = html.escape(st, quote=True)
+            if st == STATUS_SUCCESS:
+                # Green filled circle with check.
+                return f'<span class="image-status-icon image-status-success" data-status="{st_esc}">✓</span>'
+            if st == STATUS_FAILED:
+                # Red filled circle with X (same visual as required-failure tree icon).
+                return f'<span class="image-status-icon image-status-failed" data-status="{st_esc}">✗</span>'
+            if st == STATUS_BUILDING:
+                # Yellow filled circle with hourglass.
+                return f'<span class="image-status-icon image-status-building" data-status="{st_esc}">⏳</span>'
+            # Unknown/pending: subtle hollow circle (no glyph).
+            return f'<span class="image-status-icon image-status-unknown" data-status="{st_esc}"></span>'
 
         for commit in commit_data:
             try:
                 sha_short = str(commit.get("sha_short", "") or "")
                 st = str((build_status.get(sha_short) or {}).get("status", STATUS_UNKNOWN) or STATUS_UNKNOWN)
-                parity = int(commit.get("cds_parity", 0) or 0)
-                # Background always alternates grey.
-                commit["composite_bg_color"] = grey_bg_a if (parity % 2 == 0) else grey_bg_b
-
-                # IMAGE:... label colors (alternating shades; foreground picked for contrast).
-                if st == STATUS_SUCCESS:
-                    bg = green_a if (parity % 2 == 0) else green_b
-                elif st == STATUS_FAILED:
-                    bg = red_a if (parity % 2 == 0) else red_b
-                elif st == STATUS_BUILDING:
-                    bg = yellow_a if (parity % 2 == 0) else yellow_b
-                else:
-                    bg = grey_a if (parity % 2 == 0) else grey_b
-                commit["image_label_bg_color"] = bg
-                commit["image_label_fg_color"] = _fg_for_bg(bg)
-
-                # Text color encodes status.
-                if st == STATUS_SUCCESS:
-                    commit["composite_text_color"] = green_fg
-                elif st == STATUS_FAILED:
-                    commit["composite_text_color"] = red_fg
-                else:
-                    commit["composite_text_color"] = neutral_fg
+                commit["image_status_icon"] = _image_status_icon_html(status=st)
             except Exception:
+                commit["image_status_icon"] = _image_status_icon_html(status=STATUS_UNKNOWN)
                 continue
         
         # Generate timestamp (PT)
