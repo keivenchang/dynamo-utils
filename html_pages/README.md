@@ -231,7 +231,8 @@ python3 html_pages/show_commit_history.py \
 
 2. Run generator directly:
    ```bash
-   python3 html_pages/show_local_branches.py --fast
+   # Debug-mode output (debug.html):
+   ./html_pages/update_html_pages.sh --fast-debug --show-local-branches
    ```
 
 3. Common cause: Missing/renamed exports in `common_dashboard_lib.py`

@@ -318,7 +318,7 @@ class CommitHistoryGenerator:
             self._release_cache_lock(lock_fh)
 
     def _snippet_cache_key_for_raw_log(self, raw_log_path: Path) -> str:
-        # Key includes BOTH filename AND ci_log_errors fingerprint.
+        # Key includes BOTH filename AND ci_log_errors SHA fingerprint.
         # This allows multiple code versions (e.g., QA + prod) to coexist without conflicts.
         sha = self._ci_log_errors_sha()
         filename = str(raw_log_path.name or raw_log_path)
@@ -1168,11 +1168,12 @@ class CommitHistoryGenerator:
             
             gitlab_images[sha_full] = formatted_imgs
         
-        # Process commit messages for PR links and prepare Image-SHA alternation state.
+        # Process commit messages for PR links and prepare Image-SHA grouping state.
         #
-        # UX: in the dashboard, the Image SHA badge background alternates per *unique image SHA* so it's easy
-        # to visually scan for groups. The actual hue (green/red/grey) is assigned later, after we
-        # compute local build status (PASS/FAIL/BUILD/UNKNOWN).
+        # UX:
+        # - Commit SHAs are rendered with alternating background colors *by Image SHA* (see template CSS),
+        #   so commits that share an Image SHA share the same commit-SHA highlight.
+        # - IMAGE:xxxxxx badges no longer use background colors; they use a compact status-dot icon instead.
         unique_cds: List[str] = []
         seen_cds: set[str] = set()
         for commit in (commit_data or []):
