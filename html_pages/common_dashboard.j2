@@ -541,12 +541,21 @@
             if (!urlKey) return;
             
             // If URL has this key, use that state; otherwise use default
+            // BUT: never expand if data-default-expanded="0" (e.g., merged/closed branches)
+            var summaryEl = detailsEl.querySelector('summary[data-default-expanded]');
+            var defExpAttr = summaryEl ? summaryEl.getAttribute('data-default-expanded') : null;
+            var defExp = (defExpAttr === '1');
+            
             if (params.has(urlKey)) {
-            var wantOpen = _isTruthyParam(params.get(urlKey));
-              detailsEl.open = wantOpen;
+              var wantOpen = _isTruthyParam(params.get(urlKey));
+              // Respect data-default-expanded="0" - never restore open state for collapsed-by-default items
+              if (defExpAttr === '0' && wantOpen) {
+                detailsEl.open = false;  // Force closed for merged/closed branches
+              } else {
+                detailsEl.open = wantOpen;
+              }
             } else {
               // Use default expanded state
-              var defExp = (detailsEl.querySelector('summary[data-default-expanded="1"]') !== null);
               detailsEl.open = defExp;
             }
           } catch (e) {}
