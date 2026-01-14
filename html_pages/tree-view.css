@@ -119,3 +119,10 @@
     background: #0969da;  /* Darker blue for expanded */
     color: white;  /* White icon on darker background */
 }
+
+.triangle-toggle.disabled {
+    background: #f6f8fa;  /* Very light gray circle for disabled/placeholder triangle */
+    color: #d0d7de;  /* Muted gray triangle icon */
+    cursor: default;  /* Not clickable */
+    pointer-events: none;
+}
