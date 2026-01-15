@@ -22,10 +22,10 @@ import urllib.request
 import zipfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
 from zoneinfo import ZoneInfo
 
 from common_types import CIStatus, MarkerStatus
@@ -1545,6 +1545,104 @@ class GHPRCheckRow:
         return CIStatus.UNKNOWN.value
 
 
+_GHPR_CHECK_ROW_DISK_KEYS: set[str] = {
+    # NOTE: Additive schema only. New keys must have defaults in `GHPRCheckRow`.
+    # Missing keys are allowed (backward-compatible). Unknown keys are NOT allowed and should
+    # fail fast so schema drift is caught early.
+    "name",
+    "status_raw",
+    "duration",
+    "url",
+    "run_id",
+    "job_id",
+    "description",
+    "is_required",
+    "workflow_name",
+    "event",
+}
+
+
+def _ghpr_check_row_to_disk_dict(row: GHPRCheckRow) -> Dict[str, Any]:
+    # Keep this stable: it defines the on-disk cache schema for pr-check rows.
+    return {
+        "name": row.name,
+        "status_raw": row.status_raw,
+        "duration": row.duration,
+        "url": row.url,
+        "run_id": row.run_id,
+        "job_id": row.job_id,
+        "description": row.description,
+        "is_required": bool(row.is_required),
+        "workflow_name": row.workflow_name,
+        "event": row.event,
+    }
+
+
+def _ghpr_check_row_from_disk_dict_strict(*, d: Any, cache_file: Path, entry_key: str) -> GHPRCheckRow:
+    if not isinstance(d, dict):
+        raise RuntimeError(f"Invalid pr_checks cache entry row type in {cache_file}: key={entry_key!r} type={type(d)}")
+    extra = set(d.keys()) - _GHPR_CHECK_ROW_DISK_KEYS
+    if extra:
+        raise RuntimeError(
+            f"Unknown pr_checks row fields in {cache_file}: key={entry_key!r} extra={sorted(extra)}; "
+            f"expected subset of {sorted(_GHPR_CHECK_ROW_DISK_KEYS)}"
+        )
+    return GHPRCheckRow(
+        name=str(d.get("name", "") or ""),
+        status_raw=str(d.get("status_raw", "") or ""),
+        duration=str(d.get("duration", "") or ""),
+        url=str(d.get("url", "") or ""),
+        run_id=str(d.get("run_id", "") or ""),
+        job_id=str(d.get("job_id", "") or ""),
+        description=str(d.get("description", "") or ""),
+        is_required=bool(d.get("is_required", False)),
+        workflow_name=str(d.get("workflow_name", "") or ""),
+        event=str(d.get("event", "") or ""),
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class GHPRChecksCacheEntry:
+    """Typed cache entry for PR check rows.
+
+    Schema rules:
+    - Additive only: new fields must have defaults.
+    - Backward-compat: missing fields are allowed when loading from disk.
+    - Strictness: unknown fields on disk are a hard error to catch schema drift quickly.
+    """
+
+    ts: int
+    ver: int
+    rows: Tuple[GHPRCheckRow, ...]
+
+    _DISK_KEYS: set[str] = field(default_factory=lambda: {"ts", "ver", "rows"}, init=False, repr=False)
+
+    def to_disk_dict(self) -> Dict[str, Any]:
+        return {
+            "ts": int(self.ts),
+            "ver": int(self.ver),
+            "rows": [_ghpr_check_row_to_disk_dict(r) for r in self.rows],
+        }
+
+    @classmethod
+    def from_disk_dict_strict(cls, *, d: Any, cache_file: Path, entry_key: str) -> "GHPRChecksCacheEntry":
+        if not isinstance(d, dict):
+            raise RuntimeError(f"Invalid pr_checks cache entry type in {cache_file}: key={entry_key!r} type={type(d)}")
+        extra = set(d.keys()) - {"ts", "ver", "rows"}
+        if extra:
+            raise RuntimeError(
+                f"Unknown pr_checks cache entry fields in {cache_file}: key={entry_key!r} extra={sorted(extra)}; "
+                f"expected subset of {sorted({'ts','ver','rows'})}"
+            )
+        ts = int(d.get("ts", 0) or 0)
+        ver = int(d.get("ver", 0) or 0)
+        rows_in = d.get("rows") or []
+        if not isinstance(rows_in, list):
+            raise RuntimeError(f"Invalid pr_checks cache entry rows type in {cache_file}: key={entry_key!r} type={type(rows_in)}")
+        rows = tuple(_ghpr_check_row_from_disk_dict_strict(d=r, cache_file=cache_file, entry_key=entry_key) for r in rows_in)
+        return cls(ts=ts, ver=ver, rows=rows)
+
+
 @dataclass(frozen=True)
 class GitHubChecksCounts:
     """Typed bucket counts for GitHub checks.
@@ -1990,7 +2088,7 @@ class GitHubAPIClient:
         self._cache_dir = dynamo_utils_cache_dir() / "job-logs"
 
         # Cache for PR check rows (two-tier: memory + disk, short TTL because status changes).
-        self._pr_checks_mem_cache: Dict[str, Dict[str, Any]] = {}
+        self._pr_checks_mem_cache: Dict[str, GHPRChecksCacheEntry] = {}
         self._pr_checks_cache_dir = dynamo_utils_cache_dir() / "pr-checks"
 
         # Cache for repo-wide pull request listing (short TTL; used to avoid per-branch API calls).
@@ -3942,9 +4040,13 @@ class GitHubAPIClient:
         if cache_file.exists():
             try:
                 with open(cache_file, "r") as f:
-                    return json.load(f)
-            except Exception:
-                return {}
+                    data = json.load(f)
+                if not isinstance(data, dict):
+                    raise RuntimeError(f"Invalid pr_checks cache file (expected dict): {cache_file}")
+                return data
+            except Exception as e:
+                # Fail fast: unknown fields / schema drift / corruption should be visible so we can fix it.
+                raise RuntimeError(f"Failed to read pr_checks cache file: {cache_file}: {e}") from e
         return {}
 
     def _save_pr_checks_disk_cache(self, cache: Dict[str, Any]) -> None:
@@ -3986,50 +4088,36 @@ class GitHubAPIClient:
         # v5 adds `workflow_name` and `event` fields for full check display names.
         CACHE_VER = 5
 
-        # 1) memory cache
+        # 1) memory cache (typed)
         try:
             ent = self._pr_checks_mem_cache.get(key)
-            if ent and isinstance(ent, dict):
-                ts = int(ent.get("ts", 0) or 0)
-                ver = int(ent.get("ver", 0) or 0)
+            if ent is not None:
+                ts = int(ent.ts)
+                ver = int(ent.ver)
                 if ts and (now - ts) <= max(0, int(ttl_s)):
                     if ver >= CACHE_VER:
                         self._cache_hit("pr_checks_rows.mem")
                     else:
-                        # Old cache entry; ignore so we can refetch and include status contexts.
                         raise RuntimeError("stale pr_checks_rows cache schema")
-                    rows = ent.get("rows") or []
                     out: List[GHPRCheckRow] = []
-                    for r in rows:
-                        try:
-                            name = str(r.get("name", "") or "")
-                            out.append(
-                                GHPRCheckRow(
-                                    name=name,
-                                    status_raw=str(r.get("status_raw", "") or ""),
-                                    duration=str(r.get("duration", "") or ""),
-                                    url=str(r.get("url", "") or ""),
-                                    run_id=str(r.get("run_id", "") or ""),
-                                    job_id=str(r.get("job_id", "") or ""),
-                                    description=str(r.get("description", "") or ""),
-                                    is_required=(name in required_checks) or bool(r.get("is_required", False)),
-                                    workflow_name=str(r.get("workflow_name", "") or ""),
-                                    event=str(r.get("event", "") or ""),
-                                )
-                            )
-                        except Exception:
-                            continue
+                    for r in ent.rows:
+                        if r.is_required or (r.name in required_checks):
+                            out.append(r if r.is_required else replace(r, is_required=True))
+                        else:
+                            out.append(r)
                     return out
         except Exception:
             pass
 
-        # 2) disk cache
+        # 2) disk cache (strict; typed)
         try:
             disk = self._load_pr_checks_disk_cache()
-            ent = disk.get(key) if isinstance(disk, dict) else None
-            if ent and isinstance(ent, dict):
-                ts = int(ent.get("ts", 0) or 0)
-                ver = int(ent.get("ver", 0) or 0)
+            ent_raw = disk.get(key) if isinstance(disk, dict) else None
+            if ent_raw is not None:
+                cache_file = self._pr_checks_cache_dir / "pr_checks_cache.json"
+                ent = GHPRChecksCacheEntry.from_disk_dict_strict(d=ent_raw, cache_file=cache_file, entry_key=key)
+                ts = int(ent.ts)
+                ver = int(ent.ver)
                 if ts and ((now - ts) <= max(0, int(ttl_s)) or self.cache_only_mode):
                     if ver >= CACHE_VER:
                         if (now - ts) <= max(0, int(ttl_s)):
@@ -4037,31 +4125,15 @@ class GitHubAPIClient:
                         else:
                             self._cache_hit("pr_checks_rows.disk_stale_cache_only")
                     else:
-                        # Old cache entry; ignore so we can refetch and include status contexts.
                         raise RuntimeError("stale pr_checks_rows cache schema")
-                    rows = ent.get("rows") or []
                     out: List[GHPRCheckRow] = []
-                    for r in rows:
-                        try:
-                            name = str(r.get("name", "") or "")
-                            out.append(
-                                GHPRCheckRow(
-                                    name=name,
-                                    status_raw=str(r.get("status_raw", "") or ""),
-                                    duration=str(r.get("duration", "") or ""),
-                                    url=str(r.get("url", "") or ""),
-                                    run_id=str(r.get("run_id", "") or ""),
-                                    job_id=str(r.get("job_id", "") or ""),
-                                    description=str(r.get("description", "") or ""),
-                                    is_required=(name in required_checks) or bool(r.get("is_required", False)),
-                                    workflow_name=str(r.get("workflow_name", "") or ""),
-                                    event=str(r.get("event", "") or ""),
-                                )
-                            )
-                        except Exception:
-                            continue
-                    # promote to memory
-                    self._pr_checks_mem_cache[key] = {"ts": ts, "ver": ver, "rows": rows}
+                    for r in ent.rows:
+                        if r.is_required or (r.name in required_checks):
+                            out.append(r if r.is_required else replace(r, is_required=True))
+                        else:
+                            out.append(r)
+                    # promote to memory (typed)
+                    self._pr_checks_mem_cache[key] = ent
                     return out
         except Exception:
             pass
@@ -4132,7 +4204,6 @@ class GitHubAPIClient:
                 except Exception:
                     return ""
 
-            rows_dicts: List[Dict[str, Any]] = []
             out: List[GHPRCheckRow] = []
             # De-dupe exact duplicates only (same name+url). If the same check name appears multiple
             # times with different run/job URLs (reruns), we keep them all so UIs can show each.
@@ -4233,20 +4304,6 @@ class GitHubAPIClient:
                         event=event,
                     )
                 )
-                rows_dicts.append(
-                    {
-                        "name": name,
-                        "status_raw": status_raw,
-                        "duration": duration,
-                        "url": url,
-                        "run_id": run_id,
-                        "job_id": job_id,
-                        "description": description,
-                        "is_required": is_req,
-                        "workflow_name": workflow_name,
-                        "event": event,
-                    }
-                )
 
             # Merge in status contexts (best-effort).
             # These don't have step timings; duration remains empty.
@@ -4295,31 +4352,18 @@ class GitHubAPIClient:
                         event="",
                     )
                 )
-                rows_dicts.append(
-                    {
-                        "name": name,
-                        "status_raw": status_raw,
-                        "duration": "",
-                        "url": target,
-                        "run_id": run_id,
-                        "job_id": job_id,
-                        "description": desc,
-                        "is_required": is_req,
-                        "workflow_name": "",
-                        "event": "",
-                    }
-                )
 
             if not out:
                 return []
 
             # persist caches (same shape as gh output cache)
             try:
-                self._pr_checks_mem_cache[key] = {"ts": now, "ver": CACHE_VER, "rows": rows_dicts}
+                entry = GHPRChecksCacheEntry(ts=int(now), ver=int(CACHE_VER), rows=tuple(out))
+                self._pr_checks_mem_cache[key] = entry
                 disk = self._load_pr_checks_disk_cache()
                 if not isinstance(disk, dict):
                     disk = {}
-                disk[key] = {"ts": now, "ver": CACHE_VER, "rows": rows_dicts}
+                disk[key] = entry.to_disk_dict()
                 self._save_pr_checks_disk_cache(disk)
             except Exception:
                 pass
