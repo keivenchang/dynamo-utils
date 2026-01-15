@@ -401,7 +401,7 @@ run_show_commit_history() {
     if [ "$DRY_RUN" = true ]; then
         MAX_COMMITS=50
         if [ "$FAST_DEBUG" = true ]; then
-            MAX_COMMITS=10
+            MAX_COMMITS=25
         fi
         PARALLEL_WORKERS="${PARALLEL_WORKERS:-32}"
         echo "[DRY-RUN] Would generate commit history dashboard:"
@@ -447,7 +447,7 @@ run_show_commit_history() {
 
     MAX_COMMITS="${MAX_COMMITS:-200}"
     if [ "$FAST_DEBUG" = true ]; then
-        MAX_COMMITS=10
+        MAX_COMMITS=25
     fi
 
     echo "$(date '+%Y-%m-%d %H:%M:%S') - Generating commit history dashboard (max_commits=$MAX_COMMITS)" >> "$LOG_FILE"

@@ -517,6 +517,33 @@ function collapseCommitGitHubTree(shaShort) {
     try { if (window.DashboardUrlState) { window.DashboardUrlState.setBoolDefault('gh.' + String(shaShort || ''), false, false); } } catch (e) {}
 }
 
+function toggleCommitInfo(event, shaShort) {
+    event.preventDefault();
+    event.stopPropagation();
+    var row = document.getElementById('commit-info-row-' + shaShort);
+    var toggleEl = document.getElementById('commit-info-toggle-' + shaShort);
+    if (!row) return;
+    var hidden = (row.style.display === 'none' || row.style.display === '');
+    row.style.display = hidden ? 'table-row' : 'none';
+    if (toggleEl) {
+        toggleEl.textContent = hidden ? '▼' : '▶';
+        try { toggleEl.classList.toggle('expanded', hidden); } catch (e) {}
+    }
+    try { if (window.DashboardUrlState) { window.DashboardUrlState.setBoolDefault('ci.' + String(shaShort || ''), hidden, false); } } catch (e) {}
+}
+
+function collapseCommitInfo(shaShort) {
+    var row = document.getElementById('commit-info-row-' + shaShort);
+    var toggleEl = document.getElementById('commit-info-toggle-' + shaShort);
+    if (!row) return;
+    row.style.display = 'none';
+    if (toggleEl) {
+        toggleEl.textContent = '▶';
+        try { toggleEl.classList.remove('expanded'); } catch (e) {}
+    }
+    try { if (window.DashboardUrlState) { window.DashboardUrlState.setBoolDefault('ci.' + String(shaShort || ''), false, false); } } catch (e) {}
+}
+
 function toggleCommitGitLabTree(event, shaShort) {
     event.preventDefault();
     event.stopPropagation();
@@ -846,6 +873,7 @@ window.__dashboardOnReadyQueue.push(function() {
 <table id="commits-table" class="hide-col-composite hide-col-gitlab">
 <thead>
 <tr>
+<th style="width: 30px;"></th>
 <th>Commit SHA</th>
 {# Column header layout policy: checkbox, icon, description (in that order). #}
 {# NOTE: `data-url-state="1"` opts into URL syncing (common_dashboard.j2 DashboardUrlState). #}
@@ -896,14 +924,28 @@ window.__dashboardOnReadyQueue.push(function() {
 {%- set gitlab_commit_link = "https://gitlab-master.nvidia.com/dl/ai-dynamo/dynamo/-/commit/" ~ sha_full -%}
 {%- set has_docker_images = sha_short in docker_images and docker_images[sha_short] -%}
 {%- set has_gitlab = sha_full in gitlab_images and gitlab_images[sha_full] -%}
+{%- set gitlab_imgs = gitlab_images.get(sha_full, []) -%}
 {%- set composite_bg_color = commit.composite_bg_color -%}
 {%- set pipeline = gitlab_pipelines.get(sha_full) -%}
 {%- set pr_number = commit.pr_number -%}
 {%- set mr_pipeline = mr_pipelines.get(pr_number) if pr_number else none -%}
 {%- set effective_pipeline = pipeline if pipeline else mr_pipeline -%}
 {%- set sha_color_class = "sha-color-" ~ composite_sha_to_color.get(composite_sha, 0) -%}
+{%- set full_msg = commit.full_message -%}
+{%- set files_changed = commit.files_changed -%}
+{%- set insertions = commit.insertions -%}
+{%- set deletions = commit.deletions -%}
+{%- set changed_files = commit.changed_files -%}
 
 <tr>
+<td style="padding: 4px 4px 4px 8px;">
+<a href="#"
+   id="commit-info-toggle-{{ sha_short }}"
+   class="triangle-toggle"
+   onclick="toggleCommitInfo(event, '{{ sha_short }}'); return false;"
+   style="margin-right: 0;"
+   title="Show commit message and file changes">▶</a>
+</td>
 <td class="sha">
 <a href="{{ commit_link }}" target="_blank" class="{{ sha_color_class }}">{{ sha_short }}</a>
 </td>
@@ -912,7 +954,8 @@ window.__dashboardOnReadyQueue.push(function() {
 {%- set status_info = build_status.get(sha_short, {}) -%}
 {%- set status = status_info.get('status', 'unknown') -%}
 {%- set inherited = status_info.get('inherited', False) -%}
-{%- set has_composite_toggle = has_docker_images or has_gitlab -%}
+{# Image SHA dropdown should only contain Image-SHA/local-image related info. GitLab registry info belongs to GitLab dropdown. #}
+{%- set has_composite_toggle = has_docker_images -%}
 {# Expand/collapse triangle MUST be the first element in the cell (greyed out if nothing to expand). #}
 {%- if has_composite_toggle -%}
 <a href="#"
@@ -1187,10 +1230,45 @@ window.__dashboardOnReadyQueue.push(function() {
 </td>
 </tr>
 
+{# Commit info dropdown row (message, files changed, stats) #}
+<tr class="commit-info-row" id="commit-info-row-{{ sha_short }}" style="display: none;">
+<td colspan="9" style="padding: 0; background-color: #f6f8fa;">
+<div style="padding: 8px 12px; border-top: 1px solid #d0d7de;">
+  <div style="display: flex; align-items: center; justify-content: flex-start; margin-bottom: 6px;">
+    <button type="button"
+            onclick="event.stopPropagation(); try { collapseCommitInfo('{{ sha_short }}'); } catch (e) {}"
+            style="padding: 0 6px; height: 18px; line-height: 16px; font-size: 14px; border: 1px solid #d0d7de; border-radius: 999px; background: #ffffff; color: #57606a; cursor: pointer;"
+            title="Close commit info"><svg aria-hidden="true" viewBox="0 0 16 16" version="1.1" width="12" height="12" data-view-component="true" class="octicon octicon-x" fill="currentColor"><path fill-rule="evenodd" d="M3.72 3.72a.75.75 0 011.06 0L8 6.94l3.22-3.22a.75.75 0 111.06 1.06L9.06 8l3.22 3.22a.75.75 0 11-1.06 1.06L8 9.06l-3.22 3.22a.75.75 0 11-1.06-1.06L6.94 8 3.72 4.78a.75.75 0 010-1.06z"></path></svg></button>
+  </div>
+  <div style="margin: 0; padding: 0 14px;">
+    <div style="margin: 8px 0 12px 0; padding: 8px; background-color: white; border: 1px solid #d0d7de; border-radius: 4px;">
+      <div style="font-weight: 600; margin-bottom: 6px; font-size: 13px;">Commit Message:</div>
+      <div style="font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace; font-size: 12px; color: #24292f; white-space: pre-wrap; margin-bottom: 8px;">{{ full_msg | e }}</div>
+      <div style="font-size: 12px; color: #57606a; margin-top: 6px;">
+        <span style="color: #1a7f37; font-weight: 500;">+{{ insertions }}</span>
+        <span style="color: #cf222e; font-weight: 500;">-{{ deletions }}</span>
+        <span style="margin-left: 8px;">{{ files_changed }} file(s) changed</span>
+      </div>
+      <details style="margin-top: 8px;">
+        {{ summary_with_toggle('Show changed files (' ~ changed_files|length ~ ')', 'style="cursor: pointer; color: #0969da; font-size: 12px;"') }}
+        <div class="details-body">
+          <div style="margin-top: 4px; font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace; font-size: 11px;">
+            {% for file in changed_files %}
+            <div style="padding: 2px 0;">{{ file }}</div>
+            {% endfor %}
+          </div>
+        </div>
+      </details>
+    </div>
+  </div>
+</div>
+</td>
+</tr>
+
 {# GitHub checks tree row (hidden by default) #}
 {%- if commit.github_checks_tree_html -%}
 <tr id="github-tree-row-{{ sha_short }}" style="display: none;">
-<td colspan="8" style="padding: 0;">
+<td colspan="9" style="padding: 0;">
 <div style="padding: 0; border-top: 0;">
           <div style="display: flex; align-items: center; justify-content: flex-start; padding: 6px 8px 0 8px;">
             <button type="button"
@@ -1204,10 +1282,10 @@ window.__dashboardOnReadyQueue.push(function() {
 </tr>
 {%- endif -%}
 
-{# GitLab checks tree row (hidden by default) #}
-{%- if commit.gitlab_checks_tree_html -%}
+{# GitLab dropdown row (hidden by default): GitLab + commit details + registry info. #}
+{%- if commit.gitlab_checks_tree_html or has_gitlab -%}
 <tr id="gitlab-tree-row-{{ sha_short }}" style="display: none;">
-<td colspan="8" style="padding: 0;">
+<td colspan="9" style="padding: 0;">
 <div style="padding: 0; border-top: 0;">
           <div style="display: flex; align-items: center; justify-content: flex-start; padding: 6px 8px 0 8px;">
             <button type="button"
@@ -1215,24 +1293,56 @@ window.__dashboardOnReadyQueue.push(function() {
                     style="padding: 0 6px; height: 18px; line-height: 16px; font-size: 14px; border: 1px solid #d0d7de; border-radius: 999px; background: #ffffff; color: #57606a; cursor: pointer;"
                     title="Close GitLab pipeline"><svg aria-hidden="true" viewBox="0 0 16 16" version="1.1" width="12" height="12" data-view-component="true" class="octicon octicon-x" fill="currentColor"><path fill-rule="evenodd" d="M3.72 3.72a.75.75 0 011.06 0L8 6.94l3.22-3.22a.75.75 0 111.06 1.06L9.06 8l3.22 3.22a.75.75 0 11-1.06 1.06L8 9.06l-3.22 3.22a.75.75 0 11-1.06-1.06L6.94 8 3.72 4.78a.75.75 0 010-1.06z"></path></svg></button>
           </div>
-          <div style="margin: 0; padding: 0 0 0 14px;">{{ commit.gitlab_checks_tree_html | safe }}</div>
+          <div style="margin: 0; padding: 0 14px;">
+            {# GitLab Container Registry Section (belongs to GitLab dropdown) #}
+            {% if gitlab_imgs %}
+            <div style="margin-bottom: 12px;">
+              <div style="font-weight: 600; margin-bottom: 4px; font-size: 13px;">GitLab Container Registry (Runtime Images): <a href="https://gitlab-master.nvidia.com/dl/ai-dynamo/dynamo/container_registry/{{ gitlab_imgs[0].registry_id }}" target="_blank" style="color: #fc6d26; text-decoration: none; font-weight: 600; font-size: 12px;" title="View all images in GitLab Container Registry">🦊 View Registry</a></div>
+              <table style="width: 100%; border: none; background-color: white; border-collapse: collapse;">
+                <thead>
+                  <tr>
+                    <th style="width: 35%; padding: 3px 6px; border: none;">Image Name:Tag</th>
+                    <th style="width: 10%; padding: 3px 6px; border: none;">pull runtime</th>
+                    <th style="width: 10%; padding: 3px 6px; border: none;">Build ID</th>
+                    <th style="width: 8%; padding: 3px 6px; border: none;">Size</th>
+                    <th style="width: 27%; padding: 3px 6px; border: none;">Created (PDT)</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {% for img in gitlab_imgs %}
+                  {%- set arch_label = "[x86]" if img.arch == "amd64" else "[ARM]" -%}
+                  {%- set display_tag = arch_label ~ " " ~ img.tag -%}
+                  {%- set image_id = img.pipeline_id[:12] if img.pipeline_id|length >= 12 else img.pipeline_id -%}
+                  <tr>
+                    <td style="font-family: monospace; font-size: 11px; padding: 2px 6px; border: none; max-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="{{ img.tag }}
+Pipeline: {{ img.pipeline_id }}
+Framework: {{ img.framework }}">{{ display_tag }}</td>
+                    <td style="font-size: 11px; padding: 2px 6px; border: none; white-space: nowrap;"><button data-clipboard-text="docker pull {{ img.location }}" onclick="copyFromClipboardAttr(this)" style="padding: 4px 6px; font-size: 11px; background-color: transparent; color: #57606a; border: 1px solid #d0d7de; border-radius: 6px; cursor: pointer; display: inline-flex; align-items: center; vertical-align: middle;" title="Click to copy docker pull command for runtime image" onmouseover="this.style.backgroundColor='#f3f4f6'; this.style.borderColor='#8c959f';" onmouseout="this.style.backgroundColor='transparent'; this.style.borderColor='#d0d7de';"><svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" style="display: inline-block;">{% include "copy_icon_paths.svg" %}</svg></button><span style="margin-left: 6px;">copy command</span></td>
+                    <td style="font-family: monospace; font-size: 11px; padding: 2px 6px; border: none;"><a href="https://gitlab-master.nvidia.com/dl/ai-dynamo/dynamo/-/pipelines/{{ img.pipeline_id }}" target="_blank" style="color: #0969da;" title="View pipeline {{ img.pipeline_id }}">{{ image_id }}</a></td>
+                    <td style="font-size: 11px; padding: 2px 6px; border: none;">{{ img.size_display }}</td>
+                    <td style="font-size: 11px; padding: 2px 6px; border: none;">{{ img.created_display }}</td>
+                  </tr>
+                  {% endfor %}
+                </tbody>
+              </table>
+            </div>
+            {% endif %}
+
+            {%- if commit.gitlab_checks_tree_html -%}
+            <div style="margin: 0; padding: 0 0 0 0;">{{ commit.gitlab_checks_tree_html | safe }}</div>
+            {%- endif -%}
+          </div>
 </div>
 </td>
 </tr>
 {%- endif -%}
 
-{# Docker images row if any exist for this SHA #}
-{% if has_docker_images or has_gitlab %}
+{# Docker images row (Image SHA dropdown) if any LOCAL docker images exist for this SHA #}
+{% if has_docker_images %}
 {%- set images = docker_images.get(sha_short, []) -%}
-{%- set full_msg = commit.full_message -%}
-{%- set files_changed = commit.files_changed -%}
-{%- set insertions = commit.insertions -%}
-{%- set deletions = commit.deletions -%}
-{%- set changed_files = commit.changed_files -%}
-{%- set gitlab_imgs = gitlab_images.get(sha_full, []) -%}
 
 <tr class="docker-images-row" id="docker-row-{{ sha_short }}" style="display: none;">
-<td colspan="8" style="padding: 0; background-color: #f6f8fa;">
+<td colspan="9" style="padding: 0; background-color: #f6f8fa;">
 <div style="padding: 8px 12px; border-top: 1px solid #d0d7de;">
 <div style="display: flex; align-items: center; justify-content: flex-start; margin-bottom: 6px;">
   <button type="button"
@@ -1240,91 +1350,6 @@ window.__dashboardOnReadyQueue.push(function() {
           style="padding: 0 6px; height: 18px; line-height: 16px; font-size: 14px; border: 1px solid #d0d7de; border-radius: 999px; background: #ffffff; color: #57606a; cursor: pointer;"
           title="Close Docker images"><svg aria-hidden="true" viewBox="0 0 16 16" version="1.1" width="12" height="12" data-view-component="true" class="octicon octicon-x" fill="currentColor"><path fill-rule="evenodd" d="M3.72 3.72a.75.75 0 011.06 0L8 6.94l3.22-3.22a.75.75 0 111.06 1.06L9.06 8l3.22 3.22a.75.75 0 11-1.06 1.06L8 9.06l-3.22 3.22a.75.75 0 11-1.06-1.06L6.94 8 3.72 4.78a.75.75 0 010-1.06z"></path></svg></button>
 </div>
-<!-- Commit Details Section -->
-<div style="margin-bottom: 12px; padding: 8px; background-color: white; border: 1px solid #d0d7de; border-radius: 4px;">
-<div style="font-weight: 600; margin-bottom: 6px; font-size: 13px;">Commit Message:</div>
-<div style="font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace; font-size: 12px; color: #24292f; white-space: pre-wrap; margin-bottom: 8px;">{{ full_msg | e }}</div>
-<div style="font-size: 12px; color: #57606a; margin-top: 6px;">
-<span style="color: #1a7f37; font-weight: 500;">+{{ insertions }}</span>
-<span style="color: #cf222e; font-weight: 500;">-{{ deletions }}</span>
-<span style="margin-left: 8px;">{{ files_changed }} file(s) changed</span>
-</div>
-<details style="margin-top: 8px;">
-{{ summary_with_toggle('Show changed files (' ~ changed_files|length ~ ')', 'style="cursor: pointer; color: #0969da; font-size: 12px;"') }}
-<div class="details-body">
-<div style="margin-top: 4px; font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace; font-size: 11px;">
-{% for file in changed_files %}
-<div style="padding: 2px 0;">{{ file }}</div>
-{% endfor %}
-</div>
-</div>
-</details>
-</div>
-
-{# GitLab Container Registry Section #}
-{% if gitlab_imgs %}
-<div style="margin-bottom: 12px; padding: 8px; background-color: white; border: 1px solid #d0d7de; border-radius: 4px;">
-<div style="font-weight: 600; margin-bottom: 4px; font-size: 13px;">GitLab Container Registry (Runtime Images): <a href="https://gitlab-master.nvidia.com/dl/ai-dynamo/dynamo/container_registry/{{ gitlab_imgs[0].registry_id }}" target="_blank" style="color: #fc6d26; text-decoration: none; font-weight: 600; font-size: 12px;" title="View all images in GitLab Container Registry">🦊 View Registry</a></div>
-<table style="width: 100%; border: none; background-color: white; border-collapse: collapse;">
-<thead>
-<tr>
-<th style="width: 35%; padding: 3px 6px; border: none;">Image Name:Tag</th>
-<th style="width: 10%; padding: 3px 6px; border: none;">pull runtime</th>
-{# TODO: Add back "make localdev" column later #}
-{# {% if gitlab_imgs|selectattr('arch', 'equalto', 'amd64')|selectattr('framework', 'in', ['trtllm', 'vllm'])|list|length > 0 %}<th style="width: 10%; padding: 3px 6px; border: none;">make localdev</th>{% endif %} #}
-<th style="width: 10%; padding: 3px 6px; border: none;">Build ID</th>
-<th style="width: 8%; padding: 3px 6px; border: none;">Size</th>
-<th style="width: 27%; padding: 3px 6px; border: none;">Created (PDT)</th>
-</tr>
-</thead>
-{# Macro to generate docker pull, wget Dockerfile, and build command (multi-line format with early stop on error)
-   Example output:
-   (BASE_IMAGE=gitlab-master.nvidia.com:5005/dl/ai-dynamo/dynamo:2f18b23ee7163df21f20e872b83ada4226fbf851-38897884-vllm-amd64 && \
-   docker pull ${BASE_IMAGE} && \
-   wget http://keivenc-linux/nvidia/dynamo-utils/container/Dockerfile.runtime_localdev_venv -O /tmp/Dockerfile.runtime_localdev_venv && \
-   docker build -f /tmp/Dockerfile.runtime_localdev_venv --build-arg BASE_IMAGE=${BASE_IMAGE} --build-arg USER_UID=$(id -u) --build-arg USER_GID=$(id -g) -t dynamo:2f18b23e-vllm-local-dev /tmp && \
-   echo 'Build SUCCESS! Run with: container/run.sh --image dynamo:2f18b23e-vllm-local-dev --mount-workspace -it ...')
-   Note: sha_short is accessed from outer scope (commit loop)
-   Note: sglang uses Dockerfile.runtime_localdev_system, vllm/trtllm use Dockerfile.runtime_localdev_venv
-#}
-{% macro docker_pull_tag_cmd(img, sha_short) -%}
-{%- set local_tag = "dynamo:" ~ sha_short ~ "-" ~ img.framework ~ "-local-dev" -%}
-{%- if img.framework|upper == "SGLANG" -%}
-{%- set dockerfile_name = "Dockerfile.runtime_localdev_system" -%}
-{%- else -%}
-{%- set dockerfile_name = "Dockerfile.runtime_localdev_venv" -%}
-{%- endif -%}
-{%- set dockerfile_url = "http://keivenc-linux/nvidia/dynamo-utils/container/" ~ dockerfile_name -%}
-{%- set dockerfile_path = "/tmp/" ~ dockerfile_name -%}
-(BASE_IMAGE={{ img.location }} && \
-docker pull ${BASE_IMAGE} && \
-wget {{ dockerfile_url }} -O {{ dockerfile_path }} && \
-docker build -f {{ dockerfile_path }} --build-arg BASE_IMAGE=${BASE_IMAGE} --build-arg USER_UID=$(id -u) --build-arg USER_GID=$(id -g) -t {{ local_tag }} /tmp && \
-echo 'Build SUCCESS! Run with: container/run.sh --image {{ local_tag }} --mount-workspace -it ...')
-{%- endmacro %}
-
-<tbody>
-{% for img in gitlab_imgs %}
-{%- set arch_label = "[x86]" if img.arch == "amd64" else "[ARM]" -%}
-{%- set display_tag = arch_label ~ " " ~ img.tag -%}
-{%- set image_id = img.pipeline_id[:12] if img.pipeline_id|length >= 12 else img.pipeline_id -%}
-<tr>
-<td style="font-family: monospace; font-size: 11px; padding: 2px 6px; border: none; max-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="{{ img.tag }}
-Pipeline: {{ img.pipeline_id }}
-Framework: {{ img.framework }}">{{ display_tag }}</td>
-<td style="font-size: 11px; padding: 2px 6px; border: none; white-space: nowrap;"><button data-clipboard-text="docker pull {{ img.location }}" onclick="copyFromClipboardAttr(this)" style="padding: 4px 6px; font-size: 11px; background-color: transparent; color: #57606a; border: 1px solid #d0d7de; border-radius: 6px; cursor: pointer; display: inline-flex; align-items: center; vertical-align: middle;" title="Click to copy docker pull command for runtime image" onmouseover="this.style.backgroundColor='#f3f4f6'; this.style.borderColor='#8c959f';" onmouseout="this.style.backgroundColor='transparent'; this.style.borderColor='#d0d7de';"><svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" style="display: inline-block;">{% include "copy_icon_paths.svg" %}</svg></button><span style="margin-left: 6px;">copy command</span></td>
-{# TODO: Add back "make localdev" column later #}
-{# {% if gitlab_imgs|selectattr('arch', 'equalto', 'amd64')|selectattr('framework', 'in', ['trtllm', 'vllm'])|list|length > 0 %}<td style="font-size: 11px; padding: 2px 6px; border: none; white-space: nowrap;">{% if img.arch == "amd64" and (img.framework|upper == "TRTLLM" or img.framework|upper == "VLLM") %}<button data-clipboard-text="{{ docker_pull_tag_cmd(img, sha_short) }}" onclick="copyFromClipboardAttr(this)" style="padding: 4px 6px; font-size: 11px; background-color: transparent; color: #57606a; border: 1px solid #d0d7de; border-radius: 6px; cursor: pointer; display: inline-flex; align-items: center; vertical-align: middle;" title="Click to copy command for creating local-dev image: Pulls the runtime image, downloads Dockerfile, builds a local-dev container with your UID/GID, and shows how to run it" onmouseover="this.style.backgroundColor='#f3f4f6'; this.style.borderColor='#8c959f';" onmouseout="this.style.backgroundColor='transparent'; this.style.borderColor='#d0d7de';"><svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" style="display: inline-block;">{% include "copy_icon_paths.svg" %}</svg></button><span style="margin-left: 6px;">copy command</span>{% endif %}</td>{% endif %} #}
-<td style="font-family: monospace; font-size: 11px; padding: 2px 6px; border: none;"><a href="https://gitlab-master.nvidia.com/dl/ai-dynamo/dynamo/-/pipelines/{{ img.pipeline_id }}" target="_blank" style="color: #0969da;" title="View pipeline {{ img.pipeline_id }}">{{ image_id }}</a></td>
-<td style="font-size: 11px; padding: 2px 6px; border: none;">{{ img.size_display }}</td>
-<td style="font-size: 11px; padding: 2px 6px; border: none;">{{ img.created_display }}</td>
-</tr>
-{% endfor %}
-</tbody>
-</table>
-</div>
-{% endif %}
-
 <!-- Docker Images Section -->
 {% if images %}
 <div style="margin-bottom: 12px; padding: 8px; background-color: white; border: 1px solid #d0d7de; border-radius: 4px;">

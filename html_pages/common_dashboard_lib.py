@@ -459,6 +459,7 @@ def run_all_passes(
     grouped_nodes = move_jobs_by_prefix_pass(grouped_nodes, prefix="deploy-", parent_name="deploy")
     grouped_nodes = move_jobs_by_prefix_pass(grouped_nodes, prefix="build-test", parent_name="dynamo-status-check")
     grouped_nodes = move_jobs_by_prefix_pass(grouped_nodes, prefix="Post-Merge CI / ", parent_name="post-merge-ci", parent_label="Post-Merge CI", create_if_has_children=True)
+    grouped_nodes = move_jobs_by_prefix_pass(grouped_nodes, prefix="Nightly CI / ", parent_name="nightly-ci", parent_label="Nightly CI", create_if_has_children=True)
     
     # Group fast jobs under _fast parent
     _FAST = "_fast"
@@ -2153,7 +2154,7 @@ def status_icon_html(
             # REQUIRED: filled red circle X (SVG).
             return _circle_x_fill_svg(color=COLOR_RED)
         # Optional failure: small X.
-            return (
+        return (
             f'<span style="color: {COLOR_RED}; display: inline-flex; vertical-align: text-bottom;">'
             f'{_octicon_svg(path_d="M3.72 3.72a.75.75 0 011.06 0L8 6.94l3.22-3.22a.75.75 0 111.06 1.06L9.06 8l3.22 3.22a.75.75 0 11-1.06 1.06L8 9.06l-3.22 3.22a.75.75 0 11-1.06-1.06L6.94 8 3.72 4.78a.75.75 0 010-1.06z", name="octicon-x")}'
             "</span>"
