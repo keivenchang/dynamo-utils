@@ -646,14 +646,17 @@ def run_all_passes(
     # Group fast jobs under _fast parent
     _FAST = "_fast"
     _FAST_LABEL = "Jobs that tend to run fast"
-    grouped_nodes = move_jobs_by_prefix_pass(grouped_nodes, prefix="clean", parent_name=_FAST, parent_label=_FAST_LABEL, create_if_has_children=True)
-    grouped_nodes = move_jobs_by_prefix_pass(grouped_nodes, prefix="clippy", parent_name=_FAST, parent_label=_FAST_LABEL, create_if_has_children=True)
-    grouped_nodes = move_jobs_by_prefix_pass(grouped_nodes, prefix="trigger-ci", parent_name=_FAST, parent_label=_FAST_LABEL, create_if_has_children=True)
-    grouped_nodes = move_jobs_by_prefix_pass(grouped_nodes, prefix="lychee", parent_name=_FAST, parent_label=_FAST_LABEL, create_if_has_children=True)
-    grouped_nodes = move_jobs_by_prefix_pass(grouped_nodes, prefix="event_file", parent_name=_FAST, parent_label=_FAST_LABEL, create_if_has_children=True)
     grouped_nodes = move_jobs_by_prefix_pass(grouped_nodes, prefix="broken-links-check", parent_name=_FAST, parent_label=_FAST_LABEL, create_if_has_children=True)
     grouped_nodes = move_jobs_by_prefix_pass(grouped_nodes, prefix="build-docs", parent_name=_FAST, parent_label=_FAST_LABEL, create_if_has_children=True)
     grouped_nodes = move_jobs_by_prefix_pass(grouped_nodes, prefix="changed-files", parent_name=_FAST, parent_label=_FAST_LABEL, create_if_has_children=True)
+    grouped_nodes = move_jobs_by_prefix_pass(grouped_nodes, prefix="clean", parent_name=_FAST, parent_label=_FAST_LABEL, create_if_has_children=True)
+    grouped_nodes = move_jobs_by_prefix_pass(grouped_nodes, prefix="clippy", parent_name=_FAST, parent_label=_FAST_LABEL, create_if_has_children=True)
+    grouped_nodes = move_jobs_by_prefix_pass(grouped_nodes, prefix="CodeRabbit", parent_name=_FAST, parent_label=_FAST_LABEL, create_if_has_children=True)
+    grouped_nodes = move_jobs_by_prefix_pass(grouped_nodes, prefix="dco-comment", parent_name=_FAST, parent_label=_FAST_LABEL, create_if_has_children=True)
+    grouped_nodes = move_jobs_by_prefix_pass(grouped_nodes, prefix="event_file", parent_name=_FAST, parent_label=_FAST_LABEL, create_if_has_children=True)
+    grouped_nodes = move_jobs_by_prefix_pass(grouped_nodes, prefix="label", parent_name=_FAST, parent_label=_FAST_LABEL, create_if_has_children=True)
+    grouped_nodes = move_jobs_by_prefix_pass(grouped_nodes, prefix="lychee", parent_name=_FAST, parent_label=_FAST_LABEL, create_if_has_children=True)
+    grouped_nodes = move_jobs_by_prefix_pass(grouped_nodes, prefix="trigger-ci", parent_name=_FAST, parent_label=_FAST_LABEL, create_if_has_children=True)
     
     # PASS 5: Sort nodes by name
     sorted_nodes = sort_nodes_by_name_pass(grouped_nodes)
