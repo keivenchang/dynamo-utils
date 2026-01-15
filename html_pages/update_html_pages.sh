@@ -15,7 +15,7 @@
 #                          Useful to keep cron runs predictable; defaults remain script-side.
 #   DYNAMO_UTILS_TRACE  - If set (non-empty), enable shell tracing (set -x). Off by default to avoid noisy logs / secrets.
 #   DYNAMO_UTILS_TESTING - (deprecated) If set, behave like --fast-debug (write debug.html and fewer commits).
-#   MAX_COMMITS         - If set, cap commits for commit-history (default: 200; overridden by --fast/--fast-debug).
+#   MAX_COMMITS         - If set, cap commits for commit-history (default: 200; overridden by --fast-debug).
 #   DYNAMO_UTILS_CACHE_DIR - If set, overrides ~/.cache/dynamo-utils for the resource report DB lookup.
 #   RESOURCE_DB         - If set, explicit SQLite path for resource report (default: $DYNAMO_UTILS_CACHE_DIR/resource_monitor.sqlite).
 #
@@ -31,8 +31,7 @@
 #   --show-commit-history   Update the commit history dashboard ($NVIDIA_HOME/dynamo_latest/index.html)
 #   --show-local-resources  Update the resource report ($NVIDIA_HOME/resource_report.html)
 #   --show-remote-branches  Update remote PR dashboards for selected GitHub users (IDENTICAL UI to local branches)
-#   --fast-debug            Write debug.html outputs (for all tasks that write HTML) and run a smaller/faster commit history (10 commits)
-#   --fast                  Alias for --fast-debug
+#   --fast-debug            Faster runs: outputs to debug.html instead of index.html, uses smaller commit window (10 commits), shorter resource window
 #   --dry-run               Print what would be executed without actually running commands
 #   --run-ignore-lock        Bypass the /tmp lock (no flock). Useful for manual runs when a stale lock exists.
 #
@@ -67,7 +66,7 @@ NVIDIA_HOME="${NVIDIA_HOME:-$(dirname "$UTILS_DIR")}"
 
 LOGS_DIR="$NVIDIA_HOME/logs"
 FAST_DEBUG="${FAST_DEBUG:-false}"
-# Back-compat: treat env var like --fast-debug/--fast.
+# Back-compat: treat env var like --fast-debug.
 if [ -n "${DYNAMO_UTILS_TESTING:-}" ]; then
     FAST_DEBUG=true
 fi
@@ -79,14 +78,13 @@ Usage: update_html_pages.sh [FLAGS]
 If no args are provided, ALL tasks run.
 
 Flags:
-  --show-local-branches     Write: $NVIDIA_HOME/index.html (or debug.html in --fast/--fast-debug)
-  --show-commit-history     Write: $NVIDIA_HOME/dynamo_latest/index.html (or debug.html in --fast/--fast-debug)
-  --show-local-resources    Write: $NVIDIA_HOME/resource_report.html (or resource_report_debug.html in --fast/--fast-debug)
-  --show-remote-branches    Write: $HOME/dynamo/speedoflight/dynamo/users/<user>/index.html (or debug.html in --fast/--fast-debug)
+  --show-local-branches     Write: $NVIDIA_HOME/index.html (or debug.html in --fast-debug)
+  --show-commit-history     Write: $NVIDIA_HOME/dynamo_latest/index.html (or debug.html in --fast-debug)
+  --show-local-resources    Write: $NVIDIA_HOME/resource_report.html (or resource_report_debug.html in --fast-debug)
+  --show-remote-branches    Write: $HOME/dynamo/speedoflight/dynamo/users/<user>/index.html (or debug.html in --fast-debug)
   --show-remote-history     Alias for --show-remote-branches (back-compat)
 
-  --fast-debug              Faster run: uses debug.html outputs, commit-history max_commits=10, resource window ~2h
-  --fast                    Alias for --fast-debug
+  --fast-debug              Faster runs: outputs to debug.html instead of index.html, uses smaller commit window (10 commits), shorter resource window
 
   --dry-run                 Print what would be executed without actually running commands
   --run-ignore-lock         Bypass the /tmp lock (no flock). Useful for manual runs when a stale lock exists.
@@ -155,7 +153,7 @@ if [ "$ANY_FLAG" = false ]; then
     RUN_SHOW_REMOTE_BRANCHES=true
 fi
 
-# Compute branches output path after parsing flags so `--fast/--fast-debug` is honored.
+# Compute branches output path after parsing flags so `--fast-debug` is honored.
 BRANCHES_BASENAME="${BRANCHES_BASENAME:-index.html}"
 if [ "$FAST_DEBUG" = true ]; then
     BRANCHES_BASENAME="debug.html"
