@@ -128,3 +128,44 @@
     cursor: default;  /* Not clickable */
     pointer-events: none;
 }
+
+/* -------------------------------------------------------------------------- */
+/* Summary toggles (Legend & Help, Statistics, etc.)                           */
+/* -------------------------------------------------------------------------- */
+
+/* Hide the native disclosure marker when we provide our own triangle. */
+summary.summary-with-toggle {
+    list-style: none;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+summary.summary-with-toggle::marker,
+summary.summary-with-toggle::-webkit-details-marker {
+    display: none !important;
+}
+
+summary.summary-with-toggle::-webkit-details-marker {
+    content: none !important;
+}
+
+/* Use the same blue-circle triangle scheme for <details><summary> sections. */
+summary.summary-with-toggle .triangle-toggle.summary-toggle {
+    margin-left: 0 !important;
+    margin-right: 6px !important;
+    transition: transform 120ms ease, background-color 120ms ease, color 120ms ease;
+    transform: rotate(0deg);
+}
+
+summary.summary-with-toggle .summary-right {
+    margin-left: auto;
+    display: inline-flex;
+    align-items: center;
+}
+
+details[open] > summary.summary-with-toggle .triangle-toggle.summary-toggle {
+    background: #0969da;
+    color: #ffffff;
+    transform: rotate(90deg); /* ▶ -> ▼ effect without swapping glyph */
+}

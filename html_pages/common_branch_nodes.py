@@ -617,6 +617,7 @@ class CIJobNode(BranchNode):
         raw_log_href: str = "",  # Pre-materialized raw log href (relative path)
         raw_log_size_bytes: int = 0,  # Pre-materialized raw log size
         error_snippet_text: str = "",  # Pre-extracted error snippet
+        error_snippet_categories: Optional[List[str]] = None,  # Error categories (e.g., pytest-error, python-error)
         short_job_name: str = "",  # Short job name from YAML (e.g., "build-test")
         yaml_dependencies: Optional[List[str]] = None,  # List of job names this depends on (needs:)
     ):
@@ -632,6 +633,7 @@ class CIJobNode(BranchNode):
         self.raw_log_href = str(raw_log_href or "")
         self.raw_log_size_bytes = int(raw_log_size_bytes or 0)
         self.error_snippet_text = str(error_snippet_text or "")
+        self.error_snippet_categories = list(error_snippet_categories or [])
         self.short_job_name = str(short_job_name or "")
         self.yaml_dependencies = list(yaml_dependencies or [])
     
@@ -651,6 +653,7 @@ class CIJobNode(BranchNode):
             raw_log_href=self.raw_log_href,
             raw_log_size_bytes=self.raw_log_size_bytes,
             error_snippet_text=self.error_snippet_text,
+            error_snippet_categories=self.error_snippet_categories,
             short_job_name=self.short_job_name,
             yaml_dependencies=self.yaml_dependencies,
         )

@@ -1,3 +1,4 @@
+{%- from "macros.j2" import summary_with_toggle -%}
 {% extends "common_dashboard.j2" %}
 {# Auto-reload behavior:
    - common_dashboard.j2 polls the current file and reloads only if it changed.
@@ -792,17 +793,7 @@ window.__dashboardOnReadyQueue.push(function() {
      Match the branches dashboard legend style (no border/box). -->
 <div class="legend" style="margin-bottom: 0px; padding: 8px; background-color: #f6f8fa;">
 <details style="margin-top: 0;" data-url-state="1" data-url-key="legend">
-<summary>
-  <span style="display: inline-flex; align-items: center; justify-content: space-between; gap: 10px; width: calc(100% - 18px);">
-    <span style="flex: 1 1 auto;">Legend &amp; Help</span>
-    <button type="button"
-            onclick="event.preventDefault(); event.stopPropagation(); try { DashboardUrlState.resetView({reload: false}); } catch (e) {}"
-            style="flex: 0 0 auto; padding: 2px 8px; font-size: 11px; line-height: 1.2; background: transparent; color: #0969da; border: 1px solid #0969da; border-radius: 999px; cursor: pointer;"
-            title="Reset view state (clears URL params and restores defaults)">
-      Reset view
-    </button>
-  </span>
-</summary>
+{{ summary_with_toggle('Legend &amp; Help', right_html='<button type="button" onclick="event.preventDefault(); event.stopPropagation(); try { DashboardUrlState.resetView({reload: false}); } catch (e) {}" style="padding: 2px 8px; font-size: 11px; line-height: 1.2; background: transparent; color: #0969da; border: 1px solid #0969da; border-radius: 999px; cursor: pointer;" title="Reset view state (clears URL params and restores defaults)">Reset view</button>') }}
 <div style="margin-top: 10px; font-size: 12px; line-height: 1.55;">
 <div style="margin-bottom: 12px;">
 <div style="font-weight: 600; margin-bottom: 6px; color: #24292f;">GitHub Status:</div>
@@ -1257,7 +1248,7 @@ window.__dashboardOnReadyQueue.push(function() {
 <span style="margin-left: 8px;">{{ files_changed }} file(s) changed</span>
 </div>
 <details style="margin-top: 8px;">
-<summary style="cursor: pointer; color: #0969da; font-size: 12px;">Show changed files ({{ changed_files|length }})</summary>
+{{ summary_with_toggle('Show changed files (' ~ changed_files|length ~ ')', 'style="cursor: pointer; color: #0969da; font-size: 12px;"') }}
 <div style="margin-top: 4px; font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace; font-size: 11px;">
 {% for file in changed_files %}
 <div style="padding: 2px 0;">{{ file }}</div>

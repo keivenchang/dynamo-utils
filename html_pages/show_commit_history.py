@@ -324,15 +324,19 @@ class CommitHistoryGenerator:
         filename = str(raw_log_path.name or raw_log_path)
         return f"{sha}:{filename}"
 
-    def _snippet_from_cached_raw_log(self, raw_log_path: Path) -> str:
-        """Return an error snippet for a raw log file, using the persistent cache when possible."""
+    def _snippet_from_cached_raw_log(self, raw_log_path: Path) -> tuple[str, list[str]]:
+        """Return an error snippet and categories for a raw log file, using the persistent cache when possible.
+        
+        Returns:
+            (snippet_text, categories): snippet without "Categories:" prefix, and list of category strings
+        """
         t0 = time.monotonic()
         try:
             p = Path(raw_log_path)
             if not p.exists() or not p.is_file():
-                return ""
+                return ("", [])
         except Exception:
-            return ""
+            return ("", [])
 
         # Note: Cache is loaded once at the start of show_commit_history(), not per-call
         data = self._snippet_cache_data if isinstance(self._snippet_cache_data, dict) else {}
@@ -368,11 +372,12 @@ class CommitHistoryGenerator:
                     self._snippet_cache_debug["reasons"][key] = reason
                 elif cached_mtime == mtime_ns and cached_size == size:
                     sn = str(ent.get("snippet", "") or "")
+                    cats = ent.get("categories", []) or []
                     if sn:
                         self._perf_i["snippet.cache.hit"] = int(self._perf_i.get("snippet.cache.hit", 0) or 0) + 1
                         self._perf["snippet.total_secs"] = float(self._perf.get("snippet.total_secs", 0.0) or 0.0) + max(0.0, time.monotonic() - t0)
                         self._snippet_cache_debug["hits"].append(key)
-                        return sn
+                        return (sn, cats)
                 else:
                     # Cache entry exists but is stale
                     reason = f"stale (cached_mtime={cached_mtime} != {mtime_ns} or cached_size={cached_size} != {size})"
@@ -423,7 +428,7 @@ class CommitHistoryGenerator:
         except Exception:
             pass
         self._perf["snippet.total_s"] = float(self._perf.get("snippet.total_s", 0.0) or 0.0) + max(0.0, time.monotonic() - t0)
-        return str(snippet or "")
+        return (str(snippet_body or ""), categories)
 
     def _setup_logger(self) -> logging.Logger:
         """Setup logging configuration"""
@@ -1603,19 +1608,20 @@ class CommitHistoryGenerator:
 
             # Flat view: show the exact check-run list (like GitHub Checks UI / our Details list),
             # without workflow YAML parsing or run-class bucketing.
-            snippet_cache: Dict[str, str] = {}
+            snippet_cache: Dict[str, tuple[str, list[str]]] = {}
 
-            def snippet_for_raw_href(raw_href: str) -> str:
+            def snippet_for_raw_href(raw_href: str) -> tuple[str, list[str]]:
+                """Returns (snippet_text, categories) tuple."""
                 if not raw_href:
-                    return ""
+                    return ("", [])
                 if raw_href in snippet_cache:
                     return snippet_cache[raw_href]
                 try:
-                    snippet = self._snippet_from_cached_raw_log(Path(self.repo_path) / raw_href)
+                    result = self._snippet_from_cached_raw_log(Path(self.repo_path) / raw_href)
                 except Exception:
-                    snippet = ""
-                snippet_cache[raw_href] = snippet
-                return snippet
+                    result = ("", [])
+                snippet_cache[raw_href] = result
+                return result
 
             name_counts: Dict[str, int] = {}
             for cr0 in check_runs:
@@ -1644,6 +1650,7 @@ class CommitHistoryGenerator:
                 raw_href = ""
                 raw_size = 0
                 snippet = ""
+                snippet_categories: list[str] = []
                 if st == "failure" and str(cr.get("status", "") or "").lower() == "completed":
                     allow_fetch = bool(allow_raw_logs) and int(raw_log_prefetch_budget.get("n", 0) or 0) > 0
                     try:
@@ -1670,7 +1677,7 @@ class CommitHistoryGenerator:
                         raw_size = int((Path(self.repo_path) / raw_href).stat().st_size)
                     except Exception:
                         raw_size = 0
-                    snippet = snippet_for_raw_href(raw_href) if raw_href else ""
+                    snippet, snippet_categories = snippet_for_raw_href(raw_href) if raw_href else ("", [])
 
                 # Disambiguate name if there are duplicates (adds [job ID] suffix)
                 disambiguated_name = disambiguate_check_run_name(name, url, name_counts=name_counts)
@@ -1690,6 +1697,7 @@ class CommitHistoryGenerator:
                     raw_log_href=raw_href,
                     raw_log_size_bytes=raw_size,
                     error_snippet_text=snippet,
+                    error_snippet_categories=snippet_categories,
                 )
                 # Set core_job_name for YAML matching (same pattern as build_ci_nodes_from_pr)
                 node.core_job_name = name  # Original name without disambiguation

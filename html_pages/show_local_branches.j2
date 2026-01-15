@@ -1,3 +1,4 @@
+{%- from "macros.j2" import summary_with_toggle -%}
 {% extends "common_dashboard.j2" %}
 {% set refresh_seconds = 300 %}
 {% set refresh_check_interval_ms = 15000 %}
@@ -94,17 +95,7 @@
 <!-- Legend/Help Section (keep consistent with commit history) -->
   <div class="container legend" style="margin-bottom: 0px; padding: 12px; background-color: #f6f8fa;">
     <details data-url-state="1" data-url-key="legend">
-      <summary>
-        <span style="display: inline-flex; align-items: center; justify-content: space-between; gap: 10px; width: calc(100% - 18px);">
-          <span style="flex: 1 1 auto;">Legend &amp; Help</span>
-          <button type="button"
-                  onclick="event.preventDefault(); event.stopPropagation(); try { DashboardUrlState.resetView({reload: false}); } catch (e) {}"
-                  style="flex: 0 0 auto; padding: 2px 8px; font-size: 11px; line-height: 1.2; background: transparent; color: #57606a; border: 1px solid #d0d7de; border-radius: 999px; cursor: pointer;"
-                  title="Reset view (clears URL params and restores defaults)">
-            Reset view
-          </button>
-        </span>
-      </summary>
+      {{ summary_with_toggle('Legend &amp; Help', right_html='<button type="button" onclick="event.preventDefault(); event.stopPropagation(); try { DashboardUrlState.resetView({reload: false}); } catch (e) {}" style="padding: 2px 8px; font-size: 11px; line-height: 1.2; background: transparent; color: #57606a; border: 1px solid #d0d7de; border-radius: 999px; cursor: pointer;" title="Reset view (clears URL params and restores defaults)">Reset view</button>') }}
       <div style="margin-top: 10px; font-size: 12px; line-height: 1.55;">
         <div style="margin-bottom: 12px;">
           <div style="font-weight: 600; margin-bottom: 6px; color: #24292f;">CI Status Symbols:</div>

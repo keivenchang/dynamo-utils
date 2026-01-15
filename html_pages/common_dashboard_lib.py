@@ -2490,6 +2490,7 @@ def check_line_html(
     raw_log_href: str = "",
     raw_log_size_bytes: int = 0,
     error_snippet_text: str = "",
+    error_snippet_categories: Optional[List[str]] = None,
     required_failure: bool = False,
     warning_present: bool = False,
     short_job_name: str = "",  # Short YAML job name (e.g., "build-test")
@@ -2641,7 +2642,7 @@ def check_line_html(
             snippet_key = f"s.{sha7}.{suffix}" if sha7 else f"s.{suffix}"
         
         # Show category pills and command pill with snippet key for click handling
-        cats = _snippet_categories(snippet_text)
+        cats = error_snippet_categories if error_snippet_categories else _snippet_categories(snippet_text)
         for c in cats[:3]:
             links += _tag_pill_html(text=c, monospace=False, kind="category", snippet_key=snippet_key)
         cmd = _snippet_first_command(snippet_text)

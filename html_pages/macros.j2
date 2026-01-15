@@ -1,0 +1,6 @@
+{# Shared Jinja2 macros for all dashboard templates #}
+
+{# Macro for consistent summary-with-toggle (blue circle triangle) across all dashboards #}
+{%- macro summary_with_toggle(content, extra_attrs='', right_html='') -%}
+<summary class="summary-with-toggle"{{ ' ' + extra_attrs if extra_attrs else '' }}><span class="triangle-toggle summary-toggle">▶</span><span class="summary-left">{{ content|safe }}</span>{% if right_html %}<span class="summary-right">{{ right_html|safe }}</span>{% endif %}</summary>
+{%- endmacro -%}

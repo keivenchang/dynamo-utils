@@ -1,3 +1,4 @@
+{%- from "macros.j2" import summary_with_toggle -%}
 <!DOCTYPE html>
 <html>
 <head>
@@ -81,6 +82,10 @@
       font-size: 12px;
       color: #57606a;
     }
+    .footer details summary::marker,
+    .footer details summary::-webkit-details-marker {
+      display: none !important;
+    }
     .footer details summary:hover {
       color: #0969da;
     }
@@ -96,6 +101,10 @@
       font-weight: 600;
       font-size: 12px;
       color: #57606a;
+    }
+    .legend details summary::marker,
+    .legend details summary::-webkit-details-marker {
+      display: none !important;
     }
     .legend details {
       color: #57606a;
@@ -243,7 +252,7 @@
   {% if page_stats %}
   <div class="footer">
     <details data-url-state="1" data-url-key="stats">
-      <summary>Statistics</summary>
+      {{ summary_with_toggle('Statistics') }}
       <table class="stats-table">
         {% for k, v in page_stats %}
         <tr>
