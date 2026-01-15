@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import os
 import sqlite3
 import statistics
@@ -24,6 +25,8 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 # Shared dashboard runtime helper (atomic output writes)
 from common_dashboard_runtime import atomic_write_text
+
+logger = logging.getLogger(__name__)
 
 
 def _json(obj: Any) -> str:
@@ -3089,14 +3092,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 cutoff = end_ts_tmp - pd * 86400.0
                 deleted = _prune_db_samples_older_than(con, cutoff_ts_unix=cutoff)
                 if deleted:
-                    print(f"Pruned {deleted} samples older than {pd:g} days.")
+                    logger.info("Pruned %d samples older than %s days.", int(deleted), str(pd))
 
         if bool(getattr(args, "db_checkpoint_truncate", False)):
             rows = _wal_checkpoint_truncate(con)
             if rows:
                 # (busy, log, checkpointed)
                 b, l, c = rows[0]
-                print(f"wal_checkpoint(TRUNCATE): busy={b} log={l} checkpointed={c}")
+                logger.info("wal_checkpoint(TRUNCATE): busy=%s log=%s checkpointed=%s", str(b), str(l), str(c))
 
         start_ts, end_ts = _get_time_window(con, days=days)
 
@@ -3300,13 +3303,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         }
 
         atomic_write_text(out_path, _build_html(payload), encoding="utf-8")
-        print(f"Wrote: {out_path}")
+        logger.info("Wrote: %s", str(out_path))
 
         if bool(getattr(args, "db_vacuum", False)):
             # Run VACUUM after writing output so we don't lock ourselves out while generating.
             # Best-effort only: skip if another process holds the DB.
             ok = _vacuum_best_effort(db_path)
-            print(f"VACUUM: {'ok' if ok else 'skipped (db busy)'}")
+            logger.info("VACUUM: %s", ("ok" if ok else "skipped (db busy)"))
         return 0
     finally:
         try:

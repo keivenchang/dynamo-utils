@@ -1942,7 +1942,7 @@ def step_window_snippet_from_cached_raw_log(
 
     try:
         # Shared library (dependency-light): `dynamo-utils/ci_log_errors/`
-        from ci_log_errors import extract_error_snippet_from_text  # local import (avoid circulars)
+        from ci_log_errors import snippet as ci_snippet  # local import (avoid circulars)
     except Exception:
         return ""
 
@@ -1969,7 +1969,7 @@ def step_window_snippet_from_cached_raw_log(
         kept.append(ln)
     if not kept:
         return ""
-    return extract_error_snippet_from_text("\n".join(kept))
+    return ci_snippet.extract_error_snippet_from_text("\n".join(kept))
 
 def required_badge_html(*, is_required: bool, status_norm: str) -> str:
     """Render a [REQUIRED] badge with shared semantics."""

@@ -35,6 +35,7 @@ Complete Implementations (all in this file):
 from __future__ import annotations
 
 import html as html_module
+import logging
 import re
 import subprocess
 import sys
@@ -43,6 +44,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 from zoneinfo import ZoneInfo
+
+logger = logging.getLogger(__name__)
 
 # Ensure we can import sibling utilities (common.py) from the parent dynamo-utils directory
 _THIS_DIR = Path(__file__).resolve().parent
@@ -270,9 +273,9 @@ def mock_get_open_pr_info_for_author(
 
 # Log/snippet helpers (shared library: `dynamo-utils/ci_log_errors/`)
 try:
-    from ci_log_errors import extract_error_snippet_from_log_file
+    from ci_log_errors import snippet as ci_snippet
 except ImportError:
-    extract_error_snippet_from_log_file = None  # type: ignore[assignment]
+    ci_snippet = None  # type: ignore[assignment]
 
 # Jinja2 is optional (keep CLI usable in minimal envs).
 try:
@@ -1378,7 +1381,7 @@ def build_ci_nodes_from_pr(
             except Exception:
                 raw_size = 0
             try:
-                snippet = extract_error_snippet_from_log_file(base_dir / raw_href)
+                snippet = ci_snippet.extract_error_snippet_from_log_file(base_dir / raw_href) if ci_snippet else ""
             except Exception:
                 snippet = ""
         elif st == "failure":
@@ -1443,8 +1446,6 @@ def build_ci_nodes_from_pr(
         node.core_job_name = nm  # This is the original "name" from the check row
         
         # DEBUG: Verify it was set
-        import logging
-        logger = logging.getLogger(__name__)
         logger.debug(f"[build_ci_nodes_from_pr] Set core_job_name='{nm}' on node with job_id='{full_job_name[:50]}'")
 
 
@@ -1956,11 +1957,11 @@ class PRStatusNode(BranchNode):
                 # Build CI nodes based on PR number
                 if pr_number >= 100000000:
                     # Mock PR number (>= 100000000) = dummy PR, use mock
-                    print(f"[PRStatusNode] Building mock CI nodes for mock PR #{pr_number}")
+                    logger.info(f"[PRStatusNode] Building mock CI nodes for mock PR #{pr_number}")
                     ci_nodes = mock_build_ci_nodes(pr, repo_root, page_root_dir=page_root_dir)
                 elif pr_number > 0 and gh:
                     # Real PR, use real API
-                    print(f"[PRStatusNode] Building real CI nodes for PR #{pr_number}")
+                    logger.info(f"[PRStatusNode] Building real CI nodes for PR #{pr_number}")
                     ci_nodes = build_ci_nodes_from_pr(
                         pr, gh, repo_root,
                         page_root_dir=page_root_dir,
@@ -1974,11 +1975,9 @@ class PRStatusNode(BranchNode):
                 # Add built CI nodes to sorted_children AND update self.children so compute_summary_from_children() can see them
                 sorted_children = list(ci_nodes)
                 self.children = sorted_children  # Update self.children so the summary computation can access them
-                print(f"[PRStatusNode] Built {len(sorted_children)} CI nodes")
+                logger.info(f"[PRStatusNode] Built {len(sorted_children)} CI nodes")
             except Exception as e:
-                print(f"[PRStatusNode] Error building CI nodes: {e}")
-                import traceback
-                traceback.print_exc()
+                logger.exception(f"[PRStatusNode] Error building CI nodes: {e}")
         
         # Apply centralized CI tree processing pipeline
         # Pass the BranchNode objects directly (not TreeNodeVM yet)
@@ -2001,16 +2000,14 @@ class PRStatusNode(BranchNode):
                 if isinstance(child, BranchNode) and type(child).__name__ not in ('RerunLinkNode', 'ConflictWarningNode', 'BlockedMessageNode')
             ]
             
-            print(f"[PRStatusNode] Passing {len(ci_branch_nodes)} BranchNodes to pipeline")
+            logger.info(f"[PRStatusNode] Passing {len(ci_branch_nodes)} BranchNodes to pipeline")
             
             kids = run_all_passes(
                 ci_nodes=ci_branch_nodes,  # Pass List[BranchNode] directly!
                 repo_root=repo_root,
             )
         except Exception as e:
-            print(f"[PRStatusNode] Error in pipeline: {e}")
-            import traceback
-            traceback.print_exc()
+            logger.exception(f"[PRStatusNode] Error in pipeline: {e}")
             # Fallback: convert children manually
             kids = [child.to_tree_vm() for child in sorted_children if isinstance(child, BranchNode)]
         

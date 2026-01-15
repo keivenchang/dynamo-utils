@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 import sys
@@ -20,6 +21,8 @@ from typing import List, Optional, Pattern
 from . import engine as _engine  # noqa: E402
 
 globals().update(_engine.__dict__)
+
+logger = logging.getLogger(__name__)
 
 # Snippet extraction (text-only; shared by dashboards)
 # =============================================================================
@@ -1565,12 +1568,12 @@ def _audit_snippet_commands(*, logs_root: Path, tail_bytes: int) -> int:
     """
     logs_root = Path(logs_root)
     if not logs_root.exists() or not logs_root.is_dir():
-        print(f"ERROR: --logs-root is not a directory: {logs_root}", file=sys.stderr)
+        logger.error(f"ERROR: --logs-root is not a directory: {logs_root}")
         return 2
 
     files = sorted(logs_root.glob("*.log"))
     if not files:
-        print(f"(no logs found under {logs_root})")
+        logger.info(f"(no logs found under {logs_root})")
         return 0
 
     want_pytest = re.compile(r"\bpytest\b|python\s+-m\s+pytest\b|PYTEST_CMD\s*=", re.IGNORECASE)
@@ -1656,13 +1659,13 @@ def _audit_snippet_commands(*, logs_root: Path, tail_bytes: int) -> int:
                 ok = False
                 missing.append((p.name, "rust-error: no cargo command in prelude"))
 
-    print(f"audit: logs_root={logs_root}")
-    print(f"audit: total_logs={total} relevant(pytest/rust)={relevant} missing={len(missing)}")
+    logger.info(f"audit: logs_root={logs_root}")
+    logger.info(f"audit: total_logs={total} relevant(pytest/rust)={relevant} missing={len(missing)}")
     if missing:
-        print("audit: missing command prelude (first 200):")
+        logger.warning("audit: missing command prelude (first 200):")
         for name, reason in missing[:200]:
-            print(f"- {name}: {reason}")
+            logger.warning(f"- {name}: {reason}")
         if len(missing) > 200:
-            print(f"... and {len(missing) - 200} more")
+            logger.warning(f"... and {len(missing) - 200} more")
         return 1
     return 0

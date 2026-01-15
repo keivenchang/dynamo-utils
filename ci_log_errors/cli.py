@@ -11,12 +11,17 @@ from pathlib import Path
 from typing import Optional, Sequence
 
 import argparse
+import logging
 import sys
 
 from . import engine
+from . import snippet
+
+logger = logging.getLogger(__name__)
 
 
 def _cli(argv: Optional[Sequence[str]] = None) -> int:
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
     # Delegate to the implementation for the heavy lifting.
     parser = argparse.ArgumentParser(
         description="Extract and format a high-signal error snippet from a CI log file.",
@@ -84,14 +89,14 @@ def _cli(argv: Optional[Sequence[str]] = None) -> int:
 
     log_path = Path(args.log_path).expanduser()
     if not log_path.exists():
-        print(f"ERROR: file not found: {log_path}", file=sys.stderr)
+        logger.error(f"ERROR: file not found: {log_path}")
         return 2
     if not log_path.is_file():
-        print(f"ERROR: not a file: {log_path}", file=sys.stderr)
+        logger.error(f"ERROR: not a file: {log_path}")
         return 2
 
     tail_bytes = 0 if args.no_tail else int(args.tail_bytes)
-    snippet = engine.extract_error_snippet_from_log_file(
+    snippet_text = snippet.extract_error_snippet_from_log_file(
         log_path,
         tail_bytes=tail_bytes,
         context_before=int(args.context_before),
@@ -100,11 +105,12 @@ def _cli(argv: Optional[Sequence[str]] = None) -> int:
         max_chars=int(args.max_chars),
     )
 
-    if not (snippet or "").strip():
-        print("(no snippet found)")
+    if not (snippet_text or "").strip():
+        logger.info("(no snippet found)")
         return 0
 
-    print(engine.render_error_snippet_html(snippet) if args.html else snippet)
+    out = engine.render_error_snippet_html(snippet_text) if args.html else snippet_text
+    sys.stdout.write(str(out or "") + ("\n" if not str(out or "").endswith("\n") else ""))
     return 0
 
 

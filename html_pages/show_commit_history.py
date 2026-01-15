@@ -64,7 +64,7 @@ from common_dashboard_runtime import (
 )
 
 # Log/snippet helpers (shared library: `dynamo-utils/ci_log_errors/`)
-from ci_log_errors import extract_error_snippet_from_log_file
+from ci_log_errors import snippet as ci_snippet
 
 # Import utilities from common module
 import common
@@ -395,7 +395,7 @@ class CommitHistoryGenerator:
         self._perf_i["snippet.cache.miss"] = int(self._perf_i.get("snippet.cache.miss", 0) or 0) + 1
         t1 = time.monotonic()
         try:
-            snippet = extract_error_snippet_from_log_file(Path(raw_log_path))
+            snippet = ci_snippet.extract_error_snippet_from_log_file(Path(raw_log_path))
         except Exception:
             snippet = ""
         
@@ -2515,25 +2515,23 @@ Examples:
         logs_dir=args.logs_dir,
         export_pipeline_pr_csv=args.export_pipeline_pr_csv,
     )
-        # Debug: print snippet cache analysis
-        if hasattr(generator, '_snippet_cache_debug'):
-            debug = generator._snippet_cache_debug
-            print(f"\n{'='*80}", file=sys.stderr)
-            print(f"SNIPPET CACHE DEBUG", file=sys.stderr)
-            print(f"{'='*80}", file=sys.stderr)
-            print(f"Total hits: {len(debug['hits'])}", file=sys.stderr)
-            print(f"Total misses: {len(debug['misses'])}", file=sys.stderr)
-            print(f"\nMiss reasons breakdown:", file=sys.stderr)
+        # Debug: snippet cache analysis (avoid printing from library code; use logger).
+        if bool(getattr(args, "debug", False)) and hasattr(generator, "_snippet_cache_debug"):
+            import logging
             from collections import Counter
-            reason_counts = Counter(debug['reasons'].values())
+
+            log = logging.getLogger(__name__)
+            debug = generator._snippet_cache_debug
+            log.debug("SNIPPET CACHE DEBUG: hits=%d misses=%d", len(debug.get("hits", []) or []), len(debug.get("misses", []) or []))
+            reason_counts = Counter((debug.get("reasons", {}) or {}).values())
             for reason, count in reason_counts.most_common():
-                print(f"  {reason}: {count}", file=sys.stderr)
-            
-            if debug['misses']:
-                print(f"\nFirst 10 missed keys:", file=sys.stderr)
-                for key in debug['misses'][:10]:
-                    reason = debug['reasons'].get(key, 'unknown')
-                    print(f"  {key}: {reason}", file=sys.stderr)
+                log.debug("  %s: %d", reason, count)
+            misses = debug.get("misses", []) or []
+            if misses:
+                log.debug("First 10 missed keys:")
+                for key in misses[:10]:
+                    reason = (debug.get("reasons", {}) or {}).get(key, "unknown")
+                    log.debug("  %s: %s", key, reason)
         
         return rc
     finally:

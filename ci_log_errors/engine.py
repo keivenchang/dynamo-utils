@@ -542,13 +542,14 @@ def _self_test_examples(*, raw_log_path: Path) -> int:
         except Exception:
             pass
 
-        text = _read_text_tail(p, max_bytes=512 * 1024)
+        from . import snippet as _snippet
+        text = _snippet._read_text_tail(p, max_bytes=512 * 1024)
         all_lines = (text or "").splitlines()
         cats_full = [_norm_cat(x) for x in categorize_error_log_lines(all_lines)]
         cats_full_set = {c for c in cats_full if c}
-
-        snip = extract_error_snippet_from_text(text)
-        cats_snip = [_norm_cat(x) for x in categorize_error_snippet_text(snip)]
+        snip = _snippet.extract_error_snippet_from_text(text)
+        from . import render as _render
+        cats_snip = [_norm_cat(x) for x in _render.categorize_error_snippet_text(snip)]
         cats_snip_set = {c for c in cats_snip if c}
 
         exp = [_norm_cat(x) for x in expected_raw]
@@ -599,9 +600,11 @@ def _self_test_examples(*, raw_log_path: Path) -> int:
                 pass
             # Snippet assertions are sensitive to truncation. Use a larger tail budget than the
             # category self-test so we reliably capture preceding command blocks / workflow paths.
-            text = _read_text_tail(p, max_bytes=2 * 1024 * 1024)
-            snip = extract_error_snippet_from_text(text)
-            snip_html = render_error_snippet_html(snip)
+            from . import snippet as _snippet
+            text = _snippet._read_text_tail(p, max_bytes=2 * 1024 * 1024)
+            snip = _snippet.extract_error_snippet_from_text(text)
+            from . import render as _render
+            snip_html = _render.render_error_snippet_html(snip)
             missing: list[str] = []
             present_forbidden: list[str] = []
             missing_red: list[str] = []
@@ -707,7 +710,8 @@ def _self_test_examples(*, raw_log_path: Path) -> int:
                 "__________ test_router_decisions_disagg[with_bootstrap-decode_first] ___________",
             ]
         )
-        unit_html = render_error_snippet_html(unit_snip)
+        from . import render as _render
+        unit_html = _render.render_error_snippet_html(unit_snip)
 
         must_be_red = [
             "E           Failed: Timeout (>60.0s) from pytest-timeout.",
@@ -764,7 +768,8 @@ def _self_test_examples(*, raw_log_path: Path) -> int:
                 "============= 4 failed, 27 passed, 1 skipped in 199.28s (0:03:19) ==============",
             ]
         )
-        unit_snip = extract_error_snippet_from_text(unit_log, context_before=10, context_after=5, max_lines=120, max_chars=12000)
+        from . import snippet as _snippet
+        unit_snip = _snippet.extract_error_snippet_from_text(unit_log, context_before=10, context_after=5, max_lines=120, max_chars=12000)
         # Expected: derived rerun command appears before the summary line.
         summary_line = "============= 4 failed, 27 passed, 1 skipped in 199.28s (0:03:19) =============="
         rerun_prefix = "pytest --basetemp=/tmp/pytest-parallel --junitxml=pytest_parallel.xml -n 4 -m \"pre_merge and parallel"
@@ -808,7 +813,15 @@ def _self_test_examples(*, raw_log_path: Path) -> int:
         p = Path(raw_log_path) / f"{job_id}.log"
         if p.exists() and p.is_file():
             print("Self-test: rerun-only-failed (PYTEST_CMD) placement (golden)")
-            sn = extract_error_snippet_from_log_file(p, tail_bytes=0, context_before=15, context_after=15, max_lines=160, max_chars=20000)
+            from . import snippet as _snippet
+            sn = _snippet.extract_error_snippet_from_log_file(
+                p,
+                tail_bytes=0,
+                context_before=15,
+                context_after=15,
+                max_lines=160,
+                max_chars=20000,
+            )
             # Last FAILED line in that log:
             last_failed = "FAILED tests/router/test_router_e2e_with_sglang.py::test_sglang_indexers_sync"
             # Summary style in that log:
@@ -842,8 +855,8 @@ def _self_test_examples(*, raw_log_path: Path) -> int:
                 #   # suggested: pytest ...
                 # Accept both plain and suggested formats (back-compat).
                 s = re.sub(r"#\s*auto suggested\s*$", "", s0, flags=re.IGNORECASE).strip()
-                # New format: "# [suggested] <cmd>"
-                s = re.sub(r"^\s*#\s*\[\s*suggested\s*\]\s*:\s*", "", s, flags=re.IGNORECASE).strip()
+                # New format: "# [suggested] <cmd>" (also accept the old colon form for back-compat).
+                s = re.sub(r"^\s*#\s*\[\s*suggested\s*\]\s*:?\s*", "", s, flags=re.IGNORECASE).strip()
                 # Back-compat: "# suggested: <cmd>"
                 s = re.sub(r"^\s*#\s*suggested\s*:\s*", "", s, flags=re.IGNORECASE).strip()
                 # Old/plain: "# <cmd>" (or non-comment)
@@ -1001,7 +1014,8 @@ def _scan_all_logs(*, logs_root: Path, tail_bytes: int = 512 * 1024) -> int:
         except Exception:
             pass
 
-        txt = _read_text_tail(p, max_bytes=int(tail_bytes))
+        from . import snippet as _snippet
+        txt = _snippet._read_text_tail(p, max_bytes=int(tail_bytes))
         lines = (txt or "").splitlines()
 
         cats_full = [_norm_cat(x) for x in categorize_error_log_lines(lines)]
@@ -1010,7 +1024,7 @@ def _scan_all_logs(*, logs_root: Path, tail_bytes: int = 512 * 1024) -> int:
                 continue
             cats_full_counts[c] = int(cats_full_counts.get(c, 0)) + 1
 
-        snip = extract_error_snippet_from_text(txt)
+        snip = _snippet.extract_error_snippet_from_text(txt)
         if (snip or "").strip():
             snippet_found += 1
         else:
@@ -1018,7 +1032,8 @@ def _scan_all_logs(*, logs_root: Path, tail_bytes: int = 512 * 1024) -> int:
             if len(no_snippet_samples) < 12:
                 no_snippet_samples.append(p.name)
 
-        cats_snip = [_norm_cat(x) for x in categorize_error_snippet_text(snip)]
+        from . import render as _render
+        cats_snip = [_norm_cat(x) for x in _render.categorize_error_snippet_text(snip)]
         for c in cats_snip:
             if not c:
                 continue
@@ -1275,88 +1290,10 @@ def categorize_error_log_lines(lines: Sequence[str]) -> List[str]:
     return cats
 
 
-# --------------------------------------------------------------------------------------
-# Split implementation wrappers
 #
-# The heavy implementations for snippet extraction and HTML rendering live in:
-# - `ci_log_errors/snippet.py`
-# - `ci_log_errors/render.py`
-#
-# We keep these thin wrappers here so existing call sites inside this module (self-test/scan)
-# can keep calling the same names without importing those modules at import time (avoid cycles).
-# --------------------------------------------------------------------------------------
-
-
-def html_highlight_error_keywords(text: str) -> str:
-    from .render import html_highlight_error_keywords as _fn
-
-    return _fn(text)
-
-
-def categorize_error_snippet_text(snippet_text: str) -> List[str]:
-    from .render import categorize_error_snippet_text as _fn
-
-    return _fn(snippet_text)
-
-
-def render_error_snippet_html(snippet_text: str) -> str:
-    from .render import render_error_snippet_html as _fn
-
-    return _fn(snippet_text)
-
-
-def extract_error_snippet_from_text(
-    text: str,
-    *,
-    context_before: int = 10,
-    context_after: int = 5,
-    max_lines: int = 80,
-    max_chars: int = 5000,
-) -> str:
-    from .snippet import extract_error_snippet_from_text as _fn
-
-    return _fn(
-        text,
-        context_before=context_before,
-        context_after=context_after,
-        max_lines=max_lines,
-        max_chars=max_chars,
-    )
-
-
-def extract_error_snippet_from_log_file(
-    log_path: Path,
-    *,
-    tail_bytes: int = 512 * 1024,
-    context_before: int = 10,
-    context_after: int = 5,
-    max_lines: int = 80,
-    max_chars: int = 5000,
-) -> str:
-    from .snippet import extract_error_snippet_from_log_file as _fn
-
-    return _fn(
-        log_path,
-        tail_bytes=tail_bytes,
-        context_before=context_before,
-        context_after=context_after,
-        max_lines=max_lines,
-        max_chars=max_chars,
-    )
-
-
-def _read_text_tail(path: Path, *, max_bytes: int) -> str:
-    """Internal helper used by self-test/scan; implemented in `ci_log_errors/snippet.py`."""
-    from .snippet import _read_text_tail as _fn
-
-    return _fn(path, max_bytes=max_bytes)
-
-
-def _audit_snippet_commands(*, logs_root: Path, tail_bytes: int) -> int:
-    """Internal helper used by CLI; implemented in `ci_log_errors/snippet.py`."""
-    from .snippet import _audit_snippet_commands as _fn
-
-    return int(_fn(logs_root=logs_root, tail_bytes=tail_bytes))
+# NOTE: Avoid forwarding wrappers here. Import/call the real implementations directly:
+# - `ci_log_errors.snippet.*` for snippet extraction
+# - `ci_log_errors.render.*` for HTML rendering + snippet categorization
 
 
 #
@@ -1620,9 +1557,12 @@ def _cli(argv: Optional[Sequence[str]] = None) -> int:
             tail_bytes=int(0 if bool(args.no_tail) else int(args.tail_bytes)),
         )
     if bool(getattr(args, "audit_snippet_commands", False)):
-        return _audit_snippet_commands(
-            logs_root=Path(str(args.logs_root)),
-            tail_bytes=int(0 if bool(args.no_tail) else int(args.tail_bytes)),
+        from . import snippet as _snippet
+        return int(
+            _snippet._audit_snippet_commands(
+                logs_root=Path(str(args.logs_root)),
+                tail_bytes=int(0 if bool(args.no_tail) else int(args.tail_bytes)),
+            )
         )
 
     log_path = Path(args.log_path).expanduser()
@@ -1634,7 +1574,8 @@ def _cli(argv: Optional[Sequence[str]] = None) -> int:
         return 2
 
     tail_bytes = 0 if args.no_tail else int(args.tail_bytes)
-    snippet = extract_error_snippet_from_log_file(
+    from . import snippet as _snippet
+    snippet = _snippet.extract_error_snippet_from_log_file(
         log_path,
         tail_bytes=tail_bytes,
         context_before=int(args.context_before),
@@ -1647,7 +1588,8 @@ def _cli(argv: Optional[Sequence[str]] = None) -> int:
         print("(no snippet found)")
         return 0
 
-    print(render_error_snippet_html(snippet) if args.html else snippet)
+    from . import render as _render
+    print(_render.render_error_snippet_html(snippet) if args.html else snippet)
     return 0
 
 

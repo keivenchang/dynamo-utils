@@ -3233,7 +3233,7 @@ class GitHubAPIClient:
                 # Best-effort: if we can't list PRs (rate limit, network, auth), just return empty.
                 # Also negative-cache the failure for a short window to avoid spamming retries when
                 # scanning multiple clones of the same repo in one run.
-                print(f"Error listing PRs for {owner}/{repo}: {e}", file=sys.stderr)
+                _logger.warning("Error listing PRs for %s/%s: %s", str(owner), str(repo), str(e))
                 self._pulls_list_mem_cache[cache_key] = {"ts": now, "items": []}
                 if isinstance(disk, dict):
                     disk[cache_key] = {"ts": now, "items": []}
@@ -5473,9 +5473,9 @@ query($owner:String!,$name:String!,$number:Int!,$prid:ID!,$after:String) {
 
             # Prefer the purpose-built snippet extractor (lazily imported to avoid heavy deps at import time).
             try:
-                from ci_log_errors import extract_error_snippet_from_text  # type: ignore
+                from ci_log_errors import snippet as ci_snippet  # type: ignore
 
-                snippet = extract_error_snippet_from_text(txt)
+                snippet = ci_snippet.extract_error_snippet_from_text(txt)
                 snippet = (snippet or "").strip()
                 if snippet:
                     self._job_log_cache[job_id] = snippet
@@ -6002,7 +6002,7 @@ query($owner:String!,$name:String!,$number:Int!,$prid:ID!,$after:String) {
             return failed_checks, rerun_url
 
         except Exception as e:
-            print(f"Error fetching failed checks: {e}", file=sys.stderr)
+            _logger.warning("Error fetching failed checks: %s", str(e))
             return [], None
 
     def get_running_checks(self, pr_number: int, owner: str, repo: str, required_checks: set,
@@ -6079,7 +6079,7 @@ query($owner:String!,$name:String!,$number:Int!,$prid:ID!,$after:String) {
             return running_checks
 
         except Exception as e:
-            print(f"Error fetching running checks for PR {pr_number}: {e}", file=sys.stderr)
+            _logger.warning("Error fetching running checks for PR %s: %s", str(pr_number), str(e))
             return []
 
     def get_pr_info(self, owner: str, repo: str, branch: str) -> List[PRInfo]:
@@ -6120,7 +6120,7 @@ query($owner:String!,$name:String!,$number:Int!,$prid:ID!,$after:String) {
             return pr_by_branch.get(branch, []) or []
 
         except Exception as e:
-            print(f"Error fetching PR info for {branch}: {e}", file=sys.stderr)
+            _logger.warning("Error fetching PR info for %s: %s", str(branch), str(e))
             return []
 
     def get_cached_pr_merge_dates(self, pr_numbers: List[int],
@@ -6874,18 +6874,11 @@ class GitLabAPIClient:
             per_page = 100
 
             if not self.has_token():
-                # No token, show big warning
-                print("\n" + "="*80)
-                print("⚠️  WARNING: No GitLab token found!")
-                print("="*80)
-                print("Cannot fetch Docker registry images without a GitLab token.")
-                print("\nTo set up a token:")
-                print("1. Create a personal access token at:")
-                print("   https://gitlab-master.nvidia.com/-/profile/personal_access_tokens")
-                print("2. Set it using one of these methods:")
-                print("   - Export GITLAB_TOKEN environment variable")
-                print("   - Save to ~/.config/gitlab-token file")
-                print("="*80 + "\n")
+                _logger.warning(
+                    "No GitLab token found; cannot fetch Docker registry images. "
+                    "Create a personal access token and set it via GITLAB_TOKEN or ~/.config/gitlab-token. "
+                    "Token URL: https://gitlab-master.nvidia.com/-/profile/personal_access_tokens"
+                )
                 return {sha: [] for sha in sha_list}
 
             # Fetch page 1 first to get total pages from headers
@@ -6917,11 +6910,6 @@ class GitLabAPIClient:
 
             except Exception as e:
                 _logger.warning(f"Failed to fetch page 1 to determine total pages: {e}")
-                print("\n" + "="*80)
-                print("⚠️  ERROR: Failed to fetch Docker registry tags from GitLab!")
-                print("="*80)
-                print(f"Error: {e}")
-                print("="*80 + "\n")
                 return {sha: [] for sha in sha_list}
 
             # Collect all tags from all pages
