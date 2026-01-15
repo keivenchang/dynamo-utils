@@ -3008,10 +3008,10 @@ class GitHubAPIClient:
     def _running_check_to_dict(rc: "RunningCheck") -> Dict[str, Any]:
         try:
             return {
-                "name": str(getattr(rc, "name", "") or ""),
-                "check_url": str(getattr(rc, "check_url", "") or ""),
-                "is_required": bool(getattr(rc, "is_required", False)),
-                "elapsed_time": getattr(rc, "elapsed_time", None),
+                "name": str(rc.name or ""),
+                "check_url": str(rc.check_url or ""),
+                "is_required": bool(rc.is_required),
+                "elapsed_time": rc.elapsed_time,
             }
         except Exception:
             return {}
@@ -3363,18 +3363,27 @@ class GitHubAPIClient:
                 if cached is not None:
                     # Backfill head branch info from the live /pulls payload, since older cached PRInfo
                     # entries may not have these fields yet.
+                    changed = False
                     try:
                         head = (pr_data.get("head") or {}) if isinstance(pr_data.get("head"), dict) else {}
-                        if not getattr(cached, "head_ref", None):
+                        if not cached.head_ref:
                             cached.head_ref = head.get("ref")
-                        if not getattr(cached, "head_label", None):
+                            changed = True
+                        if not cached.head_label:
                             cached.head_label = head.get("label")
-                        if not getattr(cached, "head_owner", None):
+                            changed = True
+                        if not cached.head_owner:
                             hrepo = (head.get("repo") or {}) if isinstance(head.get("repo"), dict) else {}
                             hown = (hrepo.get("owner") or {}) if isinstance(hrepo.get("owner"), dict) else {}
                             cached.head_owner = str(hown.get("login") or "").strip() or None
+                            changed = True
                     except Exception:
                         pass
+                    if changed:
+                        try:
+                            self._save_pr_info_cache(owner=owner, repo=repo, pr_number=n, updated_at=upd, pr=cached)
+                        except Exception:
+                            pass
                     return cached
             # If we somehow entered cache-only mode mid-run, degrade gracefully.
             if bool(getattr(self, "cache_only_mode", False)):
@@ -3416,7 +3425,7 @@ class GitHubAPIClient:
 
         # Keep stable sort by PR number descending (regardless of completion order).
         try:
-            out.sort(key=lambda p: int(getattr(p, "number", 0) or 0), reverse=True)
+            out.sort(key=lambda p: int(p.number or 0), reverse=True)
         except Exception:
             pass
         return out
@@ -3557,18 +3566,27 @@ class GitHubAPIClient:
                     if cached is not None:
                         # Backfill head branch info from the live /pulls payload, since older cached PRInfo
                         # entries may not have these fields yet.
+                        changed = False
                         try:
                             head = (pr_data.get("head") or {}) if isinstance(pr_data.get("head"), dict) else {}
-                            if not getattr(cached, "head_ref", None):
+                            if not cached.head_ref:
                                 cached.head_ref = head.get("ref")
-                            if not getattr(cached, "head_label", None):
+                                changed = True
+                            if not cached.head_label:
                                 cached.head_label = head.get("label")
-                            if not getattr(cached, "head_owner", None):
+                                changed = True
+                            if not cached.head_owner:
                                 hrepo = (head.get("repo") or {}) if isinstance(head.get("repo"), dict) else {}
                                 hown = (hrepo.get("owner") or {}) if isinstance(hrepo.get("owner"), dict) else {}
                                 cached.head_owner = str(hown.get("login") or "").strip() or None
+                                changed = True
                         except Exception:
                             pass
+                        if changed:
+                            try:
+                                self._save_pr_info_cache(owner=owner, repo=repo, pr_number=n, updated_at=upd, pr=cached)
+                            except Exception:
+                                pass
                         return cached
                 # Cache-only mode: don't attempt enrichment fetches.
                 if bool(getattr(self, "cache_only_mode", False)):
@@ -3844,90 +3862,68 @@ class GitHubAPIClient:
         upd = str(updated_at or "").strip()
         if not upd:
             return None
-        # memory
-        try:
-            ent = self._pr_info_mem_cache.get(key)
-            if isinstance(ent, dict) and str(ent.get("updated_at") or "").strip() == upd:
-                prd = ent.get("pr")
-                if isinstance(prd, dict):
-                    pr = self._pr_info_full_from_dict(prd)
-                    # Required checks are effectively configuration and may be missing in older cache entries.
-                    # Refresh them opportunistically without forcing a full PR re-enrichment.
-                    if pr is not None and not (getattr(pr, "required_checks", None) or []):
-                        try:
-                            req = sorted(list(self.get_required_checks(owner, repo, int(pr_number)) or set()))
-                        except Exception:
-                            req = []
-                        if req:
-                            try:
-                                pr.required_checks = list(req)
-                                prd["required_checks"] = list(req)
-                                ent["pr"] = prd
-                                self._pr_info_mem_cache[key] = ent
-                            except Exception:
-                                pass
-                    # Review decision isn't present on REST /pulls objects; older cache entries may lack it.
-                    # Backfill it opportunistically so remote PR dashboards can display "Review: ...".
-                    if pr is not None and not pr.review_decision:
-                        try:
-                            rd = self._review_decision_from_reviews(owner, repo, int(pr_number))
-                        except Exception:
-                            rd = None
-                        if rd:
-                            try:
-                                pr.review_decision = str(rd)
-                                prd["review_decision"] = str(rd)
-                                ent["pr"] = prd
-                                self._pr_info_mem_cache[key] = ent
-                            except Exception:
-                                pass
-                    return pr
-        except Exception:
-            pass
-        # disk
-        disk = self._load_pr_info_disk_cache()
-        ent = disk.get(key) if isinstance(disk, dict) else None
-        if isinstance(ent, dict) and str(ent.get("updated_at") or "").strip() == upd:
+
+        def _hydrate_entry(ent: Dict[str, Any]) -> Optional[PRInfo]:
             prd = ent.get("pr")
-            if isinstance(prd, dict):
-                pr = self._pr_info_full_from_dict(prd)
-                if pr is not None:
-                    if not (getattr(pr, "required_checks", None) or []):
-                        try:
-                            req = sorted(list(self.get_required_checks(owner, repo, int(pr_number)) or set()))
-                        except Exception:
-                            req = []
-                        if req:
-                            try:
-                                pr.required_checks = list(req)
-                                prd["required_checks"] = list(req)
-                                ent["pr"] = prd
-                                if isinstance(disk, dict):
-                                    disk[key] = ent
-                                    self._save_pr_info_disk_cache(disk)
-                            except Exception:
-                                pass
-                    # Review decision isn't present on REST /pulls objects; older cache entries may lack it.
-                    if not pr.review_decision:
-                        try:
-                            rd = self._review_decision_from_reviews(owner, repo, int(pr_number))
-                        except Exception:
-                            rd = None
-                        if rd:
-                            try:
-                                pr.review_decision = str(rd)
-                                prd["review_decision"] = str(rd)
-                                ent["pr"] = prd
-                                if isinstance(disk, dict):
-                                    disk[key] = ent
-                                    self._save_pr_info_disk_cache(disk)
-                            except Exception:
-                                pass
-                    try:
-                        self._pr_info_mem_cache[key] = {"updated_at": upd, "pr": prd}
-                    except Exception:
-                        pass
-                    return pr
+            if not isinstance(prd, dict):
+                return None
+            return self._pr_info_full_from_dict(prd)
+
+        def _maybe_backfill_and_persist(pr: PRInfo) -> PRInfo:
+            """Backfill missing enrichment fields on PRInfo and persist back to caches if we changed anything."""
+            changed = False
+
+            # Required checks are effectively configuration and may be missing in older cache entries.
+            if not pr.required_checks:
+                try:
+                    req = sorted(list(self.get_required_checks(owner, repo, int(pr_number)) or set()))
+                except Exception:
+                    req = []
+                if req:
+                    pr.required_checks = list(req)
+                    changed = True
+
+            # REST /pulls objects do not include GraphQL `reviewDecision`; older cache entries may lack it.
+            if not pr.review_decision:
+                try:
+                    rd = self._review_decision_from_reviews(owner, repo, int(pr_number))
+                except Exception:
+                    rd = None
+                if rd:
+                    pr.review_decision = str(rd)
+                    changed = True
+
+            if changed:
+                # Serialize once at the cache boundary.
+                self._save_pr_info_cache(owner=owner, repo=repo, pr_number=int(pr_number), updated_at=upd, pr=pr)
+            else:
+                # Ensure mem cache has a normalized full serialization (no disk write).
+                try:
+                    self._pr_info_mem_cache[key] = {"updated_at": upd, "pr": self._pr_info_full_to_dict(pr)}
+                except Exception:
+                    pass
+            return pr
+
+        # Memory cache (deserialize -> PRInfo only)
+        ent_mem = self._pr_info_mem_cache.get(key)
+        if isinstance(ent_mem, dict) and str(ent_mem.get("updated_at") or "").strip() == upd:
+            pr = _hydrate_entry(ent_mem)
+            if pr is not None:
+                return _maybe_backfill_and_persist(pr)
+
+        # Disk cache (deserialize -> PRInfo only)
+        disk = self._load_pr_info_disk_cache()
+        ent_disk = disk.get(key) if isinstance(disk, dict) else None
+        if isinstance(ent_disk, dict) and str(ent_disk.get("updated_at") or "").strip() == upd:
+            pr = _hydrate_entry(ent_disk)
+            if pr is not None:
+                pr = _maybe_backfill_and_persist(pr)
+                # Ensure mem is populated (serialization boundary, no disk write needed here).
+                try:
+                    self._pr_info_mem_cache[key] = {"updated_at": upd, "pr": self._pr_info_full_to_dict(pr)}
+                except Exception:
+                    pass
+                return pr
         return None
 
     def _save_pr_info_cache(
