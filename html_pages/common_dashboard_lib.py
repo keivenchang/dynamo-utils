@@ -54,7 +54,7 @@ _yaml_parse_cache: Dict[Tuple[str, float], Tuple[Dict, Dict, Dict]] = {}
 def ci_should_expand_by_default(*, rollup_status: str, has_required_failure: bool) -> bool:
     """Shared UX rule: expand only when something truly needs attention.
 
-    - expand for required failures (red ✗)
+    - expand for required failures (red X icon)
     - do NOT auto-expand long/step-heavy jobs by default (even if they have subsections)
     - expand for in-progress/pending states so "BUILDING" remains visible
     - do NOT auto-expand for optional failures, cancelled, unknown-only leaves, or all-green trees
@@ -75,6 +75,7 @@ COLOR_GREEN = "#2da44e"
 # Slightly deeper than GitHub's default red; still readable and not overly saturated.
 COLOR_RED = "#c83a3a"
 COLOR_GREY = "#8c959f"
+COLOR_YELLOW = "#bf8700"
 
 # Shared SVG icon primitives (fixed-size; avoids emoji/font-size drift between legend/status bar).
 def _octicon_svg(*, path_d: str, name: str, width: int = 12, height: int = 12) -> str:
@@ -88,6 +89,66 @@ def _octicon_svg(*, path_d: str, name: str, width: int = 12, height: int = 12) -
         f'width="{int(width)}" height="{int(height)}" data-view-component="true" '
         f'class="octicon {nm}" fill="currentColor">'
         f'<path fill-rule="evenodd" d="{pd}"></path></svg>'
+    )
+
+
+def _circle_x_fill_svg(*, color: str, width: int = 12, height: int = 12, extra_style: str = "") -> str:
+    """Filled circle with a white X (SVG)."""
+    st = f"color: {html.escape(str(color or ''), quote=True)}; display: inline-flex; vertical-align: text-bottom;"
+    if str(extra_style or "").strip():
+        st += " " + str(extra_style).strip()
+    return (
+        f'<span style="{st}">'
+        f'<svg aria-hidden="true" viewBox="0 0 16 16" version="1.1" width="{int(width)}" height="{int(height)}" '
+        f'data-view-component="true" class="octicon octicon-x-circle-fill" fill="currentColor">'
+        '<circle cx="8" cy="8" r="8" fill="currentColor"></circle>'
+        '<path d="M4.5 4.5l7 7m-7 0l7-7" stroke="#fff" stroke-width="2" stroke-linecap="round"></path>'
+        "</svg></span>"
+    )
+
+
+def _circle_dot_fill_svg(*, color: str, width: int = 12, height: int = 12, extra_style: str = "") -> str:
+    """Filled circle with a white dot (SVG) for 'pending'."""
+    st = f"color: {html.escape(str(color or ''), quote=True)}; display: inline-flex; vertical-align: text-bottom;"
+    if str(extra_style or "").strip():
+        st += " " + str(extra_style).strip()
+    return (
+        f'<span style="{st}">'
+        f'<svg aria-hidden="true" viewBox="0 0 16 16" version="1.1" width="{int(width)}" height="{int(height)}" '
+        f'data-view-component="true" class="octicon octicon-dot-circle-fill" fill="currentColor">'
+        '<circle cx="8" cy="8" r="8" fill="currentColor"></circle>'
+        '<circle cx="8" cy="8" r="2.2" fill="#fff"></circle>'
+        "</svg></span>"
+    )
+
+
+def _clock_ring_svg(*, color: str, width: int = 12, height: int = 12, extra_style: str = "") -> str:
+    """Clock/ring icon (SVG) for 'in progress'."""
+    st = f"color: {html.escape(str(color or ''), quote=True)}; display: inline-flex; vertical-align: text-bottom;"
+    if str(extra_style or "").strip():
+        st += " " + str(extra_style).strip()
+    # Matches the clock icon used in the commit-history legend, but via currentColor.
+    return (
+        f'<span style="{st}">'
+        f'<svg aria-hidden="true" viewBox="0 0 16 16" version="1.1" width="{int(width)}" height="{int(height)}" '
+        f'data-view-component="true" class="octicon octicon-clock" fill="currentColor">'
+        '<path d="M8 1C4.1 1 1 4.1 1 8s3.1 7 7 7 7-3.1 7-7-3.1-7-7-7zm0 12c-2.8 0-5-2.2-5-5s2.2-5 5-5 5 2.2 5 5-2.2 5-5 5z"></path>'
+        '<path d="M8 4v5l3 2"></path>'
+        "</svg></span>"
+    )
+
+
+def _dot_svg(*, color: str, width: int = 12, height: int = 12, extra_style: str = "") -> str:
+    """Small dot (SVG) for 'unknown/other'."""
+    st = f"color: {html.escape(str(color or ''), quote=True)}; display: inline-flex; vertical-align: text-bottom;"
+    if str(extra_style or "").strip():
+        st += " " + str(extra_style).strip()
+    return (
+        f'<span style="{st}">'
+        f'<svg aria-hidden="true" viewBox="0 0 16 16" version="1.1" width="{int(width)}" height="{int(height)}" '
+        f'data-view-component="true" class="octicon octicon-dot" fill="currentColor">'
+        '<circle cx="8" cy="8" r="2.6" fill="currentColor"></circle>'
+        "</svg></span>"
     )
 
 
@@ -132,7 +193,7 @@ def compact_ci_summary_html(
     """Render the compact CI summary used in the GitHub column (shared across dashboards).
 
     This matches the visual style in `show_commit_history.j2`:
-    - order:  ✓(required) N, ✓(optional) N, ✗(required) N, ✗(optional) N, then non-terminal states (grey)
+    - order:  success(required) N, success(optional) N, failure(required) N, failure(optional) N, then non-terminal states
     - colors: green/red/grey only (no orange)
     """
     sr = int(success_required or 0)
@@ -952,8 +1013,8 @@ def expand_required_failure_descendants_pass(nodes: List[TreeNodeVM]) -> List[Tr
 
     out: List[TreeNodeVM] = []
     for n in (nodes or []):
-            n2, _ = walk(n)
-            out.append(n2)
+        n2, _ = walk(n)
+        out.append(n2)
     return out
 
 
@@ -1210,17 +1271,17 @@ def _compute_parent_status_from_children(children: List[TreeNodeVM]) -> str:
     success_count = 0
     
     for child in children:
-        label = str(getattr(child, 'label_html', '') or '')
-        # Check for status indicators in the label HTML
-        # Also check for red color (#c83a3a) which indicates failure
-        if '✗' in label or 'failure' in label.lower() or '#c83a3a' in label:
+        label = str(getattr(child, "label_html", "") or "")
+        # Check for status indicators in the label HTML. Prefer SVG class names emitted by
+        # `status_icon_html`, but keep a few keyword fallbacks for robustness.
+        label_l = label.lower()
+        if "octicon-x-circle-fill" in label_l or "octicon-x" in label_l or "failure" in label_l or "#c83a3a" in label_l:
             has_failure = True
-        elif 'success' in label.lower() or 'octicon-check' in label:
+        elif "octicon-check-circle-fill" in label_l or "octicon-check" in label_l or "success" in label_l:
             success_count += 1
-        elif '⏳' in label or 'running' in label.lower() or 'progress' in label.lower():
+        elif "octicon-clock" in label_l or "running" in label_l or "progress" in label_l or "in_progress" in label_l:
             has_running = True
-        elif 'pending' in label.lower() or ('border-radius: 999px; background-color: #8c959f' in label and '•' in label):
-            # Pending has a gray circle background with white dot
+        elif "octicon-dot-circle-fill" in label_l or "pending" in label_l:
             has_pending = True
     
     # Apply rules
@@ -1433,10 +1494,13 @@ def render_tree_divs(root_nodes: List[TreeNodeVM]) -> str:
             parts.append(f'<summary{title_attr}{default_expanded_attr}>\n')
             parts.append(node.label_html or "")
             parts.append('</summary>\n')
+            # Wrap all <details> bodies so we can apply a consistent CSS transition for open/close.
+            # NOTE: Browsers toggle <details> instantly; the transition is applied to this wrapper.
+            parts.append('<div class="details-body">\n')
             # Render raw HTML content if present (e.g., snippet <pre> blocks)
             if node.raw_html_content:
                 parts.append(node.raw_html_content)
-            
+
             # Only render <ul> if there are actual children
             if node.children:
                 parts.append('<ul>\n')
@@ -1444,6 +1508,7 @@ def render_tree_divs(root_nodes: List[TreeNodeVM]) -> str:
                     is_last_child = (i == len(node.children) - 1)
                     parts.append(render_node(child, children_id, full_key, is_last_child))
                 parts.append('</ul>\n')
+            parts.append('</div>\n')
             
             parts.append('</details>\n')
         else:
@@ -1543,7 +1608,7 @@ def render_tree_pre_lines(root_nodes: List[TreeNodeVM]) -> List[str]:
             return
             
         # Reset last reference text when rendering actual node
-            last_reference_text = None
+        last_reference_text = None
         
         # Tree connector
         if not is_root:
@@ -2059,12 +2124,8 @@ def status_icon_html(
             # Descendant failures: show a red X appended to the success icon.
             out += '<span style="color: #57606a; font-size: 11px; margin: 0 2px;">/</span>'
             if bool(required_failure):
-                # REQUIRED descendant failure: filled red circle X.
-                out += (
-                    '<span style="display: inline-flex; align-items: center; justify-content: center; '
-                    f'width: 12px; height: 12px; margin-left: 2px; border-radius: 999px; background-color: {COLOR_RED}; '
-                    'color: #ffffff; font-size: 10px; font-weight: 900; line-height: 1;">✗</span>'
-                )
+                # REQUIRED descendant failure: filled red circle X (SVG).
+                out += _circle_x_fill_svg(color=COLOR_RED, extra_style="margin-left: 2px;")
             else:
                 # Optional descendant failure: small X.
                 out += (
@@ -2085,12 +2146,8 @@ def status_icon_html(
         )
     if s == CIStatus.FAILURE:
         if bool(is_required or required_failure):
-            # REQUIRED: filled red circle X.
-            return (
-                '<span style="display: inline-flex; align-items: center; justify-content: center; '
-                f'width: 12px; height: 12px; border-radius: 999px; background-color: {COLOR_RED}; '
-                'color: #ffffff; font-size: 10px; font-weight: 900; line-height: 1;">✗</span>'
-            )
+            # REQUIRED: filled red circle X (SVG).
+            return _circle_x_fill_svg(color=COLOR_RED)
         # Optional failure: small X.
         return (
             f'<span style="color: {COLOR_RED}; display: inline-flex; vertical-align: text-bottom;">'
@@ -2098,20 +2155,12 @@ def status_icon_html(
             "</span>"
         )
     if s == CIStatus.IN_PROGRESS:
-        return f'<span style="color: {COLOR_GREY};">⏳</span>'
+        return _clock_ring_svg(color=COLOR_YELLOW)
     if s == CIStatus.PENDING:
-        return (
-            '<span style="display: inline-flex; align-items: center; justify-content: center; '
-            'width: 12px; height: 12px; border-radius: 999px; background-color: #8c959f; '
-            'color: #ffffff; font-size: 10px; font-weight: 900; line-height: 1;">•</span>'
-        )
+        return _circle_dot_fill_svg(color=COLOR_GREY)
     if s == CIStatus.CANCELLED:
-        return (
-            '<span style="display: inline-flex; align-items: center; justify-content: center; '
-            'width: 12px; height: 12px; border-radius: 999px; background-color: #8c959f; '
-            'color: #ffffff; font-size: 10px; font-weight: 900; line-height: 1;">×</span>'
-        )
-    return '<span style="color: #8c959f;">•</span>'
+        return _circle_x_fill_svg(color=COLOR_GREY)
+    return _dot_svg(color=COLOR_GREY)
 
 
 def _small_link_html(*, url: str, label: str) -> str:

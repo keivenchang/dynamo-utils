@@ -154,7 +154,6 @@ summary.summary-with-toggle::-webkit-details-marker {
 summary.summary-with-toggle .triangle-toggle.summary-toggle {
     margin-left: 0 !important;
     margin-right: 6px !important;
-    transition: transform 120ms ease, background-color 120ms ease, color 120ms ease;
     transform: rotate(0deg);
 }
 

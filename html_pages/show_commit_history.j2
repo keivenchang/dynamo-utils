@@ -794,6 +794,7 @@ window.__dashboardOnReadyQueue.push(function() {
 <div class="legend" style="margin-bottom: 0px; padding: 8px; background-color: #f6f8fa;">
 <details style="margin-top: 0;" data-url-state="1" data-url-key="legend">
 {{ summary_with_toggle('Legend &amp; Help', right_html='<button type="button" onclick="event.preventDefault(); event.stopPropagation(); try { DashboardUrlState.resetView({reload: false}); } catch (e) {}" style="padding: 2px 8px; font-size: 11px; line-height: 1.2; background: transparent; color: #0969da; border: 1px solid #0969da; border-radius: 999px; cursor: pointer;" title="Reset view state (clears URL params and restores defaults)">Reset view</button>') }}
+<div class="details-body">
 <div style="margin-top: 10px; font-size: 12px; line-height: 1.55;">
 <div style="margin-bottom: 12px;">
 <div style="font-weight: 600; margin-bottom: 6px; color: #24292f;">GitHub Status:</div>
@@ -828,12 +829,13 @@ window.__dashboardOnReadyQueue.push(function() {
 <div style="font-weight: 600; margin-bottom: 6px; color: #24292f;">Images &amp; Links:</div>
 <ul style="margin: 4px 0; padding-left: 20px;">
 <li><strong>IMAGE:xxxxxx</strong> - Image SHA for container builds</li>
-<li><strong>Status icons</strong> - <svg height="14" width="14" viewBox="0 0 16 16" style="display:inline-block;vertical-align:middle;"><circle cx="8" cy="8" r="8" fill="#2da44e"/><path fill="#fff" d="M11.5 5.5 7 10l-2.5-2.5L3.5 8.5 7 12l5.5-5.5z"/></svg> passed / <svg height="14" width="14" viewBox="0 0 16 16" style="display:inline-block;vertical-align:middle;"><circle cx="8" cy="8" r="8" fill="#d1242f"/><path fill="#fff" d="M4.5 4.5l7 7m-7 0l7-7" stroke="#fff" stroke-width="2"/></svg> failed / <svg height="14" width="14" viewBox="0 0 16 16" style="display:inline-block;vertical-align:middle;"><path fill="#bf8700" d="M8 1C4.1 1 1 4.1 1 8s3.1 7 7 7 7-3.1 7-7-3.1-7-7-7zm0 12c-2.8 0-5-2.2-5-5s2.2-5 5-5 5 2.2 5 5-2.2 5-5 5z"/><path fill="#bf8700" d="M8 4v5l3 2"/></svg> building</li>
+<li><strong>Status icons</strong> - {{ success_required_icon_html|safe }} passed / {{ failure_required_icon_html|safe }} failed / {{ in_progress_icon_html|safe }} building</li>
 <li><strong>Click IMAGE</strong> - Opens latest build report, <strong>📋</strong> shows history</li>
 <li><strong><svg height="14" width="14" viewBox="0 0 16 16" fill="#24292f" style="display: inline-block; vertical-align: middle;"><path fill-rule="evenodd" clip-rule="evenodd" d="M8 0C3.58 0 0 3.58 0 8C0 11.54 2.29 14.53 5.47 15.59C5.87 15.66 6.02 15.42 6.02 15.21C6.02 15.02 6.01 14.39 6.01 13.72C4 14.09 3.48 13.23 3.32 12.78C3.23 12.55 2.84 11.84 2.5 11.65C2.22 11.5 1.82 11.13 2.49 11.12C3.12 11.11 3.57 11.7 3.72 11.94C4.44 13.15 5.59 12.81 6.05 12.6C6.12 12.08 6.33 11.73 6.56 11.53C4.78 11.33 2.92 10.64 2.92 7.58C2.92 6.71 3.23 5.99 3.74 5.43C3.66 5.23 3.38 4.41 3.82 3.31C3.82 3.31 4.49 3.1 6.02 4.13C6.66 3.95 7.34 3.86 8.02 3.86C8.7 3.86 9.38 3.95 10.02 4.13C11.55 3.09 12.22 3.31 12.22 3.31C12.66 4.41 12.38 5.23 12.3 5.43C12.81 5.99 13.12 6.7 13.12 7.58C13.12 10.65 11.25 11.33 9.47 11.53C9.76 11.78 10.01 12.26 10.01 13.01C10.01 14.08 10 14.94 10 15.21C10 15.42 10.15 15.67 10.55 15.59C13.71 14.53 16 11.53 16 8C16 3.58 12.42 0 8 0Z"></path></svg></strong> - Opens GitHub commit/checks</li>
 <li><strong>🐳</strong> - Searches NVIDIA GitLab Docker registry</li>
 <li><strong>▶</strong> - Expands row details</li>
 </ul>
+</div>
 </div>
 </div>
 </details>
@@ -1022,12 +1024,12 @@ window.__dashboardOnReadyQueue.push(function() {
 {%- set tooltip_html_parts = [] -%}
 {%- if passed_required_jobs -%}{%- set _ = tooltip_html_parts.append('<strong style="color: #2da44e;">' ~ success_required_icon_html ~ ' Passed (required):</strong> ' ~ ((passed_required_jobs|sort)|join(', '))) -%}{%- endif -%}
 {%- if passed_optional_jobs -%}{%- set _ = tooltip_html_parts.append('<strong style="color: #2da44e;">' ~ success_icon_html ~ ' Passed (optional):</strong> ' ~ ((passed_optional_jobs|sort)|join(', '))) -%}{%- endif -%}
-{%- if failed_required_jobs -%}{%- set _ = tooltip_html_parts.append('<strong style="color: #c83a3a;"><span style="display: inline-flex; align-items: center; justify-content: center; width: 14px; height: 14px; margin-right: 6px; border-radius: 999px; background-color: #c83a3a; color: #ffffff; font-size: 11px; font-weight: 900; line-height: 1;">✗</span>Failed (required):</strong> ' + (failed_required_jobs|sort)|join(', ')) -%}{%- endif -%}
+{%- if failed_required_jobs -%}{%- set _ = tooltip_html_parts.append('<strong style="color: #c83a3a;">' ~ failure_required_icon_html ~ ' Failed (required):</strong> ' + (failed_required_jobs|sort)|join(', ')) -%}{%- endif -%}
 {%- if failed_optional_jobs -%}{%- set _ = tooltip_html_parts.append('<strong style="color: #c83a3a;">' ~ failure_optional_icon_html ~ ' Failed (optional):</strong> ' + (failed_optional_jobs|sort)|join(', ')) -%}{%- endif -%}
-{%- if progress_required_jobs -%}{%- set _ = tooltip_html_parts.append('<strong style="color: #8c959f;">⏳ In Progress (required):</strong> ' + (progress_required_jobs|sort)|join(', ')) -%}{%- endif -%}
-{%- if progress_optional_jobs -%}{%- set _ = tooltip_html_parts.append('<strong style="color: #8c959f;">⏳ In Progress (optional):</strong> ' + (progress_optional_jobs|sort)|join(', ')) -%}{%- endif -%}
-{%- if pending_jobs -%}{%- set _ = tooltip_html_parts.append('<strong style="color: #8c959f;">⏸ Pending:</strong> ' + (pending_jobs|sort)|join(', ')) -%}{%- endif -%}
-{%- if cancelled_jobs -%}{%- set _ = tooltip_html_parts.append('<strong style="color: #8c959f;">✖️ Canceled:</strong> ' + (cancelled_jobs|sort)|join(', ')) -%}{%- endif -%}
+{%- if progress_required_jobs -%}{%- set _ = tooltip_html_parts.append('<strong style="color: #8c959f;">' ~ in_progress_icon_html ~ ' In Progress (required):</strong> ' + (progress_required_jobs|sort)|join(', ')) -%}{%- endif -%}
+{%- if progress_optional_jobs -%}{%- set _ = tooltip_html_parts.append('<strong style="color: #8c959f;">' ~ in_progress_icon_html ~ ' In Progress (optional):</strong> ' + (progress_optional_jobs|sort)|join(', ')) -%}{%- endif -%}
+{%- if pending_jobs -%}{%- set _ = tooltip_html_parts.append('<strong style="color: #8c959f;">' ~ pending_icon_html ~ ' Pending:</strong> ' + (pending_jobs|sort)|join(', ')) -%}{%- endif -%}
+{%- if cancelled_jobs -%}{%- set _ = tooltip_html_parts.append('<strong style="color: #8c959f;">' ~ cancelled_icon_html ~ ' Canceled:</strong> ' + (cancelled_jobs|sort)|join(', ')) -%}{%- endif -%}
 {%- if other_jobs -%}{%- set _ = tooltip_html_parts.append('<strong style="color: #8c959f;">Other:</strong> ' + (other_jobs|sort)|join(', ')) -%}{%- endif -%}
 {%- set tooltip_html = tooltip_html_parts|join('<br>') -%}
 <span class="gh-status-tooltip">
@@ -1127,12 +1129,12 @@ window.__dashboardOnReadyQueue.push(function() {
 {%- set gitlab_tooltip_parts = [] -%}
 {# Use the same circled-check icon as GitHub for "passed" in tooltips #}
 {%- if success_jobs -%}{%- set _ = gitlab_tooltip_parts.append('<strong style="color: #2da44e;">' ~ success_icon_html ~ ' Passed:</strong> ' ~ ((success_jobs|sort)|join(', '))) -%}{%- endif -%}
-{%- if failed_required_jobs -%}{%- set _ = gitlab_tooltip_parts.append('<strong style="color: #c83a3a;"><span style="display: inline-flex; align-items: center; justify-content: center; width: 14px; height: 14px; margin-right: 6px; border-radius: 999px; background-color: #c83a3a; color: #ffffff; font-size: 11px; font-weight: 900; line-height: 1;">✗</span>Failed (mandatory):</strong> ' + (failed_required_jobs|sort)|join(', ')) -%}{%- endif -%}
+{%- if failed_required_jobs -%}{%- set _ = gitlab_tooltip_parts.append('<strong style="color: #c83a3a;">' ~ failure_required_icon_html ~ ' Failed (mandatory):</strong> ' + (failed_required_jobs|sort)|join(', ')) -%}{%- endif -%}
 {%- if failed_optional_jobs -%}{%- set _ = gitlab_tooltip_parts.append('<strong style="color: #c83a3a;">' ~ failure_optional_icon_html ~ ' Failed (non-mandatory):</strong> ' + (failed_optional_jobs|sort)|join(', ')) -%}{%- endif -%}
-{%- if running_required_jobs -%}{%- set _ = gitlab_tooltip_parts.append('<strong style="color: #8c959f;">⏳ In Progress (mandatory):</strong> ' + (running_required_jobs|sort)|join(', ')) -%}{%- endif -%}
-{%- if running_optional_jobs -%}{%- set _ = gitlab_tooltip_parts.append('<strong style="color: #8c959f;">⏳ In Progress (non-mandatory):</strong> ' + (running_optional_jobs|sort)|join(', ')) -%}{%- endif -%}
-{%- if pending_jobs -%}{%- set _ = gitlab_tooltip_parts.append('<strong style="color: #8c959f;">⏸ Pending:</strong> ' + (pending_jobs|sort)|join(', ')) -%}{%- endif -%}
-{%- if canceled_jobs -%}{%- set _ = gitlab_tooltip_parts.append('<strong style="color: #8c959f;">✖️ Canceled:</strong> ' + (canceled_jobs|sort)|join(', ')) -%}{%- endif -%}
+{%- if running_required_jobs -%}{%- set _ = gitlab_tooltip_parts.append('<strong style="color: #8c959f;">' ~ in_progress_icon_html ~ ' In Progress (mandatory):</strong> ' + (running_required_jobs|sort)|join(', ')) -%}{%- endif -%}
+{%- if running_optional_jobs -%}{%- set _ = gitlab_tooltip_parts.append('<strong style="color: #8c959f;">' ~ in_progress_icon_html ~ ' In Progress (non-mandatory):</strong> ' + (running_optional_jobs|sort)|join(', ')) -%}{%- endif -%}
+{%- if pending_jobs -%}{%- set _ = gitlab_tooltip_parts.append('<strong style="color: #8c959f;">' ~ pending_icon_html ~ ' Pending:</strong> ' + (pending_jobs|sort)|join(', ')) -%}{%- endif -%}
+{%- if canceled_jobs -%}{%- set _ = gitlab_tooltip_parts.append('<strong style="color: #8c959f;">' ~ cancelled_icon_html ~ ' Canceled:</strong> ' + (canceled_jobs|sort)|join(', ')) -%}{%- endif -%}
 {%- set gitlab_tooltip_html = gitlab_tooltip_parts|join('<br>') -%}
 <span class="gh-status-tooltip" style="margin-left: 4px;">
 <span style="white-space: nowrap; font-weight: 600; font-size: 11px;">
@@ -1194,7 +1196,7 @@ window.__dashboardOnReadyQueue.push(function() {
             <button type="button"
                     onclick="event.stopPropagation(); try { collapseCommitGitHubTree('{{ sha_short }}'); } catch (e) {}"
                     style="padding: 0 6px; height: 18px; line-height: 16px; font-size: 14px; border: 1px solid #d0d7de; border-radius: 999px; background: #ffffff; color: #57606a; cursor: pointer;"
-                    title="Close GitHub checks">×</button>
+                    title="Close GitHub checks"><svg aria-hidden="true" viewBox="0 0 16 16" version="1.1" width="12" height="12" data-view-component="true" class="octicon octicon-x" fill="currentColor"><path fill-rule="evenodd" d="M3.72 3.72a.75.75 0 011.06 0L8 6.94l3.22-3.22a.75.75 0 111.06 1.06L9.06 8l3.22 3.22a.75.75 0 11-1.06 1.06L8 9.06l-3.22 3.22a.75.75 0 11-1.06-1.06L6.94 8 3.72 4.78a.75.75 0 010-1.06z"></path></svg></button>
           </div>
           <div style="margin: 0; padding: 0 0 0 14px;">{{ commit.github_checks_tree_html | safe }}</div>
 </div>
@@ -1211,7 +1213,7 @@ window.__dashboardOnReadyQueue.push(function() {
             <button type="button"
                     onclick="event.stopPropagation(); try { collapseCommitGitLabTree('{{ sha_short }}'); } catch (e) {}"
                     style="padding: 0 6px; height: 18px; line-height: 16px; font-size: 14px; border: 1px solid #d0d7de; border-radius: 999px; background: #ffffff; color: #57606a; cursor: pointer;"
-                    title="Close GitLab pipeline">×</button>
+                    title="Close GitLab pipeline"><svg aria-hidden="true" viewBox="0 0 16 16" version="1.1" width="12" height="12" data-view-component="true" class="octicon octicon-x" fill="currentColor"><path fill-rule="evenodd" d="M3.72 3.72a.75.75 0 011.06 0L8 6.94l3.22-3.22a.75.75 0 111.06 1.06L9.06 8l3.22 3.22a.75.75 0 11-1.06 1.06L8 9.06l-3.22 3.22a.75.75 0 11-1.06-1.06L6.94 8 3.72 4.78a.75.75 0 010-1.06z"></path></svg></button>
           </div>
           <div style="margin: 0; padding: 0 0 0 14px;">{{ commit.gitlab_checks_tree_html | safe }}</div>
 </div>
@@ -1236,7 +1238,7 @@ window.__dashboardOnReadyQueue.push(function() {
   <button type="button"
           onclick="event.stopPropagation(); try { collapseDockerImages('{{ sha_short }}'); } catch (e) {}"
           style="padding: 0 6px; height: 18px; line-height: 16px; font-size: 14px; border: 1px solid #d0d7de; border-radius: 999px; background: #ffffff; color: #57606a; cursor: pointer;"
-          title="Close Docker images">×</button>
+          title="Close Docker images"><svg aria-hidden="true" viewBox="0 0 16 16" version="1.1" width="12" height="12" data-view-component="true" class="octicon octicon-x" fill="currentColor"><path fill-rule="evenodd" d="M3.72 3.72a.75.75 0 011.06 0L8 6.94l3.22-3.22a.75.75 0 111.06 1.06L9.06 8l3.22 3.22a.75.75 0 11-1.06 1.06L8 9.06l-3.22 3.22a.75.75 0 11-1.06-1.06L6.94 8 3.72 4.78a.75.75 0 010-1.06z"></path></svg></button>
 </div>
 <!-- Commit Details Section -->
 <div style="margin-bottom: 12px; padding: 8px; background-color: white; border: 1px solid #d0d7de; border-radius: 4px;">
@@ -1249,10 +1251,12 @@ window.__dashboardOnReadyQueue.push(function() {
 </div>
 <details style="margin-top: 8px;">
 {{ summary_with_toggle('Show changed files (' ~ changed_files|length ~ ')', 'style="cursor: pointer; color: #0969da; font-size: 12px;"') }}
+<div class="details-body">
 <div style="margin-top: 4px; font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace; font-size: 11px;">
 {% for file in changed_files %}
 <div style="padding: 2px 0;">{{ file }}</div>
 {% endfor %}
+</div>
 </div>
 </details>
 </div>

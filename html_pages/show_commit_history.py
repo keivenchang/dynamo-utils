@@ -1578,22 +1578,16 @@ class CommitHistoryGenerator:
         def _image_status_icon_html(*, status: str) -> str:
             """Return a fixed-size (12x12) status dot for IMAGE:... that matches tree-node style.
 
-            Important: use a single span-based style (like required check/X in tree nodes) so
-            the red circle-X looks identical, and all statuses line up consistently.
+            Important: route through shared `status_icon_html` so all dashboards/icons are consistent.
             """
-            st = str(status or STATUS_UNKNOWN)
-            st_esc = html.escape(st, quote=True)
-            if st == STATUS_SUCCESS:
-                # Green filled circle with check.
-                return f'<span class="image-status-icon image-status-success" data-status="{st_esc}">✓</span>'
-            if st == STATUS_FAILED:
-                # Red filled circle with X (same visual as required-failure tree icon).
-                return f'<span class="image-status-icon image-status-failed" data-status="{st_esc}">✗</span>'
-            if st == STATUS_BUILDING:
-                # Yellow filled circle with hourglass.
-                return f'<span class="image-status-icon image-status-building" data-status="{st_esc}">⏳</span>'
-            # Unknown/pending: subtle hollow circle (no glyph).
-            return f'<span class="image-status-icon image-status-unknown" data-status="{st_esc}"></span>'
+            st = str(status or STATUS_UNKNOWN).strip().lower()
+            if st == str(STATUS_SUCCESS).strip().lower():
+                return status_icon_html(status_norm="success", is_required=True)
+            if st == str(STATUS_FAILED).strip().lower():
+                return status_icon_html(status_norm="failure", is_required=True)
+            if st == str(STATUS_BUILDING).strip().lower():
+                return status_icon_html(status_norm="in_progress", is_required=False)
+            return status_icon_html(status_norm="unknown", is_required=False)
 
         for commit in commit_data:
             try:

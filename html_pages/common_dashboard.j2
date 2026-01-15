@@ -253,6 +253,7 @@
   <div class="footer">
     <details data-url-state="1" data-url-key="stats">
       {{ summary_with_toggle('Statistics') }}
+      <div class="details-body">
       <table class="stats-table">
         {% for k, v in page_stats %}
         <tr>
@@ -271,6 +272,7 @@
         </tr>
         {% endfor %}
       </table>
+      </div>
     </details>
   </div>
   {% endif %}
@@ -667,6 +669,20 @@
             Object.keys(_defaults || {}).forEach(function(k) {
               try { params.delete(String(k || '')); } catch (e) {}
             });
+          } catch (e) {}
+
+          // Clear persisted column-toggle state (commit history) so defaults are restored.
+          // URL params (`col.*`) are cleared above, but commit history also persists to localStorage.
+          try {
+            // Prefer scanning localStorage, so this works even if the commit-history table isn't present.
+            for (var i = (localStorage && localStorage.length ? localStorage.length - 1 : -1); i >= 0; i--) {
+              var lk = '';
+              try { lk = String(localStorage.key(i) || ''); } catch (e) { lk = ''; }
+              if (!lk) continue;
+              if (lk.indexOf('commitHistoryCol:') === 0) {
+                try { localStorage.removeItem(lk); } catch (e) {}
+              }
+            }
           } catch (e) {}
 
           _replaceUrl(params);

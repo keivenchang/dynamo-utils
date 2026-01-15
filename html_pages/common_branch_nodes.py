@@ -1602,7 +1602,13 @@ class PRStatusNode(BranchNode):
         status_parts = []
 
         if self.pr.ci_status:
-            ci_icon = "✅" if self.pr.ci_status == "passed" else "❌" if self.pr.ci_status == "failed" else "⏳"
+            ci_icon = (
+                status_icon_html(status_norm="success", is_required=True)
+                if self.pr.ci_status == "passed"
+                else status_icon_html(status_norm="failure", is_required=True)
+                if self.pr.ci_status == "failed"
+                else status_icon_html(status_norm="in_progress", is_required=False)
+            )
 
             # If CI failed, show required vs optional failure counts (based on branch protection required checks).
             if self.pr.ci_status == "failed":
@@ -1714,22 +1720,22 @@ class PRStatusNode(BranchNode):
                     )
                 if progress_required_jobs:
                     tooltip_parts.append(
-                        '<strong style="color: #8c959f;">⏳ In Progress (required):</strong> '
+                        f'<strong style="color: #8c959f;">{status_icon_html(status_norm="in_progress", is_required=False)} In Progress (required):</strong> '
                         + ", ".join(sorted(html_module.escape(n) for n in progress_required_jobs))
                     )
                 if progress_optional_jobs:
                     tooltip_parts.append(
-                        '<strong style="color: #8c959f;">⏳ In Progress (optional):</strong> '
+                        f'<strong style="color: #8c959f;">{status_icon_html(status_norm="in_progress", is_required=False)} In Progress (optional):</strong> '
                         + ", ".join(sorted(html_module.escape(n) for n in progress_optional_jobs))
                     )
                 if pending_jobs:
                     tooltip_parts.append(
-                        '<strong style="color: #8c959f;">⏸ Pending:</strong> '
+                        f'<strong style="color: #8c959f;">{status_icon_html(status_norm="pending", is_required=False)} Pending:</strong> '
                         + ", ".join(sorted(html_module.escape(n) for n in pending_jobs))
                     )
                 if cancelled_jobs:
                     tooltip_parts.append(
-                        '<strong style="color: #8c959f;">✖️ Canceled:</strong> '
+                        f'<strong style="color: #8c959f;">{status_icon_html(status_norm="cancelled", is_required=False)} Canceled:</strong> '
                         + ", ".join(sorted(html_module.escape(n) for n in cancelled_jobs))
                     )
                 if other_jobs:
