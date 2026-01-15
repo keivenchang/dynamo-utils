@@ -127,8 +127,6 @@ while [ "$#" -gt 0 ]; do
             RUN_SHOW_REMOTE_BRANCHES=true; ANY_FLAG=true; shift ;;
         --fast-debug)
             FAST_DEBUG=true; shift ;;
-        --fast)
-            FAST_DEBUG=true; shift ;;
         --dry-run)
             DRY_RUN=true; shift ;;
         --run-ignore-lock)
