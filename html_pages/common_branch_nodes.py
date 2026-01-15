@@ -576,6 +576,7 @@ class CIJobNode(BranchNode):
         duration: str = "",
         log_url: str = "",
         actions_job_id: str = "",  # GitHub Actions job id (from checks rows), for stable identity across reruns
+        core_job_name: str = "",  # Optional "core" display name (without workflow prefix/event suffix)
         is_required: bool = False,
         children: Optional[List[BranchNode]] = None,
         expanded: bool = False,
@@ -595,6 +596,7 @@ class CIJobNode(BranchNode):
         self.duration = str(duration or "")
         self.log_url = str(log_url or "")
         self.actions_job_id = str(actions_job_id or "")
+        self.core_job_name = str(core_job_name or "")
         self.is_required = bool(is_required)
         self.page_root_dir = page_root_dir
         self.context_key = str(context_key or "")
@@ -646,7 +648,7 @@ class CIJobNode(BranchNode):
             collapsible=True,
             default_expanded=self.expanded,
             job_name=self.job_id,  # Set job_name for hierarchy matching and validation
-            core_job_name=str(getattr(self, "core_job_name", "") or ""),  # optional augmentation field
+            core_job_name=str(self.core_job_name or ""),
             short_job_name=str(self.short_job_name or ""),  # always present on CIJobNode
         )
 

@@ -516,7 +516,7 @@ def convert_branch_nodes_to_tree_vm_pass(ci_nodes: List) -> List[TreeNodeVM]:
         
         # Debug: Check if core_job_name was propagated
         if idx < 5:
-            core_name = getattr(node_vm, 'core_job_name', '<none>')
+            core_name = node_vm.core_job_name or "<none>"
             logger.debug(f"  [{idx}] TreeNodeVM has core_job_name='{core_name}'")
         
         ci_info_nodes.append(node_vm)
@@ -724,8 +724,8 @@ def augment_ci_with_yaml_info_pass(
     
     for node in original_ci_nodes:
         core_name = ""
-        if isinstance(node, CIJobNode) and hasattr(node, "core_job_name"):
-            core_name = str(getattr(node, "core_job_name", "") or "")
+        if isinstance(node, CIJobNode):
+            core_name = str(node.core_job_name or "")
 
             # Direct lookup in the hash map
             if core_name in long_to_short:
@@ -927,9 +927,9 @@ def sort_nodes_by_name_pass(nodes: List[TreeNodeVM]) -> List[TreeNodeVM]:
             Tuple of (priority, name) where priority determines order:
             - 0: Regular jobs (sorted alphabetically)
         """
-        job_name = str(getattr(node, "job_name", "") or "")
+        job_name = str(node.job_name or "")
         # Use job_name if available, otherwise extract from label_html
-        name = job_name if job_name else str(getattr(node, "label_html", "") or "")
+        name = job_name if job_name else str(node.label_html or "")
         return (0, name.lower())
     
     # Sort current level
@@ -938,7 +938,7 @@ def sort_nodes_by_name_pass(nodes: List[TreeNodeVM]) -> List[TreeNodeVM]:
     # Recursively sort children
     result = []
     for node in sorted_nodes:
-        children = list(getattr(node, "children", None) or [])
+        children = list(node.children or [])
         if children:
             sorted_children = sort_nodes_by_name_pass(children)
             # Create new node with sorted children
@@ -952,9 +952,12 @@ def sort_nodes_by_name_pass(nodes: List[TreeNodeVM]) -> List[TreeNodeVM]:
                 noncollapsible_icon=node.noncollapsible_icon,
                 skip_dedup=node.skip_dedup,
                 job_name=node.job_name,
+                core_job_name=node.core_job_name,
+                short_job_name=node.short_job_name,
                 workflow_name=node.workflow_name,
                 variant=node.variant,
                 pr_number=node.pr_number,
+                raw_html_content=node.raw_html_content,
             ))
         else:
             result.append(node)
@@ -1000,21 +1003,22 @@ def expand_required_failure_descendants_pass(nodes: List[TreeNodeVM]) -> List[Tr
                 collapsible=bool(n.collapsible),
                 default_expanded=bool(new_default_expanded),
                 triangle_tooltip=n.triangle_tooltip,
-                noncollapsible_icon=getattr(n, "noncollapsible_icon", ""),
-                job_name=getattr(n, "job_name", ""),
-                core_job_name=getattr(n, "core_job_name", ""),
-                workflow_name=getattr(n, "workflow_name", ""),
-                variant=getattr(n, "variant", ""),
-                pr_number=getattr(n, "pr_number", None),
-                raw_html_content=getattr(n, "raw_html_content", ""),
+                noncollapsible_icon=n.noncollapsible_icon,
+                job_name=n.job_name,
+                core_job_name=n.core_job_name,
+                short_job_name=n.short_job_name,
+                workflow_name=n.workflow_name,
+                variant=n.variant,
+                pr_number=n.pr_number,
+                raw_html_content=n.raw_html_content,
             ),
             has_req,
         )
 
     out: List[TreeNodeVM] = []
     for n in (nodes or []):
-        n2, _ = walk(n)
-        out.append(n2)
+            n2, _ = walk(n)
+            out.append(n2)
     return out
 
 
@@ -1134,11 +1138,11 @@ def verify_tree_structure_pass(tree_nodes: List[TreeNodeVM], original_ci_nodes: 
             #
             # CIJobNode.job_id is a *display* id (often the check name, sometimes prefixed with workflow),
             # and can collide across reruns. Prefer the Actions job id extracted from the log URL.
-            log_url = str(getattr(node, "log_url", "") or "")
-            actions_job_id = str(getattr(node, "actions_job_id", "") or "").strip()
+            log_url = str(node.log_url or "")
+            actions_job_id = str(node.actions_job_id or "").strip()
             actions_job_id = actions_job_id or (extract_actions_job_id_from_url(log_url) if log_url else "")
-            stable_id = str(actions_job_id or log_url or getattr(node, "job_id", "") or "")
-            core_name = getattr(node, 'core_job_name', '')
+            stable_id = str(actions_job_id or log_url or node.job_id or "")
+            core_name = str(node.core_job_name or "")
             if short_name not in short_name_counts:
                 short_name_counts[short_name] = []
             short_name_counts[short_name].append((stable_id, core_name))
@@ -1178,10 +1182,10 @@ def verify_tree_structure_pass(tree_nodes: List[TreeNodeVM], original_ci_nodes: 
         found = False
         for node in original_ci_nodes:
             if isinstance(node, CIJobNode):
-                core_name = getattr(node, 'core_job_name', '')
-                job_id = getattr(node, 'job_id', '')
-                display_name = getattr(node, 'display_name', '')
-                short_name = getattr(node, 'short_job_name', '')
+                core_name = str(node.core_job_name or "")
+                job_id = str(node.job_id or "")
+                display_name = str(node.display_name or "")
+                short_name = str(node.short_job_name or "")
                 
                 if important_job in core_name or important_job in job_id or important_job in display_name:
                     if short_name:
@@ -1271,7 +1275,7 @@ def _compute_parent_status_from_children(children: List[TreeNodeVM]) -> str:
     success_count = 0
     
     for child in children:
-        label = str(getattr(child, "label_html", "") or "")
+        label = str(child.label_html or "")
         # Check for status indicators in the label HTML. Prefer SVG class names emitted by
         # `status_icon_html`, but keep a few keyword fallbacks for robustness.
         label_l = label.lower()
@@ -1647,7 +1651,7 @@ def render_tree_pre_lines(root_nodes: List[TreeNodeVM]) -> List[str]:
             else:
                 tri = _triangle_placeholder_html()
         else:
-            tri = _noncollapsible_icon_html(getattr(node, "noncollapsible_icon", ""))
+            tri = _noncollapsible_icon_html(node.noncollapsible_icon)
 
         line = (node.label_html or "").strip()
         if line:
@@ -2149,7 +2153,7 @@ def status_icon_html(
             # REQUIRED: filled red circle X (SVG).
             return _circle_x_fill_svg(color=COLOR_RED)
         # Optional failure: small X.
-        return (
+            return (
             f'<span style="color: {COLOR_RED}; display: inline-flex; vertical-align: text-bottom;">'
             f'{_octicon_svg(path_d="M3.72 3.72a.75.75 0 011.06 0L8 6.94l3.22-3.22a.75.75 0 111.06 1.06L9.06 8l3.22 3.22a.75.75 0 11-1.06 1.06L8 9.06l-3.22 3.22a.75.75 0 11-1.06-1.06L6.94 8 3.72 4.78a.75.75 0 010-1.06z", name="octicon-x")}'
             "</span>"
@@ -2660,7 +2664,6 @@ def check_line_html(
     # Show category pills if snippet exists (snippets are now rendered as child nodes)
     snippet_text = str(error_snippet_text or "")
     has_snippet_text = bool(snippet_text.strip())
-
     if has_snippet_text:
         # Generate snippet key (same logic as _create_snippet_tree_node)
         dom_id_seed = f"{job_id}|{display_name}|{raw_log_href}|{log_url}"
@@ -2687,10 +2690,10 @@ def check_line_html(
             snippet_key = f"s.{sha7}.j{jobid}" if sha7 else f"s.j{jobid}"
         else:
             snippet_key = f"s.{sha7}.{suffix}" if sha7 else f"s.{suffix}"
-        
+
         # Show category pills and command pill with snippet key for click handling
         cats = error_snippet_categories if error_snippet_categories else _snippet_categories(snippet_text)
-        for c in cats[:3]:
+        for c in (cats or [])[:3]:
             links += _tag_pill_html(text=c, monospace=False, kind="category", snippet_key=snippet_key)
         cmd = _snippet_first_command(snippet_text)
         if cmd:

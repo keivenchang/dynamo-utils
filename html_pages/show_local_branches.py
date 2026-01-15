@@ -278,9 +278,9 @@ def _tree_has_current_branch(node: BranchNode) -> bool:
     This prevents rendering the current branch twice (once inside a section like "Branches"
     and again as a top-level fallback line).
     """
-    if isinstance(node, BranchInfoNode) and bool(getattr(node, "is_current", False)):
+    if isinstance(node, BranchInfoNode) and bool(node.is_current):
         return True
-    for child in getattr(node, "children", []) or []:
+    for child in (node.children or []):
         if _tree_has_current_branch(child):
             return True
     return False
@@ -485,7 +485,7 @@ def _format_utc_datetime_from_iso(iso_utc: str) -> Optional[str]:
     try:
         dt = datetime.fromisoformat(iso_utc.replace("Z", "+00:00"))
         # Ensure tz-aware
-        if getattr(dt, "tzinfo", None) is None:
+        if dt.tzinfo is None:
             dt = dt.replace(tzinfo=ZoneInfo("UTC"))
         dt_utc = dt.astimezone(ZoneInfo("UTC"))
         return dt_utc.strftime("%Y-%m-%d %H:%M")
@@ -729,7 +729,7 @@ class LocalRepoScanner:
         try:
             head_commit = repo.head.commit
             head_sha = head_commit.hexsha[:7]
-            head_commit_dt = getattr(head_commit, "committed_datetime", None)
+            head_commit_dt = head_commit.committed_datetime
         except Exception:
             head_sha = None
             head_commit_dt = None
@@ -739,7 +739,7 @@ class LocalRepoScanner:
                 if dt is None:
                     return None
                 # GitPython often returns tz-aware datetimes; if not, assume UTC.
-                if getattr(dt, "tzinfo", None) is None:
+                if dt.tzinfo is None:
                     dt = dt.replace(tzinfo=ZoneInfo("UTC"))
                 pt = dt.astimezone(ZoneInfo("America/Los_Angeles"))
                 return f"{pt.strftime('%Y-%m-%d %H:%M')} PT"
@@ -785,8 +785,8 @@ class LocalRepoScanner:
             # Get commit SHA
             try:
                 sha = branch.commit.hexsha[:7]
-                commit_dt = getattr(branch.commit, "committed_datetime", None)
-                commit_msg = str(getattr(branch.commit, "message", "") or "").strip()
+                commit_dt = branch.commit.committed_datetime
+                commit_msg = str(branch.commit.message or "").strip()
             except Exception:
                 sha = None
                 commit_dt = None
@@ -855,7 +855,7 @@ class LocalRepoScanner:
                 branch_results_sorted = branch_results_sorted[: int(self.max_branches)]
 
             allow_fetch_branch_names: Set[str] = set()
-            if bool(getattr(self, "cache_only_github", False)):
+            if bool(self.cache_only_github):
                 allow_fetch_branch_names = set()
             elif self.max_checks_fetch is not None and self.max_checks_fetch > 0:
                 allow_fetch_branch_names = {bn for (bn, _info, _prs) in branch_results_sorted[: int(self.max_checks_fetch)]}
@@ -889,7 +889,7 @@ class LocalRepoScanner:
                 # Add PR status node if PR exists
                 if pr:
                     allow_fetch_checks = (branch_name in allow_fetch_branch_names) if allow_fetch_branch_names else True
-                    if bool(getattr(self, "cache_only_github", False)):
+                    if bool(self.cache_only_github):
                         allow_fetch_checks = False
                     
                     pr_state_lc = (pr.state or "").lower()
@@ -1220,9 +1220,9 @@ def main():
     try:
         def _count_prs(node: BranchNode) -> int:
             n = 0
-            if isinstance(node, PRNode) and getattr(node, "pr", None) is not None:
+            if isinstance(node, PRNode) and node.pr is not None:
                 n += 1
-            for ch in (getattr(node, "children", None) or []):
+            for ch in (node.children or []):
                 n += _count_prs(ch)
             return n
 
@@ -1233,8 +1233,8 @@ def main():
     repos_scanned = 0
     try:
         # New structure: root -> LocalUserNode -> LocalRepoNode -> ...
-        maybe_user = (getattr(root, "children", None) or [None])[0]
-        repos_scanned = len(getattr(maybe_user, "children", None) or [])
+        maybe_user = (root.children or [None])[0]
+        repos_scanned = len(maybe_user.children or []) if maybe_user is not None else 0
     except Exception:
         repos_scanned = 0
 
@@ -1280,7 +1280,7 @@ def main():
         try:
             from common_dashboard_lib import github_api_stats_rows  # local import
 
-            mode = "cache-only" if bool(getattr(scanner, "cache_only_github", False)) else "normal"
+            mode = "cache-only" if bool(scanner.cache_only_github) else "normal"
             api_rows = github_api_stats_rows(
                 github_api=scanner.github_api,
                 max_github_api_calls=int(args.max_github_api_calls),

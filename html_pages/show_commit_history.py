@@ -258,8 +258,11 @@ class CommitHistoryGenerator:
             key = self._snippet_cache_key_for_raw_log(p)
             try:
                 st = p.stat()
-                mtime_ns = int(getattr(st, "st_mtime_ns", 0) or 0)
-                size = int(getattr(st, "st_size", 0) or 0)
+                try:
+                    mtime_ns = int(st.st_mtime_ns)
+                except AttributeError:
+                    mtime_ns = int(float(st.st_mtime) * 1_000_000_000)
+                size = int(st.st_size)
             except Exception:
                 mtime_ns = 0
                 size = 0
@@ -346,7 +349,7 @@ class CommitHistoryGenerator:
 
     def _ci_log_errors_sha(self) -> str:
         """Fingerprint the ci_log_errors implementation (used for snippet cache invalidation)."""
-        fp = str(getattr(self, "_ci_log_errors_fingerprint", "") or "")
+        fp = str(self._ci_log_errors_fingerprint or "")
         if fp:
             return fp
         try:
@@ -531,8 +534,11 @@ class CommitHistoryGenerator:
         key = self._snippet_cache_key_for_raw_log(Path(raw_log_path))
         try:
             st = Path(raw_log_path).stat()
-            mtime_ns = int(getattr(st, "st_mtime_ns", 0) or 0)
-            size = int(getattr(st, "st_size", 0) or 0)
+            try:
+                mtime_ns = int(st.st_mtime_ns)
+            except AttributeError:
+                mtime_ns = int(float(st.st_mtime) * 1_000_000_000)
+            size = int(st.st_size)
         except Exception:
             mtime_ns = 0
             size = 0
@@ -774,7 +780,7 @@ class CommitHistoryGenerator:
                     pr_numbers.append(pr_num)
                     sha_to_pr_number[commit.hexsha] = pr_num
 
-            cache_only_github = bool(getattr(self.github_client, "cache_only_mode", False))
+            cache_only_github = bool(self.github_client.cache_only_mode)
             if pr_numbers and (not self.skip_gitlab_fetch) and (not cache_only_github):
                 # Batch fetch merge dates for all PRs (GitHub)
                 self.logger.info(f"Fetching merge dates for {len(pr_numbers)} PRs...")
@@ -859,7 +865,7 @@ class CommitHistoryGenerator:
                         # Backfill author_email if missing.
                         if not author_email:
                             try:
-                                author_email = str(getattr(commit.author, "email", "") or "")
+                                author_email = str(commit.author.email or "")
                             except Exception:
                                 author_email = ""
                             if author_email:
@@ -879,7 +885,7 @@ class CommitHistoryGenerator:
                         date_str = commit_dt_pt.strftime('%Y-%m-%d %H:%M:%S')
                         author_name = commit.author.name
                         try:
-                            author_email = str(getattr(commit.author, "email", "") or "")
+                            author_email = str(commit.author.email or "")
                         except Exception:
                             author_email = ""
                         message_first_line = _clean_subject_line(commit.message)
@@ -1249,7 +1255,7 @@ class CommitHistoryGenerator:
         #   - only cache when job status is completed
         #   - size caps and other safeguards
 
-        cache_only_github = bool(getattr(self.github_client, "cache_only_mode", False))
+        cache_only_github = bool(self.github_client.cache_only_mode)
         github_actions_status = self.github_client.get_github_actions_status(
             owner='ai-dynamo',
             repo='dynamo',
@@ -2096,7 +2102,7 @@ class CommitHistoryGenerator:
         try:
             from common_dashboard_lib import github_api_stats_rows  # local import
 
-            mode = "cache-only" if bool(getattr(self.github_client, "cache_only_mode", False)) else "normal"
+            mode = "cache-only" if bool(self.github_client.cache_only_mode) else "normal"
             api_rows = github_api_stats_rows(
                 github_api=self.github_client,
                 max_github_api_calls=None,
@@ -2114,8 +2120,8 @@ class CommitHistoryGenerator:
 
         # Performance breakdown (best-effort; collected across the run).
         try:
-            perf = dict(getattr(self, "_perf", {}) or {})
-            perfi = dict(getattr(self, "_perf_i", {}) or {})
+            perf = dict(self._perf or {})
+            perfi = dict(self._perf_i or {})
             if perf or perfi:
                 # Composite SHA
                 page_stats.append(("composite_sha.cache.hit", str(int(perfi.get("composite_sha.cache.hit", 0) or 0))))
@@ -2154,7 +2160,7 @@ class CommitHistoryGenerator:
 
         # GitLab API totals (best-effort).
         try:
-            gl = getattr(self, "gitlab_client", None)
+            gl = self.gitlab_client
             if gl is not None and hasattr(gl, "get_rest_call_stats"):
                 st = gl.get_rest_call_stats() or {}
                 page_stats.append(("gitlab.rest.calls", str(int(st.get("total") or 0))))
@@ -2207,7 +2213,7 @@ class CommitHistoryGenerator:
 
         # Include timing breakdown if available (best-effort).
         try:
-            t = getattr(self, "_last_timings", None) or {}
+            t = self._last_timings or {}
             if isinstance(t, dict) and t:
                 # Note: total/render/write are measured outside this HTML generator; we show those separately
                 # (or via elapsed_s above) to avoid stale/partial totals.
@@ -2693,8 +2699,8 @@ Examples:
         github_token=args.token,
         allow_anonymous_github=bool(args.allow_anonymous_github),
         max_github_api_calls=int(args.max_github_api_calls),
-        parallel_workers=int(getattr(args, "parallel_workers", 0) or 0),
-        disable_snippet_cache_read=bool(getattr(args, "disable_snippet_cache_read", False)),
+        parallel_workers=int(args.parallel_workers or 0),
+        disable_snippet_cache_read=bool(args.disable_snippet_cache_read),
     )
     # Fail fast if exhausted; detailed stats are rendered into the HTML Statistics section.
     cache_only_reason = ""
@@ -2717,7 +2723,7 @@ Examples:
         export_pipeline_pr_csv=args.export_pipeline_pr_csv,
     )
         # Debug: snippet cache analysis (avoid printing from library code; use logger).
-        if bool(getattr(args, "debug", False)) and hasattr(generator, "_snippet_cache_debug"):
+        if bool(args.debug) and hasattr(generator, "_snippet_cache_debug"):
             import logging
             from collections import Counter
 
