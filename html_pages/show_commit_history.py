@@ -10,6 +10,7 @@ HTML-only dashboard generator.
 """
 
 import argparse
+import concurrent.futures
 try:
     import git  # type: ignore[import-not-found]
 except Exception:  # pragma: no cover
@@ -105,6 +106,19 @@ STATUS_BUILDING = 'building'
 _normalize_check_name = normalize_check_name
 _is_required_check_name = is_required_check_name
 
+
+def _extract_error_snippet_worker(raw_log_path: str) -> str:
+    """Worker process entrypoint: extract snippet text for a single raw log file.
+
+    Keep this function top-level so it is picklable for multiprocessing.
+    Do not write caches in the worker; the parent merges results and persists.
+    """
+    try:
+        return str(ci_snippet.extract_error_snippet_from_log_file(Path(raw_log_path)) or "")
+    except Exception:
+        return ""
+
+
 class CommitHistoryGenerator:
     """Generate commit history with Image SHA (hash of container/ contents) and Docker images"""
 
@@ -117,6 +131,8 @@ class CommitHistoryGenerator:
         github_token: Optional[str] = None,
         allow_anonymous_github: bool = False,
         max_github_api_calls: int = 100,
+        parallel_workers: int = 0,
+        disable_snippet_cache_read: bool = False,
     ):
         """
         Initialize the commit history generator
@@ -131,6 +147,8 @@ class CommitHistoryGenerator:
         self.verbose = verbose
         self.debug = debug
         self.skip_gitlab_fetch = skip_gitlab_fetch
+        self.parallel_workers = int(parallel_workers or 0)
+        self.disable_snippet_cache_read = bool(disable_snippet_cache_read)
         self.logger = self._setup_logger()
         # Cache files live in ~/.cache/dynamo-utils to avoid polluting the repo checkout
         self.cache_file = dynamo_utils_cache_dir() / "commit_history.json"
@@ -156,6 +174,175 @@ class CommitHistoryGenerator:
         # GitHub network fetching is governed by cache TTLs in `common.py`.
         # We allow fetches when entries are missing or stale so the dashboard self-heals and
         # raw logs can be materialized whenever they are needed.
+
+    @staticmethod
+    def _split_categories_from_snippet(snippet: str) -> tuple[str, list[str]]:
+        """Split the optional 'Categories:' header from snippet output.
+
+        Input format:
+        - When `ci_log_errors.snippet.extract_error_snippet_from_log_file(...)` finds categories,
+          it prefixes the snippet with a first line like:
+            "Categories: pytest-error, python-error"
+
+        Returns:
+        - snippet_body (str): snippet text without the "Categories: ..." first line
+        - categories (list[str]): list of category strings, e.g. ["pytest-error", "python-error"]
+        """
+        categories: list[str] = []
+        snippet_body = str(snippet or "")
+        if snippet_body:
+            lines = snippet_body.split("\n", 1)
+            first_line = lines[0] if lines else ""
+            if first_line.startswith("Categories:"):
+                categories_str = first_line.replace("Categories:", "").strip()
+                categories = [c.strip() for c in categories_str.split(",")] if categories_str else []
+                snippet_body = lines[1] if len(lines) > 1 else ""
+        return (snippet_body, categories)
+
+    def _snippets_for_raw_hrefs(self, raw_hrefs: List[str]) -> Dict[str, tuple[str, list[str]]]:
+        """Batch snippet extraction for raw log hrefs (optionally in multiple processes).
+
+        Args:
+            raw_hrefs: list[str] of repo-relative paths (hrefs) to local raw log files, e.g.:
+              [
+                "dynamo_ci/logs/60392310930.log",
+                "dynamo_ci/logs/60392310931.log",
+              ]
+
+        Returns:
+            Dict[str, Tuple[str, List[str]]] mapping raw_href -> (snippet_body, categories):
+              {
+                "dynamo_ci/logs/60392310930.log": (
+                  "<snippet text without Categories header>",
+                  ["pytest-error", "python-error"],
+                ),
+                "dynamo_ci/logs/60392310931.log": ("", []),
+              }
+
+        Notes:
+        - Cache reads + writes happen in the parent process only.
+        - Worker processes only compute snippet text for cache misses; parent merges into cache.
+        """
+        out: Dict[str, tuple[str, list[str]]] = {}
+        if not raw_hrefs:
+            return out
+
+        # De-dupe while preserving order.
+        seen: set[str] = set()
+        hrefs: List[str] = []
+        for h in raw_hrefs:
+            hh = str(h or "")
+            if not hh or hh in seen:
+                continue
+            seen.add(hh)
+            hrefs.append(hh)
+
+        # Cache is loaded once at start of show_commit_history()
+        data = self._snippet_cache_data if isinstance(self._snippet_cache_data, dict) else {}
+        items = data.get("items") if isinstance(data.get("items"), dict) else {}
+
+        TTL_SECONDS = 365 * 24 * 60 * 60
+        now_ts = int(time.time())
+
+        misses: List[Tuple[str, Path, str, int, int]] = []  # (href, path, key, mtime_ns, size)
+        for href in hrefs:
+            p = Path(self.repo_path) / href
+            try:
+                if not p.exists() or not p.is_file():
+                    out[href] = ("", [])
+                    continue
+            except Exception:
+                out[href] = ("", [])
+                continue
+
+            key = self._snippet_cache_key_for_raw_log(p)
+            try:
+                st = p.stat()
+                mtime_ns = int(getattr(st, "st_mtime_ns", 0) or 0)
+                size = int(getattr(st, "st_size", 0) or 0)
+            except Exception:
+                mtime_ns = 0
+                size = 0
+
+            # For testing parallel parsing: treat everything as a miss, regardless of cache contents.
+            if bool(self.disable_snippet_cache_read):
+                misses.append((href, p, key, mtime_ns, size))
+                continue
+
+            ent = items.get(key) if isinstance(items, dict) else None
+            if isinstance(ent, dict):
+                try:
+                    cached_mtime = int(ent.get("mtime_ns", -1) or -1)
+                    cached_size = int(ent.get("size", -1) or -1)
+                    cached_ts = int(ent.get("ts", 0) or 0)
+                    if cached_ts > 0 and (now_ts - cached_ts) > TTL_SECONDS:
+                        misses.append((href, p, key, mtime_ns, size))
+                    elif cached_mtime == mtime_ns and cached_size == size:
+                        sn = str(ent.get("snippet", "") or "")
+                        cats = ent.get("categories", []) or []
+                        if sn:
+                            self._perf_i["snippet.cache.hit"] = int(self._perf_i.get("snippet.cache.hit", 0) or 0) + 1
+                            out[href] = (sn, cats)
+                            continue
+                        misses.append((href, p, key, mtime_ns, size))
+                    else:
+                        misses.append((href, p, key, mtime_ns, size))
+                except Exception:
+                    misses.append((href, p, key, mtime_ns, size))
+            else:
+                misses.append((href, p, key, mtime_ns, size))
+
+        if not misses:
+            return out
+
+        self._perf_i["snippet.cache.miss"] = int(self._perf_i.get("snippet.cache.miss", 0) or 0) + len(misses)
+        t_compute0 = time.monotonic()
+
+        def store_result(*, href: str, key: str, mtime_ns: int, size: int, snippet_text: str) -> None:
+            body, cats = self._split_categories_from_snippet(snippet_text)
+            out[href] = (body, cats)
+            try:
+                if isinstance(items, dict):
+                    items[key] = {
+                        "mtime_ns": int(mtime_ns),
+                        "size": int(size),
+                        "ts": int(time.time()),
+                        "snippet": str(body or ""),
+                        "categories": list(cats or []),
+                    }
+                    data["items"] = items
+                    self._snippet_cache_data = data
+                    self._snippet_cache_dirty = True
+            except Exception:
+                pass
+
+        if int(self.parallel_workers or 0) > 1:
+            max_workers = int(self.parallel_workers)
+            with concurrent.futures.ProcessPoolExecutor(max_workers=max_workers) as ex:
+                futs: Dict[concurrent.futures.Future, Tuple[str, str, int, int]] = {}
+                for href, p, key, mtime_ns, size in misses:
+                    fut = ex.submit(_extract_error_snippet_worker, str(p))
+                    futs[fut] = (href, key, mtime_ns, size)
+
+                for fut in concurrent.futures.as_completed(futs):
+                    href, key, mtime_ns, size = futs[fut]
+                    try:
+                        sn = str(fut.result() or "")
+                    except Exception:
+                        sn = ""
+                    store_result(href=href, key=key, mtime_ns=mtime_ns, size=size, snippet_text=sn)
+        else:
+            for href, p, key, mtime_ns, size in misses:
+                try:
+                    sn = str(ci_snippet.extract_error_snippet_from_log_file(p) or "")
+                except Exception:
+                    sn = ""
+                store_result(href=href, key=key, mtime_ns=mtime_ns, size=size, snippet_text=sn)
+
+        dt = max(0.0, time.monotonic() - t_compute0)
+        self._perf["snippet.compute_secs"] = float(self._perf.get("snippet.compute_secs", 0.0) or 0.0) + dt
+        self._perf["snippet.total_secs"] = float(self._perf.get("snippet.total_secs", 0.0) or 0.0) + dt
+        return out
 
     def _ci_log_errors_sha(self) -> str:
         """Fingerprint the ci_log_errors implementation (used for snippet cache invalidation)."""
@@ -399,17 +586,7 @@ class CommitHistoryGenerator:
         except Exception:
             snippet = ""
         
-        # Separate categories from snippet text
-        categories = []
-        snippet_body = snippet
-        if snippet:
-            lines = snippet.split('\n', 1)
-            first_line = lines[0] if lines else ""
-            if first_line.startswith("Categories:"):
-                # Extract categories and remove from snippet body
-                categories_str = first_line.replace("Categories:", "").strip()
-                categories = [c.strip() for c in categories_str.split(",")] if categories_str else []
-                snippet_body = lines[1] if len(lines) > 1 else ""
+        snippet_body, categories = self._split_categories_from_snippet(snippet)
         
         dt_compute = max(0.0, time.monotonic() - t1)
         self._perf["snippet.compute_secs"] = float(self._perf.get("snippet.compute_secs", 0.0) or 0.0) + float(dt_compute)
@@ -420,7 +597,7 @@ class CommitHistoryGenerator:
                     "size": size,
                     "ts": int(time.time()),
                     "snippet": str(snippet_body or ""),
-                    "categories": categories,
+                    "categories": list(categories or []),
                 }
                 data["items"] = items
                 self._snippet_cache_data = data
@@ -501,7 +678,8 @@ class CommitHistoryGenerator:
         repo_utils = DynamoRepositoryUtils(self.repo_path, dry_run=False, verbose=self.verbose)
 
         # Load snippet cache once at start (speeds up repeated snippet extraction)
-        self._load_snippet_cache()
+        if not bool(self.disable_snippet_cache_read):
+            self._load_snippet_cache()
 
         # Cache stats (printed at end in verbose/debug mode; avoids needing to pipe output).
         cache_stats: Dict[str, dict] = {}
@@ -1608,20 +1786,8 @@ class CommitHistoryGenerator:
 
             # Flat view: show the exact check-run list (like GitHub Checks UI / our Details list),
             # without workflow YAML parsing or run-class bucketing.
-            snippet_cache: Dict[str, tuple[str, list[str]]] = {}
-
-            def snippet_for_raw_href(raw_href: str) -> tuple[str, list[str]]:
-                """Returns (snippet_text, categories) tuple."""
-                if not raw_href:
-                    return ("", [])
-                if raw_href in snippet_cache:
-                    return snippet_cache[raw_href]
-                try:
-                    result = self._snippet_from_cached_raw_log(Path(self.repo_path) / raw_href)
-                except Exception:
-                    result = ("", [])
-                snippet_cache[raw_href] = result
-                return result
+            # Collect all raw hrefs for this commit so we can batch snippet extraction (optionally parallel).
+            raw_hrefs_for_commit: List[str] = []
 
             name_counts: Dict[str, int] = {}
             for cr0 in check_runs:
@@ -1631,6 +1797,9 @@ class CommitHistoryGenerator:
                 except Exception:
                     pass
 
+            # First pass: materialize raw logs (if needed) and collect per-check info.
+            # Second pass: batch-extract snippets for any raw logs we found.
+            check_infos: List[Dict[str, object]] = []
             # Build CIJobNode objects (not TreeNodeVM) so run_all_passes can process them
             from common_branch_nodes import CIJobNode  # local import
             
@@ -1649,8 +1818,6 @@ class CommitHistoryGenerator:
 
                 raw_href = ""
                 raw_size = 0
-                snippet = ""
-                snippet_categories: list[str] = []
                 if st == "failure" and str(cr.get("status", "") or "").lower() == "completed":
                     allow_fetch = bool(allow_raw_logs) and int(raw_log_prefetch_budget.get("n", 0) or 0) > 0
                     try:
@@ -1677,10 +1844,36 @@ class CommitHistoryGenerator:
                         raw_size = int((Path(self.repo_path) / raw_href).stat().st_size)
                     except Exception:
                         raw_size = 0
-                    snippet, snippet_categories = snippet_for_raw_href(raw_href) if raw_href else ("", [])
+                    raw_hrefs_for_commit.append(str(raw_href))
 
                 # Disambiguate name if there are duplicates (adds [job ID] suffix)
                 disambiguated_name = disambiguate_check_run_name(name, url, name_counts=name_counts)
+
+                check_infos.append(
+                    {
+                        "name": name,
+                        "disambiguated_name": disambiguated_name,
+                        "url": url,
+                        "status_norm": st,
+                        "duration": dur,
+                        "is_required": is_req,
+                        "raw_href": raw_href,
+                        "raw_size": raw_size,
+                    }
+                )
+
+            snippets_by_href = self._snippets_for_raw_hrefs(raw_hrefs_for_commit) if raw_hrefs_for_commit else {}
+
+            for info in check_infos:
+                name = str(info.get("name", "") or "")
+                disambiguated_name = str(info.get("disambiguated_name", "") or name)
+                url = str(info.get("url", "") or "")
+                st = str(info.get("status_norm", "") or "unknown")
+                dur = str(info.get("duration", "") or "")
+                is_req = bool(info.get("is_required", False))
+                raw_href = str(info.get("raw_href", "") or "")
+                raw_size = int(info.get("raw_size", 0) or 0)
+                snippet, snippet_categories = snippets_by_href.get(raw_href, ("", [])) if raw_href else ("", [])
 
                 # Create CIJobNode with minimal fields - let run_all_passes handle the rest
                 node = CIJobNode(
@@ -2412,6 +2605,18 @@ Examples:
     )
 
     parser.add_argument(
+        '--parallel-workers',
+        type=int,
+        default=0,
+        help='Number of worker processes to parallelize raw log snippet parsing (default: 0 = single process)'
+    )
+    parser.add_argument(
+        '--disable-snippet-cache-read',
+        action='store_true',
+        help='TESTING ONLY: ignore existing snippet cache contents (forces cache misses; useful for benchmarking --parallel-workers)'
+    )
+
+    parser.add_argument(
         '--verbose', '-v',
         action='store_true',
         help='Enable verbose output (INFO level logging)'
@@ -2494,6 +2699,8 @@ Examples:
         github_token=args.token,
         allow_anonymous_github=bool(args.allow_anonymous_github),
         max_github_api_calls=int(args.max_github_api_calls),
+        parallel_workers=int(getattr(args, "parallel_workers", 0) or 0),
+        disable_snippet_cache_read=bool(getattr(args, "disable_snippet_cache_read", False)),
     )
     # Fail fast if exhausted; detailed stats are rendered into the HTML Statistics section.
     cache_only_reason = ""

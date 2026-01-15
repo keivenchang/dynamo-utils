@@ -403,11 +403,12 @@ run_show_commit_history() {
         if [ "$FAST_DEBUG" = true ]; then
             MAX_COMMITS=10
         fi
+        PARALLEL_WORKERS="${PARALLEL_WORKERS:-32}"
         echo "[DRY-RUN] Would generate commit history dashboard:"
         echo "[DRY-RUN]   Output: $COMMIT_HISTORY_HTML"
         echo "[DRY-RUN]   Max commits: $MAX_COMMITS"
         echo "[DRY-RUN]   Command: cd $DYNAMO_REPO && git checkout main && git pull origin main"
-        echo "[DRY-RUN]   Command: python3 $SCRIPT_DIR/show_commit_history.py --repo-path . --max-commits $MAX_COMMITS --output $COMMIT_HISTORY_HTML"
+        echo "[DRY-RUN]   Command: python3 $SCRIPT_DIR/show_commit_history.py --repo-path . --max-commits $MAX_COMMITS --output $COMMIT_HISTORY_HTML --parallel-workers $PARALLEL_WORKERS"
         return 0
     fi
 
@@ -436,6 +437,14 @@ run_show_commit_history() {
         MAX_GH_FLAG="--max-github-api-calls ${MAX_GITHUB_API_CALLS}"
     fi
 
+    # Default: parallelize raw log snippet parsing (CPU-heavy) to speed commit history generation.
+    # Set PARALLEL_WORKERS=0 to force single-process, or override to tune.
+    PARALLEL_WORKERS="${PARALLEL_WORKERS:-32}"
+    PARALLEL_FLAG=""
+    if [ -n "${PARALLEL_WORKERS:-}" ]; then
+        PARALLEL_FLAG="--parallel-workers ${PARALLEL_WORKERS}"
+    fi
+
     MAX_COMMITS="${MAX_COMMITS:-200}"
     if [ "$FAST_DEBUG" = true ]; then
         MAX_COMMITS=10
@@ -443,7 +452,7 @@ run_show_commit_history() {
 
     echo "$(date '+%Y-%m-%d %H:%M:%S') - Generating commit history dashboard (max_commits=$MAX_COMMITS)" >> "$LOG_FILE"
     log_line_ts "$COMMIT_HISTORY_LOG" "===== run_show_commit_history start (max_commits=$MAX_COMMITS output=$COMMIT_HISTORY_HTML) ====="
-    if run_cmd_to_log_ts "$COMMIT_HISTORY_LOG" python3 "$SCRIPT_DIR/show_commit_history.py" --repo-path . --max-commits "$MAX_COMMITS" --output "$COMMIT_HISTORY_HTML" $SKIP_FLAG $MAX_GH_FLAG; then
+    if run_cmd_to_log_ts "$COMMIT_HISTORY_LOG" python3 "$SCRIPT_DIR/show_commit_history.py" --repo-path . --max-commits "$MAX_COMMITS" --output "$COMMIT_HISTORY_HTML" $SKIP_FLAG $MAX_GH_FLAG $PARALLEL_FLAG; then
         echo "$(date '+%Y-%m-%d %H:%M:%S') - Updated $COMMIT_HISTORY_HTML" >> "$LOG_FILE"
     else
         echo "$(date '+%Y-%m-%d %H:%M:%S') - ERROR: Failed to update commit-history.html" >> "$LOG_FILE"
