@@ -39,18 +39,24 @@ mkdir -p "$DAY_LOG_DIR"
 
 LOG_FILE="$DAY_LOG_DIR/${JOB_NAME}.log"
 
+# Helper function to add timestamp to each line
+add_timestamp() {
+  while IFS= read -r line; do
+    echo "[$(TZ=America/Los_Angeles date '+%Y-%m-%dT%H:%M:%S.%7NPT')] $line"
+  done
+}
+
 {
   echo "================================================================================"
-  echo "[$(date '+%Y-%m-%d %H:%M:%S')] START job=${JOB_NAME}"
+  echo "[$(TZ=America/Los_Angeles date '+%Y-%m-%dT%H:%M:%S.%7NPT')] START job=${JOB_NAME}"
   echo "cmd: $*"
 } >>"$LOG_FILE"
 
-exec >>"$LOG_FILE" 2>&1
+# Run command and prefix each line with timestamp
+"$@" 2>&1 | add_timestamp >>"$LOG_FILE"
+rc=${PIPESTATUS[0]}
 
-"$@"
-rc=$?
-
-echo "[$(date '+%Y-%m-%d %H:%M:%S')] END job=${JOB_NAME} rc=${rc}"
+echo "[$(TZ=America/Los_Angeles date '+%Y-%m-%dT%H:%M:%S.%7NPT')] END job=${JOB_NAME} rc=${rc}" >>"$LOG_FILE"
 exit "$rc"
 
 
