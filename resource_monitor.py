@@ -1523,18 +1523,19 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = parse_args(argv)
-    logging.basicConfig(level=getattr(logging, args.log_level))
+    level = logging._nameToLevel[str(args.log_level).upper()]
+    logging.basicConfig(level=level)
 
     db_path: Path = args.db_path
     if args.lock_path is not None:
         lock_path = args.lock_path
     else:
-        lock_path = _per_db_lock_path(db_path) if bool(getattr(args, "per_db_lock", False)) else _default_lock_path(db_path)
+        lock_path = _per_db_lock_path(db_path) if bool(args.per_db_lock) else _default_lock_path(db_path)
 
     lock = SingleInstanceLock(lock_path)
     lock.acquire_or_exit(
-        force_start=bool(getattr(args, "run_ignore_lock", False)),
-        force_timeout_s=float(getattr(args, "run_ignore_lock_timeout_seconds", 10.0)),
+        force_start=bool(args.run_ignore_lock),
+        force_timeout_s=float(args.run_ignore_lock_timeout_seconds),
     )
 
     db = ResourceDB(db_path)
@@ -1552,7 +1553,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         lock=lock,
         hostname=hostname,
         interval_s=float(args.interval_seconds),
-        mem_interval_s=float(getattr(args, "mem_interval_seconds", 60.0)),
+        mem_interval_s=float(args.mem_interval_seconds),
         thresholds=thresholds,
         top_k=int(args.top_k),
         net_top=bool(args.net_top),
@@ -1560,13 +1561,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         # (avoids many "unattributed" net spike rows in the report).
         net_top_interval_s=min(float(args.net_top_interval_seconds), float(args.interval_seconds)),
         net_top_k=int(args.net_top_k),
-        docker_stats=bool(getattr(args, "docker_stats", False)),
-        docker_stats_interval_s=float(getattr(args, "docker_stats_interval_seconds", 60.0)),
-        gh_rate_limit=bool(getattr(args, "gh_rate_limit", False)),
-        gh_rate_limit_interval_s=float(getattr(args, "gh_rate_limit_interval_seconds", 60.0)),
+        docker_stats=bool(args.docker_stats),
+        docker_stats_interval_s=float(args.docker_stats_interval_seconds),
+        gh_rate_limit=bool(args.gh_rate_limit),
+        gh_rate_limit_interval_s=float(args.gh_rate_limit_interval_seconds),
         gh_rate_limit_resources=[
             s.strip()
-            for s in str(getattr(args, "gh_rate_limit_resources", "") or "").split(",")
+            for s in str(args.gh_rate_limit_resources or "").split(",")
             if s.strip()
         ],
         once=bool(args.once),

@@ -2980,7 +2980,7 @@ def main() -> int:
         # Check if rebuild is needed based on Image SHA (hash of container/ contents; formerly shown as CDS)
         # Only check in non-dry-run mode to avoid writing .last_build_composite_sha
         dynamo_repo_utils = DynamoRepositoryUtils(repo_path)
-        if not dynamo_repo_utils.check_if_rebuild_needed(force_run=bool(getattr(args, "run_ignore_lock", False))):
+        if not dynamo_repo_utils.check_if_rebuild_needed(force_run=bool(args.run_ignore_lock)):
             logger.info("✅ No rebuild needed - exiting")
             return 0
 

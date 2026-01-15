@@ -3080,7 +3080,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             raise SystemExit("--days must be > 0.")
 
         # Optional DB prune (keeps resource_monitor.sqlite tidy).
-        prune_days = getattr(args, "prune_db_days", None)
+        prune_days = args.prune_db_days
         if prune_days is not None:
             pd = float(prune_days)
             if pd <= 0.0:
@@ -3094,7 +3094,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 if deleted:
                     logger.info("Pruned %d samples older than %s days.", int(deleted), str(pd))
 
-        if bool(getattr(args, "db_checkpoint_truncate", False)):
+        if bool(args.db_checkpoint_truncate):
             rows = _wal_checkpoint_truncate(con)
             if rows:
                 # (busy, log, checkpointed)
@@ -3105,7 +3105,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
         gh_resources = [
             s.strip()
-            for s in str(getattr(args, "gh_rate_limit_resources", "") or "").split(",")
+            for s in str(args.gh_rate_limit_resources or "").split(",")
             if s.strip()
         ]
         if not gh_resources:
@@ -3305,7 +3305,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         atomic_write_text(out_path, _build_html(payload), encoding="utf-8")
         logger.info("Wrote: %s", str(out_path))
 
-        if bool(getattr(args, "db_vacuum", False)):
+        if bool(args.db_vacuum):
             # Run VACUUM after writing output so we don't lock ourselves out while generating.
             # Best-effort only: skip if another process holds the DB.
             ok = _vacuum_best_effort(db_path)

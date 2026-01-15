@@ -70,16 +70,16 @@ def _cli(argv: Optional[Sequence[str]] = None) -> int:
     )
     args = parser.parse_args(list(argv) if argv is not None else None)
 
-    if bool(getattr(args, "self_test_examples", False)):
+    if bool(args.self_test_examples):
         return int(engine._self_test_examples(raw_log_path=Path(str(args.raw_log_path))))
-    if bool(getattr(args, "scan_all_logs", False)):
+    if bool(args.scan_all_logs):
         return int(
             engine._scan_all_logs(
                 logs_root=Path(str(args.logs_root)),
                 tail_bytes=int(0 if bool(args.no_tail) else int(args.tail_bytes)),
             )
         )
-    if bool(getattr(args, "audit_snippet_commands", False)):
+    if bool(args.audit_snippet_commands):
         return int(
             engine._audit_snippet_commands(
                 logs_root=Path(str(args.logs_root)),

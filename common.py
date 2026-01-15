@@ -1180,7 +1180,7 @@ class DockerUtils(BaseUtils):
                 name=image_name,
                 repository=repository,
                 tag=tag,
-                image_id=str(image.id) if getattr(image, "id", None) else "",  # Full ID
+                image_id=str(image.id),  # Full ID
                 created_at=created_at,
                 size_bytes=size_bytes,
                 size_human=self._format_size(size_bytes),
@@ -1620,12 +1620,9 @@ def summarize_pr_check_rows(rows: Iterable[GHPRCheckRow]) -> GitHubChecksSummary
     names_other: List[str] = []
 
     for r in rows:
-        try:
-            name = str(getattr(r, "name", "") or "")
-            status = str(getattr(r, "status_norm", "") or "unknown")
-            is_req = bool(getattr(r, "is_required", False))
-        except Exception:
-            continue
+        name = str(r.name or "")
+        status = str(r.status_norm or "unknown")
+        is_req = bool(r.is_required)
 
         if status == CIStatus.SUCCESS.value:
             if is_req:
@@ -2147,21 +2144,8 @@ class GitHubAPIClient:
             # Fallback: single shared lock
             k = "__default__"
         try:
-            mu = getattr(self, "_inflight_locks_mu", None)
-            locks = getattr(self, "_inflight_locks", None)
-            if not isinstance(mu, threading.Lock) or not isinstance(locks, dict):
-                raise Exception("missing inflight lock state")
-        except Exception:
-            # Initialize lazily (safe because Python GIL + best-effort semantics).
-            try:
-                self._inflight_locks_mu = threading.Lock()
-                self._inflight_locks = {}
-            except Exception:
-                pass
-        try:
-            mu = self._inflight_locks_mu  # type: ignore[attr-defined]
-            locks = self._inflight_locks  # type: ignore[attr-defined]
-            assert isinstance(locks, dict)
+            mu = self._inflight_locks_mu
+            locks = self._inflight_locks
             with mu:
                 lk = locks.get(k)
                 if lk is None:
@@ -2253,7 +2237,7 @@ class GitHubAPIClient:
         label = self._rest_label_for_url(url)
 
         # Cache-only mode: do not perform any network operations.
-        if bool(getattr(self, "cache_only_mode", False)):
+        if self.cache_only_mode:
             raise RuntimeError("cache_only_mode enabled; refusing network request")
 
         # Enforce per-invocation budget.
@@ -2282,7 +2266,7 @@ class GitHubAPIClient:
         def _record_response(r) -> None:
             """Record success/error stats for a single HTTP response."""
             try:
-                code = int(getattr(r, "status_code", 0) or 0)
+                code = int(r.status_code or 0)
             except Exception:
                 code = 0
             try:
@@ -2311,7 +2295,7 @@ class GitHubAPIClient:
                     # Prefer the response URL (includes query string) so we can diagnose failures like search/issues 422.
                     url_full = ""
                     try:
-                        url_full = str(getattr(r, "url", "") or str(url or "")).strip()
+                        url_full = str(r.url or str(url or "")).strip()
                     except Exception:
                         url_full = str(url or "")
                     self._rest_last_error = {
@@ -2330,7 +2314,7 @@ class GitHubAPIClient:
         try:
             if not self.allow_anonymous_fallback:
                 return resp
-            code0 = int(getattr(resp, "status_code", 0) or 0)
+            code0 = int(resp.status_code or 0)
             if code0 in (401, 403) and ("Authorization" in headers):
                 body_txt = ""
                 try:
@@ -2375,7 +2359,7 @@ class GitHubAPIClient:
                         pass
                     _record_response(resp2)
                     # Prefer the retry if it succeeded (or at least changed the failure mode).
-                    if int(getattr(resp2, "status_code", 0) or 0) < 400:
+                    if int(resp2.status_code or 0) < 400:
                         resp = resp2
                     else:
                         # If the retry still fails, keep the original response (it likely contains the most useful policy message).
@@ -2385,7 +2369,7 @@ class GitHubAPIClient:
         if self._debug_rest:
             try:
                 rem = resp.headers.get("X-RateLimit-Remaining")
-                code = getattr(resp, "status_code", None)
+                code = resp.status_code
                 self.logger.debug("GH REST RESP [%s] status=%s remaining=%s", label, str(code), str(rem))
             except Exception:
                 pass
@@ -2545,14 +2529,14 @@ class GitHubAPIClient:
                     self._actions_job_details_mem_cache[key] = {"ts": ts, "val": val}
                     return val
             # Cache-only mode: allow stale disk cache.
-            if bool(getattr(self, "cache_only_mode", False)):
+            if self.cache_only_mode:
                 val = ent.get("val")
                 if isinstance(val, dict):
                     self._actions_job_details_mem_cache[key] = {"ts": ts, "val": val}
                     return val
 
         # Cache-only mode: do not fetch.
-        if bool(getattr(self, "cache_only_mode", False)):
+        if self.cache_only_mode:
             return None
 
         url = f"{self.base_url}/repos/{owner}/{repo}/actions/jobs/{job_id_s}"
@@ -2664,14 +2648,14 @@ class GitHubAPIClient:
         ent = disk.get(key) if isinstance(disk, dict) else None
         if ent and isinstance(ent, dict):
             ts = int(ent.get("ts", 0) or 0)
-            if ts and ((now - ts) <= int(ttl_s) or bool(getattr(self, "cache_only_mode", False))):
+            if ts and ((now - ts) <= int(ttl_s) or self.cache_only_mode):
                 val = ent.get("val")
                 if isinstance(val, dict):
                     self._actions_workflow_mem_cache[key] = {"ts": ts, "val": val}
                     return val
 
         # Cache-only mode
-        if bool(getattr(self, "cache_only_mode", False)):
+        if self.cache_only_mode:
             return None
 
         # fetch
@@ -2745,7 +2729,7 @@ class GitHubAPIClient:
             if last_change_dt is None:
                 return ttl
             dt = last_change_dt
-            if getattr(dt, "tzinfo", None) is None:
+            if dt.tzinfo is None:
                 dt = dt.replace(tzinfo=timezone.utc)
             age_s = (datetime.now(timezone.utc) - dt.astimezone(timezone.utc)).total_seconds()
             if age_s >= float(stable_after_hours) * 3600.0:
@@ -2978,13 +2962,13 @@ class GitHubAPIClient:
     def _failed_check_to_dict(fc: "FailedCheck") -> Dict[str, Any]:
         try:
             return {
-                "name": str(getattr(fc, "name", "") or ""),
-                "job_url": str(getattr(fc, "job_url", "") or ""),
-                "run_id": str(getattr(fc, "run_id", "") or ""),
-                "duration": str(getattr(fc, "duration", "") or ""),
-                "raw_log_url": getattr(fc, "raw_log_url", None),
-                "is_required": bool(getattr(fc, "is_required", False)),
-                "error_summary": getattr(fc, "error_summary", None),
+                "name": str(fc.name or ""),
+                "job_url": str(fc.job_url or ""),
+                "run_id": str(fc.run_id or ""),
+                "duration": str(fc.duration or ""),
+                "raw_log_url": fc.raw_log_url,
+                "is_required": bool(fc.is_required),
+                "error_summary": fc.error_summary,
             }
         except Exception:
             return {}
@@ -3168,7 +3152,7 @@ class GitHubAPIClient:
                     self._cache_hit("pulls_list.disk")
                     return items  # type: ignore[return-value]
             # Cache-only mode: return stale disk cache if present.
-            if bool(getattr(self, "cache_only_mode", False)):
+            if self.cache_only_mode:
                 items = entry.get("items")
                 if isinstance(items, list):
                     self._pulls_list_mem_cache[cache_key] = {"ts": ts, "items": items}
@@ -3176,7 +3160,7 @@ class GitHubAPIClient:
                     return items  # type: ignore[return-value]
 
         # Cache-only mode: return stale memory cache if present, else empty (no network).
-        if bool(getattr(self, "cache_only_mode", False)):
+        if self.cache_only_mode:
             try:
                 mem = self._pulls_list_mem_cache.get(cache_key)
                 if isinstance(mem, dict) and isinstance(mem.get("items"), list):
@@ -3298,7 +3282,7 @@ class GitHubAPIClient:
             return []
 
         # Cache-only mode: avoid per-PR enrichment fetches; populate a minimal PRInfo from pr_data.
-        if bool(getattr(self, "cache_only_mode", False)):
+        if self.cache_only_mode:
             out_min: List[PRInfo] = []
             for pr_data in filtered:
                 try:
@@ -3386,7 +3370,7 @@ class GitHubAPIClient:
                             pass
                     return cached
             # If we somehow entered cache-only mode mid-run, degrade gracefully.
-            if bool(getattr(self, "cache_only_mode", False)):
+            if self.cache_only_mode:
                 head = (pr_data.get("head") or {}) if isinstance(pr_data.get("head"), dict) else {}
                 return self._pr_info_min_from_dict(
                     {
@@ -3495,7 +3479,7 @@ class GitHubAPIClient:
         result: Dict[str, List[PRInfo]] = {b: [] for b in branch_set}
 
         # Cache-only mode: avoid per-PR enrichment fetches; populate a minimal PRInfo from pr_data.
-        if bool(getattr(self, "cache_only_mode", False)):
+        if self.cache_only_mode:
             for branch_name, prs in head_to_prs.items():
                 for pr_data in prs:
                     try:
@@ -3589,7 +3573,7 @@ class GitHubAPIClient:
                                 pass
                         return cached
                 # Cache-only mode: don't attempt enrichment fetches.
-                if bool(getattr(self, "cache_only_mode", False)):
+                if self.cache_only_mode:
                     head = (pr_data.get("head") or {}) if isinstance(pr_data.get("head"), dict) else {}
                     return self._pr_info_min_from_dict(
                         {
@@ -3685,7 +3669,7 @@ class GitHubAPIClient:
         # Cache-only mode: do NOT perform any network fetches for closed PRs.
         # We still want to leverage the on-disk/memory closed-pr cache above (so local dashboards can
         # mark branches as merged even when max_github_api_calls=0), but we must not call GitHub here.
-        if bool(getattr(self, "cache_only_mode", False)):
+        if self.cache_only_mode:
             return result
 
         def fetch_branch(branch_name: str) -> Tuple[str, List[Dict[str, Any]]]:
@@ -4046,7 +4030,7 @@ class GitHubAPIClient:
             if ent and isinstance(ent, dict):
                 ts = int(ent.get("ts", 0) or 0)
                 ver = int(ent.get("ver", 0) or 0)
-                if ts and ((now - ts) <= max(0, int(ttl_s)) or bool(getattr(self, "cache_only_mode", False))):
+                if ts and ((now - ts) <= max(0, int(ttl_s)) or self.cache_only_mode):
                     if ver >= CACHE_VER:
                         if (now - ts) <= max(0, int(ttl_s)):
                             self._cache_hit("pr_checks_rows.disk")
@@ -4083,7 +4067,7 @@ class GitHubAPIClient:
             pass
 
         # Cache-only mode: do not fetch network; return empty if no cached entry was usable.
-        if bool(getattr(self, "cache_only_mode", False)):
+        if self.cache_only_mode:
             self._cache_miss("pr_checks_rows.cache_only_empty")
             return []
 
@@ -4818,7 +4802,7 @@ class GitHubAPIClient:
             if isinstance(ent, dict):
                 ts = int(ent.get("ts", 0) or 0)
                 val = ent.get("val")
-                if isinstance(val, set) and ts and ((now - ts) <= ttl_s or bool(getattr(self, "cache_only_mode", False))):
+                if isinstance(val, set) and ts and ((now - ts) <= ttl_s or self.cache_only_mode):
                     return val
         except Exception:
             pass
@@ -4830,7 +4814,7 @@ class GitHubAPIClient:
             if isinstance(ent, dict):
                 ts = int(ent.get("ts", 0) or 0)
                 val = ent.get("val")
-                if isinstance(val, list) and ts and ((now - ts) <= ttl_s or bool(getattr(self, "cache_only_mode", False))):
+                if isinstance(val, list) and ts and ((now - ts) <= ttl_s or self.cache_only_mode):
                     out = set(val)
                     if not hasattr(self, "_required_checks_pr_mem_cache"):
                         self._required_checks_pr_mem_cache = {}
@@ -4840,7 +4824,7 @@ class GitHubAPIClient:
             pass
         
         # Cache-only mode: do not fetch network; return empty if we have nothing.
-        if bool(getattr(self, "cache_only_mode", False)):
+        if self.cache_only_mode:
             return set()
 
         try:
@@ -5048,7 +5032,7 @@ query($owner:String!,$name:String!,$number:Int!,$prid:ID!,$after:String) {
             if isinstance(ent, dict):
                 ts = int(ent.get("ts", 0) or 0)
                 val = ent.get("val")
-                if isinstance(val, list) and ts and ((now - ts) <= int(ttl_s) or bool(getattr(self, "cache_only_mode", False))):
+                if isinstance(val, list) and ts and ((now - ts) <= int(ttl_s) or self.cache_only_mode):
                     return [str(x) for x in val if str(x).strip()]
         except Exception:
             pass
@@ -5059,13 +5043,13 @@ query($owner:String!,$name:String!,$number:Int!,$prid:ID!,$after:String) {
         if isinstance(ent, dict):
             ts = int(ent.get("ts", 0) or 0)
             val = ent.get("val")
-            if isinstance(val, list) and ts and ((now - ts) <= int(ttl_s) or bool(getattr(self, "cache_only_mode", False))):
+            if isinstance(val, list) and ts and ((now - ts) <= int(ttl_s) or self.cache_only_mode):
                 out = [str(x) for x in val if str(x).strip()]
                 self._required_checks_mem_cache[key] = {"ts": ts, "val": out}
                 return out
 
         # Cache-only mode: do not fetch network; return empty if we have nothing.
-        if bool(getattr(self, "cache_only_mode", False)):
+        if self.cache_only_mode:
             return []
 
         # 3) Network fetch
@@ -5197,7 +5181,7 @@ query($owner:String!,$name:String!,$number:Int!,$prid:ID!,$after:String) {
             if isinstance(ent, dict):
                 ts = int(ent.get("ts", 0) or 0)
                 val = ent.get("val")
-                if isinstance(val, dict) and ts and ((now - ts) <= int(ttl_s) or bool(getattr(self, "cache_only_mode", False))):
+                if isinstance(val, dict) and ts and ((now - ts) <= int(ttl_s) or self.cache_only_mode):
                     if (now - ts) <= int(ttl_s):
                         self._cache_hit("search_issues.mem")
                     else:
@@ -5222,7 +5206,7 @@ query($owner:String!,$name:String!,$number:Int!,$prid:ID!,$after:String) {
         if isinstance(ent, dict):
             ts = int(ent.get("ts", 0) or 0)
             val = ent.get("val")
-            if isinstance(val, dict) and ts and ((now - ts) <= int(ttl_s) or bool(getattr(self, "cache_only_mode", False))):
+            if isinstance(val, dict) and ts and ((now - ts) <= int(ttl_s) or self.cache_only_mode):
                 if (now - ts) <= int(ttl_s):
                     self._cache_hit("search_issues.disk")
                 else:
@@ -5232,7 +5216,7 @@ query($owner:String!,$name:String!,$number:Int!,$prid:ID!,$after:String) {
                 return out
 
         # cache-only: no network
-        if bool(getattr(self, "cache_only_mode", False)):
+        if self.cache_only_mode:
             self._cache_miss("search_issues.cache_only_empty")
             return {}
 
@@ -5245,7 +5229,7 @@ query($owner:String!,$name:String!,$number:Int!,$prid:ID!,$after:String) {
                 if isinstance(ent, dict):
                     ts = int(ent.get("ts", 0) or 0)
                     val = ent.get("val")
-                    if isinstance(val, dict) and ts and ((now - ts) <= int(ttl_s) or bool(getattr(self, "cache_only_mode", False))):
+                    if isinstance(val, dict) and ts and ((now - ts) <= int(ttl_s) or self.cache_only_mode):
                         if (now - ts) <= int(ttl_s):
                             self._cache_hit("search_issues.mem")
                         else:
@@ -5260,7 +5244,7 @@ query($owner:String!,$name:String!,$number:Int!,$prid:ID!,$after:String) {
             if isinstance(ent, dict):
                 ts = int(ent.get("ts", 0) or 0)
                 val = ent.get("val")
-                if isinstance(val, dict) and ts and ((now - ts) <= int(ttl_s) or bool(getattr(self, "cache_only_mode", False))):
+                if isinstance(val, dict) and ts and ((now - ts) <= int(ttl_s) or self.cache_only_mode):
                     if (now - ts) <= int(ttl_s):
                         self._cache_hit("search_issues.disk")
                     else:
@@ -6622,7 +6606,7 @@ def select_shas_for_network_fetch(
             dt = sha_to_datetime.get(sha)
             if dt is None:
                 continue
-            if getattr(dt, "tzinfo", None) is None:
+            if dt.tzinfo is None:
                 dt = dt.replace(tzinfo=timezone.utc)
             age_s = (now_utc - dt.astimezone(timezone.utc)).total_seconds()
             if age_s < cutoff_s:
@@ -6787,7 +6771,7 @@ class GitLabAPIClient:
                 req = urllib.request.Request(url, headers=self.headers)
                 with urllib.request.urlopen(req, timeout=timeout) as response:
                     try:
-                        status_code = int(getattr(response, "status", 200) or 200)
+                        status_code = int(response.status or 200)
                     except Exception:
                         status_code = 200
                     return json.loads(response.read().decode())
@@ -6844,11 +6828,11 @@ class GitLabAPIClient:
         """Return best-effort REST call stats for the current process/run."""
         try:
             return {
-                "total": int(getattr(self, "_rest_calls_total", 0) or 0),
-                "time_total_s": float(getattr(self, "_rest_time_total_s", 0.0) or 0.0),
-                "by_endpoint": dict(sorted(dict(getattr(self, "_rest_calls_by_endpoint", {}) or {}).items(), key=lambda kv: (-int(kv[1] or 0), kv[0]))),
-                "time_by_endpoint_s": dict(sorted(dict(getattr(self, "_rest_time_by_endpoint_s", {}) or {}).items(), key=lambda kv: (-float(kv[1] or 0.0), kv[0]))),
-                "errors_by_status": dict(sorted(dict(getattr(self, "_rest_errors_by_status", {}) or {}).items(), key=lambda kv: (-int(kv[1] or 0), int(kv[0] or 0)))),
+                "total": int(self._rest_calls_total),
+                "time_total_s": float(self._rest_time_total_s),
+                "by_endpoint": dict(sorted(dict(self._rest_calls_by_endpoint or {}).items(), key=lambda kv: (-int(kv[1] or 0), kv[0]))),
+                "time_by_endpoint_s": dict(sorted(dict(self._rest_time_by_endpoint_s or {}).items(), key=lambda kv: (-float(kv[1] or 0.0), kv[0]))),
+                "errors_by_status": dict(sorted(dict(self._rest_errors_by_status or {}).items(), key=lambda kv: (-int(kv[1] or 0), int(kv[0] or 0)))),
             }
         except Exception:
             return {"total": 0, "time_total_s": 0.0, "by_endpoint": {}, "time_by_endpoint_s": {}, "errors_by_status": {}}

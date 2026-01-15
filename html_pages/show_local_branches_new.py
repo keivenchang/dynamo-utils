@@ -240,7 +240,7 @@ def main() -> int:
     repo_node = RepoNode(label=repo_path.name, repo_path=str(repo_path))
     root.add_child(repo_node)
     
-    allow_fetch_checks = not bool(getattr(gh, "cache_only_mode", False))
+    allow_fetch_checks = not bool(gh.cache_only_mode)
     
     for branch_info in branches_info:
         branch_name = branch_info["branch_name"]
@@ -299,7 +299,7 @@ def main() -> int:
     try:
         from common_dashboard_lib import github_api_stats_rows  # local import
         
-        mode = "cache-only" if bool(getattr(gh, "cache_only_mode", False)) else "normal"
+        mode = "cache-only" if bool(gh.cache_only_mode) else "normal"
         page_stats.extend(
             list(
                 github_api_stats_rows(
