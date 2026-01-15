@@ -29,7 +29,9 @@ Other shared utilities:
 from __future__ import annotations
 
 import argparse
+import logging
 import os
+import re
 import sys
 import time
 from datetime import datetime
@@ -45,7 +47,7 @@ if str(_UTILS_DIR) not in sys.path:
 if str(_THIS_DIR) not in sys.path:
     sys.path.insert(0, str(_THIS_DIR))
 
-from common import GitHubAPIClient  # noqa: E402
+from common import GitHubAPIClient, PRInfo  # noqa: E402
 from html_pages.common_dashboard_runtime import prune_dashboard_raw_logs, prune_partial_raw_log_caches  # noqa: E402
 
 # Import shared branch/PR node classes and helpers
@@ -86,6 +88,8 @@ from common_dashboard_lib import TreeNodeVM  # noqa: E402
 from dataclasses import dataclass  # noqa: E402
 from typing import Optional as Opt  # noqa: E402
 import html as html_module  # noqa: E402
+from common_dashboard_lib import github_api_stats_rows  # noqa: E402
+from common_branch_nodes import mock_get_open_pr_info_for_author  # noqa: E402
 
 
 @dataclass
@@ -162,7 +166,6 @@ def main() -> int:
     args = parser.parse_args()
     
     # Configure logging
-    import logging
     if args.debug:
         logging.basicConfig(level=logging.DEBUG, format='[%(levelname)s] %(message)s')
     else:
@@ -190,11 +193,12 @@ def main() -> int:
     page_root_dir = output.parent
 
     # Prune locally-served raw logs to avoid unbounded growth and delete any partial/unverified artifacts.
+    # Best-effort: pruning should never block dashboard generation.
     try:
         _ = prune_dashboard_raw_logs(page_root_dir=page_root_dir, max_age_days=30)
         _ = prune_partial_raw_log_caches(page_root_dirs=[page_root_dir])
-    except Exception:
-        pass
+    except (OSError, RuntimeError, ValueError) as e:
+        logging.getLogger(__name__).warning("Failed to prune dashboard raw logs: %s", e)
 
     gh = GitHubAPIClient(
         token=args.token,
@@ -207,18 +211,14 @@ def main() -> int:
     cache_only_reason = ""
     try:
         gh.check_core_rate_limit_or_raise()
-    except Exception as e:
+    except RuntimeError as e:
         cache_only_reason = str(e)
-        try:
-            gh.set_cache_only_mode(True)
-        except Exception:
-            pass
+        gh.set_cache_only_mode(True)
 
     t0 = time.monotonic()
     
     # Create dummy PRs mode: use mock PRInfo objects for testing YAML structure
     if args.create_dummy_prs:
-        from common_branch_nodes import mock_get_open_pr_info_for_author
         prs = mock_get_open_pr_info_for_author(
             owner=owner,
             repo=repo,
@@ -230,47 +230,35 @@ def main() -> int:
 
     root = BranchNode(label="")
 
-    allow_fetch_checks = not bool(getattr(gh, "cache_only_mode", False))
+    allow_fetch_checks = not gh.cache_only_mode
 
-    def _branch_display_for_pr(pr) -> str:
-        try:
-            head_owner = str(getattr(pr, "head_owner", "") or "").strip()
-        except Exception:
-            head_owner = ""
-        try:
-            head_ref = str(getattr(pr, "head_ref", "") or "").strip()
-        except Exception:
-            head_ref = ""
-        try:
-            head_label = str(getattr(pr, "head_label", "") or "").strip()
-        except Exception:
-            head_label = ""
+    def _branch_display_for_pr(pr: PRInfo) -> str:
+        head_owner = str(pr.head_owner or "").strip()
+        head_ref = str(pr.head_ref or "").strip()
+        head_label = str(pr.head_label or "").strip()
         if head_owner and head_ref:
             return f"{head_owner}/{head_ref}"
         if head_label:
             return head_label.replace(":", "/", 1)
         if head_ref:
             return head_ref
-        return f"pr#{getattr(pr, 'number', '')}"
+        return f"pr#{pr.number}"
 
     def _dt_from_iso(s: str) -> Optional[datetime]:
         try:
             dt = datetime.fromisoformat(str(s or "").replace("Z", "+00:00"))
-            if getattr(dt, "tzinfo", None) is None:
+            if dt.tzinfo is None:
                 dt = dt.replace(tzinfo=ZoneInfo("UTC"))
             return dt
-        except Exception:
+        except ValueError:
             return None
 
     def _pt_str(dt: Optional[datetime]) -> Optional[str]:
-        try:
-            if dt is None:
-                return None
-            return dt.astimezone(ZoneInfo("America/Los_Angeles")).strftime("%Y-%m-%d %H:%M PT")
-        except Exception:
+        if dt is None:
             return None
+        return dt.astimezone(ZoneInfo("America/Los_Angeles")).strftime("%Y-%m-%d %H:%M PT")
 
-    def build_root(prs_ordered: List[object]) -> BranchNode:
+    def build_root(prs_ordered: List[PRInfo]) -> BranchNode:
         """Build tree: root -> UserNode -> branches (same structure as local: root -> RepoNode -> branches)."""
         root = BranchNode(label="")
         
@@ -285,28 +273,17 @@ def main() -> int:
         # Add each PR as a branch under the user node (matching local branch structure)
         for pr in (prs_ordered or []):
             branch_name = _branch_display_for_pr(pr)
-            sha7 = ""
-            try:
-                sha7 = str(getattr(pr, "head_sha", "") or "").strip()[:7]
-            except Exception:
-                sha7 = ""
-            created_dt = _dt_from_iso(str(getattr(pr, "created_at", "") or ""))
-            updated_dt = _dt_from_iso(str(getattr(pr, "updated_at", "") or "")) or created_dt
+            head_sha_full = str(pr.head_sha or "").strip()
+            sha7 = head_sha_full[:7]
+            created_dt = _dt_from_iso(str(pr.created_at or ""))
+            updated_dt = _dt_from_iso(str(pr.updated_at or "")) or created_dt
             commit_time_pt = _pt_str(updated_dt)
-            commit_url = ""
-            try:
-                head_sha_full = str(getattr(pr, "head_sha", "") or "").strip()
-                if head_sha_full:
-                    commit_url = f"https://github.com/{owner}/{repo}/commit/{head_sha_full}"
-            except Exception:
-                commit_url = ""
+            commit_url = f"https://github.com/{owner}/{repo}/commit/{head_sha_full}" if head_sha_full else ""
 
             # Use PR title as commit message (since we don't have local git access for remote).
             # Strip PR number prefix if present (e.g., "#5335 feat: ..." -> "feat: ...")
             # The CommitMessageNode will append the PR number as a link.
-            commit_msg = str(getattr(pr, "title", "") or "").strip()
-            # Remove leading "#1234 " pattern if present
-            import re
+            commit_msg = str(pr.title or "").strip()
             commit_msg = re.sub(r'^#\d+\s+', '', commit_msg)
 
             branch_node = RemoteBranchInfoNode(
@@ -328,7 +305,7 @@ def main() -> int:
                 refresh_checks=bool(args.refresh_checks),
                 branch_commit_dt=updated_dt,
                 allow_fetch_checks=bool(allow_fetch_checks),
-                context_key=f"remote:{owner}/{repo}:{branch_name}:{sha7}:pr{getattr(pr, 'number', '')}",
+                context_key=f"remote:{owner}/{repo}:{branch_name}:{sha7}:pr{pr.number}",
             )
             branch_node.add_child(status_node)  # Add directly to branch_node
 
@@ -336,34 +313,23 @@ def main() -> int:
             # No longer building CI hierarchy here - moved to common_dashboard_lib.py passes
 
             # Conflict/blocking messages (add directly to branch_node).
-            try:
-                msg = getattr(pr, "conflict_message", None)
-                if msg:
-                    branch_node.add_child(BranchNode(label=str(msg)))
-            except Exception:
-                pass
-            try:
-                msg = getattr(pr, "blocking_message", None)
-                if msg:
-                    branch_node.add_child(BranchNode(label=str(msg)))
-            except Exception:
-                pass
+            if pr.conflict_message:
+                branch_node.add_child(BranchNode(label=str(pr.conflict_message)))
+            if pr.blocking_message:
+                branch_node.add_child(BranchNode(label=str(pr.blocking_message)))
         return root
 
     prs_list = list(prs or [])
     # Sort PRs (server-side, like local branches)
     # Default: by most recent activity (updated_at, then created_at)
-    try:
-        prs_list = sorted(
-            prs_list,
-            key=lambda p: (
-                (_dt_from_iso(getattr(p, "updated_at", None) or "") or _dt_from_iso(getattr(p, "created_at", None) or "") or datetime.min.replace(tzinfo=ZoneInfo("UTC"))),
-                int(getattr(p, "number", 0) or 0),
-            ),
-            reverse=True,
-        )
-    except Exception:
-        pass
+    prs_list = sorted(
+        prs_list,
+        key=lambda p: (
+            (_dt_from_iso(str(p.updated_at or "")) or _dt_from_iso(str(p.created_at or "")) or datetime.min.replace(tzinfo=ZoneInfo("UTC"))),
+            int(p.number or 0),
+        ),
+        reverse=True,
+    )
 
     elapsed_s = max(0.0, time.monotonic() - t0)
     page_stats = [
@@ -372,24 +338,19 @@ def main() -> int:
         ("GitHub user", user),
         ("PRs shown", str(len(prs))),
     ]
-    try:
-        from common_dashboard_lib import github_api_stats_rows  # local import
-
-        mode = "cache-only" if bool(getattr(gh, "cache_only_mode", False)) else "normal"
-        page_stats.extend(
-            list(
-                github_api_stats_rows(
-                    github_api=gh,
-                    max_github_api_calls=int(args.max_github_api_calls),
-                    mode=mode,
-                    mode_reason=cache_only_reason or "",
-                    top_n=15,
-                )
-                or []
+    mode = "cache-only" if gh.cache_only_mode else "normal"
+    page_stats.extend(
+        list(
+            github_api_stats_rows(
+                github_api=gh,
+                max_github_api_calls=int(args.max_github_api_calls),
+                mode=mode,
+                mode_reason=cache_only_reason or "",
+                top_n=15,
             )
+            or []
         )
-    except Exception:
-        pass
+    )
 
     # Generate HTML (same as local branches - no client-side sorting)
     html = generate_html(

@@ -3764,6 +3764,13 @@ class GitHubAPIClient:
             except Exception:
                 required_checks = set()
         unresolved_count = self.count_unresolved_conversations(owner, repo, pr_number)
+        review_decision = pr_data.get("reviewDecision")
+        if not review_decision:
+            # REST /pulls objects do not include GraphQL `reviewDecision`; derive from /reviews.
+            try:
+                review_decision = self._review_decision_from_reviews(owner, repo, pr_number)
+            except Exception:
+                review_decision = None
 
         # Now process checks data synchronously (no need to parallelize since data is already fetched)
         head = (pr_data.get("head") or {}) if isinstance(pr_data.get("head"), dict) else {}
@@ -3804,7 +3811,7 @@ class GitHubAPIClient:
             url=pr_data.get("html_url", ""),
             state=pr_data.get("state", ""),
             is_merged=pr_data.get("merged_at") is not None,
-            review_decision=pr_data.get("reviewDecision"),
+            review_decision=review_decision,
             mergeable_state=mergeable_state,
             unresolved_conversations=unresolved_count,
             ci_status=ci_status,
@@ -3859,6 +3866,21 @@ class GitHubAPIClient:
                                 self._pr_info_mem_cache[key] = ent
                             except Exception:
                                 pass
+                    # Review decision isn't present on REST /pulls objects; older cache entries may lack it.
+                    # Backfill it opportunistically so remote PR dashboards can display "Review: ...".
+                    if pr is not None and not pr.review_decision:
+                        try:
+                            rd = self._review_decision_from_reviews(owner, repo, int(pr_number))
+                        except Exception:
+                            rd = None
+                        if rd:
+                            try:
+                                pr.review_decision = str(rd)
+                                prd["review_decision"] = str(rd)
+                                ent["pr"] = prd
+                                self._pr_info_mem_cache[key] = ent
+                            except Exception:
+                                pass
                     return pr
         except Exception:
             pass
@@ -3879,6 +3901,22 @@ class GitHubAPIClient:
                             try:
                                 pr.required_checks = list(req)
                                 prd["required_checks"] = list(req)
+                                ent["pr"] = prd
+                                if isinstance(disk, dict):
+                                    disk[key] = ent
+                                    self._save_pr_info_disk_cache(disk)
+                            except Exception:
+                                pass
+                    # Review decision isn't present on REST /pulls objects; older cache entries may lack it.
+                    if not pr.review_decision:
+                        try:
+                            rd = self._review_decision_from_reviews(owner, repo, int(pr_number))
+                        except Exception:
+                            rd = None
+                        if rd:
+                            try:
+                                pr.review_decision = str(rd)
+                                prd["review_decision"] = str(rd)
                                 ent["pr"] = prd
                                 if isinstance(disk, dict):
                                     disk[key] = ent
@@ -4675,6 +4713,47 @@ class GitHubAPIClient:
             return unresolved
         except Exception:
             return 0
+
+    def _review_decision_from_reviews(self, owner: str, repo: str, pr_number: int) -> Optional[str]:
+        """Best-effort review decision from REST reviews.
+
+        GitHub's REST `/pulls` endpoints do not include GraphQL `reviewDecision`.
+        For dashboards, we use a lightweight heuristic:
+        - If any latest review is CHANGES_REQUESTED => CHANGES_REQUESTED
+        - Else if any latest review is APPROVED => APPROVED
+        - Else => REVIEW_REQUIRED
+        """
+        endpoint = f"/repos/{owner}/{repo}/pulls/{int(pr_number)}/reviews"
+        try:
+            reviews = self.get(endpoint, params={"per_page": 100})
+        except Exception:
+            return None
+        if not isinstance(reviews, list) or not reviews:
+            return "REVIEW_REQUIRED"
+
+        # Keep only the latest review per user login.
+        latest_by_user: Dict[str, Tuple[str, str]] = {}
+        for r in reviews:
+            if not isinstance(r, dict):
+                continue
+            user = r.get("user") if isinstance(r.get("user"), dict) else {}
+            login = str((user or {}).get("login") or "").strip()
+            if not login:
+                continue
+            state = str(r.get("state") or "").strip().upper()
+            submitted_at = str(r.get("submitted_at") or "").strip()
+            if not submitted_at:
+                continue
+            prev = latest_by_user.get(login)
+            if prev is None or submitted_at > prev[0]:
+                latest_by_user[login] = (submitted_at, state)
+
+        states = {st for (_ts, st) in latest_by_user.values() if st}
+        if "CHANGES_REQUESTED" in states:
+            return "CHANGES_REQUESTED"
+        if "APPROVED" in states:
+            return "APPROVED"
+        return "REVIEW_REQUIRED"
 
     def _load_disk_cache(self) -> Dict[str, Optional[str]]:
         """Load job logs cache from disk."""

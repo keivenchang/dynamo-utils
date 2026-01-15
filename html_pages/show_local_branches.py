@@ -870,9 +870,8 @@ class LocalRepoScanner:
                 # Use PR title as commit message if available (like show_remote_branches.py)
                 commit_msg = info.get('commit_message', '')
                 if pr:
-                    commit_msg = str(getattr(pr, "title", "") or "").strip()
+                    commit_msg = str(pr.title or "").strip()
                     # Remove leading "#1234 " pattern if present
-                    import re
                     commit_msg = re.sub(r'^#\d+\s+', '', commit_msg)
                 
                 branch_node = BranchInfoNode(
@@ -893,7 +892,7 @@ class LocalRepoScanner:
                     if bool(getattr(self, "cache_only_github", False)):
                         allow_fetch_checks = False
                     
-                    pr_state_lc = (getattr(pr, "state", "") or "").lower()
+                    pr_state_lc = (pr.state or "").lower()
                     # Prefer the branch head commit time for "last push" heuristic.
                     branch_dt = info.get("commit_dt")
                     checks_ttl_s = GitHubAPIClient.compute_checks_cache_ttl_s(
