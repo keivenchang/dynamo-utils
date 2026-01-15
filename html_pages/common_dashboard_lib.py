@@ -832,17 +832,12 @@ def verify_tree_structure_pass(tree_nodes: List[TreeNodeVM], original_ci_nodes: 
     missing_critical = CRITICAL_REQUIRED_JOBS - required_jobs_found
     
     if missing_critical:
-        print(f"[verify_tree_structure_pass] ❌ CRITICAL: Missing required jobs: {missing_critical}{commit_ref}", file=sys.stderr)
         logger.error(f"[verify_tree_structure_pass] ❌ CRITICAL: Missing required jobs: {missing_critical}{commit_ref}")
-    else:
-        print(f"[verify_tree_structure_pass] ✓ Found all critical required jobs: {CRITICAL_REQUIRED_JOBS}{commit_ref}", file=sys.stderr)
-        logger.info(f"[verify_tree_structure_pass] ✓ Found all critical required jobs: {CRITICAL_REQUIRED_JOBS}{commit_ref}")
+    # Success case: don't log to avoid verbose output for every commit (200 commits × verbose logging = massive slowdown)
     
     if required_count < 2:
         logger.warning(f"[verify_tree_structure_pass] ⚠️  Only {required_count} required jobs found (expected at least 2: backend-status-check, dynamo-status-check){commit_ref}")
-    else:
-        print(f"[verify_tree_structure_pass] ✓ Found {required_count} required jobs (including backend-status-check, dynamo-status-check){commit_ref}", file=sys.stderr)
-        logger.info(f"[verify_tree_structure_pass] ✓ Found {required_count} required jobs{commit_ref}")
+    # Success case: don't log to avoid verbose output
     
     # Check 2: Verify short names were set for original CI nodes
     # Check 2: Count nodes with short names (no warnings about missing ones)
@@ -890,12 +885,8 @@ def verify_tree_structure_pass(tree_nodes: List[TreeNodeVM], original_ci_nodes: 
                 logger.warning(f"[verify_tree_structure_pass]    - '{short_name}' used by: {core_names}")
             if len(problem_duplicates) > 10:
                 logger.warning(f"[verify_tree_structure_pass]    ... and {len(problem_duplicates) - 10} more duplicates")
-        else:
-            logger.info(f"[verify_tree_structure_pass] ✓ No problematic duplicate short names found")
-            if ok_duplicates:
-                logger.debug(f"[verify_tree_structure_pass]   ({len(ok_duplicates)} duplicate short names exist but all have different job_ids - OK)")
-    else:
-        logger.info(f"[verify_tree_structure_pass] ✓ No duplicate short names found")
+        # Success cases: don't log to avoid verbose output
+    # Success case: don't log to avoid verbose output
     
     # Check 4: Verify specific important jobs have short names
     important_jobs = ["Build and Test - dynamo", "dynamo-status-check", "backend-status-check"]
@@ -910,21 +901,14 @@ def verify_tree_structure_pass(tree_nodes: List[TreeNodeVM], original_ci_nodes: 
                 
                 if important_job in core_name or important_job in job_id or important_job in display_name:
                     if short_name:
-                        logger.info(f"[verify_tree_structure_pass] ✓ '{important_job}' has short name: '{short_name}'")
+                        # Success case: don't log to avoid verbose output
                         found = True
                         break
-                    else:
-                        # Found the job but no short name - log details
-                        logger.warning(f"[verify_tree_structure_pass] ⚠️  Found '{important_job}' but missing short name:")
-                        logger.warning(f"[verify_tree_structure_pass]     job_id='{job_id}'")
-                        logger.warning(f"[verify_tree_structure_pass]     core_job_name='{core_name}'")
-                        logger.warning(f"[verify_tree_structure_pass]     display_name='{display_name}'")
+                    # Missing short name: don't log for every commit to avoid verbose output
         if not found:
             # Synthetic nodes like dynamo-status-check won't be in original_ci_nodes
-            if important_job in ["dynamo-status-check", "backend-status-check"]:
-                logger.debug(f"[verify_tree_structure_pass] '{important_job}' not found (expected - synthetic parent node)")
-            else:
-                logger.warning(f"[verify_tree_structure_pass] ⚠️  '{important_job}' not found in original CI nodes")
+            # Don't log to avoid verbose output for every commit
+            pass
     
     # Check 5: Verify all REQUIRED jobs are at the top (root level)
     first_non_required_idx = None
