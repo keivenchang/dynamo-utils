@@ -508,6 +508,12 @@ ls -lah ~/dynamo/dynamo_latest/index.html       # commit history dashboard
 ls -lah ~/dynamo/speedoflight/stats/index.html  # stats landing page
 ```
 
+Recent learnings / common foot-guns:
+- There are **two repos**: `dynamo-utils.dev/` (dev) and `dynamo-utils/` (prod). If the user says “dev only”, do **not** read or modify prod paths, and run the dev script: `dynamo-utils.dev/html_pages/update_html_pages.sh`.
+- `update_html_pages.sh --fast` is intentionally **removed**; the supported fast mode is `--fast-debug`. Always confirm flags with `./update_html_pages.sh --help` before running automation.
+- Per-component logs like `show_local_branches.log` are **append-only** and may contain older, non-prefixed lines. When validating “timestamp prefix on every line”, only judge **newly appended** content (or rotate/truncate the log explicitly).
+- If a log message is missing commit SHA context, it usually means the caller didn’t pass `commit_sha` through to helpers (e.g., pass PR `head_sha` into the CI pass pipeline so downstream warnings can include `(commit: <sha>)`).
+
 If `update_html_pages.sh` appears to “finish instantly”, check logs first (common root cause: a generator crashed early due to ImportError):
 ```bash
 tail -n 200 ~/dynamo/logs/$(date +%Y-%m-%d)/cron.log

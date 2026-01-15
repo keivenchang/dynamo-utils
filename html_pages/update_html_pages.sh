@@ -129,14 +129,6 @@ while [ "$#" -gt 0 ]; do
             DRY_RUN=true; shift ;;
         --run-ignore-lock)
             IGNORE_LOCK=true; shift ;;
-
-        # Back-compat aliases (deprecated)
-        --run-show-dynamo-branches)
-            RUN_SHOW_DYNAMO_BRANCHES=true; ANY_FLAG=true; shift ;;
-        --run-show-commit-history)
-            RUN_SHOW_COMMIT_HISTORY=true; ANY_FLAG=true; shift ;;
-        --run-resource-report)
-            RUN_RESOURCE_REPORT=true; ANY_FLAG=true; shift ;;
         -h|--help)
             usage; exit 0 ;;
         *)
@@ -206,6 +198,34 @@ COMMIT_HISTORY_LOG="$DAY_LOG_DIR/show_commit_history.log"
 RESOURCE_REPORT_LOG="$DAY_LOG_DIR/resource_report.log"
 REMOTE_PRS_LOG="$DAY_LOG_DIR/show_remote_branches.log"
 
+# Timestamp helper: prefix every logged line with a PT timestamp.
+ts_pt() {
+    TZ=America/Los_Angeles date '+%Y-%m-%dT%H:%M:%S.%7NPT'
+}
+
+add_timestamp() {
+    while IFS= read -r line; do
+        echo "[$(ts_pt)] $line"
+    done
+}
+
+log_line_ts() {
+    # Usage: log_line_ts <log_file> <message...>
+    local log_file="$1"
+    shift
+    echo "[$(ts_pt)] $*" >>"$log_file"
+}
+
+run_cmd_to_log_ts() {
+    # Usage: run_cmd_to_log_ts <log_file> <command...>
+    local log_file="$1"
+    shift
+    if "$@" 2>&1 | add_timestamp >>"$log_file"; then
+        return 0
+    fi
+    return "${PIPESTATUS[0]}"
+}
+
 # NOTE: log retention is handled by the dedicated cleanup cron:
 #   dynamo-utils/cleanup_log_and_docker.sh
 
@@ -243,14 +263,14 @@ run_resource_report() {
 
     if [ -f "$RESOURCE_DB" ]; then
         echo "$(date '+%Y-%m-%d %H:%M:%S') - Generating resource report" >> "$LOG_FILE"
-        echo "===== $(date '+%Y-%m-%d %H:%M:%S') run_resource_report start =====" >> "$RESOURCE_REPORT_LOG"
-        if python3 "$SCRIPT_DIR/show_local_resources.py" \
+        log_line_ts "$RESOURCE_REPORT_LOG" "===== run_resource_report start ====="
+        if run_cmd_to_log_ts "$RESOURCE_REPORT_LOG" python3 "$SCRIPT_DIR/show_local_resources.py" \
             --db-path "$RESOURCE_DB" \
             --output "$RESOURCE_REPORT_HTML" \
             --days "$RESOURCE_DAYS" \
             --prune-db-days 4 \
             --db-checkpoint-truncate \
-            --title "keivenc-linux Resource Report" >> "$RESOURCE_REPORT_LOG" 2>&1; then
+            --title "keivenc-linux Resource Report"; then
             echo "$(date '+%Y-%m-%d %H:%M:%S') - Updated $RESOURCE_REPORT_HTML" >> "$LOG_FILE"
         else
             echo "$(date '+%Y-%m-%d %H:%M:%S') - WARNING: Failed to update $RESOURCE_REPORT_HTML" >> "$LOG_FILE"
@@ -284,8 +304,8 @@ run_show_local_branches() {
     fi
     
     echo "$(date '+%Y-%m-%d %H:%M:%S') - Generating branches dashboard" >> "$LOG_FILE"
-    echo "===== $(date '+%Y-%m-%d %H:%M:%S') run_show_local_branches start (output=$BRANCHES_OUTPUT_FILE) =====" >> "$BRANCHES_LOG"
-    if python3 "$SCRIPT_DIR/show_local_branches.py" --repo-path "$NVIDIA_HOME" --output "$BRANCHES_OUTPUT_FILE" $REFRESH_CLOSED_FLAG $MAX_GH_FLAG >> "$BRANCHES_LOG" 2>&1; then
+    log_line_ts "$BRANCHES_LOG" "===== run_show_local_branches start (output=$BRANCHES_OUTPUT_FILE) ====="
+    if run_cmd_to_log_ts "$BRANCHES_LOG" python3 "$SCRIPT_DIR/show_local_branches.py" --repo-path "$NVIDIA_HOME" --output "$BRANCHES_OUTPUT_FILE" $REFRESH_CLOSED_FLAG $MAX_GH_FLAG; then
         echo "$(date '+%Y-%m-%d %H:%M:%S') - Updated $BRANCHES_OUTPUT_FILE" >> "$LOG_FILE"
     else
         echo "$(date '+%Y-%m-%d %H:%M:%S') - ERROR: Failed to update $BRANCHES_OUTPUT_FILE" >> "$LOG_FILE"
@@ -352,16 +372,16 @@ run_show_remote_branches() {
         cp -f "$SCRIPT_DIR/debug-tree.html" "$HOME/dynamo/speedoflight/dynamo/users/${U}/debug-tree.html" 2>/dev/null || true
 
         echo "$(date '+%Y-%m-%d %H:%M:%S') - Generating remote PRs dashboard (user=${U} output=$OUT_FILE)" >> "$LOG_FILE"
-        echo "===== $(date '+%Y-%m-%d %H:%M:%S') run_show_remote_branches start (user=${U} output=$OUT_FILE) =====" >> "$REMOTE_PRS_LOG"
+        log_line_ts "$REMOTE_PRS_LOG" "===== run_show_remote_branches start (user=${U} output=$OUT_FILE) ====="
 
         # Use dynamo_latest as base-dir so we can locate the repo clone for workflow YAML inference.
         # Div trees are now default (no flag needed)
         
-        if python3 "$SCRIPT_DIR/show_remote_branches.py" \
+        if run_cmd_to_log_ts "$REMOTE_PRS_LOG" python3 "$SCRIPT_DIR/show_remote_branches.py" \
             --github-user "${U}" \
             --base-dir "$NVIDIA_HOME/dynamo_latest" \
             --output "$OUT_FILE" \
-            $MAX_GH_FLAG >> "$REMOTE_PRS_LOG" 2>&1; then
+            $MAX_GH_FLAG; then
             echo "$(date '+%Y-%m-%d %H:%M:%S') - Updated $OUT_FILE" >> "$LOG_FILE"
         else
             echo "$(date '+%Y-%m-%d %H:%M:%S') - ERROR: Failed to update $OUT_FILE" >> "$LOG_FILE"
@@ -400,7 +420,8 @@ run_show_commit_history() {
 
     # Checkout main and pull latest
     echo "$(date '+%Y-%m-%d %H:%M:%S') - Updating $DYNAMO_REPO to latest main" >> "$LOG_FILE"
-    if git checkout main >> "$GIT_UPDATE_LOG" 2>&1 && git pull origin main >> "$GIT_UPDATE_LOG" 2>&1; then
+    log_line_ts "$GIT_UPDATE_LOG" "===== update dynamo_latest start ====="
+    if run_cmd_to_log_ts "$GIT_UPDATE_LOG" git checkout main && run_cmd_to_log_ts "$GIT_UPDATE_LOG" git pull origin main; then
         echo "$(date '+%Y-%m-%d %H:%M:%S') - Successfully updated to latest main" >> "$LOG_FILE"
     else
         echo "$(date '+%Y-%m-%d %H:%M:%S') - WARNING: Failed to update git repository" >> "$LOG_FILE"
@@ -421,8 +442,8 @@ run_show_commit_history() {
     fi
 
     echo "$(date '+%Y-%m-%d %H:%M:%S') - Generating commit history dashboard (max_commits=$MAX_COMMITS)" >> "$LOG_FILE"
-    echo "===== $(date '+%Y-%m-%d %H:%M:%S') run_show_commit_history start (max_commits=$MAX_COMMITS output=$COMMIT_HISTORY_HTML) =====" >> "$COMMIT_HISTORY_LOG"
-    if python3 "$SCRIPT_DIR/show_commit_history.py" --repo-path . --max-commits "$MAX_COMMITS" --output "$COMMIT_HISTORY_HTML" $SKIP_FLAG $MAX_GH_FLAG >> "$COMMIT_HISTORY_LOG" 2>&1; then
+    log_line_ts "$COMMIT_HISTORY_LOG" "===== run_show_commit_history start (max_commits=$MAX_COMMITS output=$COMMIT_HISTORY_HTML) ====="
+    if run_cmd_to_log_ts "$COMMIT_HISTORY_LOG" python3 "$SCRIPT_DIR/show_commit_history.py" --repo-path . --max-commits "$MAX_COMMITS" --output "$COMMIT_HISTORY_HTML" $SKIP_FLAG $MAX_GH_FLAG; then
         echo "$(date '+%Y-%m-%d %H:%M:%S') - Updated $COMMIT_HISTORY_HTML" >> "$LOG_FILE"
     else
         echo "$(date '+%Y-%m-%d %H:%M:%S') - ERROR: Failed to update commit-history.html" >> "$LOG_FILE"

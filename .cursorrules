@@ -331,6 +331,12 @@ Key rules (learned from debugging slow builds + permission issues):
 - Verify HTML/markdown links work before adding them
 - When editing via apply-patch: hunks must be top-to-bottom ordered and match current file context; if a patch fails, re-read the relevant region and re-apply with narrower, accurate context (don’t guess line blocks).
 
+Dashboards / CI log work (recent learnings):
+- **Scope discipline:** If the user says “only `dynamo-utils.dev/`”, do not read or modify `dynamo-utils/` (prod). Keep changes isolated to the requested tree.
+- **Flags/CLI reality check:** Before running a script with flags (especially `update_html_pages.sh`), run `--help` to confirm the flag exists (e.g., `--fast` was removed; `--fast-debug` is the supported fast mode).
+- **Context plumbing:** If you want logs to include commit SHA everywhere, ensure the caller passes `commit_sha`/PR `head_sha` into the pipeline; adding `{commit_ref}` in the logger isn’t enough if the upstream call supplies `""`.
+- **Append-only logs:** When verifying “every line is prefixed”, remember old content in an append-only log won’t be retroactively fixed. Verify against newly appended lines (or rotate/truncate explicitly if required).
+
 ## 3.4 Rust Development
 
 ### 3.4.1 Code Style

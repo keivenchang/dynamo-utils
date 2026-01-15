@@ -253,6 +253,217 @@ def _dom_id_from_node_key(node_key: str) -> str:
         return ""
 
 
+def create_dummy_nodes_from_yaml_pass(nodes: List[TreeNodeVM]) -> List[TreeNodeVM]:
+    """Create dummy nodes from YAML when no input nodes are provided.
+    
+    This pass is only used for debugging/visualization of the YAML structure.
+    If nodes are provided, they pass through unchanged.
+    If no nodes are provided AND YAML was parsed, creates minimal TreeNodeVM nodes
+    for all jobs found in the workflow files.
+    
+    Args:
+        nodes: Input nodes (may be empty)
+    
+    Returns:
+        Original nodes if non-empty, or dummy nodes created from YAML
+    """
+    if nodes:
+        return nodes
+    
+    if not _workflow_parent_child_mapping:
+        return nodes
+    
+    logger.debug("[create_dummy_nodes_from_yaml_pass] Creating dummy nodes from YAML structure")
+    
+    # Collect all job names mentioned in the YAML
+    all_job_names = set()
+    for parent, children in _workflow_parent_child_mapping.items():
+        all_job_names.add(parent)
+        all_job_names.update(children)
+    
+    logger.debug(f"[create_dummy_nodes_from_yaml_pass] Job-to-file mapping has {len(_workflow_job_to_file)} entries")
+    logger.debug(f"[create_dummy_nodes_from_yaml_pass] Total unique job names from mapping: {len(all_job_names)}")
+    
+    # Debug: show first 10 entries
+    for i, (job_name, workflow_file) in enumerate(sorted(_workflow_job_to_file.items())):
+        if i < 10:
+            logger.debug(f"[create_dummy_nodes_from_yaml_pass]   {job_name} -> {workflow_file}")
+    
+    # Helper function to format arch text with colors
+    def _format_arch_text_for_placeholder(text: str) -> str:
+        """Format job name with architecture colors and annotations."""
+        import html as html_module
+        raw = str(text or "")
+        # Detect arch token
+        m = re.search(r"\((arm64|aarch64|amd64)\)", raw, flags=re.IGNORECASE)
+        if not m:
+            return html_module.escape(raw)
+        
+        arch = str(m.group(1) or "").strip().lower()
+        # Determine color
+        if arch in {"arm64", "aarch64"}:
+            color = "#b8860b"  # Dark yellow/gold for arm64
+            # Normalize to "(arm64)" and append "; aarch64"
+            raw2 = re.sub(r"\(\s*(arm64|aarch64)\s*\)", "(arm64)", raw, flags=re.IGNORECASE)
+            raw2 = re.sub(r"\(\s*arm64\s*\)(?!\s*;\s*aarch64\b)", "(arm64); aarch64", raw2, flags=re.IGNORECASE)
+            return f'<span style="color: {color};">{html_module.escape(raw2)}</span>'
+        elif arch == "amd64":
+            color = "#0969da"  # Blue for amd64
+            raw2 = re.sub(r"\(\s*amd64\s*\)", "(amd64)", raw, flags=re.IGNORECASE)
+            raw2 = re.sub(r"\(\s*amd64\s*\)(?!\s*;\s*x86_64\b)", "(amd64); x86_64\u00a0", raw2, flags=re.IGNORECASE)  # Non-breaking space for alignment
+            return f'<span style="color: {color};">{html_module.escape(raw2)}</span>'
+        return html_module.escape(raw)
+    
+    # Create minimal TreeNodeVM for each job
+    skeleton_nodes = []
+    for job_name in sorted(all_job_names):
+        # Get job_id if available
+        job_id = _workflow_job_name_to_id.get(job_name, "")
+        
+        # Get workflow filename if available
+        workflow_file = _workflow_job_to_file.get(job_name, "")
+        
+        # Format: job_id (job_name) if they differ, otherwise just job_name
+        # job_id is in fixed-width font, job_name (description) is in normal font with lighter gray color
+        # Apply arch formatting to get colors and "; aarch64" / "; x86_64" suffixes
+        if job_id and job_id != job_name:
+            formatted_job_id = _format_arch_text_for_placeholder(job_id)
+            display_text = f'<span style="font-family: monospace;">{formatted_job_id}</span> <span style="color: #8c959f;">({job_name})</span>'
+        else:
+            formatted_job_name = _format_arch_text_for_placeholder(job_name)
+            display_text = f'<span style="font-family: monospace;">{formatted_job_name}</span>'
+        
+        # Add workflow file annotation with full path
+        if workflow_file:
+            file_path = f'.github/workflows/{workflow_file}'
+            file_annotation = f'<span style="color: #888;">[defined in {file_path}]</span>'
+        else:
+            file_annotation = '<span style="color: #888;">[defined in YAML]</span>'
+        
+        node = TreeNodeVM(
+            node_key=f"skeleton:{job_name}",
+            label_html=f'{display_text} {file_annotation}',
+            children=[],
+            collapsible=False,
+            default_expanded=False,
+            job_name=job_name,  # IMPORTANT: Set job_name for matching in PASS 1.2
+            workflow_name="",
+            variant="",
+        )        
+        skeleton_nodes.append(node)
+    
+    logger.debug(f"[create_dummy_nodes_from_yaml_pass] Created {len(skeleton_nodes)} dummy nodes from YAML")
+    return skeleton_nodes
+
+
+def run_all_passes(
+    ci_nodes: List,  # List[BranchNode] from common_branch_nodes
+    repo_root: Path,
+    commit_sha: str = "",
+) -> List[TreeNodeVM]:
+    """
+    Centralized CI tree node processing pipeline.
+    
+    Simple orchestrator that calls passes in sequence.
+    NOTE: This function is called ONCE PER PR, not for all PRs at once.
+    
+    Args:
+        ci_nodes: List of BranchNode objects for a SINGLE PR (from build_ci_nodes_from_pr or mock_build_ci_nodes)
+        repo_root: Path to the repository root (for .github/workflows/ parsing)
+        commit_sha: Commit SHA for per-commit node uniqueness
+    
+    Returns:
+        Processed list of TreeNodeVM nodes with YAML augmentation applied.
+    """
+    logger.info(f"[run_all_passes] Starting with {len(ci_nodes)} CI nodes (per-PR)")
+    
+    # PASS 1: Convert BranchNode to TreeNodeVM (actual CI info from GitHub)
+    ci_info_nodes = convert_branch_nodes_to_tree_vm_pass(ci_nodes)
+    
+    # PASS 2: Parse YAML workflows to build mappings (job names, dependencies, etc.)
+    # This populates global mappings and returns them for use in subsequent passes
+    _, yaml_mappings = parse_workflow_yaml_and_build_mapping_pass([], repo_root, commit_sha=commit_sha)
+    
+    # PASS 3: Augment CI nodes with YAML information (short names, dependencies)
+    augmented_nodes = augment_ci_with_yaml_info_pass(ci_nodes, yaml_mappings)
+    
+    # PASS 4: Move jobs under parent nodes
+    grouped_nodes = augmented_nodes
+    grouped_nodes = move_jobs_by_prefix_pass(grouped_nodes, prefix="vllm", parent_name="backend-status-check")
+    grouped_nodes = move_jobs_by_prefix_pass(grouped_nodes, prefix="sglang", parent_name="backend-status-check")
+    grouped_nodes = move_jobs_by_prefix_pass(grouped_nodes, prefix="trtllm", parent_name="backend-status-check")
+    grouped_nodes = move_jobs_by_prefix_pass(grouped_nodes, prefix="operator", parent_name="backend-status-check")
+
+    # Group other jobs under parent nodes
+    grouped_nodes = move_jobs_by_prefix_pass(grouped_nodes, prefix="deploy-", parent_name="deploy")
+    grouped_nodes = move_jobs_by_prefix_pass(grouped_nodes, prefix="build-test", parent_name="dynamo-status-check")
+    grouped_nodes = move_jobs_by_prefix_pass(grouped_nodes, prefix="Post-Merge CI / ", parent_name="post-merge-ci", parent_label="Post-Merge CI", create_if_has_children=True)
+    
+    # Group fast jobs under _fast parent
+    _FAST = "_fast"
+    _FAST_LABEL = "Jobs that tend to run fast"
+    grouped_nodes = move_jobs_by_prefix_pass(grouped_nodes, prefix="broken-links-check", parent_name=_FAST, parent_label=_FAST_LABEL, create_if_has_children=True)
+    grouped_nodes = move_jobs_by_prefix_pass(grouped_nodes, prefix="build-docs", parent_name=_FAST, parent_label=_FAST_LABEL, create_if_has_children=True)
+    grouped_nodes = move_jobs_by_prefix_pass(grouped_nodes, prefix="changed-files", parent_name=_FAST, parent_label=_FAST_LABEL, create_if_has_children=True)
+    grouped_nodes = move_jobs_by_prefix_pass(grouped_nodes, prefix="clean", parent_name=_FAST, parent_label=_FAST_LABEL, create_if_has_children=True)
+    grouped_nodes = move_jobs_by_prefix_pass(grouped_nodes, prefix="clippy", parent_name=_FAST, parent_label=_FAST_LABEL, create_if_has_children=True)
+    grouped_nodes = move_jobs_by_prefix_pass(grouped_nodes, prefix="CodeRabbit", parent_name=_FAST, parent_label=_FAST_LABEL, create_if_has_children=True)
+    grouped_nodes = move_jobs_by_prefix_pass(grouped_nodes, prefix="dco-comment", parent_name=_FAST, parent_label=_FAST_LABEL, create_if_has_children=True)
+    grouped_nodes = move_jobs_by_prefix_pass(grouped_nodes, prefix="event_file", parent_name=_FAST, parent_label=_FAST_LABEL, create_if_has_children=True)
+    grouped_nodes = move_jobs_by_prefix_pass(grouped_nodes, prefix="label", parent_name=_FAST, parent_label=_FAST_LABEL, create_if_has_children=True)
+    grouped_nodes = move_jobs_by_prefix_pass(grouped_nodes, prefix="lychee", parent_name=_FAST, parent_label=_FAST_LABEL, create_if_has_children=True)
+    grouped_nodes = move_jobs_by_prefix_pass(grouped_nodes, prefix="trigger-ci", parent_name=_FAST, parent_label=_FAST_LABEL, create_if_has_children=True)
+    
+    # PASS 5: Sort nodes by name
+    sorted_nodes = sort_nodes_by_name_pass(grouped_nodes)
+    
+    # PASS 6: Expand nodes with required failures in descendants
+    final_nodes = expand_required_failure_descendants_pass(sorted_nodes)
+    
+    # PASS 7: Move required jobs to the top (alphabetically sorted)
+    final_nodes = move_required_jobs_to_top_pass(final_nodes)
+    
+    # PASS 8: Verify the final tree structure
+    verify_tree_structure_pass(final_nodes, ci_nodes, commit_sha=commit_sha)
+    
+    logger.info(f"[PASS 2-8] YAML parse, augment, group, sort, expand, move required, and verify complete, returning {len(final_nodes)} root nodes")
+    return final_nodes
+
+
+#
+# Pass implementations (in run_all_passes order)
+# -----------------------------------------------------------------------------
+
+def convert_branch_nodes_to_tree_vm_pass(ci_nodes: List) -> List[TreeNodeVM]:
+    """Convert BranchNode objects to TreeNodeVM.
+    
+    Takes a list of BranchNode objects (from build_ci_nodes_from_pr or mock_build_ci_nodes)
+    and converts them to TreeNodeVM for rendering.
+    
+    Args:
+        ci_nodes: List of BranchNode objects for a single PR
+        
+    Returns:
+        List of TreeNodeVM objects representing actual CI info from GitHub
+    """
+    logger.info(f"Converting {len(ci_nodes)} BranchNode objects to TreeNodeVM")
+    
+    ci_info_nodes: List[TreeNodeVM] = []
+    for idx, ci_node in enumerate(ci_nodes):
+        # Convert BranchNode to TreeNodeVM (core_job_name is now set in to_tree_vm())
+        node_vm = ci_node.to_tree_vm()
+        
+        # Debug: Check if core_job_name was propagated
+        if idx < 5:
+            core_name = getattr(node_vm, 'core_job_name', '<none>')
+            logger.debug(f"  [{idx}] TreeNodeVM has core_job_name='{core_name}'")
+        
+        ci_info_nodes.append(node_vm)
+    
+    logger.info(f"Converted {len(ci_info_nodes)} nodes to TreeNodeVM")
+    return ci_info_nodes
+
+
 def parse_workflow_yaml_and_build_mapping_pass(
     flat_nodes: List[TreeNodeVM],
     repo_root: Path,
@@ -411,269 +622,6 @@ _workflow_job_name_to_id: Dict[str, str] = {}
 _workflow_job_to_file: Dict[str, str] = {}
 
 
-def expand_required_failure_descendants_pass(nodes: List[TreeNodeVM]) -> List[TreeNodeVM]:
-    """Expand any node that has a REQUIRED failure anywhere in its descendant subtree.
-
-    This is intentionally a *post-pass* so it can run after any logic that mutates/moves nodes
-    (e.g. workflow `jobs.*.needs` grouping).
-
-    Policy:
-    - expand for required failures only (not optional failures)
-    - only affects nodes that have children (expanding leaves is meaningless)
-    """
-    # Use the canonical icon HTML (via status_icon_html) to avoid brittle substring heuristics.
-    _ICON_FAIL_REQ = status_icon_html(status_norm="failure", is_required=True)
-
-    def walk(n: TreeNodeVM) -> Tuple[TreeNodeVM, bool]:
-        # returns: (new_node, has_required_failure_in_subtree)
-        new_children: List[TreeNodeVM] = []
-        child_req = False
-        for ch in (n.children or []):
-            ch2, r = walk(ch)
-            new_children.append(ch2)
-            child_req = child_req or r
-
-        own_req_fail = bool(_ICON_FAIL_REQ in str(n.label_html or ""))
-        has_req = bool(own_req_fail or child_req)
-
-        # Expand this node if it has children and any descendant required-failed.
-        new_default_expanded = bool(n.default_expanded)
-        if bool(new_children) and bool(has_req):
-            new_default_expanded = True
-
-        return (
-            TreeNodeVM(
-                node_key=str(n.node_key or ""),
-                label_html=str(n.label_html or ""),
-                children=new_children,
-                collapsible=bool(n.collapsible),
-                default_expanded=bool(new_default_expanded),
-                triangle_tooltip=n.triangle_tooltip,
-                noncollapsible_icon=getattr(n, "noncollapsible_icon", ""),
-                job_name=getattr(n, "job_name", ""),
-                core_job_name=getattr(n, "core_job_name", ""),
-                workflow_name=getattr(n, "workflow_name", ""),
-                variant=getattr(n, "variant", ""),
-                pr_number=getattr(n, "pr_number", None),
-                raw_html_content=getattr(n, "raw_html_content", ""),
-            ),
-            has_req,
-        )
-
-    out: List[TreeNodeVM] = []
-    for n in (nodes or []):
-            n2, _ = walk(n)
-            out.append(n2)
-    return out
-
-
-def create_dummy_nodes_from_yaml_pass(nodes: List[TreeNodeVM]) -> List[TreeNodeVM]:
-    """Create dummy nodes from YAML when no input nodes are provided.
-    
-    This pass is only used for debugging/visualization of the YAML structure.
-    If nodes are provided, they pass through unchanged.
-    If no nodes are provided AND YAML was parsed, creates minimal TreeNodeVM nodes
-    for all jobs found in the workflow files.
-    
-    Args:
-        nodes: Input nodes (may be empty)
-    
-    Returns:
-        Original nodes if non-empty, or dummy nodes created from YAML
-    """
-    if nodes:
-        return nodes
-    
-    if not _workflow_parent_child_mapping:
-        return nodes
-    
-    logger.debug("[create_dummy_nodes_from_yaml_pass] Creating dummy nodes from YAML structure")
-    
-    # Collect all job names mentioned in the YAML
-    all_job_names = set()
-    for parent, children in _workflow_parent_child_mapping.items():
-        all_job_names.add(parent)
-        all_job_names.update(children)
-    
-    logger.debug(f"[create_dummy_nodes_from_yaml_pass] Job-to-file mapping has {len(_workflow_job_to_file)} entries")
-    logger.debug(f"[create_dummy_nodes_from_yaml_pass] Total unique job names from mapping: {len(all_job_names)}")
-    
-    # Debug: show first 10 entries
-    for i, (job_name, workflow_file) in enumerate(sorted(_workflow_job_to_file.items())):
-        if i < 10:
-            logger.debug(f"[create_dummy_nodes_from_yaml_pass]   {job_name} -> {workflow_file}")
-    
-    # Helper function to format arch text with colors
-    def _format_arch_text_for_placeholder(text: str) -> str:
-        """Format job name with architecture colors and annotations."""
-        import html as html_module
-        raw = str(text or "")
-        # Detect arch token
-        m = re.search(r"\((arm64|aarch64|amd64)\)", raw, flags=re.IGNORECASE)
-        if not m:
-            return html_module.escape(raw)
-        
-        arch = str(m.group(1) or "").strip().lower()
-        # Determine color
-        if arch in {"arm64", "aarch64"}:
-            color = "#b8860b"  # Dark yellow/gold for arm64
-            # Normalize to "(arm64)" and append "; aarch64"
-            raw2 = re.sub(r"\(\s*(arm64|aarch64)\s*\)", "(arm64)", raw, flags=re.IGNORECASE)
-            raw2 = re.sub(r"\(\s*arm64\s*\)(?!\s*;\s*aarch64\b)", "(arm64); aarch64", raw2, flags=re.IGNORECASE)
-            return f'<span style="color: {color};">{html_module.escape(raw2)}</span>'
-        elif arch == "amd64":
-            color = "#0969da"  # Blue for amd64
-            raw2 = re.sub(r"\(\s*amd64\s*\)", "(amd64)", raw, flags=re.IGNORECASE)
-            raw2 = re.sub(r"\(\s*amd64\s*\)(?!\s*;\s*x86_64\b)", "(amd64); x86_64\u00a0", raw2, flags=re.IGNORECASE)  # Non-breaking space for alignment
-            return f'<span style="color: {color};">{html_module.escape(raw2)}</span>'
-        return html_module.escape(raw)
-    
-    # Create minimal TreeNodeVM for each job
-    skeleton_nodes = []
-    for job_name in sorted(all_job_names):
-        # Get job_id if available
-        job_id = _workflow_job_name_to_id.get(job_name, "")
-        
-        # Get workflow filename if available
-        workflow_file = _workflow_job_to_file.get(job_name, "")
-        
-        # Format: job_id (job_name) if they differ, otherwise just job_name
-        # job_id is in fixed-width font, job_name (description) is in normal font with lighter gray color
-        # Apply arch formatting to get colors and "; aarch64" / "; x86_64" suffixes
-        if job_id and job_id != job_name:
-            formatted_job_id = _format_arch_text_for_placeholder(job_id)
-            display_text = f'<span style="font-family: monospace;">{formatted_job_id}</span> <span style="color: #8c959f;">({job_name})</span>'
-        else:
-            formatted_job_name = _format_arch_text_for_placeholder(job_name)
-            display_text = f'<span style="font-family: monospace;">{formatted_job_name}</span>'
-        
-        # Add workflow file annotation with full path
-        if workflow_file:
-            file_path = f'.github/workflows/{workflow_file}'
-            file_annotation = f'<span style="color: #888;">[defined in {file_path}]</span>'
-        else:
-            file_annotation = '<span style="color: #888;">[defined in YAML]</span>'
-        
-        node = TreeNodeVM(
-            node_key=f"skeleton:{job_name}",
-            label_html=f'{display_text} {file_annotation}',
-            children=[],
-            collapsible=False,
-            default_expanded=False,
-            job_name=job_name,  # IMPORTANT: Set job_name for matching in PASS 1.2
-            workflow_name="",
-            variant="",
-        )        
-        skeleton_nodes.append(node)
-    
-    logger.debug(f"[create_dummy_nodes_from_yaml_pass] Created {len(skeleton_nodes)} dummy nodes from YAML")
-    return skeleton_nodes
-
-
-def convert_branch_nodes_to_tree_vm_pass(ci_nodes: List) -> List[TreeNodeVM]:
-    """Convert BranchNode objects to TreeNodeVM.
-    
-    Takes a list of BranchNode objects (from build_ci_nodes_from_pr or mock_build_ci_nodes)
-    and converts them to TreeNodeVM for rendering.
-    
-    Args:
-        ci_nodes: List of BranchNode objects for a single PR
-        
-    Returns:
-        List of TreeNodeVM objects representing actual CI info from GitHub
-    """
-    logger.info(f"Converting {len(ci_nodes)} BranchNode objects to TreeNodeVM")
-    
-    ci_info_nodes: List[TreeNodeVM] = []
-    for idx, ci_node in enumerate(ci_nodes):
-        # Convert BranchNode to TreeNodeVM (core_job_name is now set in to_tree_vm())
-        node_vm = ci_node.to_tree_vm()
-        
-        # Debug: Check if core_job_name was propagated
-        if idx < 5:
-            core_name = getattr(node_vm, 'core_job_name', '<none>')
-            logger.debug(f"  [{idx}] TreeNodeVM has core_job_name='{core_name}'")
-        
-        ci_info_nodes.append(node_vm)
-    
-    logger.info(f"Converted {len(ci_info_nodes)} nodes to TreeNodeVM")
-    return ci_info_nodes
-
-
-def run_all_passes(
-    ci_nodes: List,  # List[BranchNode] from common_branch_nodes
-    repo_root: Path,
-    commit_sha: str = "",
-) -> List[TreeNodeVM]:
-    """
-    Centralized CI tree node processing pipeline.
-    
-    Simple orchestrator that calls passes in sequence.
-    NOTE: This function is called ONCE PER PR, not for all PRs at once.
-    
-    Args:
-        ci_nodes: List of BranchNode objects for a SINGLE PR (from build_ci_nodes_from_pr or mock_build_ci_nodes)
-        repo_root: Path to the repository root (for .github/workflows/ parsing)
-        commit_sha: Commit SHA for per-commit node uniqueness
-    
-    Returns:
-        Processed list of TreeNodeVM nodes with YAML augmentation applied.
-    """
-    logger.info(f"[run_all_passes] Starting with {len(ci_nodes)} CI nodes (per-PR)")
-    
-    # PASS 1: Convert BranchNode to TreeNodeVM (actual CI info from GitHub)
-    ci_info_nodes = convert_branch_nodes_to_tree_vm_pass(ci_nodes)
-    
-    # PASS 2: Parse YAML workflows to build mappings (job names, dependencies, etc.)
-    # This populates global mappings and returns them for use in subsequent passes
-    _, yaml_mappings = parse_workflow_yaml_and_build_mapping_pass([], repo_root, commit_sha=commit_sha)
-    
-    # PASS 3: Augment CI nodes with YAML information (short names, dependencies)
-    augmented_nodes = augment_ci_with_yaml_info_pass(ci_nodes, yaml_mappings)
-    
-    # PASS 4: Move jobs under parent nodes
-    grouped_nodes = augmented_nodes
-    grouped_nodes = move_jobs_by_prefix_pass(grouped_nodes, prefix="vllm", parent_name="backend-status-check")
-    grouped_nodes = move_jobs_by_prefix_pass(grouped_nodes, prefix="sglang", parent_name="backend-status-check")
-    grouped_nodes = move_jobs_by_prefix_pass(grouped_nodes, prefix="trtllm", parent_name="backend-status-check")
-    grouped_nodes = move_jobs_by_prefix_pass(grouped_nodes, prefix="operator", parent_name="backend-status-check")
-
-    # Group other jobs under parent nodes
-    grouped_nodes = move_jobs_by_prefix_pass(grouped_nodes, prefix="deploy-", parent_name="deploy")
-    grouped_nodes = move_jobs_by_prefix_pass(grouped_nodes, prefix="build-test", parent_name="dynamo-status-check")
-    grouped_nodes = move_jobs_by_prefix_pass(grouped_nodes, prefix="Post-Merge CI / ", parent_name="post-merge-ci", parent_label="Post-Merge CI", create_if_has_children=True)
-    
-    # Group fast jobs under _fast parent
-    _FAST = "_fast"
-    _FAST_LABEL = "Jobs that tend to run fast"
-    grouped_nodes = move_jobs_by_prefix_pass(grouped_nodes, prefix="broken-links-check", parent_name=_FAST, parent_label=_FAST_LABEL, create_if_has_children=True)
-    grouped_nodes = move_jobs_by_prefix_pass(grouped_nodes, prefix="build-docs", parent_name=_FAST, parent_label=_FAST_LABEL, create_if_has_children=True)
-    grouped_nodes = move_jobs_by_prefix_pass(grouped_nodes, prefix="changed-files", parent_name=_FAST, parent_label=_FAST_LABEL, create_if_has_children=True)
-    grouped_nodes = move_jobs_by_prefix_pass(grouped_nodes, prefix="clean", parent_name=_FAST, parent_label=_FAST_LABEL, create_if_has_children=True)
-    grouped_nodes = move_jobs_by_prefix_pass(grouped_nodes, prefix="clippy", parent_name=_FAST, parent_label=_FAST_LABEL, create_if_has_children=True)
-    grouped_nodes = move_jobs_by_prefix_pass(grouped_nodes, prefix="CodeRabbit", parent_name=_FAST, parent_label=_FAST_LABEL, create_if_has_children=True)
-    grouped_nodes = move_jobs_by_prefix_pass(grouped_nodes, prefix="dco-comment", parent_name=_FAST, parent_label=_FAST_LABEL, create_if_has_children=True)
-    grouped_nodes = move_jobs_by_prefix_pass(grouped_nodes, prefix="event_file", parent_name=_FAST, parent_label=_FAST_LABEL, create_if_has_children=True)
-    grouped_nodes = move_jobs_by_prefix_pass(grouped_nodes, prefix="label", parent_name=_FAST, parent_label=_FAST_LABEL, create_if_has_children=True)
-    grouped_nodes = move_jobs_by_prefix_pass(grouped_nodes, prefix="lychee", parent_name=_FAST, parent_label=_FAST_LABEL, create_if_has_children=True)
-    grouped_nodes = move_jobs_by_prefix_pass(grouped_nodes, prefix="trigger-ci", parent_name=_FAST, parent_label=_FAST_LABEL, create_if_has_children=True)
-    
-    # PASS 5: Sort nodes by name
-    sorted_nodes = sort_nodes_by_name_pass(grouped_nodes)
-    
-    # PASS 6: Expand nodes with required failures in descendants
-    final_nodes = expand_required_failure_descendants_pass(sorted_nodes)
-    
-    # PASS 7: Move required jobs to the top (alphabetically sorted)
-    final_nodes = move_required_jobs_to_top_pass(final_nodes)
-    
-    # PASS 8: Verify the final tree structure
-    verify_tree_structure_pass(final_nodes, ci_nodes, commit_sha=commit_sha)
-    
-    logger.info(f"[PASS 2-8] YAML parse, augment, group, sort, expand, move required, and verify complete, returning {len(final_nodes)} root nodes")
-    return final_nodes
-
-
 def augment_ci_with_yaml_info_pass(
     original_ci_nodes: List,  # List[BranchNode] - original CIJobNode objects
     yaml_mappings: Dict[str, Dict],  # Mappings from YAML parsing
@@ -741,278 +689,6 @@ def augment_ci_with_yaml_info_pass(
         augmented_tree_nodes.append(node.to_tree_vm())
     
     return augmented_tree_nodes
-
-
-def move_required_jobs_to_top_pass(nodes: List[TreeNodeVM]) -> List[TreeNodeVM]:
-    """Move all REQUIRED jobs to the top, keeping alphabetical order within each group.
-    
-    This pass separates required and non-required jobs at the ROOT level only,
-    preserving all parent-child relationships. A job is considered required if
-    its label_html contains the '[REQUIRED]' badge (which comes from the is_required
-    attribute of the original CIJobNode).
-    
-    Args:
-        nodes: List of TreeNodeVM nodes (root level)
-        
-    Returns:
-        List with required jobs at top, then non-required jobs, each group alphabetically sorted
-    """
-    logger.info(f"[move_required_jobs_to_top] Processing {len(nodes)} root nodes")
-    
-    required_jobs = []
-    non_required_jobs = []
-    
-    for node in nodes:
-        # Check if the node's label contains [REQUIRED] badge
-        # This badge is added by check_line_html when is_required=True
-        if '[REQUIRED]' in str(node.label_html or ''):
-            required_jobs.append(node)
-            logger.debug(f"[move_required_jobs_to_top] REQUIRED: {node.short_job_name or node.job_name}")
-        else:
-            non_required_jobs.append(node)
-    
-    # Sort each group alphabetically by short_job_name or job_name
-    def sort_key(node):
-        name = node.short_job_name or node.job_name or node.label_html
-        return str(name).lower()
-    
-    required_jobs.sort(key=sort_key)
-    non_required_jobs.sort(key=sort_key)
-    
-    result = required_jobs + non_required_jobs
-    
-    logger.info(f"[move_required_jobs_to_top] Moved {len(required_jobs)} required jobs to top, {len(non_required_jobs)} non-required after")
-    if required_jobs:
-        logger.info(f"[move_required_jobs_to_top] Required jobs at top: {[node.short_job_name or node.job_name for node in required_jobs]}")
-    
-    return result
-
-
-def verify_tree_structure_pass(tree_nodes: List[TreeNodeVM], original_ci_nodes: List, commit_sha: str = "") -> None:
-    """Verify the final tree structure for common issues.
-    
-    This pass checks for:
-    - Duplicate short names
-    - Missing short names for important jobs
-    - Minimum number of required jobs
-    
-    Args:
-        tree_nodes: Final tree structure to verify
-        original_ci_nodes: Original CI nodes to check augmentation
-        commit_sha: Commit SHA for context in error messages
-    """
-    from common_branch_nodes import CIJobNode
-    
-    # Format commit ref for logging
-    commit_ref = f" (commit: {commit_sha[:7]})" if commit_sha else ""
-    logger.info(f"[verify_tree_structure_pass] Verifying tree structure ({len(tree_nodes)} root nodes){commit_ref}")
-    
-    # Collect all nodes (including nested)
-    all_nodes = []
-    def collect_nodes(nodes):
-        for node in nodes:
-            all_nodes.append(node)
-            if node.children:
-                collect_nodes(node.children)
-    collect_nodes(tree_nodes)
-    
-    # Check 1: Count required jobs and verify critical required jobs
-    required_count = 0
-    required_jobs_found = set()
-    for node in all_nodes:
-        # Check in label_html for REQUIRED badge
-        if '[REQUIRED]' in str(node.label_html or ''):
-            required_count += 1
-            job_name = node.short_job_name or node.job_name or ''
-            if job_name:
-                required_jobs_found.add(job_name)
-    
-    # Check for critical required jobs
-    CRITICAL_REQUIRED_JOBS = {"backend-status-check", "dynamo-status-check"}
-    missing_critical = CRITICAL_REQUIRED_JOBS - required_jobs_found
-    
-    if missing_critical:
-        logger.error(f"[verify_tree_structure_pass] ❌ CRITICAL: Missing required jobs: {missing_critical}{commit_ref}")
-    # Success case: don't log to avoid verbose output for every commit (200 commits × verbose logging = massive slowdown)
-    
-    if required_count < 2:
-        logger.warning(f"[verify_tree_structure_pass] ⚠️  Only {required_count} required jobs found (expected at least 2: backend-status-check, dynamo-status-check){commit_ref}")
-    # Success case: don't log to avoid verbose output
-    
-    # Check 2: Verify short names were set for original CI nodes
-    # Check 2: Count nodes with short names (no warnings about missing ones)
-    ci_nodes_with_short_names = 0
-    
-    for node in original_ci_nodes:
-        if isinstance(node, CIJobNode):
-            if hasattr(node, 'short_job_name') and node.short_job_name:
-                ci_nodes_with_short_names += 1
-    
-    logger.debug(f"[verify_tree_structure_pass] {ci_nodes_with_short_names} CI nodes have short names")
-    
-    # Check 3: Look for duplicate short names
-    short_name_counts = {}
-    for node in original_ci_nodes:
-        if isinstance(node, CIJobNode) and hasattr(node, 'short_job_name') and node.short_job_name:
-            short_name = node.short_job_name
-            job_id = node.job_id
-            core_name = getattr(node, 'core_job_name', '')
-            if short_name not in short_name_counts:
-                short_name_counts[short_name] = []
-            short_name_counts[short_name].append((job_id, core_name))
-    
-    duplicates = {k: v for k, v in short_name_counts.items() if len(v) > 1}
-    if duplicates:
-        # Separate duplicates into "OK" (different job_ids) and "problematic" (same job_ids)
-        ok_duplicates = []
-        problem_duplicates = []
-        
-        for short_name, job_list in duplicates.items():
-            job_ids = [job_id for job_id, _ in job_list]
-            unique_job_ids = len(set(job_ids))
-            if unique_job_ids == len(job_ids):
-                # All different job_ids - already disambiguated
-                ok_duplicates.append(short_name)
-            else:
-                # Some job_ids are the same - this is a real duplicate
-                core_names = [core_name for _, core_name in job_list]
-                problem_duplicates.append((short_name, core_names))
-        
-        # Only warn about true duplicates (same job_ids)
-        if problem_duplicates:
-            logger.warning(f"[verify_tree_structure_pass] ⚠️  Found {len(problem_duplicates)} duplicate short names with SAME job_ids:")
-            for short_name, core_names in problem_duplicates[:10]:  # Show first 10
-                logger.warning(f"[verify_tree_structure_pass]    - '{short_name}' used by: {core_names}")
-            if len(problem_duplicates) > 10:
-                logger.warning(f"[verify_tree_structure_pass]    ... and {len(problem_duplicates) - 10} more duplicates")
-        # Success cases: don't log to avoid verbose output
-    # Success case: don't log to avoid verbose output
-    
-    # Check 4: Verify specific important jobs have short names
-    important_jobs = ["Build and Test - dynamo", "dynamo-status-check", "backend-status-check"]
-    for important_job in important_jobs:
-        found = False
-        for node in original_ci_nodes:
-            if isinstance(node, CIJobNode):
-                core_name = getattr(node, 'core_job_name', '')
-                job_id = getattr(node, 'job_id', '')
-                display_name = getattr(node, 'display_name', '')
-                short_name = getattr(node, 'short_job_name', '')
-                
-                if important_job in core_name or important_job in job_id or important_job in display_name:
-                    if short_name:
-                        # Success case: don't log to avoid verbose output
-                        found = True
-                        break
-                    # Missing short name: don't log for every commit to avoid verbose output
-        if not found:
-            # Synthetic nodes like dynamo-status-check won't be in original_ci_nodes
-            # Don't log to avoid verbose output for every commit
-            pass
-    
-    # Check 5: Verify all REQUIRED jobs are at the top (root level)
-    first_non_required_idx = None
-    required_after_non_required = []
-    
-    for i, node in enumerate(tree_nodes):
-        is_required = '[REQUIRED]' in str(node.label_html or '')
-        
-        if not is_required and first_non_required_idx is None:
-            first_non_required_idx = i
-        
-        if is_required and first_non_required_idx is not None:
-            # Found a REQUIRED job after a non-required job
-            job_name = node.short_job_name or node.job_name or str(node.label_html)[:50]
-            required_after_non_required.append((i, job_name))
-    
-    if required_after_non_required:
-        logger.warning(f"[verify_tree_structure_pass] ⚠️  {len(required_after_non_required)} REQUIRED jobs found AFTER non-required jobs:")
-        for idx, job_name in required_after_non_required[:5]:
-            logger.warning(f"[verify_tree_structure_pass]    - Position {idx}: '{job_name}'")
-        if len(required_after_non_required) > 5:
-            logger.warning(f"[verify_tree_structure_pass]    ... and {len(required_after_non_required) - 5} more")
-        logger.warning(f"[verify_tree_structure_pass] ⚠️  move_required_jobs_to_top_pass may not be working correctly!")
-    else:
-        logger.info(f"[verify_tree_structure_pass] ✓ All REQUIRED jobs are at the top (first {first_non_required_idx or len(tree_nodes)} positions)")
-    
-    # Check 6: Verify build-test is under dynamo-status-check
-    dynamo_node = None
-    for node in tree_nodes:
-        if 'dynamo-status-check' in str(node.short_job_name or node.job_name or '').lower():
-            dynamo_node = node
-            break
-    
-    if dynamo_node:
-        has_build_test = False
-        for child in (dynamo_node.children or []):
-            # Check both short_job_name and job_name
-            child_short = str(child.short_job_name or '').lower()
-            child_full = str(child.job_name or '').lower()
-            if 'build-test' in child_short or 'build and test' in child_full:
-                has_build_test = True
-                break
-        
-        if has_build_test:
-            logger.info(f"[verify_tree_structure_pass] ✓ build-test is under dynamo-status-check")
-        else:
-            child_names = [(c.short_job_name or '', c.job_name or '') for c in (dynamo_node.children or [])]
-            logger.warning(f"[verify_tree_structure_pass] ⚠️  build-test NOT found under dynamo-status-check. Children: {child_names}")
-    else:
-        logger.warning(f"[verify_tree_structure_pass] ⚠️  dynamo-status-check node not found")
-    
-    logger.info(f"[verify_tree_structure_pass] Verification complete")
-
-
-
-
-def _compute_parent_status_from_children(children: List[TreeNodeVM]) -> str:
-    """Compute parent node status based on children statuses.
-    
-    Rules:
-    - If any child is 'failure', parent is 'failure'
-    - If all children are 'success', parent is 'success'
-    - Otherwise, parent status is 'unknown' or the most common status
-    
-    Args:
-        children: List of child TreeNodeVM nodes
-    
-    Returns:
-        Status string: 'success', 'failure', 'pending', 'in_progress', or 'unknown'
-    """
-    if not children:
-        return "unknown"
-    
-    # Extract statuses from children's label_html (contains status icons)
-    has_failure = False
-    has_running = False
-    has_pending = False
-    success_count = 0
-    
-    for child in children:
-        label = str(getattr(child, 'label_html', '') or '')
-        # Check for status indicators in the label HTML
-        # Also check for red color (#c83a3a) which indicates failure
-        if '✗' in label or 'failure' in label.lower() or '#c83a3a' in label:
-            has_failure = True
-        elif 'success' in label.lower() or 'octicon-check' in label:
-            success_count += 1
-        elif '⏳' in label or 'running' in label.lower() or 'progress' in label.lower():
-            has_running = True
-        elif 'pending' in label.lower() or ('border-radius: 999px; background-color: #8c959f' in label and '•' in label):
-            # Pending has a gray circle background with white dot
-            has_pending = True
-    
-    # Apply rules
-    if has_failure:
-        return "failure"
-    elif success_count == len(children):
-        return "success"
-    elif has_running:
-        return "in_progress"  # Return 'in_progress' to match CIStatus.IN_PROGRESS
-    elif has_pending:
-        return "pending"
-    else:
-        return "unknown"
 
 
 def move_jobs_by_prefix_pass(
@@ -1223,6 +899,341 @@ def sort_nodes_by_name_pass(nodes: List[TreeNodeVM]) -> List[TreeNodeVM]:
             result.append(node)
     
     return result
+
+
+def expand_required_failure_descendants_pass(nodes: List[TreeNodeVM]) -> List[TreeNodeVM]:
+    """Expand any node that has a REQUIRED failure anywhere in its descendant subtree.
+
+    This is intentionally a *post-pass* so it can run after any logic that mutates/moves nodes
+    (e.g. workflow `jobs.*.needs` grouping).
+
+    Policy:
+    - expand for required failures only (not optional failures)
+    - only affects nodes that have children (expanding leaves is meaningless)
+    """
+    # Use the canonical icon HTML (via status_icon_html) to avoid brittle substring heuristics.
+    _ICON_FAIL_REQ = status_icon_html(status_norm="failure", is_required=True)
+
+    def walk(n: TreeNodeVM) -> Tuple[TreeNodeVM, bool]:
+        # returns: (new_node, has_required_failure_in_subtree)
+        new_children: List[TreeNodeVM] = []
+        child_req = False
+        for ch in (n.children or []):
+            ch2, r = walk(ch)
+            new_children.append(ch2)
+            child_req = child_req or r
+
+        own_req_fail = bool(_ICON_FAIL_REQ in str(n.label_html or ""))
+        has_req = bool(own_req_fail or child_req)
+
+        # Expand this node if it has children and any descendant required-failed.
+        new_default_expanded = bool(n.default_expanded)
+        if bool(new_children) and bool(has_req):
+            new_default_expanded = True
+
+        return (
+            TreeNodeVM(
+                node_key=str(n.node_key or ""),
+                label_html=str(n.label_html or ""),
+                children=new_children,
+                collapsible=bool(n.collapsible),
+                default_expanded=bool(new_default_expanded),
+                triangle_tooltip=n.triangle_tooltip,
+                noncollapsible_icon=getattr(n, "noncollapsible_icon", ""),
+                job_name=getattr(n, "job_name", ""),
+                core_job_name=getattr(n, "core_job_name", ""),
+                workflow_name=getattr(n, "workflow_name", ""),
+                variant=getattr(n, "variant", ""),
+                pr_number=getattr(n, "pr_number", None),
+                raw_html_content=getattr(n, "raw_html_content", ""),
+            ),
+            has_req,
+        )
+
+    out: List[TreeNodeVM] = []
+    for n in (nodes or []):
+            n2, _ = walk(n)
+            out.append(n2)
+    return out
+
+
+def move_required_jobs_to_top_pass(nodes: List[TreeNodeVM]) -> List[TreeNodeVM]:
+    """Move all REQUIRED jobs to the top, keeping alphabetical order within each group.
+    
+    This pass separates required and non-required jobs at the ROOT level only,
+    preserving all parent-child relationships. A job is considered required if
+    its label_html contains the '[REQUIRED]' badge (which comes from the is_required
+    attribute of the original CIJobNode).
+    
+    Args:
+        nodes: List of TreeNodeVM nodes (root level)
+        
+    Returns:
+        List with required jobs at top, then non-required jobs, each group alphabetically sorted
+    """
+    logger.info(f"[move_required_jobs_to_top] Processing {len(nodes)} root nodes")
+    
+    required_jobs = []
+    non_required_jobs = []
+    
+    for node in nodes:
+        # Check if the node's label contains [REQUIRED] badge
+        # This badge is added by check_line_html when is_required=True
+        if '[REQUIRED]' in str(node.label_html or ''):
+            required_jobs.append(node)
+            logger.debug(f"[move_required_jobs_to_top] REQUIRED: {node.short_job_name or node.job_name}")
+        else:
+            non_required_jobs.append(node)
+    
+    # Sort each group alphabetically by short_job_name or job_name
+    def sort_key(node):
+        name = node.short_job_name or node.job_name or node.label_html
+        return str(name).lower()
+    
+    required_jobs.sort(key=sort_key)
+    non_required_jobs.sort(key=sort_key)
+    
+    result = required_jobs + non_required_jobs
+    
+    logger.info(f"[move_required_jobs_to_top] Moved {len(required_jobs)} required jobs to top, {len(non_required_jobs)} non-required after")
+    if required_jobs:
+        logger.info(f"[move_required_jobs_to_top] Required jobs at top: {[node.short_job_name or node.job_name for node in required_jobs]}")
+    
+    return result
+
+
+def verify_tree_structure_pass(tree_nodes: List[TreeNodeVM], original_ci_nodes: List, commit_sha: str = "") -> None:
+    """Verify the final tree structure for common issues.
+    
+    This pass checks for:
+    - Duplicate short names
+    - Missing short names for important jobs
+    - Minimum number of required jobs
+    
+    Args:
+        tree_nodes: Final tree structure to verify
+        original_ci_nodes: Original CI nodes to check augmentation
+        commit_sha: Commit SHA for context in error messages
+    """
+    from common_branch_nodes import CIJobNode
+    
+    # Format commit ref for logging
+    commit_ref = f" (commit: {commit_sha[:7]})" if commit_sha else ""
+    logger.info(f"[verify_tree_structure_pass] Verifying tree structure ({len(tree_nodes)} root nodes){commit_ref}")
+    
+    # Collect all nodes (including nested)
+    all_nodes = []
+    def collect_nodes(nodes):
+        for node in nodes:
+            all_nodes.append(node)
+            if node.children:
+                collect_nodes(node.children)
+    collect_nodes(tree_nodes)
+    
+    # Check 1: Count required jobs and verify critical required jobs
+    required_count = 0
+    required_jobs_found = set()
+    for node in all_nodes:
+        # Check in label_html for REQUIRED badge
+        if '[REQUIRED]' in str(node.label_html or ''):
+            required_count += 1
+            job_name = node.short_job_name or node.job_name or ''
+            if job_name:
+                required_jobs_found.add(job_name)
+    
+    # Check for critical required jobs
+    CRITICAL_REQUIRED_JOBS = {"backend-status-check", "dynamo-status-check"}
+    missing_critical = CRITICAL_REQUIRED_JOBS - required_jobs_found
+    
+    if missing_critical:
+        logger.error(f"[verify_tree_structure_pass] ❌ CRITICAL: Missing required jobs: {missing_critical}{commit_ref}")
+    # Success case: don't log to avoid verbose output for every commit (200 commits × verbose logging = massive slowdown)
+    
+    if required_count < 2:
+        logger.warning(f"[verify_tree_structure_pass] ⚠️  Only {required_count} required jobs found (expected at least 2: backend-status-check, dynamo-status-check){commit_ref}")
+    # Success case: don't log to avoid verbose output
+    
+    # Check 2: Verify short names were set for original CI nodes
+    # Check 2: Count nodes with short names (no warnings about missing ones)
+    ci_nodes_with_short_names = 0
+    
+    for node in original_ci_nodes:
+        if isinstance(node, CIJobNode):
+            if hasattr(node, 'short_job_name') and node.short_job_name:
+                ci_nodes_with_short_names += 1
+    
+    logger.debug(f"[verify_tree_structure_pass] {ci_nodes_with_short_names} CI nodes have short names")
+    
+    # Check 3: Look for duplicate short names
+    short_name_counts = {}
+    for node in original_ci_nodes:
+        if isinstance(node, CIJobNode) and hasattr(node, 'short_job_name') and node.short_job_name:
+            short_name = node.short_job_name
+            # Use a stable underlying ID for duplicate detection.
+            #
+            # CIJobNode.job_id is a *display* id (often the check name, sometimes prefixed with workflow),
+            # and can collide across reruns. Prefer the Actions job id extracted from the log URL.
+            log_url = str(getattr(node, "log_url", "") or "")
+            actions_job_id = str(getattr(node, "actions_job_id", "") or "").strip()
+            actions_job_id = actions_job_id or (extract_actions_job_id_from_url(log_url) if log_url else "")
+            stable_id = str(actions_job_id or log_url or getattr(node, "job_id", "") or "")
+            core_name = getattr(node, 'core_job_name', '')
+            if short_name not in short_name_counts:
+                short_name_counts[short_name] = []
+            short_name_counts[short_name].append((stable_id, core_name))
+    
+    duplicates = {k: v for k, v in short_name_counts.items() if len(v) > 1}
+    if duplicates:
+        # Only warn about duplicates where *all* entries share the same job_id.
+        # (I.e., not "some repeats" like [a,a,b], but truly the same underlying ID everywhere.)
+        same_id_duplicates: List[Tuple[str, str, List[str]]] = []
+
+        for short_name, job_list in duplicates.items():
+            job_ids = [str(job_id or "") for job_id, _ in job_list]
+            uniq = sorted(set(job_ids))
+            if len(uniq) != 1:
+                continue
+            core_names = [str(core_name or "") for _, core_name in job_list]
+            same_id_duplicates.append((short_name, uniq[0], core_names))
+
+        if same_id_duplicates:
+            logger.warning(
+                f"[verify_tree_structure_pass] ⚠️  Found {len(same_id_duplicates)} duplicate short names with SAME job_ids:{commit_ref}"
+            )
+            for short_name, job_id, core_names in same_id_duplicates[:10]:
+                logger.warning(
+                    f"[verify_tree_structure_pass]    - '{short_name}' job_id='{job_id}' used by: {core_names}{commit_ref}"
+                )
+            if len(same_id_duplicates) > 10:
+                logger.warning(
+                    f"[verify_tree_structure_pass]    ... and {len(same_id_duplicates) - 10} more duplicates{commit_ref}"
+                )
+        # Success cases: don't log to avoid verbose output
+    # Success case: don't log to avoid verbose output
+    
+    # Check 4: Verify specific important jobs have short names
+    important_jobs = ["Build and Test - dynamo", "dynamo-status-check", "backend-status-check"]
+    for important_job in important_jobs:
+        found = False
+        for node in original_ci_nodes:
+            if isinstance(node, CIJobNode):
+                core_name = getattr(node, 'core_job_name', '')
+                job_id = getattr(node, 'job_id', '')
+                display_name = getattr(node, 'display_name', '')
+                short_name = getattr(node, 'short_job_name', '')
+                
+                if important_job in core_name or important_job in job_id or important_job in display_name:
+                    if short_name:
+                        # Success case: don't log to avoid verbose output
+                        found = True
+                        break
+                    # Missing short name: don't log for every commit to avoid verbose output
+        if not found:
+            # Synthetic nodes like dynamo-status-check won't be in original_ci_nodes
+            # Don't log to avoid verbose output for every commit
+            pass
+    
+    # Check 5: Verify all REQUIRED jobs are at the top (root level)
+    first_non_required_idx = None
+    required_after_non_required = []
+    
+    for i, node in enumerate(tree_nodes):
+        is_required = '[REQUIRED]' in str(node.label_html or '')
+        
+        if not is_required and first_non_required_idx is None:
+            first_non_required_idx = i
+        
+        if is_required and first_non_required_idx is not None:
+            # Found a REQUIRED job after a non-required job
+            job_name = node.short_job_name or node.job_name or str(node.label_html)[:50]
+            required_after_non_required.append((i, job_name))
+    
+    if required_after_non_required:
+        logger.warning(f"[verify_tree_structure_pass] ⚠️  {len(required_after_non_required)} REQUIRED jobs found AFTER non-required jobs:")
+        for idx, job_name in required_after_non_required[:5]:
+            logger.warning(f"[verify_tree_structure_pass]    - Position {idx}: '{job_name}'")
+        if len(required_after_non_required) > 5:
+            logger.warning(f"[verify_tree_structure_pass]    ... and {len(required_after_non_required) - 5} more")
+        logger.warning(f"[verify_tree_structure_pass] ⚠️  move_required_jobs_to_top_pass may not be working correctly!")
+    else:
+        logger.info(f"[verify_tree_structure_pass] ✓ All REQUIRED jobs are at the top (first {first_non_required_idx or len(tree_nodes)} positions)")
+    
+    # Check 6: Verify build-test is under dynamo-status-check
+    dynamo_node = None
+    for node in tree_nodes:
+        if 'dynamo-status-check' in str(node.short_job_name or node.job_name or '').lower():
+            dynamo_node = node
+            break
+    
+    if dynamo_node:
+        has_build_test = False
+        for child in (dynamo_node.children or []):
+            # Check both short_job_name and job_name
+            child_short = str(child.short_job_name or '').lower()
+            child_full = str(child.job_name or '').lower()
+            if 'build-test' in child_short or 'build and test' in child_full:
+                has_build_test = True
+                break
+        
+        if has_build_test:
+            logger.info(f"[verify_tree_structure_pass] ✓ build-test is under dynamo-status-check")
+        else:
+            child_names = [(c.short_job_name or '', c.job_name or '') for c in (dynamo_node.children or [])]
+            logger.warning(f"[verify_tree_structure_pass] ⚠️  build-test NOT found under dynamo-status-check. Children: {child_names}")
+    else:
+        logger.warning(f"[verify_tree_structure_pass] ⚠️  dynamo-status-check node not found")
+    
+    logger.info(f"[verify_tree_structure_pass] Verification complete")
+
+
+def _compute_parent_status_from_children(children: List[TreeNodeVM]) -> str:
+    """Compute parent node status based on children statuses.
+    
+    Rules:
+    - If any child is 'failure', parent is 'failure'
+    - If all children are 'success', parent is 'success'
+    - Otherwise, parent status is 'unknown' or the most common status
+    
+    Args:
+        children: List of child TreeNodeVM nodes
+    
+    Returns:
+        Status string: 'success', 'failure', 'pending', 'in_progress', or 'unknown'
+    """
+    if not children:
+        return "unknown"
+    
+    # Extract statuses from children's label_html (contains status icons)
+    has_failure = False
+    has_running = False
+    has_pending = False
+    success_count = 0
+    
+    for child in children:
+        label = str(getattr(child, 'label_html', '') or '')
+        # Check for status indicators in the label HTML
+        # Also check for red color (#c83a3a) which indicates failure
+        if '✗' in label or 'failure' in label.lower() or '#c83a3a' in label:
+            has_failure = True
+        elif 'success' in label.lower() or 'octicon-check' in label:
+            success_count += 1
+        elif '⏳' in label or 'running' in label.lower() or 'progress' in label.lower():
+            has_running = True
+        elif 'pending' in label.lower() or ('border-radius: 999px; background-color: #8c959f' in label and '•' in label):
+            # Pending has a gray circle background with white dot
+            has_pending = True
+    
+    # Apply rules
+    if has_failure:
+        return "failure"
+    elif success_count == len(children):
+        return "success"
+    elif has_running:
+        return "in_progress"  # Return 'in_progress' to match CIStatus.IN_PROGRESS
+    elif has_pending:
+        return "pending"
+    else:
+        return "unknown"
 
 
 def _hash10(s: str) -> str:

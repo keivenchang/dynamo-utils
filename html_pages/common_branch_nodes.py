@@ -611,6 +611,7 @@ class CIJobNode(BranchNode):
         status: str = CIStatus.UNKNOWN,
         duration: str = "",
         log_url: str = "",
+        actions_job_id: str = "",  # GitHub Actions job id (from checks rows), for stable identity across reruns
         is_required: bool = False,
         children: Optional[List[BranchNode]] = None,
         expanded: bool = False,
@@ -629,6 +630,7 @@ class CIJobNode(BranchNode):
         self.display_name = str(display_name or "")
         self.duration = str(duration or "")
         self.log_url = str(log_url or "")
+        self.actions_job_id = str(actions_job_id or "")
         self.is_required = bool(is_required)
         self.page_root_dir = page_root_dir
         self.context_key = str(context_key or "")
@@ -1433,6 +1435,7 @@ def build_ci_nodes_from_pr(
             status=str(st or "unknown"),
             duration=str(getattr(r, "duration", "") or ""),
             log_url=job_url,
+            actions_job_id=str(getattr(r, "job_id", "") or ""),
             is_required=bool(getattr(r, "is_required", False)),
             children=[],
             page_root_dir=page_root_dir,  # Pass page_root_dir for raw log and snippet extraction
@@ -2005,6 +2008,7 @@ class PRStatusNode(BranchNode):
             kids = run_all_passes(
                 ci_nodes=ci_branch_nodes,  # Pass List[BranchNode] directly!
                 repo_root=repo_root,
+                commit_sha=str(getattr(getattr(self, "pr", None), "head_sha", None) or ""),
             )
         except Exception as e:
             logger.exception(f"[PRStatusNode] Error in pipeline: {e}")
