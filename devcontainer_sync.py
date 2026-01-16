@@ -52,7 +52,7 @@ class DevContainerSync:
         self.template_file = self.script_dir / "devcontainer.json.j2"
         
         # Destination directory pattern
-        dest_base = os.environ.get("DEVCONTAINER_SRC_DIR", f"{os.path.expanduser('~')}/nvidia/dynamo")
+        dest_base = os.environ.get("DEVCONTAINER_SRC_DIR", f"{os.path.expanduser('~')}/dynamo/dynamo")
         self.dest_pattern = Path(dest_base).parent
         self.dest_prefix = Path(dest_base).name
         
