@@ -160,6 +160,11 @@ def main() -> int:
     parser.add_argument("--max-github-api-calls", type=int, default=100, help="Hard cap on GitHub REST API network calls per invocation")
     parser.add_argument("--max-prs", type=int, default=50, help="Cap PRs shown (default: 50)")
     parser.add_argument("--refresh-checks", action="store_true", help="Force-refresh checks cache TTLs (more GitHub calls)")
+    parser.add_argument(
+        "--enable-success-build-test-logs",
+        action="store_true",
+        help='Opt-in: cache raw logs for successful *-build-test jobs so we can parse pytest slowest tests under "Run tests" (slower).',
+    )
     parser.add_argument("--use-text-trees", action="store_true", help="Use old text-based tree rendering instead of interactive <div> (legacy)")
     parser.add_argument("--create-dummy-prs", action="store_true", help="Create 2 dummy PRs to visualize YAML structure (for testing)")
     parser.add_argument("--debug", action="store_true", help="Enable debug logging")
@@ -306,6 +311,7 @@ def main() -> int:
                 branch_commit_dt=updated_dt,
                 allow_fetch_checks=bool(allow_fetch_checks),
                 context_key=f"remote:{owner}/{repo}:{branch_name}:{sha7}:pr{pr.number}",
+                enable_success_build_test_logs=bool(args.enable_success_build_test_logs),
             )
             branch_node.add_child(status_node)  # Add directly to branch_node
 

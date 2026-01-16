@@ -597,6 +597,7 @@ class LocalRepoScanner:
         max_checks_fetch: Optional[int] = None,
         allow_anonymous_github: bool = False,
         max_github_api_calls: int = 100,
+        enable_success_build_test_logs: bool = False,
     ):
         require_auth = not bool(allow_anonymous_github)
         self.github_api = GitHubAPIClient(
@@ -609,6 +610,7 @@ class LocalRepoScanner:
         self.max_branches = int(max_branches) if max_branches is not None else None
         self.max_checks_fetch = int(max_checks_fetch) if max_checks_fetch is not None else None
         self.cache_only_github: bool = False
+        self.enable_success_build_test_logs = bool(enable_success_build_test_logs)
 
     @staticmethod
     def _is_world_readable_executable_dir(p: Path) -> bool:
@@ -909,6 +911,7 @@ class LocalRepoScanner:
                         branch_commit_dt=branch_dt,
                         allow_fetch_checks=bool(allow_fetch_checks),
                         context_key=f"{repo_dir.name}:{branch_name}:{info.get('sha','')}",
+                        enable_success_build_test_logs=bool(self.enable_success_build_test_logs),
                     )
 
                     branch_node.add_child(status_node)
@@ -1139,6 +1142,11 @@ def main():
         default=100,
         help='Hard cap on GitHub REST API network calls per invocation (cached reads do not count). Default: 100.'
     )
+    parser.add_argument(
+        '--enable-success-build-test-logs',
+        action='store_true',
+        help='Opt-in: cache raw logs for successful *-build-test jobs so we can parse pytest slowest tests under "Run tests" (slower).'
+    )
     args = parser.parse_args()
 
     base_dir = (args.repo_path or args.base_dir or Path.cwd()).resolve()
@@ -1161,6 +1169,7 @@ def main():
         max_checks_fetch=args.max_checks_fetch,
         allow_anonymous_github=bool(args.allow_anonymous_github),
         max_github_api_calls=int(args.max_github_api_calls),
+        enable_success_build_test_logs=bool(args.enable_success_build_test_logs),
     )
     # Cache-only fallback if exhausted.
     try:

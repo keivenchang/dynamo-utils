@@ -85,6 +85,7 @@ Flags:
   --show-remote-history     Alias for --show-remote-branches (back-compat)
 
   --fast-debug              Faster runs: outputs to debug.html instead of index.html, uses smaller commit window (10 commits), shorter resource window
+  --enable-success-build-test-logs  Opt-in: cache raw logs for successful *-build-test jobs to parse pytest slowest tests under "Run tests" (slower)
 
   --dry-run                 Print what would be executed without actually running commands
   --run-ignore-lock         Bypass the /tmp lock (no flock). Useful for manual runs when a stale lock exists.
@@ -105,6 +106,7 @@ RUN_SHOW_REMOTE_BRANCHES=false
 ANY_FLAG=false
 IGNORE_LOCK=false
 DRY_RUN=false
+ENABLE_SUCCESS_BUILD_TEST_LOGS=false
 
 USER_NAME="${USER:-${LOGNAME:-}}"
 if [ -z "$USER_NAME" ]; then
@@ -125,6 +127,8 @@ while [ "$#" -gt 0 ]; do
             RUN_SHOW_REMOTE_BRANCHES=true; ANY_FLAG=true; shift ;;
         --fast-debug)
             FAST_DEBUG=true; shift ;;
+        --enable-success-build-test-logs)
+            ENABLE_SUCCESS_BUILD_TEST_LOGS=true; shift ;;
         --dry-run)
             DRY_RUN=true; shift ;;
         --run-ignore-lock)
@@ -295,17 +299,21 @@ run_show_local_branches() {
     if [ -n "${MAX_GITHUB_API_CALLS:-}" ]; then
         MAX_GH_FLAG="--max-github-api-calls ${MAX_GITHUB_API_CALLS}"
     fi
+    SUCCESS_BUILD_TEST_FLAG=""
+    if [ "$ENABLE_SUCCESS_BUILD_TEST_LOGS" = true ]; then
+        SUCCESS_BUILD_TEST_FLAG="--enable-success-build-test-logs"
+    fi
     
     if [ "$DRY_RUN" = true ]; then
         echo "[DRY-RUN] Would generate branches dashboard:"
         echo "[DRY-RUN]   Output: $BRANCHES_OUTPUT_FILE"
-        echo "[DRY-RUN]   Command: python3 $SCRIPT_DIR/show_local_branches.py --repo-path $NVIDIA_HOME --output $BRANCHES_OUTPUT_FILE $REFRESH_CLOSED_FLAG $MAX_GH_FLAG"
+        echo "[DRY-RUN]   Command: python3 $SCRIPT_DIR/show_local_branches.py --repo-path $NVIDIA_HOME --output $BRANCHES_OUTPUT_FILE $REFRESH_CLOSED_FLAG $MAX_GH_FLAG $SUCCESS_BUILD_TEST_FLAG"
         return 0
     fi
     
     echo "$(date '+%Y-%m-%d %H:%M:%S') - Generating branches dashboard" >> "$LOG_FILE"
     log_line_ts "$BRANCHES_LOG" "===== run_show_local_branches start (output=$BRANCHES_OUTPUT_FILE) ====="
-    if run_cmd_to_log_ts "$BRANCHES_LOG" python3 "$SCRIPT_DIR/show_local_branches.py" --repo-path "$NVIDIA_HOME" --output "$BRANCHES_OUTPUT_FILE" $REFRESH_CLOSED_FLAG $MAX_GH_FLAG; then
+    if run_cmd_to_log_ts "$BRANCHES_LOG" python3 "$SCRIPT_DIR/show_local_branches.py" --repo-path "$NVIDIA_HOME" --output "$BRANCHES_OUTPUT_FILE" $REFRESH_CLOSED_FLAG $MAX_GH_FLAG $SUCCESS_BUILD_TEST_FLAG; then
         echo "$(date '+%Y-%m-%d %H:%M:%S') - Updated $BRANCHES_OUTPUT_FILE" >> "$LOG_FILE"
     else
         echo "$(date '+%Y-%m-%d %H:%M:%S') - ERROR: Failed to update $BRANCHES_OUTPUT_FILE" >> "$LOG_FILE"
@@ -335,6 +343,10 @@ run_show_remote_branches() {
     MAX_GH_FLAG=""
     if [ -n "${MAX_GITHUB_API_CALLS:-}" ]; then
         MAX_GH_FLAG="--max-github-api-calls ${MAX_GITHUB_API_CALLS}"
+    fi
+    SUCCESS_BUILD_TEST_FLAG=""
+    if [ "$ENABLE_SUCCESS_BUILD_TEST_LOGS" = true ]; then
+        SUCCESS_BUILD_TEST_FLAG="--enable-success-build-test-logs"
     fi
 
     if [ "$DRY_RUN" = true ]; then
@@ -381,7 +393,8 @@ run_show_remote_branches() {
             --github-user "${U}" \
             --base-dir "$NVIDIA_HOME/dynamo_latest" \
             --output "$OUT_FILE" \
-            $MAX_GH_FLAG; then
+                $MAX_GH_FLAG \
+                $SUCCESS_BUILD_TEST_FLAG; then
             echo "$(date '+%Y-%m-%d %H:%M:%S') - Updated $OUT_FILE" >> "$LOG_FILE"
         else
             echo "$(date '+%Y-%m-%d %H:%M:%S') - ERROR: Failed to update $OUT_FILE" >> "$LOG_FILE"
@@ -397,6 +410,10 @@ run_show_commit_history() {
         COMMIT_HISTORY_BASENAME="debug.html"
     fi
     COMMIT_HISTORY_HTML="$DYNAMO_REPO/$COMMIT_HISTORY_BASENAME"
+    SUCCESS_BUILD_TEST_FLAG=""
+    if [ "$ENABLE_SUCCESS_BUILD_TEST_LOGS" = true ]; then
+        SUCCESS_BUILD_TEST_FLAG="--enable-success-build-test-logs"
+    fi
 
     if [ "$DRY_RUN" = true ]; then
         MAX_COMMITS=50
@@ -408,7 +425,7 @@ run_show_commit_history() {
         echo "[DRY-RUN]   Output: $COMMIT_HISTORY_HTML"
         echo "[DRY-RUN]   Max commits: $MAX_COMMITS"
         echo "[DRY-RUN]   Command: cd $DYNAMO_REPO && git checkout main && git pull origin main"
-        echo "[DRY-RUN]   Command: python3 $SCRIPT_DIR/show_commit_history.py --repo-path . --max-commits $MAX_COMMITS --output $COMMIT_HISTORY_HTML --parallel-workers $PARALLEL_WORKERS"
+        echo "[DRY-RUN]   Command: python3 $SCRIPT_DIR/show_commit_history.py --repo-path . --max-commits $MAX_COMMITS --output $COMMIT_HISTORY_HTML --parallel-workers $PARALLEL_WORKERS $SUCCESS_BUILD_TEST_FLAG"
         return 0
     fi
 
@@ -452,7 +469,7 @@ run_show_commit_history() {
 
     echo "$(date '+%Y-%m-%d %H:%M:%S') - Generating commit history dashboard (max_commits=$MAX_COMMITS)" >> "$LOG_FILE"
     log_line_ts "$COMMIT_HISTORY_LOG" "===== run_show_commit_history start (max_commits=$MAX_COMMITS output=$COMMIT_HISTORY_HTML) ====="
-    if run_cmd_to_log_ts "$COMMIT_HISTORY_LOG" python3 "$SCRIPT_DIR/show_commit_history.py" --repo-path . --max-commits "$MAX_COMMITS" --output "$COMMIT_HISTORY_HTML" $SKIP_FLAG $MAX_GH_FLAG $PARALLEL_FLAG; then
+    if run_cmd_to_log_ts "$COMMIT_HISTORY_LOG" python3 "$SCRIPT_DIR/show_commit_history.py" --repo-path . --max-commits "$MAX_COMMITS" --output "$COMMIT_HISTORY_HTML" $SKIP_FLAG $MAX_GH_FLAG $PARALLEL_FLAG $SUCCESS_BUILD_TEST_FLAG; then
         echo "$(date '+%Y-%m-%d %H:%M:%S') - Updated $COMMIT_HISTORY_HTML" >> "$LOG_FILE"
     else
         echo "$(date '+%Y-%m-%d %H:%M:%S') - ERROR: Failed to update commit-history.html" >> "$LOG_FILE"

@@ -1159,6 +1159,7 @@ def build_ci_nodes_from_pr(
     checks_ttl_s: int = 300,
     skip_fetch: bool = False,
     validate_raw_logs: bool = True,
+    enable_success_build_test_logs: bool = False,
 ) -> List[BranchNode]:
     """Build a flat list of CI job nodes from a PR's GitHub check runs.
     
@@ -1386,9 +1387,13 @@ def build_ci_nodes_from_pr(
         # - other long-running Actions jobs: long steps (>= 30s)
         dur_s = _duration_str_to_seconds(str(r.duration or ""))
 
-        # For Build-and-Test, allow raw-log fetch even on success so fallback parsing can work.
+        # For Build-and-Test jobs, optionally allow raw-log fetch even on success so we can parse pytest test durations.
+        # This covers: Build and Test - dynamo, vllm-build-test, sglang-build-test, trtllm-build-test, etc.
         raw_href_for_sub = raw_href
-        if nm == "Build and Test - dynamo" and (not raw_href_for_sub) and (not skip_fetch):
+        nm_lower = nm.lower()
+        is_build_test_job = "build" in nm_lower and "test" in nm_lower
+        # Default: do NOT fetch raw logs for successful build-test jobs (can be slow). Opt-in via flag.
+        if enable_success_build_test_logs and is_build_test_job and str(st or "") == "success" and (not raw_href_for_sub) and (not skip_fetch):
             try:
                 raw_href_for_sub = (
                     materialize_job_raw_log_text_local_link(
@@ -1452,7 +1457,7 @@ def build_ci_nodes_from_pr(
                     display_name="",
                     status=str(sub_status or "unknown"),
                     duration=str(sub_dur or ""),
-                    log_url=job_url,
+                    log_url="",  # Don't link to parent job URL - parent already has the link
                     is_required=False,  # Steps/children are never marked as required - only parent jobs
                     children=[],
                 )
@@ -1504,6 +1509,7 @@ class PRStatusNode(BranchNode):
         branch_commit_dt: Optional[datetime] = None,
         allow_fetch_checks: bool = True,
         context_key: str = "",
+        enable_success_build_test_logs: bool = False,
         children: Optional[List[BranchNode]] = None,
     ):
         super().__init__(label=label, children=children, expanded=False)
@@ -1513,6 +1519,7 @@ class PRStatusNode(BranchNode):
         self.branch_commit_dt = branch_commit_dt
         self.allow_fetch_checks = allow_fetch_checks
         self.context_key = context_key
+        self.enable_success_build_test_logs = bool(enable_success_build_test_logs)
 
     def _format_content(self) -> str:
         if not self.pr:
@@ -1863,6 +1870,7 @@ class PRStatusNode(BranchNode):
                     checks_ttl_s=checks_ttl_s,
                     skip_fetch=skip_fetch,
                     validate_raw_logs=True,
+                    enable_success_build_test_logs=bool(self.enable_success_build_test_logs),
                 )
             else:
                 ci_nodes = []

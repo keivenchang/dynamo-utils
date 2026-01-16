@@ -1947,6 +1947,12 @@ def ci_subsection_tuples_for_job(
     nm = str(job_name or "").strip()
     if not nm:
         return []
+    
+    # Check if this is a build-test job
+    nm_lower = nm.lower()
+    is_build_test = "build" in nm_lower and "test" in nm_lower
+    
+    # Special case: "Build and Test - dynamo" has custom phase extraction
     if nm == "Build and Test - dynamo":
         try:
             phases = build_and_test_dynamo_phase_tuples(
@@ -1982,7 +1988,23 @@ def ci_subsection_tuples_for_job(
 
             out = [(p[0], p[1], p[2]) for p in (phases or [])]
             out.extend([(s[0], s[1], s[2]) for s in extra_steps])
-            return out
+            
+            # Apply pytest test extraction to "Run tests" steps (same as other build-test jobs)
+            result = []
+            for step_name, step_dur, step_status in out:
+                result.append((step_name, step_dur, step_status))
+                
+                # If this is a "Run tests" step, parse pytest slowest tests from raw log
+                if "run tests" in step_name.lower() and raw_log_path:
+                    pytest_tests = pytest_slowest_tests_from_raw_log(
+                        raw_log_path=raw_log_path,
+                        min_seconds=float(step_min_s),
+                    )
+                    # Add pytest tests as indented entries
+                    for test_name, test_dur, test_status in pytest_tests:
+                        result.append((f"  └─ {test_name}", test_dur, test_status))
+            
+            return result
         except Exception:
             return []
 
@@ -1990,14 +2012,28 @@ def ci_subsection_tuples_for_job(
     if bool(is_required):
         return actions_job_step_tuples(github_api=github_api, job_url=str(job_url or ""), min_seconds=float(step_min_s))
 
-    # Build/test jobs (framework builds): always show their steps (similar to "Build and Test - dynamo").
-    # This covers:
-    # - "Build and Test - dynamo"
-    # - vllm-build-test, sglang-build-test, trtllm-build-test (with cuda/arch variants)
-    # - pytorch-build-test, jax-build-test, tensorflow-build-test, etc.
-    nm_lower = nm.lower()
-    if "build" in nm_lower and "test" in nm_lower:
-        return actions_job_step_tuples(github_api=github_api, job_url=str(job_url or ""), min_seconds=float(step_min_s))
+    # Build/test jobs (framework builds): show steps + pytest tests.
+    # This covers: vllm-build-test, sglang-build-test, trtllm-build-test (with cuda/arch variants), etc.
+    if is_build_test:
+        steps = actions_job_step_tuples(github_api=github_api, job_url=str(job_url or ""), min_seconds=float(step_min_s))
+        
+        # For each step, check if it's "Run tests" - if so, add pytest tests as additional entries
+        result = []
+        for step_name, step_dur, step_status in (steps or []):
+            result.append((step_name, step_dur, step_status))
+            
+            # If this is a "Run tests" step, parse pytest slowest tests from raw log
+            if "run tests" in step_name.lower() and raw_log_path:
+                pytest_tests = pytest_slowest_tests_from_raw_log(
+                    raw_log_path=raw_log_path,
+                    min_seconds=float(step_min_s),
+                )
+                # Add pytest tests as indented/prefixed entries
+                for test_name, test_dur, test_status in pytest_tests:
+                    # Prefix with indentation to show hierarchy
+                    result.append((f"  └─ {test_name}", test_dur, test_status))
+        
+        return result
 
     # Non-required jobs: show steps only for long-running jobs (avoid noise).
     try:
@@ -2007,6 +2043,96 @@ def ci_subsection_tuples_for_job(
         return []
 
     return actions_job_step_tuples(github_api=github_api, job_url=str(job_url or ""), min_seconds=float(step_min_s))
+
+
+def pytest_slowest_tests_from_raw_log(
+    *,
+    raw_log_path: Optional[Path],
+    min_seconds: float = 10.0,
+) -> List[Tuple[str, str, str]]:
+    """Parse pytest slowest durations from raw log file.
+    
+    Looks for the "slowest N durations" section that pytest outputs at the end.
+    
+    Args:
+        raw_log_path: Path to the raw log file
+        min_seconds: Minimum duration to include (default: 10s)
+    
+    Returns:
+        List of (test_name, duration_str, status) tuples, sorted by duration (slowest first)
+        
+    Example output format:
+        [
+            ("test_kvbm.py::test_offload_and_onboard", "110.16s", "success"),
+            ("test_serve_vllm.py::test_serve_deployment[agg]", "103.05s", "success"),
+            ...
+        ]
+    """
+    if not raw_log_path:
+        return []
+    
+    try:
+        p = Path(raw_log_path)
+        if not p.exists() or not p.is_file():
+            return []
+        
+        with open(p, 'r', encoding='utf-8', errors='ignore') as f:
+            log_text = f.read()
+        
+        lines = log_text.split('\n')
+        
+        # Look for the "slowest N durations" section
+        # Format: "============================= slowest 10 durations ============================="
+        # Followed by lines like (with GitHub Actions timestamp prefix):
+        # "2026-01-15T22:01:23.5641223Z 110.16s setup    tests/kvbm_integration/test_kvbm.py::test_offload_and_onboard[llm_server_kvbm0]"
+        # "2026-01-15T22:01:23.5641223Z 103.05s call     tests/serve/test_vllm.py::test_serve_deployment[agg-request-plane-tcp]"
+        
+        test_times = []
+        in_slowest_section = False
+        
+        for line in lines:
+            # Start of slowest section
+            if 'slowest' in line.lower() and 'duration' in line.lower() and '=====' in line:
+                in_slowest_section = True
+                continue
+            
+            # End of slowest section (next ===== line)
+            if in_slowest_section and '=====' in line:
+                break
+            
+            if in_slowest_section:
+                # Parse line format (with GitHub Actions timestamp prefix):
+                # "2026-01-15T22:01:23.5641223Z 110.16s setup    tests/..."
+                # "2026-01-15T22:01:23.5641223Z 103.05s call     tests/..."
+                import re
+                # Skip timestamp prefix (anything before the duration)
+                m = re.match(r'^.*?(\d+\.?\d*)s\s+(setup|call|teardown)\s+(.+)$', line)
+                if m:
+                    duration = float(m.group(1))
+                    phase = m.group(2)
+                    test_name = m.group(3).strip()
+                    
+                    # Filter by minimum duration
+                    if duration >= min_seconds:
+                        # Format duration as "1m 50s" or "110s"
+                        if duration >= 60:
+                            mins = int(duration // 60)
+                            secs = int(duration % 60)
+                            dur_str = f"{mins}m {secs}s"
+                        else:
+                            dur_str = f"{int(duration)}s"
+                        
+                        # Include phase in the test name for clarity
+                        full_name = f"[{phase}] {test_name}"
+                        
+                        # Status is always success for tests in slowest durations
+                        test_times.append((full_name, dur_str, CIStatus.SUCCESS.value))
+        
+        return test_times
+        
+    except Exception as e:
+        logger.debug(f"Failed to parse pytest slowest durations from {raw_log_path}: {e}")
+        return []
 
 
 def step_window_snippet_from_cached_raw_log(

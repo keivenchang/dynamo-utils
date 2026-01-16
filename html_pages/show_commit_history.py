@@ -134,6 +134,7 @@ class CommitHistoryGenerator:
         max_github_api_calls: int = 100,
         parallel_workers: int = 0,
         disable_snippet_cache_read: bool = False,
+        enable_success_build_test_logs: bool = False,
     ):
         """
         Initialize the commit history generator
@@ -150,6 +151,9 @@ class CommitHistoryGenerator:
         self.skip_gitlab_fetch = skip_gitlab_fetch
         self.parallel_workers = int(parallel_workers or 0)
         self.disable_snippet_cache_read = bool(disable_snippet_cache_read)
+        # Opt-in because downloading successful build-test raw logs can be expensive.
+        # When enabled, we cache successful build-test raw logs so we can parse pytest slowest tests.
+        self.enable_success_build_test_logs = bool(enable_success_build_test_logs)
         self.logger = self._setup_logger()
         # Cache files live in ~/.cache/dynamo-utils to avoid polluting the repo checkout
         self.cache_file = dynamo_utils_cache_dir() / "commit_history.json"
@@ -1821,7 +1825,20 @@ class CommitHistoryGenerator:
 
                 raw_href = ""
                 raw_size = 0
-                if st == "failure" and str(cr.get("status", "") or "").lower() == "completed":
+                # Fetch raw logs for:
+                # 1. Failed jobs (for error snippets)
+                # 2. Build-test jobs (for pytest timing extraction, regardless of success/failure)
+                nm_lower = name.lower()
+                is_build_test = "build" in nm_lower and "test" in nm_lower
+                cr_status_lc = str(cr.get("status", "") or "").lower()
+                should_fetch_raw_log = (
+                    # Always fetch raw logs for failed jobs (for error snippets).
+                    (st == "failure" and cr_status_lc == "completed")
+                    # Optional: fetch raw logs for successful build-test jobs so we can parse pytest timings.
+                    or (self.enable_success_build_test_logs and is_build_test and st == "success" and cr_status_lc == "completed")
+                )
+                
+                if should_fetch_raw_log:
                     allow_fetch = bool(allow_raw_logs) and int(raw_log_prefetch_budget.get("n", 0) or 0) > 0
                     try:
                         raw_href = (
@@ -1847,7 +1864,11 @@ class CommitHistoryGenerator:
                         raw_size = int((Path(self.repo_path) / raw_href).stat().st_size)
                     except Exception:
                         raw_size = 0
-                    raw_hrefs_for_commit.append(str(raw_href))
+                    # Only extract error snippets for failed jobs (not for successful build-test jobs)
+                    # We fetch raw logs for successful build-test jobs to get pytest timings,
+                    # but we don't need to extract error snippets from them
+                    if st == "failure":
+                        raw_hrefs_for_commit.append(str(raw_href))
 
                 # Disambiguate name if there are duplicates (adds [job ID] suffix)
                 disambiguated_name = disambiguate_check_run_name(name, url, name_counts=name_counts)
@@ -1902,11 +1923,19 @@ class CommitHistoryGenerator:
                 raw_path_for_steps = None
                 if raw_href:
                     try:
-                        raw_path_for_steps = Path(self.repo_path) / raw_href
+                        # raw_href is relative to the HTML output directory, not the git repo
+                        raw_path_for_steps = output_path.parent / raw_href
                         if not raw_path_for_steps.exists():
+                            self.logger.warning(f"Raw log file doesn't exist: {raw_path_for_steps}")
                             raw_path_for_steps = None
-                    except Exception:
+                        else:
+                            self.logger.info(f"Raw log exists for {name}: {raw_path_for_steps}")
+                    except Exception as e:
+                        self.logger.warning(f"Error setting raw_path_for_steps: {e}")
                         raw_path_for_steps = None
+                else:
+                    if "build" in name.lower() and "test" in name.lower():
+                        self.logger.warning(f"No raw_href for build-test job: {name}")
                 
                 # Parse duration string to seconds for step filtering
                 dur_seconds = 0.0
@@ -1937,17 +1966,42 @@ class CommitHistoryGenerator:
                 )
                 
                 # Create child nodes for each step
+                # Pytest tests (with └─ prefix) should be children of the "Run tests" step
+                current_test_parent = None
                 for (step_name, step_dur, step_status) in (step_tuples or []):
-                    step_node = CIJobNode(
-                        job_id=step_name,
-                        display_name="",
-                        status=step_status,
-                        duration=step_dur,
-                        log_url=url,  # Steps link to parent job URL
-                        is_required=False,  # Steps are never marked as required
-                        children=[],
-                    )
-                    node.children.append(step_node)
+                    # Check if this is a pytest test (has └─ prefix)
+                    if step_name.startswith("  └─ "):
+                        # This is a pytest test - add as child of the current "Run tests" step
+                        if current_test_parent:
+                            test_name = step_name[len("  └─ "):]  # Remove prefix
+                            test_node = CIJobNode(
+                                job_id=test_name,
+                                display_name="",
+                                status=step_status,
+                                duration=step_dur,
+                                log_url="",
+                                is_required=False,
+                                children=[],
+                            )
+                            current_test_parent.children.append(test_node)
+                    else:
+                        # This is a regular step
+                        step_node = CIJobNode(
+                            job_id=step_name,
+                            display_name="",
+                            status=step_status,
+                            duration=step_dur,
+                            log_url="",  # Don't link to parent job URL - parent already has the link
+                            is_required=False,  # Steps are never marked as required
+                            children=[],
+                        )
+                        node.children.append(step_node)
+                        
+                        # If this is "Run tests", remember it as the parent for pytest tests
+                        if "run tests" in step_name.lower():
+                            current_test_parent = step_node
+                        else:
+                            current_test_parent = None
                 
                 ci_job_nodes.append(node)
 
@@ -2666,6 +2720,11 @@ Examples:
         help='Number of worker processes to parallelize raw log snippet parsing (default: 0 = single process)'
     )
     parser.add_argument(
+        '--enable-success-build-test-logs',
+        action='store_true',
+        help='Opt-in: also cache raw logs for successful *-build-test jobs so we can parse pytest slowest tests under "Run tests" (slower).'
+    )
+    parser.add_argument(
         '--disable-snippet-cache-read',
         action='store_true',
         help='TESTING ONLY: ignore existing snippet cache contents (forces cache misses; useful for benchmarking --parallel-workers)'
@@ -2756,6 +2815,7 @@ Examples:
         max_github_api_calls=int(args.max_github_api_calls),
         parallel_workers=int(args.parallel_workers or 0),
         disable_snippet_cache_read=bool(args.disable_snippet_cache_read),
+        enable_success_build_test_logs=bool(args.enable_success_build_test_logs),
     )
     # Fail fast if exhausted; detailed stats are rendered into the HTML Statistics section.
     cache_only_reason = ""
