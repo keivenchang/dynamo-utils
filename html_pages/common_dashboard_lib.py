@@ -355,23 +355,20 @@ def create_dummy_nodes_from_yaml_pass(nodes: List[TreeNodeVM]) -> List[TreeNodeV
         """Format job name with architecture colors and annotations."""
         import html as html_module
         raw = str(text or "")
-        # Detect arch token
-        m = re.search(r"\((arm64|aarch64|amd64)\)", raw, flags=re.IGNORECASE)
+        # Detect arch token - handle both standalone and matrix format like "(cuda12.9, amd64)"
+        m = re.search(r"\((?:[^,)]+,\s*)?(arm64|aarch64|amd64)\)", raw, flags=re.IGNORECASE)
         if not m:
             return html_module.escape(raw)
         
         arch = str(m.group(1) or "").strip().lower()
-        # Determine color
+        # Determine color and prefix with arch alias
         if arch in {"arm64", "aarch64"}:
             color = "#b8860b"  # Dark yellow/gold for arm64
-            # Normalize to "(arm64)" and append "; aarch64"
-            raw2 = re.sub(r"\(\s*(arm64|aarch64)\s*\)", "(arm64)", raw, flags=re.IGNORECASE)
-            raw2 = re.sub(r"\(\s*arm64\s*\)(?!\s*;\s*aarch64\b)", "(arm64); aarch64", raw2, flags=re.IGNORECASE)
+            raw2 = f"[aarch64] {raw}"
             return f'<span style="color: {color};">{html_module.escape(raw2)}</span>'
         elif arch == "amd64":
             color = "#0969da"  # Blue for amd64
-            raw2 = re.sub(r"\(\s*amd64\s*\)", "(amd64)", raw, flags=re.IGNORECASE)
-            raw2 = re.sub(r"\(\s*amd64\s*\)(?!\s*;\s*x86_64\b)", "(amd64); x86_64\u00a0", raw2, flags=re.IGNORECASE)  # Non-breaking space for alignment
+            raw2 = f"[x86_64] {raw}"
             return f'<span style="color: {color};">{html_module.escape(raw2)}</span>'
         return html_module.escape(raw)
     
@@ -929,8 +926,22 @@ def sort_nodes_by_name_pass(nodes: List[TreeNodeVM]) -> List[TreeNodeVM]:
             - 0: Regular jobs (sorted alphabetically)
         """
         job_name = str(node.job_name or "")
-        # Use job_name if available, otherwise extract from label_html
-        name = job_name if job_name else str(node.label_html or "")
+        label_html = str(node.label_html or "")
+        
+        # Extract plain text from label_html for sorting (includes arch prefix like "[x86_64]")
+        # This ensures jobs are sorted by their display name, not their internal job_name
+        if label_html:
+            # Strip HTML tags to get the plain text
+            import re
+            text = re.sub(r'<[^>]+>', '', label_html)
+            # Decode HTML entities
+            import html as html_module
+            text = html_module.unescape(text)
+            name = text.strip()
+        else:
+            # Fallback to job_name if no label_html
+            name = job_name if job_name else ""
+        
         return (0, name.lower())
     
     # Sort current level
@@ -1745,7 +1756,9 @@ def _parse_iso_utc(s: str) -> Optional[datetime]:
 def _status_norm_from_actions_step(status: str, conclusion: str) -> str:
     s = (status or "").strip().lower()
     c = (conclusion or "").strip().lower()
-    if c in (CIStatus.SUCCESS.value, CIStatus.NEUTRAL.value, CIStatus.SKIPPED.value):
+    if c == CIStatus.SKIPPED.value:
+        return CIStatus.SKIPPED.value
+    if c in (CIStatus.SUCCESS.value, CIStatus.NEUTRAL.value):
         return CIStatus.SUCCESS.value
     if c in ("failure", "timed_out", "action_required"):
         return CIStatus.FAILURE.value
@@ -1888,7 +1901,7 @@ def actions_job_step_tuples(
     *,
     github_api: Optional["GitHubAPIClient"],
     job_url: str,
-    min_seconds: float = 30.0,
+    min_seconds: float = 10.0,
     ttl_s: int = 7 * 24 * 3600,
 ) -> List[Tuple[str, str, str]]:
     """Fetch job details (cached) and return long-running steps (duration >= min_seconds)."""
@@ -1917,16 +1930,18 @@ def ci_subsection_tuples_for_job(
     duration_seconds: float,
     is_required: bool,
     long_job_threshold_s: float = 10.0 * 60.0,
-    step_min_s: float = 30.0,
+    step_min_s: float = 10.0,
 ) -> List[Tuple[str, str, str]]:
     """Shared rule: return child tuples for CI subsections.
 
     Terminology (official):
     - "subsections" is the umbrella term for child rows under a job/check.
     - "phases" are a *special-case* kind of subsection for `Build and Test - dynamo`
-      (we keep the name "phases" in code where it’s specific to that job).
+      (we keep the name "phases" in code where it's specific to that job).
 
+    Policy:
     - Build and Test - dynamo: return the dedicated phases (status+duration) from Actions job `steps[]`.
+    - Other build/test jobs: return job steps >= step_min_s (vllm-build-test, sglang-build-test, trtllm-build-test, etc.).
     - Other long-running Actions jobs: return job steps >= step_min_s.
     """
     nm = str(job_name or "").strip()
@@ -1973,6 +1988,15 @@ def ci_subsection_tuples_for_job(
 
     # REQUIRED jobs: always show failing steps + steps >= threshold (even if job isn't "long-running").
     if bool(is_required):
+        return actions_job_step_tuples(github_api=github_api, job_url=str(job_url or ""), min_seconds=float(step_min_s))
+
+    # Build/test jobs (framework builds): always show their steps (similar to "Build and Test - dynamo").
+    # This covers:
+    # - "Build and Test - dynamo"
+    # - vllm-build-test, sglang-build-test, trtllm-build-test (with cuda/arch variants)
+    # - pytorch-build-test, jax-build-test, tensorflow-build-test, etc.
+    nm_lower = nm.lower()
+    if "build" in nm_lower and "test" in nm_lower:
         return actions_job_step_tuples(github_api=github_api, job_url=str(job_url or ""), min_seconds=float(step_min_s))
 
     # Non-required jobs: show steps only for long-running jobs (avoid noise).
@@ -2569,36 +2593,37 @@ def check_line_html(
     def _format_arch_text(raw_text: str) -> str:
         """Format the job text with arch styling.
 
-        - If the job contains an explicit arch token:
-          - `(arm64)` / `(aarch64)` -> keep the original token `(arm64)` and append `; aarch64`
-          - `(amd64)`              -> keep the original token `(amd64)` and append `; x86_64`
+        - If the job contains an explicit arch token, prefix with arch alias:
+          - `(arm64)` / `(aarch64)` -> `[aarch64] job-name (...)`
+          - `(amd64)`              -> `[x86_64] job-name (...)`
         - Otherwise, keep normal styling (no special casing).
         
         Note: Color styling is applied to the entire line, not within this function.
         """
         raw = str(raw_text or "")
         # Only rewrite when we see an explicit arch token (avoid surprising renames).
-        m = re.search(r"\((arm64|aarch64|amd64)\)", raw, flags=re.IGNORECASE)
+        # Match architecture even when part of matrix variables like "(cuda12.9, amd64)"
+        m = re.search(r"\((?:[^,)]+,\s*)?(arm64|aarch64|amd64)\)", raw, flags=re.IGNORECASE)
         if not m:
             return html.escape(raw)
 
         arch = str(m.group(1) or "").strip().lower()
-        # Rewrite arch token casing/label.
+        # Prefix with arch alias for grouping/sorting
         if arch in {"arm64", "aarch64"}:
-            # Normalize to "(arm64)" and append "; aarch64" immediately after the token.
-            raw2 = re.sub(r"\(\s*(arm64|aarch64)\s*\)", "(arm64)", raw, flags=re.IGNORECASE)
-            raw2 = re.sub(r"\(\s*arm64\s*\)(?!\s*;\s*aarch64\b)", "(arm64); aarch64", raw2, flags=re.IGNORECASE)
+            # Prefix with "[aarch64] " at the beginning
+            raw2 = f"[aarch64] {raw}"
             return html.escape(raw2)
         if arch == "amd64":
-            raw2 = re.sub(r"\(\s*amd64\s*\)", "(amd64)", raw, flags=re.IGNORECASE)
-            raw2 = re.sub(r"\(\s*amd64\s*\)(?!\s*;\s*x86_64\b)", "(amd64); x86_64\u00a0", raw2, flags=re.IGNORECASE)  # Non-breaking space for alignment
+            # Prefix with "[x86_64] " at the beginning
+            raw2 = f"[x86_64] {raw}"
             return html.escape(raw2)
         return html.escape(raw)
     
     # Detect architecture for line-wide color styling
     def _get_arch_color(text: str) -> str:
         """Return the color for the entire line based on architecture."""
-        m = re.search(r"\((arm64|aarch64|amd64)\)", str(text or ""), flags=re.IGNORECASE)
+        # Match architecture even when part of matrix variables like "(cuda12.9, amd64)"
+        m = re.search(r"\((?:[^,)]+,\s*)?(arm64|aarch64|amd64)\)", str(text or ""), flags=re.IGNORECASE)
         if not m:
             return ""  # No special color
         arch = str(m.group(1) or "").strip().lower()

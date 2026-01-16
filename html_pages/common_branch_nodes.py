@@ -1417,7 +1417,7 @@ def build_ci_nodes_from_pr(
             duration_seconds=float(dur_s or 0.0),
             is_required=bool(r.is_required),
             long_job_threshold_s=10.0 * 60.0,
-            step_min_s=30.0,
+            step_min_s=10.0,
         )
         for (sub_name, sub_dur, sub_status) in (sub3 or []):
             if nm == "Build and Test - dynamo":

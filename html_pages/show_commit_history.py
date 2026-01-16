@@ -47,6 +47,7 @@ from common_dashboard_lib import (
     check_line_html,
     ci_should_expand_by_default,
     ci_status_icon_context,
+    ci_subsection_tuples_for_job,
     compact_ci_summary_html,
     disambiguate_check_run_name,
     extract_actions_job_id_from_url,
@@ -1663,7 +1664,9 @@ class CommitHistoryGenerator:
         def _status_norm_for_check_run(*, status: str, conclusion: str) -> str:
             s = (status or "").strip().lower()
             c = (conclusion or "").strip().lower()
-            if c in (CIStatus.SUCCESS.value, CIStatus.NEUTRAL.value, CIStatus.SKIPPED.value):
+            if c == CIStatus.SKIPPED.value:
+                return CIStatus.SKIPPED.value
+            if c in (CIStatus.SUCCESS.value, CIStatus.NEUTRAL.value):
                 return CIStatus.SUCCESS.value
             if c in ("failure", "timed_out", "action_required"):
                 return CIStatus.FAILURE.value
@@ -1894,6 +1897,58 @@ class CommitHistoryGenerator:
                 )
                 # Set core_job_name for YAML matching (same pattern as build_ci_nodes_from_pr)
                 node.core_job_name = name  # Original name without disambiguation
+                
+                # Add step breakdown as children (for build/test jobs and other long-running jobs)
+                raw_path_for_steps = None
+                if raw_href:
+                    try:
+                        raw_path_for_steps = Path(self.repo_path) / raw_href
+                        if not raw_path_for_steps.exists():
+                            raw_path_for_steps = None
+                    except Exception:
+                        raw_path_for_steps = None
+                
+                # Parse duration string to seconds for step filtering
+                dur_seconds = 0.0
+                try:
+                    total = 0.0
+                    for m in re.finditer(r"([0-9]+)\s*([hms])", str(dur or "").lower()):
+                        v = float(m.group(1))
+                        unit = m.group(2)
+                        if unit == "h":
+                            total += v * 3600.0
+                        elif unit == "m":
+                            total += v * 60.0
+                        elif unit == "s":
+                            total += v
+                    dur_seconds = total
+                except Exception:
+                    dur_seconds = 0.0
+                
+                step_tuples = ci_subsection_tuples_for_job(
+                    github_api=self.github_client,
+                    job_name=name,
+                    job_url=url,
+                    raw_log_path=raw_path_for_steps,
+                    duration_seconds=dur_seconds,
+                    is_required=is_req,
+                    long_job_threshold_s=10.0 * 60.0,
+                    step_min_s=10.0,
+                )
+                
+                # Create child nodes for each step
+                for (step_name, step_dur, step_status) in (step_tuples or []):
+                    step_node = CIJobNode(
+                        job_id=step_name,
+                        display_name="",
+                        status=step_status,
+                        duration=step_dur,
+                        log_url=url,  # Steps link to parent job URL
+                        is_required=False,  # Steps are never marked as required
+                        children=[],
+                    )
+                    node.children.append(step_node)
+                
                 ci_job_nodes.append(node)
 
             # Use centralized CI tree processing pipeline - it handles YAML augmentation, grouping, sorting
