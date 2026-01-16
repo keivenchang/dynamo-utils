@@ -682,6 +682,10 @@
               if (lk.indexOf('commitHistoryCol:') === 0) {
                 try { localStorage.removeItem(lk); } catch (e) {}
               }
+              // Also clear date mode preference
+              if (lk === 'commitHistoryDateMode') {
+                try { localStorage.removeItem(lk); } catch (e) {}
+              }
             }
           } catch (e) {}
 

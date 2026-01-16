@@ -171,6 +171,20 @@ td.col-message {
     color: #24292f;
 }
 
+/* Triangle toggle rotation animation (300ms) */
+.triangle-toggle {
+    display: inline-block;
+    transition: transform 300ms ease;
+    transform-origin: center;
+}
+.triangle-toggle.expanded {
+    transform: rotate(90deg);
+}
+/* For details/summary elements, rotate when open */
+details[open] > summary .triangle-toggle {
+    transform: rotate(90deg);
+}
+
 /* Make Message column consume remaining space when visible. */
 th.col-message,
 td.col-message {
@@ -464,12 +478,10 @@ function toggleDockerImages(event, linkElement) {
         // Toggle visibility
         if (dockerRow.style.display === 'none') {
             dockerRow.style.display = 'table-row';
-            linkElement.textContent = '▼';  // Point down when expanded
             try { linkElement.classList.add('expanded'); } catch (e) {}
             try { if (window.DashboardUrlState && shaShort) { window.DashboardUrlState.setBoolDefault('d.' + shaShort, true, false); } } catch (e) {}
         } else {
             dockerRow.style.display = 'none';
-            linkElement.textContent = '▶';  // Point right when collapsed
             try { linkElement.classList.remove('expanded'); } catch (e) {}
             try { if (window.DashboardUrlState && shaShort) { window.DashboardUrlState.setBoolDefault('d.' + shaShort, false, false); } } catch (e) {}
         }
@@ -484,7 +496,6 @@ function collapseDockerImages(shaShort) {
         row.style.display = 'none';
     }
     if (toggleEl) {
-        toggleEl.textContent = '▶';
         try { toggleEl.classList.remove('expanded'); } catch (e) {}
     }
     try { if (window.DashboardUrlState && shaShort) { window.DashboardUrlState.setBoolDefault('d.' + shaShort, false, false); } } catch (e) {}
@@ -499,7 +510,6 @@ function toggleCommitGitHubTree(event, shaShort) {
     var hidden = (row.style.display === 'none' || row.style.display === '');
     row.style.display = hidden ? 'table-row' : 'none';
     if (toggleEl) {
-        toggleEl.textContent = hidden ? '▼' : '▶';
         try { toggleEl.classList.toggle('expanded', hidden); } catch (e) {}
     }
     try { if (window.DashboardUrlState) { window.DashboardUrlState.setBoolDefault('gh.' + String(shaShort || ''), hidden, false); } } catch (e) {}
@@ -511,7 +521,6 @@ function collapseCommitGitHubTree(shaShort) {
     if (!row) return;
     row.style.display = 'none';
     if (toggleEl) {
-        toggleEl.textContent = '▶';
         try { toggleEl.classList.remove('expanded'); } catch (e) {}
     }
     try { if (window.DashboardUrlState) { window.DashboardUrlState.setBoolDefault('gh.' + String(shaShort || ''), false, false); } } catch (e) {}
@@ -526,7 +535,6 @@ function toggleCommitInfo(event, shaShort) {
     var hidden = (row.style.display === 'none' || row.style.display === '');
     row.style.display = hidden ? 'table-row' : 'none';
     if (toggleEl) {
-        toggleEl.textContent = hidden ? '▼' : '▶';
         try { toggleEl.classList.toggle('expanded', hidden); } catch (e) {}
     }
     try { if (window.DashboardUrlState) { window.DashboardUrlState.setBoolDefault('ci.' + String(shaShort || ''), hidden, false); } } catch (e) {}
@@ -538,7 +546,6 @@ function collapseCommitInfo(shaShort) {
     if (!row) return;
     row.style.display = 'none';
     if (toggleEl) {
-        toggleEl.textContent = '▶';
         try { toggleEl.classList.remove('expanded'); } catch (e) {}
     }
     try { if (window.DashboardUrlState) { window.DashboardUrlState.setBoolDefault('ci.' + String(shaShort || ''), false, false); } } catch (e) {}
@@ -553,7 +560,6 @@ function toggleCommitGitLabTree(event, shaShort) {
     var hidden = (row.style.display === 'none' || row.style.display === '');
     row.style.display = hidden ? 'table-row' : 'none';
     if (toggleEl) {
-        toggleEl.textContent = hidden ? '▼' : '▶';
         try { toggleEl.classList.toggle('expanded', hidden); } catch (e) {}
     }
     try { if (window.DashboardUrlState) { window.DashboardUrlState.setBoolDefault('gl.' + String(shaShort || ''), hidden, false); } } catch (e) {}
@@ -565,7 +571,6 @@ function collapseCommitGitLabTree(shaShort) {
     if (!row) return;
     row.style.display = 'none';
     if (toggleEl) {
-        toggleEl.textContent = '▶';
         try { toggleEl.classList.remove('expanded'); } catch (e) {}
     }
     try { if (window.DashboardUrlState) { window.DashboardUrlState.setBoolDefault('gl.' + String(shaShort || ''), false, false); } } catch (e) {}
@@ -680,13 +685,11 @@ function _formatAgo(seconds) {
         return String(m) + 'm ' + _pad2(rem) + 's ago';
     }
     if (s < 86400) {
-        var h = Math.floor(s / 3600);
-        var mm = Math.floor((s % 3600) / 60);
-        return String(h) + ':' + _pad2(mm) + ' hrs ago';
+        var h = (s / 3600).toFixed(1);
+        return String(h) + ' hours ago';
     }
-    var d = Math.floor(s / 86400);
-    var hh = Math.floor((s % 86400) / 3600);
-    return String(d) + 'd ' + String(hh) + 'h ago';
+    var d = (s / 86400).toFixed(1);
+    return String(d) + ' days ago';
 }
 
 function _updateCommitAges() {
@@ -735,8 +738,17 @@ function initCommitDateModeToggle() {
             return;
         }
     } catch (e) {}
-    // Default: show "ago" unless the user explicitly persisted "abs".
+    // Force a stable default from data-url-default (like column toggles do).
     var mode = 'abs';
+    try {
+        var def = cb.getAttribute('data-url-default');
+        if (def === null || def === undefined || String(def) === '') {
+            def = cb.getAttribute('data-url-state');  // backward compat
+        }
+        // data-url-default="0" means unchecked (abs), "1" means checked (ago)
+        mode = (String(def || '') === '1') ? 'ago' : 'abs';
+    } catch (e) {}
+    // Then check localStorage override
     try {
         var saved = localStorage.getItem('commitHistoryDateMode');
         if (saved === 'ago' || saved === 'abs') {
@@ -777,7 +789,9 @@ window.__dashboardOnReadyQueue.push(function() {
                     var row = document.getElementById('docker-row-' + sha);
                     var tg = document.getElementById('docker-toggle-' + sha);
                     if (row) row.style.display = wantOpen ? 'table-row' : 'none';
-                    if (tg) tg.textContent = wantOpen ? '▼' : '▶';
+                    if (tg) {
+                        try { tg.classList.toggle('expanded', wantOpen); } catch (e) {}
+                    }
                     return;
                 }
                 if (ks.startsWith('gh.')) {
@@ -786,7 +800,9 @@ window.__dashboardOnReadyQueue.push(function() {
                     var r2 = document.getElementById('github-tree-row-' + sha2);
                     var t2 = document.getElementById('github-tree-toggle-' + sha2);
                     if (r2) r2.style.display = wantOpen ? 'table-row' : 'none';
-                    if (t2) t2.textContent = wantOpen ? '▼' : '▶';
+                    if (t2) {
+                        try { t2.classList.toggle('expanded', wantOpen); } catch (e) {}
+                    }
                     return;
                 }
                 if (ks.startsWith('gl.')) {
@@ -795,7 +811,9 @@ window.__dashboardOnReadyQueue.push(function() {
                     var r3 = document.getElementById('gitlab-tree-row-' + sha3);
                     var t3 = document.getElementById('gitlab-tree-toggle-' + sha3);
                     if (r3) r3.style.display = wantOpen ? 'table-row' : 'none';
-                    if (t3) t3.textContent = wantOpen ? '▼' : '▶';
+                    if (t3) {
+                        try { t3.classList.toggle('expanded', wantOpen); } catch (e) {}
+                    }
                     return;
                 }
             } catch (e) {}
@@ -870,7 +888,7 @@ window.__dashboardOnReadyQueue.push(function() {
 
 <div class="container">
 {# Default UX: collapse Image SHA + GitLab Status columns on first load (users can re-enable via checkbox / URL state / localStorage). #}
-<table id="commits-table" class="hide-col-composite hide-col-gitlab">
+<table id="commits-table" class="hide-col-composite hide-col-gitlab hide-col-email">
 <thead>
 <tr>
 <th style="width: 30px;"></th>
@@ -884,11 +902,11 @@ window.__dashboardOnReadyQueue.push(function() {
 <th class="col-date">
   <span class="date-header-controls">
     <label class="col-toggle">
-      <input class="commit-col-toggle" type="checkbox" checked data-col="date" data-url-state="1" data-url-key="col.date" onchange="toggleCommitColumn(this)">
+      <input class="commit-col-toggle" type="checkbox" checked data-col="date" data-url-state="1" data-url-default="1" data-url-key="col.date" onchange="toggleCommitColumn(this)">
       <span class="col-title">PST</span>
     </label>
     <label class="col-toggle" title="Toggle absolute time vs time ago">
-      <input class="commit-date-mode-toggle" type="checkbox" data-url-state="1" data-url-key="date.mode" onchange="toggleCommitDateMode(this)">
+      <input class="commit-date-mode-toggle" type="checkbox" data-url-state="1" data-url-default="0" data-url-key="date.mode" onchange="toggleCommitDateMode(this)">
       <span class="col-title">ago</span>
     </label>
   </span>
@@ -1249,7 +1267,7 @@ window.__dashboardOnReadyQueue.push(function() {
         <span style="color: #cf222e; font-weight: 500;">-{{ deletions }}</span>
         <span style="margin-left: 8px;">{{ files_changed }} file(s) changed</span>
       </div>
-      <details style="margin-top: 8px;">
+      <details style="margin-top: 8px;" open>
         {{ summary_with_toggle('Show changed files (' ~ changed_files|length ~ ')', 'style="cursor: pointer; color: #0969da; font-size: 12px;"') }}
         <div class="details-body">
           <div style="margin-top: 4px; font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace; font-size: 11px;">
