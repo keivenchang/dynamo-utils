@@ -578,6 +578,7 @@ class CIJobNode(BranchNode):
         actions_job_id: str = "",  # GitHub Actions job id (from checks rows), for stable identity across reruns
         core_job_name: str = "",  # Optional "core" display name (without workflow prefix/event suffix)
         is_required: bool = False,
+        is_synthetic: bool = False,  # Synthetic nodes (steps / parsed tests) should be visually distinct
         children: Optional[List[BranchNode]] = None,
         expanded: bool = False,
         page_root_dir: Optional[Path] = None,
@@ -598,6 +599,7 @@ class CIJobNode(BranchNode):
         self.actions_job_id = str(actions_job_id or "")
         self.core_job_name = str(core_job_name or "")
         self.is_required = bool(is_required)
+        self.is_synthetic = bool(is_synthetic)
         self.page_root_dir = page_root_dir
         self.context_key = str(context_key or "")
         self.github_api = github_api
@@ -625,6 +627,9 @@ class CIJobNode(BranchNode):
             raw_log_size_bytes=self.raw_log_size_bytes,
             error_snippet_text=self.error_snippet_text,
             error_snippet_categories=self.error_snippet_categories,
+            # Synthetic nodes (steps / parsed tests) should be visually distinct from real jobs/checks,
+            # but still readable.
+            icon_px=(7 if self.is_synthetic else 12),
             short_job_name=self.short_job_name,
             yaml_dependencies=self.yaml_dependencies,
         )
@@ -846,10 +851,9 @@ class PRNode(BranchNode):
         # Build PR line: status pill + PR number + title + base branch
         parts = []
         
-        # Status pill - derived from optional check_rows attached to PR objects by some callsites.
-        # If check_rows isn't present, we show PR number/title/base only (no pill).
-        if hasattr(self.pr, "check_rows"):
-            rows = self.pr.check_rows or []  # type: ignore[attr-defined]
+        # Status pill - derived from optional check rows (may be empty).
+        rows = list(self.pr.check_rows or [])
+        if rows:
             summary = summarize_pr_check_rows(rows)
             counts = summary.counts
             status_html = compact_ci_summary_html(
@@ -1366,7 +1370,8 @@ def build_ci_nodes_from_pr(
             actions_job_id=str(r.job_id or ""),
             is_required=bool(r.is_required),
             children=[],
-            page_root_dir=page_root_dir,  # Pass page_root_dir for raw log and snippet extraction
+            # Use base_dir (page_root_dir if provided, else repo_path) so downstream passes can resolve raw_log_href.
+            page_root_dir=base_dir,
             context_key=f"{pr_number}:{full_job_name}",  # Unique context for caching
             github_api=github_api,  # Pass github_api for raw log materialization
             raw_log_href=raw_href,  # Pass pre-materialized raw log data
@@ -1379,23 +1384,17 @@ def build_ci_nodes_from_pr(
         # DEBUG: Verify it was set
         logger.debug(f"[build_ci_nodes_from_pr] Set core_job_name='{nm}' on node with job_id='{full_job_name[:50]}'")
 
-
-
-
-        # Shared subsections:
-        # - Build and Test - dynamo: phases (a special-case subsection; steps API)
-        # - other long-running Actions jobs: long steps (>= 30s)
-        dur_s = _duration_str_to_seconds(str(r.duration or ""))
-
         # For Build-and-Test jobs, optionally allow raw-log fetch even on success so we can parse pytest test durations.
         # This covers: Build and Test - dynamo, vllm-build-test, sglang-build-test, trtllm-build-test, etc.
-        raw_href_for_sub = raw_href
-        nm_lower = nm.lower()
-        is_build_test_job = "build" in nm_lower and "test" in nm_lower
+        # The materialized raw log href is stored on the CIJobNode so add_job_steps_and_tests_pass can access it.
+        # Shared policy with commit history: which jobs should have pytest-per-test details.
+        from common_dashboard_lib import job_name_wants_pytest_details  # local import (avoid cycles)
+
+        is_build_test_job = job_name_wants_pytest_details(nm)
         # Default: do NOT fetch raw logs for successful build-test jobs (can be slow). Opt-in via flag.
-        if enable_success_build_test_logs and is_build_test_job and str(st or "") == "success" and (not raw_href_for_sub) and (not skip_fetch):
+        if enable_success_build_test_logs and is_build_test_job and str(st or "") == "success" and (not raw_href) and (not skip_fetch):
             try:
-                raw_href_for_sub = (
+                additional_raw_href = (
                     materialize_job_raw_log_text_local_link(
                         github_api,
                         job_url=job_url,
@@ -1408,60 +1407,18 @@ def build_ci_nodes_from_pr(
                     )
                     or ""
                 )
+                if additional_raw_href:
+                    node.raw_log_href = additional_raw_href
+                    # Also update size if available
+                    additional_raw_path = base_dir / additional_raw_href
+                    if additional_raw_path.exists():
+                        node.raw_log_size_bytes = additional_raw_path.stat().st_size
             except (RuntimeError, FileNotFoundError, subprocess.TimeoutExpired, subprocess.SubprocessError, OSError) as e:
-                logger.warning("Failed to materialize raw log (subsections) for %s: %s", job_url, e)
-                raw_href_for_sub = ""
+                logger.warning("Failed to materialize raw log (for steps/tests) for %s: %s", job_url, e)
 
-        raw_path_for_sub = (base_dir / raw_href_for_sub) if raw_href_for_sub else None
-
-        sub3 = ci_subsection_tuples_for_job(
-            github_api=github_api,
-            job_name=nm,
-            job_url=job_url,
-            raw_log_path=raw_path_for_sub,
-            duration_seconds=float(dur_s or 0.0),
-            is_required=bool(r.is_required),
-            long_job_threshold_s=10.0 * 60.0,
-            step_min_s=10.0,
-        )
-        for (sub_name, sub_dur, sub_status) in (sub3 or []):
-            if nm == "Build and Test - dynamo":
-                kind2 = classify_ci_kind(str(sub_name))
-                sub_id = f"{kind2}: {sub_name}" if kind2 and kind2 != "check" else str(sub_name)
-            else:
-                sub_id = str(sub_name)
-
-            # If this is a failing step, try to scope the snippet to the step window.
-            step_snip = ""
-            if sub_id.startswith("step:") and str(sub_status or "") == "failure" and raw_path_for_sub:
-                jid = extract_actions_job_id_from_url(job_url)
-                job_det = (
-                    github_api.get_actions_job_details_cached(owner=DYNAMO_OWNER, repo=DYNAMO_REPO, job_id=jid, ttl_s=7 * 24 * 3600)
-                    if (github_api and jid)
-                    else None
-                )
-                if isinstance(job_det, dict):
-                    try:
-                        step_snip = step_window_snippet_from_cached_raw_log(
-                            job=job_det, step_name=str(sub_name), raw_log_path=raw_path_for_sub
-                        )
-                    except (KeyError, ValueError, OSError) as e:
-                        logger.debug("Failed to extract step-window snippet for %s (%s): %s", job_url, sub_id, e)
-
-            # If we successfully attributed a snippet to a failing step, avoid duplicating it on the parent.
-            if (step_snip or "").strip():
-                node.error_snippet_text = ""
-            node.children.append(
-                CIJobNode(
-                    job_id=sub_id,
-                    display_name="",
-                    status=str(sub_status or "unknown"),
-                    duration=str(sub_dur or ""),
-                    log_url="",  # Don't link to parent job URL - parent already has the link
-                    is_required=False,  # Steps/children are never marked as required - only parent jobs
-                    children=[],
-                )
-            )
+        # NOTE: Step/test children are now added by add_job_steps_and_tests_pass in common_dashboard_lib.py
+        # This centralized pass runs as part of run_all_passes() to avoid duplication.
+        # The raw log href is stored on the CIJobNode so the pass can access it later.
 
         out.append(node)
 
@@ -1505,6 +1462,8 @@ class PRStatusNode(BranchNode):
         label: str = "",
         pr: Optional[PRInfo] = None,
         github_api: Optional[GitHubAPIClient] = None,
+        repo_root: Optional[Path] = None,
+        page_root_dir: Optional[Path] = None,
         refresh_checks: bool = False,
         branch_commit_dt: Optional[datetime] = None,
         allow_fetch_checks: bool = True,
@@ -1515,6 +1474,8 @@ class PRStatusNode(BranchNode):
         super().__init__(label=label, children=children, expanded=False)
         self.pr = pr
         self.github_api = github_api
+        self.repo_root = Path(repo_root).resolve() if repo_root is not None else None
+        self.page_root_dir = Path(page_root_dir).resolve() if page_root_dir is not None else None
         self.refresh_checks = refresh_checks
         self.branch_commit_dt = branch_commit_dt
         self.allow_fetch_checks = allow_fetch_checks
@@ -1846,9 +1807,9 @@ class PRStatusNode(BranchNode):
         gh = self.github_api
         pr_number = int(pr.number)
 
-        repo_root = Path("/home/keivenc/dynamo/dynamo_latest")  # fallback
-        if gh and hasattr(gh, "repo_root"):
-            repo_root = Path(str(gh.repo_root))
+        # repo_root MUST be supplied by the caller (script/entrypoint), e.g. from a --repo-root flag.
+        # We never hardcode or infer specific clone paths here.
+        repo_root = (self.repo_root or Path.cwd()).resolve()
 
         # Build CI nodes if we don't have any children yet (common case).
         if not sorted_children and pr_number:
@@ -1860,13 +1821,13 @@ class PRStatusNode(BranchNode):
             )
             skip_fetch = not bool(self.allow_fetch_checks)
             if pr_number >= 100000000:
-                ci_nodes = mock_build_ci_nodes(pr, repo_root, page_root_dir=None)
+                ci_nodes = mock_build_ci_nodes(pr, repo_root, page_root_dir=self.page_root_dir)
             elif gh:
                 ci_nodes = build_ci_nodes_from_pr(
                     pr,
                     gh,
                     repo_root,
-                    page_root_dir=None,
+                    page_root_dir=self.page_root_dir,
                     checks_ttl_s=checks_ttl_s,
                     skip_fetch=skip_fetch,
                     validate_raw_logs=True,

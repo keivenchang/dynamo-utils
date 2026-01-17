@@ -167,7 +167,10 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Show local branches with PR information (HTML-only)")
     parser.add_argument("--repo-path", type=Path, default=Path.cwd(), help="Path to local Git repository (default: cwd)")
     parser.add_argument("--output", type=Path, default=None, help="Output HTML path (default: <repo-path>/local_branches.html)")
-    parser.add_argument("--token", help="GitHub personal access token (or login with gh so ~/.config/gh/hosts.yml exists)")
+    parser.add_argument(
+        "--github-token",
+        help="GitHub personal access token (preferred). If omitted, we try ~/.config/github-token or ~/.config/gh/hosts.yml.",
+    )
     parser.add_argument("--allow-anonymous-github", action="store_true", help="Allow anonymous GitHub REST calls (60/hr core rate limit)")
     parser.add_argument("--max-github-api-calls", type=int, default=100, help="Hard cap on GitHub REST API network calls per invocation")
     parser.add_argument("--max-branches", type=int, default=50, help="Cap branches shown (default: 50)")
@@ -202,7 +205,7 @@ def main() -> int:
     
     # GitHub API client
     gh = GitHubAPIClient(
-        token=args.token,
+        token=args.github_token,
         require_auth=(not bool(args.allow_anonymous_github)),
         allow_anonymous_fallback=bool(args.allow_anonymous_github),
         max_rest_calls=int(args.max_github_api_calls),

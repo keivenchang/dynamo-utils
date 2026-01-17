@@ -19,6 +19,7 @@ import logging
 import os
 import re
 import sys
+import time
 import yaml
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -435,6 +436,10 @@ def run_all_passes(
     """
     logger.info(f"[run_all_passes] Starting with {len(ci_nodes)} CI nodes (per-PR)")
     
+    # PASS 0: Add job steps and pytest tests to CIJobNode children (before conversion to TreeNodeVM)
+    # This must run BEFORE convert_branch_nodes_to_tree_vm_pass so children are in place
+    ci_nodes = add_job_steps_and_tests_pass(ci_nodes, repo_root)
+    
     # PASS 1: Convert BranchNode to TreeNodeVM (actual CI info from GitHub)
     ci_info_nodes = convert_branch_nodes_to_tree_vm_pass(ci_nodes)
     
@@ -485,13 +490,128 @@ def run_all_passes(
     # PASS 8: Verify the final tree structure
     verify_tree_structure_pass(final_nodes, ci_nodes, commit_sha=commit_sha)
     
-    logger.info(f"[PASS 2-8] YAML parse, augment, group, sort, expand, move required, and verify complete, returning {len(final_nodes)} root nodes")
+    logger.info(f"[PASS 0-8] Add steps, YAML parse, augment, group, sort, expand, move required, and verify complete, returning {len(final_nodes)} root nodes")
     return final_nodes
 
 
 #
 # Pass implementations (in run_all_passes order)
 # -----------------------------------------------------------------------------
+
+def add_job_steps_and_tests_pass(ci_nodes: List, repo_root: Path) -> List:
+    """
+    PASS 0: Add job steps and pytest tests as children to CIJobNode objects.
+    
+    This pass runs BEFORE conversion to TreeNodeVM to ensure step children are in place.
+    It handles all the step/test extraction logic that was previously duplicated across
+    build_ci_nodes_from_pr and show_commit_history.py.
+    
+    Args:
+        ci_nodes: List of BranchNode objects (may contain CIJobNode instances)
+        repo_root: Path to repository root (for resolving raw log paths)
+        
+    Returns:
+        Same list of nodes, with CIJobNode.children populated with step/test nodes
+    """
+    from common_branch_nodes import CIJobNode, _duration_str_to_seconds
+    
+    logger.info(f"[add_job_steps_and_tests_pass] Processing {len(ci_nodes)} nodes")
+    
+    for node in ci_nodes:
+        if not isinstance(node, CIJobNode):
+            continue
+            
+        # Skip if this node already has children (avoid re-processing)
+        if node.children:
+            logger.debug(f"[add_job_steps_and_tests_pass] Skipping {node.job_id} (already has {len(node.children)} children)")
+            continue
+        
+        # Extract parameters from the CIJobNode
+        job_name = node.display_name or node.job_id or ""
+        job_url = node.log_url or ""
+        github_api = node.github_api
+        page_root_dir = node.page_root_dir
+        raw_log_href = node.raw_log_href or ""
+        is_required = node.is_required
+        
+        # Resolve raw log path
+        raw_log_path: Optional[Path] = None
+        if raw_log_href and page_root_dir:
+            raw_log_path = page_root_dir / raw_log_href
+        
+        # Parse duration
+        dur_str = node.duration or ""
+        dur_seconds = _duration_str_to_seconds(dur_str)
+        
+        # Get step tuples using the centralized logic
+        step_tuples = ci_subsection_tuples_for_job(
+            github_api=github_api,
+            job_name=job_name,
+            job_url=job_url,
+            raw_log_path=raw_log_path,
+            duration_seconds=float(dur_seconds or 0.0),
+            is_required=bool(is_required),
+            long_job_threshold_s=10.0 * 60.0,
+            step_min_s=10.0,
+        )
+        
+        if not step_tuples:
+            continue
+        
+        # Create child nodes for each step
+        # Pytest tests (with └─ prefix) should be children of the "Run tests" step
+        current_test_parent: Optional[CIJobNode] = None
+        for (step_name, step_dur, step_status) in step_tuples:
+            step_name_s = str(step_name or "")
+            
+            # Check if this is a pytest test (has └─ prefix)
+            if step_name_s.startswith("  └─ "):
+                # This is a pytest test - add as child of the current "Run tests" step
+                if current_test_parent:
+                    test_name = step_name_s[len("  └─ "):]  # Remove prefix
+                    test_node = CIJobNode(
+                        job_id=test_name,
+                        display_name="",
+                        status=step_status,
+                        duration=step_dur,
+                        log_url="",
+                        is_required=False,
+                        is_synthetic=True,
+                        children=[],
+                    )
+                    current_test_parent.children.append(test_node)
+            else:
+                # This is a regular step
+                # For "Build and Test - dynamo", classify the step type
+                if job_name == "Build and Test - dynamo":
+                    kind = classify_ci_kind(str(step_name))
+                    step_id = f"{kind}: {step_name}" if kind and kind != "check" else str(step_name)
+                else:
+                    step_id = str(step_name)
+                
+                step_node = CIJobNode(
+                    job_id=step_id,
+                    display_name="",
+                    status=step_status,
+                    duration=step_dur,
+                    log_url="",  # Don't link to parent job URL - parent already has the link
+                    is_required=False,  # Steps are never marked as required
+                    is_synthetic=True,
+                    children=[],
+                )
+                node.children.append(step_node)
+                
+                # If this is "Run tests" or "test: pytest", remember it as the parent for pytest tests
+                if "run tests" in step_name_s.lower() or "test: pytest" in step_name_s.lower():
+                    current_test_parent = step_node
+                else:
+                    current_test_parent = None
+        
+        logger.debug(f"[add_job_steps_and_tests_pass] Added {len(node.children)} step/test children to {node.job_id}")
+    
+    logger.info(f"[add_job_steps_and_tests_pass] Complete")
+    return ci_nodes
+
 
 def convert_branch_nodes_to_tree_vm_pass(ci_nodes: List) -> List[TreeNodeVM]:
     """Convert BranchNode objects to TreeNodeVM.
@@ -918,6 +1038,35 @@ def sort_nodes_by_name_pass(nodes: List[TreeNodeVM]) -> List[TreeNodeVM]:
     Returns:
         Sorted list of TreeNodeVM nodes (children are also recursively sorted)
     """
+    def _is_build_test_tree_root(node: TreeNodeVM) -> bool:
+        """Return True if this node's children ordering must be preserved.
+
+        Policy:
+        - For build-test jobs, preserve the natural order:
+          - Actions steps order (as emitted by GitHub)
+          - Pytest per-test timing order (as emitted by pytest/log)
+        """
+        try:
+            # The YAML "short job name" is the most reliable discriminator when present.
+            sj = str(node.short_job_name or "").strip().lower()
+            jn = str(node.job_name or "").strip().lower()
+            cn = str(node.core_job_name or "").strip().lower()
+            # Keep "Build and Test - dynamo" in natural order too.
+            if jn == "build and test - dynamo":
+                return True
+            # Typical cases:
+            # - short_job_name: "build-test"
+            # - core/job name: "...-build-test"
+            if sj == "build-test" or ("build-test" in sj):
+                return True
+            if ("-build-test" in jn) or ("build-test" in jn):
+                return True
+            if ("-build-test" in cn) or ("build-test" in cn):
+                return True
+        except Exception:
+            return False
+        return False
+
     def sort_key(node: TreeNodeVM) -> tuple:
         """Generate sort key for a node.
         
@@ -952,7 +1101,11 @@ def sort_nodes_by_name_pass(nodes: List[TreeNodeVM]) -> List[TreeNodeVM]:
     for node in sorted_nodes:
         children = list(node.children or [])
         if children:
-            sorted_children = sort_nodes_by_name_pass(children)
+            # Do NOT sort children under build-test jobs; preserve original order (steps/tests).
+            if _is_build_test_tree_root(node):
+                sorted_children = children
+            else:
+                sorted_children = sort_nodes_by_name_pass(children)
             # Create new node with sorted children
             result.append(TreeNodeVM(
                 node_key=node.node_key,
@@ -1457,6 +1610,11 @@ def render_tree_divs(root_nodes: List[TreeNodeVM]) -> str:
         has_children = node.collapsible and node.children
         has_raw_content = node.collapsible and node.raw_html_content
         is_collapsible = has_children or has_raw_content
+
+        # Skip truly-empty leaf nodes. These can happen when upstream data creates an empty TreeNodeVM
+        # (e.g., a trailing separator). Rendering them produces a dangling connector with no label.
+        if (not is_collapsible) and (not (node.label_html or "").strip()) and (not (node.raw_html_content or "").strip()):
+            return ""
         
         # Check if this is a repository node (for spacing)
         is_repo_node = node_key.startswith("repo:")
@@ -1921,6 +2079,37 @@ def actions_job_step_tuples(
     return actions_job_steps_over_threshold_from_actions_job(job, min_seconds=float(min_seconds))
 
 
+_PYTEST_DETAIL_JOB_PREFIXES = ("sglang", "vllm", "trtllm")
+
+
+def job_name_wants_pytest_details(job_name: str) -> bool:
+    """
+    Shared policy for whether a job should show pytest per-test children under "Run tests".
+
+    This is used by:
+    - the step/test injection pass (so UI is consistent across pages)
+    - "success raw log" caching policy (so per-test parsing is possible)
+
+    IMPORTANT: keep this conservative; raw-log fetching for successful jobs can be expensive.
+    """
+    nm = str(job_name or "").strip()
+    if not nm:
+        return False
+    nm_lc = nm.lower()
+    if nm == "Build and Test - dynamo":
+        return True
+    # Canonical build-test jobs (local branches + commit history).
+    if ("build" in nm_lc) and ("test" in nm_lc):
+        return True
+    # Framework jobs that commonly run pytest but don't include "build"/"test" in the check name,
+    # e.g. "sglang (amd64)".
+    if nm_lc.startswith(_PYTEST_DETAIL_JOB_PREFIXES):
+        # Heuristic: these matrix-style jobs almost always contain an arch tuple.
+        if ("(" in nm_lc) or ("amd64" in nm_lc) or ("arm64" in nm_lc) or ("aarch64" in nm_lc):
+            return True
+    return False
+
+
 def ci_subsection_tuples_for_job(
     *,
     github_api: Optional["GitHubAPIClient"],
@@ -1941,16 +2130,15 @@ def ci_subsection_tuples_for_job(
 
     Policy:
     - Build and Test - dynamo: return the dedicated phases (status+duration) from Actions job `steps[]`.
-    - Other build/test jobs: return job steps >= step_min_s (vllm-build-test, sglang-build-test, trtllm-build-test, etc.).
+    - Other build/test jobs: return all job steps (vllm-build-test, sglang-build-test, trtllm-build-test, etc.).
     - Other long-running Actions jobs: return job steps >= step_min_s.
     """
     nm = str(job_name or "").strip()
     if not nm:
         return []
     
-    # Check if this is a build-test job
-    nm_lower = nm.lower()
-    is_build_test = "build" in nm_lower and "test" in nm_lower
+    # Shared policy: which jobs get full steps + pytest per-test breakdown.
+    is_build_test = job_name_wants_pytest_details(nm)
     
     # Special case: "Build and Test - dynamo" has custom phase extraction
     if nm == "Build and Test - dynamo":
@@ -1968,7 +2156,8 @@ def ci_subsection_tuples_for_job(
             steps = actions_job_step_tuples(
                 github_api=github_api,
                 job_url=str(job_url or ""),
-                min_seconds=float(step_min_s),
+                # Build/test UX: show all steps (not just slow ones).
+                min_seconds=0.0,
             )
 
             def _covered_by_phase(step_name: str) -> bool:
@@ -1989,16 +2178,19 @@ def ci_subsection_tuples_for_job(
             out = [(p[0], p[1], p[2]) for p in (phases or [])]
             out.extend([(s[0], s[1], s[2]) for s in extra_steps])
             
-            # Apply pytest test extraction to "Run tests" steps (same as other build-test jobs)
+            # Apply pytest test extraction to "Run tests" steps and "test: pytest" phases (same as other build-test jobs)
             result = []
             for step_name, step_dur, step_status in out:
                 result.append((step_name, step_dur, step_status))
                 
-                # If this is a "Run tests" step, parse pytest slowest tests from raw log
-                if "run tests" in step_name.lower() and raw_log_path:
+                # If this is a "Run tests" step or a "test: pytest" phase, parse pytest slowest tests from raw log
+                step_lower = step_name.lower()
+                if ("run tests" in step_lower or "test: pytest" in step_lower) and raw_log_path:
                     pytest_tests = pytest_slowest_tests_from_raw_log(
                         raw_log_path=raw_log_path,
-                        min_seconds=float(step_min_s),
+                        # Tests: list *all* per-test timings in order (do not filter).
+                        min_seconds=0.0,
+                        include_all=True,
                     )
                     # Add pytest tests as indented entries
                     for test_name, test_dur, test_status in pytest_tests:
@@ -2015,7 +2207,8 @@ def ci_subsection_tuples_for_job(
     # Build/test jobs (framework builds): show steps + pytest tests.
     # This covers: vllm-build-test, sglang-build-test, trtllm-build-test (with cuda/arch variants), etc.
     if is_build_test:
-        steps = actions_job_step_tuples(github_api=github_api, job_url=str(job_url or ""), min_seconds=float(step_min_s))
+        # Build/test UX: show all steps (not just slow ones).
+        steps = actions_job_step_tuples(github_api=github_api, job_url=str(job_url or ""), min_seconds=0.0)
         
         # For each step, check if it's "Run tests" - if so, add pytest tests as additional entries
         result = []
@@ -2026,7 +2219,9 @@ def ci_subsection_tuples_for_job(
             if "run tests" in step_name.lower() and raw_log_path:
                 pytest_tests = pytest_slowest_tests_from_raw_log(
                     raw_log_path=raw_log_path,
-                    min_seconds=float(step_min_s),
+                    # Tests: list *all* per-test timings in order (do not filter).
+                    min_seconds=0.0,
+                    include_all=True,
                 )
                 # Add pytest tests as indented/prefixed entries
                 for test_name, test_dur, test_status in pytest_tests:
@@ -2049,29 +2244,43 @@ def pytest_slowest_tests_from_raw_log(
     *,
     raw_log_path: Optional[Path],
     min_seconds: float = 10.0,
+    include_all: bool = False,
 ) -> List[Tuple[str, str, str]]:
-    """Parse pytest slowest durations from raw log file.
+    """Parse pytest per-test durations from cached raw log file.
     
-    Looks for the "slowest N durations" section that pytest outputs at the end.
+    This is based on pytest's "slowest N durations" section (`--durations=N`).
+    If CI is configured with `--durations=0`, this section contains all tests.
     
     Args:
         raw_log_path: Path to the raw log file
-        min_seconds: Minimum duration to include (default: 10s)
+        min_seconds: Minimum duration to include (default: 10s). Ignored when include_all=True.
+        include_all: If True, include all entries in the durations section regardless of duration threshold.
     
     Returns:
-        List of (test_name, duration_str, status) tuples, sorted by duration (slowest first)
+        List of (test_name, duration_str, status_norm) tuples, in the same order as the log section.
         
     Example output format:
         [
-            ("test_kvbm.py::test_offload_and_onboard", "110.16s", "success"),
-            ("test_serve_vllm.py::test_serve_deployment[agg]", "103.05s", "success"),
+            ("[call] tests/serve/test_vllm.py::test_serve_deployment[agg]", "1m 43s", "success"),
+            ("[setup] tests/kvbm_integration/test_kvbm.py::test_offload_and_onboard[llm_server_kvbm0]", "1m 50s", "failure"),
             ...
         ]
     """
     if not raw_log_path:
         return []
+
+    # Parsed pytest timings cache (disk-backed). Cache boundary is JSON-on-disk; in-memory uses dataclasses.
+    try:
+        from pytest_timings_cache import PYTEST_TIMINGS_CACHE  # local file import
+
+        cached = PYTEST_TIMINGS_CACHE.get_if_fresh(raw_log_path=Path(raw_log_path))
+        if cached is not None:
+            return list(cached)
+    except Exception:
+        cached = None
     
     try:
+        t0_parse = time.monotonic()
         p = Path(raw_log_path)
         if not p.exists() or not p.is_file():
             return []
@@ -2080,6 +2289,34 @@ def pytest_slowest_tests_from_raw_log(
             log_text = f.read()
         
         lines = log_text.split('\n')
+
+        # Build a map from test-id -> status using pytest summary lines.
+        # Example lines:
+        #   FAILED tests/foo.py::test_bar[param] - AssertionError: ...
+        #   ERROR  tests/foo.py::test_baz - ...
+        #   SKIPPED tests/foo.py::test_qux - ...
+        #   XFAIL tests/foo.py::test_x - ...
+        import re
+        status_by_test: Dict[str, str] = {}
+
+        def _norm_test_id(s: str) -> str:
+            return str(s or "").strip()
+
+        summary_re = re.compile(r'^\s*(FAILED|ERROR|XPASS|XFAIL|SKIPPED|PASSED)\s+(.+?)(?:\s+-\s+.*)?\s*$')
+        for ln in lines:
+            msum = summary_re.match(str(ln or ""))
+            if not msum:
+                continue
+            st_word = str(msum.group(1) or "").strip().upper()
+            test_id = _norm_test_id(msum.group(2) or "")
+            if not test_id:
+                continue
+            if st_word in {"FAILED", "ERROR", "XPASS"}:
+                status_by_test[test_id] = CIStatus.FAILURE.value
+            elif st_word in {"SKIPPED", "XFAIL"}:
+                status_by_test[test_id] = CIStatus.SKIPPED.value
+            elif st_word == "PASSED":
+                status_by_test[test_id] = CIStatus.SUCCESS.value
         
         # Look for the "slowest N durations" section
         # Format: "============================= slowest 10 durations ============================="
@@ -2087,8 +2324,9 @@ def pytest_slowest_tests_from_raw_log(
         # "2026-01-15T22:01:23.5641223Z 110.16s setup    tests/kvbm_integration/test_kvbm.py::test_offload_and_onboard[llm_server_kvbm0]"
         # "2026-01-15T22:01:23.5641223Z 103.05s call     tests/serve/test_vllm.py::test_serve_deployment[agg-request-plane-tcp]"
         
-        test_times = []
+        test_times: List[Tuple[str, str, str]] = []
         in_slowest_section = False
+        threshold = 0.0 if bool(include_all) else float(min_seconds or 0.0)
         
         for line in lines:
             # Start of slowest section
@@ -2104,16 +2342,15 @@ def pytest_slowest_tests_from_raw_log(
                 # Parse line format (with GitHub Actions timestamp prefix):
                 # "2026-01-15T22:01:23.5641223Z 110.16s setup    tests/..."
                 # "2026-01-15T22:01:23.5641223Z 103.05s call     tests/..."
-                import re
                 # Skip timestamp prefix (anything before the duration)
-                m = re.match(r'^.*?(\d+\.?\d*)s\s+(setup|call|teardown)\s+(.+)$', line)
+                m = re.match(r'^.*?(\d+\.?\d*)s\s+(setup|call|teardown)\s+(.+)$', str(line or ""))
                 if m:
                     duration = float(m.group(1))
                     phase = m.group(2)
-                    test_name = m.group(3).strip()
+                    test_id = str(m.group(3) or "").strip()
                     
-                    # Filter by minimum duration
-                    if duration >= min_seconds:
+                    # Filter by minimum duration unless include_all is set
+                    if duration >= threshold:
                         # Format duration as "1m 50s" or "110s"
                         if duration >= 60:
                             mins = int(duration // 60)
@@ -2123,11 +2360,27 @@ def pytest_slowest_tests_from_raw_log(
                             dur_str = f"{int(duration)}s"
                         
                         # Include phase in the test name for clarity
-                        full_name = f"[{phase}] {test_name}"
+                        full_name = f"[{phase}] {test_id}"
                         
-                        # Status is always success for tests in slowest durations
-                        test_times.append((full_name, dur_str, CIStatus.SUCCESS.value))
+                        # Determine status (best-effort) from summary lines; default to success.
+                        status_norm = status_by_test.get(test_id, CIStatus.SUCCESS.value)
+                        test_times.append((full_name, dur_str, status_norm))
         
+        # Persist parsed rows (best-effort).
+        try:
+            from pytest_timings_cache import PYTEST_TIMINGS_CACHE  # local file import
+
+            # Record parse timing on the concrete cache object.
+            try:
+                PYTEST_TIMINGS_CACHE.stats.parse_calls += 1
+                PYTEST_TIMINGS_CACHE.stats.parse_secs += max(0.0, float(time.monotonic() - t0_parse))
+            except Exception:
+                pass
+
+            PYTEST_TIMINGS_CACHE.put(raw_log_path=p, rows=test_times)
+        except Exception:
+            pass
+
         return test_times
         
     except Exception as e:
@@ -2246,6 +2499,7 @@ def status_icon_html(
     is_required: bool,
     required_failure: bool = False,
     warning_present: bool = False,
+    icon_px: int = 12,
 ) -> str:
     """Shared status icon HTML (match all dashboards).
 
@@ -2257,12 +2511,13 @@ def status_icon_html(
     """
     s = (status_norm or "").strip().lower()
 
+    icon_px_i = int(icon_px or 12)
     if s == CIStatus.SUCCESS:
         if bool(is_required):
             # REQUIRED: filled green circle-check.
             out = (
                 f'<span style="color: {COLOR_GREEN}; display: inline-flex; vertical-align: text-bottom;">'
-                '<svg aria-hidden="true" viewBox="0 0 16 16" version="1.1" width="12" height="12" '
+                f'<svg aria-hidden="true" viewBox="0 0 16 16" version="1.1" width="{icon_px_i}" height="{icon_px_i}" '
                 'data-view-component="true" class="octicon octicon-check-circle-fill" fill="currentColor">'
                 '<path fill-rule="evenodd" '
                 'd="M8 16A8 8 0 108 0a8 8 0 000 16zm3.78-9.78a.75.75 0 00-1.06-1.06L7 9.94 5.28 8.22a.75.75 0 10-1.06 1.06l2 2a.75.75 0 001.06 0l4-4z">'
@@ -2272,7 +2527,7 @@ def status_icon_html(
             # Optional success: small check icon (preferred).
             out = (
                 f'<span style="color: {COLOR_GREEN}; display: inline-flex; vertical-align: text-bottom;">'
-                f'{_octicon_svg(path_d="M13.78 4.22a.75.75 0 00-1.06 0L6.75 10.19 3.28 6.72a.75.75 0 10-1.06 1.06l4 4a.75.75 0 001.06 0l7.5-7.5a.75.75 0 000-1.06z", name="octicon-check")}'
+                f'{_octicon_svg(path_d="M13.78 4.22a.75.75 0 00-1.06 0L6.75 10.19 3.28 6.72a.75.75 0 10-1.06 1.06l4 4a.75.75 0 001.06 0l7.5-7.5a.75.75 0 000-1.06z", name="octicon-check", width=icon_px_i, height=icon_px_i)}'
                 "</span>"
             )
         if bool(warning_present):
@@ -2280,12 +2535,12 @@ def status_icon_html(
             out += '<span style="color: #57606a; font-size: 11px; margin: 0 2px;">/</span>'
             if bool(required_failure):
                 # REQUIRED descendant failure: filled red circle X (SVG).
-                out += _circle_x_fill_svg(color=COLOR_RED, extra_style="margin-left: 2px;")
+                out += _circle_x_fill_svg(color=COLOR_RED, width=icon_px_i, height=icon_px_i, extra_style="margin-left: 2px;")
             else:
                 # Optional descendant failure: small X.
                 out += (
                     f'<span style="color: {COLOR_RED}; display: inline-flex; vertical-align: text-bottom; margin-left: 2px;">'
-                    f'{_octicon_svg(path_d="M3.72 3.72a.75.75 0 011.06 0L8 6.94l3.22-3.22a.75.75 0 111.06 1.06L9.06 8l3.22 3.22a.75.75 0 11-1.06 1.06L8 9.06l-3.22 3.22a.75.75 0 11-1.06-1.06L6.94 8 3.72 4.78a.75.75 0 010-1.06z", name="octicon-x")}'
+                    f'{_octicon_svg(path_d="M3.72 3.72a.75.75 0 011.06 0L8 6.94l3.22-3.22a.75.75 0 111.06 1.06L9.06 8l3.22 3.22a.75.75 0 11-1.06 1.06L8 9.06l-3.22 3.22a.75.75 0 11-1.06-1.06L6.94 8 3.72 4.78a.75.75 0 010-1.06z", name="octicon-x", width=icon_px_i, height=icon_px_i)}'
                     "</span>"
                 )
         return out
@@ -2293,7 +2548,7 @@ def status_icon_html(
         # GitHub-like "skipped": grey circle with a slash.
         return (
             '<span style="color: #8c959f; display: inline-flex; vertical-align: text-bottom;">'
-            '<svg aria-hidden="true" viewBox="0 0 16 16" version="1.1" width="12" height="12" '
+            f'<svg aria-hidden="true" viewBox="0 0 16 16" version="1.1" width="{icon_px_i}" height="{icon_px_i}" '
             'data-view-component="true" class="octicon octicon-circle-slash" fill="currentColor">'
             '<path fill-rule="evenodd" '
             'd="M8 16A8 8 0 108 0a8 8 0 000 16ZM1.5 8a6.5 6.5 0 0110.364-5.083l-8.947 8.947A6.473 6.473 0 011.5 8Zm3.136 5.083 8.947-8.947A6.5 6.5 0 014.636 13.083Z">'
@@ -2302,20 +2557,20 @@ def status_icon_html(
     if s == CIStatus.FAILURE:
         if bool(is_required or required_failure):
             # REQUIRED: filled red circle X (SVG).
-            return _circle_x_fill_svg(color=COLOR_RED)
+            return _circle_x_fill_svg(color=COLOR_RED, width=icon_px_i, height=icon_px_i)
         # Optional failure: small X.
         return (
             f'<span style="color: {COLOR_RED}; display: inline-flex; vertical-align: text-bottom;">'
-            f'{_octicon_svg(path_d="M3.72 3.72a.75.75 0 011.06 0L8 6.94l3.22-3.22a.75.75 0 111.06 1.06L9.06 8l3.22 3.22a.75.75 0 11-1.06 1.06L8 9.06l-3.22 3.22a.75.75 0 11-1.06-1.06L6.94 8 3.72 4.78a.75.75 0 010-1.06z", name="octicon-x")}'
+            f'{_octicon_svg(path_d="M3.72 3.72a.75.75 0 011.06 0L8 6.94l3.22-3.22a.75.75 0 111.06 1.06L9.06 8l3.22 3.22a.75.75 0 11-1.06 1.06L8 9.06l-3.22 3.22a.75.75 0 11-1.06-1.06L6.94 8 3.72 4.78a.75.75 0 010-1.06z", name="octicon-x", width=icon_px_i, height=icon_px_i)}'
             "</span>"
         )
     if s == CIStatus.IN_PROGRESS:
-        return _clock_ring_svg(color=COLOR_YELLOW)
+        return _clock_ring_svg(color=COLOR_YELLOW, width=icon_px_i, height=icon_px_i)
     if s == CIStatus.PENDING:
-        return _circle_dot_fill_svg(color=COLOR_GREY)
+        return _circle_dot_fill_svg(color=COLOR_GREY, width=icon_px_i, height=icon_px_i)
     if s == CIStatus.CANCELLED:
-        return _circle_x_fill_svg(color=COLOR_GREY)
-    return _dot_svg(color=COLOR_GREY)
+        return _circle_x_fill_svg(color=COLOR_GREY, width=icon_px_i, height=icon_px_i)
+    return _dot_svg(color=COLOR_GREY, width=icon_px_i, height=icon_px_i)
 
 
 def _small_link_html(*, url: str, label: str) -> str:
@@ -2492,6 +2747,41 @@ def github_api_stats_rows(
     except Exception:
         cache_summary = {"hits": 0, "misses": 0, "writes_ops": 0, "writes_entries": 0}
     rows.append(("Cache summary", _fmt_kv(cache_summary)))
+
+    # Parsed pytest timings cache (disk-backed). This caches per-test children rows from raw logs.
+    try:
+        from pytest_timings_cache import PYTEST_TIMINGS_CACHE  # local file import
+
+        st = PYTEST_TIMINGS_CACHE.stats
+        if (int(st.hit) or int(st.miss) or int(st.write) or int(st.parse_calls)):
+            rows.append(
+                (
+                    "Pytest timings cache (this run)",
+                    _fmt_kv(
+                        {
+                            "hit": int(st.hit),
+                            "miss": int(st.miss),
+                            "write": int(st.write),
+                            "parse_calls": int(st.parse_calls),
+                            "parse_secs": f"{float(st.parse_secs):.2f}s",
+                        }
+                    ),
+                )
+            )
+    except Exception:
+        pass
+
+    # Raw-log text caching (Actions job logs: "<job_id>.log")
+    # This is the mechanism that produces `[cached raw log ...]` links and enables snippet/pytest parsing.
+    try:
+        hits_by = dict(cache.get("hits_by") or {}) if isinstance(cache, dict) else {}
+        misses_by = dict(cache.get("misses_by") or {}) if isinstance(cache, dict) else {}
+        raw_hits = int(sum(int(v or 0) for k, v in hits_by.items() if str(k).startswith("raw_log_text.")))
+        raw_misses = int(sum(int(v or 0) for k, v in misses_by.items() if str(k).startswith("raw_log_text.")))
+        if raw_hits or raw_misses:
+            rows.append(("Raw log text cache (this run)", _fmt_kv({"hits": raw_hits, "misses": raw_misses})))
+    except Exception:
+        pass
 
     # Include the commit-history-only github_actions_status_cache (if provided).
     if isinstance(extra_cache_stats, dict) and extra_cache_stats:
@@ -2695,6 +2985,7 @@ def check_line_html(
     error_snippet_categories: Optional[List[str]] = None,
     required_failure: bool = False,
     warning_present: bool = False,
+    icon_px: int = 12,
     short_job_name: str = "",  # Short YAML job name (e.g., "build-test")
     yaml_dependencies: Optional[List[str]] = None,  # List of dependencies from YAML
 ) -> str:
@@ -2704,9 +2995,10 @@ def check_line_html(
     # - Also suppress the redundant trailing "— ◇" marker in the label.
     is_expected_placeholder = bool(str(display_name or "").strip() == EXPECTED_CHECK_PLACEHOLDER_SYMBOL)
     if is_expected_placeholder:
+        icon_px_i = int(icon_px or 12)
         icon = (
             '<span style="display: inline-flex; align-items: center; justify-content: center; '
-            f'width: 12px; height: 12px; color: #8c959f; font-size: 12px; font-weight: 900;">{EXPECTED_CHECK_PLACEHOLDER_SYMBOL}</span>'
+            f'width: {icon_px_i}px; height: {icon_px_i}px; color: #8c959f; font-size: {icon_px_i}px; font-weight: 900;">{EXPECTED_CHECK_PLACEHOLDER_SYMBOL}</span>'
         )
     else:
         icon = status_icon_html(
@@ -2714,6 +3006,7 @@ def check_line_html(
             is_required=is_required,
             required_failure=required_failure,
             warning_present=warning_present,
+            icon_px=int(icon_px or 12),
         )
 
     def _format_arch_text(raw_text: str) -> str:
@@ -2805,7 +3098,7 @@ def check_line_html(
 
     links = ""
     if log_url:
-        log_label = f"[{job_num}.log]" if job_num else "[log]"
+        log_label = f"[{job_num} log]" if job_num else "[log]"
         links += _small_link_html(url=log_url, label=log_label)
     # Raw-log link (only when present).
     if raw_log_href:

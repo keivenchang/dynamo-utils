@@ -155,7 +155,10 @@ def main() -> int:
     parser.add_argument("--repo-root", type=Path, default=None, help="Path to a local clone of the repo (for workflow YAML parsing)")
     parser.add_argument("--base-dir", type=Path, default=Path.cwd(), help="Directory to search for a local clone (default: cwd)")
     parser.add_argument("--output", type=Path, default=None, help="Output HTML path (default: <base-dir>/remote_prs_<user>.html)")
-    parser.add_argument("--token", help="GitHub personal access token (or login with gh so ~/.config/gh/hosts.yml exists)")
+    parser.add_argument(
+        "--github-token",
+        help="GitHub personal access token (preferred). If omitted, we try ~/.config/github-token or ~/.config/gh/hosts.yml.",
+    )
     parser.add_argument("--allow-anonymous-github", action="store_true", help="Allow anonymous GitHub REST calls (60/hr core rate limit)")
     parser.add_argument("--max-github-api-calls", type=int, default=100, help="Hard cap on GitHub REST API network calls per invocation")
     parser.add_argument("--max-prs", type=int, default=50, help="Cap PRs shown (default: 50)")
@@ -206,7 +209,7 @@ def main() -> int:
         logging.getLogger(__name__).warning("Failed to prune dashboard raw logs: %s", e)
 
     gh = GitHubAPIClient(
-        token=args.token,
+        token=args.github_token,
         require_auth=(not bool(args.allow_anonymous_github)),
         allow_anonymous_fallback=bool(args.allow_anonymous_github),
         max_rest_calls=int(args.max_github_api_calls),
@@ -307,6 +310,8 @@ def main() -> int:
                 label="",
                 pr=pr,
                 github_api=gh,
+                repo_root=repo_root,
+                page_root_dir=output.parent,
                 refresh_checks=bool(args.refresh_checks),
                 branch_commit_dt=updated_dt,
                 allow_fetch_checks=bool(allow_fetch_checks),

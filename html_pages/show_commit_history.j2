@@ -1008,7 +1008,15 @@ window.__dashboardOnReadyQueue.push(function() {
 {%- else -%}
 {# No build logs: still render the IMAGE badge (not a link) with the status icon. #}
 {%- set cds_label = "IMAGE:" ~ composite_sha[:6] -%}
-{%- if commit.image_status_icon -%}{{ commit.image_status_icon|safe }} {%- endif -%}<span class="image-sha-badge" title="{%- if inherited -%}Inherited: {%- endif -%}{%- if status == 'success' -%}All local builds passed{%- elif status == 'failed' -%}Some local builds failed{%- else -%}Build in progress / no local build status{%- endif -%}">{{ cds_label }}</span>
+{%- if commit.image_status_icon -%}{{ commit.image_status_icon|safe }} {%- endif -%}
+{%- if has_composite_toggle -%}
+<a href="#"
+   class="image-sha-badge"
+   onclick="toggleDockerImages(event, document.getElementById('docker-toggle-{{ sha_short }}')); return false;"
+   title="{%- if inherited -%}Inherited: {%- endif -%}{%- if status == 'success' -%}All local builds passed{%- elif status == 'failed' -%}Some local builds failed{%- else -%}Build in progress / no local build status{%- endif -%} - Click to show Docker images">{{ cds_label }}</a>
+{%- else -%}
+<span class="image-sha-badge" title="{%- if inherited -%}Inherited: {%- endif -%}{%- if status == 'success' -%}All local builds passed{%- elif status == 'failed' -%}Some local builds failed{%- else -%}Build in progress / no local build status{%- endif -%}">{{ cds_label }}</span>
+{%- endif -%}
 {%- endif -%}
 </span></td>
 </td>

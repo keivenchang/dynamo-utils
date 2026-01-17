@@ -5,10 +5,11 @@
 # Cron-friendly wrapper to update HTML dashboards (local branches, remote PRs, commit history, resource report).
 # This script is designed to be run by cron.
 #
-# Environment Variables (optional):
+# Environment Variables (optional; deprecated for GitLab fetch control):
 #   NVIDIA_HOME         - Base directory for logs and output files
 #                        (default: parent of script dir; for this repo layout that is typically ~/dynamo)
-#   SKIP_GITLAB_FETCH   - If set, skip fetching from GitLab API, use cached data only (faster).
+#   GITLAB_FETCH_SKIP   - DEPRECATED: use --gitlab-fetch-skip. If set, skip fetching from GitLab API (faster).
+#   SKIP_GITLAB_FETCH   - DEPRECATED alias for GITLAB_FETCH_SKIP.
 #                        Note: GitHub fetching is independently capped/cached by the Python scripts.
 #   REFRESH_CLOSED_PRS  - If set, refresh cached closed/merged PR mappings (more GitHub API calls)
 #   MAX_GITHUB_API_CALLS - If set, pass --max-github-api-calls to the Python generators.
@@ -32,6 +33,9 @@
 #   --show-local-resources  Update the resource report ($NVIDIA_HOME/resource_report.html)
 #   --show-remote-branches  Update remote PR dashboards for selected GitHub users (IDENTICAL UI to local branches)
 #   --fast-debug            Faster runs: outputs to debug.html instead of index.html, uses smaller commit window (10 commits), shorter resource window
+#   --github-token <token>  GitHub token to pass to all show_*.py scripts (preferred).
+#   --gitlab-fetch-skip     Skip fetching from GitLab API (commit-history only); use cached data only (faster).
+#   --gitlab-fetch          Explicitly allow GitLab fetching (overrides --fast-debug default).
 #   --dry-run               Print what would be executed without actually running commands
 #   --run-ignore-lock        Bypass the /tmp lock (no flock). Useful for manual runs when a stale lock exists.
 #
@@ -48,7 +52,7 @@
 #   # Full fetch every 30 minutes (minute 0 and 30)
 #   0,30 * * * * NVIDIA_HOME=$HOME/dynamo /path/to/update_html_pages.sh
 #   # Cache-only between full runs (every 4 minutes from minute 8..56)
-#   8-59/4 * * * * NVIDIA_HOME=$HOME/dynamo SKIP_GITLAB_FETCH=1 /path/to/update_html_pages.sh
+#   8-59/4 * * * * NVIDIA_HOME=$HOME/dynamo /path/to/update_html_pages.sh --gitlab-fetch-skip
 #   # Resource report every minute
 #   * * * * * NVIDIA_HOME=$HOME/dynamo /path/to/update_html_pages.sh --show-local-resources
 
@@ -86,6 +90,10 @@ Flags:
 
   --fast-debug              Faster runs: outputs to debug.html instead of index.html, uses smaller commit window (10 commits), shorter resource window
   --enable-success-build-test-logs  Opt-in: cache raw logs for successful *-build-test jobs to parse pytest slowest tests under "Run tests" (slower)
+  --gitlab-fetch-skip       Skip fetching from GitLab API (commit-history only); use cached data only (faster).
+  --gitlab-fetch            Explicitly allow GitLab fetching (overrides --fast-debug default).
+                           Default: GitLab fetch is skipped in --fast-debug.
+  --github-token <token>    GitHub token to pass to all show_*.py scripts.
 
   --dry-run                 Print what would be executed without actually running commands
   --run-ignore-lock         Bypass the /tmp lock (no flock). Useful for manual runs when a stale lock exists.
@@ -107,6 +115,8 @@ ANY_FLAG=false
 IGNORE_LOCK=false
 DRY_RUN=false
 ENABLE_SUCCESS_BUILD_TEST_LOGS=false
+GITLAB_FETCH_SKIP_MODE="auto"  # auto|skip|fetch
+GITHUB_TOKEN_ARG=""
 
 USER_NAME="${USER:-${LOGNAME:-}}"
 if [ -z "$USER_NAME" ]; then
@@ -129,6 +139,17 @@ while [ "$#" -gt 0 ]; do
             FAST_DEBUG=true; shift ;;
         --enable-success-build-test-logs)
             ENABLE_SUCCESS_BUILD_TEST_LOGS=true; shift ;;
+        --github-token)
+            if [ "$#" -lt 2 ]; then
+                echo "Missing value for --github-token" >&2
+                exit 2
+            fi
+            GITHUB_TOKEN_ARG="$2"; shift 2 ;;
+        --gitlab-fetch-skip)
+            GITLAB_FETCH_SKIP_MODE="skip"; shift ;;
+        --gitlab-fetch)
+            # Explicitly allow GitLab fetching (overrides --fast-debug default).
+            GITLAB_FETCH_SKIP_MODE="fetch"; shift ;;
         --dry-run)
             DRY_RUN=true; shift ;;
         --run-ignore-lock)
@@ -147,6 +168,24 @@ if [ "$ANY_FLAG" = false ]; then
     RUN_SHOW_COMMIT_HISTORY=true
     RUN_RESOURCE_REPORT=true
     RUN_SHOW_REMOTE_BRANCHES=true
+fi
+
+# Determine whether to skip GitLab fetching (commit-history only).
+# Prefer CLI flags; keep env vars as deprecated aliases.
+GITLAB_FETCH_SKIP_EFFECTIVE=false
+if [ "$GITLAB_FETCH_SKIP_MODE" = "skip" ]; then
+    GITLAB_FETCH_SKIP_EFFECTIVE=true
+elif [ "$GITLAB_FETCH_SKIP_MODE" = "fetch" ]; then
+    GITLAB_FETCH_SKIP_EFFECTIVE=false
+else
+    # auto mode:
+    # - In --fast-debug, default to skip GitLab fetch (much faster; good for interactive debugging).
+    # - Otherwise, honor legacy env vars if set.
+    if [ "$FAST_DEBUG" = true ]; then
+        GITLAB_FETCH_SKIP_EFFECTIVE=true
+    elif [ -n "${GITLAB_FETCH_SKIP:-}" ] || [ -n "${SKIP_GITLAB_FETCH:-}" ]; then
+        GITLAB_FETCH_SKIP_EFFECTIVE=true
+    fi
 fi
 
 # Compute branches output path after parsing flags so `--fast-debug` is honored.
@@ -181,7 +220,7 @@ fi
 # - show_local_resources.py (1 day): ~0.6s
 # - mv operations + cleanup: ~0-2ms each
 # Notes:
-# - show_commit_history.py can dominate if it fetches from GitLab (use SKIP_GITLAB_FETCH=1 for faster runs).
+# - show_commit_history.py can dominate if it fetches from GitLab (use GITLAB_FETCH_SKIP=1 for faster runs).
 # - Real timings vary with network conditions, repo state, and API responsiveness.
 
 # Create logs directory if it doesn't exist
@@ -299,21 +338,25 @@ run_show_local_branches() {
     if [ -n "${MAX_GITHUB_API_CALLS:-}" ]; then
         MAX_GH_FLAG="--max-github-api-calls ${MAX_GITHUB_API_CALLS}"
     fi
-    SUCCESS_BUILD_TEST_FLAG=""
-    if [ "$ENABLE_SUCCESS_BUILD_TEST_LOGS" = true ]; then
-        SUCCESS_BUILD_TEST_FLAG="--enable-success-build-test-logs"
+    TOKEN_FLAG=""
+    if [ -n "${GITHUB_TOKEN_ARG:-}" ]; then
+        TOKEN_FLAG="--github-token ${GITHUB_TOKEN_ARG}"
     fi
+    SUCCESS_BUILD_TEST_FLAG=""
+    # Always enable: fetch/cache successful *-build-test raw logs so we can parse pytest test timings.
+    # NOTE: This can be slower; this is intentional per user request.
+    SUCCESS_BUILD_TEST_FLAG="--enable-success-build-test-logs"
     
     if [ "$DRY_RUN" = true ]; then
         echo "[DRY-RUN] Would generate branches dashboard:"
         echo "[DRY-RUN]   Output: $BRANCHES_OUTPUT_FILE"
-        echo "[DRY-RUN]   Command: python3 $SCRIPT_DIR/show_local_branches.py --repo-path $NVIDIA_HOME --output $BRANCHES_OUTPUT_FILE $REFRESH_CLOSED_FLAG $MAX_GH_FLAG $SUCCESS_BUILD_TEST_FLAG"
+        echo "[DRY-RUN]   Command: python3 $SCRIPT_DIR/show_local_branches.py --repo-path $NVIDIA_HOME --output $BRANCHES_OUTPUT_FILE $TOKEN_FLAG $REFRESH_CLOSED_FLAG $MAX_GH_FLAG $SUCCESS_BUILD_TEST_FLAG"
         return 0
     fi
     
     echo "$(date '+%Y-%m-%d %H:%M:%S') - Generating branches dashboard" >> "$LOG_FILE"
     log_line_ts "$BRANCHES_LOG" "===== run_show_local_branches start (output=$BRANCHES_OUTPUT_FILE) ====="
-    if run_cmd_to_log_ts "$BRANCHES_LOG" python3 "$SCRIPT_DIR/show_local_branches.py" --repo-path "$NVIDIA_HOME" --output "$BRANCHES_OUTPUT_FILE" $REFRESH_CLOSED_FLAG $MAX_GH_FLAG $SUCCESS_BUILD_TEST_FLAG; then
+    if run_cmd_to_log_ts "$BRANCHES_LOG" python3 "$SCRIPT_DIR/show_local_branches.py" --repo-path "$NVIDIA_HOME" --output "$BRANCHES_OUTPUT_FILE" $TOKEN_FLAG $REFRESH_CLOSED_FLAG $MAX_GH_FLAG $SUCCESS_BUILD_TEST_FLAG; then
         echo "$(date '+%Y-%m-%d %H:%M:%S') - Updated $BRANCHES_OUTPUT_FILE" >> "$LOG_FILE"
     else
         echo "$(date '+%Y-%m-%d %H:%M:%S') - ERROR: Failed to update $BRANCHES_OUTPUT_FILE" >> "$LOG_FILE"
@@ -344,10 +387,12 @@ run_show_remote_branches() {
     if [ -n "${MAX_GITHUB_API_CALLS:-}" ]; then
         MAX_GH_FLAG="--max-github-api-calls ${MAX_GITHUB_API_CALLS}"
     fi
-    SUCCESS_BUILD_TEST_FLAG=""
-    if [ "$ENABLE_SUCCESS_BUILD_TEST_LOGS" = true ]; then
-        SUCCESS_BUILD_TEST_FLAG="--enable-success-build-test-logs"
+    TOKEN_FLAG=""
+    if [ -n "${GITHUB_TOKEN_ARG:-}" ]; then
+        TOKEN_FLAG="--github-token ${GITHUB_TOKEN_ARG}"
     fi
+    # Always enable: fetch/cache successful *-build-test raw logs so we can parse pytest test timings.
+    SUCCESS_BUILD_TEST_FLAG="--enable-success-build-test-logs"
 
     if [ "$DRY_RUN" = true ]; then
         echo "[DRY-RUN] Would generate remote PRs dashboards for users: $USERS_LIST"
@@ -362,7 +407,7 @@ run_show_remote_branches() {
             fi
             echo "[DRY-RUN]   User: $U"
             echo "[DRY-RUN]     Output: $OUT_FILE"
-            echo "[DRY-RUN]     Command: python3 $SCRIPT_DIR/show_remote_branches.py --github-user $U --base-dir $NVIDIA_HOME/dynamo_latest --output $OUT_FILE $MAX_GH_FLAG"
+            echo "[DRY-RUN]     Command: python3 $SCRIPT_DIR/show_remote_branches.py --github-user $U --base-dir $NVIDIA_HOME/dynamo_latest --output $OUT_FILE $TOKEN_FLAG $MAX_GH_FLAG $SUCCESS_BUILD_TEST_FLAG"
         done
         return 0
     fi
@@ -393,6 +438,7 @@ run_show_remote_branches() {
             --github-user "${U}" \
             --base-dir "$NVIDIA_HOME/dynamo_latest" \
             --output "$OUT_FILE" \
+                $TOKEN_FLAG \
                 $MAX_GH_FLAG \
                 $SUCCESS_BUILD_TEST_FLAG; then
             echo "$(date '+%Y-%m-%d %H:%M:%S') - Updated $OUT_FILE" >> "$LOG_FILE"
@@ -410,22 +456,39 @@ run_show_commit_history() {
         COMMIT_HISTORY_BASENAME="debug.html"
     fi
     COMMIT_HISTORY_HTML="$DYNAMO_REPO/$COMMIT_HISTORY_BASENAME"
-    SUCCESS_BUILD_TEST_FLAG=""
-    if [ "$ENABLE_SUCCESS_BUILD_TEST_LOGS" = true ]; then
-        SUCCESS_BUILD_TEST_FLAG="--enable-success-build-test-logs"
+    # Always enable: fetch/cache successful *-build-test raw logs so we can parse pytest test timings.
+    SUCCESS_BUILD_TEST_FLAG="--enable-success-build-test-logs"
+
+    # Flags (shared by dry-run and real-run paths)
+    MAX_COMMITS="${MAX_COMMITS:-50}"
+    if [ "$FAST_DEBUG" = true ]; then
+        MAX_COMMITS=25
+    fi
+
+    SKIP_FLAG=""
+    if [ "$GITLAB_FETCH_SKIP_EFFECTIVE" = true ]; then
+        SKIP_FLAG="--gitlab-fetch-skip"
+    fi
+
+    MAX_GH_FLAG=""
+    if [ -n "${MAX_GITHUB_API_CALLS:-}" ]; then
+        MAX_GH_FLAG="--max-github-api-calls ${MAX_GITHUB_API_CALLS}"
+    fi
+
+    # Default: parallelize raw log snippet parsing (CPU-heavy) to speed commit history generation.
+    # Set PARALLEL_WORKERS=0 to force single-process, or override to tune.
+    PARALLEL_WORKERS="${PARALLEL_WORKERS:-32}"
+    PARALLEL_FLAG=""
+    if [ -n "${PARALLEL_WORKERS:-}" ]; then
+        PARALLEL_FLAG="--parallel-workers ${PARALLEL_WORKERS}"
     fi
 
     if [ "$DRY_RUN" = true ]; then
-        MAX_COMMITS=50
-        if [ "$FAST_DEBUG" = true ]; then
-            MAX_COMMITS=25
-        fi
-        PARALLEL_WORKERS="${PARALLEL_WORKERS:-32}"
         echo "[DRY-RUN] Would generate commit history dashboard:"
         echo "[DRY-RUN]   Output: $COMMIT_HISTORY_HTML"
         echo "[DRY-RUN]   Max commits: $MAX_COMMITS"
         echo "[DRY-RUN]   Command: cd $DYNAMO_REPO && git checkout main && git pull origin main"
-        echo "[DRY-RUN]   Command: python3 $SCRIPT_DIR/show_commit_history.py --repo-path . --max-commits $MAX_COMMITS --output $COMMIT_HISTORY_HTML --parallel-workers $PARALLEL_WORKERS $SUCCESS_BUILD_TEST_FLAG"
+        echo "[DRY-RUN]   Command: python3 $SCRIPT_DIR/show_commit_history.py --repo-path . --max-commits $MAX_COMMITS --output $COMMIT_HISTORY_HTML $SKIP_FLAG $MAX_GH_FLAG $PARALLEL_FLAG $SUCCESS_BUILD_TEST_FLAG"
         return 0
     fi
 
@@ -447,25 +510,6 @@ run_show_commit_history() {
     fi
 
     # Note: --logs-dir defaults to ../dynamo_ci/logs for dynamo_latest repo
-    # Set flag based on environment variable
-    SKIP_FLAG="${SKIP_GITLAB_FETCH:+--skip-gitlab-fetch}"
-    MAX_GH_FLAG=""
-    if [ -n "${MAX_GITHUB_API_CALLS:-}" ]; then
-        MAX_GH_FLAG="--max-github-api-calls ${MAX_GITHUB_API_CALLS}"
-    fi
-
-    # Default: parallelize raw log snippet parsing (CPU-heavy) to speed commit history generation.
-    # Set PARALLEL_WORKERS=0 to force single-process, or override to tune.
-    PARALLEL_WORKERS="${PARALLEL_WORKERS:-32}"
-    PARALLEL_FLAG=""
-    if [ -n "${PARALLEL_WORKERS:-}" ]; then
-        PARALLEL_FLAG="--parallel-workers ${PARALLEL_WORKERS}"
-    fi
-
-    MAX_COMMITS="${MAX_COMMITS:-200}"
-    if [ "$FAST_DEBUG" = true ]; then
-        MAX_COMMITS=25
-    fi
 
     echo "$(date '+%Y-%m-%d %H:%M:%S') - Generating commit history dashboard (max_commits=$MAX_COMMITS)" >> "$LOG_FILE"
     log_line_ts "$COMMIT_HISTORY_LOG" "===== run_show_commit_history start (max_commits=$MAX_COMMITS output=$COMMIT_HISTORY_HTML) ====="

@@ -1502,6 +1502,9 @@ class PRInfo:
     failed_checks: List['FailedCheck'] = field(default_factory=list)
     running_checks: List['RunningCheck'] = field(default_factory=list)
     rerun_url: Optional[str] = None
+    # Optional: cached PR checks rows (used by some dashboards to show a compact status pill).
+    # Keeping this on the concrete type avoids hasattr/getattr patterns downstream.
+    check_rows: List['GHPRCheckRow'] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -2605,6 +2608,25 @@ class GitHubAPIClient:
         key = f"{owner}/{repo}:job:{job_id_s}"
         now = int(time.time())
 
+        def _is_completed_job_details(v: Any) -> bool:
+            """We only trust/caches job details once the job is completed.
+
+            Rationale: while a job is running, GitHub returns `steps[]` entries with `pending/in_progress`
+            and missing `completed_at`, which makes downstream step-duration rendering empty/misleading.
+            """
+            try:
+                if not isinstance(v, dict):
+                    return False
+                st = str(v.get("status", "") or "").lower()
+                if st != "completed":
+                    return False
+                # `completed_at` should exist for completed jobs; be strict to avoid partial caches.
+                if not str(v.get("completed_at", "") or "").strip():
+                    return False
+                return True
+            except Exception:
+                return False
+
         # Memory cache
         try:
             ent = self._actions_job_details_mem_cache.get(key)
@@ -2612,7 +2634,8 @@ class GitHubAPIClient:
                 ts = int(ent.get("ts", 0) or 0)
                 if ts and (now - ts) <= int(ttl_s):
                     val = ent.get("val")
-                    return val if isinstance(val, dict) else None
+                    if _is_completed_job_details(val):
+                        return val if isinstance(val, dict) else None
         except Exception:
             pass
 
@@ -2624,14 +2647,17 @@ class GitHubAPIClient:
             if ts and (now - ts) <= int(ttl_s):
                 val = ent.get("val")
                 if isinstance(val, dict):
-                    self._actions_job_details_mem_cache[key] = {"ts": ts, "val": val}
-                    return val
+                    if _is_completed_job_details(val):
+                        self._actions_job_details_mem_cache[key] = {"ts": ts, "val": val}
+                        return val
             # Cache-only mode: allow stale disk cache.
             if self.cache_only_mode:
                 val = ent.get("val")
                 if isinstance(val, dict):
-                    self._actions_job_details_mem_cache[key] = {"ts": ts, "val": val}
-                    return val
+                    # Even in cache-only mode, do not return incomplete job details (they hide steps).
+                    if _is_completed_job_details(val):
+                        self._actions_job_details_mem_cache[key] = {"ts": ts, "val": val}
+                        return val
 
         # Cache-only mode: do not fetch.
         if self.cache_only_mode:
@@ -2652,6 +2678,15 @@ class GitHubAPIClient:
         except Exception:
             data = {}
         if not isinstance(data, dict):
+            return None
+
+        # Never cache incomplete job details (see `_is_completed_job_details` above).
+        try:
+            if str(data.get("status", "") or "").lower() != "completed":
+                return None
+            if not str(data.get("completed_at", "") or "").strip():
+                return None
+        except Exception:
             return None
 
         # Keep only the fields we need (keep cache small + stable).
@@ -5806,6 +5841,7 @@ query($owner:String!,$name:String!,$number:Int!,$prid:ID!,$after:String) {
             if isinstance(ent, dict):
                 ts = int(ent.get("ts", 0) or 0)
                 if ts and (now - ts) <= max(0, int(ttl_s)):
+                    self._cache_hit("raw_log_text.mem")
                     return ent.get("text")
         except Exception:
             pass
@@ -5831,6 +5867,7 @@ query($owner:String!,$name:String!,$number:Int!,$prid:ID!,$after:String) {
                 if bool(ent.get("completed", False)) and ts and (now - ts) <= max(0, int(ttl_s)):
                     text = chosen_path.read_text(encoding="utf-8", errors="replace")
                     self._raw_log_text_mem_cache[job_id] = {"ts": ts, "text": text}
+                    self._cache_hit("raw_log_text.disk")
                     # Best-effort migrate legacy .txt -> .log for future runs.
                     if chosen_path == legacy_txt_path and (not txt_path.exists()):
                         try:
@@ -5860,6 +5897,7 @@ query($owner:String!,$name:String!,$number:Int!,$prid:ID!,$after:String) {
 
         tmp_zip_path: Optional[Path] = None
         try:
+            self._cache_miss("raw_log_text.network")
             api_url = f"{self.base_url}/repos/{owner}/{repo}/actions/jobs/{job_id}/logs"
             resp = self._rest_get(api_url, timeout=timeout, allow_redirects=True, stream=True)
             resp.raise_for_status()
@@ -5910,6 +5948,8 @@ query($owner:String!,$name:String!,$number:Int!,$prid:ID!,$after:String) {
                         pass
 
             os.replace(tmp_txt, txt_path)
+            # Track that we wrote a cached log entry for this job_id.
+            self._cache_write("raw_log_text.disk", entries=1)
 
             # Best-effort persist index + mem cache
             try:

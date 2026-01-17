@@ -449,7 +449,9 @@ def render_graph_html(graph: CIGraph, pr_number: int) -> str:
 
 if __name__ == "__main__":
     # Test with dynamo repo
-    repo_root = Path("/home/keivenc/dynamo/dynamo_latest")
+    repo_root = Path(os.environ.get("CI_GRAPH_REPO_ROOT", "")).expanduser()
+    if not str(repo_root).strip():
+        repo_root = Path.cwd()
     graph = parse_workflow_yaml_to_graph(repo_root)
     
     print(f"\nTotal nodes: {len(graph.nodes)}")
@@ -466,6 +468,8 @@ if __name__ == "__main__":
     
     # Generate HTML
     html = render_graph_html(graph, pr_number=12345)
-    output_file = Path("/home/keivenc/dynamo/speedoflight/users/keivenchang/ci-graph-test.html")
+    output_file = Path(os.environ.get("CI_GRAPH_OUTPUT_FILE", "")).expanduser()
+    if not str(output_file).strip():
+        output_file = Path.cwd() / "ci-graph-test.html"
     output_file.write_text(html, encoding="utf-8")
     print(f"\nGenerated test HTML: {output_file}")

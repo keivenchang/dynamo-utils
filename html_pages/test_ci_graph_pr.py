@@ -15,7 +15,9 @@ from html_pages.ci_graph_view import CIGraph, GraphNode, parse_workflow_yaml_to_
 def main():
     # Test with keivenchang's first PR
     github_api = GitHubAPIClient()
-    repo_root = Path("/home/keivenc/dynamo/dynamo_latest")
+    repo_root = Path(os.environ.get("CI_GRAPH_REPO_ROOT", "")).expanduser()
+    if not str(repo_root).strip():
+        repo_root = Path.cwd()
     
     # Get PRs for user
     prs = github_api.get_open_pr_info_for_author(
@@ -80,7 +82,9 @@ def main():
 </body>
 </html>"""
     
-    output_file = Path("/home/keivenc/dynamo/speedoflight/users/keivenchang/ci-graph-pr.html")
+    output_file = Path(os.environ.get("CI_GRAPH_OUTPUT_FILE", "")).expanduser()
+    if not str(output_file).strip():
+        output_file = Path.cwd() / "ci-graph-pr.html"
     output_file.write_text(full_html, encoding="utf-8")
     print(f"\n[CI Graph] Generated HTML: {output_file}")
 

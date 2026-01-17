@@ -128,7 +128,7 @@ class CommitHistoryGenerator:
         repo_path: Path,
         verbose: bool = False,
         debug: bool = False,
-        skip_gitlab_fetch: bool = False,
+        gitlab_fetch_skip: bool = False,
         github_token: Optional[str] = None,
         allow_anonymous_github: bool = False,
         max_github_api_calls: int = 100,
@@ -143,12 +143,12 @@ class CommitHistoryGenerator:
             repo_path: Path to the Dynamo repository
             verbose: Enable verbose output (INFO level)
             debug: Enable debug output (DEBUG level)
-            skip_gitlab_fetch: Skip fetching GitLab registry data, use cached data only
+            gitlab_fetch_skip: Skip fetching GitLab registry data, use cached data only
         """
         self.repo_path = Path(repo_path)
         self.verbose = verbose
         self.debug = debug
-        self.skip_gitlab_fetch = skip_gitlab_fetch
+        self.gitlab_fetch_skip = bool(gitlab_fetch_skip)
         self.parallel_workers = int(parallel_workers or 0)
         self.disable_snippet_cache_read = bool(disable_snippet_cache_read)
         # Opt-in because downloading successful build-test raw logs can be expensive.
@@ -786,7 +786,7 @@ class CommitHistoryGenerator:
                     sha_to_pr_number[commit.hexsha] = pr_num
 
             cache_only_github = bool(self.github_client.cache_only_mode)
-            if pr_numbers and (not self.skip_gitlab_fetch) and (not cache_only_github):
+            if pr_numbers and (not self.gitlab_fetch_skip) and (not cache_only_github):
                 # Batch fetch merge dates for all PRs (GitHub)
                 self.logger.info(f"Fetching merge dates for {len(pr_numbers)} PRs...")
                 t0 = phase_t.start()
@@ -802,7 +802,7 @@ class CommitHistoryGenerator:
 
                 if pr_numbers:
                     # Batch fetch required checks for all PRs (branch protection required checks).
-                    # If skip_gitlab_fetch=True, we still read from cache (skip_fetch=True).
+                    # If gitlab_fetch_skip=True, we still read from cache (skip_fetch=True).
                     self.logger.info(f"Fetching required checks for {len(pr_numbers)} PRs...")
                 t0 = phase_t.start()
                 pr_to_required_checks = self.github_client.get_cached_required_checks(
@@ -810,7 +810,7 @@ class CommitHistoryGenerator:
                     owner="ai-dynamo",
                     repo="dynamo",
                     cache_file="github_required_checks.json",
-                    skip_fetch=bool(self.skip_gitlab_fetch) or bool(cache_only_github),
+                    skip_fetch=bool(self.gitlab_fetch_skip) or bool(cache_only_github),
                 )
                 phase_t.stop("github_required_checks", t0)
                 self.logger.info(
@@ -1204,7 +1204,7 @@ class CommitHistoryGenerator:
                     pr_numbers,
                     project_id="169905",
                     cache_file="gitlab_mr_pipelines.json",
-                    skip_fetch=self.skip_gitlab_fetch,
+                    skip_fetch=self.gitlab_fetch_skip,
                 )
             except Exception:
                 mr_pipelines = {}
@@ -1828,8 +1828,8 @@ class CommitHistoryGenerator:
                 # Fetch raw logs for:
                 # 1. Failed jobs (for error snippets)
                 # 2. Build-test jobs (for pytest timing extraction, regardless of success/failure)
-                nm_lower = name.lower()
-                is_build_test = "build" in nm_lower and "test" in nm_lower
+                from common_dashboard_lib import job_name_wants_pytest_details  # local import
+                is_build_test = job_name_wants_pytest_details(name)
                 cr_status_lc = str(cr.get("status", "") or "").lower()
                 should_fetch_raw_log = (
                     # Always fetch raw logs for failed jobs (for error snippets).
@@ -1841,6 +1841,9 @@ class CommitHistoryGenerator:
                 if should_fetch_raw_log:
                     allow_fetch = bool(allow_raw_logs) and int(raw_log_prefetch_budget.get("n", 0) or 0) > 0
                     try:
+                        # Raw logs are stored relative to the output HTML directory (page root),
+                        # not relative to the git repo root.
+                        page_root_dir = (output_path.parent if output_path else Path(self.repo_path)).resolve()
                         raw_href = (
                             materialize_job_raw_log_text_local_link(
                                 self.github_client,
@@ -1848,7 +1851,7 @@ class CommitHistoryGenerator:
                                 job_name=name,
                                 owner="ai-dynamo",
                                 repo="dynamo",
-                                page_root_dir=Path(self.repo_path),
+                                page_root_dir=page_root_dir,
                                 allow_fetch=bool(allow_fetch),
                                 assume_completed=True,
                             )
@@ -1861,7 +1864,8 @@ class CommitHistoryGenerator:
 
                 if raw_href:
                     try:
-                        raw_size = int((Path(self.repo_path) / raw_href).stat().st_size)
+                        page_root_dir = (output_path.parent if output_path else Path(self.repo_path)).resolve()
+                        raw_size = int((page_root_dir / raw_href).stat().st_size)
                     except Exception:
                         raw_size = 0
                     # Only extract error snippets for failed jobs (not for successful build-test jobs)
@@ -1908,7 +1912,7 @@ class CommitHistoryGenerator:
                     log_url=url,
                     is_required=is_req,
                     children=[],
-                    page_root_dir=Path(self.repo_path),
+                    page_root_dir=(output_path.parent if output_path else Path(self.repo_path)).resolve(),
                     context_key=f"{sha_full}:{name}",
                     github_api=self.github_client,
                     raw_log_href=raw_href,
@@ -1919,91 +1923,13 @@ class CommitHistoryGenerator:
                 # Set core_job_name for YAML matching (same pattern as build_ci_nodes_from_pr)
                 node.core_job_name = name  # Original name without disambiguation
                 
-                # Add step breakdown as children (for build/test jobs and other long-running jobs)
-                raw_path_for_steps = None
-                if raw_href:
-                    try:
-                        # raw_href is relative to the HTML output directory, not the git repo
-                        raw_path_for_steps = output_path.parent / raw_href
-                        if not raw_path_for_steps.exists():
-                            self.logger.warning(f"Raw log file doesn't exist: {raw_path_for_steps}")
-                            raw_path_for_steps = None
-                        else:
-                            self.logger.info(f"Raw log exists for {name}: {raw_path_for_steps}")
-                    except Exception as e:
-                        self.logger.warning(f"Error setting raw_path_for_steps: {e}")
-                        raw_path_for_steps = None
-                else:
-                    if "build" in name.lower() and "test" in name.lower():
-                        self.logger.warning(f"No raw_href for build-test job: {name}")
-                
-                # Parse duration string to seconds for step filtering
-                dur_seconds = 0.0
-                try:
-                    total = 0.0
-                    for m in re.finditer(r"([0-9]+)\s*([hms])", str(dur or "").lower()):
-                        v = float(m.group(1))
-                        unit = m.group(2)
-                        if unit == "h":
-                            total += v * 3600.0
-                        elif unit == "m":
-                            total += v * 60.0
-                        elif unit == "s":
-                            total += v
-                    dur_seconds = total
-                except Exception:
-                    dur_seconds = 0.0
-                
-                step_tuples = ci_subsection_tuples_for_job(
-                    github_api=self.github_client,
-                    job_name=name,
-                    job_url=url,
-                    raw_log_path=raw_path_for_steps,
-                    duration_seconds=dur_seconds,
-                    is_required=is_req,
-                    long_job_threshold_s=10.0 * 60.0,
-                    step_min_s=10.0,
-                )
-                
-                # Create child nodes for each step
-                # Pytest tests (with └─ prefix) should be children of the "Run tests" step
-                current_test_parent = None
-                for (step_name, step_dur, step_status) in (step_tuples or []):
-                    # Check if this is a pytest test (has └─ prefix)
-                    if step_name.startswith("  └─ "):
-                        # This is a pytest test - add as child of the current "Run tests" step
-                        if current_test_parent:
-                            test_name = step_name[len("  └─ "):]  # Remove prefix
-                            test_node = CIJobNode(
-                                job_id=test_name,
-                                display_name="",
-                                status=step_status,
-                                duration=step_dur,
-                                log_url="",
-                                is_required=False,
-                                children=[],
-                            )
-                            current_test_parent.children.append(test_node)
-                    else:
-                        # This is a regular step
-                        step_node = CIJobNode(
-                            job_id=step_name,
-                            display_name="",
-                            status=step_status,
-                            duration=step_dur,
-                            log_url="",  # Don't link to parent job URL - parent already has the link
-                            is_required=False,  # Steps are never marked as required
-                            children=[],
-                        )
-                        node.children.append(step_node)
-                        
-                        # If this is "Run tests", remember it as the parent for pytest tests
-                        if "run tests" in step_name.lower():
-                            current_test_parent = step_node
-                        else:
-                            current_test_parent = None
+                # NOTE: Steps/tests are populated via the shared pipeline pass:
+                # common_dashboard_lib.add_job_steps_and_tests_pass (used by local/remote branches too).
                 
                 ci_job_nodes.append(node)
+                
+                # (intentionally removed) duplicate CIJobNode creation
+                # The CIJobNode was already created above (disambiguated_name) and appended once.
 
             # Use centralized CI tree processing pipeline - it handles YAML augmentation, grouping, sorting
             children: List[TreeNodeVM]
@@ -2225,7 +2151,7 @@ class CommitHistoryGenerator:
             pass
 
         page_stats.append(("Commits shown", str(len(commit_data))))
-        page_stats.append(("skip_gitlab_fetch", "true" if self.skip_gitlab_fetch else "false"))
+        page_stats.append(("gitlab_fetch_skip", "true" if self.gitlab_fetch_skip else "false"))
 
         # Performance breakdown (best-effort; collected across the run).
         try:
@@ -2426,8 +2352,8 @@ class CommitHistoryGenerator:
         """Get Docker images mapped by commit SHA using cache.
         
         Simplified logic:
-        - If skip_gitlab_fetch=True: Only use cache
-        - If skip_gitlab_fetch=False: Fetch tags for recent commits (within 8 hours) using binary search
+        - If gitlab_fetch_skip=True: Only use cache
+        - If gitlab_fetch_skip=False: Fetch tags for recent commits (within 8 hours) using binary search
         
         Args:
             commit_data: List of commit dictionaries with sha_full and committed_datetime
@@ -2463,7 +2389,7 @@ class CommitHistoryGenerator:
             sha_list=sha_full_list,
             sha_to_datetime=sha_to_datetime,
             cache_file=cache_file,
-            skip_fetch=self.skip_gitlab_fetch
+            skip_fetch=self.gitlab_fetch_skip
         )
         self._perf["gitlab.registry_images.total_secs"] = float(self._perf.get("gitlab.registry_images.total_secs", 0.0) or 0.0) + max(
             0.0, time.monotonic() - t0
@@ -2519,7 +2445,7 @@ class CommitHistoryGenerator:
 
         t0 = time.monotonic()
         
-        result = self.gitlab_client.get_cached_pipeline_status(sha_full_list, cache_file=cache_file, skip_fetch=self.skip_gitlab_fetch)
+        result = self.gitlab_client.get_cached_pipeline_status(sha_full_list, cache_file=cache_file, skip_fetch=self.gitlab_fetch_skip)
         self._perf["gitlab.pipeline_status.total_secs"] = float(self._perf.get("gitlab.pipeline_status.total_secs", 0.0) or 0.0) + max(
             0.0, time.monotonic() - t0
         )
@@ -2594,7 +2520,7 @@ class CommitHistoryGenerator:
 
         t0 = time.monotonic()
 
-        result = self.gitlab_client.get_cached_pipeline_job_details(pipeline_ids, cache_file=cache_file, skip_fetch=self.skip_gitlab_fetch)
+        result = self.gitlab_client.get_cached_pipeline_job_details(pipeline_ids, cache_file=cache_file, skip_fetch=self.gitlab_fetch_skip)
         self._perf["gitlab.pipeline_jobs.total_secs"] = float(self._perf.get("gitlab.pipeline_jobs.total_secs", 0.0) or 0.0) + max(
             0.0, time.monotonic() - t0
         )
@@ -2749,15 +2675,23 @@ Examples:
     )
 
     parser.add_argument(
-        '--skip-gitlab-fetch',
+        '--gitlab-fetch-skip',
+        dest='gitlab_fetch_skip',
         action='store_true',
         help='Skip fetching GitLab registry data, use cached data only (much faster)'
+    )
+    # Back-compat alias (prefer --gitlab-fetch-skip)
+    parser.add_argument(
+        '--skip-gitlab-fetch',
+        dest='gitlab_fetch_skip',
+        action='store_true',
+        help='DEPRECATED: use --gitlab-fetch-skip'
     )
     # NOTE: Removed --max-github-fetch-commits.
     # GitHub fetch behavior is now governed by cache TTLs in `common.py`.
     parser.add_argument(
-        '--token',
-        help='GitHub personal access token (or set GH_TOKEN/GITHUB_TOKEN env var)'
+        '--github-token',
+        help='GitHub personal access token (preferred). If omitted, we try ~/.config/github-token or ~/.config/gh/hosts.yml.'
     )
     parser.add_argument(
         '--allow-anonymous-github',
@@ -2809,8 +2743,8 @@ Examples:
         repo_path=args.repo_path,
         verbose=args.verbose,
         debug=args.debug,
-        skip_gitlab_fetch=args.skip_gitlab_fetch,
-        github_token=args.token,
+        gitlab_fetch_skip=bool(args.gitlab_fetch_skip),
+        github_token=args.github_token,
         allow_anonymous_github=bool(args.allow_anonymous_github),
         max_github_api_calls=int(args.max_github_api_calls),
         parallel_workers=int(args.parallel_workers or 0),

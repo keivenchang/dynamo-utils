@@ -318,6 +318,15 @@ def materialize_job_raw_log_text_local_link(
     if not job_id:
         return None
 
+    # Best-effort: if we're allowed to fetch and not in cache-only mode, also cache the job details
+    # (including `steps[]`). This avoids "cached raw log exists but no step breakdown" when later
+    # runs are forced into cache-only mode (budget/rate-limit).
+    try:
+        if allow_fetch and (not bool(github.cache_only_mode)):
+            _ = github.get_actions_job_details_cached(owner=owner, repo=repo, job_id=str(job_id), ttl_s=7 * 24 * 3600)
+    except Exception:
+        pass
+
     # Ensure we use a canonical /job/<id> URL for fetch APIs that require it.
     job_url_for_fetch = job_url
     if "/job/" not in job_url_for_fetch:
@@ -366,6 +375,11 @@ def materialize_job_raw_log_text_local_link(
     # If already materialized, return immediately (no IO / network).
     try:
         if dest_path.exists():
+            # Count this as a raw-log cache hit (served page cache already has <job_id>.log).
+            try:
+                github._cache_hit("raw_log_text.page")
+            except Exception:
+                pass
             return href
     except Exception:
         pass
@@ -401,6 +415,11 @@ def materialize_job_raw_log_text_local_link(
             tmp = str(dest_path) + ".tmp"
             shutil.copyfile(str(src), tmp)
             os.replace(tmp, dest_path)
+            # Count this as a cache hit (copied from global raw-log cache into served cache).
+            try:
+                github._cache_hit("raw_log_text.global")
+            except Exception:
+                pass
             return href
     except Exception:
         pass

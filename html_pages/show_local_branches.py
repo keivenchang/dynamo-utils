@@ -598,6 +598,8 @@ class LocalRepoScanner:
         allow_anonymous_github: bool = False,
         max_github_api_calls: int = 100,
         enable_success_build_test_logs: bool = False,
+        repo_root: Optional[Path] = None,
+        page_root_dir: Optional[Path] = None,
     ):
         require_auth = not bool(allow_anonymous_github)
         self.github_api = GitHubAPIClient(
@@ -611,6 +613,8 @@ class LocalRepoScanner:
         self.max_checks_fetch = int(max_checks_fetch) if max_checks_fetch is not None else None
         self.cache_only_github: bool = False
         self.enable_success_build_test_logs = bool(enable_success_build_test_logs)
+        self.repo_root = Path(repo_root).resolve() if repo_root is not None else Path.cwd().resolve()
+        self.page_root_dir = Path(page_root_dir).resolve() if page_root_dir is not None else None
 
     @staticmethod
     def _is_world_readable_executable_dir(p: Path) -> bool:
@@ -907,6 +911,8 @@ class LocalRepoScanner:
                         label="",
                         pr=pr,
                         github_api=self.github_api,
+                        repo_root=self.repo_root,
+                        page_root_dir=self.page_root_dir,
                         refresh_checks=bool(self.refresh_closed_prs),
                         branch_commit_dt=branch_dt,
                         allow_fetch_checks=bool(allow_fetch_checks),
@@ -1106,8 +1112,14 @@ def main():
         help='Path to the base directory to scan (direct children only) (default: current directory)'
     )
     parser.add_argument(
-        '--token',
-        help='GitHub personal access token (or set GH_TOKEN/GITHUB_TOKEN env var)'
+        '--repo-root',
+        type=Path,
+        default=None,
+        help='Path to a local clone of the repo for workflow YAML parsing (optional; auto-detect under --repo-path if omitted)'
+    )
+    parser.add_argument(
+        '--github-token',
+        help='GitHub personal access token (preferred). If omitted, we try ~/.config/github-token or ~/.config/gh/hosts.yml.'
     )
     parser.add_argument(
         '--allow-anonymous-github',
@@ -1150,26 +1162,37 @@ def main():
     args = parser.parse_args()
 
     base_dir = (args.repo_path or args.base_dir or Path.cwd()).resolve()
+    out_path = (Path(args.output).resolve() if args.output is not None else (base_dir / "index.html"))
+    page_root_dir = out_path.parent.resolve()
+
+    repo_root = Path(args.repo_root).resolve() if args.repo_root is not None else None
+    if repo_root is None:
+        repo_root = find_local_clone_of_repo(base_dir, repo_slug=f"{DYNAMO_OWNER}/{DYNAMO_REPO}")
+    if repo_root is None:
+        # Best-effort fallback: YAML parsing will degrade gracefully.
+        repo_root = base_dir
 
     # Prune locally-served raw logs to avoid unbounded growth and delete any partial/unverified artifacts.
     # We only render `[raw log]` links when the local file exists (or was materialized),
     # so pruning won't produce dead links on a freshly generated page.
     try:
         with phase_t.phase("prune"):
-            _ = prune_dashboard_raw_logs(page_root_dir=base_dir, max_age_days=30)
-            _ = prune_partial_raw_log_caches(page_root_dirs=[base_dir])
+            _ = prune_dashboard_raw_logs(page_root_dir=page_root_dir, max_age_days=30)
+            _ = prune_partial_raw_log_caches(page_root_dirs=[page_root_dir])
     except Exception:
         pass
 
     # Scan repositories
     scanner = LocalRepoScanner(
-        token=args.token,
+        token=args.github_token,
         refresh_closed_prs=bool(args.refresh_closed_prs),
         max_branches=args.max_branches,
         max_checks_fetch=args.max_checks_fetch,
         allow_anonymous_github=bool(args.allow_anonymous_github),
         max_github_api_calls=int(args.max_github_api_calls),
         enable_success_build_test_logs=bool(args.enable_success_build_test_logs),
+        repo_root=repo_root,
+        page_root_dir=page_root_dir,
     )
     # Cache-only fallback if exhausted.
     try:

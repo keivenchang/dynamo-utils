@@ -8,6 +8,7 @@ __pycache__
 no-commit/
 .venv/
 .cache/
+.devcontainer/
 update_html_pages.log
 .backup_sha
 raw-log-text
