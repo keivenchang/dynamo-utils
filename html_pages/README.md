@@ -14,8 +14,7 @@ HTML dashboard generators and shared UI utilities for monitoring Dynamo CI/CD.
 
 **Utilities:**
 - `update_html_pages.sh` - Cron-friendly wrapper for atomic updates
-- `TREE_NODE_REFERENCE.md` - Complete node type documentation
-- `common_dashboard*.py` - Shared rendering logic
+- `common_dashboard*.py` - Shared rendering logic (see module docstring for node hierarchy)
 
 **Prerequisites:**
 - Python 3.10+
@@ -64,7 +63,7 @@ Scans local git repositories and displays branch status with GitHub integration.
    └─ ✓ Copyright Checks
 ```
 
-See `TREE_NODE_REFERENCE.md` for complete node definitions.
+See module docstring in `common_dashboard_lib.py` for complete node hierarchy and creation flow.
 
 ### CI Check Details
 
@@ -151,12 +150,26 @@ python3 show_remote_branches.py \
 
 ### Cron Integration
 
-```bash
-# Via update_html_pages.sh
-REMOTE_GITHUB_USERS="user1 user2" update_html_pages.sh --show-remote-branches
+**Working hours (8am-6pm PT):** Every 1 minute
+```cron
+# Working hours: 16:00-23:59 UTC + 00:00-01:59 UTC
+* 16-23 * * * NVIDIA_HOME=$HOME/dynamo REMOTE_GITHUB_USERS="kthui keivenchang" $HOME/dynamo/dynamo-utils/cron_log.sh remote_prs_working $HOME/dynamo/dynamo-utils/html_pages/update_html_pages.sh --show-remote-branches
+* 0-1 * * * NVIDIA_HOME=$HOME/dynamo REMOTE_GITHUB_USERS="kthui keivenchang" $HOME/dynamo/dynamo-utils/cron_log.sh remote_prs_working $HOME/dynamo/dynamo-utils/html_pages/update_html_pages.sh --show-remote-branches
 ```
 
-See `CRONTAB_REMOTE_BRANCHES.md` for scheduling details.
+**Off hours (6pm-8am PT):** Every 20 minutes
+```cron
+# Off hours: 02:00-15:59 UTC
+*/20 2-15 * * * NVIDIA_HOME=$HOME/dynamo REMOTE_GITHUB_USERS="kthui keivenchang" $HOME/dynamo/dynamo-utils/cron_log.sh remote_prs_offhours $HOME/dynamo/dynamo-utils/html_pages/update_html_pages.sh --show-remote-branches
+```
+
+**Output locations:**
+- `$HOME/dynamo/speedoflight/users/kthui/index.html`
+- `$HOME/dynamo/speedoflight/users/keivenchang/index.html`
+
+**Logs:**
+- Working hours: `~/dynamo/logs/YYYY-MM-DD/remote_prs_working.log`
+- Off hours: `~/dynamo/logs/YYYY-MM-DD/remote_prs_offhours.log`
 
 ---
 
@@ -372,11 +385,9 @@ Multiply by number of PRs to estimate total. Budget (`--max-github-api-calls`) c
 
 ## Quick Reference
 
-**Node types:** See `TREE_NODE_REFERENCE.md`
+**Node hierarchy:** See `common_dashboard_lib.py` module docstring for complete tree structure and creation flow
 
 **Common modifications:**
-- Branch line format → `BranchInfoNode._format_html_content()`
-- CI expansion logic → `PRStatusNode.to_tree_vm()` or `CIJobTreeNode._subtree_needs_attention()`
-- Repo icon → `RepoNode._format_html_content()`
-
-**Helper functions:** See "Shared Helper Functions" in `TREE_NODE_REFERENCE.md`
+- Branch line format → `BranchInfoNode.to_tree_vm()`
+- CI expansion logic → `PRStatusWithJobsNode.to_tree_vm()` or `ci_should_expand_by_default()`
+- Pass customization → `common_dashboard_lib.py` (PASS -1 through PASS 8)

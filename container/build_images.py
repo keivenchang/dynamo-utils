@@ -361,6 +361,18 @@ def create_task_graph(framework: str, sha: str, repo_path: Path, version: Option
         timeout=45.0,  # 45 seconds for sanity checks
     )
 
+    # Level 5: Dev upload (runs after dev sanity check succeeds, in parallel with local-dev build)
+    gitlab_dev_image_tag = f"gitlab-master.nvidia.com:5005/dl/ai-dynamo/dynamo/dev/{dev_image_tag}"
+    tasks[f"{framework}-dev-upload"] = CommandTask(
+        task_id=f"{framework}-dev-upload",
+        description=f"Upload {framework.upper()} dev image to GitLab registry",
+        command=f"echo 'Placeholder: Would upload {dev_image_tag} to {gitlab_dev_image_tag}'",
+        input_image=dev_image_tag,
+        output_image=gitlab_dev_image_tag,
+        parents=[f"{framework}-dev-sanity"],
+        timeout=600.0,  # 10 minutes for upload
+    )
+
     # Level 3: Local-dev image build
     local_dev_image_tag = f"dynamo:{version}-{framework}-local-dev"
     tasks[f"{framework}-local-dev-build"] = BuildTask(
@@ -523,9 +535,7 @@ class BaseTask(ABC):
             if self.log_file is None:
                 raise ValueError("log_file is not set")
             with open(self.log_file, 'a') as log_fh:
-                log_fh.write(f"\n{'='*80}\n")
-                log_fh.write(f"Executing: {command}\n")
-                log_fh.write(f"{'='*80}\n\n")
+                log_fh.write(f"\n→ {command}\n\n")
                 log_fh.flush()
 
                 # Run the command
@@ -743,11 +753,11 @@ class BaseTask(ABC):
             Formatted header string
         """
         from datetime import datetime
-        header = f"Task:              {self.task_id}\n"
-        header += f"Description:       {self.description}\n"
-        header += f"Command:           {sanitize_token(self.get_command(repo_path))}\n"
-        header += f"Started:           {datetime.now().isoformat()}\n"
-        header += "=" * 80 + "\n\n"
+        header = f"Task:        {self.task_id}\n"
+        header += f"Description: {self.description}\n"
+        header += f"Command:     {sanitize_token(self.get_command(repo_path))}\n"
+        header += f"Started:     {datetime.now().isoformat()}\n"
+        header += "-" * 80 + "\n"
         return header
 
     def format_log_footer(self, success: bool) -> str:
@@ -766,12 +776,11 @@ class BaseTask(ABC):
             duration = 0.0
 
         footer = f"\n"
-        footer += f"{'='*80}\n"
-        footer += f"Task: {self.task_id}\n"
+        footer += f"-" * 80 + "\n"
+        footer += f"Task:     {self.task_id}\n"
         footer += f"Duration: {duration:.2f}s\n"
-        footer += f"Exit code: {self.exit_code if self.exit_code is not None else (0 if success else 1)}\n"
-        footer += f"Status: {'SUCCESS' if success else 'FAILED'}\n"
-        footer += f"{'='*80}\n"
+        footer += f"Status:   {'SUCCESS' if success else 'FAILED'} (exit code: {self.exit_code if self.exit_code is not None else (0 if success else 1)})\n"
+        footer += f"-" * 80 + "\n"
         return footer
 
     def passed_previously(self) -> bool:
@@ -911,11 +920,11 @@ class BuildTask(BaseTask):
             Formatted header string
         """
         from datetime import datetime
-        header = f"Task:              {self.task_id}\n"
-        header += f"Description:       {self.description}\n"
-        header += f"Command:           {sanitize_token(self.get_command(repo_path))}\n"
-        header += f"Started:           {datetime.now().isoformat()}\n"
-        header += "=" * 80 + "\n\n"
+        header = f"Task:        {self.task_id}\n"
+        header += f"Description: {self.description}\n"
+        header += f"Command:     {sanitize_token(self.get_command(repo_path))}\n"
+        header += f"Started:     {datetime.now().isoformat()}\n"
+        header += "-" * 80 + "\n"
         return header
 
 
@@ -2052,7 +2061,7 @@ def initialize_frameworks_data_cache(
     hostname = DEFAULT_HOSTNAME
     html_path = DEFAULT_HTML_PATH
     frameworks_data: Dict[str, Dict[str, Any]] = {}
-    targets = ['runtime', 'dev', 'local-dev']
+    targets = ['runtime', 'dev', 'dev-upload', 'local-dev']
 
     # Determine which frameworks are actually being run (present in all_tasks)
     frameworks_in_all_tasks = set()
@@ -2074,6 +2083,43 @@ def initialize_frameworks_data_cache(
         for target in targets:
             # Initialize target structure
             frameworks_data[framework][target] = FrameworkTargetData()
+
+            # Special handling for dev-upload: it's a CommandTask, not a BuildTask
+            if target == 'dev-upload':
+                task_id_for_upload = f"{framework}-dev-upload"
+                upload_task = None
+                
+                # Try to get from all_tasks (frameworks currently being run)
+                if task_id_for_upload in all_tasks and isinstance(all_tasks[task_id_for_upload], CommandTask):
+                    upload_task = all_tasks[task_id_for_upload]
+                # Otherwise, get from temp_tasks (frameworks NOT being run)
+                elif temp_tasks and task_id_for_upload in temp_tasks and isinstance(temp_tasks[task_id_for_upload], CommandTask):
+                    upload_task = temp_tasks[task_id_for_upload]
+                
+                if upload_task:
+                    frameworks_data[framework][target].input_image = upload_task.input_image
+                    frameworks_data[framework][target].output_image = upload_task.output_image
+                    # Don't check image size for dev-upload (will be set when upload succeeds)
+                
+                # Load previous upload log (if exists)
+                prev_log_result = find_previous_log_file(repo_path, date_str, sha, f"{framework}-dev-upload")
+                if prev_log_result:
+                    log_file, found_log_dir = prev_log_result
+                    log_results = parse_log_file_results(log_file)
+                    if log_results:
+                        # If log is from a different date, use relative path
+                        if found_log_dir.name != date_str:
+                            log_link = f"../{found_log_dir.name}/{log_file.name}"
+                        else:
+                            log_link = log_file.name
+
+                        frameworks_data[framework][target].build = TaskData(
+                            status='skipped',
+                            time=f"{log_results.duration:.1f}s" if log_results.duration else None,
+                            log_file=log_link if not use_absolute_urls else f"http://{hostname}{html_path}/{found_log_dir.name}/{log_file.name}",
+                            prev_status=log_results.status.value,
+                        )
+                continue  # Skip the normal BuildTask handling for dev-upload
 
             # Get BuildTask for this target to extract image info
             # BuildTask IDs now have -build suffix: framework-target-build
@@ -2098,24 +2144,26 @@ def initialize_frameworks_data_cache(
                     if image_size:
                         frameworks_data[framework][target].image_size = image_size
 
+
+
             # Load previous build log (if exists) - search current and previous dates
             prev_log_result = find_previous_log_file(repo_path, date_str, sha, f"{framework}-{target}-build")
             if prev_log_result:
-                log_file, found_log_dir = prev_log_result
-                log_results = parse_log_file_results(log_file)
-                if log_results:
-                    # If log is from a different date, use relative path
-                    if found_log_dir.name != date_str:
-                        log_link = f"../{found_log_dir.name}/{log_file.name}"
-                    else:
-                        log_link = log_file.name
+                    log_file, found_log_dir = prev_log_result
+                    log_results = parse_log_file_results(log_file)
+                    if log_results:
+                        # If log is from a different date, use relative path
+                        if found_log_dir.name != date_str:
+                            log_link = f"../{found_log_dir.name}/{log_file.name}"
+                        else:
+                            log_link = log_file.name
 
-                    frameworks_data[framework][target].build = TaskData(
-                        status='skipped',
-                        time=f"{log_results.duration:.1f}s" if log_results.duration else None,
-                        log_file=log_link if not use_absolute_urls else f"http://{hostname}{html_path}/{found_log_dir.name}/{log_file.name}",
-                        prev_status=log_results.status.value,  # Use .value (lowercase) not .name (uppercase)
-                    )
+                        frameworks_data[framework][target].build = TaskData(
+                            status='skipped',
+                            time=f"{log_results.duration:.1f}s" if log_results.duration else None,
+                            log_file=log_link if not use_absolute_urls else f"http://{hostname}{html_path}/{found_log_dir.name}/{log_file.name}",
+                            prev_status=log_results.status.value,  # Use .value (lowercase) not .name (uppercase)
+                        )
 
             # Load previous compilation log (if exists) - search current and previous dates
             if target in ['dev', 'local-dev']:
@@ -2225,6 +2273,18 @@ def update_frameworks_data_cache(task: 'BaseTask', use_absolute_urls: bool = Fal
         elif 'sanity' in rest:
             target = rest.replace('-sanity', '')
             _frameworks_data_cache[framework][target].sanity = create_task_data_from_task(task)
+        elif 'upload' in rest:
+            target = rest.replace('-upload', '')
+            _frameworks_data_cache[framework][target].build = create_task_data_from_task(task)
+            # Update image info for upload task
+            if task.output_image:
+                _frameworks_data_cache[framework][target].output_image = task.output_image
+            if task.input_image:
+                _frameworks_data_cache[framework][target].input_image = task.input_image
+            # Set image size to the dev image size when upload succeeds
+            if task.status == TaskStatus.PASSED and framework in _frameworks_data_cache:
+                if 'dev' in _frameworks_data_cache[framework]:
+                    _frameworks_data_cache[framework][target].image_size = _frameworks_data_cache[framework]['dev'].image_size
 
 
 def update_report_status_marker(

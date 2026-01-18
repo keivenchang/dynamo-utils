@@ -68,24 +68,28 @@ from common_dashboard_runtime import (
 # Log/snippet helpers (shared library: `dynamo-utils/ci_log_errors/`)
 from ci_log_errors import snippet as ci_snippet
 
-# Import utilities from common module
+# Import utilities from common and API modules
 import common
 from common import (
     DynamoRepositoryUtils,
-    GitLabAPIClient,
-    GitHubAPIClient,
     PhaseTimer,
-    classify_ci_kind,
-    format_gh_check_run_duration,
     dynamo_utils_cache_dir,
     MARKER_RUNNING,
     MARKER_PASSED,
     MARKER_FAILED,
     MARKER_KILLED,
-    summarize_check_runs,
     select_shas_for_network_fetch,
+)
+from common_github import (
+    GitHubAPIClient,
+    classify_ci_kind,
+    format_gh_check_run_duration,
+    summarize_check_runs,
     normalize_check_name,
     is_required_check_name,
+)
+from common_gitlab import (
+    GitLabAPIClient,
 )
 
 # Import Jinja2 for HTML template rendering
@@ -1721,7 +1725,7 @@ class CommitHistoryGenerator:
             # the local-branches tree UX (and makes missing required checks visible).
             try:
                 from common_dashboard_lib import EXPECTED_CHECK_PLACEHOLDER_SYMBOL  # local import
-                from common import normalize_check_name  # local import
+                from common_github import normalize_check_name  # local import
 
                 present_norm = {
                     normalize_check_name(str((cr or {}).get("name", "") or ""))

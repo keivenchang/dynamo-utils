@@ -9,20 +9,20 @@ Goal: IDENTICAL look & feel as `show_local_branches.py`, but organized by GitHub
 instead of local repository directory.
 
 Structure:
-- UserNode (GitHub user) → BranchInfoNode (remote branch) → CommitMessageNode, MetadataNode,
-  PRNode, PRStatusNode (PASSED/FAILED pill) → CIJobNode (CI jobs with hierarchy)
+- UserNode (GitHub user) → BranchInfoNode (remote branch) → BranchCommitMessageNode, BranchMetadataNode,
+  PRNode, PRStatusWithJobsNode (PASSED/FAILED pill) → CIJobNode (CI jobs with hierarchy)
 
 IMPORTANT: Architecture Rule
 ---------------------------
 ⚠️ show_remote_branches.py and show_local_branches.py should NEVER import from each other!
    - ALL shared code lives in: common_branch_nodes.py, common_dashboard_lib.py, common.py
-   - ✅ REFACTORED: PRStatusNode and _build_ci_hierarchy_nodes now in common_branch_nodes.py
+   - ✅ REFACTORED: PRStatusWithJobsNode and _build_ci_hierarchy_nodes now in common_branch_nodes.py
 
 This ensures IDENTICAL rendering logic for status pills, CI hierarchy, and all formatting
 between local and remote branch dashboards.
 
 Other shared utilities:
-- `BranchInfoNode`, `CommitMessageNode`, `MetadataNode`, `generate_html` from `common_branch_nodes.py`
+- `BranchInfoNode`, `BranchCommitMessageNode`, `BranchMetadataNode`, `generate_html` from `common_branch_nodes.py`
 - `GitHubAPIClient` from `common.py`
 """
 
@@ -47,7 +47,7 @@ if str(_UTILS_DIR) not in sys.path:
 if str(_THIS_DIR) not in sys.path:
     sys.path.insert(0, str(_THIS_DIR))
 
-from common import GitHubAPIClient, PRInfo  # noqa: E402
+from common_github import GitHubAPIClient, PRInfo  # noqa: E402
 from html_pages.common_dashboard_runtime import prune_dashboard_raw_logs, prune_partial_raw_log_caches  # noqa: E402
 
 # Import shared branch/PR node classes and helpers
@@ -60,16 +60,15 @@ from common_branch_nodes import (  # noqa: E402
     BranchInfoNode,
     BlockedMessageNode,
     CIJobNode,
-    CommitMessageNode,
+    BranchCommitMessageNode,
     ConflictWarningNode,
-    MetadataNode,
+    BranchMetadataNode,
     PRNode,
-    PRStatusNode,
+    PRStatusWithJobsNode,
     PRURLNode,
     RawLogValidationError,
     RepoNode,
     RerunLinkNode,
-    SectionNode,
     _assume_completed_for_check_row,
     _duration_str_to_seconds,
     _format_age_compact,
@@ -125,26 +124,6 @@ class UserNode(BranchNode):
             collapsible=bool(has_children),
             default_expanded=True,
         )
-
-
-class RemoteBranchInfoNode(BranchInfoNode):
-    """Branch line for remote PRs (inherits new structure from BranchInfoNode).
-
-    Structure (same as local):
-    - Branch line: copy + label + → base + [SHA]
-    - Child 1: Commit message (PR#)
-    - Child 2: (modified, created, age)
-    - Child 3+: PRStatusNode
-    """
-    # No override needed - BranchInfoNode.to_tree_vm() already implements the correct structure.
-
-
-class RemotePRStatusNode(PRStatusNode):
-    """Remote PR status node (inherits collapse logic from PRStatusNode).
-    
-    Policy: collapsed for PASSED, expanded for FAILED/RUNNING (same as local).
-    """
-    # No override needed - PRStatusNode.to_tree_vm() already implements the correct logic.
 
 
 def main() -> int:
@@ -294,7 +273,7 @@ def main() -> int:
             commit_msg = str(pr.title or "").strip()
             commit_msg = re.sub(r'^#\d+\s+', '', commit_msg)
 
-            branch_node = RemoteBranchInfoNode(
+            branch_node = BranchInfoNode(
                 label=branch_name,
                 sha=sha7 or None,
                 is_current=False,
@@ -306,7 +285,13 @@ def main() -> int:
             )
             user_node.add_child(branch_node)  # Add to user_node, not root
 
-            status_node = RemotePRStatusNode(
+            # Conflict/blocking messages (branch-level; show immediately after metadata)
+            if pr.conflict_message:
+                branch_node.add_child(ConflictWarningNode(label=str(pr.conflict_message)))
+            if pr.blocking_message:
+                branch_node.add_child(BlockedMessageNode(label=str(pr.blocking_message)))
+
+            status_node = PRStatusWithJobsNode(
                 label="",
                 pr=pr,
                 github_api=gh,
@@ -320,14 +305,7 @@ def main() -> int:
             )
             branch_node.add_child(status_node)  # Add directly to branch_node
 
-            # CI nodes will be built later in the pipeline passes (build_ci_nodes / mock_build_ci_nodes)
-            # No longer building CI hierarchy here - moved to common_dashboard_lib.py passes
-
-            # Conflict/blocking messages (add directly to branch_node).
-            if pr.conflict_message:
-                branch_node.add_child(BranchNode(label=str(pr.conflict_message)))
-            if pr.blocking_message:
-                branch_node.add_child(BranchNode(label=str(pr.blocking_message)))
+            # CI nodes are built inside PRStatusWithJobsNode via run_all_passes().
         return root
 
     prs_list = list(prs or [])

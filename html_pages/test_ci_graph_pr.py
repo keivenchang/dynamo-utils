@@ -9,7 +9,7 @@ from pathlib import Path
 # Add parent to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from common import GitHubAPIClient
+from common_github import GitHubAPIClient
 from html_pages.ci_graph_view import CIGraph, GraphNode, parse_workflow_yaml_to_graph, render_graph_html
 
 def main():

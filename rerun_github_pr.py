@@ -19,7 +19,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Dict, List, Optional, Set
 
-from common import GitHubAPIClient
+from common_github import GitHubAPIClient
 
 
 # Code-related error patterns to detect

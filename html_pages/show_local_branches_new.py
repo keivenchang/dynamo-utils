@@ -9,20 +9,20 @@ Goal: IDENTICAL look & feel as `show_remote_branches.py`, but organized by local
 Git repository directory instead of GitHub username.
 
 Structure:
-- RepoNode (local repo) → BranchInfoNode (local branch) → CommitMessageNode, MetadataNode,
-  PRNode, PRStatusNode (PASSED/FAILED pill) → CIJobNode (CI jobs with hierarchy)
+- RepoNode (local repo) → BranchInfoNode (local branch) → BranchCommitMessageNode, BranchMetadataNode,
+  PRNode, PRStatusWithJobsNode (PASSED/FAILED pill) → CIJobNode (CI jobs with hierarchy)
 
 IMPORTANT: Architecture Rule
 ---------------------------
 ⚠️ show_remote_branches.py and show_local_branches.py should NEVER import from each other!
    - ALL shared code lives in: common_branch_nodes.py, common_dashboard_lib.py, common.py
-   - ✅ REFACTORED: PRStatusNode and _build_ci_hierarchy_nodes now in common_branch_nodes.py
+   - ✅ REFACTORED: PRStatusWithJobsNode and _build_ci_hierarchy_nodes now in common_branch_nodes.py
 
 This ensures IDENTICAL rendering logic for status pills, CI hierarchy, and all formatting
 between local and remote branch dashboards.
 
 Other shared utilities:
-- `BranchInfoNode`, `CommitMessageNode`, `MetadataNode`, `generate_html` from `common_branch_nodes.py`
+- `BranchInfoNode`, `BranchCommitMessageNode`, `BranchMetadataNode`, `generate_html` from `common_branch_nodes.py`
 - `GitHubAPIClient` from `common.py`
 """
 
@@ -48,7 +48,7 @@ if str(_UTILS_DIR) not in sys.path:
 if str(_THIS_DIR) not in sys.path:
     sys.path.insert(0, str(_THIS_DIR))
 
-from common import GitHubAPIClient, PRInfo  # noqa: E402
+from common_github import GitHubAPIClient, PRInfo  # noqa: E402
 from html_pages.common_dashboard_runtime import prune_dashboard_raw_logs, prune_partial_raw_log_caches  # noqa: E402
 
 # Import shared branch/PR node classes and helpers
@@ -61,16 +61,15 @@ from common_branch_nodes import (  # noqa: E402
     BranchInfoNode,
     BlockedMessageNode,
     CIJobNode,
-    CommitMessageNode,
+    BranchCommitMessageNode,
     ConflictWarningNode,
-    MetadataNode,
+    BranchMetadataNode,
     PRNode,
-    PRStatusNode,
+    PRStatusWithJobsNode,
     PRURLNode,
     RawLogValidationError,
     RepoNode,
     RerunLinkNode,
-    SectionNode,
     _assume_completed_for_check_row,
     _duration_str_to_seconds,
     _format_age_compact,
@@ -279,7 +278,7 @@ def main() -> int:
                 refresh=bool(args.refresh_checks),
             )
             
-            status_node = PRStatusNode(
+            status_node = PRStatusWithJobsNode(
                 label="",
                 pr=pr,
                 github_api=gh,

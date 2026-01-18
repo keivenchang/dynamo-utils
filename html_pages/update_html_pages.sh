@@ -15,8 +15,8 @@
 #   MAX_GITHUB_API_CALLS - If set, pass --max-github-api-calls to the Python generators.
 #                          Useful to keep cron runs predictable; defaults remain script-side.
 #   DYNAMO_UTILS_TRACE  - If set (non-empty), enable shell tracing (set -x). Off by default to avoid noisy logs / secrets.
-#   DYNAMO_UTILS_TESTING - (deprecated) If set, behave like --fast-debug (write debug.html and fewer commits).
-#   MAX_COMMITS         - If set, cap commits for commit-history (default: 200; overridden by --fast-debug).
+#   DYNAMO_UTILS_TESTING - (deprecated) If set, behave like --output-debug-html (write debug.html and fewer commits).
+#   MAX_COMMITS         - If set, cap commits for commit-history (default: 200; overridden by --output-debug-html).
 #   DYNAMO_UTILS_CACHE_DIR - If set, overrides ~/.cache/dynamo-utils for the resource report DB lookup.
 #   RESOURCE_DB         - If set, explicit SQLite path for resource report (default: $DYNAMO_UTILS_CACHE_DIR/resource_monitor.sqlite).
 #
@@ -32,10 +32,10 @@
 #   --show-commit-history   Update the commit history dashboard ($NVIDIA_HOME/dynamo_latest/index.html)
 #   --show-local-resources  Update the resource report ($NVIDIA_HOME/resource_report.html)
 #   --show-remote-branches  Update remote PR dashboards for selected GitHub users (IDENTICAL UI to local branches)
-#   --fast-debug            Faster runs: outputs to debug.html instead of index.html, uses smaller commit window (10 commits), shorter resource window
+#   --output-debug-html            Faster runs: outputs to debug.html instead of index.html, uses smaller commit window (10 commits), shorter resource window
 #   --github-token <token>  GitHub token to pass to all show_*.py scripts (preferred).
 #   --gitlab-fetch-skip     Skip fetching from GitLab API (commit-history only); use cached data only (faster).
-#   --gitlab-fetch          Explicitly allow GitLab fetching (overrides --fast-debug default).
+#   --gitlab-fetch          Explicitly allow GitLab fetching (overrides --output-debug-html default).
 #   --dry-run               Print what would be executed without actually running commands
 #   --run-ignore-lock        Bypass the /tmp lock (no flock). Useful for manual runs when a stale lock exists.
 #
@@ -70,7 +70,7 @@ NVIDIA_HOME="${NVIDIA_HOME:-$(dirname "$UTILS_DIR")}"
 
 LOGS_DIR="$NVIDIA_HOME/logs"
 FAST_DEBUG="${FAST_DEBUG:-false}"
-# Back-compat: treat env var like --fast-debug.
+# Back-compat: treat env var like --output-debug-html.
 if [ -n "${DYNAMO_UTILS_TESTING:-}" ]; then
     FAST_DEBUG=true
 fi
@@ -82,17 +82,17 @@ Usage: update_html_pages.sh [FLAGS]
 If no args are provided, ALL tasks run.
 
 Flags:
-  --show-local-branches     Write: $NVIDIA_HOME/index.html (or debug.html in --fast-debug)
-  --show-commit-history     Write: $NVIDIA_HOME/dynamo_latest/index.html (or debug.html in --fast-debug)
-  --show-local-resources    Write: $NVIDIA_HOME/resource_report.html (or resource_report_debug.html in --fast-debug)
-  --show-remote-branches    Write: $HOME/dynamo/speedoflight/dynamo/users/<user>/index.html (or debug.html in --fast-debug)
+  --show-local-branches     Write: $NVIDIA_HOME/index.html (or debug.html in --output-debug-html)
+  --show-commit-history     Write: $NVIDIA_HOME/dynamo_latest/index.html (or debug.html in --output-debug-html)
+  --show-local-resources    Write: $NVIDIA_HOME/resource_report.html (or resource_report_debug.html in --output-debug-html)
+  --show-remote-branches    Write: $HOME/dynamo/speedoflight/dynamo/users/<user>/index.html (or debug.html in --output-debug-html)
   --show-remote-history     Alias for --show-remote-branches (back-compat)
 
-  --fast-debug              Faster runs: outputs to debug.html instead of index.html, uses smaller commit window (10 commits), shorter resource window
+  --output-debug-html              Faster runs: outputs to debug.html instead of index.html, uses smaller commit window (10 commits), shorter resource window
   --enable-success-build-test-logs  Opt-in: cache raw logs for successful *-build-test jobs to parse pytest slowest tests under "Run tests" (slower)
   --gitlab-fetch-skip       Skip fetching from GitLab API (commit-history only); use cached data only (faster).
-  --gitlab-fetch            Explicitly allow GitLab fetching (overrides --fast-debug default).
-                           Default: GitLab fetch is skipped in --fast-debug.
+  --gitlab-fetch            Explicitly allow GitLab fetching (overrides --output-debug-html default).
+                           Default: GitLab fetch is skipped in --output-debug-html.
   --github-token <token>    GitHub token to pass to all show_*.py scripts.
 
   --dry-run                 Print what would be executed without actually running commands
@@ -135,7 +135,7 @@ while [ "$#" -gt 0 ]; do
             RUN_RESOURCE_REPORT=true; ANY_FLAG=true; shift ;;
         --show-remote-branches)
             RUN_SHOW_REMOTE_BRANCHES=true; ANY_FLAG=true; shift ;;
-        --fast-debug)
+        --output-debug-html)
             FAST_DEBUG=true; shift ;;
         --enable-success-build-test-logs)
             ENABLE_SUCCESS_BUILD_TEST_LOGS=true; shift ;;
@@ -148,7 +148,7 @@ while [ "$#" -gt 0 ]; do
         --gitlab-fetch-skip)
             GITLAB_FETCH_SKIP_MODE="skip"; shift ;;
         --gitlab-fetch)
-            # Explicitly allow GitLab fetching (overrides --fast-debug default).
+            # Explicitly allow GitLab fetching (overrides --output-debug-html default).
             GITLAB_FETCH_SKIP_MODE="fetch"; shift ;;
         --dry-run)
             DRY_RUN=true; shift ;;
@@ -179,7 +179,7 @@ elif [ "$GITLAB_FETCH_SKIP_MODE" = "fetch" ]; then
     GITLAB_FETCH_SKIP_EFFECTIVE=false
 else
     # auto mode:
-    # - In --fast-debug, default to skip GitLab fetch (much faster; good for interactive debugging).
+    # - In --output-debug-html, default to skip GitLab fetch (much faster; good for interactive debugging).
     # - Otherwise, honor legacy env vars if set.
     if [ "$FAST_DEBUG" = true ]; then
         GITLAB_FETCH_SKIP_EFFECTIVE=true
@@ -188,7 +188,7 @@ else
     fi
 fi
 
-# Compute branches output path after parsing flags so `--fast-debug` is honored.
+# Compute branches output path after parsing flags so `--output-debug-html` is honored.
 BRANCHES_BASENAME="${BRANCHES_BASENAME:-index.html}"
 if [ "$FAST_DEBUG" = true ]; then
     BRANCHES_BASENAME="debug.html"

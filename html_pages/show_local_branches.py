@@ -7,14 +7,14 @@ Show dynamo branches with PR information using a node-based tree structure.
 Supports parallel data gathering for improved performance.
 
 Structure:
-- RepoNode (local directory) → BranchInfoNode (branch) → CommitMessageNode, MetadataNode,
-  PRNode, PRStatusNode (PASSED/FAILED pill) → CIJobNode (CI jobs with hierarchy)
+- RepoNode (local directory) → BranchInfoNode (branch) → BranchCommitMessageNode, BranchMetadataNode,
+  PRNode, PRStatusWithJobsNode (PASSED/FAILED pill) → CIJobNode (CI jobs with hierarchy)
 
 IMPORTANT: Architecture Rule
 ---------------------------
 ⚠️ show_local_branches.py and show_remote_branches.py should NEVER import from each other!
    - ALL shared code lives in: common_branch_nodes.py, common_dashboard_lib.py, common.py
-   - ✅ REFACTORED: PRStatusNode and _build_ci_hierarchy_nodes now in common_branch_nodes.py
+   - ✅ REFACTORED: PRStatusWithJobsNode and _build_ci_hierarchy_nodes now in common_branch_nodes.py
 
 This is the reference implementation for branch/PR dashboards. show_remote_branches.py
 imports the same shared components from common_branch_nodes.py to ensure IDENTICAL
@@ -28,7 +28,7 @@ Key Features:
 - Cached GitHub API calls with smart TTL
 - Failure snippets with raw log caching
 
-NOTE: The actual implementation of PRStatusNode, _build_ci_hierarchy_nodes, and related
+NOTE: The actual implementation of PRStatusWithJobsNode, _build_ci_hierarchy_nodes, and related
 classes/functions are in common_branch_nodes.py. This file only imports them.
 """
 
@@ -102,16 +102,18 @@ except Exception:  # pragma: no cover
     FileSystemLoader = None  # type: ignore[assignment]
     select_autoescape = None  # type: ignore[assignment]
 
-# Import GitHub utilities from common module
+# Import utilities from common and common_github modules
 import common
 from common import (
+    PhaseTimer,
+    dynamo_utils_cache_dir,
+)
+from common_github import (
     FailedCheck,
     GHPRCheckRow,
     GitHubAPIClient,
-    PhaseTimer,
     PRInfo,
     classify_ci_kind,
-    dynamo_utils_cache_dir,
     summarize_pr_check_rows,
 )
 
@@ -151,16 +153,15 @@ from common_branch_nodes import (
     BranchInfoNode,
     BranchNode,
     CIJobNode,
-    CommitMessageNode,
+    BranchCommitMessageNode,
     ConflictWarningNode,
-    MetadataNode,
+    BranchMetadataNode,
     PRNode,
-    PRStatusNode,
+    PRStatusWithJobsNode,
     PRURLNode,
     RawLogValidationError,
     RepoNode,
     RerunLinkNode,
-    SectionNode,
     _assume_completed_for_check_row,
     _duration_str_to_seconds,
     _is_known_required_check,
@@ -318,204 +319,6 @@ def _copy_icon_svg(*, size_px: int = 12) -> str:
 
 # Keep a module-level constant for existing call sites / template rendering.
 _COPY_ICON_SVG = _copy_icon_svg(size_px=12)
-
-
-def _format_epoch_pt(epoch_s: Optional[int]) -> Optional[str]:
-    """Format an epoch as 'YYYY-mm-dd HH:MM:SS PT'."""
-    if epoch_s is None:
-        return None
-    try:
-        dt = datetime.fromtimestamp(int(epoch_s), tz=timezone.utc).astimezone(ZoneInfo("America/Los_Angeles"))
-        return dt.strftime("%Y-%m-%d %H:%M:%S %Z")
-    except Exception:
-        return None
-
-
-def _format_seconds_delta_short(seconds: Optional[int]) -> Optional[str]:
-    if seconds is None:
-        return None
-    try:
-        return GitHubAPIClient._format_seconds_delta(int(seconds))
-    except Exception:
-        return None
-
-
-def _parse_rate_limit_resources(rate_limit_payload: Dict[str, object]) -> Dict[str, Dict[str, object]]:
-    """Parse /rate_limit payload into a stable dict: {resource_name: {limit, remaining, used, reset_epoch,...}}."""
-    out: Dict[str, Dict[str, object]] = {}
-    resources = (rate_limit_payload or {}).get("resources")  # type: ignore[assignment]
-    if not isinstance(resources, dict):
-        return out
-    now = int(time.time())
-    for name, info in resources.items():
-        if not isinstance(name, str) or not isinstance(info, dict):
-            continue
-        try:
-            limit = info.get("limit")
-            remaining = info.get("remaining")
-            used = info.get("used")
-            reset_epoch = info.get("reset")
-            limit_i = int(limit) if limit is not None else None
-            remaining_i = int(remaining) if remaining is not None else None
-            used_i = int(used) if used is not None else None
-            reset_i = int(reset_epoch) if reset_epoch is not None else None
-        except Exception:
-            continue
-        seconds_until = (reset_i - now) if reset_i is not None else None
-        out[name] = {
-            "limit": limit_i,
-            "remaining": remaining_i,
-            "used": used_i,
-            "reset_epoch": reset_i,
-            "reset_pt": _format_epoch_pt(reset_i),
-            "seconds_until_reset": seconds_until,
-            "until_reset": _format_seconds_delta_short(seconds_until),
-        }
-    return out
-
-
-def _rate_limit_history_path() -> Path:
-    # Keep this under the shared dynamo-utils cache dir so it persists across runs (host/container).
-    return dynamo_utils_cache_dir() / "dashboards" / "show_local_branches" / "gh_rate_limit_history.jsonl"
-
-
-def _load_rate_limit_history(path: Path, *, max_points: int = 288) -> List[Dict[str, object]]:
-    """Load jsonl history (best-effort). Keeps at most max_points newest entries."""
-    try:
-        if not path.exists():
-            return []
-        lines = path.read_text().splitlines()
-        out: List[Dict[str, object]] = []
-        for line in lines[-max_points:]:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                obj = json.loads(line)
-                if isinstance(obj, dict):
-                    out.append(obj)
-            except Exception:
-                continue
-        return out[-max_points:]
-    except Exception:
-        return []
-
-
-def _append_rate_limit_history(path: Path, sample: Dict[str, object], *, max_points: int = 288) -> List[Dict[str, object]]:
-    """Append a single sample to history and compact to max_points (best-effort). Returns updated history."""
-    hist = _load_rate_limit_history(path, max_points=max_points)
-    hist.append(sample)
-    hist = hist[-max_points:]
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = str(path) + ".tmp"
-        with open(tmp, "w") as f:
-            for row in hist:
-                f.write(json.dumps(row, sort_keys=True) + "\n")
-        os.replace(tmp, path)
-    except Exception:
-        pass
-    return hist
-
-
-def _sparkline_svg_for_percent(points: List[float], *, width: int = 180, height: int = 34) -> str:
-    """Render a tiny inline SVG sparkline for a [0..1] percent series."""
-    if not points:
-        return ""
-    # Clamp + keep only finite-ish.
-    series = []
-    for p in points:
-        try:
-            v = float(p)
-            if v != v:  # NaN
-                continue
-            series.append(max(0.0, min(1.0, v)))
-        except Exception:
-            continue
-    if len(series) < 2:
-        return ""
-
-    pad = 2
-    w = max(int(width), 60)
-    h = max(int(height), 20)
-    x_step = (w - 2 * pad) / float(max(1, len(series) - 1))
-
-    pts = []
-    for i, v in enumerate(series):
-        x = pad + i * x_step
-        # invert y (1.0 at top)
-        y = pad + (1.0 - v) * (h - 2 * pad)
-        pts.append(f"{x:.2f},{y:.2f}")
-    pts_str = " ".join(pts)
-    return (
-        f'<svg width="{w}" height="{h}" viewBox="0 0 {w} {h}" '
-        f'xmlns="http://www.w3.org/2000/svg" style="vertical-align: middle;">'
-        f'<rect x="0" y="0" width="{w}" height="{h}" rx="4" fill="#ffffff" stroke="#d0d7de" />'
-        f'<polyline fill="none" stroke="#0969da" stroke-width="1.5" points="{pts_str}" />'
-        f"</svg>"
-    )
-
-
-def _html_copy_button(*, clipboard_text: str, title: str) -> str:
-    """Return a show_commit_history-style copy button that calls copyFromClipboardAttr(this)."""
-    text_escaped = html.escape(clipboard_text, quote=True)
-    title_escaped = html.escape(title, quote=True)
-    return (
-        f'<button data-clipboard-text="{text_escaped}" '
-        f'onclick="event.preventDefault(); copyFromClipboardAttr(this);" '
-        f'style="{_COPY_BTN_STYLE}" '
-        f'title="{title_escaped}" '
-        f'onmouseover="this.style.backgroundColor=\'#f3f4f6\'; this.style.borderColor=\'#8c959f\';" '
-        f'onmouseout="this.style.backgroundColor=\'transparent\'; this.style.borderColor=\'#d0d7de\';">'
-        f"{_COPY_ICON_SVG}"
-        f"</button>"
-    )
-
-
-def _html_small_link(*, url: str, label: str) -> str:
-    url_escaped = html.escape(url, quote=True)
-    label_escaped = html.escape(label)
-    return (
-        f' <a href="{url_escaped}" target="_blank" '
-        f'style="color: #0969da; font-size: 11px; margin-left: 5px; text-decoration: none;">{label_escaped}</a>'
-    )
-
-def _format_utc_datetime_from_iso(iso_utc: str) -> Optional[str]:
-    """Format a GitHub ISO timestamp (UTC) as UTC time string (YYYY-MM-DD HH:MM)."""
-    try:
-        dt = datetime.fromisoformat(iso_utc.replace("Z", "+00:00"))
-        # Ensure tz-aware
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=ZoneInfo("UTC"))
-        dt_utc = dt.astimezone(ZoneInfo("UTC"))
-        return dt_utc.strftime("%Y-%m-%d %H:%M")
-    except Exception:
-        return None
-
-
-#
-# GitHub CI hierarchy helpers (workflow needs graph + PR checks)
-#
-
-
-def _aggregate_status(statuses: Iterable[str]) -> str:
-    priority = {"failure": 5, "cancelled": 4, "in_progress": 3, "pending": 2, "success": 1, "unknown": 0}
-    best = "unknown"
-    best_p = -1
-    for s in statuses:
-        p = priority.get(s, 0)
-        if p > best_p:
-            best_p = p
-            best = s
-    return best
-
-
-
-
-
-
-
-
 
 
 def looks_like_git_repo_dir(p: Path) -> bool:
@@ -906,8 +709,14 @@ class LocalRepoScanner:
                         refresh=bool(self.refresh_closed_prs),
                     )
                     
+                    # Add conflict/blocking messages (branch-level; show immediately after metadata)
+                    if pr.conflict_message:
+                        branch_node.add_child(ConflictWarningNode(label=pr.conflict_message))
+                    if pr.blocking_message:
+                        branch_node.add_child(BlockedMessageNode(label=pr.blocking_message))
+
                     # Create status node (will contain CI children)
-                    status_node = PRStatusNode(
+                    status_node = PRStatusWithJobsNode(
                         label="",
                         pr=pr,
                         github_api=self.github_api,
@@ -922,18 +731,7 @@ class LocalRepoScanner:
 
                     branch_node.add_child(status_node)
 
-                    # CI nodes will be built later in the pipeline passes (run_all_passes)
-                    # No longer building CI hierarchy here - moved to common_dashboard_lib.py passes
-
-                    # Add conflict warning if applicable
-                    if pr.conflict_message:
-                        conflict_node = ConflictWarningNode(label=pr.conflict_message)
-                        status_node.add_child(conflict_node)
-
-                    # Add blocking message if applicable
-                    if pr.blocking_message:
-                        blocked_node = BlockedMessageNode(label=pr.blocking_message)
-                        status_node.add_child(blocked_node)
+                    # CI nodes will be built later in the pipeline (run_all_passes) inside PRStatusWithJobsNode.
 
                     # With CI hierarchy embedded, we no longer render separate flat running/failed check lines here.
 

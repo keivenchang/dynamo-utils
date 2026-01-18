@@ -1560,8 +1560,8 @@ def _cli(argv: Optional[Sequence[str]] = None) -> int:
         from . import snippet as _snippet
         return int(
             _snippet._audit_snippet_commands(
-                logs_root=Path(str(args.logs_root)),
-                tail_bytes=int(0 if bool(args.no_tail) else int(args.tail_bytes)),
+            logs_root=Path(str(args.logs_root)),
+            tail_bytes=int(0 if bool(args.no_tail) else int(args.tail_bytes)),
             )
         )
 

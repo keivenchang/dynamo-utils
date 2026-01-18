@@ -18,13 +18,14 @@ IMPORTANT: Architecture Rule
 Complete Implementations (all in this file):
 - BranchNode: Base class for all tree nodes
 - BranchInfoNode: Branch line with copy button, label, SHA, metadata
-- CommitMessageNode: Commit message display
-- MetadataNode: Branch metadata (modified, created, age)
+- BranchCommitMessageNode: Commit message display
+- BranchMetadataNode: Branch metadata (modified, created, age)
 - PRNode: PR summary line with status pill and links
-- PRStatusNode: PR status information with collapsible CI hierarchy
+- PRStatusWithJobsNode: PR status information with collapsible CI hierarchy
 - CIJobNode: CI job node with status icon, duration, logs
+- CIStepNode: CI job step node (synthetic, 7px icons)
+- CIPytestNode: Pytest test node (synthetic, 7px icons)
 - RepoNode: Repository directory node (collapsible)
-- SectionNode: Section header for grouping
 - BlockedMessageNode, ConflictWarningNode, RerunLinkNode: Special status nodes
 - build_ci_nodes_from_pr: Build flat CI job list from real PR check rows (PR first param, requires github_api)
 - mock_build_ci_nodes: Build mock CI nodes for dummy PRs (negative PR numbers)
@@ -78,8 +79,8 @@ from common_dashboard_runtime import (
     materialize_job_raw_log_text_local_link,
 )
 
-# Import GitHub utilities from common module
-from common import (
+# Import GitHub utilities from common_github module
+from common_github import (
     FailedCheck,
     GHPRCheckRow,
     GitHubAPIClient,
@@ -102,6 +103,7 @@ from common_dashboard_runtime import (
     prune_partial_raw_log_caches,
 )
 import common
+import common_github
 
 
 def mock_build_ci_nodes(
@@ -658,6 +660,72 @@ class CIJobNode(BranchNode):
         )
 
 
+class CIStepNode(CIJobNode):
+    """A CI job step node (synthetic node representing a step within a GitHub Actions job).
+
+    Steps are parsed from job logs and represent individual actions within a job (e.g., "Build dependencies", "Run tests").
+    They render with smaller icons (7px) to visually distinguish from real jobs.
+    """
+
+    def __init__(
+        self,
+        *,
+        job_id: str,
+        display_name: str = "",
+        status: str = CIStatus.UNKNOWN,
+        duration: str = "",
+        log_url: str = "",
+        children: Optional[List[BranchNode]] = None,
+        expanded: bool = False,
+        **kwargs  # Accept but ignore other CIJobNode parameters
+    ):
+        # Always set is_synthetic=True for steps
+        super().__init__(
+            job_id=job_id,
+            display_name=display_name,
+            status=status,
+            duration=duration,
+            log_url=log_url,
+            is_synthetic=True,  # Steps are always synthetic
+            children=children,
+            expanded=expanded,
+            **kwargs
+        )
+
+
+class CIPytestNode(CIJobNode):
+    """A pytest test node (synthetic node representing an individual pytest test result).
+
+    Pytest tests are parsed from pytest output and represent individual test cases.
+    They render with smaller icons (7px) to visually distinguish from real jobs and steps.
+    """
+
+    def __init__(
+        self,
+        *,
+        job_id: str,
+        display_name: str = "",
+        status: str = CIStatus.UNKNOWN,
+        duration: str = "",
+        log_url: str = "",
+        children: Optional[List[BranchNode]] = None,
+        expanded: bool = False,
+        **kwargs  # Accept but ignore other CIJobNode parameters
+    ):
+        # Always set is_synthetic=True for pytest tests
+        super().__init__(
+            job_id=job_id,
+            display_name=display_name,
+            status=status,
+            duration=duration,
+            log_url=log_url,
+            is_synthetic=True,  # Pytest tests are always synthetic
+            children=children,
+            expanded=expanded,
+            **kwargs
+        )
+
+
 class RepoNode(BranchNode):
     """Represents a repository in the tree (for multi-repo views)."""
     
@@ -670,25 +738,6 @@ class RepoNode(BranchNode):
         label_html = f'<span style="font-weight: 600;">{html_module.escape(self.label)}</span>'
         return TreeNodeVM(
             node_key=f"repo:{id(self)}",
-            label_html=label_html,
-            children=kids,
-            collapsible=False,
-            default_expanded=True,
-        )
-
-
-class SectionNode(BranchNode):
-    """Represents a section header in the tree (for grouping branches)."""
-    
-    def __init__(self, label: str, *, children: Optional[List[BranchNode]] = None):
-        super().__init__(label=label, children=children, expanded=True)
-    
-    def to_tree_vm(self) -> TreeNodeVM:
-        """Convert section node to TreeNodeVM with header styling."""
-        kids = [c.to_tree_vm() for c in (self.children or [])]
-        label_html = f'<span style="font-weight: 600; font-size: 14px;">{html_module.escape(self.label)}</span>'
-        return TreeNodeVM(
-            node_key=f"section:{id(self)}",
             label_html=label_html,
             children=kids,
             collapsible=False,
@@ -726,7 +775,7 @@ class BranchInfoNode(BranchNode):
         self.pr = pr
     
     def to_tree_vm(self) -> TreeNodeVM:
-        """Convert to TreeNodeVM with structured children (commit message + metadata + other)."""
+        """Convert to TreeNodeVM with structured children (commit message, metadata, then other children)."""
         # Construct the main branch line HTML
         parts = []
         
@@ -765,52 +814,25 @@ class BranchInfoNode(BranchNode):
         
         label_html = " ".join(parts)
         
-        # Build children: commit message with metadata inline, then other children
+        # Build children: commit message, then metadata, then other children
         kids = []
         
-        # 1. Commit message with metadata on same line (if available)
+        # 1) Commit message (single line) (if available)
         if self.commit_message:
-            # Get metadata suffix (already contains HTML tags)
-            metadata_suffix = _format_branch_metadata_suffix(
-                commit_time_pt=self.commit_time_pt,
-                commit_datetime=self.commit_datetime,
-                created_at=self.created_at,
-            )
-            
-            # Build label with commit message styled, then PR number (if available), then raw metadata HTML
-            commit_parts = []
-            
-            # Format commit message: first line only
-            msg_lines = self.commit_message.split('\n')
+            msg_lines = self.commit_message.split("\n")
             msg_display = msg_lines[0] if msg_lines else self.commit_message
-            
-            # Style the commit message text
-            commit_parts.append(f'<span style="color: #1f2328;">{html_module.escape(msg_display)}</span>')
-            
-            # Add PR number link (if available) - with parentheses like git log
-            if self.pr:
-                pr_link = _format_pr_number_link(self.pr)
-                if pr_link:
-                    commit_parts.append(f'({pr_link})')
-            
-            if metadata_suffix:
-                # Metadata already has HTML tags AND parentheses, append as-is
-                commit_parts.append(metadata_suffix)
-            
-            combined_label = " ".join(commit_parts)
-            
-            # Create a TreeNodeVM directly instead of using CommitMessageNode
-            # to avoid double-escaping the HTML in metadata
-            kids.append(TreeNodeVM(
-                node_key=f"commit_msg_metadata:{id(self)}",
-                label_html=combined_label,
-                children=[],
-                collapsible=False,
-                default_expanded=False,
-                skip_dedup=True,
-            ))
+            kids.append(BranchCommitMessageNode(label=msg_display, pr=self.pr).to_tree_vm())
+
+        # 2) Metadata (muted) (if available)
+        metadata_suffix = _format_branch_metadata_suffix(
+            commit_time_pt=self.commit_time_pt,
+            commit_datetime=self.commit_datetime,
+            created_at=self.created_at,
+        )
+        if metadata_suffix:
+            kids.append(BranchMetadataNode(label=metadata_suffix).to_tree_vm())
         
-        # 2. Other children (PR status, CI checks, etc.)
+        # 3) Other children (PR status, CI checks, etc.)
         for c in (self.children or []):
             kids.append(c.to_tree_vm())
         
@@ -920,7 +942,7 @@ class PRURLNode(BranchNode):
         )
 
 
-class CommitMessageNode(BranchNode):
+class BranchCommitMessageNode(BranchNode):
     """Commit message node with PR number (if available)."""
     
     def __init__(self, label: str, *, pr: Optional[PRInfo] = None):
@@ -954,7 +976,7 @@ class CommitMessageNode(BranchNode):
         )
 
 
-class MetadataNode(BranchNode):
+class BranchMetadataNode(BranchNode):
     """Metadata node (modified, created, age in muted color)."""
     
     def __init__(self, label: str):
@@ -1229,14 +1251,14 @@ def build_ci_nodes_from_pr(
     # Inject placeholders for expected checks that are missing from the reported contexts.
     #
     # This makes "missing required checks" visible even when GitHub never posts a check context for them.
-    present_norm = {common.normalize_check_name(str(r.name or "")) for r in (rows or [])}
+    present_norm = {common_github.normalize_check_name(str(r.name or "")) for r in (rows or [])}
     seen_norm = set(present_norm)
     expected_required = {str(x) for x in (required_set or set()) if str(x).strip()}
-    required_norm = {common.normalize_check_name(x) for x in expected_required}
+    required_norm = {common_github.normalize_check_name(x) for x in expected_required}
 
     # Expected checks from branch protection required checks.
     for nm0 in sorted(expected_required, key=lambda s: str(s).lower()):
-        n0 = common.normalize_check_name(nm0)
+        n0 = common_github.normalize_check_name(nm0)
         if n0 and n0 not in seen_norm:
             rows.append(
                 GHPRCheckRow(
@@ -1247,7 +1269,7 @@ def build_ci_nodes_from_pr(
                     run_id="",
                     job_id="",
                     description="expected",
-                    is_required=(common.normalize_check_name(nm0) in required_norm),
+                    is_required=(common_github.normalize_check_name(nm0) in required_norm),
                 )
             )
             seen_norm.add(n0)
@@ -1293,7 +1315,7 @@ def build_ci_nodes_from_pr(
         if (not rerun_run_id) and st == "failure":
             rid = str(r.run_id or "").strip()
             if not rid:
-                rid = str(common.parse_actions_run_id_from_url(job_url) or "").strip()
+                rid = str(common_github.parse_actions_run_id_from_url(job_url) or "").strip()
             if rid:
                 rerun_run_id = rid
         base_dir = (Path(page_root_dir) if page_root_dir is not None else repo_path)
@@ -1431,7 +1453,7 @@ def build_ci_nodes_from_pr(
         )
 
     # NOTE: Sorting, failure marking, and expansion are handled by the centralized
-    # pipeline in PRStatusNode.to_tree_vm() (via run_all_passes in common_dashboard_lib.py)
+    # pipeline in PRStatusWithJobsNode.to_tree_vm() (via run_all_passes in common_dashboard_lib.py)
 
     # If CI failed and we can identify a GitHub Actions run_id, include an explicit restart link.
     #
@@ -1450,10 +1472,10 @@ def build_ci_nodes_from_pr(
 
 
 # ======================================================================
-# PRStatusNode (moved from show_local_branches.py)
+# PRStatusWithJobsNode (moved from show_local_branches.py)
 # ======================================================================
 
-class PRStatusNode(BranchNode):
+class PRStatusWithJobsNode(BranchNode):
     """PR status information node"""
     
     def __init__(

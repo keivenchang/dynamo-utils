@@ -32,7 +32,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict, dataclass
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple, Union
 
-from common import GitLabAPIClient
+from common_gitlab import GitLabAPIClient
 
 
 DEFAULT_BASE_URL = "https://gitlab-master.nvidia.com"

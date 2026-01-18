@@ -23,6 +23,7 @@ class PytestTimingRow:
 class PytestTimingCacheEntry:
     schema_version: int
     key: str
+    step_name: str
     ts_cached: int
     raw_log_mtime_ns: int
     raw_log_size_bytes: int
@@ -50,7 +51,7 @@ class PytestTimingCache:
       - This is intentionally independent of the snippet cache.
     """
 
-    _SCHEMA_VERSION = 1
+    _SCHEMA_VERSION = 2
 
     def __init__(self, *, cache_file: Path):
         self._mu = Lock()
@@ -92,6 +93,7 @@ class PytestTimingCache:
                     ent = PytestTimingCacheEntry(
                         schema_version=int(v.get("schema_version", self._SCHEMA_VERSION) or self._SCHEMA_VERSION),
                         key=str(v.get("key", k) or k),
+                        step_name=str(v.get("step_name", "") or ""),
                         ts_cached=int(v.get("ts_cached", 0) or 0),
                         raw_log_mtime_ns=int(v.get("raw_log_mtime_ns", 0) or 0),
                         raw_log_size_bytes=int(v.get("raw_log_size_bytes", 0) or 0),
@@ -121,17 +123,19 @@ class PytestTimingCache:
             return
 
     @staticmethod
-    def _key_for_raw_log_path(p: Path) -> str:
+    def _key_for_raw_log_and_step(p: Path, step_name: str) -> str:
         # Prefer numeric job-id cache keys; else use full path (stable within a repo checkout).
+        # Include step_name to distinguish between different test phases (e.g., "Run unit tests" vs "Run e2e tests")
+        step_suffix = f"_{step_name.lower().replace(' ', '_')}" if step_name else ""
         try:
             stem = str(p.stem or "").strip()
             if stem.isdigit():
-                return stem
+                return f"{stem}{step_suffix}"
         except Exception:
             pass
-        return str(p)
+        return f"{str(p)}{step_suffix}"
 
-    def get_if_fresh(self, *, raw_log_path: Path) -> Optional[List[Tuple[str, str, str]]]:
+    def get_if_fresh(self, *, raw_log_path: Path, step_name: str = "") -> Optional[List[Tuple[str, str, str]]]:
         p = Path(raw_log_path)
         try:
             st = p.stat()
@@ -140,7 +144,7 @@ class PytestTimingCache:
         except Exception:
             return None
 
-        key = self._key_for_raw_log_path(p)
+        key = self._key_for_raw_log_and_step(p, step_name)
         with self._mu:
             self._load_once()
             ent = self._entries.get(key)
@@ -157,6 +161,7 @@ class PytestTimingCache:
         self,
         *,
         raw_log_path: Path,
+        step_name: str = "",
         rows: List[Tuple[str, str, str]],
     ) -> None:
         p = Path(raw_log_path)
@@ -167,7 +172,7 @@ class PytestTimingCache:
         except Exception:
             return
 
-        key = self._key_for_raw_log_path(p)
+        key = self._key_for_raw_log_and_step(p, step_name)
         try:
             row_objs = [PytestTimingRow(display_name=a, duration_str=b, status_norm=c) for (a, b, c) in (rows or [])]
         except Exception:
@@ -178,6 +183,7 @@ class PytestTimingCache:
             self._entries[key] = PytestTimingCacheEntry(
                 schema_version=self._SCHEMA_VERSION,
                 key=key,
+                step_name=step_name,
                 ts_cached=int(time.time()),
                 raw_log_mtime_ns=int(mtime_ns),
                 raw_log_size_bytes=int(size_b),

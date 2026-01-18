@@ -9,6 +9,85 @@ This file intentionally groups previously-split helper modules into one place to
 - avoid UI drift between dashboards
 - reduce small-module sprawl
 - keep <pre>-safe tree rendering + check-line rendering consistent
+
+======================================================================================
+NODE HIERARCHY REFERENCE
+======================================================================================
+
+This section documents the tree node structure used across all dashboards.
+
+Node Hierarchy (with creators):
+--------------------------------
+```
+LocalRepoNode (repository directory)                         ← Created by: show_local_branches.py
+└─ BranchInfoNode (individual branch)                        ← Created by: show_local_branches.py, show_remote_branches.py
+   ├─ BranchCommitMessageNode (commit message + PR link)     ← Created by: BranchInfoNode.to_tree_vm()
+   ├─ BranchMetadataNode (timestamps / age)                  ← Created by: BranchInfoNode.to_tree_vm()
+   ├─ ConflictWarningNode                                    ← Created by: show_local_branches.py, show_remote_branches.py (optional)
+   ├─ BlockedMessageNode                                     ← Created by: show_local_branches.py, show_remote_branches.py (optional)
+   ├─ PRStatusWithJobsNode (CI status for PRs)               ← Created by: add_pr_status_node_pass
+   │  ├─ CIJobNode (CI check/job)                            ← Created by: build_ci_nodes_from_pr()
+   │  │  ├─ CIJobNode (nested steps)                         ← Created by: add_job_steps_and_tests_pass
+   │  │  │  └─ PytestTestNode (pytest tests)                 ← Created by: pytest_slowest_tests_from_raw_log (within add_job_steps_and_tests_pass)
+   │  └─ RerunLinkNode                                       ← Created by: build_ci_nodes_from_pr() (on CI failure)
+   └─ (no PR)                                                ← BranchInfoNode only (no workflow-status child node today)
+
+Note: show_commit_history.py uses a different model:
+  - Creates CIJobNode directly (no BranchInfoNode wrapper)
+  - Renders commit metadata in the Jinja2 template (not via BranchCommitMessageNode)
+  - Displays commits as a flat table (not a nested tree)
+  - Still uses run_all_passes() for consistent CI job processing
+```
+
+Visual Example:
+---------------
+```
+▼ dynamo/                                                    ← LocalRepoNode
+│  ├─ [copy] Merged user/branch-1 [SHA]                      ← BranchInfoNode (merged PR)
+│  │  ├─ commit message (#1234)                              ← BranchCommitMessageNode
+│  │  ├─ (modified ..., created ..., ago)                    ← BranchMetadataNode
+│  │  └─ ▶ PASSED  3 ✓26 ✗2                                  ← PRStatusWithJobsNode (collapsed)
+│  │     ├─ ✓ check-1 (6m) [log]                             ← CIJobNode (hidden)
+│  │     └─ ✗ check-2 (2m) [log] ▶ Snippet                   ← CIJobNode
+│  ├─ [copy] user/branch-2 [SHA]                             ← BranchInfoNode (open PR)
+│  │  ├─ fix: memory leak (#2345)                            ← BranchCommitMessageNode
+│  │  ├─ (modified ..., created ..., ago)                    ← BranchMetadataNode
+│  │  ├─ ⚠️  conflicts...                                    ← ConflictWarningNode (optional)
+│  │  ├─ 🚫 Blocked by ...                                    ← BlockedMessageNode (optional)
+│  │  └─ ▼ FAILED  2 ✓24 ✗1                                  ← PRStatusWithJobsNode (expanded)
+│  │     ├─ ✓ check-1 (5m)                                   ← CIJobNode
+│  │     └─ ▼ ✗ check-2 (3m) [log] ▶ Snippet                 ← CIJobNode
+│  │        ├─ ✓ setup (10s)                                 ← CIStepNode
+│  │        ├─ ▼ ✗ Run e2e tests (2m 30s)                    ← CIStepNode (test step)
+│  │        │  ├─ ✓ [call] tests/...::test_foo (45s)         ← CIPytestNode
+│  │        │  ├─ ✗ [call] tests/...::test_bar (1m 11s)      ← CIPytestNode
+│  │        │  └─ ✓ [call] tests/...::test_baz (34s)         ← CIPytestNode
+│  │        └─ ✓ cleanup (20s)                               ← CIStepNode
+│  │     └─ 🔄 Restart failed jobs                            ← RerunLinkNode (only when CI failed + run_id known)
+│  ├─ [copy] Closed user/abandoned [SHA]                     ← BranchInfoNode (closed, not merged)
+│  ├─ [copy] user/feature [SHA]                              ← BranchInfoNode (branch with remote, no PR)
+│  │  └─ (no CI shown; no PR → no checks fetched today)
+│  ├─ [copy] local-branch [SHA]                              ← BranchInfoNode (local-only branch)
+│  └─ [copy] Merged old-feature [SHA]                        ← BranchInfoNode (merged local branch)
+```
+
+Node Creation Flow:
+-------------------
+```
+BranchInfoNode("feature/DIS-1200")              ← Created by show_local_branches.py
+├─ TreeNodeVM(commit message + metadata)        ← Created by BranchInfoNode.to_tree_vm()
+└─ PRStatusWithJobsNode(pr=PRInfo(...))         ← Created by add_pr_status_node_pass
+   ├─ CIJobNode("[x86_64] vllm (amd64)")        ← Created by build_ci_nodes_from_pr()
+   │  ├─ CIJobNode("Build Container")           ← Created by add_job_steps_and_tests_pass()
+   │  ├─ CIJobNode("Run tests")                 ← Created by add_job_steps_and_tests_pass()
+   │  │  ├─ PytestTestNode("test_serve[agg]")   ← Created by pytest_slowest_tests_from_raw_log()
+   │  │  └─ PytestTestNode("test_router[nats]") ← Created by pytest_slowest_tests_from_raw_log()
+   │  └─ CIJobNode("Docker Tag and Push")       ← Created by add_job_steps_and_tests_pass()
+   ├─ ConflictWarningNode("⚠️ conflicts...")    ← Created by show_local_branches.py
+   └─ BlockedMessageNode("🚫 Blocked...")       ← Created by show_local_branches.py
+```
+
+======================================================================================
 """
 
 from __future__ import annotations
@@ -26,7 +105,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING
 from datetime import datetime, timezone
 
-from common import GitHubAPIClient, classify_ci_kind
+from common_github import GitHubAPIClient, classify_ci_kind
 from common_types import CIStatus
 
 # Avoid circular import by importing CIJobNode only for type checking
@@ -419,35 +498,67 @@ def run_all_passes(
     ci_nodes: List,  # List[BranchNode] from common_branch_nodes
     repo_root: Path,
     commit_sha: str = "",
+    # NEW: Optional parameters for BranchInfoNode processing (PASS -1)
+    github_api: Optional = None,  # GitHubAPIClient
+    page_root_dir: Optional[Path] = None,
+    refresh_checks: bool = False,
+    allow_fetch_checks: bool = True,
+    enable_success_build_test_logs: bool = False,
+    context_prefix: str = "",
 ) -> List[TreeNodeVM]:
     """
-    Centralized CI tree node processing pipeline.
+    Centralized tree node processing pipeline.
     
     Simple orchestrator that calls passes in sequence.
-    NOTE: This function is called ONCE PER PR, not for all PRs at once.
+    
+    Can handle two types of input:
+    1. List[CIJobNode] - Flat CI nodes (original use case, called from PRStatusWithJobsNode)
+    2. List[BranchInfoNode] - Branch hierarchy (new use case, called from show_*.py)
     
     Args:
-        ci_nodes: List of BranchNode objects for a SINGLE PR (from build_ci_nodes_from_pr or mock_build_ci_nodes)
+        ci_nodes: List of BranchNode objects (CIJobNode or BranchInfoNode)
         repo_root: Path to the repository root (for .github/workflows/ parsing)
         commit_sha: Commit SHA for per-commit node uniqueness
+        github_api: GitHub API client (required for BranchInfoNode/PR processing)
+        page_root_dir: Page root directory (required for BranchInfoNode/PR processing)
+        refresh_checks: Force refresh checks cache
+        allow_fetch_checks: Allow network fetch for checks
+        enable_success_build_test_logs: Cache raw logs for successful jobs
+        context_prefix: Prefix for context keys (e.g., "remote:", "local:")
     
     Returns:
         Processed list of TreeNodeVM nodes with YAML augmentation applied.
     """
-    logger.info(f"[run_all_passes] Starting with {len(ci_nodes)} CI nodes (per-PR)")
+    logger.info(f"[run_all_passes] Starting with {len(ci_nodes)} nodes")
     
-    # PASS 0: Add job steps and pytest tests to CIJobNode children (before conversion to TreeNodeVM)
-    # This must run BEFORE convert_branch_nodes_to_tree_vm_pass so children are in place
+    # PASS 1: Add PRStatusWithJobsNode as children to BranchInfoNode (if PR exists)
+    # This must run BEFORE all other passes (operates on BranchNode layer)
+    # Only runs if we have BranchInfoNode instances with github_api and page_root_dir
+    from common_branch_nodes import BranchInfoNode
+    has_branch_info_nodes = any(isinstance(n, BranchInfoNode) for n in ci_nodes)
+    
+    if has_branch_info_nodes and github_api and page_root_dir:
+        ci_nodes = add_pr_status_node_pass(
+            nodes=ci_nodes,
+            github_api=github_api,
+            repo_root=repo_root,
+            page_root_dir=page_root_dir,
+            refresh_checks=refresh_checks,
+            allow_fetch_checks=allow_fetch_checks,
+            enable_success_build_test_logs=enable_success_build_test_logs,
+            context_prefix=context_prefix,
+        )
+    
+    # PASS 2: Add job steps and pytest tests to CIJobNode children (before conversion to TreeNodeVM)
+    # This must run BEFORE augment_ci_with_yaml_info_pass so children are in place
     ci_nodes = add_job_steps_and_tests_pass(ci_nodes, repo_root)
     
-    # PASS 1: Convert BranchNode to TreeNodeVM (actual CI info from GitHub)
-    ci_info_nodes = convert_branch_nodes_to_tree_vm_pass(ci_nodes)
-    
-    # PASS 2: Parse YAML workflows to build mappings (job names, dependencies, etc.)
-    # This populates global mappings and returns them for use in subsequent passes
+    # Parse YAML workflows to build mappings (job names, dependencies, etc.)
+    # Note: This is NOT a pass - it doesn't modify nodes, just parses YAML files
     _, yaml_mappings = parse_workflow_yaml_and_build_mapping_pass([], repo_root, commit_sha=commit_sha)
     
     # PASS 3: Augment CI nodes with YAML information (short names, dependencies)
+    # This pass also converts BranchNode to TreeNodeVM
     augmented_nodes = augment_ci_with_yaml_info_pass(ci_nodes, yaml_mappings)
     
     # PASS 4: Move jobs under parent nodes
@@ -490,7 +601,7 @@ def run_all_passes(
     # PASS 8: Verify the final tree structure
     verify_tree_structure_pass(final_nodes, ci_nodes, commit_sha=commit_sha)
     
-    logger.info(f"[PASS 0-8] Add steps, YAML parse, augment, group, sort, expand, move required, and verify complete, returning {len(final_nodes)} root nodes")
+    logger.info(f"[run_all_passes] All passes complete (1-8), returning {len(final_nodes)} root nodes")
     return final_nodes
 
 
@@ -498,9 +609,102 @@ def run_all_passes(
 # Pass implementations (in run_all_passes order)
 # -----------------------------------------------------------------------------
 
+def add_pr_status_node_pass(
+    nodes: List,  # List[BranchNode]
+    github_api,  # GitHubAPIClient
+    repo_root: Path,
+    page_root_dir: Path,
+    refresh_checks: bool = False,
+    allow_fetch_checks: bool = True,
+    enable_success_build_test_logs: bool = False,
+    context_prefix: str = "",
+) -> List:
+    """
+    Add PRStatusWithJobsNode as child to BranchInfoNode (if PR exists).
+    
+    This pass runs FIRST and operates on the BranchNode layer.
+    It centralizes PR status node creation logic that was previously duplicated
+    across show_local_branches.py, show_remote_branches.py, and show_local_branches_new.py.
+    
+    For each BranchInfoNode that has a PR:
+    - Create PRStatusWithJobsNode with the PR
+    - Add it as a child to BranchInfoNode
+    - PRStatusWithJobsNode.__init__ will automatically:
+      - Call build_ci_nodes_from_pr() → creates List[CIJobNode]
+      - Call run_all_passes() recursively for CI nodes
+      - Store TreeNodeVM children in _ci_children_vm
+    
+    Args:
+        nodes: List of BranchNode (may contain BranchInfoNode instances)
+        github_api: GitHub API client
+        repo_root: Path to repo root
+        page_root_dir: Path to page root directory
+        refresh_checks: Force refresh checks cache
+        allow_fetch_checks: Allow network fetch for checks
+        enable_success_build_test_logs: Cache raw logs for successful jobs
+        context_prefix: Prefix for context_key (e.g., "remote:", "local:")
+    
+    Returns:
+        Same list of nodes (modified in-place with new children)
+    """
+    from common_branch_nodes import BranchInfoNode, PRStatusWithJobsNode
+    
+    def process_node(node) -> None:
+        """Recursively process nodes to add PR status children."""
+        # Process this node if it's a BranchInfoNode with a PR
+        if isinstance(node, BranchInfoNode) and node.pr is not None:
+            # Check if PRStatusWithJobsNode already exists as a child
+            has_pr_status = any(
+                isinstance(c, PRStatusWithJobsNode) for c in (node.children or [])
+            )
+            
+            if not has_pr_status:
+                pr = node.pr
+                
+                # Build context_key (stable DOM ID seed)
+                label = node.label
+                sha = node.sha or ""
+                context_key = f"{context_prefix}{label}:{sha}:pr{pr.number}"
+                
+                # Compute branch commit datetime for TTL calculation
+                branch_commit_dt = node.commit_datetime
+                
+                # Create PR status node (CI nodes built inside __init__)
+                status_node = PRStatusWithJobsNode(
+                    label="",
+                    pr=pr,
+                    github_api=github_api,
+                    repo_root=repo_root,
+                    page_root_dir=page_root_dir,
+                    refresh_checks=refresh_checks,
+                    branch_commit_dt=branch_commit_dt,
+                    allow_fetch_checks=allow_fetch_checks,
+                    context_key=context_key,
+                    enable_success_build_test_logs=enable_success_build_test_logs,
+                )
+                
+                # Add as child to BranchInfoNode
+                node.add_child(status_node)
+                
+                logger.debug(
+                    f"[PASS -1] Added PRStatusWithJobsNode for PR #{pr.number} to branch '{label}'"
+                )
+        
+        # Recursively process children
+        for child in (node.children or []):
+            process_node(child)
+    
+    # Process all nodes recursively
+    for node in nodes:
+        process_node(node)
+    
+    logger.info(f"[PASS -1] add_pr_status_node_pass complete")
+    return nodes
+
+
 def add_job_steps_and_tests_pass(ci_nodes: List, repo_root: Path) -> List:
     """
-    PASS 0: Add job steps and pytest tests as children to CIJobNode objects.
+    Add job steps and pytest tests as children to CIJobNode objects.
     
     This pass runs BEFORE conversion to TreeNodeVM to ensure step children are in place.
     It handles all the step/test extraction logic that was previously duplicated across
@@ -513,7 +717,7 @@ def add_job_steps_and_tests_pass(ci_nodes: List, repo_root: Path) -> List:
     Returns:
         Same list of nodes, with CIJobNode.children populated with step/test nodes
     """
-    from common_branch_nodes import CIJobNode, _duration_str_to_seconds
+    from common_branch_nodes import CIJobNode, CIStepNode, CIPytestNode, _duration_str_to_seconds
     
     logger.info(f"[add_job_steps_and_tests_pass] Processing {len(ci_nodes)} nodes")
     
@@ -569,14 +773,12 @@ def add_job_steps_and_tests_pass(ci_nodes: List, repo_root: Path) -> List:
                 # This is a pytest test - add as child of the current "Run tests" step
                 if current_test_parent:
                     test_name = step_name_s[len("  └─ "):]  # Remove prefix
-                    test_node = CIJobNode(
+                    test_node = CIPytestNode(
                         job_id=test_name,
                         display_name="",
                         status=step_status,
                         duration=step_dur,
                         log_url="",
-                        is_required=False,
-                        is_synthetic=True,
                         children=[],
                     )
                     current_test_parent.children.append(test_node)
@@ -588,21 +790,20 @@ def add_job_steps_and_tests_pass(ci_nodes: List, repo_root: Path) -> List:
                     step_id = f"{kind}: {step_name}" if kind and kind != "check" else str(step_name)
                 else:
                     step_id = str(step_name)
-                
-                step_node = CIJobNode(
+
+                step_node = CIStepNode(
                     job_id=step_id,
                     display_name="",
                     status=step_status,
                     duration=step_dur,
-                    log_url="",  # Don't link to parent job URL - parent already has the link
-                    is_required=False,  # Steps are never marked as required
-                    is_synthetic=True,
+                    log_url="",
                     children=[],
                 )
                 node.children.append(step_node)
-                
-                # If this is "Run tests" or "test: pytest", remember it as the parent for pytest tests
-                if "run tests" in step_name_s.lower() or "test: pytest" in step_name_s.lower():
+
+                # If this step name indicates a Python test step, treat it as a test parent
+                # Examples: "Run e2e tests", "Run test", "test run", "pytest", "test: pytest"
+                if is_python_test_step(step_name_s):
                     current_test_parent = step_node
                 else:
                     current_test_parent = None
@@ -648,11 +849,18 @@ def parse_workflow_yaml_and_build_mapping_pass(
     repo_root: Path,
     commit_sha: str = "",
 ) -> List[TreeNodeVM]:
-    """Parse YAML to annotate nodes with parent/child metadata.
+    """
+    Parse YAML workflows to build job name mappings and dependencies.
     
-    This pass reads .github/workflows/*.yml files and annotates each node with
-    information about which jobs it depends on (children) and which jobs depend on it (parents).
-    The nodes remain flat and disconnected - actual connections are made in PASS 2.
+    NOTE: This is NOT a pass in the traditional sense - it doesn't modify nodes.
+    It only parses .github/workflows/*.yml files and returns mappings for use by PASS 3.
+    
+    This reads .github/workflows/*.yml files and builds mappings for:
+    - job_name_to_id: Maps display names to YAML job IDs
+    - parent_child_mapping: Maps job names to their dependencies
+    - job_to_file: Maps job IDs to workflow files
+    
+    The mappings are returned and used by subsequent passes to augment CI nodes.
     
     PERFORMANCE: Results are cached per repo_root + workflows_dir mtime to avoid
     re-parsing YAML files on every commit. Cache is automatically invalidated when
@@ -805,10 +1013,12 @@ def augment_ci_with_yaml_info_pass(
     original_ci_nodes: List,  # List[BranchNode] - original CIJobNode objects
     yaml_mappings: Dict[str, Dict],  # Mappings from YAML parsing
 ) -> List[TreeNodeVM]:
-    """Augment CI nodes with YAML information (short names, dependencies).
+    """
+    Augment CI nodes with YAML information and convert to TreeNodeVM.
     
     This pass builds a mapping from long check name to short YAML job_id,
     then updates each CIJobNode with short_job_name and yaml_dependencies.
+    Finally, it converts the augmented BranchNode objects to TreeNodeVM.
     
     Args:
         original_ci_nodes: Original CIJobNode objects (before conversion to TreeNodeVM)
@@ -877,7 +1087,8 @@ def move_jobs_by_prefix_pass(
     parent_label: str = "",
     create_if_has_children: bool = False,
 ) -> List[TreeNodeVM]:
-    """Generic pass to move jobs matching a prefix under a parent node.
+    """
+    Move jobs matching a prefix under a parent node.
     
     This pass finds all root-level nodes whose job_name starts with the given prefix,
     removes them from the root level, and either creates a new parent node or adds them
@@ -1027,7 +1238,8 @@ def move_jobs_by_prefix_pass(
 
 
 def sort_nodes_by_name_pass(nodes: List[TreeNodeVM]) -> List[TreeNodeVM]:
-    """Sort nodes alphabetically by job name (recursively).
+    """
+    Sort nodes alphabetically by job name (recursively).
     
     Sorts nodes at each level by their job_name or label_html for consistent display.
     Special nodes (like status-check jobs) can be preserved at specific positions if needed.
@@ -1131,7 +1343,8 @@ def sort_nodes_by_name_pass(nodes: List[TreeNodeVM]) -> List[TreeNodeVM]:
 
 
 def expand_required_failure_descendants_pass(nodes: List[TreeNodeVM]) -> List[TreeNodeVM]:
-    """Expand any node that has a REQUIRED failure anywhere in its descendant subtree.
+    """
+    Expand any node that has a REQUIRED failure anywhere in its descendant subtree.
 
     This is intentionally a *post-pass* so it can run after any logic that mutates/moves nodes
     (e.g. workflow `jobs.*.needs` grouping).
@@ -1188,7 +1401,8 @@ def expand_required_failure_descendants_pass(nodes: List[TreeNodeVM]) -> List[Tr
 
 
 def move_required_jobs_to_top_pass(nodes: List[TreeNodeVM]) -> List[TreeNodeVM]:
-    """Move all REQUIRED jobs to the top, keeping alphabetical order within each group.
+    """
+    Move all REQUIRED jobs to the top, keeping alphabetical order within each group.
     
     This pass separates required and non-required jobs at the ROOT level only,
     preserving all parent-child relationships. A job is considered required if
@@ -1233,7 +1447,8 @@ def move_required_jobs_to_top_pass(nodes: List[TreeNodeVM]) -> List[TreeNodeVM]:
 
 
 def verify_tree_structure_pass(tree_nodes: List[TreeNodeVM], original_ci_nodes: List, commit_sha: str = "") -> None:
-    """Verify the final tree structure for common issues.
+    """
+    Verify the final tree structure for common issues.
     
     This pass checks for:
     - Duplicate short names
@@ -2082,6 +2297,29 @@ def actions_job_step_tuples(
 _PYTEST_DETAIL_JOB_PREFIXES = ("sglang", "vllm", "trtllm")
 
 
+def is_python_test_step(step_name: str) -> bool:
+    """
+    Check if a step name indicates it's a Python test step that should have pytest children.
+
+    Examples that match:
+    - "Run tests"
+    - "Run e2e tests"
+    - "Run unit tests"
+    - "test: pytest"
+    - "pytest"
+
+    Args:
+        step_name: The step or phase name to check
+
+    Returns:
+        True if this step should have pytest test children parsed from raw logs
+    """
+    step_lower = str(step_name or "").lower()
+    if not step_lower:
+        return False
+    return ("run" in step_lower and "test" in step_lower) or "pytest" in step_lower
+
+
 def job_name_wants_pytest_details(job_name: str) -> bool:
     """
     Shared policy for whether a job should show pytest per-test children under "Run tests".
@@ -2102,11 +2340,12 @@ def job_name_wants_pytest_details(job_name: str) -> bool:
     if ("build" in nm_lc) and ("test" in nm_lc):
         return True
     # Framework jobs that commonly run pytest but don't include "build"/"test" in the check name,
-    # e.g. "sglang (amd64)".
-    if nm_lc.startswith(_PYTEST_DETAIL_JOB_PREFIXES):
-        # Heuristic: these matrix-style jobs almost always contain an arch tuple.
-        if ("(" in nm_lc) or ("amd64" in nm_lc) or ("arm64" in nm_lc) or ("aarch64" in nm_lc):
-            return True
+    # e.g. "sglang (amd64)", "[x86_64] vllm (amd64)".
+    for prefix in _PYTEST_DETAIL_JOB_PREFIXES:
+        if prefix in nm_lc:
+            # Heuristic: these matrix-style jobs almost always contain an arch tuple.
+            if ("(" in nm_lc) or ("amd64" in nm_lc) or ("arm64" in nm_lc) or ("aarch64" in nm_lc):
+                return True
     return False
 
 
@@ -2184,13 +2423,13 @@ def ci_subsection_tuples_for_job(
                 result.append((step_name, step_dur, step_status))
                 
                 # If this is a "Run tests" step or a "test: pytest" phase, parse pytest slowest tests from raw log
-                step_lower = step_name.lower()
-                if ("run tests" in step_lower or "test: pytest" in step_lower) and raw_log_path:
+                if is_python_test_step(step_name) and raw_log_path:
                     pytest_tests = pytest_slowest_tests_from_raw_log(
                         raw_log_path=raw_log_path,
                         # Tests: list *all* per-test timings in order (do not filter).
                         min_seconds=0.0,
                         include_all=True,
+                        step_name=step_name,
                     )
                     # Add pytest tests as indented entries
                     for test_name, test_dur, test_status in pytest_tests:
@@ -2216,12 +2455,14 @@ def ci_subsection_tuples_for_job(
             result.append((step_name, step_dur, step_status))
             
             # If this is a "Run tests" step, parse pytest slowest tests from raw log
-            if "run tests" in step_name.lower() and raw_log_path:
+            step_lower = step_name.lower()
+            if (("run" in step_lower and "test" in step_lower) or "pytest" in step_lower) and raw_log_path:
                 pytest_tests = pytest_slowest_tests_from_raw_log(
                     raw_log_path=raw_log_path,
                     # Tests: list *all* per-test timings in order (do not filter).
                     min_seconds=0.0,
                     include_all=True,
+                    step_name=step_name,
                 )
                 # Add pytest tests as indented/prefixed entries
                 for test_name, test_dur, test_status in pytest_tests:
@@ -2245,6 +2486,7 @@ def pytest_slowest_tests_from_raw_log(
     raw_log_path: Optional[Path],
     min_seconds: float = 10.0,
     include_all: bool = False,
+    step_name: str = "",
 ) -> List[Tuple[str, str, str]]:
     """Parse pytest per-test durations from cached raw log file.
     
@@ -2273,7 +2515,7 @@ def pytest_slowest_tests_from_raw_log(
     try:
         from pytest_timings_cache import PYTEST_TIMINGS_CACHE  # local file import
 
-        cached = PYTEST_TIMINGS_CACHE.get_if_fresh(raw_log_path=Path(raw_log_path))
+        cached = PYTEST_TIMINGS_CACHE.get_if_fresh(raw_log_path=Path(raw_log_path), step_name=step_name)
         if cached is not None:
             return list(cached)
     except Exception:
@@ -2302,7 +2544,9 @@ def pytest_slowest_tests_from_raw_log(
         def _norm_test_id(s: str) -> str:
             return str(s or "").strip()
 
-        summary_re = re.compile(r'^\s*(FAILED|ERROR|XPASS|XFAIL|SKIPPED|PASSED)\s+(.+?)(?:\s+-\s+.*)?\s*$')
+        # Match status lines with optional timestamp prefix (GitHub Actions format)
+        # Example: "2025-11-29T21:55:17.1891443Z FAILED tests/foo.py::test_bar - AssertionError: ..."
+        summary_re = re.compile(r'^.*?\s(FAILED|ERROR|XPASS|XFAIL|SKIPPED|PASSED)\s+(.+?)(?:\s+-\s+.*)?\s*$')
         for ln in lines:
             msum = summary_re.match(str(ln or ""))
             if not msum:
@@ -2318,27 +2562,48 @@ def pytest_slowest_tests_from_raw_log(
             elif st_word == "PASSED":
                 status_by_test[test_id] = CIStatus.SUCCESS.value
         
+        # Determine which test_type to filter for based on step_name
+        # Examples: "Run unit tests" -> "unit", "Run e2e tests" -> "e2e"
+        target_test_type = ""
+        step_lower = str(step_name or "").lower()
+        if "unit" in step_lower:
+            target_test_type = "unit"
+        elif "e2e" in step_lower:
+            target_test_type = "e2e"
+
         # Look for the "slowest N durations" section
         # Format: "============================= slowest 10 durations ============================="
         # Followed by lines like (with GitHub Actions timestamp prefix):
         # "2026-01-15T22:01:23.5641223Z 110.16s setup    tests/kvbm_integration/test_kvbm.py::test_offload_and_onboard[llm_server_kvbm0]"
         # "2026-01-15T22:01:23.5641223Z 103.05s call     tests/serve/test_vllm.py::test_serve_deployment[agg-request-plane-tcp]"
-        
+
         test_times: List[Tuple[str, str, str]] = []
         in_slowest_section = False
+        current_test_type = ""  # Track which test_type section we're in
         threshold = 0.0 if bool(include_all) else float(min_seconds or 0.0)
-        
+
         for line in lines:
+            # Track which test_type section we're in by looking for pytest action markers
+            # Example: "  test_type: unit" or "  test_type: e2e, gpu_1"
+            # Match only "test_type:" at the start of a word (not "STR_TEST_TYPE:")
+            type_match = re.search(r'\btest_type:\s*(\w+)', line, re.IGNORECASE)
+            if type_match:
+                current_test_type = type_match.group(1).strip().lower()
             # Start of slowest section
             if 'slowest' in line.lower() and 'duration' in line.lower() and '=====' in line:
                 in_slowest_section = True
                 continue
-            
+
             # End of slowest section (next ===== line)
+            # Don't break - there may be multiple "slowest durations" sections (multiple pytest runs)
             if in_slowest_section and '=====' in line:
-                break
-            
+                in_slowest_section = False
+                continue
+
             if in_slowest_section:
+                # Skip this section if we're filtering by test_type and it doesn't match
+                if target_test_type and current_test_type != target_test_type:
+                    continue
                 # Parse line format (with GitHub Actions timestamp prefix):
                 # "2026-01-15T22:01:23.5641223Z 110.16s setup    tests/..."
                 # "2026-01-15T22:01:23.5641223Z 103.05s call     tests/..."
@@ -2377,7 +2642,7 @@ def pytest_slowest_tests_from_raw_log(
             except Exception:
                 pass
 
-            PYTEST_TIMINGS_CACHE.put(raw_log_path=p, rows=test_times)
+            PYTEST_TIMINGS_CACHE.put(raw_log_path=p, step_name=step_name, rows=test_times)
         except Exception:
             pass
 
