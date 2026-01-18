@@ -454,7 +454,7 @@ run_show_commit_history() {
     SUCCESS_BUILD_TEST_FLAG="--enable-success-build-test-logs"
 
     # Flags (shared by dry-run and real-run paths)
-    MAX_COMMITS="${MAX_COMMITS:-50}"
+    MAX_COMMITS="${MAX_COMMITS:-100}"
     if [ "$FAST_DEBUG" = true ]; then
         MAX_COMMITS=25
     fi

@@ -4834,7 +4834,11 @@ query($owner:String!,$name:String!,$number:Int!,$prid:ID!,$after:String) {
                 text = ""
             self._raw_log_text_mem_cache[job_id] = {"ts": now, "text": text}
             return text
-        except Exception:
+        except Exception as e:
+            # Log the error for debugging but don't fail silently
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.warning(f"Failed to fetch/cache raw log for job {job_id}: {type(e).__name__}: {e}")
             return None
         finally:
             try:

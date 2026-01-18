@@ -367,6 +367,55 @@ class CommitHistoryGenerator:
             self._ci_log_errors_fingerprint = fp
             return fp
 
+    def _save_commit_cache_with_merge(self, cache: Dict[str, Any]) -> bool:
+        """Save commit cache with merge logic to handle concurrent writers.
+
+        Returns True if saved successfully, False otherwise.
+        """
+        lock_file = self.cache_file.parent / ".commit_cache.lock"
+        lock_file.parent.mkdir(parents=True, exist_ok=True)
+
+        try:
+            with open(lock_file, "w") as lock_fh:
+                # Acquire exclusive lock with timeout
+                start = time.monotonic()
+                timeout = 10.0
+                while time.monotonic() - start < timeout:
+                    try:
+                        fcntl.flock(lock_fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        break
+                    except (IOError, OSError):
+                        time.sleep(0.1)
+                else:
+                    self.logger.warning("Failed to acquire commit cache lock after timeout")
+                    return False
+
+                # Reload cache from disk (might have been updated by another process)
+                disk_cache = {}
+                if self.cache_file.exists():
+                    try:
+                        disk_cache = json.loads(self.cache_file.read_text() or "{}")
+                        if not isinstance(disk_cache, dict):
+                            disk_cache = {}
+                    except Exception as e:
+                        self.logger.warning(f"Failed to reload cache during merge: {e}")
+                        disk_cache = {}
+
+                # Merge: in-memory cache entries override disk cache (newer wins)
+                merged_cache = {**disk_cache, **cache}
+
+                # Write atomically
+                self.cache_file.parent.mkdir(parents=True, exist_ok=True)
+                atomic_write_text(self.cache_file, json.dumps(merged_cache, indent=2), encoding="utf-8")
+
+                # Release lock (automatic when context manager exits, but explicit for clarity)
+                fcntl.flock(lock_fh.fileno(), fcntl.LOCK_UN)
+                return True
+
+        except Exception as e:
+            self.logger.warning(f"Failed to save commit cache with merge: {e}")
+            return False
+
     def _acquire_cache_lock(self, timeout: float = 10.0) -> Optional[object]:
         """Acquire file lock for snippet cache. Returns lock file handle or None on failure."""
         lock_file = self.snippet_cache_file.parent / ".snippet_cache.lock"
@@ -898,6 +947,14 @@ class CommitHistoryGenerator:
 
                     sha_to_message_first_line[sha_full] = message_first_line
 
+                    # Periodically save cache to avoid losing progress if killed (every 10 commits)
+                    if cache_updated and (i + 1) % 10 == 0:
+                        if self._save_commit_cache_with_merge(cache):
+                            self.logger.debug(f"Periodic cache save: {len(cache)} entries ({i+1}/{len(commits)} commits processed)")
+                            cache_updated = False  # Reset flag after save
+                        else:
+                            self.logger.warning(f"Failed periodic cache save at commit {i+1}")
+
             finally:
                 # Restore original ref (best-effort)
                 if repo is not None and original_ref is not None:
@@ -1011,16 +1068,13 @@ class CommitHistoryGenerator:
                         meta_stats.get("miss", 0),
                     )
 
-            # Save cache if updated
+            # Save cache if updated (with merge logic to handle concurrent writers)
             if cache_updated:
                 t0 = phase_t.start()
-                try:
-                    self.cache_file.parent.mkdir(parents=True, exist_ok=True)
-                    # Atomic write: avoid partial/corrupted JSON which can cause "cache misses" on next run.
-                    atomic_write_text(self.cache_file, json.dumps(cache, indent=2), encoding="utf-8")
+                if self._save_commit_cache_with_merge(cache):
                     self.logger.debug(f"Cache saved with {len(cache)} entries")
-                except Exception as e:
-                    self.logger.warning(f"Failed to save cache: {e}")
+                else:
+                    self.logger.warning(f"Failed to save cache (final)")
                 phase_t.stop("cache_save", t0)
 
             # Persist snippet cache (best-effort).
@@ -1141,34 +1195,49 @@ class CommitHistoryGenerator:
                 pr_to_shas.setdefault(pr_num, []).append(sha)
 
         # Fetch check runs for each PR and convert to SHA-keyed format
+        # Use ThreadPoolExecutor to parallelize I/O-bound GitHub API calls
         github_actions_status: Dict[str, Dict[str, Any]] = {}
-        for pr_num, shas in pr_to_shas.items():
+
+        def fetch_pr_checks(pr_num: int, shas: List[str]) -> Tuple[int, List[str], List[Any]]:
+            """Fetch check runs for a single PR (parallelizable worker)."""
             rows = self.github_client.get_pr_checks_rows(
                 owner='ai-dynamo',
                 repo='dynamo',
                 pr_number=pr_num,
                 skip_fetch=bool(cache_only_github),
             )
+            return (pr_num, shas, rows)
 
-            # Convert GHPRCheckRow objects to dict format for all SHAs in this PR
-            check_runs_dicts = []
-            for row in rows:
-                check_runs_dicts.append({
-                    'name': row.name,
-                    'status': row.status_raw if row.status_raw not in {'pass', 'fail'} else ('completed' if row.status_raw in {'pass', 'fail'} else row.status_raw),
-                    'conclusion': 'success' if row.status_raw == 'pass' else ('failure' if row.status_raw == 'fail' else row.status_raw),
-                    'html_url': row.url,
-                    'details_url': row.url,
-                })
+        # Parallelize API calls using ThreadPoolExecutor (I/O-bound work)
+        max_workers = min(32, len(pr_to_shas) or 1)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {
+                executor.submit(fetch_pr_checks, pr_num, shas): (pr_num, shas)
+                for pr_num, shas in pr_to_shas.items()
+            }
 
-            # Assign same check runs to all SHAs in this PR
-            for sha in shas:
-                github_actions_status[sha] = {
-                    'status': 'completed',
-                    'conclusion': 'success',
-                    'total_count': len(check_runs_dicts),
-                    'check_runs': check_runs_dicts,
-                }
+            for future in concurrent.futures.as_completed(futures):
+                pr_num, shas, rows = future.result()
+
+                # Convert GHPRCheckRow objects to dict format for all SHAs in this PR
+                check_runs_dicts = []
+                for row in rows:
+                    check_runs_dicts.append({
+                        'name': row.name,
+                        'status': row.status_raw if row.status_raw not in {'pass', 'fail'} else ('completed' if row.status_raw in {'pass', 'fail'} else row.status_raw),
+                        'conclusion': 'success' if row.status_raw == 'pass' else ('failure' if row.status_raw == 'fail' else row.status_raw),
+                        'html_url': row.url,
+                        'details_url': row.url,
+                    })
+
+                # Assign same check runs to all SHAs in this PR
+                for sha in shas:
+                    github_actions_status[sha] = {
+                        'status': 'completed',
+                        'conclusion': 'success',
+                        'total_count': len(check_runs_dicts),
+                        'check_runs': check_runs_dicts,
+                    }
 
         # Annotate GitHub check runs with "is_required" using PR required-checks + fallback patterns.
         pr_to_required_checks = pr_to_required_checks or {}
@@ -1603,7 +1672,7 @@ class CommitHistoryGenerator:
                 root = TreeNodeVM(
                     node_key=f"gha-root:{sha_full}",
                     label_html=(
-                        f'<span style="font-weight: 600;">GitHub checks</span> '
+                        f'<span style="font-weight: 600;">GitHub Actions</span> '
                         f'<a href="https://github.com/ai-dynamo/dynamo/commit/{html.escape(sha_full)}/checks" '
                         f'target="_blank" style="color: #0969da; font-size: 11px; text-decoration: none;">[checks]</a>'
                     ),
@@ -1615,9 +1684,9 @@ class CommitHistoryGenerator:
                             collapsible=False,
                         )
                     ],
-                    collapsible=True,
+                    collapsible=False,
                     default_expanded=True,
-                    triangle_tooltip="GitHub checks",
+                    triangle_tooltip="GitHub Actions",
                 )
                 # Return the div-based tree HTML
                 return render_tree_divs([root])
@@ -1768,14 +1837,14 @@ class CommitHistoryGenerator:
             root = TreeNodeVM(
                 node_key=f"gha-root:{sha_full}",
                 label_html=(
-                    f'<span style="font-weight: 600;">GitHub checks</span> '
+                    f'<span style="font-weight: 600;">GitHub Actions</span> '
                     f'<a href="https://github.com/ai-dynamo/dynamo/commit/{html.escape(sha_full)}/checks" '
                     f'target="_blank" style="color: #0969da; font-size: 11px; text-decoration: none;">[checks]</a>'
                 ),
                 children=children,
-                collapsible=True,
+                collapsible=False,
                 default_expanded=True,
-                triangle_tooltip="GitHub checks",
+                triangle_tooltip="GitHub Actions",
             )
             # Return the div-based tree HTML
             return render_tree_divs([root])
@@ -1854,14 +1923,14 @@ class CommitHistoryGenerator:
                 root = TreeNodeVM(
                     node_key=f"gl-root:{sha_full}",
                     label_html=(
-                        f'<span style="font-weight: 600;">GitLab pipeline</span> '
+                        f'<span style="font-weight: 600;">GitLab</span> '
                         f'<a href="{html.escape(web_url, quote=True)}" target="_blank" style="color: #0969da; font-size: 11px; text-decoration: none;">[pipeline]</a> '
                         f'<span style="color: #57606a; font-size: 12px;">({html.escape(status)})</span>'
                     ),
                     children=children,
-                    collapsible=True,
+                    collapsible=False,
                     default_expanded=True,
-                    triangle_tooltip="GitLab pipeline jobs",
+                    triangle_tooltip="GitLab",
                 )
                 return render_tree_divs([root])
 
@@ -1869,7 +1938,7 @@ class CommitHistoryGenerator:
             root = TreeNodeVM(
                 node_key=f"gl-root:{sha_full}",
                 label_html=(
-                    f'<span style="font-weight: 600;">GitLab pipeline</span> '
+                    f'<span style="font-weight: 600;">GitLab</span> '
                     f'<a href="https://gitlab-master.nvidia.com/dl/ai-dynamo/dynamo/-/commit/{html.escape(sha_full)}" '
                     f'target="_blank" style="color: #0969da; font-size: 11px; text-decoration: none;">[commit]</a>'
                 ),
@@ -1881,9 +1950,9 @@ class CommitHistoryGenerator:
                         collapsible=False,
                     )
                 ],
-                collapsible=True,
+                collapsible=False,
                 default_expanded=True,
-                triangle_tooltip="GitLab pipeline (if available)",
+                triangle_tooltip="GitLab",
             )
             return render_tree_divs([root])
 
@@ -1897,24 +1966,61 @@ class CommitHistoryGenerator:
         build_gitlab_s = 0.0
         slow_github: List[tuple[float, str]] = []
         slow_gitlab: List[tuple[float, str]] = []
+
+        def build_github_tree(commit_dict: dict) -> Tuple[str, str, str, float]:
+            """Build GitHub checks tree for a single commit (parallelizable worker)."""
+            sha_full = str(commit_dict.get("sha_full", "") or "")
+            sha_short = str(commit_dict.get("sha_short", "") or "")
+            t0 = time.monotonic()
+            try:
+                tree_html = _build_github_checks_tree_html(repo_path=self.repo_path, sha_full=sha_full)
+            except Exception:
+                tree_html = ""  # Best-effort: tree building is optional
+            dt = max(0.0, time.monotonic() - t0)
+            return (sha_full, sha_short, tree_html, dt)
+
+        def build_gitlab_tree(commit_dict: dict) -> Tuple[str, str, str, float]:
+            """Build GitLab checks tree for a single commit (parallelizable worker)."""
+            sha_full = str(commit_dict.get("sha_full", "") or "")
+            sha_short = str(commit_dict.get("sha_short", "") or "")
+            t0 = time.monotonic()
+            tree_html = _build_gitlab_checks_tree_html(sha_full=sha_full, sha_short=sha_short)
+            dt = max(0.0, time.monotonic() - t0)
+            return (sha_full, sha_short, tree_html, dt)
+
         with render_t.phase("build_trees"):
-            for c in commit_data:
-                sha_full = str(c.get("sha_full", "") or "")
-                sha_short = str(c.get("sha_short", "") or "")
-                try:
-                    t0 = time.monotonic()
-                    c["github_checks_tree_html"] = _build_github_checks_tree_html(repo_path=self.repo_path, sha_full=sha_full)
-                    dt = max(0.0, time.monotonic() - t0)
+            # Build trees in parallel using ThreadPoolExecutor
+            max_workers = min(32, len(commit_data) or 1)
+            github_results: Dict[str, Tuple[str, float]] = {}
+            gitlab_results: Dict[str, Tuple[str, float]] = {}
+
+            with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+                # Submit all GitHub tree builds
+                github_futures = {executor.submit(build_github_tree, c): c for c in commit_data}
+                # Submit all GitLab tree builds
+                gitlab_futures = {executor.submit(build_gitlab_tree, c): c for c in commit_data}
+
+                # Collect GitHub results
+                for future in concurrent.futures.as_completed(github_futures):
+                    sha_full, sha_short, tree_html, dt = future.result()
+                    github_results[sha_full] = (tree_html, dt)
                     build_github_s += dt
                     slow_github.append((dt, sha_short or sha_full[:9]))
-                except Exception:
-                    pass  # Best-effort: tree building is optional
 
-                t0 = time.monotonic()
-                c["gitlab_checks_tree_html"] = _build_gitlab_checks_tree_html(sha_full=sha_full, sha_short=sha_short)
-                dt = max(0.0, time.monotonic() - t0)
-                build_gitlab_s += dt
-                slow_gitlab.append((dt, sha_short or sha_full[:9]))
+                # Collect GitLab results
+                for future in concurrent.futures.as_completed(gitlab_futures):
+                    sha_full, sha_short, tree_html, dt = future.result()
+                    gitlab_results[sha_full] = (tree_html, dt)
+                    build_gitlab_s += dt
+                    slow_gitlab.append((dt, sha_short or sha_full[:9]))
+
+            # Attach results to commit dictionaries
+            for c in commit_data:
+                sha_full = str(c.get("sha_full", "") or "")
+                if sha_full in github_results:
+                    c["github_checks_tree_html"] = github_results[sha_full][0]
+                if sha_full in gitlab_results:
+                    c["gitlab_checks_tree_html"] = gitlab_results[sha_full][0]
 
         # Render template
         template_dir = Path(__file__).parent
@@ -1973,8 +2079,8 @@ class CommitHistoryGenerator:
         if slow_gitlab_sorted:
             page_stats.append(("html_slowest_commits_gitlab.total_secs", ", ".join([f"{sha}={dt:.2f}s" for dt, sha in slow_gitlab_sorted])))
 
-        # Sort stats for readability (Generation time first, then other keys grouped by prefix).
-        gen = [stat for stat in page_stats if stat[0] == "Generation time"]
+        # Sort stats for readability (generation.total_secs first, then other keys grouped by prefix).
+        gen = [stat for stat in page_stats if stat[0] == "generation.total_secs"]
 
         # Sort function: group by prefix (before first _ or .) then by full key
         def prefix_sort_key(kv):
@@ -1990,8 +2096,8 @@ class CommitHistoryGenerator:
                 prefix = k
             return (prefix, k)
 
-        # Apply prefix-based grouping to all stats except Generation time
-        other = sorted([stat for stat in page_stats if stat[0] != "Generation time"], key=prefix_sort_key)
+        # Apply prefix-based grouping to all stats except generation.total_secs
+        other = sorted([stat for stat in page_stats if stat[0] != "generation.total_secs"], key=prefix_sort_key)
         page_stats[:] = gen + other
 
         # Build tree time is known now.

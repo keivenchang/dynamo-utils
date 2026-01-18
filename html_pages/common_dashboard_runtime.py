@@ -316,13 +316,21 @@ def materialize_job_raw_log_text_local_link(
         return None
 
     # Fetch (or refresh) the cached text, then copy it into page_root_dir.
-    _ = github.get_job_raw_log_text_cached(
-        job_url=job_url_for_fetch,
-        owner=owner,
-        repo=repo,
-        ttl_s=int(ttl_s),
-        assume_completed=bool(assume_completed),
-    )
+    # IMPORTANT: Temporarily disable cache_only_mode to allow raw log fetches when explicitly requested.
+    # The allow_fetch parameter represents explicit user intent (e.g., --enable-success-build-test-logs flag),
+    # so we should honor it even if the GitHub client is in cache_only_mode due to rate limiting.
+    saved_cache_only = github.cache_only_mode
+    try:
+        github.cache_only_mode = False
+        _ = github.get_job_raw_log_text_cached(
+            job_url=job_url_for_fetch,
+            owner=owner,
+            repo=repo,
+            ttl_s=int(ttl_s),
+            assume_completed=bool(assume_completed),
+        )
+    finally:
+        github.cache_only_mode = saved_cache_only
 
     global_txt = github._raw_log_text_cache_dir / f"{job_id}.log"  # type: ignore[attr-defined]
     legacy_txt = github._raw_log_text_cache_dir / f"{job_id}.txt"  # type: ignore[attr-defined]

@@ -983,9 +983,9 @@ def main():
 
     # Update the page stats with the timing breakdown before producing the final HTML.
     tdict = phase_t.as_dict(include_total=True)
-    # Make "Generation time" reflect total wall time so it matches the timing breakdown.
+    # Make "generation.total_secs" reflect total wall time so it matches the timing breakdown.
     elapsed_total = float(tdict.get("total") or 0.0)
-    _upsert_stat(page_stats, "Generation time", f"{elapsed_total:.2f}s")
+    _upsert_stat(page_stats, "generation.total_secs", f"{elapsed_total:.2f}s")
     for k in ["prune", "scan", "render", "write", "total"]:
         if k in tdict:
             _upsert_stat(page_stats, f"{k}.total_secs", f"{float(tdict.get(k) or 0.0):.2f}s")

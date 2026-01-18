@@ -723,12 +723,12 @@ def add_job_steps_and_tests_pass(ci_nodes: List, repo_root: Path) -> List:
     for node in ci_nodes:
         if not isinstance(node, CIJobNode):
             continue
-            
+
         # Skip if this node already has children (avoid re-processing)
         if node.children:
             logger.debug(f"[add_job_steps_and_tests_pass] Skipping {node.job_id} (already has {len(node.children)} children)")
             continue
-        
+
         # Extract parameters from the CIJobNode
         job_name = node.display_name or node.job_id or ""
         job_url = node.log_url or ""
@@ -736,16 +736,16 @@ def add_job_steps_and_tests_pass(ci_nodes: List, repo_root: Path) -> List:
         page_root_dir = node.page_root_dir
         raw_log_href = node.raw_log_href or ""
         is_required = node.is_required
-        
+
         # Resolve raw log path
         raw_log_path: Optional[Path] = None
         if raw_log_href and page_root_dir:
             raw_log_path = page_root_dir / raw_log_href
-        
+
         # Parse duration
         dur_str = node.duration or ""
         dur_seconds = _duration_str_to_seconds(dur_str)
-        
+
         # Get step tuples using the centralized logic
         step_tuples = ci_subsection_tuples_for_job(
             github_api=github_api,
@@ -757,10 +757,10 @@ def add_job_steps_and_tests_pass(ci_nodes: List, repo_root: Path) -> List:
             long_job_threshold_s=10.0 * 60.0,
             step_min_s=10.0,
         )
-        
+
         if not step_tuples:
             continue
-        
+
         # Create child nodes for each step
         # Pytest tests (with └─ prefix) should be children of the "Run tests" step
         current_test_parent: Optional[CIJobNode] = None
@@ -1805,31 +1805,34 @@ def render_tree_divs(root_nodes: List[TreeNodeVM]) -> str:
         
         # Reset last reference text when rendering actual node
         last_reference_text = None
-        
-        has_children = node.collapsible and node.children
-        has_raw_content = node.collapsible and node.raw_html_content
-        is_collapsible = has_children or has_raw_content
+
+        # Check if node has children or raw content
+        has_children = bool(node.children)
+        has_raw_content = bool(node.raw_html_content)
+
+        # Determine if this should be collapsible (requires both collapsible=True AND having content)
+        is_collapsible = node.collapsible and (has_children or has_raw_content)
 
         # Skip truly-empty leaf nodes. These can happen when upstream data creates an empty TreeNodeVM
         # (e.g., a trailing separator). Rendering them produces a dangling connector with no label.
-        if (not is_collapsible) and (not (node.label_html or "").strip()) and (not (node.raw_html_content or "").strip()):
+        if (not has_children) and (not has_raw_content) and (not (node.label_html or "").strip()):
             return ""
-        
+
         # Check if this is a repository node (for spacing)
         is_repo_node = node_key.startswith("repo:")
-        
+
         # Add 'leaf' class for nodes without children, 'repo-node' for repository nodes
         li_classes = []
-        if not is_collapsible:
+        if not (has_children or has_raw_content):
             li_classes.append('leaf')
         if is_repo_node:
             li_classes.append('repo-node')
-        
+
         li_class_attr = f' class="{" ".join(li_classes)}"' if li_classes else ''
-        
+
         parts = []
         parts.append(f'<li{li_class_attr}>\n')
-        
+
         if is_collapsible:
             # Collapsible node with children - use <details>/<summary>
             nk = str(node.node_key or "")
@@ -1885,12 +1888,24 @@ def render_tree_divs(root_nodes: List[TreeNodeVM]) -> str:
             
             parts.append('</details>\n')
         else:
-            # Leaf node - just render the label
+            # Non-collapsible node - render label and children directly (no <details> wrapper)
             parts.append(node.label_html or "")
             # Render raw HTML content if present (e.g., snippet <pre> blocks for non-collapsible nodes)
             if node.raw_html_content:
                 parts.append(node.raw_html_content)
-        
+
+            # If node has children but collapsible=False, render them directly without <details>
+            if has_children:
+                nk = str(node.node_key or "")
+                full_key = (str(node_key_path or "") + ">" + nk).strip(">")
+                children_id = alloc_children_id(full_key)
+
+                parts.append('<ul>\n')
+                for i, child in enumerate(node.children):
+                    is_last_child = (i == len(node.children) - 1)
+                    parts.append(render_node(child, children_id, full_key, is_last_child))
+                parts.append('</ul>\n')
+
         parts.append('</li>\n')
         return "".join(parts)
     
@@ -2245,7 +2260,48 @@ def actions_job_step_tuples(
     return actions_job_steps_over_threshold_from_actions_job(job, min_seconds=float(min_seconds))
 
 
-_PYTEST_DETAIL_JOB_PREFIXES = ("sglang", "vllm", "trtllm")
+_PYTEST_DETAIL_JOB_PREFIXES = ("sglang", "vllm", "trtllm", "operator")
+
+
+def is_build_test_job(job_name: str) -> bool:
+    """
+    Check if a job name matches the build-test pattern that should have pytest details extracted.
+
+    Matches two patterns:
+    1. Jobs with both "build" AND "test" in the name:
+       - "Build and Test - dynamo"
+       - "sglang-build-test (cuda12.9, amd64)"
+       - "vllm-build-test (cuda12.9, arm64)"
+
+    2. Framework jobs with architecture indicator (older pattern):
+       - "sglang (amd64)"
+       - "[x86_64] vllm (amd64)"
+       - "[aarch64] trtllm (arm64)"
+
+    Args:
+        job_name: The CI job name to check
+
+    Returns:
+        True if the job matches build-test patterns and should have pytest details
+    """
+    nm = str(job_name or "").strip()
+    if not nm:
+        return False
+    nm_lc = nm.lower()
+
+    # Pattern 1: "build" AND "test" in name (covers both old and new naming)
+    if ("build" in nm_lc) and ("test" in nm_lc):
+        return True
+
+    # Pattern 2: Framework prefix + architecture indicator (older naming convention)
+    # e.g. "sglang (amd64)", "[x86_64] vllm (amd64)"
+    for prefix in _PYTEST_DETAIL_JOB_PREFIXES:
+        if prefix in nm_lc:
+            # Heuristic: these matrix-style jobs almost always contain an arch tuple or keyword
+            if ("(" in nm_lc) or ("amd64" in nm_lc) or ("arm64" in nm_lc) or ("aarch64" in nm_lc):
+                return True
+
+    return False
 
 
 def is_python_test_step(step_name: str) -> bool:
@@ -2280,24 +2336,25 @@ def job_name_wants_pytest_details(job_name: str) -> bool:
     - "success raw log" caching policy (so per-test parsing is possible)
 
     IMPORTANT: keep this conservative; raw-log fetching for successful jobs can be expensive.
+
+    Examples of job names that match (via is_build_test_job()):
+    - "Build and Test - dynamo" (special case, always matches)
+    - "sglang-build-test (cuda12.9, amd64)" (has "build" AND "test")
+    - "[x86_64] vllm-build-test (cuda12.9, amd64)" (has "build" AND "test")
+    - "sglang (amd64)" (framework prefix + architecture)
+    - "[x86_64] vllm (amd64)" (framework prefix + architecture)
+    - "[aarch64] trtllm (arm64)" (framework prefix + architecture)
     """
     nm = str(job_name or "").strip()
     if not nm:
         return False
-    nm_lc = nm.lower()
+
+    # Special case: "Build and Test - dynamo" (canonical job name)
     if nm == "Build and Test - dynamo":
         return True
-    # Canonical build-test jobs (local branches + commit history).
-    if ("build" in nm_lc) and ("test" in nm_lc):
-        return True
-    # Framework jobs that commonly run pytest but don't include "build"/"test" in the check name,
-    # e.g. "sglang (amd64)", "[x86_64] vllm (amd64)".
-    for prefix in _PYTEST_DETAIL_JOB_PREFIXES:
-        if prefix in nm_lc:
-            # Heuristic: these matrix-style jobs almost always contain an arch tuple.
-            if ("(" in nm_lc) or ("amd64" in nm_lc) or ("arm64" in nm_lc) or ("aarch64" in nm_lc):
-                return True
-    return False
+
+    # Use common pattern matcher for build-test jobs
+    return is_build_test_job(job_name)
 
 
 def ci_subsection_tuples_for_job(
@@ -2326,10 +2383,10 @@ def ci_subsection_tuples_for_job(
     nm = str(job_name or "").strip()
     if not nm:
         return []
-    
+
     # Shared policy: which jobs get full steps + pytest per-test breakdown.
     is_build_test = job_name_wants_pytest_details(nm)
-    
+
     # Special case: "Build and Test - dynamo" has custom phase extraction
     if nm == "Build and Test - dynamo":
         phases = build_and_test_dynamo_phase_tuples(
@@ -2396,15 +2453,14 @@ def ci_subsection_tuples_for_job(
     if is_build_test:
         # Build/test UX: show all steps (not just slow ones).
         steps = actions_job_step_tuples(github_api=github_api, job_url=str(job_url or ""), min_seconds=0.0)
-        
+
         # For each step, check if it's "Run tests" - if so, add pytest tests as additional entries
         result = []
         for step_name, step_dur, step_status in (steps or []):
             result.append((step_name, step_dur, step_status))
-            
+
             # If this is a "Run tests" step, parse pytest slowest tests from raw log
-            step_lower = step_name.lower()
-            if (("run" in step_lower and "test" in step_lower) or "pytest" in step_lower) and raw_log_path:
+            if is_python_test_step(step_name) and raw_log_path:
                 pytest_tests = pytest_slowest_tests_from_raw_log(
                     raw_log_path=raw_log_path,
                     # Tests: list *all* per-test timings in order (do not filter).
@@ -2416,7 +2472,7 @@ def ci_subsection_tuples_for_job(
                 for test_name, test_dur, test_status in pytest_tests:
                     # Prefix with indentation to show hierarchy
                     result.append((f"  └─ {test_name}", test_dur, test_status))
-        
+
         return result
 
     # Non-required jobs: show steps only for long-running jobs (avoid noise).
@@ -2933,8 +2989,8 @@ def github_api_stats_rows(
     misses_by = dict(cache.get("misses_by") or {}) if isinstance(cache, dict) else {}
     raw_hits = int(sum(int(v or 0) for k, v in hits_by.items() if str(k).startswith("raw_log_text.")))
     raw_misses = int(sum(int(v or 0) for k, v in misses_by.items() if str(k).startswith("raw_log_text.")))
-    rows.append(("raw_log.cache.hits", str(raw_hits), "Raw CI log text cache hits"))
-    rows.append(("raw_log.cache.misses", str(raw_misses), "Raw CI log text cache misses"))
+    rows.append(("github.raw_log.cache.hits", str(raw_hits), "Raw CI log text cache hits"))
+    rows.append(("github.raw_log.cache.misses", str(raw_misses), "Raw CI log text cache misses"))
 
     # REST by category (top N as individual entries)
     labels = sorted(set(list(by_label.keys()) + list(time_by_label_s.keys())))
@@ -3465,7 +3521,7 @@ def check_line_html(
 
     links = ""
     if log_url:
-        log_label = f"[{job_num} log]" if job_num else "[log]"
+        log_label = f"[job {job_num}]" if job_num else "[log]"
         links += _small_link_html(url=log_url, label=log_label)
     # Raw-log link (only when present).
     if raw_log_href:
