@@ -136,6 +136,12 @@
       color: #cf222e;
       font-weight: 600;
     }
+    .stats-table td.desc {
+      color: #57606a;
+      font-size: 11px;
+      font-style: italic;
+      padding-left: 12px;
+    }
     .stats-table td.section {
       padding: 10px 8px 6px 8px;
       color: #24292f;
@@ -255,19 +261,23 @@
       {{ summary_with_toggle('Statistics') }}
       <div class="details-body">
       <table class="stats-table">
-        {% for k, v in page_stats %}
+        {% for stat in page_stats %}
+        {% set k = stat[0] %}
+        {% set v = stat[1] %}
+        {% set desc = stat[2] if stat|length > 2 else '' %}
         <tr>
           {% if v is none and (k|string)[:3] == '## ' %}
-          <td class="section" colspan="2">{{ (k|string)[3:] }}</td>
+          <td class="section" colspan="3">{{ (k|string)[3:] }}</td>
           {% else %}
           <td class="k">{{ k }}</td>
-          <td class="v{% if 'miss' in (k|string)|lower and v != '0' %} warn-text{% endif %}">
+          <td class="v{% if 'miss' in (k|string)|lower and v != '0' and v != '(N/A)' %} warn-text{% endif %}">
             {% if v is string and '\n' in v %}
             <pre class="stats-pre">{{ v }}</pre>
             {% else %}
             {{ v }}
             {% endif %}
           </td>
+          <td class="desc">{{ desc }}</td>
           {% endif %}
         </tr>
         {% endfor %}

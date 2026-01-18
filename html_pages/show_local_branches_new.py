@@ -48,6 +48,8 @@ if str(_UTILS_DIR) not in sys.path:
 if str(_THIS_DIR) not in sys.path:
     sys.path.insert(0, str(_THIS_DIR))
 
+import git  # GitPython  # noqa: E402
+
 from common_github import GitHubAPIClient, PRInfo  # noqa: E402
 from html_pages.common_dashboard_runtime import prune_dashboard_raw_logs, prune_partial_raw_log_caches  # noqa: E402
 
@@ -100,22 +102,13 @@ def get_local_branches_info(repo_dir: Path) -> List[Dict]:
     - commit_message: str
     """
     try:
-        import git  # GitPython
-    except ImportError:
-        logging.error("GitPython not available - cannot read local branches")
-        return []
-    
-    try:
         repo = git.Repo(str(repo_dir))
     except Exception as e:
         logging.error(f"Failed to open git repo at {repo_dir}: {e}")
         return []
     
     branches_info = []
-    try:
-        current_branch_name = repo.active_branch.name if not repo.head.is_detached else None
-    except Exception:
-        current_branch_name = None
+    current_branch_name = repo.active_branch.name if not repo.head.is_detached else None
     
     for branch in repo.branches:
         try:
@@ -196,11 +189,8 @@ def main() -> int:
     page_root_dir = output.parent
     
     # Prune old logs
-    try:
-        _ = prune_dashboard_raw_logs(page_root_dir=page_root_dir, max_age_days=30)
-        _ = prune_partial_raw_log_caches(page_root_dirs=[page_root_dir])
-    except Exception:
-        pass
+    _ = prune_dashboard_raw_logs(page_root_dir=page_root_dir, max_age_days=30)
+    _ = prune_partial_raw_log_caches(page_root_dirs=[page_root_dir])
     
     # GitHub API client
     gh = GitHubAPIClient(
@@ -216,10 +206,7 @@ def main() -> int:
         gh.check_core_rate_limit_or_raise()
     except Exception as e:
         cache_only_reason = str(e)
-        try:
-            gh.set_cache_only_mode(True)
-        except Exception:
-            pass
+        gh.set_cache_only_mode(True)
     
     t0 = time.monotonic()
     
@@ -314,8 +301,6 @@ def main() -> int:
                 or []
             )
         )
-    except Exception:
-        pass
     
     # Generate HTML (same as remote branches)
     html = generate_html(

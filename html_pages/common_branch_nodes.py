@@ -79,6 +79,9 @@ from common_dashboard_runtime import (
     materialize_job_raw_log_text_local_link,
 )
 
+# Snippet cache (shared across all dashboards)
+from snippet_cache import SNIPPET_CACHE
+
 # Import GitHub utilities from common_github module
 from common_github import (
     FailedCheck,
@@ -274,20 +277,10 @@ def mock_get_open_pr_info_for_author(
 
 
 # Log/snippet helpers (shared library: `dynamo-utils/ci_log_errors/`)
-try:
-    from ci_log_errors import snippet as ci_snippet
-except ImportError:
-    ci_snippet = None  # type: ignore[assignment]
+from ci_log_errors import snippet as ci_snippet
 
-# Jinja2 is optional (keep CLI usable in minimal envs).
-try:
-    from jinja2 import Environment, FileSystemLoader, select_autoescape
-    HAS_JINJA2 = True
-except ImportError:  # pragma: no cover
-    HAS_JINJA2 = False
-    Environment = None  # type: ignore[assignment]
-    FileSystemLoader = None  # type: ignore[assignment]
-    select_autoescape = None  # type: ignore[assignment]
+# Jinja2 for HTML template rendering
+from jinja2 import Environment, FileSystemLoader, select_autoescape
 
 
 #
@@ -832,7 +825,14 @@ class BranchInfoNode(BranchNode):
         if metadata_suffix:
             kids.append(BranchMetadataNode(label=metadata_suffix).to_tree_vm())
         
-        # 3) Other children (PR status, CI checks, etc.)
+        # 3) Conflict/blocking warnings (if PR has issues)
+        if self.pr:
+            if self.pr.conflict_message:
+                kids.append(ConflictWarningNode(label=str(self.pr.conflict_message)).to_tree_vm())
+            if self.pr.blocking_message:
+                kids.append(BlockedMessageNode(label=str(self.pr.blocking_message)).to_tree_vm())
+        
+        # 4) Other children (PR status, CI checks, etc.)
         for c in (self.children or []):
             kids.append(c.to_tree_vm())
         
@@ -1035,9 +1035,6 @@ def generate_html(
     Returns:
         HTML string
     """
-    if not HAS_JINJA2:
-        raise RuntimeError("Jinja2 is required for HTML generation")
-    
     # Get current time in both UTC and PDT
     now_utc = datetime.now(ZoneInfo('UTC'))
     now_pdt = datetime.now(ZoneInfo('America/Los_Angeles'))
@@ -1240,6 +1237,7 @@ def build_ci_nodes_from_pr(
         DYNAMO_REPO,
         pr_number,
         commit_sha=str(pr.head_sha or ""),
+        head_sha=str(pr.head_sha or ""),  # Pass head_sha to skip wasteful PR fetch (saves 1 API call)
         required_checks=required_set,
         ttl_s=int(checks_ttl_s),
         skip_fetch=bool(skip_fetch),
@@ -1351,7 +1349,9 @@ def build_ci_nodes_from_pr(
             except OSError:
                 raw_size = 0
             try:
-                snippet = ci_snippet.extract_error_snippet_from_log_file(base_dir / raw_href) if ci_snippet else ""
+                # Use shared snippet cache (ALL dashboards now track snippet stats!)
+                snippet_body, _categories = SNIPPET_CACHE.get_or_compute(raw_log_path=base_dir / raw_href)
+                snippet = str(snippet_body or "")
             except OSError:
                 snippet = ""
         elif st == "failure":

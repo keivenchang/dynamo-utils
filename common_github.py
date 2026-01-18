@@ -55,6 +55,136 @@ from common import (
 # Module logger
 _logger = logging.getLogger(__name__)
 
+
+# ======================================================================================
+# GLOBAL CACHE STATISTICS
+# ======================================================================================
+# All GitHub API caching operations write to these global statistics.
+# Dashboard scripts read from these to display cache performance.
+
+class _GitHubCacheStats:
+    """Global singleton for tracking GitHub cache statistics across all operations."""
+
+    def __init__(self):
+        self.reset()
+
+    def reset(self):
+        """Reset all statistics (useful for testing)."""
+        # Merge dates cache (when PRs were merged)
+        self.merge_dates_hits = 0
+        self.merge_dates_misses = 0
+        self.merge_dates_miss_reason = ""
+        self.merge_dates_miss_prs_sample = []
+
+        # Required checks cache (required status checks per PR)
+        self.required_checks_hits = 0
+        self.required_checks_misses = 0
+        self.required_checks_miss_reason = ""
+        self.required_checks_skip_fetch = False
+        self.required_checks_miss_prs_sample = []
+
+    def to_dict(self) -> Dict[str, dict]:
+        """Return statistics in the format expected by build_page_stats (extra_cache_stats)."""
+        return {
+            "merge_dates_cache": {
+                "hits": self.merge_dates_hits,
+                "misses": self.merge_dates_misses,
+                "miss_reason": self.merge_dates_miss_reason,
+                "miss_prs_sample": list(self.merge_dates_miss_prs_sample),
+            },
+            "required_checks_cache": {
+                "hits": self.required_checks_hits,
+                "misses": self.required_checks_misses,
+                "miss_reason": self.required_checks_miss_reason,
+                "skip_fetch": self.required_checks_skip_fetch,
+                "miss_prs_sample": list(self.required_checks_miss_prs_sample),
+            },
+        }
+
+
+# Global instance - all code writes to this
+GITHUB_CACHE_STATS = _GitHubCacheStats()
+
+
+class _GitHubAPIStats:
+    """Global singleton for tracking GitHub API REST call statistics."""
+
+    def __init__(self):
+        self.reset()
+
+    def reset(self):
+        """Reset all statistics."""
+        # REST call stats
+        self.rest_calls_total = 0
+        self.rest_calls_by_label = {}  # Dict[str, int] - count by API endpoint label
+        self.rest_success_total = 0
+        self.rest_success_by_label = {}  # Dict[str, int]
+        self.rest_time_total_s = 0.0
+        self.rest_time_by_label_s = {}  # Dict[str, float] - time in seconds by label
+        self.rest_budget_max = None  # Optional[int]
+        self.rest_budget_exhausted = False
+        self.rest_budget_exhausted_reason = ""
+
+        # Error stats
+        self.rest_errors_total = 0
+        self.rest_errors_by_status = {}  # Dict[int, int]
+        self.rest_errors_by_label_status = {}  # Dict[str, Dict[int, int]] - errors by label and status code
+        self.rest_last_error = {}  # Dict[str, Any]
+        self.rest_last_error_label = ""
+
+        # Generic cache stats (file-level operations)
+        self.cache_hits = {}  # Dict[str, int] - by cache name
+        self.cache_misses = {}  # Dict[str, int] - by cache name
+        self.cache_writes_ops = {}  # Dict[str, int] - write operations by cache name
+        self.cache_writes_entries = {}  # Dict[str, int] - entries written by cache name
+
+        # Rate limit info
+        self.core_rate_limit = None  # Optional[Dict] - {remaining, limit, reset_pt}
+
+
+# Global instance - all code writes to this
+GITHUB_API_STATS = _GitHubAPIStats()
+
+
+class _CommitHistoryPerfStats:
+    """Global singleton for commit-history-specific performance statistics."""
+
+    def __init__(self):
+        self.reset()
+
+    def reset(self):
+        """Reset all statistics."""
+        # Composite SHA operations
+        self.composite_sha_cache_hit = 0
+        self.composite_sha_cache_miss = 0
+        self.composite_sha_errors = 0
+        self.composite_sha_total_secs = 0.0
+        self.composite_sha_compute_secs = 0.0
+
+        # Local build markers
+        self.marker_composite_with_reports = 0
+        self.marker_composite_with_status = 0
+        self.marker_composite_without_reports = 0
+        self.marker_total_secs = 0.0
+
+        # GitLab cache operations
+        self.gitlab_cache_registry_images_hit = 0
+        self.gitlab_cache_registry_images_miss = 0
+        self.gitlab_cache_pipeline_status_hit = 0
+        self.gitlab_cache_pipeline_status_miss = 0
+        self.gitlab_cache_pipeline_jobs_hit = 0
+        self.gitlab_cache_pipeline_jobs_miss = 0
+
+        # GitLab timings
+        self.gitlab_registry_images_total_secs = 0.0
+        self.gitlab_pipeline_status_total_secs = 0.0
+        self.gitlab_pipeline_jobs_total_secs = 0.0
+
+
+# Global instance - all code writes to this
+COMMIT_HISTORY_PERF_STATS = _CommitHistoryPerfStats()
+
+
 # ======================================================================================
 # ======================================================================================
 # API inventory (where the dashboard data comes from)
@@ -797,34 +927,8 @@ class GitHubAPIClient:
         if self.token:
             self.headers['Authorization'] = f'token {self.token}'
 
-        # Per-run REST call accounting (helps debug "why so many API calls?").
-        # Counts only requests made via this client (not `gh` CLI subprocess calls).
-        self._rest_calls_total: int = 0
-        self._rest_calls_by_label: Dict[str, int] = {}
-        # Per-run REST success/error accounting (counts each HTTP response we receive, including retries).
-        self._rest_success_total: int = 0
-        self._rest_success_by_label: Dict[str, int] = {}
-        # Per-run REST error accounting (helps debug auth/policy issues like 401/403).
-        self._rest_errors_total: int = 0
-        self._rest_errors_by_status: Dict[int, int] = {}
-        # Per-run REST error accounting by label+status (pinpoints which API types are failing).
-        # Shape: {label: {status_code: count}}
-        self._rest_errors_by_label_status: Dict[str, Dict[int, int]] = {}
-        self._rest_last_error: Dict[str, Any] = {}
-        self._rest_last_error_label: str = ""
-        # Per-run REST timing (seconds; counts actual network time, including retries).
-        self._rest_time_total_s: float = 0.0
-        self._rest_time_by_label_s: Dict[str, float] = {}
-
-        # Per-run cache hit/miss accounting (helps debug "why so many API calls?").
-        # Shape: {cache_name: count}. Cache names are stable, low-cardinality strings.
-        self._cache_hits: Dict[str, int] = {}
-        self._cache_misses: Dict[str, int] = {}
-        # Per-run cache write accounting (disk persistence).
-        # - ops: number of times we wrote a cache file
-        # - entries: best-effort count of logical entries we wrote/updated
-        self._cache_writes_ops: Dict[str, int] = {}
-        self._cache_writes_entries: Dict[str, int] = {}
+        # Store budget info in global stats
+        GITHUB_API_STATS.rest_budget_max = self._rest_budget_max
 
         # ----------------------------
         # Persistent caches (disk + memory)
@@ -908,7 +1012,7 @@ class GitHubAPIClient:
             raise RuntimeError(self._rest_budget_exhausted_reason or "GitHub REST call budget exhausted")
         # Consume (note: retries are counted separately by callers that also invoke _rest_get)
         try:
-            remaining = int(self._rest_budget_max) - int(self._rest_calls_total)
+            remaining = int(self._rest_budget_max) - int(GITHUB_API_STATS.rest_calls_total)
         except Exception:
             remaining = -1
         if remaining <= 0:
@@ -1008,58 +1112,58 @@ class GitHubAPIClient:
     def _cache_hit(self, name: str) -> None:
         try:
             k = str(name or "").strip() or "unknown"
-            self._cache_hits[k] = int(self._cache_hits.get(k, 0) or 0) + 1
+            GITHUB_API_STATS.cache_hits[k] = int(GITHUB_API_STATS.cache_hits.get(k, 0) or 0) + 1
         except Exception:
             pass
 
     def _cache_miss(self, name: str) -> None:
         try:
             k = str(name or "").strip() or "unknown"
-            self._cache_misses[k] = int(self._cache_misses.get(k, 0) or 0) + 1
+            GITHUB_API_STATS.cache_misses[k] = int(GITHUB_API_STATS.cache_misses.get(k, 0) or 0) + 1
         except Exception:
             pass
 
     def _cache_write(self, name: str, *, entries: int = 0) -> None:
         try:
             k = str(name or "").strip() or "unknown"
-            self._cache_writes_ops[k] = int(self._cache_writes_ops.get(k, 0) or 0) + 1
+            GITHUB_API_STATS.cache_writes_ops[k] = int(GITHUB_API_STATS.cache_writes_ops.get(k, 0) or 0) + 1
             if int(entries or 0) > 0:
-                self._cache_writes_entries[k] = int(self._cache_writes_entries.get(k, 0) or 0) + int(entries or 0)
+                GITHUB_API_STATS.cache_writes_entries[k] = int(GITHUB_API_STATS.cache_writes_entries.get(k, 0) or 0) + int(entries or 0)
         except Exception:
             pass
 
     def get_cache_stats(self) -> Dict[str, Any]:
         """Return best-effort per-run cache hit/miss stats for displaying in dashboards."""
         try:
-            hits_total = int(sum(int(v) for v in (self._cache_hits or {}).values()))
+            hits_total = int(sum(int(v) for v in (GITHUB_API_STATS.cache_hits or {}).values()))
         except Exception:
             hits_total = 0
         try:
-            misses_total = int(sum(int(v) for v in (self._cache_misses or {}).values()))
+            misses_total = int(sum(int(v) for v in (GITHUB_API_STATS.cache_misses or {}).values()))
         except Exception:
             misses_total = 0
         try:
-            hits_by = dict(sorted((self._cache_hits or {}).items(), key=lambda kv: (-int(kv[1] or 0), str(kv[0]))))
+            hits_by = dict(sorted((GITHUB_API_STATS.cache_hits or {}).items(), key=lambda kv: (-int(kv[1] or 0), str(kv[0]))))
         except Exception:
             hits_by = {}
         try:
-            misses_by = dict(sorted((self._cache_misses or {}).items(), key=lambda kv: (-int(kv[1] or 0), str(kv[0]))))
+            misses_by = dict(sorted((GITHUB_API_STATS.cache_misses or {}).items(), key=lambda kv: (-int(kv[1] or 0), str(kv[0]))))
         except Exception:
             misses_by = {}
         try:
-            writes_ops_total = int(sum(int(v) for v in (self._cache_writes_ops or {}).values()))
+            writes_ops_total = int(sum(int(v) for v in (GITHUB_API_STATS.cache_writes_ops or {}).values()))
         except Exception:
             writes_ops_total = 0
         try:
-            writes_ops_by = dict(sorted((self._cache_writes_ops or {}).items(), key=lambda kv: (-int(kv[1] or 0), str(kv[0]))))
+            writes_ops_by = dict(sorted((GITHUB_API_STATS.cache_writes_ops or {}).items(), key=lambda kv: (-int(kv[1] or 0), str(kv[0]))))
         except Exception:
             writes_ops_by = {}
         try:
-            writes_entries_total = int(sum(int(v) for v in (self._cache_writes_entries or {}).values()))
+            writes_entries_total = int(sum(int(v) for v in (GITHUB_API_STATS.cache_writes_entries or {}).values()))
         except Exception:
             writes_entries_total = 0
         try:
-            writes_entries_by = dict(sorted((self._cache_writes_entries or {}).items(), key=lambda kv: (-int(kv[1] or 0), str(kv[0]))))
+            writes_entries_by = dict(sorted((GITHUB_API_STATS.cache_writes_entries or {}).items(), key=lambda kv: (-int(kv[1] or 0), str(kv[0]))))
         except Exception:
             writes_entries_by = {}
         return {
@@ -1094,8 +1198,8 @@ class GitHubAPIClient:
         self._budget_maybe_consume_or_raise()
 
         try:
-            self._rest_calls_total += 1
-            self._rest_calls_by_label[label] = int(self._rest_calls_by_label.get(label, 0) or 0) + 1
+            GITHUB_API_STATS.rest_calls_total += 1
+            GITHUB_API_STATS.rest_calls_by_label[label] = int(GITHUB_API_STATS.rest_calls_by_label.get(label, 0) or 0) + 1
         except Exception:
             pass
         if self._debug_rest:
@@ -1108,8 +1212,8 @@ class GitHubAPIClient:
         resp = requests.get(url, headers=headers, params=params, timeout=timeout, allow_redirects=allow_redirects, stream=stream)
         try:
             dt = max(0.0, time.monotonic() - t0_req)
-            self._rest_time_total_s += float(dt)
-            self._rest_time_by_label_s[label] = float(self._rest_time_by_label_s.get(label, 0.0)) + float(dt)
+            GITHUB_API_STATS.rest_time_total_s += float(dt)
+            GITHUB_API_STATS.rest_time_by_label_s[label] = float(GITHUB_API_STATS.rest_time_by_label_s.get(label, 0.0)) + float(dt)
         except Exception:
             pass
 
@@ -1121,18 +1225,18 @@ class GitHubAPIClient:
                 code = 0
             try:
                 if code and code < 400:
-                    self._rest_success_total += 1
-                    self._rest_success_by_label[label] = int(self._rest_success_by_label.get(label, 0) or 0) + 1
+                    GITHUB_API_STATS.rest_success_total += 1
+                    GITHUB_API_STATS.rest_success_by_label[label] = int(GITHUB_API_STATS.rest_success_by_label.get(label, 0) or 0) + 1
                 else:
-                    self._rest_errors_total += 1
+                    GITHUB_API_STATS.rest_errors_total += 1
                     if code:
-                        self._rest_errors_by_status[code] = int(self._rest_errors_by_status.get(code, 0) or 0) + 1
+                        GITHUB_API_STATS.rest_errors_by_status[code] = int(GITHUB_API_STATS.rest_errors_by_status.get(code, 0) or 0) + 1
                         # label+status breakdown
                         try:
-                            d = self._rest_errors_by_label_status.get(label)
+                            d = GITHUB_API_STATS.rest_errors_by_label_status.get(label)
                             if not isinstance(d, dict):
                                 d = {}
-                                self._rest_errors_by_label_status[label] = d
+                                GITHUB_API_STATS.rest_errors_by_label_status[label] = d
                             d[int(code)] = int(d.get(int(code), 0) or 0) + 1
                         except Exception:
                             pass
@@ -1148,12 +1252,12 @@ class GitHubAPIClient:
                         url_full = str(r.url or str(url or "")).strip()
                     except Exception:
                         url_full = str(url or "")
-                    self._rest_last_error = {
+                    GITHUB_API_STATS.rest_last_error = {
                         "status": code,
                         "url": url_full,
                         "body": body,
                     }
-                    self._rest_last_error_label = str(label or "")
+                    GITHUB_API_STATS.rest_last_error_label = str(label or "")
             except Exception:
                 pass
 
@@ -1190,8 +1294,8 @@ class GitHubAPIClient:
                     self._budget_maybe_consume_or_raise()
                     # Count this retry as a REST call too (it is).
                     try:
-                        self._rest_calls_total += 1
-                        self._rest_calls_by_label[label] = int(self._rest_calls_by_label.get(label, 0) or 0) + 1
+                        GITHUB_API_STATS.rest_calls_total += 1
+                        GITHUB_API_STATS.rest_calls_by_label[label] = int(GITHUB_API_STATS.rest_calls_by_label.get(label, 0) or 0) + 1
                     except Exception:
                         pass
                     if self._debug_rest:
@@ -1203,8 +1307,8 @@ class GitHubAPIClient:
                     resp2 = requests.get(url, headers=headers_no_auth, params=params, timeout=timeout, allow_redirects=allow_redirects, stream=stream)
                     try:
                         dt2 = max(0.0, time.monotonic() - t0_req2)
-                        self._rest_time_total_s += float(dt2)
-                        self._rest_time_by_label_s[label] = float(self._rest_time_by_label_s.get(label, 0.0)) + float(dt2)
+                        GITHUB_API_STATS.rest_time_total_s += float(dt2)
+                        GITHUB_API_STATS.rest_time_by_label_s[label] = float(GITHUB_API_STATS.rest_time_by_label_s.get(label, 0.0)) + float(dt2)
                     except Exception:
                         pass
                     _record_response(resp2)
@@ -1229,15 +1333,15 @@ class GitHubAPIClient:
         """Return best-effort per-run REST error stats for displaying in dashboards."""
         try:
             return {
-                "total": int(self._rest_errors_total),
-                "by_status": dict(sorted(self._rest_errors_by_status.items(), key=lambda kv: (-kv[1], kv[0]))),
+                "total": int(GITHUB_API_STATS.rest_errors_total),
+                "by_status": dict(sorted(GITHUB_API_STATS.rest_errors_by_status.items(), key=lambda kv: (-kv[1], kv[0]))),
                 "by_label_status": {
                     str(lbl): dict(sorted({int(k): int(v) for k, v in (m or {}).items() if int(v or 0) > 0}.items(), key=lambda kv: (-kv[1], kv[0])))
-                    for (lbl, m) in dict(sorted((self._rest_errors_by_label_status or {}).items(), key=lambda kv: str(kv[0]))).items()
+                    for (lbl, m) in dict(sorted((GITHUB_API_STATS.rest_errors_by_label_status or {}).items(), key=lambda kv: str(kv[0]))).items()
                     if isinstance(m, dict)
                 },
-                "last_label": str(self._rest_last_error_label or ""),
-                "last": dict(self._rest_last_error or {}),
+                "last_label": str(GITHUB_API_STATS.rest_last_error_label or ""),
+                "last": dict(GITHUB_API_STATS.rest_last_error or {}),
             }
         except Exception:
             return {"total": 0, "by_status": {}, "by_label_status": {}, "last_label": "", "last": {}}
@@ -1246,15 +1350,15 @@ class GitHubAPIClient:
         """Return per-run REST call stats for debugging."""
         try:
             return {
-                "total": int(self._rest_calls_total),
+                "total": int(GITHUB_API_STATS.rest_calls_total),
                 "budget_max": int(self._rest_budget_max) if self._rest_budget_max is not None else None,
                 "budget_exhausted": bool(self._rest_budget_exhausted),
-                "by_label": dict(sorted(self._rest_calls_by_label.items(), key=lambda kv: (-kv[1], kv[0]))),
-                "success_total": int(self._rest_success_total),
-                "success_by_label": dict(sorted(self._rest_success_by_label.items(), key=lambda kv: (-kv[1], kv[0]))),
-                "error_total": int(self._rest_errors_total),
-                "time_total_s": float(self._rest_time_total_s),
-                "time_by_label_s": dict(sorted(self._rest_time_by_label_s.items(), key=lambda kv: (-kv[1], kv[0]))),
+                "by_label": dict(sorted(GITHUB_API_STATS.rest_calls_by_label.items(), key=lambda kv: (-kv[1], kv[0]))),
+                "success_total": int(GITHUB_API_STATS.rest_success_total),
+                "success_by_label": dict(sorted(GITHUB_API_STATS.rest_success_by_label.items(), key=lambda kv: (-kv[1], kv[0]))),
+                "error_total": int(GITHUB_API_STATS.rest_errors_total),
+                "time_total_s": float(GITHUB_API_STATS.rest_time_total_s),
+                "time_by_label_s": dict(sorted(GITHUB_API_STATS.rest_time_by_label_s.items(), key=lambda kv: (-kv[1], kv[0]))),
             }
         except Exception:
             return {
@@ -2850,6 +2954,7 @@ class GitHubAPIClient:
         pr_number: int,
         *,
         commit_sha: Optional[str] = None,
+        head_sha: Optional[str] = None,
         required_checks: Optional[set] = None,
         ttl_s: int = 300,
         skip_fetch: bool = False,
@@ -2858,9 +2963,10 @@ class GitHubAPIClient:
 
         Note: the raw-log links are time-limited, but the checks rows themselves are cheap to cache
         for a short TTL to speed repeated HTML generation.
-        
+
         Args:
             commit_sha: Optional commit SHA to cache per-commit. If not provided, caches per-PR only.
+            head_sha: Optional PR head SHA. If provided, skips the PR fetch to get head SHA (saves 1 API call).
         """
         required_checks = required_checks or set()
         key = self._pr_checks_cache_key(owner, repo, pr_number, commit_sha=commit_sha)
@@ -2881,6 +2987,7 @@ class GitHubAPIClient:
                 if ts and (now - ts) <= max(0, int(ttl_s)):
                     if ver >= CACHE_VER:
                         self._cache_hit("pr_checks_rows.mem")
+                        GITHUB_CACHE_STATS.required_checks_hits += 1
                     else:
                         raise RuntimeError("stale pr_checks_rows cache schema")
                     out: List[GHPRCheckRow] = []
@@ -2906,8 +3013,10 @@ class GitHubAPIClient:
                     if ver >= CACHE_VER:
                         if (now - ts) <= max(0, int(ttl_s)):
                             self._cache_hit("pr_checks_rows.disk")
+                            GITHUB_CACHE_STATS.required_checks_hits += 1
                         else:
                             self._cache_hit("pr_checks_rows.disk_stale_cache_only")
+                            GITHUB_CACHE_STATS.required_checks_hits += 1
                     else:
                         raise RuntimeError("stale pr_checks_rows cache schema")
                     out: List[GHPRCheckRow] = []
@@ -2932,10 +3041,17 @@ class GitHubAPIClient:
 
         # 3) REST check-runs for PR head SHA (best-effort; works for public repos without auth)
         self._cache_miss("pr_checks_rows.network")
+        GITHUB_CACHE_STATS.required_checks_misses += 1
         try:
-            pr = self.get(f"/repos/{owner}/{repo}/pulls/{int(pr_number)}", timeout=10) or {}
-            head_sha = (((pr.get("head") or {}) if isinstance(pr, dict) else {}) or {}).get("sha")
-            head_sha = str(head_sha or "").strip()
+            # If head_sha provided, use it directly (saves 1 API call)
+            if head_sha:
+                head_sha = str(head_sha).strip()
+            else:
+                # Otherwise fetch PR to get head SHA
+                pr = self.get(f"/repos/{owner}/{repo}/pulls/{int(pr_number)}", timeout=10) or {}
+                head_sha = (((pr.get("head") or {}) if isinstance(pr, dict) else {}) or {}).get("sha")
+                head_sha = str(head_sha or "").strip()
+
             if not head_sha:
                 return []
 
@@ -4151,7 +4267,6 @@ query($owner:String!,$name:String!,$number:Int!,$prid:ID!,$after:String) {
         repo: str = "dynamo",
         cache_file: str = "github_required_checks.json",
         skip_fetch: bool = False,
-        stats: Optional[Dict[str, Any]] = None,
     ) -> Dict[int, List[str]]:
         """Get required check names for a list of PRs, with a persistent cache.
 
@@ -4237,20 +4352,12 @@ query($owner:String!,$name:String!,$number:Int!,$prid:ID!,$after:String) {
             except Exception:
                 pass
 
-        # Stats (best-effort): why did we call `gh` vs use cache?
-        try:
-            if isinstance(stats, dict):
-                stats["required_checks_cache"] = {
-                    "total_prs": len(pr_numbers_unique),
-                    "hits": len(pr_numbers_unique) - len(prs_to_fetch),
-                    "misses": len(prs_to_fetch),
-                    "skip_fetch": bool(skip_fetch),
-                    "cache_file": str(cache_path),
-                    "miss_reason": "not_in_cache" if prs_to_fetch else "",
-                    "miss_prs_sample": [int(x) for x in prs_to_fetch[:10]],
-                }
-        except Exception:
-            pass
+        # Update global cache statistics
+        GITHUB_CACHE_STATS.required_checks_hits += len(pr_numbers_unique) - len(prs_to_fetch)
+        GITHUB_CACHE_STATS.required_checks_misses += len(prs_to_fetch)
+        GITHUB_CACHE_STATS.required_checks_skip_fetch = bool(skip_fetch)
+        GITHUB_CACHE_STATS.required_checks_miss_reason = "not_in_cache" if prs_to_fetch else ""
+        GITHUB_CACHE_STATS.required_checks_miss_prs_sample = [int(x) for x in prs_to_fetch[:10]]
 
         return result
 
@@ -5018,8 +5125,7 @@ query($owner:String!,$name:String!,$number:Int!,$prid:ID!,$after:String) {
     def get_cached_pr_merge_dates(self, pr_numbers: List[int],
                                   owner: str = "ai-dynamo",
                                   repo: str = "dynamo",
-                                  cache_file: str = '.github_pr_merge_dates_cache.json',
-                                  stats: Optional[Dict[str, Any]] = None) -> Dict[int, Optional[str]]:
+                                  cache_file: str = '.github_pr_merge_dates_cache.json') -> Dict[int, Optional[str]]:
         """Get merge dates for pull requests with caching.
 
         Merge dates are cached permanently since they don't change once a PR is merged.
@@ -5129,290 +5235,13 @@ query($owner:String!,$name:String!,$number:Int!,$prid:ID!,$after:String) {
             except Exception:
                 pass
 
-        # Stats (best-effort): merge dates are immutable, so misses mean "not cached yet".
-        try:
-            if isinstance(stats, dict):
-                stats["merge_dates_cache"] = {
-                    "total_prs": len(pr_numbers_unique),
-                    "hits": len(pr_numbers_unique) - len(prs_to_fetch),
-                    "misses": len(prs_to_fetch),
-                    "cache_file": str(pr_cache_path),
-                    "miss_reason": "not_in_cache" if prs_to_fetch else "",
-                    "miss_prs_sample": [int(x) for x in prs_to_fetch[:10]],
-                }
-        except Exception:
-            pass
+        # Update global cache statistics
+        GITHUB_CACHE_STATS.merge_dates_hits += len(pr_numbers_unique) - len(prs_to_fetch)
+        GITHUB_CACHE_STATS.merge_dates_misses += len(prs_to_fetch)
+        GITHUB_CACHE_STATS.merge_dates_miss_reason = "not_in_cache" if prs_to_fetch else ""
+        GITHUB_CACHE_STATS.merge_dates_miss_prs_sample = [int(x) for x in prs_to_fetch[:10]]
 
         return result
-
-    def get_github_actions_status(
-        self,
-        owner,
-        repo,
-        sha_list,
-        cache_file=None,
-        skip_fetch=False,
-        *,
-        ttl_s: int = DEFAULT_UNSTABLE_TTL_S,
-        fetch_allowlist: Optional[set] = None,
-        sha_to_datetime: Optional[Dict[str, datetime]] = None,
-        stable_after_hours: int = DEFAULT_STABLE_AFTER_HOURS,
-        stable_ttl_s: int = DEFAULT_STABLE_TTL_S,
-        flush_every: int = 10,
-        stats: Optional[Dict[str, Any]] = None,
-    ):
-        """Get GitHub Actions check status for commits.
-
-        Args:
-            owner: Repository owner
-            repo: Repository name
-            sha_list: List of commit SHAs (full 40-char)
-            cache_file: Path to cache file (default: .github_actions_status_cache.json)
-            skip_fetch: If True, only return cached data
-
-        Returns:
-            Dict mapping SHA -> status info:
-            {
-                "sha": {
-                    "status": "success|failure|pending|in_progress|null",
-                    "conclusion": "success|failure|cancelled|skipped|timed_out|action_required|null",
-                    "total_count": int,
-                    "check_runs": [...]
-                }
-            }
-        """
-        from pathlib import Path
-        from concurrent.futures import ThreadPoolExecutor
-
-        if cache_file is None:
-            cache_file = resolve_cache_path('.github_actions_status_cache.json')
-        else:
-            cache_file = resolve_cache_path(str(cache_file))
-
-        # Load cache
-        cache = {}
-        if cache_file.exists():
-            try:
-                cache = json.loads(cache_file.read_text())
-            except Exception:
-                cache = {}
-
-        now = int(time.time())
-
-        def _unpack(ent: Any) -> tuple[int, Any]:
-            # New format: {"ts": 123, "data": {...}}
-            if isinstance(ent, dict) and "ts" in ent and "data" in ent:
-                try:
-                    return int(ent.get("ts") or 0), ent.get("data")
-                except Exception:
-                    return 0, ent.get("data")
-            # Legacy: cached value directly (no ts)
-            return 0, ent
-
-        def _pack(ts: int, data: Any) -> Dict[str, Any]:
-            return {"ts": int(ts), "data": data}
-
-        def _allow_fetch(sha: str) -> bool:
-            if skip_fetch:
-                return False
-            if fetch_allowlist is None:
-                return True
-            try:
-                # Normally, respect the allowlist (used to cap network calls).
-                #
-                # However, if the cache indicates this SHA is still "in progress"/"pending",
-                # we must allow a refresh even if the commit is older than the time window.
-                # Otherwise, an in-progress cache entry can get "stuck" forever.
-                if sha in fetch_allowlist:
-                    return True
-                ent = cache.get(sha) if isinstance(cache, dict) else None
-                _ts, _data = _unpack(ent)
-                if isinstance(_data, dict):
-                    st = str(_data.get("status", "") or "").strip().lower()
-                    if st in ("in_progress", "pending"):
-                        return True
-                    crs = _data.get("check_runs")
-                    if isinstance(crs, list):
-                        for cr in crs:
-                            if not isinstance(cr, dict):
-                                continue
-                            cr_status = str(cr.get("status", "") or "").strip().lower()
-                            cr_concl = str(cr.get("conclusion", "") or "").strip().lower()
-                            if cr_status in ("queued", "in_progress", "pending"):
-                                return True
-                            if cr_status and cr_status != "completed" and cr_concl in ("", "null", "none"):
-                                return True
-                return False
-            except Exception:
-                return False
-
-        shas_to_fetch: List[str] = []
-        result: Dict[str, Any] = {}
-        # Stats (best-effort)
-        _stats = {
-            "total_shas": 0,
-            "cache_hit_fresh": 0,
-            "cache_hit_stale_no_fetch": 0,
-            "cache_stale_refresh": 0,
-            "cache_miss_fetch": 0,
-            "cache_miss_no_fetch": 0,
-            "skip_fetch": bool(skip_fetch),
-            "allowlist_size": int(len(fetch_allowlist)) if isinstance(fetch_allowlist, set) else None,
-            "cache_file": str(cache_file),
-            "miss_reason_samples": {},  # reason -> [sha_short,...]
-        }
-
-        for sha in sha_list:
-            _stats["total_shas"] += 1
-            ent = cache.get(sha) if isinstance(cache, dict) else None
-            ts, data = _unpack(ent)
-
-            if ent is not None:
-                # If cached, return it, but optionally refresh if stale AND allowed.
-                result[sha] = data
-                stale = True
-                try:
-                    per_sha_ttl = int(ttl_s)
-                    if sha_to_datetime is not None:
-                        dt = sha_to_datetime.get(sha)
-                        per_sha_ttl = self.compute_checks_cache_ttl_s(
-                            dt,
-                            refresh=False,
-                            stable_after_hours=int(stable_after_hours),
-                            short_ttl_s=int(ttl_s),
-                            stable_ttl_s=int(stable_ttl_s),
-                        )
-                    if ts and (now - ts) <= max(0, int(per_sha_ttl)):
-                        stale = False
-                except Exception:
-                    stale = True
-
-                if stale:
-                    if _allow_fetch(sha):
-                        shas_to_fetch.append(sha)
-                        _stats["cache_stale_refresh"] += 1
-                    else:
-                        _stats["cache_hit_stale_no_fetch"] += 1
-                else:
-                    _stats["cache_hit_fresh"] += 1
-            else:
-                if _allow_fetch(sha):
-                    shas_to_fetch.append(sha)
-                    _stats["cache_miss_fetch"] += 1
-                else:
-                    result[sha] = None
-                    _stats["cache_miss_no_fetch"] += 1
-                    try:
-                        _stats["miss_reason_samples"].setdefault("blocked_by_allowlist_or_skip_fetch", []).append(str(sha)[:9])
-                    except Exception:
-                        pass
-
-        def _flush_cache_to_disk() -> None:
-            try:
-                cache_file.parent.mkdir(parents=True, exist_ok=True)
-                tmp = str(cache_file) + ".tmp"
-                Path(tmp).write_text(json.dumps(cache, indent=2))
-                os.replace(tmp, cache_file)
-                # Best-effort entry count: number of SHAs we fetched/updated this invocation.
-                self._cache_write("github_actions_status.disk_write", entries=int(len(shas_to_fetch or [])))
-            except Exception:
-                pass
-
-        # Fetch uncached SHAs in parallel
-        cache_updated = False
-        if shas_to_fetch:
-            def fetch_check_status(sha):
-                """Helper to fetch check status for a single commit"""
-                try:
-                    # Use GitHub REST to get check runs (no gh dependency)
-                    data = self.get(f"/repos/{owner}/{repo}/commits/{sha}/check-runs", params={"per_page": 100}, timeout=30) or {}
-                    check_runs = data.get("check_runs", []) if isinstance(data, dict) else []
-                    total_count = data.get("total_count", 0) if isinstance(data, dict) else 0
-
-                    # Determine overall status (best-effort; used by dashboards).
-                    if int(total_count or 0) == 0:
-                        status = "null"
-                        conclusion = "null"
-                    else:
-                        has_failure = any(
-                            str((cr or {}).get("conclusion") or "") in ["failure", "timed_out", "action_required"]
-                            for cr in (check_runs or [])
-                            if isinstance(cr, dict)
-                        )
-                        has_pending = any(
-                            str((cr or {}).get("status") or "") in ["queued", "in_progress"]
-                            for cr in (check_runs or [])
-                            if isinstance(cr, dict)
-                        )
-                        has_cancelled = any(
-                            str((cr or {}).get("conclusion") or "") == "cancelled"
-                            for cr in (check_runs or [])
-                            if isinstance(cr, dict)
-                        )
-
-                        if has_failure:
-                            status = "completed"
-                            conclusion = "failure"
-                        elif has_pending:
-                            status = "in_progress"
-                            conclusion = "null"
-                        elif has_cancelled:
-                            status = "completed"
-                            conclusion = "cancelled"
-                        else:
-                            # All succeeded or skipped
-                            status = "completed"
-                            conclusion = "success"
-
-                    return (
-                        sha,
-                        {
-                            "status": status,
-                            "conclusion": conclusion,
-                            "total_count": total_count,
-                            "check_runs": check_runs,
-                        },
-                    )
-                except Exception as e:
-                    _logger.debug(f"Failed to fetch check status for {sha[:8]}: {e}")
-                    return (sha, None)
-
-            # Fetch in parallel with 10 workers
-            with ThreadPoolExecutor(max_workers=10) as executor:
-                futures = [executor.submit(fetch_check_status, sha) for sha in shas_to_fetch]
-                flushed = 0
-                for future in futures:
-                    sha, status_info = future.result()
-                    # If we failed to fetch this SHA (rate limit, auth, network, etc), do NOT overwrite
-                    # an existing cache entry with `None`. This prevents the cache from degrading when
-                    # we run out of API calls.
-                    if status_info is None:
-                        result[sha] = result.get(sha)
-                        continue
-                    cache[sha] = _pack(int(time.time()), status_info)
-                    result[sha] = status_info
-                    cache_updated = True
-                    flushed += 1
-                    # Periodically flush cache so a crash/kill doesn't lose fetched data.
-                    if int(flush_every or 0) > 0 and (flushed % int(flush_every) == 0):
-                        _flush_cache_to_disk()
-
-        # Save cache if updated
-        if cache_updated:
-            _flush_cache_to_disk()
-
-        # Expose stats to caller
-        try:
-            if isinstance(stats, dict):
-                # Also report how many SHAs we actually fetched this run.
-                _stats["fetched_shas"] = int(len(shas_to_fetch))
-                stats["github_actions_status_cache"] = _stats
-        except Exception:
-            pass
-
-        return result
-
-        # unreachable
 
 
 def select_shas_for_network_fetch(

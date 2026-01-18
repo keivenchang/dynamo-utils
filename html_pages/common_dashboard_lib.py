@@ -23,8 +23,8 @@ LocalRepoNode (repository directory)                         ← Created by: sho
 └─ BranchInfoNode (individual branch)                        ← Created by: show_local_branches.py, show_remote_branches.py
    ├─ BranchCommitMessageNode (commit message + PR link)     ← Created by: BranchInfoNode.to_tree_vm()
    ├─ BranchMetadataNode (timestamps / age)                  ← Created by: BranchInfoNode.to_tree_vm()
-   ├─ ConflictWarningNode                                    ← Created by: show_local_branches.py, show_remote_branches.py (optional)
-   ├─ BlockedMessageNode                                     ← Created by: show_local_branches.py, show_remote_branches.py (optional)
+   ├─ ConflictWarningNode                                    ← Created by: BranchInfoNode.to_tree_vm() (when pr.conflict_message exists)
+   ├─ BlockedMessageNode                                     ← Created by: BranchInfoNode.to_tree_vm() (when pr.blocking_message exists)
    ├─ PRStatusWithJobsNode (CI status for PRs)               ← Created by: add_pr_status_node_pass
    │  ├─ CIJobNode (CI check/job)                            ← Created by: build_ci_nodes_from_pr()
    │  │  ├─ CIJobNode (nested steps)                         ← Created by: add_job_steps_and_tests_pass
@@ -83,8 +83,8 @@ BranchInfoNode("feature/DIS-1200")              ← Created by show_local_branch
    │  │  ├─ PytestTestNode("test_serve[agg]")   ← Created by pytest_slowest_tests_from_raw_log()
    │  │  └─ PytestTestNode("test_router[nats]") ← Created by pytest_slowest_tests_from_raw_log()
    │  └─ CIJobNode("Docker Tag and Push")       ← Created by add_job_steps_and_tests_pass()
-   ├─ ConflictWarningNode("⚠️ conflicts...")    ← Created by show_local_branches.py
-   └─ BlockedMessageNode("🚫 Blocked...")       ← Created by show_local_branches.py
+   ├─ ConflictWarningNode("⚠️ conflicts...")    ← Created by BranchInfoNode.to_tree_vm()
+   └─ BlockedMessageNode("🚫 Blocked...")       ← Created by BranchInfoNode.to_tree_vm()
 ```
 
 ======================================================================================
@@ -105,8 +105,10 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING
 from datetime import datetime, timezone
 
-from common_github import GitHubAPIClient, classify_ci_kind
+from common_github import GitHubAPIClient, classify_ci_kind, GITHUB_CACHE_STATS, COMMIT_HISTORY_PERF_STATS
 from common_types import CIStatus
+from pytest_timings_cache import PYTEST_TIMINGS_CACHE
+from snippet_cache import SNIPPET_CACHE
 
 # Avoid circular import by importing CIJobNode only for type checking
 if TYPE_CHECKING:
@@ -384,14 +386,11 @@ def _dom_id_from_node_key(node_key: str) -> str:
     This is used so URL state can target specific nodes across page regenerations.
     The caller should ensure node_key is stable and unique-enough (e.g. include repo/branch/SHA).
     """
-    try:
-        k = str(node_key or "")
-        if not k:
-            return ""
-        # Prefix with a letter for HTML id validity.
-        return f"tree_children_k_{_hash10(k)}"
-    except Exception:
+    k = str(node_key or "")
+    if not k:
         return ""
+    # Prefix with a letter for HTML id validity.
+    return f"tree_children_k_{_hash10(k)}"
 
 
 def create_dummy_nodes_from_yaml_pass(nodes: List[TreeNodeVM]) -> List[TreeNodeVM]:
@@ -1258,25 +1257,22 @@ def sort_nodes_by_name_pass(nodes: List[TreeNodeVM]) -> List[TreeNodeVM]:
           - Actions steps order (as emitted by GitHub)
           - Pytest per-test timing order (as emitted by pytest/log)
         """
-        try:
-            # The YAML "short job name" is the most reliable discriminator when present.
-            sj = str(node.short_job_name or "").strip().lower()
-            jn = str(node.job_name or "").strip().lower()
-            cn = str(node.core_job_name or "").strip().lower()
-            # Keep "Build and Test - dynamo" in natural order too.
-            if jn == "build and test - dynamo":
-                return True
-            # Typical cases:
-            # - short_job_name: "build-test"
-            # - core/job name: "...-build-test"
-            if sj == "build-test" or ("build-test" in sj):
-                return True
-            if ("-build-test" in jn) or ("build-test" in jn):
-                return True
-            if ("-build-test" in cn) or ("build-test" in cn):
-                return True
-        except Exception:
-            return False
+        # The YAML "short job name" is the most reliable discriminator when present.
+        sj = str(node.short_job_name or "").strip().lower()
+        jn = str(node.job_name or "").strip().lower()
+        cn = str(node.core_job_name or "").strip().lower()
+        # Keep "Build and Test - dynamo" in natural order too.
+        if jn == "build and test - dynamo":
+            return True
+        # Typical cases:
+        # - short_job_name: "build-test"
+        # - core/job name: "...-build-test"
+        if sj == "build-test" or ("build-test" in sj):
+            return True
+        if ("-build-test" in jn) or ("build-test" in jn):
+            return True
+        if ("-build-test" in cn) or ("build-test" in cn):
+            return True
         return False
 
     def sort_key(node: TreeNodeVM) -> tuple:
@@ -1690,28 +1686,22 @@ _ACTIONS_JOB_ID_RE = re.compile(r"/job/([0-9]+)(?:$|[/?#])")
 
 def extract_actions_job_id_from_url(url: str) -> str:
     """Best-effort extraction of the numeric job id from GitHub Actions job URLs."""
-    try:
-        m = _ACTIONS_JOB_ID_RE.search(str(url or ""))
-        return str(m.group(1)) if m else ""
-    except Exception:
-        return ""
+    m = _ACTIONS_JOB_ID_RE.search(str(url or ""))
+    return str(m.group(1)) if m else ""
 
 
 def disambiguate_check_run_name(name: str, url: str, *, name_counts: Dict[str, int]) -> str:
     """If multiple runs share the same name, add a stable suffix so the UI doesn't show duplicates."""
-    try:
-        n = str(name or "")
-        if int(name_counts.get(n, 0) or 0) <= 1:
-            return n
-        jid = extract_actions_job_id_from_url(str(url or ""))
-        if jid:
-            return f"{n} [job {jid}]"
-        u = str(url or "")
-        if u:
-            return f"{n} [{_hash10(u)}]"
+    n = str(name or "")
+    if int(name_counts.get(n, 0) or 0) <= 1:
         return n
-    except Exception:
-        return str(name or "")
+    jid = extract_actions_job_id_from_url(str(url or ""))
+    if jid:
+        return f"{n} [job {jid}]"
+    u = str(url or "")
+    if u:
+        return f"{n} [{_hash10(u)}]"
+    return n
 
 
 def _triangle_html(
@@ -1785,26 +1775,20 @@ def render_tree_divs(root_nodes: List[TreeNodeVM]) -> str:
 
     def _sha7_from_key(s: str) -> str:
         import re
-        try:
-            m = re.findall(r"\b[0-9a-f]{7,40}\b", str(s or ""), re.IGNORECASE)
-            if not m:
-                return ""
-            return str(m[-1])[:7].lower()
-        except Exception:
+        m = re.findall(r"\b[0-9a-f]{7,40}\b", str(s or ""), re.IGNORECASE)
+        if not m:
             return ""
+        return str(m[-1])[:7].lower()
 
     def _repo_token_from_key(s: str) -> str:
         import re
-        try:
-            txt = str(s or "")
-            m = re.search(r"\b(?:PRStatus|CI|repo):([^:>]+)", txt)
-            if not m:
-                return ""
-            repo = str(m.group(1) or "").strip()
-            repo = re.sub(r"[^a-zA-Z0-9._-]+", "-", repo).strip("-").lower()
-            return repo[:32]
-        except Exception:
+        txt = str(s or "")
+        m = re.search(r"\b(?:PRStatus|CI|repo):([^:>]+)", txt)
+        if not m:
             return ""
+        repo = str(m.group(1) or "").strip()
+        repo = re.sub(r"[^a-zA-Z0-9._-]+", "-", repo).strip("-").lower()
+        return repo[:32]
 
     def render_node(node: TreeNodeVM, parent_children_id: Optional[str], node_key_path: str, is_last: bool = True) -> str:
         """Render a single node as <li> with optional <details>/<summary> for collapsible nodes.
@@ -1954,31 +1938,22 @@ def render_tree_pre_lines(root_nodes: List[TreeNodeVM]) -> List[str]:
     _HEX_SHA_RE = re.compile(r"\b[0-9a-f]{7,40}\b", re.IGNORECASE)
 
     def _sha7_from_key(s: str) -> str:
-        try:
-            m = _HEX_SHA_RE.findall(str(s or ""))
-            if not m:
-                return ""
-            # Prefer the last SHA-ish token (often the most specific like branch head SHA).
-            return str(m[-1])[:7].lower()
-        except Exception:
+        m = _HEX_SHA_RE.findall(str(s or ""))
+        if not m:
             return ""
+        # Prefer the last SHA-ish token (often the most specific like branch head SHA).
+        return str(m[-1])[:7].lower()
 
     def _repo_token_from_key(s: str) -> str:
         """Extract a repo/dir token for URL readability (not uniqueness)."""
-        try:
-            txt = str(s or "")
-        except Exception:
+        txt = str(s or "")
+        # Match PRStatus:, CI:, or repo: patterns
+        m = re.search(r"\b(?:PRStatus|CI|repo):([^:>]+)", txt)
+        if not m:
             return ""
-        try:
-            # Match PRStatus:, CI:, or repo: patterns
-            m = re.search(r"\b(?:PRStatus|CI|repo):([^:>]+)", txt)
-            if not m:
-                return ""
-            repo = str(m.group(1) or "").strip()
-            repo = re.sub(r"[^a-zA-Z0-9._-]+", "-", repo).strip("-").lower()
-            return repo[:32]
-        except Exception:
-            return ""
+        repo = str(m.group(1) or "").strip()
+        repo = re.sub(r"[^a-zA-Z0-9._-]+", "-", repo).strip("-").lower()
+        return repo[:32]
 
     def render_node(
         node: TreeNodeVM,
@@ -2098,10 +2073,7 @@ def render_tree_pre_lines(root_nodes: List[TreeNodeVM]) -> List[str]:
 
 def _format_duration_short(seconds: float) -> str:
     """Format seconds as a short duration like '3s', '2m 10s', '1h 4m'."""
-    try:
-        s = int(round(float(seconds)))
-    except Exception:
-        return ""
+    s = int(round(float(seconds)))
     if s <= 0:
         return "0s"
     h = s // 3600
@@ -2115,15 +2087,12 @@ def _format_duration_short(seconds: float) -> str:
 
 
 def _parse_iso_utc(s: str) -> Optional[datetime]:
-    try:
-        x = str(s or "").strip()
-        if not x:
-            return None
-        if x.endswith("Z"):
-            return datetime.fromisoformat(x[:-1] + "+00:00")
-        return datetime.fromisoformat(x)
-    except Exception:
+    x = str(s or "").strip()
+    if not x:
         return None
+    if x.endswith("Z"):
+        return datetime.fromisoformat(x[:-1] + "+00:00")
+    return datetime.fromisoformat(x)
 
 
 def _status_norm_from_actions_step(status: str, conclusion: str) -> str:
@@ -2153,11 +2122,8 @@ def build_and_test_dynamo_phases_from_actions_job(job: Dict[str, object]) -> Lis
 
     Returns (phase_name, duration_str, status_norm).
     """
-    try:
-        steps = job.get("steps") if isinstance(job, dict) else None
-        if not isinstance(steps, list) or not steps:
-            return []
-    except Exception:
+    steps = job.get("steps") if isinstance(job, dict) else None
+    if not isinstance(steps, list) or not steps:
         return []
 
     def _dur(st: Dict[str, object]) -> str:
@@ -2165,10 +2131,7 @@ def build_and_test_dynamo_phases_from_actions_job(job: Dict[str, object]) -> Lis
         b = _parse_iso_utc(str(st.get("completed_at", "") or ""))
         if not a or not b:
             return ""
-        try:
-            return _format_duration_short((b - a).total_seconds())
-        except Exception:
-            return ""
+        return _format_duration_short((b - a).total_seconds())
 
     out: List[Tuple[str, str, str]] = []
 
@@ -2215,11 +2178,8 @@ def actions_job_steps_over_threshold_from_actions_job(
     - show steps with duration >= min_seconds
     - always show failing steps (even if < min_seconds or duration is missing)
     """
-    try:
-        steps = job.get("steps") if isinstance(job, dict) else None
-        if not isinstance(steps, list) or not steps:
-            return []
-    except Exception:
+    steps = job.get("steps") if isinstance(job, dict) else None
+    if not isinstance(steps, list) or not steps:
         return []
 
     out: List[Tuple[str, str, str]] = []
@@ -2235,25 +2195,19 @@ def actions_job_steps_over_threshold_from_actions_job(
         )
         # Duration is best-effort; some steps may not include timestamps.
         dt_s = None
-        try:
-            a = _parse_iso_utc(str(st.get("started_at", "") or ""))
-            b = _parse_iso_utc(str(st.get("completed_at", "") or ""))
-            if a and b:
-                dt_s = float((b - a).total_seconds())
-        except Exception:
-            dt_s = None
+        a = _parse_iso_utc(str(st.get("started_at", "") or ""))
+        b = _parse_iso_utc(str(st.get("completed_at", "") or ""))
+        if a and b:
+            dt_s = float((b - a).total_seconds())
 
         # Selection rule:
         # - always include failures
         # - if min_seconds <= 0: include all non-failing steps (even if duration is missing)
         # - otherwise include only steps >= threshold
         if status_norm != "failure":
-            try:
-                if float(min_seconds) <= 0.0:
-                    pass
-                elif dt_s is None or float(dt_s) < float(min_seconds):
-                    continue
-            except Exception:
+            if float(min_seconds) <= 0.0:
+                pass
+            elif dt_s is None or float(dt_s) < float(min_seconds):
                 continue
 
         dur_s = _format_duration_short(float(dt_s)) if dt_s is not None else ""
@@ -2283,12 +2237,9 @@ def actions_job_step_tuples(
     jid = extract_actions_job_id_from_url(str(job_url or ""))
     if not jid:
         return []
-    try:
-        job = github_api.get_actions_job_details_cached(
-            owner="ai-dynamo", repo="dynamo", job_id=jid, ttl_s=int(ttl_s)
-        ) or {}
-    except Exception:
-        job = {}
+    job = github_api.get_actions_job_details_cached(
+        owner="ai-dynamo", repo="dynamo", job_id=jid, ttl_s=int(ttl_s)
+    ) or {}
     if not isinstance(job, dict):
         return []
     return actions_job_steps_over_threshold_from_actions_job(job, min_seconds=float(min_seconds))
@@ -2381,63 +2332,60 @@ def ci_subsection_tuples_for_job(
     
     # Special case: "Build and Test - dynamo" has custom phase extraction
     if nm == "Build and Test - dynamo":
-        try:
-            phases = build_and_test_dynamo_phase_tuples(
-                github_api=github_api,
-                job_url=str(job_url or ""),
-                raw_log_path=raw_log_path,
-                is_required=bool(is_required),
-            )
-            # Also include *non-phase* steps so we can surface useful failures like
-            # "Copy test report..." without duplicating the phase rows.
-            #
-            # Policy for REQUIRED jobs: show all failing steps + steps >= threshold; ignore the rest.
-            steps = actions_job_step_tuples(
-                github_api=github_api,
-                job_url=str(job_url or ""),
-                # Build/test UX: show all steps (not just slow ones).
-                min_seconds=0.0,
-            )
+        phases = build_and_test_dynamo_phase_tuples(
+            github_api=github_api,
+            job_url=str(job_url or ""),
+            raw_log_path=raw_log_path,
+            is_required=bool(is_required),
+        )
+        # Also include *non-phase* steps so we can surface useful failures like
+        # "Copy test report..." without duplicating the phase rows.
+        #
+        # Policy for REQUIRED jobs: show all failing steps + steps >= threshold; ignore the rest.
+        steps = actions_job_step_tuples(
+            github_api=github_api,
+            job_url=str(job_url or ""),
+            # Build/test UX: show all steps (not just slow ones).
+            min_seconds=0.0,
+        )
 
-            def _covered_by_phase(step_name: str) -> bool:
-                s = str(step_name or "").strip().lower()
-                if not s:
-                    return True
-                # Phase-like steps (already represented by `phases`).
-                if "build image" in s:
-                    return True
-                if ("rust" in s) and ("check" in s):
-                    return True
-                if "pytest" in s:
-                    return True
-                return False
+        def _covered_by_phase(step_name: str) -> bool:
+            s = str(step_name or "").strip().lower()
+            if not s:
+                return True
+            # Phase-like steps (already represented by `phases`).
+            if "build image" in s:
+                return True
+            if ("rust" in s) and ("check" in s):
+                return True
+            if "pytest" in s:
+                return True
+            return False
 
-            extra_steps = [(n, d, st) for (n, d, st) in (steps or []) if not _covered_by_phase(n)]
+        extra_steps = [(n, d, st) for (n, d, st) in (steps or []) if not _covered_by_phase(n)]
 
-            out = [(p[0], p[1], p[2]) for p in (phases or [])]
-            out.extend([(s[0], s[1], s[2]) for s in extra_steps])
-            
-            # Apply pytest test extraction to "Run tests" steps and "test: pytest" phases (same as other build-test jobs)
-            result = []
-            for step_name, step_dur, step_status in out:
-                result.append((step_name, step_dur, step_status))
-                
-                # If this is a "Run tests" step or a "test: pytest" phase, parse pytest slowest tests from raw log
-                if is_python_test_step(step_name) and raw_log_path:
-                    pytest_tests = pytest_slowest_tests_from_raw_log(
-                        raw_log_path=raw_log_path,
-                        # Tests: list *all* per-test timings in order (do not filter).
-                        min_seconds=0.0,
-                        include_all=True,
-                        step_name=step_name,
-                    )
-                    # Add pytest tests as indented entries
-                    for test_name, test_dur, test_status in pytest_tests:
-                        result.append((f"  └─ {test_name}", test_dur, test_status))
-            
-            return result
-        except Exception:
-            return []
+        out = [(p[0], p[1], p[2]) for p in (phases or [])]
+        out.extend([(s[0], s[1], s[2]) for s in extra_steps])
+
+        # Apply pytest test extraction to "Run tests" steps and "test: pytest" phases (same as other build-test jobs)
+        result = []
+        for step_name, step_dur, step_status in out:
+            result.append((step_name, step_dur, step_status))
+
+            # If this is a "Run tests" step or a "test: pytest" phase, parse pytest slowest tests from raw log
+            if is_python_test_step(step_name) and raw_log_path:
+                pytest_tests = pytest_slowest_tests_from_raw_log(
+                    raw_log_path=raw_log_path,
+                    # Tests: list *all* per-test timings in order (do not filter).
+                    min_seconds=0.0,
+                    include_all=True,
+                    step_name=step_name,
+                )
+                # Add pytest tests as indented entries
+                for test_name, test_dur, test_status in pytest_tests:
+                    result.append((f"  └─ {test_name}", test_dur, test_status))
+
+        return result
 
     # REQUIRED jobs: always show failing steps + steps >= threshold (even if job isn't "long-running").
     if bool(is_required):
@@ -2472,10 +2420,7 @@ def ci_subsection_tuples_for_job(
         return result
 
     # Non-required jobs: show steps only for long-running jobs (avoid noise).
-    try:
-        if float(duration_seconds or 0.0) < float(long_job_threshold_s):
-            return []
-    except Exception:
+    if float(duration_seconds or 0.0) < float(long_job_threshold_s):
         return []
 
     return actions_job_step_tuples(github_api=github_api, job_url=str(job_url or ""), min_seconds=float(step_min_s))
@@ -2512,14 +2457,11 @@ def pytest_slowest_tests_from_raw_log(
         return []
 
     # Parsed pytest timings cache (disk-backed). Cache boundary is JSON-on-disk; in-memory uses dataclasses.
-    try:
-        from pytest_timings_cache import PYTEST_TIMINGS_CACHE  # local file import
+    from pytest_timings_cache import PYTEST_TIMINGS_CACHE  # local file import
 
-        cached = PYTEST_TIMINGS_CACHE.get_if_fresh(raw_log_path=Path(raw_log_path), step_name=step_name)
-        if cached is not None:
-            return list(cached)
-    except Exception:
-        cached = None
+    cached = PYTEST_TIMINGS_CACHE.get_if_fresh(raw_log_path=Path(raw_log_path), step_name=step_name)
+    if cached is not None:
+        return list(cached)
     
     try:
         t0_parse = time.monotonic()
@@ -2632,22 +2574,16 @@ def pytest_slowest_tests_from_raw_log(
                         test_times.append((full_name, dur_str, status_norm))
         
         # Persist parsed rows (best-effort).
-        try:
-            from pytest_timings_cache import PYTEST_TIMINGS_CACHE  # local file import
+        from pytest_timings_cache import PYTEST_TIMINGS_CACHE  # local file import
 
-            # Record parse timing on the concrete cache object.
-            try:
-                PYTEST_TIMINGS_CACHE.stats.parse_calls += 1
-                PYTEST_TIMINGS_CACHE.stats.parse_secs += max(0.0, float(time.monotonic() - t0_parse))
-            except Exception:
-                pass
+        # Record parse timing on the concrete cache object.
+        PYTEST_TIMINGS_CACHE.stats.parse_calls += 1
+        PYTEST_TIMINGS_CACHE.stats.parse_secs += max(0.0, float(time.monotonic() - t0_parse))
 
-            PYTEST_TIMINGS_CACHE.put(raw_log_path=p, step_name=step_name, rows=test_times)
-        except Exception:
-            pass
+        PYTEST_TIMINGS_CACHE.put(raw_log_path=p, step_name=step_name, rows=test_times)
 
         return test_times
-        
+
     except Exception as e:
         logger.debug(f"Failed to parse pytest slowest durations from {raw_log_path}: {e}")
         return []
@@ -2672,15 +2608,12 @@ def step_window_snippet_from_cached_raw_log(
     if not p.exists() or not p.is_file():
         return ""
     step = None
-    try:
-        steps = job.get("steps") if isinstance(job, dict) else None
-        if isinstance(steps, list):
-            for st in steps:
-                if isinstance(st, dict) and str(st.get("name", "") or "") == str(step_name or ""):
-                    step = st
-                    break
-    except Exception:
-        step = None
+    steps = job.get("steps") if isinstance(job, dict) else None
+    if isinstance(steps, list):
+        for st in steps:
+            if isinstance(st, dict) and str(st.get("name", "") or "") == str(step_name or ""):
+                step = st
+                break
     if not isinstance(step, dict):
         return ""
 
@@ -2689,28 +2622,19 @@ def step_window_snippet_from_cached_raw_log(
     if not a or not b:
         return ""
 
-    try:
-        # Shared library (dependency-light): `dynamo-utils/ci_log_errors/`
-        from ci_log_errors import snippet as ci_snippet  # local import (avoid circulars)
-    except Exception:
-        return ""
+    # Shared library (dependency-light): `dynamo-utils/ci_log_errors/`
+    from ci_log_errors import snippet as ci_snippet  # local import (avoid circulars)
 
-    try:
-        text = p.read_text(encoding="utf-8", errors="replace")
-    except Exception:
-        return ""
+    text = p.read_text(encoding="utf-8", errors="replace")
 
     # Filter lines by timestamp window (raw logs include ISO-8601 timestamps).
     kept: List[str] = []
     for ln in (text.splitlines() or []):
         # Most lines are prefixed with an ISO timestamp; ignore unparsable lines.
         ts = None
-        try:
-            # Heuristic: take the first token, strip any trailing 'Z'.
-            head = (ln.split(" ", 1)[0] if " " in ln else ln).strip()
-            ts = _parse_iso_utc(head)
-        except Exception:
-            ts = None
+        # Heuristic: take the first token, strip any trailing 'Z'.
+        head = (ln.split(" ", 1)[0] if " " in ln else ln).strip()
+        ts = _parse_iso_utc(head)
         if not ts:
             continue
         if ts < a or ts > b:
@@ -2773,11 +2697,17 @@ def status_icon_html(
     - REQUIRED failure: red filled circle X
     - non-required success: small check
     - non-required failure: small X
+    - Synthetic items (icon_px=7): colored dots instead of checkmarks/X
     """
     s = (status_norm or "").strip().lower()
 
     icon_px_i = int(icon_px or 12)
+    is_synthetic = (icon_px_i == 7)
+    
     if s == CIStatus.SUCCESS:
+        if is_synthetic:
+            # Synthetic success: green dot (normal size, 12px)
+            return _circle_dot_fill_svg(color=COLOR_GREEN, width=12, height=12)
         if bool(is_required):
             # REQUIRED: filled green circle-check.
             out = (
@@ -2810,6 +2740,9 @@ def status_icon_html(
                 )
         return out
     if s in {CIStatus.SKIPPED, CIStatus.NEUTRAL}:
+        if is_synthetic:
+            # Synthetic skipped: grey dot (normal size, 12px)
+            return _circle_dot_fill_svg(color=COLOR_GREY, width=12, height=12)
         # GitHub-like "skipped": grey circle with a slash.
         return (
             '<span style="color: #8c959f; display: inline-flex; vertical-align: text-bottom;">'
@@ -2820,6 +2753,9 @@ def status_icon_html(
             "</path></svg></span>"
         )
     if s == CIStatus.FAILURE:
+        if is_synthetic:
+            # Synthetic failure: red dot (normal size, 12px)
+            return _circle_dot_fill_svg(color=COLOR_RED, width=12, height=12)
         if bool(is_required or required_failure):
             # REQUIRED: filled red circle X (SVG).
             return _circle_x_fill_svg(color=COLOR_RED, width=icon_px_i, height=icon_px_i)
@@ -2830,10 +2766,16 @@ def status_icon_html(
             "</span>"
         )
     if s == CIStatus.IN_PROGRESS:
+        if is_synthetic:
+            # Synthetic in-progress: yellow dot (normal size, 12px)
+            return _circle_dot_fill_svg(color=COLOR_YELLOW, width=12, height=12)
         return _clock_ring_svg(color=COLOR_YELLOW, width=icon_px_i, height=icon_px_i)
     if s == CIStatus.PENDING:
         return _circle_dot_fill_svg(color=COLOR_GREY, width=icon_px_i, height=icon_px_i)
     if s == CIStatus.CANCELLED:
+        if is_synthetic:
+            # Synthetic cancelled: grey dot (normal size, 12px)
+            return _circle_dot_fill_svg(color=COLOR_GREY, width=12, height=12)
         return _circle_x_fill_svg(color=COLOR_GREY, width=icon_px_i, height=icon_px_i)
     return _dot_svg(color=COLOR_GREY, width=icon_px_i, height=icon_px_i)
 
@@ -2858,14 +2800,14 @@ def github_api_stats_rows(
     max_github_api_calls: Optional[int] = None,
     mode: str = "",
     mode_reason: str = "",
-    extra_cache_stats: Optional[Dict[str, Any]] = None,
     top_n: int = 15,
-) -> List[Tuple[str, Optional[str]]]:
+) -> List[Tuple[str, Optional[str], str]]:
     """Build human-readable GitHub API statistics rows for the footer.
 
     Returns rows suitable for `page_stats`, including section headers ("## ...") and multiline values.
+    Each row is a 3-tuple: (name, value, description).
     """
-    rows: List[Tuple[str, Optional[str]]] = []
+    rows: List[Tuple[str, Optional[str], str]] = []
     if github_api is None:
         return rows
 
@@ -2936,136 +2878,312 @@ def github_api_stats_rows(
         if rest.get("budget_max") is not None:
             budget["budget_max"] = rest.get("budget_max")
         budget["budget_exhausted"] = "true" if bool(rest.get("budget_exhausted")) else "false"
-    try:
-        rl = github_api.get_core_rate_limit_info() or {}
-        rem = rl.get("remaining")
-        lim = rl.get("limit")
-        reset_pt = rl.get("reset_pt")
-        if rem is not None and lim is not None:
-            budget["core_remaining"] = f"{rem}/{lim}"
-        elif rem is not None:
-            budget["core_remaining"] = str(rem)
-        if reset_pt:
-            budget["core_resets"] = str(reset_pt)
-    except Exception:
-        pass
+    rl = github_api.get_core_rate_limit_info() or {}
+    rem = rl.get("remaining")
+    lim = rl.get("limit")
+    reset_pt = rl.get("reset_pt")
+    if rem is not None and lim is not None:
+        budget["core_remaining"] = f"{rem}/{lim}"
+    elif rem is not None:
+        budget["core_remaining"] = str(rem)
+    if reset_pt:
+        budget["core_resets"] = str(reset_pt)
 
-    rows.append(("## GitHub API", None))
-    rows.append(("Budget & mode", _fmt_kv(budget) or "(none)"))
+    rows.append(("## GitHub API", None, ""))
 
-    # REST summary
-    try:
-        rest_summary = {
-            "calls": int(rest.get("total") or 0),
-            "ok": int(rest.get("success_total") or 0),
-            "errors": int(rest.get("error_total") or 0),
-            "time_total": f"{float(rest.get('time_total_s') or 0.0):.2f}s",
-        }
-    except Exception:
-        rest_summary = {"calls": 0, "ok": 0, "errors": 0, "time_total": "0.00s"}
-    rows.append(("REST summary", _fmt_kv(rest_summary)))
+    # REST summary (individual flat entries)
+    rows.append(("github.rest.calls", str(int(rest.get("total") or 0)), "Total GitHub REST API calls made"))
+    rows.append(("github.rest.ok", str(int(rest.get("success_total") or 0)), "Successful API calls"))
+    rows.append(("github.rest.errors", str(int(rest.get("error_total") or 0)), "Failed API calls"))
+    rows.append(("github.rest.time_total_secs", f"{float(rest.get('time_total_s') or 0.0):.2f}s", "Total time spent in API calls"))
 
-    rows.append(
-        (
-            f"REST by category (top {int(top_n)})",
-            _fmt_top_counts_and_time(by_label=by_label, time_by_label_s=time_by_label_s, n=int(top_n)),
-        )
-    )
+    # Budget & mode (individual flat entries)
+    if mode:
+        rows.append(("github.mode", mode, "API budget enforcement mode"))
+    if mode_reason:
+        rows.append(("github.mode_reason", mode_reason, "Reason for current mode"))
+    # Note: github.budget_max is populated from GitHubAPIClient state (same as max_github_api_calls parameter)
+    if isinstance(rest, dict) and rest.get("budget_max") is not None:
+        rows.append(("github.budget_max", str(rest.get("budget_max")), "Maximum API calls allowed"))
+    if isinstance(rest, dict):
+        rows.append(("github.budget_exhausted", "true" if bool(rest.get("budget_exhausted")) else "false", "Whether API budget was exhausted"))
+    if rem is not None and lim is not None:
+        rows.append(("github.core_remaining", f"{rem}/{lim}", "GitHub core rate limit remaining"))
+    elif rem is not None:
+        rows.append(("github.core_remaining", str(rem), "GitHub core rate limit remaining"))
+    if reset_pt:
+        rows.append(("github.core_resets", str(reset_pt), "When rate limit resets"))
 
-    # Errors
+    # Cache summary (individual flat entries)
+    rows.append(("github.cache.hits", str(int(cache.get("hits_total") or 0)), "Total cache hits across all operations"))
+    rows.append(("github.cache.misses", str(int(cache.get("misses_total") or 0)), "Total cache misses"))
+    rows.append(("github.cache.writes_ops", str(int(cache.get("writes_ops_total") or 0)), "Number of cache write operations"))
+    rows.append(("github.cache.writes_entries", str(int(cache.get("writes_entries_total") or 0)), "Number of entries written to cache"))
+
+    # Pytest timings cache (individual flat entries)
+    st = PYTEST_TIMINGS_CACHE.stats
+    rows.append(("pytest.cache.hit", str(int(st.hit)), "Pytest timing cache hits"))
+    rows.append(("pytest.cache.miss", str(int(st.miss)), "Pytest timing cache misses"))
+    rows.append(("pytest.cache.write", str(int(st.write)), "Pytest cache writes"))
+    rows.append(("pytest.cache.parse_calls", str(int(st.parse_calls)), "Number of pytest timing file parses"))
+    rows.append(("pytest.cache.parse_secs", f"{float(st.parse_secs):.2f}s", "Time spent parsing pytest timings"))
+
+    # Raw log text cache (individual flat entries)
+    hits_by = dict(cache.get("hits_by") or {}) if isinstance(cache, dict) else {}
+    misses_by = dict(cache.get("misses_by") or {}) if isinstance(cache, dict) else {}
+    raw_hits = int(sum(int(v or 0) for k, v in hits_by.items() if str(k).startswith("raw_log_text.")))
+    raw_misses = int(sum(int(v or 0) for k, v in misses_by.items() if str(k).startswith("raw_log_text.")))
+    rows.append(("raw_log.cache.hits", str(raw_hits), "Raw CI log text cache hits"))
+    rows.append(("raw_log.cache.misses", str(raw_misses), "Raw CI log text cache misses"))
+
+    # REST by category (top N as individual entries)
+    labels = sorted(set(list(by_label.keys()) + list(time_by_label_s.keys())))
+    if labels:
+        labels.sort(key=lambda k: (-int(by_label.get(k, 0) or 0), -float(time_by_label_s.get(k, 0.0) or 0.0), k))
+        for lbl in labels[: max(0, int(top_n))]:
+            c = int(by_label.get(lbl, 0) or 0)
+            t = float(time_by_label_s.get(lbl, 0.0) or 0.0)
+            rows.append((f"github.rest.by_category.{lbl}.calls", str(c), f"API calls for {lbl}"))
+            rows.append((f"github.rest.by_category.{lbl}.time_secs", f"{t:.2f}s", f"Time spent in {lbl} calls"))
+
+    # REST errors by status (individual flat entries)
     by_status = (errs or {}).get("by_status") if isinstance(errs, dict) else {}
     if isinstance(by_status, dict) and by_status:
-        items = list(by_status.items())[:8]
-        rows.append(("REST errors by status", ", ".join([f"{k}={v}" for k, v in items])))
-    else:
-        rows.append(("REST errors by status", "(none)"))
+        for status_code, count in list(by_status.items())[:8]:
+            rows.append((f"github.rest.errors.by_status.{status_code}", str(count), f"Errors with HTTP status {status_code}"))
 
-    bls = (errs or {}).get("by_label_status") if isinstance(errs, dict) else {}
-    rows.append(("REST errors by category+status", _fmt_error_by_label_status(bls if isinstance(bls, dict) else {}, n=int(top_n))))
-
-    try:
-        last = (errs or {}).get("last") if isinstance(errs, dict) else None
-        last_label = (errs or {}).get("last_label") if isinstance(errs, dict) else ""
-        if isinstance(last, dict) and last.get("status"):
-            code = last.get("status")
-            body = str(last.get("body") or "").strip()
+    # Last REST error (optional)
+    last = (errs or {}).get("last") if isinstance(errs, dict) else None
+    last_label = (errs or {}).get("last_label") if isinstance(errs, dict) else ""
+    if isinstance(last, dict) and last.get("status"):
+        rows.append(("github.rest.last_error.status", str(last.get("status")), "Most recent API error status"))
+        if last_label:
+            rows.append(("github.rest.last_error.label", str(last_label), "Category of last error"))
+        body = str(last.get("body") or "").strip()
+        if body:
             if len(body) > 160:
                 body = body[:160].rstrip() + "…"
-            url = str(last.get("url") or "").strip()
-            s = f"{code}: {body}" if body else str(code)
-            if last_label:
-                s += f"\nlabel: {last_label}"
-            if url:
-                s += f"\nurl: {url}"
-            rows.append(("Last REST error", s))
-    except Exception:
-        pass
-
-    # Cache summary (keep small; details are already available in README if needed)
-    try:
-        cache_summary = {
-            "hits": int(cache.get("hits_total") or 0),
-            "misses": int(cache.get("misses_total") or 0),
-            "writes_ops": int(cache.get("writes_ops_total") or 0),
-            "writes_entries": int(cache.get("writes_entries_total") or 0),
-        }
-    except Exception:
-        cache_summary = {"hits": 0, "misses": 0, "writes_ops": 0, "writes_entries": 0}
-    rows.append(("Cache summary", _fmt_kv(cache_summary)))
-
-    # Parsed pytest timings cache (disk-backed). This caches per-test children rows from raw logs.
-    try:
-        from pytest_timings_cache import PYTEST_TIMINGS_CACHE  # local file import
-
-        st = PYTEST_TIMINGS_CACHE.stats
-        if (int(st.hit) or int(st.miss) or int(st.write) or int(st.parse_calls)):
-            rows.append(
-                (
-                    "Pytest timings cache (this run)",
-                    _fmt_kv(
-                        {
-                            "hit": int(st.hit),
-                            "miss": int(st.miss),
-                            "write": int(st.write),
-                            "parse_calls": int(st.parse_calls),
-                            "parse_secs": f"{float(st.parse_secs):.2f}s",
-                        }
-                    ),
-                )
-            )
-    except Exception:
-        pass
-
-    # Raw-log text caching (Actions job logs: "<job_id>.log")
-    # This is the mechanism that produces `[cached raw log ...]` links and enables snippet/pytest parsing.
-    try:
-        hits_by = dict(cache.get("hits_by") or {}) if isinstance(cache, dict) else {}
-        misses_by = dict(cache.get("misses_by") or {}) if isinstance(cache, dict) else {}
-        raw_hits = int(sum(int(v or 0) for k, v in hits_by.items() if str(k).startswith("raw_log_text.")))
-        raw_misses = int(sum(int(v or 0) for k, v in misses_by.items() if str(k).startswith("raw_log_text.")))
-        if raw_hits or raw_misses:
-            rows.append(("Raw log text cache (this run)", _fmt_kv({"hits": raw_hits, "misses": raw_misses})))
-    except Exception:
-        pass
-
-    # Include the commit-history-only github_actions_status_cache (if provided).
-    if isinstance(extra_cache_stats, dict) and extra_cache_stats:
-        try:
-            gha = extra_cache_stats.get("github_actions_status_cache") or {}
-            if isinstance(gha, dict) and gha:
-                d = {
-                    "total_shas": int(gha.get("total_shas", 0) or 0),
-                    "fetched_shas": int(gha.get("fetched_shas", 0) or 0),
-                    "hit_fresh": int(gha.get("cache_hit_fresh", 0) or 0),
-                    "stale_refresh": int(gha.get("cache_stale_refresh", 0) or 0),
-                    "miss_fetch": int(gha.get("cache_miss_fetch", 0) or 0),
-                    "miss_no_fetch": int(gha.get("cache_miss_no_fetch", 0) or 0),
-                }
-                rows.append(("Actions-status cache (this run)", _fmt_kv(d)))
-        except Exception:
-            pass
+            rows.append(("github.rest.last_error.body", body, "Last error response body"))
+        url = str(last.get("url") or "").strip()
+        if url:
+            rows.append(("github.rest.last_error.url", url, "URL of last failed request"))
 
     return rows
+
+
+def build_page_stats(
+    *,
+    generation_time_secs: Optional[float] = None,
+    github_api: Optional[Any] = None,
+    max_github_api_calls: Optional[int] = None,
+    cache_only_mode: bool = False,
+    cache_only_reason: str = "",
+    phase_timings: Optional[Dict[str, float]] = None,
+    repos_scanned: Optional[int] = None,
+    prs_shown: Optional[int] = None,
+    commits_shown: Optional[int] = None,
+    repo_info: Optional[str] = None,
+    github_user: Optional[str] = None,
+    max_branches: Optional[int] = None,
+    max_checks_fetch: Optional[int] = None,
+    refresh_closed_prs: bool = False,
+    gitlab_fetch_skip: Optional[bool] = None,
+    gitlab_client: Optional[Any] = None,
+) -> List[Tuple[str, Optional[str], str]]:
+    """Build unified page statistics for all dashboards (local/remote/commit-history).
+
+    This ensures all 3 dashboards show the same statistics structure, even if some values
+    are 0 or N/A. Statistics are displayed in a consistent order across all dashboards.
+
+    ALL DASHBOARDS NOW USE UNIFIED get_pr_checks_rows() API for check runs:
+    - Local branches: Uses get_pr_checks_rows() → tracks required_checks.* stats
+    - Remote branches: Uses get_pr_checks_rows() → tracks required_checks.* stats
+    - Commit history: Uses get_pr_checks_rows() → tracks required_checks.* stats
+
+    GitHub cache statistics are read from the global GITHUB_CACHE_STATS object which is
+    populated by GitHubAPIClient.get_pr_checks_rows() as it executes.
+
+    Commit-history performance statistics are read from the global COMMIT_HISTORY_PERF_STATS
+    object which is populated during commit history processing.
+
+    Args:
+        generation_time_secs: Total generation time in seconds
+        github_api: GitHubAPIClient instance (for API stats)
+        max_github_api_calls: Max API calls limit
+        cache_only_mode: Whether GitHub API was in cache-only mode
+        cache_only_reason: Reason for cache-only mode
+        phase_timings: Dict of phase timings (prune, scan, render, write, total)
+        repos_scanned: Number of repositories scanned (local branches)
+        prs_shown: Number of PRs shown
+        commits_shown: Number of commits shown (commit history)
+        repo_info: Repository info string like "owner/repo"
+        github_user: GitHub username
+        max_branches: max_branches flag value
+        max_checks_fetch: max_checks_fetch flag value
+        refresh_closed_prs: Whether refresh_closed_prs is enabled
+        gitlab_fetch_skip: Whether GitLab fetch was skipped (commit history only)
+        gitlab_client: GitLab client for stats (commit history only)
+
+    Returns:
+        List of (key, value, description) tuples for the Statistics section
+    """
+    page_stats: List[Tuple[str, Optional[str], str]] = []
+
+    # 1. Generation time (always first)
+    if generation_time_secs is not None:
+        page_stats.append(("generation.total_secs", f"{generation_time_secs:.2f}s", "Total HTML generation time"))
+
+    # 2. Context info (repo, user, counts)
+    if repo_info:
+        page_stats.append(("dashboard.repo", repo_info, "Repository being displayed"))
+    if github_user:
+        page_stats.append(("dashboard.github_user", github_user, "GitHub user filter"))
+    if repos_scanned is not None:
+        page_stats.append(("dashboard.repos_scanned", str(repos_scanned), "Local repositories scanned"))
+    if prs_shown is not None:
+        page_stats.append(("dashboard.prs_shown", str(prs_shown), "Pull requests displayed"))
+    if commits_shown is not None:
+        page_stats.append(("dashboard.commits_shown", str(commits_shown), "Commits displayed"))
+    
+    # 3. GitHub API stats (from github_api_stats_rows)
+    if github_api is not None:
+        mode = "cache-only" if cache_only_mode else "normal"
+        api_rows = github_api_stats_rows(
+            github_api=github_api,
+            max_github_api_calls=max_github_api_calls,
+            mode=mode,
+            mode_reason=cache_only_reason,
+            top_n=15,
+        )
+        page_stats.extend(list(api_rows or []))
+
+    # 4. CLI flags (if set)
+    if max_branches is not None:
+        page_stats.append(("cli.max_branches", str(max_branches), "Max branches to display"))
+    if max_checks_fetch is not None:
+        page_stats.append(("cli.max_checks_fetch", str(max_checks_fetch), "Max check runs to fetch per commit"))
+    if refresh_closed_prs:
+        page_stats.append(("cli.refresh_closed_prs", "true", "Whether closed PRs are refreshed"))
+    if gitlab_fetch_skip is not None:
+        page_stats.append(("cli.gitlab_fetch_skip", "true" if gitlab_fetch_skip else "false", "Whether GitLab API calls were skipped"))
+
+    # 5. Phase timings (prune/scan/render/write/total)
+    if phase_timings:
+        for phase in ["prune", "scan", "render", "write", "total"]:
+            if phase in phase_timings:
+                page_stats.append((f"phase.{phase}.total_secs", f"{phase_timings[phase]:.2f}s", f"Time spent in {phase} phase"))
+    
+    # 6. Performance counters (read from global COMMIT_HISTORY_PERF_STATS)
+    # These apply to all dashboards (snippets/markers are used everywhere)
+    perf_stats = COMMIT_HISTORY_PERF_STATS
+
+    # Composite SHA (commit-history-only, show real values when available)
+    if perf_stats.composite_sha_cache_hit > 0 or perf_stats.composite_sha_cache_miss > 0:
+        page_stats.append(("composite_sha.cache.hit", str(perf_stats.composite_sha_cache_hit), "Composite SHA cache hits (commit history only)"))
+        page_stats.append(("composite_sha.cache.miss", str(perf_stats.composite_sha_cache_miss), "Composite SHA cache misses (commit history only)"))
+        page_stats.append(("composite_sha.errors", str(perf_stats.composite_sha_errors), "Errors computing composite SHAs (commit history only)"))
+        page_stats.append(("composite_sha.total_secs", f"{perf_stats.composite_sha_total_secs:.2f}s", "Total time computing composite SHAs (commit history only)"))
+        page_stats.append(("composite_sha.compute_secs", f"{perf_stats.composite_sha_compute_secs:.2f}s", "Time spent in SHA computations (commit history only)"))
+    else:
+        page_stats.append(("composite_sha.cache.hit", "(N/A)", "Composite SHA cache hits (commit history only)"))
+        page_stats.append(("composite_sha.cache.miss", "(N/A)", "Composite SHA cache misses (commit history only)"))
+        page_stats.append(("composite_sha.errors", "(N/A)", "Errors computing composite SHAs (commit history only)"))
+        page_stats.append(("composite_sha.total_secs", "(N/A)", "Total time computing composite SHAs (commit history only)"))
+        page_stats.append(("composite_sha.compute_secs", "(N/A)", "Time spent in SHA computations (commit history only)"))
+
+    # Snippet cache (always show, tracked globally in SNIPPET_CACHE)
+    snippet_stats = SNIPPET_CACHE.stats
+    page_stats.append(("snippet.cache.hit", str(int(snippet_stats.hit)), "CI log snippet cache hits"))
+    page_stats.append(("snippet.cache.miss", str(int(snippet_stats.miss)), "CI log snippet cache misses"))
+    page_stats.append(("snippet.cache.write", str(int(snippet_stats.write)), "Snippet cache writes"))
+    page_stats.append(("snippet.cache.compute_secs", f"{float(snippet_stats.compute_secs):.2f}s", "Time extracting snippets from logs"))
+    page_stats.append(("snippet.cache.total_secs", f"{float(snippet_stats.total_secs):.2f}s", "Total time in snippet operations"))
+
+    # Markers / local build reports (used by all dashboards)
+    if perf_stats.marker_composite_with_reports > 0 or perf_stats.marker_composite_without_reports > 0:
+        page_stats.append(("marker.composite.unique", str(perf_stats.marker_composite_with_reports + perf_stats.marker_composite_without_reports), "Unique local build markers found"))
+        page_stats.append(("marker.composite.with.reports", str(perf_stats.marker_composite_with_reports), "Markers with test reports"))
+        page_stats.append(("marker.composite.with.status", str(perf_stats.marker_composite_with_status), "Markers with status info"))
+        page_stats.append(("marker.composite.without.reports", str(perf_stats.marker_composite_without_reports), "Markers without reports"))
+        page_stats.append(("marker.total_secs", f"{perf_stats.marker_total_secs:.2f}s", "Time processing build markers"))
+    else:
+        page_stats.append(("marker.composite.unique", "(N/A)", "Unique local build markers found"))
+        page_stats.append(("marker.composite.with.reports", "(N/A)", "Markers with test reports"))
+        page_stats.append(("marker.composite.with.status", "(N/A)", "Markers with status info"))
+        page_stats.append(("marker.composite.without.reports", "(N/A)", "Markers without reports"))
+        page_stats.append(("marker.total_secs", "(N/A)", "Time processing build markers"))
+
+    # GitLab cache stats (commit-history-only, but show consistently)
+    has_gitlab_stats = (
+        perf_stats.gitlab_cache_registry_images_hit > 0 or
+        perf_stats.gitlab_cache_registry_images_miss > 0 or
+        perf_stats.gitlab_cache_pipeline_status_hit > 0 or
+        perf_stats.gitlab_cache_pipeline_status_miss > 0 or
+        perf_stats.gitlab_cache_pipeline_jobs_hit > 0 or
+        perf_stats.gitlab_cache_pipeline_jobs_miss > 0
+    )
+    if has_gitlab_stats:
+        page_stats.append(("gitlab.cache.registry_images.hit", str(perf_stats.gitlab_cache_registry_images_hit), "GitLab registry image cache hits (commit history only)"))
+        page_stats.append(("gitlab.cache.registry_images.miss", str(perf_stats.gitlab_cache_registry_images_miss), "GitLab registry image cache misses (commit history only)"))
+        page_stats.append(("gitlab.cache.pipeline_status.hit", str(perf_stats.gitlab_cache_pipeline_status_hit), "GitLab pipeline status cache hits (commit history only)"))
+        page_stats.append(("gitlab.cache.pipeline_status.miss", str(perf_stats.gitlab_cache_pipeline_status_miss), "GitLab pipeline status cache misses (commit history only)"))
+        page_stats.append(("gitlab.cache.pipeline_jobs.hit", str(perf_stats.gitlab_cache_pipeline_jobs_hit), "GitLab pipeline jobs cache hits (commit history only)"))
+        page_stats.append(("gitlab.cache.pipeline_jobs.miss", str(perf_stats.gitlab_cache_pipeline_jobs_miss), "GitLab pipeline jobs cache misses (commit history only)"))
+        page_stats.append(("gitlab.registry_images.total_secs", f"{perf_stats.gitlab_registry_images_total_secs:.2f}s", "Time fetching GitLab registry images (commit history only)"))
+        page_stats.append(("gitlab.pipeline_status.total_secs", f"{perf_stats.gitlab_pipeline_status_total_secs:.2f}s", "Time fetching GitLab pipeline status (commit history only)"))
+        page_stats.append(("gitlab.pipeline_jobs.total_secs", f"{perf_stats.gitlab_pipeline_jobs_total_secs:.2f}s", "Time fetching GitLab pipeline jobs (commit history only)"))
+    else:
+        page_stats.append(("gitlab.cache.registry_images.hit", "(N/A)", "GitLab registry image cache hits (commit history only)"))
+        page_stats.append(("gitlab.cache.registry_images.miss", "(N/A)", "GitLab registry image cache misses (commit history only)"))
+        page_stats.append(("gitlab.cache.pipeline_status.hit", "(N/A)", "GitLab pipeline status cache hits (commit history only)"))
+        page_stats.append(("gitlab.cache.pipeline_status.miss", "(N/A)", "GitLab pipeline status cache misses (commit history only)"))
+        page_stats.append(("gitlab.cache.pipeline_jobs.hit", "(N/A)", "GitLab pipeline jobs cache hits (commit history only)"))
+        page_stats.append(("gitlab.cache.pipeline_jobs.miss", "(N/A)", "GitLab pipeline jobs cache misses (commit history only)"))
+        page_stats.append(("gitlab.registry_images.total_secs", "(N/A)", "Time fetching GitLab registry images (commit history only)"))
+        page_stats.append(("gitlab.pipeline_status.total_secs", "(N/A)", "Time fetching GitLab pipeline status (commit history only)"))
+        page_stats.append(("gitlab.pipeline_jobs.total_secs", "(N/A)", "Time fetching GitLab pipeline jobs (commit history only)"))
+
+    # 6b. GitHub cache statistics (reads from global GITHUB_CACHE_STATS)
+    # Always show these, even if N/A (for consistency across dashboards)
+    gh_stats = GITHUB_CACHE_STATS
+
+    # Merge dates cache
+    if gh_stats.merge_dates_hits > 0 or gh_stats.merge_dates_misses > 0:
+        page_stats.append(("github.cache.merge_dates.hits", str(gh_stats.merge_dates_hits), "PR merge date cache hits (all dashboards)"))
+        page_stats.append(("github.cache.merge_dates.misses", str(gh_stats.merge_dates_misses), "PR merge date cache misses (all dashboards)"))
+    else:
+        page_stats.append(("github.cache.merge_dates.hits", "(N/A)", "PR merge date cache hits (all dashboards)"))
+        page_stats.append(("github.cache.merge_dates.misses", "(N/A)", "PR merge date cache misses (all dashboards)"))
+
+    # Required checks cache
+    if gh_stats.required_checks_hits > 0 or gh_stats.required_checks_misses > 0:
+        page_stats.append(("github.cache.required_checks.hits", str(gh_stats.required_checks_hits), "PR-level check runs cache hits (all dashboards)"))
+        page_stats.append(("github.cache.required_checks.misses", str(gh_stats.required_checks_misses), "PR-level check runs cache misses (all dashboards)"))
+    else:
+        page_stats.append(("github.cache.required_checks.hits", "(N/A)", "PR-level check runs cache hits (all dashboards)"))
+        page_stats.append(("github.cache.required_checks.misses", "(N/A)", "PR-level check runs cache misses (all dashboards)"))
+
+    # Actions status cache - DEPRECATED (now unified with required_checks)
+    # No longer shown - all dashboards use unified required_checks stats
+
+    # 7. GitLab API stats (commit history only)
+    if gitlab_client is not None:
+        if hasattr(gitlab_client, "get_rest_call_stats"):
+            st = gitlab_client.get_rest_call_stats() or {}
+            gl_total = int(st.get("total", 0) or 0)
+            gl_ok = int(st.get("success_total", 0) or 0)
+            gl_err = int(st.get("error_total", 0) or 0)
+            if gl_total > 0:
+                page_stats.append(("gitlab.rest.calls", str(gl_total), "Total GitLab REST API calls"))
+                page_stats.append(("gitlab.rest.success", str(gl_ok), "Successful GitLab API calls"))
+                page_stats.append(("gitlab.rest.errors", str(gl_err), "Failed GitLab API calls"))
+
+    # Sort all stats alphabetically by key (but preserve section headers with None values)
+    section_headers = [s for s in page_stats if s[1] is None]
+    regular_stats = [s for s in page_stats if s[1] is not None]
+    regular_stats.sort(key=lambda x: x[0].lower())
+
+    return regular_stats
 
 
 def _tag_pill_html(*, text: str, monospace: bool = False, kind: str = "category", snippet_key: str = "") -> str:
@@ -3157,25 +3275,13 @@ def _create_snippet_tree_node(*, dom_id_seed: str, snippet_text: str) -> Optiona
     #   s.<sha7>.j<jobid>
     # Fallback:
     #   s.<sha7>.<h6>  (or s.<h6> if no sha)
-    try:
-        seed_s = str(dom_id_seed or "")
-    except Exception:
-        seed_s = ""
-    try:
-        m = re.findall(r"\b[0-9a-f]{7,40}\b", seed_s, flags=re.IGNORECASE)
-        sha7 = (str(m[-1])[:7].lower() if m else "")
-    except Exception:
-        sha7 = ""
+    seed_s = str(dom_id_seed or "")
+    m = re.findall(r"\b[0-9a-f]{7,40}\b", seed_s, flags=re.IGNORECASE)
+    sha7 = (str(m[-1])[:7].lower() if m else "")
     jobid = ""
-    try:
-        m2 = re.search(r"/job/([0-9]{5,})", seed_s)
-        jobid = str(m2.group(1)) if m2 else ""
-    except Exception:
-        jobid = ""
-    try:
-        suffix = _hash10(seed_s)[:6]
-    except Exception:
-        suffix = "x"
+    m2 = re.search(r"/job/([0-9]{5,})", seed_s)
+    jobid = str(m2.group(1)) if m2 else ""
+    suffix = _hash10(seed_s)[:6]
     if jobid:
         url_key = f"s.{sha7}.j{jobid}" if sha7 else f"s.j{jobid}"
     else:
@@ -3211,10 +3317,7 @@ def _create_snippet_tree_node(*, dom_id_seed: str, snippet_text: str) -> Optiona
 
 
 def _format_bytes_short(n_bytes: int) -> str:
-    try:
-        n = int(n_bytes or 0)
-    except Exception:
-        return ""
+    n = int(n_bytes or 0)
     if n <= 0:
         return ""
     gb = 1024**3
@@ -3255,15 +3358,17 @@ def check_line_html(
     yaml_dependencies: Optional[List[str]] = None,  # List of dependencies from YAML
 ) -> str:
     # Expected placeholder checks:
-    # - Use the placeholder symbol as the *icon* (instead of the generic pending dot),
-    #   since the symbol already communicates "not yet returned by the API".
-    # - Also suppress the redundant trailing "— ◇" marker in the label.
+    # - Use a normal gray dot (same as queued/pending) instead of the special ◇ symbol
+    # - Suppress the redundant trailing marker in the label
     is_expected_placeholder = bool(str(display_name or "").strip() == EXPECTED_CHECK_PLACEHOLDER_SYMBOL)
     if is_expected_placeholder:
-        icon_px_i = int(icon_px or 12)
-        icon = (
-            '<span style="display: inline-flex; align-items: center; justify-content: center; '
-            f'width: {icon_px_i}px; height: {icon_px_i}px; color: #8c959f; font-size: {icon_px_i}px; font-weight: 900;">{EXPECTED_CHECK_PLACEHOLDER_SYMBOL}</span>'
+        # Use normal gray dot for expected placeholders (status="queued")
+        icon = status_icon_html(
+            status_norm="pending",  # Gray dot
+            is_required=is_required,
+            required_failure=required_failure,
+            warning_present=warning_present,
+            icon_px=int(icon_px or 12),
         )
     else:
         icon = status_icon_html(
@@ -3355,11 +3460,8 @@ def check_line_html(
     # Extract job number from log_url for the log link label
     job_num = ""
     if log_url:
-        try:
-            m = re.search(r"/job/([0-9]{5,})", str(log_url))
-            job_num = str(m.group(1)) if m else ""
-        except Exception:
-            job_num = ""
+        m = re.search(r"/job/([0-9]{5,})", str(log_url))
+        job_num = str(m.group(1)) if m else ""
 
     links = ""
     if log_url:
@@ -3377,25 +3479,13 @@ def check_line_html(
     if has_snippet_text:
         # Generate snippet key (same logic as _create_snippet_tree_node)
         dom_id_seed = f"{job_id}|{display_name}|{raw_log_href}|{log_url}"
-        try:
-            seed_s = str(dom_id_seed or "")
-        except Exception:
-            seed_s = ""
-        try:
-            m = re.findall(r"\b[0-9a-f]{7,40}\b", seed_s, flags=re.IGNORECASE)
-            sha7 = (str(m[-1])[:7].lower() if m else "")
-        except Exception:
-            sha7 = ""
+        seed_s = str(dom_id_seed or "")
+        m = re.findall(r"\b[0-9a-f]{7,40}\b", seed_s, flags=re.IGNORECASE)
+        sha7 = (str(m[-1])[:7].lower() if m else "")
         jobid = ""
-        try:
-            m2 = re.search(r"/job/([0-9]{5,})", seed_s)
-            jobid = str(m2.group(1)) if m2 else ""
-        except Exception:
-            jobid = ""
-        try:
-            suffix = _hash10(seed_s)[:6]
-        except Exception:
-            suffix = "x"
+        m2 = re.search(r"/job/([0-9]{5,})", seed_s)
+        jobid = str(m2.group(1)) if m2 else ""
+        suffix = _hash10(seed_s)[:6]
         if jobid:
             snippet_key = f"s.{sha7}.j{jobid}" if sha7 else f"s.j{jobid}"
         else:
@@ -3425,14 +3515,11 @@ def build_and_test_dynamo_phase_tuples(
     Shared helper used by both dashboards to keep logic identical.
     """
     phases3: List[Tuple[str, str, str]] = []
-    try:
-        jid = extract_actions_job_id_from_url(str(job_url or ""))
-        if github_api and jid:
-            job = github_api.get_actions_job_details_cached(owner="ai-dynamo", repo="dynamo", job_id=jid, ttl_s=600) or {}
-            if isinstance(job, dict):
-                phases3 = build_and_test_dynamo_phases_from_actions_job(job) or []
-    except Exception:
-        phases3 = []
+    jid = extract_actions_job_id_from_url(str(job_url or ""))
+    if github_api and jid:
+        job = github_api.get_actions_job_details_cached(owner="ai-dynamo", repo="dynamo", job_id=jid, ttl_s=600) or {}
+        if isinstance(job, dict):
+            phases3 = build_and_test_dynamo_phases_from_actions_job(job) or []
 
     return [(str(n), str(d), str(s)) for (n, d, s) in (phases3 or [])]
 

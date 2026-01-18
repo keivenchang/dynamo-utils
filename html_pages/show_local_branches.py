@@ -60,10 +60,7 @@ if str(_UTILS_DIR) not in sys.path:
 if str(_THIS_DIR) not in sys.path:
     sys.path.insert(0, str(_THIS_DIR))
 
-try:
-    import git  # type: ignore[import-not-found]
-except Exception:  # pragma: no cover
-    git = None  # type: ignore[assignment]
+import git  # type: ignore[import-not-found]
 
 # Shared dashboard helpers (UI + workflow graph)
 from common_dashboard_lib import (
@@ -71,6 +68,7 @@ from common_dashboard_lib import (
     EXPECTED_CHECK_PLACEHOLDER_SYMBOL,
     PASS_PLUS_STYLE,
     TreeNodeVM,
+    build_page_stats,
     check_line_html,
     ci_should_expand_by_default,
     compact_ci_summary_html,
@@ -92,15 +90,11 @@ from common_dashboard_runtime import (
 # Log/snippet helpers (shared library: `dynamo-utils/ci_log_errors/`)
 from ci_log_errors import snippet as ci_snippet
 
-# Jinja2 is optional (keep CLI usable in minimal envs).
-try:
-    from jinja2 import Environment, FileSystemLoader, select_autoescape
-    HAS_JINJA2 = True
-except Exception:  # pragma: no cover
-    HAS_JINJA2 = False
-    Environment = None  # type: ignore[assignment]
-    FileSystemLoader = None  # type: ignore[assignment]
-    select_autoescape = None  # type: ignore[assignment]
+# Snippet cache (shared across all dashboards)
+from snippet_cache import SNIPPET_CACHE
+
+# Jinja2 for HTML template rendering
+from jinja2 import Environment, FileSystemLoader, select_autoescape
 
 # Import utilities from common and common_github modules
 import common
@@ -126,35 +120,30 @@ def _detect_branch_merged_locally(*, repo_dir: Path, branch_sha: Optional[str]) 
     sha = str(branch_sha or "").strip()
     if not sha:
         return False
-    try:
-        # Prefer origin/main when present, otherwise main.
-        has_origin_main = subprocess.run(
-            ["git", "-C", str(repo_dir), "show-ref", "--verify", "--quiet", "refs/remotes/origin/main"],
+    # Prefer origin/main when present, otherwise main.
+    has_origin_main = subprocess.run(
+        ["git", "-C", str(repo_dir), "show-ref", "--verify", "--quiet", "refs/remotes/origin/main"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    ).returncode == 0
+    base_ref = "origin/main" if has_origin_main else "main"
+    return (
+        subprocess.run(
+            ["git", "-C", str(repo_dir), "merge-base", "--is-ancestor", sha, base_ref],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             check=False,
-        ).returncode == 0
-        base_ref = "origin/main" if has_origin_main else "main"
-        return (
-            subprocess.run(
-                ["git", "-C", str(repo_dir), "merge-base", "--is-ancestor", sha, base_ref],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                check=False,
-            ).returncode
-            == 0
-        )
-    except Exception:
-        return False
+        ).returncode
+        == 0
+    )
 
 # Import shared node classes and refactored functions from common_branch_nodes
 from common_branch_nodes import (
-    BlockedMessageNode,
     BranchInfoNode,
     BranchNode,
     CIJobNode,
     BranchCommitMessageNode,
-    ConflictWarningNode,
     BranchMetadataNode,
     PRNode,
     PRStatusWithJobsNode,
@@ -230,14 +219,11 @@ class LocalRepoNode(RepoNode):
         """Format repo node with symlink target if applicable."""
         # If the repository directory itself is a symlink, show the target for clarity.
         link_suffix = ""
-        try:
-            p = Path(self.repo_path) if self.repo_path is not None else None
-            if p is not None and p.is_symlink():
-                tgt = str(p.readlink().resolve())
-                link_suffix = f' <span style="color: #666; font-size: 11px;">→ {html_module.escape(tgt)}</span>'
-        except Exception:
-            pass
-        
+        p = Path(self.repo_path) if self.repo_path is not None else None
+        if p is not None and p.is_symlink():
+            tgt = str(p.readlink().resolve())
+            link_suffix = f' <span style="color: #666; font-size: 11px;">→ {html_module.escape(tgt)}</span>'
+
         label_html = html_module.escape(self.label)
         
         if self.error:
@@ -306,11 +292,8 @@ DYNAMO_REPO_SLUG = f"{DYNAMO_OWNER}/{DYNAMO_REPO}"
 @functools.lru_cache(maxsize=1)
 def _copy_icon_svg(*, size_px: int = 12) -> str:
     """Return the shared 'copy' icon SVG (2-squares), sourced from copy_icon_paths.svg."""
-    try:
-        p = (Path(__file__).resolve().parent / "copy_icon_paths.svg").resolve()
-        paths = p.read_text(encoding="utf-8").strip()
-    except Exception:
-        paths = ""
+    p = (Path(__file__).resolve().parent / "copy_icon_paths.svg").resolve()
+    paths = p.read_text(encoding="utf-8").strip()
     return (
         f'<svg width="{int(size_px)}" height="{int(size_px)}" viewBox="0 0 16 16" fill="currentColor" '
         f'style="display: inline-block; vertical-align: middle;">{paths}</svg>'
@@ -326,50 +309,41 @@ def looks_like_git_repo_dir(p: Path) -> bool:
     
     Supports normal repos ('.git' directory) and worktrees/submodules ('.git' file).
     """
-    try:
-        if not p.is_dir():
-            return False
-        git_marker = p / ".git"
-        return git_marker.is_dir() or git_marker.is_file()
-    except Exception:
+    if not p.is_dir():
         return False
+    git_marker = p / ".git"
+    return git_marker.is_dir() or git_marker.is_file()
 
 
 def gitdir_from_git_file(p: Path) -> Optional[Path]:
     """Handle worktrees where .git is a file containing 'gitdir: <path>'."""
-    try:
-        txt = (p / ".git").read_text(encoding="utf-8", errors="ignore").strip()
-        if not txt.startswith("gitdir:"):
-            return None
-        rest = txt.split("gitdir:", 1)[1].strip()
-        if not rest:
-            return None
-        gd = Path(rest)
-        if not gd.is_absolute():
-            gd = (p / gd).resolve()
-        return gd if gd.is_dir() else None
-    except Exception:
+    txt = (p / ".git").read_text(encoding="utf-8", errors="ignore").strip()
+    if not txt.startswith("gitdir:"):
         return None
+    rest = txt.split("gitdir:", 1)[1].strip()
+    if not rest:
+        return None
+    gd = Path(rest)
+    if not gd.is_absolute():
+        gd = (p / gd).resolve()
+    return gd if gd.is_dir() else None
 
 
 def origin_url_from_git_config(repo_dir: Path) -> str:
     """Extract origin URL from .git/config without loading GitPython."""
-    try:
-        git_dir = repo_dir / ".git"
-        if git_dir.is_file():
-            gd = gitdir_from_git_file(repo_dir)
-            if gd:
-                git_dir = gd
-        config = git_dir / "config"
-        if not config.is_file():
-            return ""
-        txt = config.read_text(encoding="utf-8", errors="ignore")
-        m = re.search(r'\[remote\s+"origin"\].*?url\s*=\s*(.+?)(?:\n|\r\n|\r|$)', txt, re.IGNORECASE | re.DOTALL)
-        if m:
-            return m.group(1).strip()
+    git_dir = repo_dir / ".git"
+    if git_dir.is_file():
+        gd = gitdir_from_git_file(repo_dir)
+        if gd:
+            git_dir = gd
+    config = git_dir / "config"
+    if not config.is_file():
         return ""
-    except Exception:
-        return ""
+    txt = config.read_text(encoding="utf-8", errors="ignore")
+    m = re.search(r'\[remote\s+"origin"\].*?url\s*=\s*(.+?)(?:\n|\r\n|\r|$)', txt, re.IGNORECASE | re.DOTALL)
+    if m:
+        return m.group(1).strip()
+    return ""
 
 
 def find_local_clone_of_repo(base_dir: Path, *, repo_slug: str) -> Optional[Path]:
@@ -426,10 +400,7 @@ class LocalRepoScanner:
 
         For directories, readable enables listing and executable enables traversal.
         """
-        try:
-            st = p.stat()
-        except Exception:
-            return False
+        st = p.stat()
         mode = st.st_mode
         return bool(mode & stat.S_IROTH) and bool(mode & stat.S_IXOTH)
 
@@ -444,10 +415,7 @@ class LocalRepoScanner:
 
         # Match show_remote_branches.py style: root -> UserNode -> (things).
         # For local branches, we group all repo directories under a single local-user parent node.
-        try:
-            user_id = str(getpass.getuser() or "").strip() or "local"
-        except Exception:
-            user_id = "local"
+        user_id = str(getpass.getuser() or "").strip() or "local"
         user_node = LocalUserNode(label=user_id, user_id=user_id, base_dir=base_dir)
         root.add_child(user_node)
 
@@ -499,11 +467,8 @@ class LocalRepoScanner:
 
         # <pre>Symlink repos: show repo line (with → target) but don't scan/render nested info
         # (branches/PR/CI). Render as non-expandable in the UI.</pre>
-        try:
-            if Path(repo_dir).is_symlink():
-                return repo_node
-        except Exception:
-            pass
+        if Path(repo_dir).is_symlink():
+            return repo_node
 
         if git is None:
             repo_node.error = "GitPython is required. Install with: pip install gitpython"
@@ -518,53 +483,36 @@ class LocalRepoScanner:
         # <pre>Capture origin URL. We no longer treat "non-dynamo" repos as an error;
         # just skip PR/CI lookups wired to ai-dynamo/dynamo.</pre>
         is_dynamo_repo = False
-        try:
-            remote = repo.remote('origin')
-            remote_url = next(remote.urls)
-            repo_node.remote_url = remote_url
+        remote = repo.remote('origin')
+        remote_url = next(remote.urls)
+        repo_node.remote_url = remote_url
 
-            is_dynamo_repo = (DYNAMO_REPO_SLUG in remote_url)
-        except Exception:
-            repo_node.error = "No origin remote found"
-            return repo_node
+        is_dynamo_repo = (DYNAMO_REPO_SLUG in remote_url)
 
         # Get current branch
-        try:
-            current_branch = repo.active_branch.name
-        except Exception:
-            current_branch = None
+        current_branch = repo.active_branch.name
 
         # Always capture current HEAD SHA (for display even when we skip "main" branches, or when detached).
-        try:
-            head_commit = repo.head.commit
-            head_sha = head_commit.hexsha[:7]
-            head_commit_dt = head_commit.committed_datetime
-        except Exception:
-            head_sha = None
-            head_commit_dt = None
+        head_commit = repo.head.commit
+        head_sha = head_commit.hexsha[:7]
+        head_commit_dt = head_commit.committed_datetime
 
         def _format_pt_time(dt) -> Optional[str]:
-            try:
-                if dt is None:
-                    return None
-                # GitPython often returns tz-aware datetimes; if not, assume UTC.
-                if dt.tzinfo is None:
-                    dt = dt.replace(tzinfo=ZoneInfo("UTC"))
-                pt = dt.astimezone(ZoneInfo("America/Los_Angeles"))
-                return f"{pt.strftime('%Y-%m-%d %H:%M')} PT"
-            except Exception:
+            if dt is None:
                 return None
+            # GitPython often returns tz-aware datetimes; if not, assume UTC.
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=ZoneInfo("UTC"))
+            pt = dt.astimezone(ZoneInfo("America/Los_Angeles"))
+            return f"{pt.strftime('%Y-%m-%d %H:%M')} PT"
 
         # Collect branch information
         branches_with_prs = {}
         local_only_branches = []
 
         # Get remote branches
-        try:
-            remote = repo.remote('origin')
-            remote.fetch()
-        except Exception:
-            pass
+        remote = repo.remote('origin')
+        remote.fetch()
 
         # Scan all local branches
         for branch in repo.branches:  # type: ignore[attr-defined]
@@ -575,31 +523,20 @@ class LocalRepoScanner:
                 continue
 
             # Check if branch has remote tracking or matching remote branch
-            try:
-                tracking_branch = branch.tracking_branch()
-                has_remote = tracking_branch is not None
-            except Exception:
-                has_remote = False
+            tracking_branch = branch.tracking_branch()
+            has_remote = tracking_branch is not None
 
             # Also check if a remote branch exists with the same name (even if not tracking)
             if not has_remote:
-                try:
-                    remote_branches = [ref.name for ref in repo.remote().refs]  # type: ignore[attr-defined]
-                    # Check for origin/branch_name
-                    if f'origin/{branch_name}' in remote_branches:
-                        has_remote = True
-                except Exception:
-                    pass
+                remote_branches = [ref.name for ref in repo.remote().refs]  # type: ignore[attr-defined]
+                # Check for origin/branch_name
+                if f'origin/{branch_name}' in remote_branches:
+                    has_remote = True
 
             # Get commit SHA
-            try:
-                sha = branch.commit.hexsha[:7]
-                commit_dt = branch.commit.committed_datetime
-                commit_msg = str(branch.commit.message or "").strip()
-            except Exception:
-                sha = None
-                commit_dt = None
-                commit_msg = ""
+            sha = branch.commit.hexsha[:7]
+            commit_dt = branch.commit.committed_datetime
+            commit_msg = str(branch.commit.message or "").strip()
 
             is_current = (branch_name == current_branch)
 
@@ -628,17 +565,13 @@ class LocalRepoScanner:
             # Branches with PRs - add directly to repo_node (no section wrapper)
             # NOTE: Avoid per-branch GitHub API calls. We list open PRs once per repo (cached),
             # then match PRs to branch names locally.
-            try:
-                pr_infos_by_branch = self.github_api.get_pr_info_for_branches(
-                    DYNAMO_OWNER,
-                    DYNAMO_REPO,
-                    branches_with_prs.keys(),
-                    include_closed=True,
-                    refresh_closed=self.refresh_closed_prs,
-                )
-            except Exception as e:
-                self.logger.warning("Error fetching PR info: %s", e)
-                pr_infos_by_branch = {}
+            pr_infos_by_branch = self.github_api.get_pr_info_for_branches(
+                DYNAMO_OWNER,
+                DYNAMO_REPO,
+                branches_with_prs.keys(),
+                include_closed=True,
+                refresh_closed=self.refresh_closed_prs,
+            )
 
             branch_results = []
             for branch_name, info in branches_with_prs.items():
@@ -709,12 +642,6 @@ class LocalRepoScanner:
                         refresh=bool(self.refresh_closed_prs),
                     )
                     
-                    # Add conflict/blocking messages (branch-level; show immediately after metadata)
-                    if pr.conflict_message:
-                        branch_node.add_child(ConflictWarningNode(label=pr.conflict_message))
-                    if pr.blocking_message:
-                        branch_node.add_child(BlockedMessageNode(label=pr.blocking_message))
-
                     # Create status node (will contain CI children)
                     status_node = PRStatusWithJobsNode(
                         label="",
@@ -855,16 +782,6 @@ def generate_html(
     else:
         tree_html = tree_html + ("\n" if not tree_html.endswith("\n") else "")
 
-    if not HAS_JINJA2:
-        raise RuntimeError(
-            "Jinja2 is required for HTML output. Install with: pip install jinja2"
-        )
-
-    # Help type-checkers: these are set only when HAS_JINJA2 is True.
-    assert Environment is not None
-    assert FileSystemLoader is not None
-    assert select_autoescape is not None
-
     env = Environment(
         loader=FileSystemLoader(str(_THIS_DIR)),
         autoescape=select_autoescape(["html", "xml"]),
@@ -973,12 +890,9 @@ def main():
     # Prune locally-served raw logs to avoid unbounded growth and delete any partial/unverified artifacts.
     # We only render `[raw log]` links when the local file exists (or was materialized),
     # so pruning won't produce dead links on a freshly generated page.
-    try:
-        with phase_t.phase("prune"):
-            _ = prune_dashboard_raw_logs(page_root_dir=page_root_dir, max_age_days=30)
-            _ = prune_partial_raw_log_caches(page_root_dirs=[page_root_dir])
-    except Exception:
-        pass
+    with phase_t.phase("prune"):
+        _ = prune_dashboard_raw_logs(page_root_dir=page_root_dir, max_age_days=30)
+        _ = prune_partial_raw_log_caches(page_root_dirs=[page_root_dir])
 
     # Scan repositories
     scanner = LocalRepoScanner(
@@ -998,10 +912,7 @@ def main():
     except Exception as e:
         # Switch to cache-only mode (no new network calls; use existing caches).
         scanner.cache_only_github = True
-        try:
-            scanner.github_api.set_cache_only_mode(True)
-        except Exception:
-            pass
+        scanner.github_api.set_cache_only_mode(True)
         # Also disable refresh knobs in cache-only mode.
         scanner.refresh_closed_prs = False
         # Record reason (displayed in Statistics section).
@@ -1022,141 +933,74 @@ def main():
     # That means we need to measure render/write first, then re-render once so the stats reflect
     # those timings. This is intentionally low-tech and stable.
     elapsed_s = max(0.0, time.monotonic() - generation_t0)
-    rest_calls = 0
-    rest_ok = 0
-    rest_err = 0
-    rest_err_by_status_s = ""
-    try:
-        stats = scanner.github_api.get_rest_call_stats() if scanner.github_api else {}
-        rest_calls = int(stats.get("total") or 0)
-        rest_ok = int(stats.get("success_total") or 0)
-        rest_err = int(stats.get("error_total") or 0)
-    except Exception:
-        rest_calls = 0
-        rest_ok = 0
-        rest_err = 0
-        stats = {}
 
-    try:
-        es = scanner.github_api.get_rest_error_stats() if scanner.github_api else {}
-        by_status = (es or {}).get("by_status") if isinstance(es, dict) else {}
-        if isinstance(by_status, dict) and by_status:
-            items = list(by_status.items())[:8]
-            rest_err_by_status_s = ", ".join([f"{k}={v}" for k, v in items])
-    except Exception:
-        rest_err_by_status_s = ""
+    def _count_prs(node: BranchNode) -> int:
+        n = 0
+        if isinstance(node, PRNode) and node.pr is not None:
+            n += 1
+        for ch in (node.children or []):
+            n += _count_prs(ch)
+        return n
 
-    pr_count = 0
-    try:
-        def _count_prs(node: BranchNode) -> int:
-            n = 0
-            if isinstance(node, PRNode) and node.pr is not None:
-                n += 1
-            for ch in (node.children or []):
-                n += _count_prs(ch)
-            return n
+    pr_count = _count_prs(root)
 
-        pr_count = _count_prs(root)
-    except Exception:
-        pr_count = 0
+    # New structure: root -> LocalUserNode -> LocalRepoNode -> ...
+    maybe_user = (root.children or [None])[0]
+    repos_scanned = len(maybe_user.children or []) if maybe_user is not None else 0
 
-    repos_scanned = 0
-    try:
-        # New structure: root -> LocalUserNode -> LocalRepoNode -> ...
-        maybe_user = (root.children or [None])[0]
-        repos_scanned = len(maybe_user.children or []) if maybe_user is not None else 0
-    except Exception:
-        repos_scanned = 0
+    # Force tree conversion to TreeNodeVM to trigger snippet extraction and cache stats population.
+    # This must happen BEFORE build_page_stats() so statistics are captured correctly.
+    _ = root.to_tree_vm()
 
-    page_stats: List[tuple[str, Optional[str]]] = [
-        ("Generation time", f"{elapsed_s:.2f}s"),
-        ("Repos scanned", str(repos_scanned)),
-        ("PRs shown", str(pr_count)),
-    ]
+    # Helper to update stats after phase timing measurement
+    def _upsert_stat(page_stats: List[tuple[str, Optional[str], str]], k: str, v: str, desc: str = "") -> None:
+        for i, stat in enumerate(page_stats):
+            kk = stat[0]
+            if kk == k:
+                # Preserve existing description if not provided
+                existing_desc = stat[2] if len(stat) > 2 else ""
+                page_stats[i] = (k, v, desc or existing_desc)
+                return
+        page_stats.append((k, v, desc))
 
-    # Keep all page-stats augmentation in one scope block.
-    if True:
-        def _upsert_stat(k: str, v: str) -> None:
-            try:
-                for i, (kk, _vv) in enumerate(page_stats):
-                    if kk == k:
-                        page_stats[i] = (k, v)
-                        return
-            except Exception:
-                pass
-            page_stats.append((k, v))
+    # Initial stats using shared function (now includes snippet extraction stats)
+    page_stats = build_page_stats(
+        generation_time_secs=elapsed_s,
+        github_api=scanner.github_api,
+        max_github_api_calls=int(args.max_github_api_calls),
+        cache_only_mode=bool(scanner.cache_only_github),
+        cache_only_reason=cache_only_reason or "",
+        repos_scanned=repos_scanned,
+        prs_shown=pr_count,
+        max_branches=args.max_branches,
+        max_checks_fetch=args.max_checks_fetch,
+        refresh_closed_prs=bool(args.refresh_closed_prs),
+    )
 
-        def _sort_stats() -> None:
-            # Keep logical order for human scanning; sort all stats by prefix grouping.
-            try:
-                # Extract prefix (before first _ or .) for grouping
-                def prefix_sort_key(kv):
-                    k = str(kv[0])
-                    if "_" in k or "." in k:
-                        underscore_pos = k.find("_") if "_" in k else len(k)
-                        dot_pos = k.find(".") if "." in k else len(k)
-                        split_pos = min(underscore_pos, dot_pos)
-                        prefix = k[:split_pos]
-                    else:
-                        prefix = k
-                    return (prefix, k)
-                
-                # Sort all stats by prefix, then by full key
-                page_stats[:] = sorted(page_stats, key=prefix_sort_key)
-            except Exception:
-                pass
+    # Render once to measure render time.
+    with phase_t.phase("render"):
+        _ = generate_html(root, page_stats=page_stats)
 
-        # GitHub API stats (structured; rendered with <pre> blocks in Statistics).
-        try:
-            from common_dashboard_lib import github_api_stats_rows  # local import
+    # Update the page stats with the timing breakdown before producing the final HTML.
+    tdict = phase_t.as_dict(include_total=True)
+    # Make "Generation time" reflect total wall time so it matches the timing breakdown.
+    elapsed_total = float(tdict.get("total") or 0.0)
+    _upsert_stat(page_stats, "Generation time", f"{elapsed_total:.2f}s")
+    for k in ["prune", "scan", "render", "write", "total"]:
+        if k in tdict:
+            _upsert_stat(page_stats, f"{k}.total_secs", f"{float(tdict.get(k) or 0.0):.2f}s")
 
-            mode = "cache-only" if bool(scanner.cache_only_github) else "normal"
-            api_rows = github_api_stats_rows(
-                github_api=scanner.github_api,
-                max_github_api_calls=int(args.max_github_api_calls),
-                mode=mode,
-                mode_reason=cache_only_reason or "",
-                top_n=15,
-            )
-            page_stats.extend(list(api_rows or []))
-        except Exception:
-            pass
+    # Final render + atomic write to destination (single visible update).
+    out_path = args.output
+    if out_path is None:
+        out_path = base_dir / "index.html"
+    with phase_t.phase("render_final"):
+        html_output2 = generate_html(root, page_stats=page_stats)
+    with phase_t.phase("write"):
+        atomic_write_text(out_path, html_output2, encoding="utf-8")
 
-        # Include relevant knobs if set (helps explain “why so many API calls?”).
-        if args.max_branches is not None:
-            page_stats.append(("max_branches", str(args.max_branches)))
-        if args.max_checks_fetch is not None:
-            page_stats.append(("max_checks_fetch", str(args.max_checks_fetch)))
-        if bool(args.refresh_closed_prs):
-            page_stats.append(("refresh_closed_prs", "true"))
-
-        _sort_stats()
-
-        # Render once to measure render time.
-        with phase_t.phase("render"):
-            _ = generate_html(root, page_stats=page_stats)
-
-        # Update the page stats with the timing breakdown before producing the final HTML.
-        try:
-            tdict = phase_t.as_dict(include_total=True)
-            # Make "Generation time" reflect total wall time so it matches the timing breakdown.
-            elapsed_total = float(tdict.get("total") or 0.0)
-            _upsert_stat("Generation time", f"{elapsed_total:.2f}s")
-            for k in ["prune", "scan", "render", "write", "total"]:
-                if k in tdict:
-                    _upsert_stat(f"{k}.total_secs", f"{float(tdict.get(k) or 0.0):.2f}s")
-        except Exception:
-            pass
-        _sort_stats()
-
-        # Final render + atomic write to destination (single visible update).
-        out_path = args.output
-        if out_path is None:
-            out_path = base_dir / "index.html"
-        with phase_t.phase("render_final"):
-            html_output2 = generate_html(root, page_stats=page_stats)
-        with phase_t.phase("write"):
-            atomic_write_text(out_path, html_output2, encoding="utf-8")
+    # Flush shared caches to disk (snippet cache, pytest timings cache, etc.)
+    SNIPPET_CACHE.flush()
 
     # No stdout/stderr run-stats; the HTML Statistics section contains the breakdowns.
 

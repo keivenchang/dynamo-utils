@@ -58,10 +58,8 @@ from common_branch_nodes import (  # noqa: E402
     DYNAMO_REPO_SLUG,
     BranchNode,
     BranchInfoNode,
-    BlockedMessageNode,
     CIJobNode,
     BranchCommitMessageNode,
-    ConflictWarningNode,
     BranchMetadataNode,
     PRNode,
     PRStatusWithJobsNode,
@@ -83,12 +81,13 @@ from common_branch_nodes import (  # noqa: E402
     looks_like_git_repo_dir,
     origin_url_from_git_config,
 )
-from common_dashboard_lib import TreeNodeVM  # noqa: E402
+from common_dashboard_lib import TreeNodeVM, build_page_stats  # noqa: E402
 from dataclasses import dataclass  # noqa: E402
 from typing import Optional as Opt  # noqa: E402
 import html as html_module  # noqa: E402
 from common_dashboard_lib import github_api_stats_rows  # noqa: E402
 from common_branch_nodes import mock_get_open_pr_info_for_author  # noqa: E402
+from snippet_cache import SNIPPET_CACHE  # noqa: E402
 
 
 @dataclass
@@ -285,12 +284,6 @@ def main() -> int:
             )
             user_node.add_child(branch_node)  # Add to user_node, not root
 
-            # Conflict/blocking messages (branch-level; show immediately after metadata)
-            if pr.conflict_message:
-                branch_node.add_child(ConflictWarningNode(label=str(pr.conflict_message)))
-            if pr.blocking_message:
-                branch_node.add_child(BlockedMessageNode(label=str(pr.blocking_message)))
-
             status_node = PRStatusWithJobsNode(
                 label="",
                 pr=pr,
@@ -321,29 +314,29 @@ def main() -> int:
     )
 
     elapsed_s = max(0.0, time.monotonic() - t0)
-    page_stats = [
-        ("Generation time", f"{elapsed_s:.2f}s"),
-        ("Repo", f"{owner}/{repo}"),
-        ("GitHub user", user),
-        ("PRs shown", str(len(prs))),
-    ]
-    mode = "cache-only" if gh.cache_only_mode else "normal"
-    page_stats.extend(
-        list(
-            github_api_stats_rows(
-                github_api=gh,
-                max_github_api_calls=int(args.max_github_api_calls),
-                mode=mode,
-                mode_reason=cache_only_reason or "",
-                top_n=15,
-            )
-            or []
-        )
+
+    # Build the tree FIRST
+    root = build_root(prs_list) if prs_list else build_root([])
+
+    # Force tree conversion to TreeNodeVM to trigger snippet extraction and cache stats population.
+    # This must happen BEFORE build_page_stats() so statistics are captured correctly.
+    _ = root.to_tree_vm()
+
+    # THEN capture statistics (now includes snippet extraction stats)
+    page_stats = build_page_stats(
+        generation_time_secs=elapsed_s,
+        github_api=gh,
+        max_github_api_calls=int(args.max_github_api_calls),
+        cache_only_mode=bool(gh.cache_only_mode),
+        cache_only_reason=cache_only_reason or "",
+        repo_info=f"{owner}/{repo}",
+        github_user=user,
+        prs_shown=len(prs),
     )
 
     # Generate HTML (same as local branches - no client-side sorting)
     html = generate_html(
-        build_root(prs_list) if prs_list else build_root([]),
+        root,
         page_stats=page_stats,
         page_title=f"Remote PR Info ({user})",
         header_title=f"Remote PR Info ({user})",
@@ -352,6 +345,10 @@ def main() -> int:
     )
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(html, encoding="utf-8")
+
+    # Flush shared caches to disk
+    SNIPPET_CACHE.flush()
+
     return 0
 
 

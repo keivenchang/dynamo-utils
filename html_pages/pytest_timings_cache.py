@@ -64,85 +64,70 @@ class PytestTimingCache:
         if self._loaded:
             return
         self._loaded = True
-        try:
-            if not self._cache_file.exists():
-                return
-            data = json.loads(self._cache_file.read_text() or "{}")
-            if not isinstance(data, dict):
-                return
-            entries = data.get("entries")
-            if not isinstance(entries, dict):
-                return
-            for k, v in entries.items():
-                if not isinstance(k, str) or not isinstance(v, dict):
-                    continue
-                try:
-                    rows_in = v.get("rows")
-                    rows: List[PytestTimingRow] = []
-                    if isinstance(rows_in, list):
-                        for r in rows_in:
-                            if not isinstance(r, dict):
-                                continue
-                            rows.append(
-                                PytestTimingRow(
-                                    display_name=str(r.get("display_name", "") or ""),
-                                    duration_str=str(r.get("duration_str", "") or ""),
-                                    status_norm=str(r.get("status_norm", "") or ""),
-                                )
-                            )
-                    ent = PytestTimingCacheEntry(
-                        schema_version=int(v.get("schema_version", self._SCHEMA_VERSION) or self._SCHEMA_VERSION),
-                        key=str(v.get("key", k) or k),
-                        step_name=str(v.get("step_name", "") or ""),
-                        ts_cached=int(v.get("ts_cached", 0) or 0),
-                        raw_log_mtime_ns=int(v.get("raw_log_mtime_ns", 0) or 0),
-                        raw_log_size_bytes=int(v.get("raw_log_size_bytes", 0) or 0),
-                        rows=rows,
-                    )
-                    # Only accept current schema.
-                    if int(ent.schema_version) != int(self._SCHEMA_VERSION):
-                        continue
-                    self._entries[k] = ent
-                except Exception:
-                    continue
-        except Exception:
+        if not self._cache_file.exists():
             return
+        data = json.loads(self._cache_file.read_text() or "{}")
+        if not isinstance(data, dict):
+            return
+        entries = data.get("entries")
+        if not isinstance(entries, dict):
+            return
+        for k, v in entries.items():
+            if not isinstance(k, str) or not isinstance(v, dict):
+                continue
+            rows_in = v.get("rows")
+            rows: List[PytestTimingRow] = []
+            if isinstance(rows_in, list):
+                for r in rows_in:
+                    if not isinstance(r, dict):
+                        continue
+                    rows.append(
+                        PytestTimingRow(
+                            display_name=str(r.get("display_name", "") or ""),
+                            duration_str=str(r.get("duration_str", "") or ""),
+                            status_norm=str(r.get("status_norm", "") or ""),
+                        )
+                    )
+            ent = PytestTimingCacheEntry(
+                schema_version=int(v.get("schema_version", self._SCHEMA_VERSION) or self._SCHEMA_VERSION),
+                key=str(v.get("key", k) or k),
+                step_name=str(v.get("step_name", "") or ""),
+                ts_cached=int(v.get("ts_cached", 0) or 0),
+                raw_log_mtime_ns=int(v.get("raw_log_mtime_ns", 0) or 0),
+                raw_log_size_bytes=int(v.get("raw_log_size_bytes", 0) or 0),
+                rows=rows,
+            )
+            # Only accept current schema.
+            if int(ent.schema_version) != int(self._SCHEMA_VERSION):
+                continue
+            self._entries[k] = ent
 
     def _persist(self) -> None:
-        try:
-            self._cache_file.parent.mkdir(parents=True, exist_ok=True)
-            payload = {
-                "schema_version": self._SCHEMA_VERSION,
-                "ts_written": int(time.time()),
-                "entries": {k: asdict(v) for k, v in self._entries.items()},
-            }
-            tmp = str(self._cache_file) + ".tmp"
-            Path(tmp).write_text(json.dumps(payload, separators=(",", ":")))
-            Path(tmp).replace(self._cache_file)
-        except Exception:
-            return
+        self._cache_file.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "schema_version": self._SCHEMA_VERSION,
+            "ts_written": int(time.time()),
+            "entries": {k: asdict(v) for k, v in self._entries.items()},
+        }
+        tmp = str(self._cache_file) + ".tmp"
+        Path(tmp).write_text(json.dumps(payload, separators=(",", ":")))
+        Path(tmp).replace(self._cache_file)
 
     @staticmethod
     def _key_for_raw_log_and_step(p: Path, step_name: str) -> str:
         # Prefer numeric job-id cache keys; else use full path (stable within a repo checkout).
         # Include step_name to distinguish between different test phases (e.g., "Run unit tests" vs "Run e2e tests")
         step_suffix = f"_{step_name.lower().replace(' ', '_')}" if step_name else ""
-        try:
-            stem = str(p.stem or "").strip()
-            if stem.isdigit():
-                return f"{stem}{step_suffix}"
-        except Exception:
-            pass
+        stem = str(p.stem or "").strip()
+        if stem.isdigit():
+            return f"{stem}{step_suffix}"
         return f"{str(p)}{step_suffix}"
 
     def get_if_fresh(self, *, raw_log_path: Path, step_name: str = "") -> Optional[List[Tuple[str, str, str]]]:
         p = Path(raw_log_path)
-        try:
-            st = p.stat()
-            mtime_ns = int(getattr(st, "st_mtime_ns", int(st.st_mtime * 1e9)))
-            size_b = int(st.st_size)
-        except Exception:
-            return None
+        st = p.stat()
+        mtime_ns = int(getattr(st, "st_mtime_ns", int(st.st_mtime * 1e9)))
+        size_b = int(st.st_size)
 
         key = self._key_for_raw_log_and_step(p, step_name)
         with self._mu:
@@ -165,18 +150,12 @@ class PytestTimingCache:
         rows: List[Tuple[str, str, str]],
     ) -> None:
         p = Path(raw_log_path)
-        try:
-            st = p.stat()
-            mtime_ns = int(getattr(st, "st_mtime_ns", int(st.st_mtime * 1e9)))
-            size_b = int(st.st_size)
-        except Exception:
-            return
+        st = p.stat()
+        mtime_ns = int(getattr(st, "st_mtime_ns", int(st.st_mtime * 1e9)))
+        size_b = int(st.st_size)
 
         key = self._key_for_raw_log_and_step(p, step_name)
-        try:
-            row_objs = [PytestTimingRow(display_name=a, duration_str=b, status_norm=c) for (a, b, c) in (rows or [])]
-        except Exception:
-            return
+        row_objs = [PytestTimingRow(display_name=a, duration_str=b, status_norm=c) for (a, b, c) in (rows or [])]
 
         with self._mu:
             self._load_once()

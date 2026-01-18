@@ -5,11 +5,9 @@
 # Cron-friendly wrapper to update HTML dashboards (local branches, remote PRs, commit history, resource report).
 # This script is designed to be run by cron.
 #
-# Environment Variables (optional; deprecated for GitLab fetch control):
+# Environment Variables (optional):
 #   NVIDIA_HOME         - Base directory for logs and output files
 #                        (default: parent of script dir; for this repo layout that is typically ~/dynamo)
-#   GITLAB_FETCH_SKIP   - DEPRECATED: use --gitlab-fetch-skip. If set, skip fetching from GitLab API (faster).
-#   SKIP_GITLAB_FETCH   - DEPRECATED alias for GITLAB_FETCH_SKIP.
 #                        Note: GitHub fetching is independently capped/cached by the Python scripts.
 #   REFRESH_CLOSED_PRS  - If set, refresh cached closed/merged PR mappings (more GitHub API calls)
 #   MAX_GITHUB_API_CALLS - If set, pass --max-github-api-calls to the Python generators.
@@ -178,12 +176,8 @@ if [ "$GITLAB_FETCH_SKIP_MODE" = "skip" ]; then
 elif [ "$GITLAB_FETCH_SKIP_MODE" = "fetch" ]; then
     GITLAB_FETCH_SKIP_EFFECTIVE=false
 else
-    # auto mode:
-    # - In --output-debug-html, default to skip GitLab fetch (much faster; good for interactive debugging).
-    # - Otherwise, honor legacy env vars if set.
+    # auto mode: In --output-debug-html, default to skip GitLab fetch (much faster; good for interactive debugging).
     if [ "$FAST_DEBUG" = true ]; then
-        GITLAB_FETCH_SKIP_EFFECTIVE=true
-    elif [ -n "${GITLAB_FETCH_SKIP:-}" ] || [ -n "${SKIP_GITLAB_FETCH:-}" ]; then
         GITLAB_FETCH_SKIP_EFFECTIVE=true
     fi
 fi
@@ -220,7 +214,7 @@ fi
 # - show_local_resources.py (1 day): ~0.6s
 # - mv operations + cleanup: ~0-2ms each
 # Notes:
-# - show_commit_history.py can dominate if it fetches from GitLab (use GITLAB_FETCH_SKIP=1 for faster runs).
+# - show_commit_history.py can dominate if it fetches from GitLab (use --gitlab-fetch-skip for faster runs).
 # - Real timings vary with network conditions, repo state, and API responsiveness.
 
 # Create logs directory if it doesn't exist

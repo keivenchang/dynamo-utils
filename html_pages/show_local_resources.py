@@ -92,26 +92,17 @@ def _query_gh_rate_limit_timeseries(
         series[str(r)] = {"x": [], "remaining": [], "limit": [], "reset_epoch": []}
 
     for row in rows:
-        try:
-            res = str(row["resource"] or "")
-        except Exception:
-            continue
+        res = str(row["resource"] or "")
         if not res or (want and res not in want):
             continue
-        try:
-            tsu = float(row["ts_unix"])
-        except Exception:
-            continue
+        tsu = float(row["ts_unix"])
         x = _ts_to_iso(tsu)
         rem = row["rem"]
         lim = row["lim"]
         reset_epoch = row["reset_epoch"]
-        try:
-            rem_i = int(rem) if rem is not None else None
-            lim_i = int(lim) if lim is not None else None
-            reset_i = int(reset_epoch) if reset_epoch is not None else None
-        except Exception:
-            continue
+        rem_i = int(rem) if rem is not None else None
+        lim_i = int(lim) if lim is not None else None
+        reset_i = int(reset_epoch) if reset_epoch is not None else None
 
         d = series.setdefault(res, {"x": [], "remaining": [], "limit": [], "reset_epoch": []})
         d["x"].append(x)
@@ -163,13 +154,8 @@ def _wal_checkpoint_truncate(con: sqlite3.Connection) -> List[Tuple[int, int, in
         rows = con.execute("PRAGMA wal_checkpoint(TRUNCATE);").fetchall()
         out: List[Tuple[int, int, int]] = []
         for r in rows:
-            try:
-                out.append((int(r[0]), int(r[1]), int(r[2])))
-            except Exception:
-                continue
+            out.append((int(r[0]), int(r[1]), int(r[2])))
         return out
-    except Exception:
-        return []
 
 
 def _vacuum_best_effort(db_path: Path) -> bool:
@@ -178,16 +164,13 @@ def _vacuum_best_effort(db_path: Path) -> bool:
 
     VACUUM requires an exclusive lock; if the monitor is running, this will likely fail quickly.
     """
+    con = sqlite3.connect(str(db_path), timeout=2.0)
     try:
-        con = sqlite3.connect(str(db_path), timeout=2.0)
-        try:
-            con.execute("PRAGMA foreign_keys=ON;")
-            con.execute("VACUUM;")
-            return True
-        finally:
-            con.close()
-    except Exception:
-        return False
+        con.execute("PRAGMA foreign_keys=ON;")
+        con.execute("VACUUM;")
+        return True
+    finally:
+        con.close()
 
 
 def _prune_db_samples_older_than(
@@ -201,18 +184,12 @@ def _prune_db_samples_older_than(
     `resource_monitor.py` schema uses ON DELETE CASCADE for child tables, but SQLite only enforces
     that when PRAGMA foreign_keys=ON for the current connection.
     """
-    try:
-        con.execute("PRAGMA foreign_keys=ON;")
-    except Exception:
-        pass
+    con.execute("PRAGMA foreign_keys=ON;")
     cur = con.cursor()
-    try:
-        n = cur.execute(
-            "SELECT COUNT(*) AS n FROM samples WHERE ts_unix < ?", (float(cutoff_ts_unix),)
-        ).fetchone()["n"]
-        to_delete = int(n or 0)
-    except Exception:
-        to_delete = 0
+    n = cur.execute(
+        "SELECT COUNT(*) AS n FROM samples WHERE ts_unix < ?", (float(cutoff_ts_unix),)
+    ).fetchone()["n"]
+    to_delete = int(n or 0)
     cur.execute("DELETE FROM samples WHERE ts_unix < ?", (float(cutoff_ts_unix),))
     con.commit()
     return to_delete
@@ -3312,10 +3289,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             logger.info("VACUUM: %s", ("ok" if ok else "skipped (db busy)"))
         return 0
     finally:
-        try:
-            con.close()
-        except Exception:
-            pass
+        con.close()
 
 
 if __name__ == "__main__":

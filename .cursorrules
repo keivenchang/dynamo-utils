@@ -471,8 +471,28 @@ Notes:
 ## 3.5 Python Development
 
 ### 3.5.1 Code Style
+
+**CRITICAL RULES (NEVER VIOLATE WITHOUT EXPLICIT PERMISSION):**
+
+1. **ALL IMPORTS AT TOP OF FILE - NEVER INSIDE FUNCTIONS**
+   - ❌ NEVER: `def foo(): import json`
+   - ✅ ALWAYS: Import at module top
+   - Exception: ONLY with explicit user permission for lazy imports in rare cases
+
+2. **NO DEFENSIVE getattr() WHEN TYPES ARE KNOWN**
+   - ❌ NEVER: `getattr(node, "job_name", "")` when node has job_name
+   - ✅ ALWAYS: `node.job_name` (let it fail if attribute missing!)
+   - Using getattr() for known attributes is REDUNDANT and hides bugs
+
+3. **FAIL FAST - NEVER HIDE ERRORS**
+   - ❌ NEVER: `try: ... except Exception: pass`
+   - ❌ NEVER: `try: ... except Exception as e: logging.error(...); return []`
+   - ✅ ALWAYS: Let exceptions propagate immediately
+   - ✅ ONLY catch specific exceptions you can actually handle
+   - See detailed examples in section 3.5.3 below
+
+**Standard Style Rules:**
 - Follow PEP 8
-- Put imports at top of file (not inside functions)
 - Check indentation carefully (must be perfect)
 - **Indentation/continuation-indent MUST be mechanically verified after edits (don't rely on eyeballing):**
   - **Single-command indentation gate (preferred):**
@@ -510,30 +530,53 @@ Notes:
 
 ### 3.5.3 Error Handling and Anti-Patterns
 
-**CRITICAL: NEVER SILENTLY CATCH AND IGNORE EXCEPTIONS**
+**CRITICAL: FAIL FAST - NEVER HIDE ERRORS**
 
-This is a cardinal sin in software development - it makes debugging impossible and hides bugs until production:
+**THIS IS AN ABSOLUTE RULE - NO EXCEPTIONS WITHOUT EXPLICIT USER PERMISSION**
+
+Hiding errors makes debugging impossible and creates bugs that will need fixing later. Every error-hiding pattern below is FORBIDDEN:
 
 ```python
-# ❌ NEVER DO THIS:
+# ❌ ABSOLUTELY FORBIDDEN:
 try:
     something()
 except Exception:
-    pass  # Silent failure!
+    pass  # NEVER DO THIS - Silent failure!
 
-# ❌ NEVER DO THIS:
+# ❌ ABSOLUTELY FORBIDDEN:
 try:
     something()
 except Exception as e:
-    print(f"Error: {e}")  # Print and continue = silent failure!
+    logging.error(f"Error: {e}")  # NEVER DO THIS - Log and hide!
+    # Missing raise = hidden error!
+
+# ❌ ABSOLUTELY FORBIDDEN:
+try:
+    something()
+except Exception as e:
+    print(f"Error: {e}")  # NEVER DO THIS - Print and continue!
     continue
 
-# ❌ NEVER DO THIS:
+# ❌ ABSOLUTELY FORBIDDEN:
 try:
     something()
 except Exception:
-    return []  # Return empty result on error = silent failure!
+    return []  # NEVER DO THIS - Return default on error!
+
+# ❌ ABSOLUTELY FORBIDDEN:
+try:
+    something()
+except Exception as e:
+    logger.error(f"Failed: {e}")
+    return None  # NEVER DO THIS - Hide error with return!
 ```
+
+**WHY THESE ARE FORBIDDEN:**
+- Makes debugging impossible (where did the error happen?)
+- Hides bugs until production
+- Wastes hours tracking down issues later
+- Corrupts data by continuing with invalid state
+- The user EXPLICITLY WANTS errors to fail immediately
 
 **ALWAYS FAIL EARLY AND LOUDLY**
 
@@ -573,34 +616,51 @@ Regex / parsing changes (common source of subtle bugs):
   - In Python raw strings, `\s` is whitespace; `\\s` is a literal backslash + `s` (often wrong).
 - When changing a critical regex, add a tiny local one-line reproduction/"unit test" to prove the match works on representative input.
 
-**CRITICAL ANTI-PATTERN: NO DEFENSIVE getattr() or ""**
-This anti-pattern makes type-checking impossible and hides bugs:
+**CRITICAL ANTI-PATTERN: NO REDUNDANT getattr() WHEN TYPES ARE KNOWN**
 
-❌ **ANTI-PATTERNS (NEVER DO THIS):**
+**ABSOLUTE RULE: If you know the object has an attribute, access it directly - NO getattr()!**
+
+❌ **ABSOLUTELY FORBIDDEN (when types are known):**
 ```python
-getattr(node, "job_name", "") or ""
-str(getattr(node, "job_name", "") or "")
-getattr(node, "job_name", None) or ""
+# If node is typed and has job_name attribute:
+getattr(node, "job_name", "")  # REDUNDANT - you already know it has job_name!
+str(getattr(node, "job_name", "") or "")  # REDUNDANT and hides None bugs!
+getattr(node, "job_name", None) or ""  # REDUNDANT defensive garbage!
+
+# If pr is typed PRInfo:
+getattr(pr, "number", 0)  # REDUNDANT - pr.number exists!
 ```
 
-✅ **CORRECT PATTERNS:**
+✅ **CORRECT (direct attribute access):**
 ```python
+# Type is known, attribute exists - just use it!
 node.job_name
 str(node.job_name)
+pr.number
 ```
 
-**WHY THIS IS AN ANTI-PATTERN:**
+**WHY getattr() IS FORBIDDEN FOR KNOWN ATTRIBUTES:**
+- REDUNDANT - you already know the attribute exists from types
 - Masks AttributeError bugs that should fail immediately
-- Makes type checkers (mypy) completely useless
+- Makes type checkers (mypy/pyright) completely useless
 - Hides None/empty string confusion
-- Either a node has the attribute or it doesn't - defensive programming just delays finding the bug
+- Defensive programming just delays finding real bugs
+- The user EXPLICITLY wants immediate failures, not defensive hiding
 
-**ONLY EXCEPTION:**
-Use getattr() ONLY when checking if an attribute exists for optional/dynamic attributes:
+**ONLY EXCEPTION - Unknown/Dynamic Attributes:**
+Use getattr() ONLY for truly optional/dynamic attributes on duck-typed objects:
 ```python
+# OK for optional attributes:
 if hasattr(node, "optional_field"):
-    value = node.optional_field  # NOT getattr()
+    value = node.optional_field  # Direct access after hasattr check!
+
+# OK for dynamic plugin-style attributes:
+handler = getattr(self, f"handle_{event_type}", None)
+if handler:
+    handler()
 ```
+
+**NEVER use getattr() as a "safe" way to access known attributes - that's what type hints are for!**
 
 ### 3.5.4 Testing
 - Framework: pytest

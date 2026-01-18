@@ -3,13 +3,16 @@
 """GitLab API client for dynamo-utils."""
 
 # Standard library imports
+import json
 import logging
 import os
 import re
+import threading
 import time
-from datetime import datetime
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 # Third-party imports
 import requests
@@ -19,6 +22,9 @@ from common import resolve_cache_path
 
 # Module-level logger
 _logger = logging.getLogger(__name__)
+
+# Docker image stability window (hours)
+DEFAULT_STABLE_AFTER_HOURS = 8
 
 class GitLabAPIClient:
     """GitLab API client with automatic token detection and error handling.

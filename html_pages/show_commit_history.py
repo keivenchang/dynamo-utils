@@ -11,6 +11,10 @@ HTML-only dashboard generator.
 
 import argparse
 import concurrent.futures
+import csv
+import fcntl
+import logging
+from collections import Counter, defaultdict
 try:
     import git  # type: ignore[import-not-found]
 except Exception:  # pragma: no cover
@@ -18,7 +22,6 @@ except Exception:  # pragma: no cover
 import glob
 import html
 import json
-import logging
 import os
 import re
 import subprocess
@@ -41,9 +44,11 @@ if str(_THIS_DIR) not in sys.path:
 # Shared dashboard helpers (UI + workflow graph)
 from common_dashboard_lib import (
     CIStatus,
+    EXPECTED_CHECK_PLACEHOLDER_SYMBOL,
     PASS_PLUS_STYLE,
     TreeNodeVM,
     build_and_test_dynamo_phases_from_actions_job,
+    build_page_stats,
     check_line_html,
     ci_should_expand_by_default,
     ci_status_icon_context,
@@ -51,9 +56,13 @@ from common_dashboard_lib import (
     compact_ci_summary_html,
     disambiguate_check_run_name,
     extract_actions_job_id_from_url,
+    github_api_stats_rows,
+    job_name_wants_pytest_details,
+    parse_workflow_yaml_and_build_mapping_pass,
     render_tree_divs,
     required_badge_html,
     mandatory_badge_html,
+    run_all_passes,
     status_icon_html,
 )
 
@@ -67,21 +76,24 @@ from common_dashboard_runtime import (
 
 # Log/snippet helpers (shared library: `dynamo-utils/ci_log_errors/`)
 from ci_log_errors import snippet as ci_snippet
+from snippet_cache import SNIPPET_CACHE
 
 # Import utilities from common and API modules
-import common
 from common import (
     DynamoRepositoryUtils,
     PhaseTimer,
     dynamo_utils_cache_dir,
+    resolve_cache_path,
     MARKER_RUNNING,
     MARKER_PASSED,
     MARKER_FAILED,
     MARKER_KILLED,
     select_shas_for_network_fetch,
 )
+from common_branch_nodes import CIJobNode
 from common_github import (
     GitHubAPIClient,
+    COMMIT_HISTORY_PERF_STATS,
     classify_ci_kind,
     format_gh_check_run_duration,
     summarize_check_runs,
@@ -92,15 +104,8 @@ from common_gitlab import (
     GitLabAPIClient,
 )
 
-# Import Jinja2 for HTML template rendering
-try:
-    from jinja2 import Environment, FileSystemLoader, select_autoescape
-    HAS_JINJA2 = True
-except ImportError:
-    HAS_JINJA2 = False
-    Environment = None  # type: ignore[assignment]
-    FileSystemLoader = None  # type: ignore[assignment]
-    select_autoescape = None  # type: ignore[assignment]
+# Jinja2 for HTML template rendering
+from jinja2 import Environment, FileSystemLoader, select_autoescape
 
 # Constants for build status values
 STATUS_UNKNOWN = 'unknown'
@@ -118,10 +123,7 @@ def _extract_error_snippet_worker(raw_log_path: str) -> str:
     Keep this function top-level so it is picklable for multiprocessing.
     Do not write caches in the worker; the parent merges results and persists.
     """
-    try:
-        return str(ci_snippet.extract_error_snippet_from_log_file(Path(raw_log_path)) or "")
-    except Exception:
-        return ""
+    return str(ci_snippet.extract_error_snippet_from_log_file(Path(raw_log_path)) or "")
 
 
 class CommitHistoryGenerator:
@@ -166,9 +168,7 @@ class CommitHistoryGenerator:
         self._snippet_cache_dirty = False
         self._snippet_cache_data: Dict[str, object] = {}
         self._ci_log_errors_fingerprint: str = ""
-        # Per-run performance counters (shown in Statistics).
-        self._perf: Dict[str, float] = {}
-        self._perf_i: Dict[str, int] = {}
+        # Per-run performance counters are now tracked globally in COMMIT_HISTORY_PERF_STATS
         self.gitlab_client = GitLabAPIClient()  # Single instance for all GitLab operations
         require_auth = not bool(allow_anonymous_github)
         self.github_client = GitHubAPIClient(
@@ -256,25 +256,17 @@ class CommitHistoryGenerator:
         misses: List[Tuple[str, Path, str, int, int]] = []  # (href, path, key, mtime_ns, size)
         for href in hrefs:
             p = Path(self.repo_path) / href
-            try:
-                if not p.exists() or not p.is_file():
-                    out[href] = ("", [])
-                    continue
-            except Exception:
+            if not p.exists() or not p.is_file():
                 out[href] = ("", [])
                 continue
 
             key = self._snippet_cache_key_for_raw_log(p)
+            st = p.stat()
             try:
-                st = p.stat()
-                try:
-                    mtime_ns = int(st.st_mtime_ns)
-                except AttributeError:
-                    mtime_ns = int(float(st.st_mtime) * 1_000_000_000)
-                size = int(st.st_size)
-            except Exception:
-                mtime_ns = 0
-                size = 0
+                mtime_ns = int(st.st_mtime_ns)
+            except AttributeError:
+                mtime_ns = int(float(st.st_mtime) * 1_000_000_000)
+            size = int(st.st_size)
 
             # For testing parallel parsing: treat everything as a miss, regardless of cache contents.
             if bool(self.disable_snippet_cache_read):
@@ -283,23 +275,20 @@ class CommitHistoryGenerator:
 
             ent = items.get(key) if isinstance(items, dict) else None
             if isinstance(ent, dict):
-                try:
-                    cached_mtime = int(ent.get("mtime_ns", -1) or -1)
-                    cached_size = int(ent.get("size", -1) or -1)
-                    cached_ts = int(ent.get("ts", 0) or 0)
-                    if cached_ts > 0 and (now_ts - cached_ts) > TTL_SECONDS:
-                        misses.append((href, p, key, mtime_ns, size))
-                    elif cached_mtime == mtime_ns and cached_size == size:
-                        sn = str(ent.get("snippet", "") or "")
-                        cats = ent.get("categories", []) or []
-                        if sn:
-                            self._perf_i["snippet.cache.hit"] = int(self._perf_i.get("snippet.cache.hit", 0) or 0) + 1
-                            out[href] = (sn, cats)
-                            continue
-                        misses.append((href, p, key, mtime_ns, size))
-                    else:
-                        misses.append((href, p, key, mtime_ns, size))
-                except Exception:
+                cached_mtime = int(ent.get("mtime_ns", -1) or -1)
+                cached_size = int(ent.get("size", -1) or -1)
+                cached_ts = int(ent.get("ts", 0) or 0)
+                if cached_ts > 0 and (now_ts - cached_ts) > TTL_SECONDS:
+                    misses.append((href, p, key, mtime_ns, size))
+                elif cached_mtime == mtime_ns and cached_size == size:
+                    sn = str(ent.get("snippet", "") or "")
+                    cats = ent.get("categories", []) or []
+                    if sn:
+                        # Snippet cache hits are automatically tracked by SNIPPET_CACHE.stats
+                        out[href] = (sn, cats)
+                        continue
+                    misses.append((href, p, key, mtime_ns, size))
+                else:
                     misses.append((href, p, key, mtime_ns, size))
             else:
                 misses.append((href, p, key, mtime_ns, size))
@@ -307,26 +296,23 @@ class CommitHistoryGenerator:
         if not misses:
             return out
 
-        self._perf_i["snippet.cache.miss"] = int(self._perf_i.get("snippet.cache.miss", 0) or 0) + len(misses)
+        # Snippet cache misses are automatically tracked by SNIPPET_CACHE.stats
         t_compute0 = time.monotonic()
 
         def store_result(*, href: str, key: str, mtime_ns: int, size: int, snippet_text: str) -> None:
             body, cats = self._split_categories_from_snippet(snippet_text)
             out[href] = (body, cats)
-            try:
-                if isinstance(items, dict):
-                    items[key] = {
-                        "mtime_ns": int(mtime_ns),
-                        "size": int(size),
-                        "ts": int(time.time()),
-                        "snippet": str(body or ""),
-                        "categories": list(cats or []),
-                    }
-                    data["items"] = items
-                    self._snippet_cache_data = data
-                    self._snippet_cache_dirty = True
-            except Exception:
-                pass
+            if isinstance(items, dict):
+                items[key] = {
+                    "mtime_ns": int(mtime_ns),
+                    "size": int(size),
+                    "ts": int(time.time()),
+                    "snippet": str(body or ""),
+                    "categories": list(cats or []),
+                }
+                data["items"] = items
+                self._snippet_cache_data = data
+                self._snippet_cache_dirty = True
 
         if int(self.parallel_workers or 0) > 1:
             max_workers = int(self.parallel_workers)
@@ -338,22 +324,16 @@ class CommitHistoryGenerator:
 
                 for fut in concurrent.futures.as_completed(futs):
                     href, key, mtime_ns, size = futs[fut]
-                    try:
-                        sn = str(fut.result() or "")
-                    except Exception:
-                        sn = ""
+                    sn = str(fut.result() or "")
                     store_result(href=href, key=key, mtime_ns=mtime_ns, size=size, snippet_text=sn)
         else:
             for href, p, key, mtime_ns, size in misses:
-                try:
-                    sn = str(ci_snippet.extract_error_snippet_from_log_file(p) or "")
-                except Exception:
-                    sn = ""
+                sn = str(ci_snippet.extract_error_snippet_from_log_file(p) or "")
                 store_result(href=href, key=key, mtime_ns=mtime_ns, size=size, snippet_text=sn)
 
         dt = max(0.0, time.monotonic() - t_compute0)
-        self._perf["snippet.compute_secs"] = float(self._perf.get("snippet.compute_secs", 0.0) or 0.0) + dt
-        self._perf["snippet.total_secs"] = float(self._perf.get("snippet.total_secs", 0.0) or 0.0) + dt
+        # Snippet compute time is automatically tracked by SNIPPET_CACHE.stats
+        # Snippet total time is automatically tracked by SNIPPET_CACHE.stats
         return out
 
     def _ci_log_errors_sha(self) -> str:
@@ -374,47 +354,42 @@ class CommitHistoryGenerator:
             for p in files:
                 try:
                     h.update(p.read_bytes())
-                except Exception:
+                except OSError:
                     # Still include filename so missing files change the fingerprint.
                     h.update(str(p).encode("utf-8", errors="ignore"))
                     h.update(b"\0")
             fp = h.hexdigest()[:12]
-        except Exception:
+            self._ci_log_errors_fingerprint = fp
+            return fp
+        except Exception as e:
+            logger.warning(f"Failed to compute ci_log_errors fingerprint: {e}")
             fp = "unknown"
-        self._ci_log_errors_fingerprint = fp
-        return fp
+            self._ci_log_errors_fingerprint = fp
+            return fp
 
     def _acquire_cache_lock(self, timeout: float = 10.0) -> Optional[object]:
         """Acquire file lock for snippet cache. Returns lock file handle or None on failure."""
-        import fcntl
         lock_file = self.snippet_cache_file.parent / ".snippet_cache.lock"
-        try:
-            lock_file.parent.mkdir(parents=True, exist_ok=True)
-            fh = open(lock_file, "w")
-            # Try to acquire exclusive lock with timeout
-            start = time.monotonic()
-            while time.monotonic() - start < timeout:
-                try:
-                    fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-                    return fh
-                except (IOError, OSError):
-                    time.sleep(0.1)
-            # Timeout
-            fh.close()
-            return None
-        except Exception:
-            return None
+        lock_file.parent.mkdir(parents=True, exist_ok=True)
+        fh = open(lock_file, "w")
+        # Try to acquire exclusive lock with timeout
+        start = time.monotonic()
+        while time.monotonic() - start < timeout:
+            try:
+                fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                return fh
+            except (IOError, OSError):
+                time.sleep(0.1)
+        # Timeout
+        fh.close()
+        return None
 
     def _release_cache_lock(self, lock_fh: Optional[object]) -> None:
         """Release file lock for snippet cache."""
         if lock_fh is None:
             return
-        try:
-            import fcntl
-            fcntl.flock(lock_fh.fileno(), fcntl.LOCK_UN)
-            lock_fh.close()
-        except Exception:
-            pass
+        fcntl.flock(lock_fh.fileno(), fcntl.LOCK_UN)
+        lock_fh.close()
 
     def _load_snippet_cache(self) -> None:
         """Load persistent snippet cache with file locking (best-effort)."""
@@ -424,11 +399,8 @@ class CommitHistoryGenerator:
         lock_fh = self._acquire_cache_lock(timeout=5.0)
         try:
             data: Dict[str, object] = {}
-            try:
-                if self.snippet_cache_file.exists():
-                    data = json.loads(self.snippet_cache_file.read_text() or "{}")
-            except Exception:
-                data = {}
+            if self.snippet_cache_file.exists():
+                data = json.loads(self.snippet_cache_file.read_text() or "{}")
             if not isinstance(data, dict):
                 data = {}
             # Invalidate on ci_log_errors changes.
@@ -459,11 +431,8 @@ class CommitHistoryGenerator:
             
             # Step 1: Read existing cache from disk
             disk_data: Dict[str, object] = {}
-            try:
-                if self.snippet_cache_file.exists():
-                    disk_data = json.loads(self.snippet_cache_file.read_text() or "{}")
-            except Exception:
-                disk_data = {}
+            if self.snippet_cache_file.exists():
+                disk_data = json.loads(self.snippet_cache_file.read_text() or "{}")
             if not isinstance(disk_data, dict):
                 disk_data = {}
             if not isinstance(disk_data.get("items"), dict):
@@ -490,29 +459,20 @@ class CommitHistoryGenerator:
             
             # Step 3: Size cap - keep at most ~5000 entries (oldest by ts)
             if len(merged_items) > 5200:
-                try:
-                    pairs = []
-                    for k, v in merged_items.items():
-                        if not isinstance(v, dict):
-                            continue
-                        ts = int(v.get("ts", 0) or 0)
-                        pairs.append((ts, k))
-                    pairs.sort()
-                    # Drop oldest to ~5000
-                    for _ts, k in pairs[: max(0, len(pairs) - 5000)]:
-                        try:
-                            merged_items.pop(k, None)
-                        except Exception:
-                            pass
-                except Exception:
-                    pass
+                pairs = []
+                for k, v in merged_items.items():
+                    if not isinstance(v, dict):
+                        continue
+                    ts = int(v.get("ts", 0) or 0)
+                    pairs.append((ts, k))
+                pairs.sort()
+                # Drop oldest to ~5000
+                for _ts, k in pairs[: max(0, len(pairs) - 5000)]:
+                    merged_items.pop(k, None)
             
             # Step 4: Write merged data atomically
             atomic_write_text(self.snippet_cache_file, json.dumps(merged_data, indent=2), encoding="utf-8")
             self._snippet_cache_dirty = False
-        except Exception:
-            # Don't fail page generation on cache persistence issues.
-            pass
         finally:
             self._release_cache_lock(lock_fh)
 
@@ -530,27 +490,20 @@ class CommitHistoryGenerator:
             (snippet_text, categories): snippet without "Categories:" prefix, and list of category strings
         """
         t0 = time.monotonic()
-        try:
-            p = Path(raw_log_path)
-            if not p.exists() or not p.is_file():
-                return ("", [])
-        except Exception:
+        p = Path(raw_log_path)
+        if not p.exists() or not p.is_file():
             return ("", [])
 
         # Note: Cache is loaded once at the start of show_commit_history(), not per-call
         data = self._snippet_cache_data if isinstance(self._snippet_cache_data, dict) else {}
         items = data.get("items") if isinstance(data.get("items"), dict) else {}
         key = self._snippet_cache_key_for_raw_log(Path(raw_log_path))
+        st = Path(raw_log_path).stat()
         try:
-            st = Path(raw_log_path).stat()
-            try:
-                mtime_ns = int(st.st_mtime_ns)
-            except AttributeError:
-                mtime_ns = int(float(st.st_mtime) * 1_000_000_000)
-            size = int(st.st_size)
-        except Exception:
-            mtime_ns = 0
-            size = 0
+            mtime_ns = int(st.st_mtime_ns)
+        except AttributeError:
+            mtime_ns = int(float(st.st_mtime) * 1_000_000_000)
+        size = int(st.st_size)
 
         # Debug: track cache lookups
         if not hasattr(self, '_snippet_cache_debug'):
@@ -576,8 +529,8 @@ class CommitHistoryGenerator:
                     sn = str(ent.get("snippet", "") or "")
                     cats = ent.get("categories", []) or []
                     if sn:
-                        self._perf_i["snippet.cache.hit"] = int(self._perf_i.get("snippet.cache.hit", 0) or 0) + 1
-                        self._perf["snippet.total_secs"] = float(self._perf.get("snippet.total_secs", 0.0) or 0.0) + max(0.0, time.monotonic() - t0)
+                        # Snippet cache hits are automatically tracked by SNIPPET_CACHE.stats
+                        # Snippet total time is automatically tracked by SNIPPET_CACHE.stats
                         self._snippet_cache_debug["hits"].append(key)
                         return (sn, cats)
                 else:
@@ -594,32 +547,26 @@ class CommitHistoryGenerator:
             self._snippet_cache_debug["reasons"][key] = "no entry" if key not in items else "entry not dict"
 
         # Cache miss/stale: compute and store.
-        self._perf_i["snippet.cache.miss"] = int(self._perf_i.get("snippet.cache.miss", 0) or 0) + 1
+        # Snippet cache misses are automatically tracked by SNIPPET_CACHE.stats
         t1 = time.monotonic()
-        try:
-            snippet = ci_snippet.extract_error_snippet_from_log_file(Path(raw_log_path))
-        except Exception:
-            snippet = ""
-        
+        snippet = ci_snippet.extract_error_snippet_from_log_file(Path(raw_log_path))
+
         snippet_body, categories = self._split_categories_from_snippet(snippet)
-        
+
         dt_compute = max(0.0, time.monotonic() - t1)
-        self._perf["snippet.compute_secs"] = float(self._perf.get("snippet.compute_secs", 0.0) or 0.0) + float(dt_compute)
-        try:
-            if isinstance(items, dict):
-                items[key] = {
-                    "mtime_ns": mtime_ns,
-                    "size": size,
-                    "ts": int(time.time()),
-                    "snippet": str(snippet_body or ""),
-                    "categories": list(categories or []),
-                }
-                data["items"] = items
-                self._snippet_cache_data = data
-                self._snippet_cache_dirty = True
-        except Exception:
-            pass
-        self._perf["snippet.total_s"] = float(self._perf.get("snippet.total_s", 0.0) or 0.0) + max(0.0, time.monotonic() - t0)
+        # Snippet compute time is automatically tracked by SNIPPET_CACHE.stats
+        if isinstance(items, dict):
+            items[key] = {
+                "mtime_ns": mtime_ns,
+                "size": size,
+                "ts": int(time.time()),
+                "snippet": str(snippet_body or ""),
+                "categories": list(categories or []),
+            }
+            data["items"] = items
+            self._snippet_cache_data = data
+            self._snippet_cache_dirty = True
+        # Snippet total time is automatically tracked by SNIPPET_CACHE.stats
         return (str(snippet_body or ""), categories)
 
     def _setup_logger(self) -> logging.Logger:
@@ -645,7 +592,6 @@ class CommitHistoryGenerator:
             logger.addHandler(handler)
         
         # Also configure the common module logger
-        import common
         common_logger = logging.getLogger('common')
         if self.debug:
             common_logger.setLevel(logging.DEBUG)
@@ -696,8 +642,6 @@ class CommitHistoryGenerator:
         if not bool(self.disable_snippet_cache_read):
             self._load_snippet_cache()
 
-        # Cache stats (printed at end in verbose/debug mode; avoids needing to pipe output).
-        cache_stats: Dict[str, dict] = {}
         meta_stats: Dict[str, int] = {"full_hit": 0, "miss": 0}
 
         # Load cache (commit_history.json in dynamo-utils cache dir)
@@ -747,14 +691,10 @@ class CommitHistoryGenerator:
             # Record the original ref so we can restore it at the end without detaching.
             # - If we started on a branch, restore that branch name (e.g. "main")
             # - If we started detached, best-effort restore the original SHA
-            try:
-                if repo.head.is_detached:
-                    original_ref = repo.head.commit.hexsha
-                else:
-                    original_ref = repo.active_branch.name
-            except Exception:
-                # Fallback: SHA (may restore detached)
+            if repo.head.is_detached:
                 original_ref = repo.head.commit.hexsha
+            else:
+                original_ref = repo.active_branch.name
 
             _INLINE_TRAILER_RE = re.compile(
                 r"\\s+(signed-off-by|co-authored-by|reviewed-by|tested-by|acked-by|suggested-by|fixes)\\s*:",
@@ -790,31 +730,32 @@ class CommitHistoryGenerator:
                     sha_to_pr_number[commit.hexsha] = pr_num
 
             cache_only_github = bool(self.github_client.cache_only_mode)
-            if pr_numbers and (not self.gitlab_fetch_skip) and (not cache_only_github):
-                # Batch fetch merge dates for all PRs (GitHub)
+
+            # Batch fetch merge dates for all PRs (GitHub)
+            # NOTE: gitlab_fetch_skip only affects GitLab calls, not GitHub calls
+            if pr_numbers and (not cache_only_github):
                 self.logger.info(f"Fetching merge dates for {len(pr_numbers)} PRs...")
                 t0 = phase_t.start()
                 pr_to_merge_date = self.github_client.get_cached_pr_merge_dates(
                     pr_numbers,
                     cache_file="github_pr_merge_dates.json",
-                    stats=cache_stats,
                 )
                 phase_t.stop("github_merge_dates", t0)
                 self.logger.info(
                     f"Got merge dates for {sum(1 for v in pr_to_merge_date.values() if v)} PRs"
                 )
 
-                if pr_numbers:
-                    # Batch fetch required checks for all PRs (branch protection required checks).
-                    # If gitlab_fetch_skip=True, we still read from cache (skip_fetch=True).
-                    self.logger.info(f"Fetching required checks for {len(pr_numbers)} PRs...")
+            # Batch fetch required checks for all PRs (branch protection required checks).
+            # NOTE: gitlab_fetch_skip only affects GitLab calls, not GitHub calls
+            if pr_numbers:
+                self.logger.info(f"Fetching required checks for {len(pr_numbers)} PRs...")
                 t0 = phase_t.start()
                 pr_to_required_checks = self.github_client.get_cached_required_checks(
                     pr_numbers,
                     owner="ai-dynamo",
                     repo="dynamo",
                     cache_file="github_required_checks.json",
-                    skip_fetch=bool(self.gitlab_fetch_skip) or bool(cache_only_github),
+                    skip_fetch=bool(cache_only_github),
                 )
                 phase_t.stop("github_required_checks", t0)
                 self.logger.info(
@@ -850,7 +791,7 @@ class CommitHistoryGenerator:
 
                     if cached_entry and isinstance(cached_entry, dict):
                         meta_stats["full_hit"] += 1
-                        self._perf_i["composite_sha.cache.hit"] = int(self._perf_i.get("composite_sha.cache.hit", 0) or 0) + 1
+                        COMMIT_HISTORY_PERF_STATS.composite_sha_cache_hit += 1
                         composite_sha = cached_entry['composite_docker_sha']
                         date_str = cached_entry['date']
                         author_name = cached_entry['author']
@@ -864,19 +805,13 @@ class CommitHistoryGenerator:
                         changed_files = cached_entry['changed_files']
 
                         # Normalize cached subject line if needed.
-                        try:
-                            if str(cached_entry.get("message") or "") != str(message_first_line or "") and message_first_line:
-                                cached_entry["message"] = message_first_line
-                                cache_updated = True
-                        except Exception:
-                            pass
+                        if str(cached_entry.get("message") or "") != str(message_first_line or "") and message_first_line:
+                            cached_entry["message"] = message_first_line
+                            cache_updated = True
 
                         # Backfill author_email if missing.
                         if not author_email:
-                            try:
-                                author_email = str(commit.author.email or "")
-                            except Exception:
-                                author_email = ""
+                            author_email = str(commit.author.email or "")
                             if author_email:
                                 cached_entry["author_email"] = author_email
                                 cache_updated = True
@@ -893,17 +828,14 @@ class CommitHistoryGenerator:
                         # Cache miss: compute from git
                         date_str = commit_dt_pt.strftime('%Y-%m-%d %H:%M:%S')
                         author_name = commit.author.name
-                        try:
-                            author_email = str(commit.author.email or "")
-                        except Exception:
-                            author_email = ""
+                        author_email = str(commit.author.email or "")
                         message_first_line = _clean_subject_line(commit.message)
                         pr_number = GitLabAPIClient.parse_mr_number_from_message(message_first_line)
                         if pr_number and pr_number in pr_to_merge_date:
                             merge_date = pr_to_merge_date[pr_number]
 
                         meta_stats["miss"] += 1
-                        self._perf_i["composite_sha.cache.miss"] = int(self._perf_i.get("composite_sha.cache.miss", 0) or 0) + 1
+                        COMMIT_HISTORY_PERF_STATS.composite_sha_cache_miss += 1
                         t_sha = time.monotonic()
                         try:
                             repo.git.checkout(commit.hexsha)
@@ -911,8 +843,8 @@ class CommitHistoryGenerator:
                         except Exception as e:
                             composite_sha = "ERROR"
                             self.logger.error(f"Failed to calculate composite SHA for {sha_short}: {e}")
-                            self._perf_i["composite_sha.errors"] = int(self._perf_i.get("composite_sha.errors", 0) or 0) + 1
-                        self._perf["composite_sha.compute_secs"] = float(self._perf.get("composite_sha.compute_secs", 0.0) or 0.0) + max(0.0, time.monotonic() - t_sha)
+                            COMMIT_HISTORY_PERF_STATS.composite_sha_errors += 1
+                        COMMIT_HISTORY_PERF_STATS.composite_sha_compute_secs += max(0.0, time.monotonic() - t_sha)
 
                         stats = commit.stats.total
                         files_changed = stats['files']
@@ -940,9 +872,7 @@ class CommitHistoryGenerator:
                         cache_updated = True
 
                     # Total time spent obtaining composite SHA (hit + miss path).
-                    self._perf["composite_sha.total_secs"] = float(self._perf.get("composite_sha.total_secs", 0.0) or 0.0) + max(
-                        0.0, time.monotonic() - t_sha_total
-                    )
+                    COMMIT_HISTORY_PERF_STATS.composite_sha_total_secs += max(0.0, time.monotonic() - t_sha_total)
 
                     # Always include this commit in the HTML, regardless of cache hit/miss.
                     commit_data.append(
@@ -971,10 +901,7 @@ class CommitHistoryGenerator:
             finally:
                 # Restore original ref (best-effort)
                 if repo is not None and original_ref is not None:
-                    try:
-                        repo.git.checkout(original_ref)
-                    except Exception:
-                        pass
+                    repo.git.checkout(original_ref)
 
             # Optional: export pipeline -> PR mapping as CSV for this commit window.
             if export_pipeline_pr_csv:
@@ -982,7 +909,6 @@ class CommitHistoryGenerator:
                     sha_full_list = list(sha_to_message_first_line.keys())
                     gitlab_pipelines = self._get_gitlab_pipeline_statuses(sha_full_list)
                     export_pipeline_pr_csv.parent.mkdir(parents=True, exist_ok=True)
-                    import csv
 
                     with export_pipeline_pr_csv.open("w", newline="") as f:
                         w = csv.DictWriter(
@@ -1061,10 +987,7 @@ class CommitHistoryGenerator:
                 # Make the timing breakdown available to the HTML generator.
                 # Note: render_html/write_output timings are measured outside, but the HTML generator
                 # can still show the earlier phases (cache/git/process) via `_last_timings`.
-                try:
-                    self._last_timings = dict(phase_t.as_dict(include_total=True))
-                except Exception:
-                    self._last_timings = {}
+                self._last_timings = dict(phase_t.as_dict(include_total=True))
 
                 t0 = phase_t.start()
                 html_content = self._generate_commit_history_html(
@@ -1073,7 +996,6 @@ class CommitHistoryGenerator:
                     output_path,
                     sha_to_pr_number=sha_to_pr_number,
                     pr_to_required_checks=pr_to_required_checks,
-                    cache_stats=cache_stats,
                     generation_t0=generation_t0,
                 )
                 phase_t.stop("render_html", t0)
@@ -1083,46 +1005,11 @@ class CommitHistoryGenerator:
                 phase_t.stop("write_output", t0)
                 # Cache miss summary
                 if self.verbose or self.debug:
-                    try:
-                        self.logger.info(
-                            "Cache stats: commit_metadata full_hit=%s miss=%s",
-                            meta_stats.get("full_hit", 0),
-                            meta_stats.get("miss", 0),
-                        )
-                        md = cache_stats.get("merge_dates_cache") or {}
-                        if md:
-                            self.logger.info(
-                                "Cache stats: merge_dates hits=%s misses=%s reason=%s sample_misses=%s",
-                                md.get("hits"),
-                                md.get("misses"),
-                                md.get("miss_reason"),
-                                md.get("miss_prs_sample"),
-                            )
-                        rc = cache_stats.get("required_checks_cache") or {}
-                        if rc:
-                            self.logger.info(
-                                "Cache stats: required_checks hits=%s misses=%s reason=%s skip_fetch=%s sample_misses=%s",
-                                rc.get("hits"),
-                                rc.get("misses"),
-                                rc.get("miss_reason"),
-                                rc.get("skip_fetch"),
-                                rc.get("miss_prs_sample"),
-                            )
-                        gha = cache_stats.get("github_actions_status_cache") or {}
-                        if gha:
-                            self.logger.info(
-                                "Cache stats: github_actions_status total=%s fetched=%s hit_fresh=%s stale_refresh=%s miss_fetch=%s miss_no_fetch=%s",
-                                gha.get("total_shas"),
-                                gha.get("fetched_shas"),
-                                gha.get("cache_hit_fresh"),
-                                gha.get("cache_stale_refresh"),
-                                gha.get("cache_miss_fetch"),
-                                gha.get("cache_miss_no_fetch"),
-                            )
-                            if self.debug:
-                                self.logger.debug("Cache stats: github_actions_status details=%s", gha)
-                    except Exception:
-                        pass
+                    self.logger.info(
+                        "Cache stats: commit_metadata full_hit=%s miss=%s",
+                        meta_stats.get("full_hit", 0),
+                        meta_stats.get("miss", 0),
+                    )
 
             # Save cache if updated
             if cache_updated:
@@ -1137,16 +1024,10 @@ class CommitHistoryGenerator:
                 phase_t.stop("cache_save", t0)
 
             # Persist snippet cache (best-effort).
-            try:
-                self._save_snippet_cache()
-            except Exception:
-                pass
+            self._save_snippet_cache()
 
             # Persist timings for HTML page stats / debugging (best-effort).
-            try:
-                self._last_timings = dict(phase_t.as_dict(include_total=True))
-            except Exception:
-                self._last_timings = {}
+            self._last_timings = dict(phase_t.as_dict(include_total=True))
 
             return 0
         except KeyboardInterrupt:
@@ -1159,7 +1040,7 @@ class CommitHistoryGenerator:
                 pass
             return 1
         except Exception as e:
-            self.logger.error(f"Failed to get commit history: {e}")
+            self.logger.error(f"Failed to get commit history: {e}", exc_info=True)
             return 1
 
     def _generate_commit_history_html(
@@ -1169,7 +1050,6 @@ class CommitHistoryGenerator:
         output_path: Path,
         sha_to_pr_number: Optional[Dict[str, int]] = None,
         pr_to_required_checks: Optional[Dict[int, List[str]]] = None,
-        cache_stats: Optional[Dict[str, dict]] = None,
         generation_t0: Optional[float] = None,
     ) -> str:
         """Generate HTML report for commit history with Docker image detection
@@ -1184,11 +1064,6 @@ class CommitHistoryGenerator:
         Returns:
             HTML content as string
         """
-        if not HAS_JINJA2:
-            raise ImportError("jinja2 is required for HTML generation. Install with: pip install jinja2")
-        # Make type checkers happy: these are only None when HAS_JINJA2 is False.
-        assert Environment is not None and FileSystemLoader is not None and select_autoescape is not None
-        
         # Get local Docker images containing SHAs
         docker_images = self._get_local_docker_images_by_sha([c['sha_short'] for c in commit_data])
 
@@ -1203,15 +1078,12 @@ class CommitHistoryGenerator:
         pr_numbers = sorted({v for v in sha_to_pr_number.values() if v})
         mr_pipelines: Dict[int, Optional[dict]] = {}
         if pr_numbers:
-            try:
-                mr_pipelines = self.gitlab_client.get_cached_merge_request_pipelines(
-                    pr_numbers,
-                    project_id="169905",
-                    cache_file="gitlab_mr_pipelines.json",
-                    skip_fetch=self.gitlab_fetch_skip,
-                )
-            except Exception:
-                mr_pipelines = {}
+            mr_pipelines = self.gitlab_client.get_cached_merge_request_pipelines(
+                pr_numbers,
+                project_id="169905",
+                cache_file="gitlab_mr_pipelines.json",
+                skip_fetch=self.gitlab_fetch_skip,
+            )
 
         # Get GitLab CI pipeline job counts
         pipeline_ids = [p['id'] for p in gitlab_pipelines.values() if p and 'id' in p]
@@ -1219,31 +1091,26 @@ class CommitHistoryGenerator:
         if pipeline_ids:
             pipeline_job_counts = self._get_gitlab_pipeline_job_counts(pipeline_ids)
 
+        # Build SHA list for later use
+        sha_full_list = [c['sha_full'] for c in commit_data]
+
         # Prime required-checks metadata (GitHub) in a capped way:
         # - always read cache for all PRs (no API calls)
         # - only allow network fetch for PRs associated with allow_fetch_shas
-        try:
-            pr_to_required_checks = self.github_client.get_cached_required_checks(
-                pr_numbers,
-                cache_file="github_required_checks.json",
-                skip_fetch=True,
-                stats=cache_stats,
-            )
-        except Exception:
-            pr_to_required_checks = {}
+        pr_to_required_checks = self.github_client.get_cached_required_checks(
+            pr_numbers,
+            cache_file="github_required_checks.json",
+            skip_fetch=True,
+        )
 
-        try:
-            pr_numbers_allow = sorted({p for p in (sha_to_pr_number.get(sha) for sha in sha_full_list) if p})
-            if pr_numbers_allow:
-                fetched_required = self.github_client.get_cached_required_checks(
-                    pr_numbers_allow,
-                    cache_file="github_required_checks.json",
-                    skip_fetch=False,
-                    stats=cache_stats,
-                )
-                pr_to_required_checks.update(fetched_required or {})
-        except Exception:
-            pass
+        pr_numbers_allow = sorted({p for p in (sha_to_pr_number.get(sha) for sha in sha_full_list) if p})
+        if pr_numbers_allow:
+            fetched_required = self.github_client.get_cached_required_checks(
+                pr_numbers_allow,
+                cache_file="github_required_checks.json",
+                skip_fetch=False,
+            )
+            pr_to_required_checks.update(fetched_required or {})
 
         # Get GitHub Actions check status for commits:
         # - allow network fetch for any SHA that is cache-missing/stale (TTL policy lives in `common.py`).
@@ -1251,7 +1118,6 @@ class CommitHistoryGenerator:
         # NOTE: We do *not* age-gate fetch here anymore. The cache TTL policy already ensures
         # old commits refresh very rarely (DEFAULT_STABLE_TTL_S), but we still need to fetch
         # at least once to populate the cache; otherwise some SHAs show no GitHub dropdown.
-        sha_full_list = [c['sha_full'] for c in commit_data]
         sha_to_dt = {c['sha_full']: c.get('committed_datetime') for c in commit_data}
 
         # Raw-log policy:
@@ -1265,33 +1131,56 @@ class CommitHistoryGenerator:
         #   - size caps and other safeguards
 
         cache_only_github = bool(self.github_client.cache_only_mode)
-        github_actions_status = self.github_client.get_github_actions_status(
-            owner='ai-dynamo',
-            repo='dynamo',
-            sha_list=sha_full_list,
-            cache_file="github_actions_status.json",
-            # Do NOT tie GitHub fetch behavior to --skip-gitlab-fetch.
-            # GitHub fetching is already capped via fetch_allowlist + TTL policy.
-            skip_fetch=bool(cache_only_github),
-            fetch_allowlist=set(sha_full_list),
-            sha_to_datetime=sha_to_dt,          # age-based cache policy (>8h => stable TTL)
-            stats=cache_stats,
-        )
+
+        # Batch fetch check runs using get_pr_checks_rows() for all unique PRs
+        # Group SHAs by PR number
+        pr_to_shas: Dict[int, List[str]] = {}
+        for sha in sha_full_list:
+            pr_num = sha_to_pr_number.get(sha)
+            if pr_num:
+                pr_to_shas.setdefault(pr_num, []).append(sha)
+
+        # Fetch check runs for each PR and convert to SHA-keyed format
+        github_actions_status: Dict[str, Dict[str, Any]] = {}
+        for pr_num, shas in pr_to_shas.items():
+            rows = self.github_client.get_pr_checks_rows(
+                owner='ai-dynamo',
+                repo='dynamo',
+                pr_number=pr_num,
+                skip_fetch=bool(cache_only_github),
+            )
+
+            # Convert GHPRCheckRow objects to dict format for all SHAs in this PR
+            check_runs_dicts = []
+            for row in rows:
+                check_runs_dicts.append({
+                    'name': row.name,
+                    'status': row.status_raw if row.status_raw not in {'pass', 'fail'} else ('completed' if row.status_raw in {'pass', 'fail'} else row.status_raw),
+                    'conclusion': 'success' if row.status_raw == 'pass' else ('failure' if row.status_raw == 'fail' else row.status_raw),
+                    'html_url': row.url,
+                    'details_url': row.url,
+                })
+
+            # Assign same check runs to all SHAs in this PR
+            for sha in shas:
+                github_actions_status[sha] = {
+                    'status': 'completed',
+                    'conclusion': 'success',
+                    'total_count': len(check_runs_dicts),
+                    'check_runs': check_runs_dicts,
+                }
 
         # Annotate GitHub check runs with "is_required" using PR required-checks + fallback patterns.
         pr_to_required_checks = pr_to_required_checks or {}
         
         # Build a mapping of job names to short names from YAML (shared across all commits)
-        from common_dashboard_lib import parse_workflow_yaml_and_build_mapping_pass
-        try:
-            yaml_mappings = parse_workflow_yaml_and_build_mapping_pass(
-                repo_root=Path(self.repo_path),
-                commit_sha="HEAD",  # Use HEAD as a representative commit for YAML parsing
-            )
-            job_name_to_short = yaml_mappings.get('job_name_to_id', {})
-        except Exception:
-            job_name_to_short = {}
-        
+        _, yaml_mappings = parse_workflow_yaml_and_build_mapping_pass(
+            flat_nodes=[],  # Empty list since we only need YAML parsing, not node modification
+            repo_root=Path(self.repo_path),
+            commit_sha="HEAD",  # Use HEAD as a representative commit for YAML parsing
+        )
+        job_name_to_short = yaml_mappings.get('job_name_to_id', {})
+
         for sha_full, gha in (github_actions_status or {}).items():
             if not gha or not gha.get('check_runs'):
                 continue
@@ -1300,15 +1189,10 @@ class CommitHistoryGenerator:
             required_norm = {_normalize_check_name(n) for n in (required_list or []) if n}
             # Note: Sorting is now handled by PASS 4 (sort_by_name_pass) in the centralized pipeline.
             for check in (gha.get('check_runs', []) or []):
-                try:
-                    check_name = check.get('name', '')
-                    check['is_required'] = _is_required_check_name(check_name, required_norm)
-                    # Add short name for tooltip display
-                    check['short_name'] = job_name_to_short.get(check_name, check_name)
-                except Exception:
-                    # Best-effort; never break page generation.
-                    check['is_required'] = False
-                    check['short_name'] = check.get('name', '')
+                check_name = check.get('name', '')
+                check['is_required'] = _is_required_check_name(check_name, required_norm)
+                # Add short name for tooltip display
+                check['short_name'] = job_name_to_short.get(check_name, check_name)
 
         # Process GitLab images: deduplicate and format
         gitlab_images = {}
@@ -1395,10 +1279,7 @@ class CommitHistoryGenerator:
                     message
                 )
                 commit['message'] = message
-                try:
-                    commit['pr_number'] = int(pr_number)
-                except Exception:
-                    commit['pr_number'] = None
+                commit['pr_number'] = int(pr_number)
             else:
                 commit['pr_number'] = sha_to_pr_number.get(commit.get("sha_full", ""))
 
@@ -1431,10 +1312,6 @@ class CommitHistoryGenerator:
         composite_to_status = {}  # Maps composite_sha to status (with priority: building > failed > success)
         commit_to_status = {}  # Maps commit sha_short to its own build status
         composite_to_commits = {}  # Maps composite_sha to list of commit SHAs
-
-        # Status priority for conflict resolution (higher number = higher priority)
-        # Building > Failed > Success (if any build is still running, show as building)
-        status_priority = {STATUS_UNKNOWN: 0, STATUS_SUCCESS: 1, STATUS_FAILED: 2, STATUS_BUILDING: 3}
 
         # First pass: Group commits by composite_sha to minimize glob searches
         for commit in commit_data:
@@ -1484,7 +1361,7 @@ class CommitHistoryGenerator:
 
             # If any commit in this composite_sha has logs, determine status
             if matching_logs_for_composite:
-                self._perf_i["marker.composite.with.reports"] = int(self._perf_i.get("marker.composite.with.reports", 0) or 0) + 1
+                COMMIT_HISTORY_PERF_STATS.marker_composite_with_reports += 1
 
                 # Use the most recent log for status determination
                 log_path = Path(sorted(matching_logs_for_composite)[-1])
@@ -1501,10 +1378,9 @@ class CommitHistoryGenerator:
 
                 status = STATUS_UNKNOWN  # Default status
                 if all_status_files:
-                    self._perf_i["marker.composite.with.status"] = int(self._perf_i.get("marker.composite.with.status", 0) or 0) + 1
+                    COMMIT_HISTORY_PERF_STATS.marker_composite_with_status += 1
                     # Extract dates from filenames (format: YYYY-MM-DD.sha.task.STATUS)
                     # Group files by date
-                    from collections import defaultdict
                     files_by_date = defaultdict(list)
                     for f in all_status_files:
                         filename = Path(f).name
@@ -1540,7 +1416,7 @@ class CommitHistoryGenerator:
                 # Store composite SHA status
                 composite_to_status[composite_sha] = status
             else:
-                self._perf_i["marker.composite.without.reports"] = int(self._perf_i.get("marker.composite.without.reports", 0) or 0) + 1
+                COMMIT_HISTORY_PERF_STATS.marker_composite_without_reports += 1
                 # No report yet, status unknown
                 if composite_sha not in composite_to_status:
                     composite_to_status[composite_sha] = STATUS_UNKNOWN
@@ -1578,7 +1454,7 @@ class CommitHistoryGenerator:
             # GitHub Actions and GitLab pipeline status are shown separately in their own columns
 
         # Marker scan time (glob+grouping) regardless of cache.
-        self._perf["marker.total_secs"] = float(self._perf.get("marker.total_secs", 0.0) or 0.0) + max(0.0, time.monotonic() - t_markers)
+        COMMIT_HISTORY_PERF_STATS.marker_total_secs += max(0.0, time.monotonic() - t_markers)
         
         # Now that local build status is known, add status icons for IMAGE SHA badges.
         #
@@ -1605,13 +1481,9 @@ class CommitHistoryGenerator:
             return status_icon_html(status_norm="unknown", is_required=False)
 
         for commit in commit_data:
-            try:
-                sha_short = str(commit.get("sha_short", "") or "")
-                st = str((build_status.get(sha_short) or {}).get("status", STATUS_UNKNOWN) or STATUS_UNKNOWN)
-                commit["image_status_icon"] = _image_status_icon_html(status=st)
-            except Exception:
-                commit["image_status_icon"] = _image_status_icon_html(status=STATUS_UNKNOWN)
-                continue
+            sha_short = str(commit.get("sha_short", "") or "")
+            st = str((build_status.get(sha_short) or {}).get("status", STATUS_UNKNOWN) or STATUS_UNKNOWN)
+            commit["image_status_icon"] = _image_status_icon_html(status=st)
         
         # Generate timestamp (PT)
         generated_time = datetime.now(ZoneInfo('America/Los_Angeles')).strftime('%Y-%m-%d %H:%M:%S %Z')
@@ -1686,86 +1558,45 @@ class CommitHistoryGenerator:
                 return CIStatus.PENDING.value
             return CIStatus.UNKNOWN.value
 
-        def _duration_str_to_seconds(s: str) -> float:
-            """Best-effort parse of durations like '43m 33s', '30m33s', '2s', '1h 4m'."""
-            try:
-                total = 0.0
-                for m in re.finditer(r"([0-9]+)\s*([hms])", str(s or "").lower()):
-                    v = float(m.group(1))
-                    u = m.group(2)
-                    if u == "h":
-                        total += v * 3600.0
-                    elif u == "m":
-                        total += v * 60.0
-                    elif u == "s":
-                        total += v
-                return total
-            except Exception:
-                return 0.0
-
-        def _subtree_needs_attention(node: TreeNodeVM, rollup_status: str, has_required_failure: bool) -> bool:
-            # Shared policy with branches page.
-            return ci_should_expand_by_default(
-                rollup_status=str(rollup_status or ""),
-                has_required_failure=bool(has_required_failure),
-            )
-
         def _build_github_checks_tree_html(*, repo_path: Path, sha_full: str) -> str:
             gha = github_actions_status.get(sha_full) if github_actions_status else None
             check_runs = (gha.get("check_runs") if isinstance(gha, dict) else None) or []
-            # Snapshot of API-returned check names (before we inject placeholders).
-            # We use this to scope workflow-YAML inference to "relevant" workflows, and to avoid
-            # placeholder-driven matching (which can otherwise make us infer too much when API data is missing).
-            api_present_names = [
-                str((cr or {}).get("name", "") or "").strip()
-                for cr in (check_runs or [])
-                if isinstance(cr, dict) and str((cr or {}).get("name", "") or "").strip()
-            ]
             # Inject "expected but missing" placeholder checks so the commit-history tree matches
             # the local-branches tree UX (and makes missing required checks visible).
-            try:
-                from common_dashboard_lib import EXPECTED_CHECK_PLACEHOLDER_SYMBOL  # local import
-                from common_github import normalize_check_name  # local import
-
-                present_norm = {
-                    normalize_check_name(str((cr or {}).get("name", "") or ""))
-                    for cr in (check_runs or [])
-                    if isinstance(cr, dict)
-                }
-                # Track what we've already seen/added so we never append duplicate placeholders.
-                seen_norm = set(present_norm)
-                required_names: List[str] = []
-                try:
-                    # Branch protection required checks for main (best-effort; may be empty on 403).
-                    required_names = list(
-                        self.github_client.get_required_checks_for_base_ref(owner="ai-dynamo", repo="dynamo", base_ref="main") or []
+            present_norm = {
+                normalize_check_name(str((cr or {}).get("name", "") or ""))
+                for cr in (check_runs or [])
+                if isinstance(cr, dict)
+            }
+            # Track what we've already seen/added so we never append duplicate placeholders.
+            seen_norm = set(present_norm)
+            required_names: List[str] = []
+            # Branch protection required checks for main (best-effort; may be empty on 403).
+            required_names = list(
+                self.github_client.get_required_checks_for_base_ref(owner="ai-dynamo", repo="dynamo", base_ref="main") or []
+            )
+            required_norm = {normalize_check_name(x) for x in (required_names or []) if str(x).strip()}
+            expected_all = sorted({*set(required_names or [])}, key=lambda s: str(s).lower())
+            for nm0 in expected_all:
+                n0 = normalize_check_name(nm0)
+                if n0 and n0 not in seen_norm:
+                    check_runs.append(
+                        {
+                            "name": str(nm0),
+                            "status": "queued",
+                            "conclusion": "",
+                            "html_url": "",
+                            "details_url": "",
+                            "is_required": (n0 in required_norm),
+                            # Marker so rendering can show "— ◇" like branches page.
+                            "_expected_placeholder": True,
+                            "_expected_placeholder_symbol": EXPECTED_CHECK_PLACEHOLDER_SYMBOL,
+                        }
                     )
-                except Exception:
-                    required_names = []
-                required_norm = {normalize_check_name(x) for x in (required_names or []) if str(x).strip()}
-                expected_all = sorted({*set(required_names or [])}, key=lambda s: str(s).lower())
-                for nm0 in expected_all:
-                    n0 = normalize_check_name(nm0)
-                    if n0 and n0 not in seen_norm:
-                        check_runs.append(
-                            {
-                                "name": str(nm0),
-                                "status": "queued",
-                                "conclusion": "",
-                                "html_url": "",
-                                "details_url": "",
-                                "is_required": (n0 in required_norm),
-                                # Marker so rendering can show "— ◇" like branches page.
-                                "_expected_placeholder": True,
-                                "_expected_placeholder_symbol": EXPECTED_CHECK_PLACEHOLDER_SYMBOL,
-                            }
-                        )
-                        seen_norm.add(n0)
+                    seen_norm.add(n0)
 
-                # Note: Expected checks (◇) inference from workflow YAML has been removed.
-                # Only actual check runs from the API are displayed.
-            except Exception:
-                pass
+            # Note: Expected checks (◇) inference from workflow YAML has been removed.
+            # Only actual check runs from the API are displayed.
             # Note: Sorting is now handled by PASS 4 (sort_by_name_pass) in the centralized pipeline.
             if not check_runs:
                 # Always render a stable placeholder so every commit row can show the dropdown.
@@ -1802,17 +1633,13 @@ class CommitHistoryGenerator:
 
             name_counts: Dict[str, int] = {}
             for cr0 in check_runs:
-                try:
-                    nm0 = str((cr0 or {}).get("name", "") or "")
-                    name_counts[nm0] = int(name_counts.get(nm0, 0) or 0) + 1
-                except Exception:
-                    pass
+                nm0 = str((cr0 or {}).get("name", "") or "")
+                name_counts[nm0] = int(name_counts.get(nm0, 0) or 0) + 1
 
             # First pass: materialize raw logs (if needed) and collect per-check info.
             # Second pass: batch-extract snippets for any raw logs we found.
             check_infos: List[Dict[str, object]] = []
             # Build CIJobNode objects (not TreeNodeVM) so run_all_passes can process them
-            from common_branch_nodes import CIJobNode  # local import
             
             ci_job_nodes: List[CIJobNode] = []
             for cr in check_runs:
@@ -1832,7 +1659,6 @@ class CommitHistoryGenerator:
                 # Fetch raw logs for:
                 # 1. Failed jobs (for error snippets)
                 # 2. Build-test jobs (for pytest timing extraction, regardless of success/failure)
-                from common_dashboard_lib import job_name_wants_pytest_details  # local import
                 is_build_test = job_name_wants_pytest_details(name)
                 cr_status_lc = str(cr.get("status", "") or "").lower()
                 should_fetch_raw_log = (
@@ -1861,17 +1687,14 @@ class CommitHistoryGenerator:
                             )
                             or ""
                         )
+                        if allow_fetch:
+                            raw_log_prefetch_budget["n"] = int(raw_log_prefetch_budget.get("n", 0) or 0) - 1
                     except Exception:
-                        raw_href = ""
-                    if allow_fetch:
-                        raw_log_prefetch_budget["n"] = int(raw_log_prefetch_budget.get("n", 0) or 0) - 1
+                        pass  # Best-effort: raw log materialization is optional
 
                 if raw_href:
-                    try:
-                        page_root_dir = (output_path.parent if output_path else Path(self.repo_path)).resolve()
-                        raw_size = int((page_root_dir / raw_href).stat().st_size)
-                    except Exception:
-                        raw_size = 0
+                    page_root_dir = (output_path.parent if output_path else Path(self.repo_path)).resolve()
+                    raw_size = int((page_root_dir / raw_href).stat().st_size)
                     # Only extract error snippets for failed jobs (not for successful build-test jobs)
                     # We fetch raw logs for successful build-test jobs to get pytest timings,
                     # but we don't need to extract error snippets from them
@@ -1936,20 +1759,11 @@ class CommitHistoryGenerator:
                 # The CIJobNode was already created above (disambiguated_name) and appended once.
 
             # Use centralized CI tree processing pipeline - it handles YAML augmentation, grouping, sorting
-            children: List[TreeNodeVM]
-            try:
-                from common_dashboard_lib import run_all_passes
-                
-                children = run_all_passes(
-                    ci_nodes=ci_job_nodes,
-                    repo_root=Path(repo_path),
-                    commit_sha=sha_full,
-                )
-            except Exception as e:
-                import logging
-                logging.getLogger(__name__).warning(f"run_all_passes failed for {sha_full[:7]}: {e}")
-                # Fallback: convert CI nodes to TreeVM directly
-                children = [node.to_tree_vm() for node in ci_job_nodes]
+            children: List[TreeNodeVM] = run_all_passes(
+                ci_nodes=ci_job_nodes,
+                repo_root=Path(repo_path),
+                commit_sha=sha_full,
+            )
 
             root = TreeNodeVM(
                 node_key=f"gha-root:{sha_full}",
@@ -1967,8 +1781,6 @@ class CommitHistoryGenerator:
             return render_tree_divs([root])
 
         def _build_gitlab_checks_tree_html(*, sha_full: str, sha_short: str) -> str:
-            nodes: List[TreeNodeVM] = []
-
             pr_num = sha_to_pr_number.get(sha_full) if sha_to_pr_number else None
             pipeline = gitlab_pipelines.get(sha_full) if gitlab_pipelines else None
             if (not pipeline) and pr_num and mr_pipelines:
@@ -2096,23 +1908,13 @@ class CommitHistoryGenerator:
                     build_github_s += dt
                     slow_github.append((dt, sha_short or sha_full[:9]))
                 except Exception:
-                    # Never drop the toggles; keep stable placeholders even on errors.
-                    try:
-                        c["github_checks_tree_html"] = _build_github_checks_tree_html(repo_path=self.repo_path, sha_full=sha_full)
-                    except Exception:
-                        c["github_checks_tree_html"] = ""
+                    pass  # Best-effort: tree building is optional
 
-                try:
-                    t0 = time.monotonic()
-                    c["gitlab_checks_tree_html"] = _build_gitlab_checks_tree_html(sha_full=sha_full, sha_short=sha_short)
-                    dt = max(0.0, time.monotonic() - t0)
-                    build_gitlab_s += dt
-                    slow_gitlab.append((dt, sha_short or sha_full[:9]))
-                except Exception:
-                    try:
-                        c["gitlab_checks_tree_html"] = _build_gitlab_checks_tree_html(sha_full=sha_full, sha_short=sha_short)
-                    except Exception:
-                        c["gitlab_checks_tree_html"] = ""
+                t0 = time.monotonic()
+                c["gitlab_checks_tree_html"] = _build_gitlab_checks_tree_html(sha_full=sha_full, sha_short=sha_short)
+                dt = max(0.0, time.monotonic() - t0)
+                build_gitlab_s += dt
+                slow_gitlab.append((dt, sha_short or sha_full[:9]))
 
         # Render template
         template_dir = Path(__file__).parent
@@ -2127,140 +1929,31 @@ class CommitHistoryGenerator:
         # Page statistics (shown in an expandable block at the bottom of the HTML).
         elapsed_s = None
         if generation_t0 is not None:
-            try:
-                elapsed_s = max(0.0, time.monotonic() - float(generation_t0))
-            except Exception:
-                elapsed_s = None
+            elapsed_s = max(0.0, time.monotonic() - float(generation_t0))
 
-        page_stats: List[tuple[str, Optional[str]]] = []
-        if elapsed_s is not None:
-            page_stats.append(("Generation time", f"{elapsed_s:.2f}s"))
-            # Keep a consistent "generation.total_secs" row for dashboards.
-            page_stats.append(("generation.total_secs", f"{elapsed_s:.2f}s"))
-        # GitHub API stats (structured; rendered with <pre> blocks in Statistics).
-        try:
-            from common_dashboard_lib import github_api_stats_rows  # local import
+        # Use shared build_page_stats() for consistent statistics across all dashboards
+        page_stats = build_page_stats(
+            generation_time_secs=elapsed_s,
+            github_api=self.github_client,
+            max_github_api_calls=None,
+            cache_only_mode=bool(self.github_client.cache_only_mode),
+            cache_only_reason="",
+            commits_shown=len(commit_data),
+            gitlab_fetch_skip=self.gitlab_fetch_skip,
+            gitlab_client=self.gitlab_client,
+        )
 
-            mode = "cache-only" if bool(self.github_client.cache_only_mode) else "normal"
-            api_rows = github_api_stats_rows(
-                github_api=self.github_client,
-                max_github_api_calls=None,
-                mode=mode,
-                mode_reason="",
-                extra_cache_stats=cache_stats if isinstance(cache_stats, dict) else None,
-                top_n=15,
-            )
-            page_stats.extend(list(api_rows or []))
-        except Exception:
-            pass
-
-        page_stats.append(("Commits shown", str(len(commit_data))))
-        page_stats.append(("gitlab_fetch_skip", "true" if self.gitlab_fetch_skip else "false"))
-
-        # Performance breakdown (best-effort; collected across the run).
-        try:
-            perf = dict(self._perf or {})
-            perfi = dict(self._perf_i or {})
-            if perf or perfi:
-                # Composite SHA
-                page_stats.append(("composite_sha.cache.hit", str(int(perfi.get("composite_sha.cache.hit", 0) or 0))))
-                page_stats.append(("composite_sha.cache.miss", str(int(perfi.get("composite_sha.cache.miss", 0) or 0))))
-                page_stats.append(("composite_sha.errors", str(int(perfi.get("composite_sha.errors", 0) or 0))))
-                page_stats.append(("composite_sha.total_secs", f"{float(perf.get('composite_sha.total_secs') or 0.0):.2f}s"))
-                page_stats.append(("composite_sha.compute_secs", f"{float(perf.get('composite_sha.compute_secs') or 0.0):.2f}s"))
-                # Snippets
-                page_stats.append(("snippet.cache.hit", str(int(perfi.get("snippet.cache.hit", 0) or 0))))
-                page_stats.append(("snippet.cache.miss", str(int(perfi.get("snippet.cache.miss", 0) or 0))))
-                page_stats.append(("snippet.total_secs", f"{float(perf.get('snippet.total_secs') or 0.0):.2f}s"))
-                page_stats.append(("snippet.compute_secs", f"{float(perf.get('snippet.compute_secs') or 0.0):.2f}s"))
-                # Markers / local build reports (grouped by composite_sha / Docker image)
-                page_stats.append(("marker.composite.unique", str(int(perfi.get("marker.composite.with.reports", 0) or 0) + int(perfi.get("marker.composite.without.reports", 0) or 0))))
-                page_stats.append(("marker.composite.with.reports", str(int(perfi.get("marker.composite.with.reports", 0) or 0))))
-                page_stats.append(("marker.composite.with.status", str(int(perfi.get("marker.composite.with.status", 0) or 0))))
-                page_stats.append(("marker.composite.without.reports", str(int(perfi.get("marker.composite.without.reports", 0) or 0))))
-                page_stats.append(("marker.total_secs", f"{float(perf.get('marker.total_secs') or 0.0):.2f}s"))
-
-                # GitLab cache hit/miss (cache files under ~/.cache/dynamo-utils)
-                for k in [
-                    "gitlab.cache.registry_images.hit",
-                    "gitlab.cache.registry_images.miss",
-                    "gitlab.cache.pipeline_status.hit",
-                    "gitlab.cache.pipeline_status.miss",
-                    "gitlab.cache.pipeline_jobs.hit",
-                    "gitlab.cache.pipeline_jobs.miss",
-                ]:
-                    if k in perfi:
-                        page_stats.append((k, str(int(perfi.get(k, 0) or 0))))
-                page_stats.append(("gitlab.registry_images.total_secs", f"{float(perf.get('gitlab.registry_images.total_secs') or 0.0):.2f}s"))
-                page_stats.append(("gitlab.pipeline_status.total_secs", f"{float(perf.get('gitlab.pipeline_status.total_secs') or 0.0):.2f}s"))
-                page_stats.append(("gitlab.pipeline_jobs.total_secs", f"{float(perf.get('gitlab.pipeline_jobs.total_secs') or 0.0):.2f}s"))
-        except Exception:
-            pass
-
-        # GitLab API totals (best-effort).
-        try:
-            gl = self.gitlab_client
-            if gl is not None and hasattr(gl, "get_rest_call_stats"):
-                st = gl.get_rest_call_stats() or {}
-                page_stats.append(("gitlab.rest.calls", str(int(st.get("total") or 0))))
-                page_stats.append(("gitlab.rest.total_secs", f"{float(st.get('time_total_s') or 0.0):.2f}s"))
-                es = st.get("errors_by_status") if isinstance(st, dict) else None
-                if isinstance(es, dict) and es:
-                    page_stats.append(
-                        ("gitlab.rest.errors_by_status", ", ".join([f"{k}={v}" for k, v in list(es.items())[:8]]))
-                    )
-                # Top endpoints (time + count) to spot hot paths quickly.
-                try:
-                    by_ep = st.get("by_endpoint") if isinstance(st, dict) else {}
-                    t_by_ep = st.get("time_by_endpoint_s") if isinstance(st, dict) else {}
-                    if isinstance(by_ep, dict) and isinstance(t_by_ep, dict) and (by_ep or t_by_ep):
-                        labels = sorted(set(list(by_ep.keys()) + list(t_by_ep.keys())))
-                        labels.sort(key=lambda k: (-int(by_ep.get(k, 0) or 0), -float(t_by_ep.get(k, 0.0) or 0.0), str(k)))
-                        labels = labels[:10]
-                        w = max(10, max(len(str(x)) for x in labels))
-                        lines = [f"{'endpoint':<{w}}  calls   time"]
-                        for k in labels:
-                            c = int(by_ep.get(k, 0) or 0)
-                            t = float(t_by_ep.get(k, 0.0) or 0.0)
-                            lines.append(f"{str(k):<{w}}  {c:>5d}  {t:>6.2f}s")
-                        page_stats.append(("gitlab.rest.by_endpoint_top10", "\n".join(lines)))
-                except Exception:
-                    pass
-        except Exception:
-            pass
-
-        # GitHub cache hit/miss (derived from `cache_stats` we already collect).
-        try:
-            cs = cache_stats if isinstance(cache_stats, dict) else {}
-            if cs:
-                md = cs.get("merge_dates_cache") if isinstance(cs.get("merge_dates_cache"), dict) else {}
-                rc = cs.get("required_checks_cache") if isinstance(cs.get("required_checks_cache"), dict) else {}
-                gha = cs.get("github_actions_status_cache") if isinstance(cs.get("github_actions_status_cache"), dict) else {}
-                if isinstance(md, dict) and md:
-                    page_stats.append(("github.cache.merge_dates.hits", str(md.get("hits"))))
-                    page_stats.append(("github.cache.merge_dates.misses", str(md.get("misses"))))
-                if isinstance(rc, dict) and rc:
-                    page_stats.append(("github.cache.required_checks.hits", str(rc.get("hits"))))
-                    page_stats.append(("github.cache.required_checks.misses", str(rc.get("misses"))))
-                if isinstance(gha, dict) and gha:
-                    page_stats.append(("github.cache.actions_status.hit_fresh", str(gha.get("cache_hit_fresh"))))
-                    page_stats.append(("github.cache.actions_status.stale_refresh", str(gha.get("cache_stale_refresh"))))
-                    page_stats.append(("github.cache.actions_status.miss_fetch", str(gha.get("cache_miss_fetch"))))
-                    page_stats.append(("github.cache.actions_status.miss_no_fetch", str(gha.get("cache_miss_no_fetch"))))
-        except Exception:
-            pass
+        # NOTE: GitHub cache statistics (merge_dates, required_checks, actions_status) are now
+        # handled by build_page_stats via the extra_cache_stats parameter (no longer duplicated here).
 
         # Include timing breakdown if available (best-effort).
-        try:
-            t = self._last_timings or {}
-            if isinstance(t, dict) and t:
-                # Note: total/render/write are measured outside this HTML generator; we show those separately
-                # (or via elapsed_s above) to avoid stale/partial totals.
-                for k in ["cache_load", "git_iter_commits", "github_merge_dates", "github_required_checks", "process_commits", "cache_save"]:
-                    if k in t:
-                        page_stats.append((f"{k}.total_secs", f"{float(t[k]):.2f}s"))
-        except Exception:
-            pass
+        t = self._last_timings or {}
+        if isinstance(t, dict) and t:
+            # Note: total/render/write are measured outside this HTML generator; we show those separately
+            # (or via elapsed_s above) to avoid stale/partial totals.
+            for k in ["cache_load", "git_iter_commits", "github_merge_dates", "github_required_checks", "process_commits", "cache_save"]:
+                if k in t:
+                    page_stats.append((f"{k}.total_secs", f"{float(t[k]):.2f}s"))
 
         # Timing rows we want to show, but can't know until after rendering. Use placeholders and
         # patch them into the final HTML string to avoid a second expensive template render.
@@ -2273,48 +1966,36 @@ class CommitHistoryGenerator:
         page_stats.append(("html_build_trees_gitlab.total_secs", "__TIMING_HTML_BUILD_TREES_GL__"))
         page_stats.append(("html_template_render.total_secs", PH_TPL))
         # Top slow commits (helps pinpoint which commit(s) dominate tree-building).
-        try:
-            slow_github_sorted = sorted(slow_github, key=lambda x: -float(x[0]))[:5]
-            slow_gitlab_sorted = sorted(slow_gitlab, key=lambda x: -float(x[0]))[:5]
-            if slow_github_sorted:
-                page_stats.append(("html_slowest_commits_github.total_secs", ", ".join([f"{sha}={dt:.2f}s" for dt, sha in slow_github_sorted])))
-            if slow_gitlab_sorted:
-                page_stats.append(("html_slowest_commits_gitlab.total_secs", ", ".join([f"{sha}={dt:.2f}s" for dt, sha in slow_gitlab_sorted])))
-        except Exception:
-            pass
+        slow_github_sorted = sorted(slow_github, key=lambda x: -float(x[0]))[:5]
+        slow_gitlab_sorted = sorted(slow_gitlab, key=lambda x: -float(x[0]))[:5]
+        if slow_github_sorted:
+            page_stats.append(("html_slowest_commits_github.total_secs", ", ".join([f"{sha}={dt:.2f}s" for dt, sha in slow_github_sorted])))
+        if slow_gitlab_sorted:
+            page_stats.append(("html_slowest_commits_gitlab.total_secs", ", ".join([f"{sha}={dt:.2f}s" for dt, sha in slow_gitlab_sorted])))
 
         # Sort stats for readability (Generation time first, then other keys grouped by prefix).
-        try:
-            gen = [(k, v) for (k, v) in page_stats if k == "Generation time"]
-            
-            # Sort function: group by prefix (before first _ or .) then by full key
-            def prefix_sort_key(kv):
-                k = str(kv[0])
-                # Extract prefix: everything before first underscore or dot
-                if "_" in k or "." in k:
-                    # Find the position of the first _ or .
-                    underscore_pos = k.find("_") if "_" in k else len(k)
-                    dot_pos = k.find(".") if "." in k else len(k)
-                    split_pos = min(underscore_pos, dot_pos)
-                    prefix = k[:split_pos]
-                else:
-                    prefix = k
-                return (prefix, k)
-            
-            # Apply prefix-based grouping to all stats except Generation time
-            other = sorted([(k, v) for (k, v) in page_stats if k != "Generation time"], key=prefix_sort_key)
-            page_stats[:] = gen + other
-        except Exception:
-            pass
-        except Exception:
-            pass
+        gen = [stat for stat in page_stats if stat[0] == "Generation time"]
+
+        # Sort function: group by prefix (before first _ or .) then by full key
+        def prefix_sort_key(kv):
+            k = str(kv[0])
+            # Extract prefix: everything before first underscore or dot
+            if "_" in k or "." in k:
+                # Find the position of the first _ or .
+                underscore_pos = k.find("_") if "_" in k else len(k)
+                dot_pos = k.find(".") if "." in k else len(k)
+                split_pos = min(underscore_pos, dot_pos)
+                prefix = k[:split_pos]
+            else:
+                prefix = k
+            return (prefix, k)
+
+        # Apply prefix-based grouping to all stats except Generation time
+        other = sorted([stat for stat in page_stats if stat[0] != "Generation time"], key=prefix_sort_key)
+        page_stats[:] = gen + other
 
         # Build tree time is known now.
-        build_trees_s = 0.0
-        try:
-            build_trees_s = float(render_t.as_dict(include_total=False).get("build_trees") or 0.0)
-        except Exception:
-            build_trees_s = 0.0
+        build_trees_s = float(render_t.as_dict(include_total=False).get("build_trees") or 0.0)
 
         t0_tpl = time.monotonic()
         rendered_html = template.render(
@@ -2342,14 +2023,11 @@ class CommitHistoryGenerator:
         tpl_render_s = max(0.0, time.monotonic() - t0_tpl)
 
         # Patch placeholders into the final HTML.
-        try:
-            rendered_html = rendered_html.replace(PH_BUILD, f"{build_trees_s:.2f}s")
-            rendered_html = rendered_html.replace(PH_TPL, f"{tpl_render_s:.2f}s")
-            rendered_html = rendered_html.replace(PH_RENDER, f"{(build_trees_s + tpl_render_s):.2f}s")
-            rendered_html = rendered_html.replace("__TIMING_HTML_BUILD_TREES_GH__", f"{build_github_s:.2f}s")
-            rendered_html = rendered_html.replace("__TIMING_HTML_BUILD_TREES_GL__", f"{build_gitlab_s:.2f}s")
-        except Exception:
-            pass
+        rendered_html = rendered_html.replace(PH_BUILD, f"{build_trees_s:.2f}s")
+        rendered_html = rendered_html.replace(PH_TPL, f"{tpl_render_s:.2f}s")
+        rendered_html = rendered_html.replace(PH_RENDER, f"{(build_trees_s + tpl_render_s):.2f}s")
+        rendered_html = rendered_html.replace("__TIMING_HTML_BUILD_TREES_GH__", f"{build_github_s:.2f}s")
+        rendered_html = rendered_html.replace("__TIMING_HTML_BUILD_TREES_GL__", f"{build_gitlab_s:.2f}s")
         return rendered_html
 
     def _get_cached_gitlab_images_from_sha(self, commit_data: List[dict]) -> dict:
@@ -2373,17 +2051,12 @@ class CommitHistoryGenerator:
         self.logger.debug(f"Getting Docker images for {len(sha_full_list)} SHAs")
 
         # Cache hit/miss accounting (best-effort).
-        try:
-            cache_path = common.resolve_cache_path(cache_file)
-            cache0 = json.loads(cache_path.read_text() or "{}") if cache_path.exists() else {}
-            if isinstance(cache0, dict):
-                hit = sum(1 for sha in sha_full_list if sha in cache0)
-                self._perf_i["gitlab.cache.registry_images.hit"] = int(self._perf_i.get("gitlab.cache.registry_images.hit", 0) or 0) + int(hit)
-                self._perf_i["gitlab.cache.registry_images.miss"] = int(self._perf_i.get("gitlab.cache.registry_images.miss", 0) or 0) + int(
-                    max(0, len(sha_full_list) - hit)
-                )
-        except Exception:
-            pass
+        cache_path = resolve_cache_path(cache_file)
+        cache0 = json.loads(cache_path.read_text() or "{}") if cache_path.exists() else {}
+        if isinstance(cache0, dict):
+            hit = sum(1 for sha in sha_full_list if sha in cache0)
+            COMMIT_HISTORY_PERF_STATS.gitlab_cache_registry_images_hit += int(hit)
+            COMMIT_HISTORY_PERF_STATS.gitlab_cache_registry_images_miss += int(max(0, len(sha_full_list) - hit))
 
         t0 = time.monotonic()
         
@@ -2395,9 +2068,7 @@ class CommitHistoryGenerator:
             cache_file=cache_file,
             skip_fetch=self.gitlab_fetch_skip
         )
-        self._perf["gitlab.registry_images.total_secs"] = float(self._perf.get("gitlab.registry_images.total_secs", 0.0) or 0.0) + max(
-            0.0, time.monotonic() - t0
-        )
+        COMMIT_HISTORY_PERF_STATS.gitlab_registry_images_total_secs += max(0.0, time.monotonic() - t0)
         
         cached_count = sum(1 for v in result.values() if v)
         self.logger.debug(f"Found Docker images for {cached_count}/{len(sha_full_list)} SHAs")
@@ -2435,24 +2106,17 @@ class CommitHistoryGenerator:
         self.logger.debug(f"Getting pipeline status for {len(sha_full_list)} commits")
 
         # Cache hit/miss accounting (best-effort).
-        try:
-            cache_path = common.resolve_cache_path(cache_file)
-            cache0 = json.loads(cache_path.read_text() or "{}") if cache_path.exists() else {}
-            if isinstance(cache0, dict):
-                hit = sum(1 for sha in sha_full_list if sha in cache0)
-                self._perf_i["gitlab.cache.pipeline_status.hit"] = int(self._perf_i.get("gitlab.cache.pipeline_status.hit", 0) or 0) + int(hit)
-                self._perf_i["gitlab.cache.pipeline_status.miss"] = int(self._perf_i.get("gitlab.cache.pipeline_status.miss", 0) or 0) + int(
-                    max(0, len(sha_full_list) - hit)
-                )
-        except Exception:
-            pass
+        cache_path = resolve_cache_path(cache_file)
+        cache0 = json.loads(cache_path.read_text() or "{}") if cache_path.exists() else {}
+        if isinstance(cache0, dict):
+            hit = sum(1 for sha in sha_full_list if sha in cache0)
+            COMMIT_HISTORY_PERF_STATS.gitlab_cache_pipeline_status_hit += int(hit)
+            COMMIT_HISTORY_PERF_STATS.gitlab_cache_pipeline_status_miss += int(max(0, len(sha_full_list) - hit))
 
         t0 = time.monotonic()
         
         result = self.gitlab_client.get_cached_pipeline_status(sha_full_list, cache_file=cache_file, skip_fetch=self.gitlab_fetch_skip)
-        self._perf["gitlab.pipeline_status.total_secs"] = float(self._perf.get("gitlab.pipeline_status.total_secs", 0.0) or 0.0) + max(
-            0.0, time.monotonic() - t0
-        )
+        COMMIT_HISTORY_PERF_STATS.gitlab_pipeline_status_total_secs += max(0.0, time.monotonic() - t0)
         
         cached_count = sum(1 for v in result.values() if v is not None)
         self.logger.debug(f"Found pipeline status for {cached_count}/{len(sha_full_list)} commits")
@@ -2511,23 +2175,19 @@ class CommitHistoryGenerator:
         # Cache hit/miss accounting (best-effort).
         try:
             keys = [str(int(x)) for x in (pipeline_ids or [])]
-            cache_path = common.resolve_cache_path(cache_file)
+            cache_path = resolve_cache_path(cache_file)
             cache0 = json.loads(cache_path.read_text() or "{}") if cache_path.exists() else {}
             if isinstance(cache0, dict):
                 hit = sum(1 for k in keys if k in cache0)
-                self._perf_i["gitlab.cache.pipeline_jobs.hit"] = int(self._perf_i.get("gitlab.cache.pipeline_jobs.hit", 0) or 0) + int(hit)
-                self._perf_i["gitlab.cache.pipeline_jobs.miss"] = int(self._perf_i.get("gitlab.cache.pipeline_jobs.miss", 0) or 0) + int(
-                    max(0, len(keys) - hit)
-                )
+                COMMIT_HISTORY_PERF_STATS.gitlab_cache_pipeline_jobs_hit += int(hit)
+                COMMIT_HISTORY_PERF_STATS.gitlab_cache_pipeline_jobs_miss += int(max(0, len(keys) - hit))
         except Exception:
-            pass
+            pass  # Best-effort: cache accounting is optional
 
         t0 = time.monotonic()
 
         result = self.gitlab_client.get_cached_pipeline_job_details(pipeline_ids, cache_file=cache_file, skip_fetch=self.gitlab_fetch_skip)
-        self._perf["gitlab.pipeline_jobs.total_secs"] = float(self._perf.get("gitlab.pipeline_jobs.total_secs", 0.0) or 0.0) + max(
-            0.0, time.monotonic() - t0
-        )
+        COMMIT_HISTORY_PERF_STATS.gitlab_pipeline_jobs_total_secs += max(0.0, time.monotonic() - t0)
 
         cached_count = sum(1 for v in result.values() if v is not None)
         self.logger.debug(f"Found job details for {cached_count}/{len(pipeline_ids)} pipelines")
@@ -2735,12 +2395,9 @@ Examples:
     # Prune locally-served raw logs to avoid unbounded growth and delete any partial/unverified artifacts.
     # We only render `[raw log]` links when the local file exists (or was materialized),
     # so pruning won't produce dead links on a freshly generated page.
-    try:
-        _ = prune_dashboard_raw_logs(page_root_dir=args.repo_path, max_age_days=30)
-        # Also remove any partial/unverified raw logs (legacy cache artifacts, missing completed=true, etc).
-        _ = prune_partial_raw_log_caches(page_root_dirs=[args.repo_path])
-    except Exception:
-        pass
+    _ = prune_dashboard_raw_logs(page_root_dir=args.repo_path, max_age_days=30)
+    # Also remove any partial/unverified raw logs (legacy cache artifacts, missing completed=true, etc).
+    _ = prune_partial_raw_log_caches(page_root_dirs=[args.repo_path])
 
     # Create generator and run
     generator = CommitHistoryGenerator(
@@ -2756,16 +2413,11 @@ Examples:
         enable_success_build_test_logs=bool(args.enable_success_build_test_logs),
     )
     # Fail fast if exhausted; detailed stats are rendered into the HTML Statistics section.
-    cache_only_reason = ""
     try:
         generator.github_client.check_core_rate_limit_or_raise()
-    except Exception as e:
+    except Exception:
         # Switch to cache-only mode (no new GitHub network calls).
-        cache_only_reason = str(e)
-        try:
-            generator.github_client.set_cache_only_mode(True)
-        except Exception:
-            pass
+        generator.github_client.set_cache_only_mode(True)
 
     rc = 1
     try:
@@ -2777,8 +2429,6 @@ Examples:
     )
         # Debug: snippet cache analysis (avoid printing from library code; use logger).
         if bool(args.debug) and hasattr(generator, "_snippet_cache_debug"):
-            import logging
-            from collections import Counter
 
             log = logging.getLogger(__name__)
             debug = generator._snippet_cache_debug
