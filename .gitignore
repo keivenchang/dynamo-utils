@@ -12,4 +12,4 @@ no-commit/
 update_html_pages.log
 .backup_sha
 raw-log-text
-raw-log-text/
+raw-log-text/html_pages/debug.html
