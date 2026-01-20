@@ -67,7 +67,7 @@ def categorize_error_snippet_text(snippet_text: str) -> List[str]:
                         seen.add(tok)
                         out.append(tok)
                 break
-    except Exception:
+    except Exception:  # THIS IS A HORRIBLE ANTI-PATTERN, FIX IT
         pass
 
     # Multi-line backend JSON-ish blocks: tag both engines when both blocks fail.
@@ -78,7 +78,7 @@ def categorize_error_snippet_text(snippet_text: str) -> List[str]:
                 if name not in seen:
                     seen.add(name)
                     out.append(name)
-    except Exception:
+    except Exception:  # THIS IS A HORRIBLE ANTI-PATTERN, FIX IT
         pass
 
     # Apply the shared marker rules to the snippet text as well, so snippet tags stay consistent
@@ -104,7 +104,7 @@ def categorize_error_snippet_text(snippet_text: str) -> List[str]:
                 continue
             filtered.append(ln)
         _apply_category_rules(text=text, lines=filtered, out=out, seen=seen)
-    except Exception:
+    except Exception:  # THIS IS A HORRIBLE ANTI-PATTERN, FIX IT
         _apply_category_rules(text=text, lines=(snippet_text or "").splitlines(), out=out, seen=seen)
     return out
 
@@ -164,7 +164,7 @@ def render_error_snippet_html(snippet_text: str) -> str:
                     else:
                         cleaned.append(ln)
                 cmd_copy_text = "\n".join(cleaned).strip("\n")
-            except Exception:
+            except Exception:  # THIS IS A HORRIBLE ANTI-PATTERN, FIX IT
                 cmd_copy_text = cmd_text
 
             cmd_js = html.escape(json.dumps(cmd_copy_text), quote=True)
@@ -213,7 +213,7 @@ def render_error_snippet_html(snippet_text: str) -> str:
                     if len(rhs) >= 2 and rhs[0] in ("'", '"') and rhs[-1] == rhs[0]:
                         rhs = rhs[1:-1]
                     payload = rhs
-                except Exception:
+                except Exception:  # THIS IS A HORRIBLE ANTI-PATTERN, FIX IT
                     payload = ""
                 payload_js = html.escape(json.dumps(payload), quote=True)
                 out_lines.append(
@@ -228,7 +228,7 @@ def render_error_snippet_html(snippet_text: str) -> str:
                 payload = ""
                 try:
                     payload = str(display_line or "").strip()
-                except Exception:
+                except Exception:  # THIS IS A HORRIBLE ANTI-PATTERN, FIX IT
                     payload = ""
                 payload_js = html.escape(json.dumps(payload), quote=True)
                 out_lines.append(

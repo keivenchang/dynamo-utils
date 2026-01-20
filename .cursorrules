@@ -474,9 +474,12 @@ Notes:
 
 **CRITICAL RULES (NEVER VIOLATE WITHOUT EXPLICIT PERMISSION):**
 
-1. **ALL IMPORTS AT TOP OF FILE - NEVER INSIDE FUNCTIONS**
+1. **ALL IMPORTS AT TOP OF FILE - NO try/except - NEVER INSIDE FUNCTIONS**
    - ❌ NEVER: `def foo(): import json`
-   - ✅ ALWAYS: Import at module top
+   - ❌ NEVER: `try: import requests; HAS_REQUESTS = True; except: HAS_REQUESTS = False`
+   - ✅ ALWAYS: Import directly at module top: `import requests`
+   - Import third-party packages DIRECTLY - don't use try/except to hide ImportError
+   - Fail fast if dependencies are missing (add them to requirements.txt)
    - Exception: ONLY with explicit user permission for lazy imports in rare cases
 
 2. **NO DEFENSIVE getattr() WHEN TYPES ARE KNOWN**
@@ -560,7 +563,7 @@ except Exception as e:
 # ❌ ABSOLUTELY FORBIDDEN:
 try:
     something()
-except Exception:
+except Exception:  # NO NO NO!!!!!! DO NOT DO THIS!
     return []  # NEVER DO THIS - Return default on error!
 
 # ❌ ABSOLUTELY FORBIDDEN:
@@ -584,11 +587,15 @@ except Exception as e:
 # ✅ DO THIS - Let exceptions propagate:
 result = something()  # If it fails, let it crash!
 
-# ✅ DO THIS - Only catch specific exceptions you can handle:
+# ✅ DO THIS - Only catch SPECIFIC exceptions you can handle:
 try:
     result = parse_config(file)
 except FileNotFoundError:
     # Specific exception we know how to handle
+    result = DEFAULT_CONFIG
+except ValueError as e:
+    # Another specific exception we can handle
+    logger.warning(f"Invalid config format: {e}")
     result = DEFAULT_CONFIG
 # Other exceptions propagate up!
 
@@ -599,6 +606,59 @@ except Exception as e:
     logger.error(f"Failed to do something: {e}")
     raise  # Re-raise so caller knows it failed!
 ```
+
+**CRITICAL: NEVER USE `except Exception:` WITHOUT RE-RAISING**
+
+❌ **ABSOLUTELY FORBIDDEN:**
+```python
+# Catching Exception without re-raising = hiding ALL errors!
+try:
+    something()
+except Exception:
+    pass  # HIDES ALL ERRORS!
+
+try:
+    something()
+except Exception as e:
+    logger.error(f"Error: {e}")  # HIDES ERROR FROM CALLER!
+    # Missing raise = silent failure
+
+try:
+    something()
+except Exception:
+    return []  # HIDES ERROR WITH DEFAULT VALUE!
+```
+
+✅ **CORRECT - Use SPECIFIC exception types:**
+```python
+# Catch only exceptions you know how to handle:
+try:
+    result = json.loads(text)
+except json.JSONDecodeError as e:
+    logger.error(f"Invalid JSON: {e}")
+    return {}  # OK: specific exception, intentional handling
+
+try:
+    file_size = os.path.getsize(path)
+except FileNotFoundError:
+    file_size = 0  # OK: specific exception, intentional default
+
+try:
+    value = int(string)
+except ValueError:
+    value = 0  # OK: specific exception, intentional default
+```
+
+**WHY `except Exception:` IS ALMOST ALWAYS WRONG:**
+- Catches **everything**: ValueError, TypeError, AttributeError, KeyError, etc.
+- Hides bugs you didn't anticipate
+- Makes debugging impossible ("where did the error come from?")
+- Violates fail-fast principle
+
+**THE RULE:**
+1. If you can remove the try/except → DO IT (let it fail fast!)
+2. If you must catch exceptions → Use SPECIFIC types (FileNotFoundError, ValueError, TypeError, etc.)
+3. If you catch Exception → You MUST re-raise it (or have explicit user permission)
 
 **Why this matters:**
 - Silent failures make debugging impossible

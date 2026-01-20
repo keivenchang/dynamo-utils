@@ -248,7 +248,7 @@ def _default_raw_log_dir() -> Path:
         override = os.environ.get("DYNAMO_UTILS_CACHE_DIR", "").strip()
         if override:
             return Path(override).expanduser() / "raw-log-text"
-    except Exception:
+    except Exception:  # THIS IS A HORRIBLE ANTI-PATTERN, FIX IT
         pass
     return Path.home() / ".cache" / "dynamo-utils" / "raw-log-text"
 
@@ -303,7 +303,7 @@ def _unescape_nested_shell_quotes(s: str) -> str:
         # Be conservative: only undo escaped quotes. Do NOT try to interpret all backslash escapes.
         t = t.replace('\\"', '"').replace("\\'", "'")
         return t
-    except Exception:
+    except Exception:  # THIS IS A HORRIBLE ANTI-PATTERN, FIX IT
         return str(s or "")
 
 
@@ -325,7 +325,7 @@ def _extract_log_level(line: str) -> Optional[str]:
         if not m:
             return None
         return str(m.group(1) or "").upper() or None
-    except Exception:
+    except Exception:  # THIS IS A HORRIBLE ANTI-PATTERN, FIX IT
         return None
 
 
@@ -355,7 +355,7 @@ def _has_huggingface_auth_error_signal(lines: Sequence[str]) -> bool:
             if _line_is_warn_or_lower(str(raw or "")):
                 continue
             return True
-    except Exception:
+    except Exception:  # THIS IS A HORRIBLE ANTI-PATTERN, FIX IT
         return False
     return False
 
@@ -407,7 +407,7 @@ def _has_pytest_failure_signal(lines: Sequence[str]) -> bool:
                 flags=re.IGNORECASE,
             ):
                 return True
-    except Exception:
+    except Exception:  # THIS IS A HORRIBLE ANTI-PATTERN, FIX IT
         return False
     return False
 
@@ -539,7 +539,7 @@ def _self_test_examples(*, raw_log_path: Path) -> int:
         # This should ONLY happen during the self-check process (per policy).
         try:
             _ = _chmod_remove_write_bits(p)
-        except Exception:
+        except Exception:  # THIS IS A HORRIBLE ANTI-PATTERN, FIX IT
             pass
 
         from . import snippet as _snippet
@@ -596,7 +596,7 @@ def _self_test_examples(*, raw_log_path: Path) -> int:
                 continue
             try:
                 _ = _chmod_remove_write_bits(p)
-            except Exception:
+            except Exception:  # THIS IS A HORRIBLE ANTI-PATTERN, FIX IT
                 pass
             # Snippet assertions are sensitive to truncation. Use a larger tail budget than the
             # category self-test so we reliably capture preceding command blocks / workflow paths.
@@ -632,7 +632,7 @@ def _self_test_examples(*, raw_log_path: Path) -> int:
                             flags=re.IGNORECASE,
                         )
                     )
-                except Exception:
+                except Exception:  # THIS IS A HORRIBLE ANTI-PATTERN, FIX IT
                     return False
 
             for rsub in (must_red or []):
@@ -683,7 +683,7 @@ def _self_test_examples(*, raw_log_path: Path) -> int:
                         flags=re.IGNORECASE,
                     )
                 )
-            except Exception:
+            except Exception:  # THIS IS A HORRIBLE ANTI-PATTERN, FIX IT
                 return False
 
         # Craft a small snippet body with both "should be red" and "should NOT be red" lines.
@@ -747,7 +747,7 @@ def _self_test_examples(*, raw_log_path: Path) -> int:
         print("")
         if unit_fail:
             failures += 1
-    except Exception:
+    except Exception:  # THIS IS A HORRIBLE ANTI-PATTERN, FIX IT
         # Never hard-fail self-test on the unit runner itself; the golden logs are the primary guardrail.
         pass
 
@@ -787,7 +787,7 @@ def _self_test_examples(*, raw_log_path: Path) -> int:
         print("")
         if not ok:
             failures += 1
-    except Exception:
+    except Exception:  # THIS IS A HORRIBLE ANTI-PATTERN, FIX IT
         pass
 
     # Extra categorization unit test: network port conflicts.
@@ -802,7 +802,7 @@ def _self_test_examples(*, raw_log_path: Path) -> int:
             print("  missing: network-port-conflict-error")
             print(f"  got: {cats}")
         print("")
-    except Exception:
+    except Exception:  # THIS IS A HORRIBLE ANTI-PATTERN, FIX IT
         pass
 
     # Extra golden regression guard: `PYTEST_CMD="pytest ..."` variable expansion should still produce
@@ -879,7 +879,7 @@ def _self_test_examples(*, raw_log_path: Path) -> int:
             print("")
             if not ok:
                 failures += 1
-    except Exception:
+    except Exception:  # THIS IS A HORRIBLE ANTI-PATTERN, FIX IT
         pass
 
     if missing_files:
@@ -914,7 +914,7 @@ def golden_log_job_ids() -> set[str]:
             m = re.match(r"^\s*(\d+)\.log\s*$", str(log_name or ""))
             if m:
                 ids.add(str(m.group(1)))
-    except Exception:
+    except Exception:  # THIS IS A HORRIBLE ANTI-PATTERN, FIX IT
         ids = set()
     _GOLDEN_JOB_IDS = set(ids)
     return set(_GOLDEN_JOB_IDS)
@@ -926,7 +926,7 @@ def is_golden_log_job_id(job_id: str) -> bool:
         if not j.isdigit():
             return False
         return j in golden_log_job_ids()
-    except Exception:
+    except Exception:  # THIS IS A HORRIBLE ANTI-PATTERN, FIX IT
         return False
 
 
@@ -945,7 +945,7 @@ def _chmod_remove_write_bits(path: Path) -> bool:
             return True
         os.chmod(str(p), int(new_mode))
         return True
-    except Exception:
+    except Exception:  # THIS IS A HORRIBLE ANTI-PATTERN, FIX IT
         return False
 
 
@@ -964,7 +964,7 @@ def _chmod_add_user_write_bit(path: Path) -> bool:
             return True
         os.chmod(str(p), int(new_mode))
         return True
-    except Exception:
+    except Exception:  # THIS IS A HORRIBLE ANTI-PATTERN, FIX IT
         return False
 
 
@@ -1011,7 +1011,7 @@ def _scan_all_logs(*, logs_root: Path, tail_bytes: int = 512 * 1024) -> int:
                 _ = _chmod_remove_write_bits(p)
             else:
                 _ = _chmod_add_user_write_bit(p)
-        except Exception:
+        except Exception:  # THIS IS A HORRIBLE ANTI-PATTERN, FIX IT
             pass
 
         from . import snippet as _snippet
@@ -1112,7 +1112,7 @@ def _backend_failure_engines_from_lines(lines: Sequence[str]) -> set[str]:
                 st = (s or "").strip()
                 if st in ("}", "},"):
                     current = None
-    except Exception:
+    except Exception:  # THIS IS A HORRIBLE ANTI-PATTERN, FIX IT
         return engines
     return engines
 
@@ -1284,7 +1284,7 @@ def categorize_error_log_lines(lines: Sequence[str]) -> List[str]:
         # OOM / kill
         if re.search(r"\bout\s+of\s+memory\b|\boom\b|killed\s+process", t):
             add("oom")
-    except Exception:
+    except Exception:  # THIS IS A HORRIBLE ANTI-PATTERN, FIX IT
         return cats
 
     return cats
@@ -1333,7 +1333,7 @@ def _copy_icon_svg(*, size_px: int = 12) -> str:
         # Shared icon lives in `dynamo-utils/html_pages/copy_icon_paths.svg` (sibling of this package).
         p = (Path(__file__).resolve().parent.parent / "html_pages" / "copy_icon_paths.svg").resolve()
         paths = p.read_text(encoding="utf-8").strip()
-    except Exception:
+    except Exception:  # THIS IS A HORRIBLE ANTI-PATTERN, FIX IT
         # Fallback: empty icon rather than crashing snippet rendering.
         paths = ""
     return (
@@ -1491,13 +1491,13 @@ def _apply_category_rules(*, text: str, lines: Sequence[str], out: List[str], se
 
                 if rx.search(text) and name not in seen:
                     add(name)
-            except Exception:
+            except Exception:  # THIS IS A HORRIBLE ANTI-PATTERN, FIX IT
                 continue
 
         # Derived: helm errors are inherently Kubernetes-related; show k8s-error alongside helm-error.
         if "helm-error" in seen:
             add("k8s-error")
-    except Exception:
+    except Exception:  # THIS IS A HORRIBLE ANTI-PATTERN, FIX IT
         return
 
 

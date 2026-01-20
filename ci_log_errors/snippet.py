@@ -99,7 +99,7 @@ def extract_error_snippet_from_text(
                         if m:
                             return str(m.group(2) or "")
                     return ""
-                except Exception:
+                except Exception:  # THIS IS A HORRIBLE ANTI-PATTERN, FIX IT
                     return ""
 
             def extract_vanilla_pytest_from_shell(line: str) -> str:
@@ -112,7 +112,7 @@ def extract_error_snippet_from_text(
                     if not re.search(r"\\bpytest\\b", inner, flags=re.IGNORECASE):
                         return ""
                     return _unescape_nested_shell_quotes(inner).strip()
-                except Exception:
+                except Exception:  # THIS IS A HORRIBLE ANTI-PATTERN, FIX IT
                     return ""
 
             def normalize_cmd_line(raw: str) -> str:
@@ -190,7 +190,7 @@ def extract_error_snippet_from_text(
                     parts = [x.rstrip() for x in blk.splitlines() if x.strip()]
                     if parts:
                         blk = "\n".join(parts).strip()
-                except Exception:
+                except Exception:  # THIS IS A HORRIBLE ANTI-PATTERN, FIX IT
                     pass
                 # Cap length so commands don't drown out the actual failure lines.
                 cap = 2200
@@ -320,7 +320,7 @@ def extract_error_snippet_from_text(
                 try:
                     if re.search(r"^E\s+ModuleNotFoundError:\s*No\s+module\s+named\b", s_norm):
                         last_e_module_not_found = i
-                except Exception:
+                except Exception:  # THIS IS A HORRIBLE ANTI-PATTERN, FIX IT
                     pass
             if SNIPPET_PYTHON_EXCEPTION_LINE_RE.search(s_norm):
                 last_python_exception_line = i
@@ -358,7 +358,7 @@ def extract_error_snippet_from_text(
                         cmd = str(m.group(1) or "").strip()
                         if cmd:
                             last_buildkit_process_cmd = _unescape_nested_shell_quotes(cmd)
-                except Exception:
+                except Exception:  # THIS IS A HORRIBLE ANTI-PATTERN, FIX IT
                     pass
             if NETWORK_ERROR_LINE_RE.search(s_norm):
                 last_network_err = i
@@ -378,7 +378,7 @@ def extract_error_snippet_from_text(
                     last_broken_link_error = i
                 if st.startswith("##[error]Problematic symlink:"):
                     last_problematic_symlink_error = i
-            except Exception:
+            except Exception:  # THIS IS A HORRIBLE ANTI-PATTERN, FIX IT
                 pass
 
         # Choose anchor by priority (first non-None index wins).
@@ -418,7 +418,7 @@ def extract_error_snippet_from_text(
                     if int(j) <= int(anchor_idx):
                         best = int(j)
                 closest_pytest_cmd_before_anchor = best
-        except Exception:
+        except Exception:  # THIS IS A HORRIBLE ANTI-PATTERN, FIX IT
             closest_pytest_cmd_before_anchor = None
 
         snippet_lines: List[str] = []
@@ -466,7 +466,7 @@ def extract_error_snippet_from_text(
                             last = s
                     if last and last not in snippet_lines:
                         snippet_lines.append(last)
-                except Exception:
+                except Exception:  # THIS IS A HORRIBLE ANTI-PATTERN, FIX IT
                     return
 
             add_last(SNIPPET_PYTEST_PROGRESS_100_RE)
@@ -521,7 +521,7 @@ def extract_error_snippet_from_text(
                 mn_line = _strip_ts_and_ansi(all_lines[int(last_e_module_not_found)]).rstrip("\n")
                 if mn_line and mn_line.strip() and mn_line not in snippet_lines:
                     snippet_lines.append(mn_line)
-            except Exception:
+            except Exception:  # THIS IS A HORRIBLE ANTI-PATTERN, FIX IT
                 pass
 
         # If we anchored on a python ModuleNotFoundError inside pytest, ensure we include the
@@ -584,7 +584,7 @@ def extract_error_snippet_from_text(
                     break
             if insert_at is not None and marker not in snippet_lines:
                 snippet_lines.insert(insert_at, marker)
-        except Exception:
+        except Exception:  # THIS IS A HORRIBLE ANTI-PATTERN, FIX IT
             pass
 
         # Git LFS dependency fetch failures: include the whole uv/pip/LFS error block when present.
@@ -598,7 +598,7 @@ def extract_error_snippet_from_text(
                 m = re.search(r"\s#(\d+)\b", all_lines[last_git_lfs_anchor])
                 if m:
                     step_id = str(m.group(1))
-            except Exception:
+            except Exception:  # THIS IS A HORRIBLE ANTI-PATTERN, FIX IT
                 step_id = None
 
             def same_step(ln: str) -> bool:
@@ -606,7 +606,7 @@ def extract_error_snippet_from_text(
                     return True
                 try:
                     return bool(re.search(rf"\s#{re.escape(step_id)}\b", ln))
-                except Exception:
+                except Exception:  # THIS IS A HORRIBLE ANTI-PATTERN, FIX IT
                     return True
 
             # Walk backward to find a good block start.
@@ -697,7 +697,7 @@ def extract_error_snippet_from_text(
                 ln = _strip_ts_and_ansi(all_lines[idx])
                 if ln and ln.strip() and ln not in snippet_lines:
                     snippet_lines.append(ln)
-        except Exception:
+        except Exception:  # THIS IS A HORRIBLE ANTI-PATTERN, FIX IT
             pass
         for idx in (last_hf_auth_sig, last_copyright_sig):
             if idx is None:
@@ -757,7 +757,7 @@ def extract_error_snippet_from_text(
                     ln = all_lines[int(i)]
                     if ln and ln.strip() and ln not in snippet_lines:
                         snippet_lines.append(ln)
-        except Exception:
+        except Exception:  # THIS IS A HORRIBLE ANTI-PATTERN, FIX IT
             pass
 
         # broken-links: force-include the high-signal report blocks users need to fix the issue.
@@ -788,7 +788,7 @@ def extract_error_snippet_from_text(
                             continue
                         if ln not in snippet_lines:
                             snippet_lines.append(ln)
-        except Exception:
+        except Exception:  # THIS IS A HORRIBLE ANTI-PATTERN, FIX IT
             pass
 
         # Cap size and add explicit ellipsis markers when we cut off leading/trailing log content.
@@ -843,7 +843,7 @@ def extract_error_snippet_from_text(
             ctx_lines = ctx_lines[-6:]
             if ctx_lines:
                 snippet_lines = ctx_lines + ["..."] + list(snippet_lines or [])
-        except Exception:
+        except Exception:  # THIS IS A HORRIBLE ANTI-PATTERN, FIX IT
             pass
 
         # Prepend "execution context" commands into the snippet body, separated by ellipses.
@@ -900,7 +900,7 @@ def extract_error_snippet_from_text(
                     # For pytest/rust failures, keep the prelude laser-focused; don't add unrelated buildx noise.
                     if buildx_lines and not want_single_closest_execution_cmd:
                         cmd_blocks.append("\n".join(buildx_lines))
-                except Exception:
+                except Exception:  # THIS IS A HORRIBLE ANTI-PATTERN, FIX IT
                     pass
 
                 # Also surface the BuildKit failing "/bin/sh -c ..." payload if we captured it.
@@ -908,7 +908,7 @@ def extract_error_snippet_from_text(
                 try:
                     if last_buildkit_process_cmd and last_buildkit_process_cmd not in cmd_blocks:
                         cmd_blocks.append(last_buildkit_process_cmd)
-                except Exception:
+                except Exception:  # THIS IS A HORRIBLE ANTI-PATTERN, FIX IT
                     pass
 
                 # Find the last few "Run ..." command groups *before the anchor* and keep the most relevant ones.
@@ -1008,7 +1008,7 @@ def extract_error_snippet_from_text(
                                     pre_k -= 1
                                     continue
                                 break
-                    except Exception:
+                    except Exception:  # THIS IS A HORRIBLE ANTI-PATTERN, FIX IT
                         pre_k = start_k
 
                     # Collect the command block including continuation lines until a clear stop marker.
@@ -1033,7 +1033,7 @@ def extract_error_snippet_from_text(
                             if st.startswith("#") or st.startswith("set +e") or st.startswith("set -e"):
                                 k += 1
                                 continue
-                        except Exception:
+                        except Exception:  # THIS IS A HORRIBLE ANTI-PATTERN, FIX IT
                             pass
                         # If line ends with "\" keep consuming obvious continuations.
                         if s.rstrip().endswith("\\"):
@@ -1062,7 +1062,7 @@ def extract_error_snippet_from_text(
                         cmd_blocks.append(blk)
                         if want_single_closest_execution_cmd:
                             break
-            except Exception:
+            except Exception:  # THIS IS A HORRIBLE ANTI-PATTERN, FIX IT
                 cmd_blocks = []
 
             # De-dup blocks
@@ -1075,7 +1075,7 @@ def extract_error_snippet_from_text(
                         seenb.add(s)
                         uniq.append(s)
                 cmd_blocks = uniq
-            except Exception:
+            except Exception:  # THIS IS A HORRIBLE ANTI-PATTERN, FIX IT
                 pass
 
             # If the closest execution command references ${PYTEST_CMD}, inject the resolved PYTEST_CMD="pytest ..."
@@ -1105,7 +1105,7 @@ def extract_error_snippet_from_text(
                                     inner = str(m.group(2) or "").strip()
                                     if inner and inner not in cmd_blocks:
                                         cmd_blocks.insert(1, inner)
-            except Exception:
+            except Exception:  # THIS IS A HORRIBLE ANTI-PATTERN, FIX IT
                 pass
 
             # Also add a "vanilla pytest ..." block when the command is wrapped in `bash -c "... pytest ..."`.
@@ -1132,7 +1132,7 @@ def extract_error_snippet_from_text(
                                 seen.add(nid)
                                 nodeids.append(nid)
                         return nodeids
-                    except Exception:
+                    except Exception:  # THIS IS A HORRIBLE ANTI-PATTERN, FIX IT
                         return []
 
                 def _extract_shell_c_payload_from_cmd_block(blk: str) -> str:
@@ -1159,7 +1159,7 @@ def extract_error_snippet_from_text(
                                 m = rx.search(ln_s)
                                 if m:
                                     break
-                        except Exception:
+                        except Exception:  # THIS IS A HORRIBLE ANTI-PATTERN, FIX IT
                             m = None
                         if not m:
                             continue
@@ -1194,7 +1194,7 @@ def extract_error_snippet_from_text(
                                 if m:
                                     inner = str(m.group(2) or "")
                                     break
-                        except Exception:
+                        except Exception:  # THIS IS A HORRIBLE ANTI-PATTERN, FIX IT
                             inner = ""
                         if not inner:
                             continue
@@ -1237,7 +1237,7 @@ def extract_error_snippet_from_text(
                                     best_vanilla_pytest = _unescape_nested_shell_quotes(inner)
                             elif first.lower().startswith("pytest"):
                                 best_vanilla_pytest = _unescape_nested_shell_quotes(first)
-                        except Exception:
+                        except Exception:  # THIS IS A HORRIBLE ANTI-PATTERN, FIX IT
                             pass
                     # If executed via `bash/sh ... -c "<payload>"`, suggest the inner payload (without shell wrapper).
                     inner_payload = _extract_shell_c_payload_from_cmd_block(b)
@@ -1273,17 +1273,17 @@ def extract_error_snippet_from_text(
                         # IMPORTANT UX: place the suggested rerun command *after* the contiguous FAILED
                         # lines chunk in the snippet body, not in the command prelude.
                         rerun_only_failed_pytest_cmd = rerun
-                except Exception:
+                except Exception:  # THIS IS A HORRIBLE ANTI-PATTERN, FIX IT
                     pass
                 cmd_blocks = expanded
-            except Exception:
+            except Exception:  # THIS IS A HORRIBLE ANTI-PATTERN, FIX IT
                 pass
 
             # Keep only the last few extracted command blocks so the snippet stays readable.
             # (We only need enough context to see "what ran" before the error.)
             try:
                 cmd_blocks = (cmd_blocks or [])[-10:]
-            except Exception:
+            except Exception:  # THIS IS A HORRIBLE ANTI-PATTERN, FIX IT
                 pass
 
             cmd_lines: List[str] = []
@@ -1350,7 +1350,7 @@ def extract_error_snippet_from_text(
                                     _format_suggested_cmd(rerun_only_failed_pytest_cmd) or rerun_only_failed_pytest_cmd,
                                     "[[/CMD]]",
                                 ]
-                except Exception:
+                except Exception:  # THIS IS A HORRIBLE ANTI-PATTERN, FIX IT
                     pass
 
                 # Use a single ellipsis to separate the command prelude from the failure context,
@@ -1363,7 +1363,7 @@ def extract_error_snippet_from_text(
                     keep_tail = max(0, max_lines_i - len(cmd_lines))
                     combined = cmd_lines + (tail[-keep_tail:] if keep_tail > 0 else [])
                 snippet_lines = combined
-        except Exception:
+        except Exception:  # THIS IS A HORRIBLE ANTI-PATTERN, FIX IT
             pass
 
         # Normalize body lines: never show noisy GitHub Actions timestamp prefixes or ANSI codes.
@@ -1381,10 +1381,10 @@ def extract_error_snippet_from_text(
                         )
                     else:
                         normalized_lines.append(_strip_ts_and_ansi(ln))
-                except Exception:
+                except Exception:  # THIS IS A HORRIBLE ANTI-PATTERN, FIX IT
                     normalized_lines.append(_strip_ts_and_ansi(ln))
             snippet_lines = normalized_lines
-        except Exception:
+        except Exception:  # THIS IS A HORRIBLE ANTI-PATTERN, FIX IT
             pass
 
         body = "\n".join(snippet_lines).strip()
@@ -1427,7 +1427,7 @@ def extract_error_snippet_from_text(
                 snippet = header + body
 
         return snippet
-    except Exception:
+    except Exception:  # THIS IS A HORRIBLE ANTI-PATTERN, FIX IT
         # Debugging aid: snippet extraction is intentionally best-effort and swallows many errors to
         # avoid breaking dashboards. During refactors, enable this to surface the root cause:
         #   CI_LOG_ERRORS_DEBUG=1 python3 -m ci_log_errors <log>
@@ -1454,7 +1454,7 @@ def _read_text_tail(path: Path, *, max_bytes: int) -> str:
                 f.seek(-max_b, os.SEEK_END)
             data = f.read()
         return data.decode("utf-8", errors="replace")
-    except Exception:
+    except Exception:  # THIS IS A HORRIBLE ANTI-PATTERN, FIX IT
         return ""
 
 
@@ -1479,7 +1479,7 @@ def extract_error_snippet_from_log_file(
     # just read it entirely. Otherwise, do a best-effort progressive tail expansion.
     try:
         size_b = int(p.stat().st_size)
-    except Exception:
+    except Exception:  # THIS IS A HORRIBLE ANTI-PATTERN, FIX IT
         size_b = 0
 
     tb = int(tail_bytes)
@@ -1515,7 +1515,7 @@ def extract_error_snippet_from_log_file(
                     "tests completed with exit code",
                 )
             )
-        except Exception:
+        except Exception:  # THIS IS A HORRIBLE ANTI-PATTERN, FIX IT
             return False
 
     # If we didn't find command blocks for a pytest/rust failure, retry with a larger tail window.
@@ -1536,7 +1536,7 @@ def extract_error_snippet_from_log_file(
                 )
                 if "[[CMD]]" in (snip2 or ""):
                     return snip2
-    except Exception:
+    except Exception:  # THIS IS A HORRIBLE ANTI-PATTERN, FIX IT
         pass
 
     # If the tail window likely missed the real failure, expand and try again (bounded).
@@ -1554,7 +1554,7 @@ def extract_error_snippet_from_log_file(
             # Prefer the expanded snippet if it contains more high-signal content.
             if _has_high_signal(snip3) and not _has_high_signal(snip):
                 return snip3
-    except Exception:
+    except Exception:  # THIS IS A HORRIBLE ANTI-PATTERN, FIX IT
         pass
 
     return snip
@@ -1593,7 +1593,7 @@ def _audit_snippet_commands(*, logs_root: Path, tail_bytes: int) -> int:
             txt = _read_text_tail(p, max_bytes=int(tail_bytes))
             lines = (txt or "").splitlines()
             cats = categorize_error_log_lines(lines)
-        except Exception:
+        except Exception:  # THIS IS A HORRIBLE ANTI-PATTERN, FIX IT
             continue
 
         is_pytest = "pytest-error" in cats
@@ -1625,7 +1625,7 @@ def _audit_snippet_commands(*, logs_root: Path, tail_bytes: int) -> int:
                     continue
                 if in_cmd:
                     cur.append(ln)
-        except Exception:
+        except Exception:  # THIS IS A HORRIBLE ANTI-PATTERN, FIX IT
             cmd_blocks = []
 
         prelude = "\n".join([b for b in cmd_blocks if b]).strip()
@@ -1639,7 +1639,7 @@ def _audit_snippet_commands(*, logs_root: Path, tail_bytes: int) -> int:
                     first_fail_idx = i
                     break
             pre_fail_text = "\n".join(snip.splitlines()[:first_fail_idx]) if first_fail_idx is not None else snip
-        except Exception:
+        except Exception:  # THIS IS A HORRIBLE ANTI-PATTERN, FIX IT
             pre_fail_text = snip
 
         ok = True

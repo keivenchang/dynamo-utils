@@ -72,37 +72,22 @@ class PhaseTimer:
         try:
             yield
         finally:
-            try:
-                self._dur_s[str(name)] = float(self._dur_s.get(str(name), 0.0)) + max(0.0, time.monotonic() - t0)
-            except Exception:
-                pass
+            self._dur_s[str(name)] = float(self._dur_s.get(str(name), 0.0)) + max(0.0, time.monotonic() - t0)
 
     def mark(self, name: str) -> None:
         """Record time since the last mark into `name`, and advance the 'last' cursor."""
-        try:
-            now = time.monotonic()
-            self._dur_s[str(name)] = float(self._dur_s.get(str(name), 0.0)) + max(0.0, now - self._t_last)
-            self._t_last = now
-        except Exception:
-            pass
+        now = time.monotonic()
+        self._dur_s[str(name)] = float(self._dur_s.get(str(name), 0.0)) + max(0.0, now - self._t_last)
+        self._t_last = now
 
     def start(self) -> float:
         """Return a monotonic timestamp suitable for passing to `stop()`."""
-        try:
-            return float(time.monotonic())
-        except Exception:
-            return 0.0
+        return float(time.monotonic())
 
     def stop(self, name: str, started_at: float) -> None:
         """Accumulate elapsed seconds since `started_at` into `name`."""
-        try:
-            dt = max(0.0, float(time.monotonic()) - float(started_at))
-        except Exception:
-            return
-        try:
-            self._dur_s[str(name)] = float(self._dur_s.get(str(name), 0.0)) + dt
-        except Exception:
-            pass
+        dt = max(0.0, float(time.monotonic()) - float(started_at))
+        self._dur_s[str(name)] = float(self._dur_s.get(str(name), 0.0)) + dt
 
     def time_call(self, name: str, fn, *args, **kwargs):
         """Time a callable and return its result (best-effort)."""
@@ -113,10 +98,7 @@ class PhaseTimer:
             self.stop(str(name), t0)
 
     def total_s(self) -> float:
-        try:
-            return max(0.0, time.monotonic() - self._t0)
-        except Exception:
-            return 0.0
+        return max(0.0, time.monotonic() - self._t0)
 
     def as_dict(self, *, include_total: bool = True) -> Dict[str, float]:
         d = dict(self._dur_s)
@@ -126,10 +108,7 @@ class PhaseTimer:
 
     @staticmethod
     def format_seconds(s: float) -> str:
-        try:
-            return f"{float(s):.2f}s"
-        except Exception:
-            return "?"
+        return f"{float(s):.2f}s"
 
     def format_one_line(self, *, keys: Optional[List[str]] = None) -> str:
         d = self.as_dict(include_total=True)
@@ -147,7 +126,7 @@ class PhaseTimer:
         """Format a dict of {phase: seconds} similarly to `format_one_line()`."""
         try:
             dd: Dict[str, float] = {str(k): float(v) for k, v in (d or {}).items() if v is not None}
-        except Exception:
+        except (ValueError, TypeError):
             dd = {}
         if keys:
             parts = []
@@ -176,26 +155,25 @@ DEFAULT_STABLE_AFTER_HOURS: int = 8
 DEFAULT_UNSTABLE_TTL_S: int = 300
 # ^ "Fast refresh" TTL (seconds) for things that change quickly.
 #   Example: for a commit from ~5 minutes ago, we may re-check GitHub Actions status every 5 minutes.
-DEFAULT_STABLE_TTL_S: int = 30 * 24 * 3600
-# ^ "Stable" TTL (seconds) for older/less-changing data.
-#   Example: for a commit from last week, we only refresh its GitHub Actions status about once per 30 days
-#   (because it is past `DEFAULT_STABLE_AFTER_HOURS`).
+DEFAULT_STABLE_TTL_S: int = 3 * 24 * 3600
+# ^ "Stable" TTL (seconds) for older/less-changing data (commits > 8 hours old).
+#   CI can still be re-run even for old commits, so we don't cache forever.
+#   Example: for a commit from yesterday, we cache its GitHub Actions status for 3 days.
 DEFAULT_OPEN_PRS_TTL_S: int = 60
 # ^ TTL (seconds) for caches keyed by *open* PRs (expected to change often).
 #   Example: required-checks / PR metadata for an open PR can be refreshed every 5 minutes.
-DEFAULT_CLOSED_PRS_TTL_S: int = 14 * 24 * 3600
-# ^ TTL (seconds) for caches keyed by *closed/merged* PRs (mostly stable).
-#   Example: merge-date for a merged PR is basically immutable, but we still allow a refresh every ~14 days.
+DEFAULT_CLOSED_PRS_TTL_S: int = 365 * 24 * 3600
+# ^ TTL (seconds) for caches keyed by *closed/merged* PRs.
+#   Merged PRs are IMMUTABLE and never change, so we cache them for 1 year (effectively forever).
+#   Example: merge-date for a merged PR is cached for 365 days.
 DEFAULT_NO_PR_TTL_S: int = 24 * 3600
 # ^ TTL (seconds) for "negative cache" entries (when we *didn't* find something).
 #   Example: if SHA→PR mapping wasn't found, we remember that for 24 hours so we don't re-query constantly,
 #   but we retry later in case the mapping appears.
-DEFAULT_RAW_LOG_URL_TTL_S: int = 3600
-# ^ TTL (seconds) for GitHub job raw-log *redirect URLs* (signed + short-lived).
-#   Example: a `Location:` URL returned by `/actions/jobs/{id}/logs` can expire in ~1 hour.
-DEFAULT_RAW_LOG_TEXT_TTL_S: int = 30 * 24 * 3600
+DEFAULT_RAW_LOG_TEXT_TTL_S: int = 365 * 24 * 3600
 # ^ TTL (seconds) for cached raw log *content* (the downloaded text we parse/snippet locally).
-#   Example: once we download job `59030780729`, keep its `.log` for ~30 days to avoid re-downloading.
+#   Completed job logs are IMMUTABLE and never change, so we cache them for 1 year (effectively forever).
+#   Example: once we download job `59030780729`, keep its `.log` for 365 days to avoid re-downloading.
 DEFAULT_RAW_LOG_TEXT_MAX_BYTES: int = 0
 # ^ Max bytes to download when caching raw log content.
 #   Example: set to `10*1024*1024` to cap downloads at 10MB; `0` means "no cap".
@@ -416,14 +394,14 @@ def get_terminal_width(padding: int = 2, default: int = 118) -> int:
                 )
                 if result.returncode == 0 and result.stdout.strip().isdigit():
                     term_width = int(result.stdout.strip()) - padding
-            except Exception:
+            except (OSError, subprocess.SubprocessError, ValueError):
                 pass
 
         # Method 3: Use shutil.get_terminal_size() (ioctl-based)
         if term_width is None:
             term_width = shutil.get_terminal_size().columns - padding
 
-    except Exception:
+    except OSError:
         term_width = default
 
     # Final fallback to default
@@ -778,14 +756,14 @@ class DynamoRepositoryUtils(BaseUtils):
             # Keep remote refs reasonably fresh; avoid tags to reduce work.
             try:
                 git_utils.repo.git.fetch("origin", "--prune", "--no-tags", "--quiet")
-            except Exception:
+            except git.exc.GitCommandError:
                 # Non-fatal; proceed with whatever refs we have
                 pass
 
         try:
             out = git_utils.repo.git.for_each_ref("--format=%(refname:short)", release_ref_glob)
             branches = [b.strip() for b in out.splitlines() if b.strip()]
-        except Exception:
+        except git.exc.GitCommandError:
             branches = []
         if not branches:
             return {}
@@ -821,14 +799,14 @@ class DynamoRepositoryUtils(BaseUtils):
             # Preferred: fork-point
             try:
                 mb = (git_utils.repo.git.merge_base("--fork-point", base_ref, branch_ref) or "").strip()
-            except Exception:
+            except git.exc.GitCommandError:
                 mb = ""
 
             # Fallback: normal merge-base
             if not mb:
                 try:
                     mb = (git_utils.repo.git.merge_base(base_ref, branch_ref) or "").strip()
-                except Exception:
+                except git.exc.GitCommandError:
                     mb = ""
 
             if not mb:
@@ -1373,20 +1351,17 @@ def select_shas_for_network_fetch(
     if not sha_list or not sha_to_datetime:
         return allow
 
-    try:
-        now_utc = datetime.now(timezone.utc)
-        cutoff_s = float(recent_hours) * 3600.0
-        for sha in sha_list[: int(max_fetch or 0)]:
-            dt = sha_to_datetime.get(sha)
-            if dt is None:
-                continue
-            if dt.tzinfo is None:
-                dt = dt.replace(tzinfo=timezone.utc)
-            age_s = (now_utc - dt.astimezone(timezone.utc)).total_seconds()
-            if age_s < cutoff_s:
-                allow.add(sha)
-    except Exception:
-        return set()
+    now_utc = datetime.now(timezone.utc)
+    cutoff_s = float(recent_hours) * 3600.0
+    for sha in sha_list[: int(max_fetch or 0)]:
+        dt = sha_to_datetime.get(sha)
+        if dt is None:
+            continue
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        age_s = (now_utc - dt.astimezone(timezone.utc)).total_seconds()
+        if age_s < cutoff_s:
+            allow.add(sha)
     return allow
 
 

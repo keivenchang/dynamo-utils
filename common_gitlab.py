@@ -51,7 +51,7 @@ class GitLabAPIClient:
             token_file = Path.home() / '.config' / 'gitlab-token'
             if token_file.exists():
                 return token_file.read_text().strip()
-        except Exception:
+        except OSError:
             pass
         return None
 
@@ -130,7 +130,7 @@ class GitLabAPIClient:
             response = requests.get(url, headers=self.headers, params=params, timeout=timeout)
             try:
                 status_code = int(response.status_code)
-            except Exception:
+            except (ValueError, TypeError):
                 status_code = None
 
             if response.status_code == 401:
@@ -147,28 +147,22 @@ class GitLabAPIClient:
             raise Exception(f"GitLab API request failed for {endpoint}: {e}")
         finally:
             dt = max(0.0, time.monotonic() - t0)
-            try:
-                self._rest_calls_total += 1
-                self._rest_calls_by_endpoint[ep] = int(self._rest_calls_by_endpoint.get(ep, 0) or 0) + 1
-                self._rest_time_total_s += float(dt)
-                self._rest_time_by_endpoint_s[ep] = float(self._rest_time_by_endpoint_s.get(ep, 0.0) or 0.0) + float(dt)
-                if status_code is not None and int(status_code) >= 400:
-                    self._rest_errors_by_status[int(status_code)] = int(self._rest_errors_by_status.get(int(status_code), 0) or 0) + 1
-            except Exception:
-                pass
+            self._rest_calls_total += 1
+            self._rest_calls_by_endpoint[ep] = int(self._rest_calls_by_endpoint.get(ep, 0) or 0) + 1
+            self._rest_time_total_s += float(dt)
+            self._rest_time_by_endpoint_s[ep] = float(self._rest_time_by_endpoint_s.get(ep, 0.0) or 0.0) + float(dt)
+            if status_code is not None and int(status_code) >= 400:
+                self._rest_errors_by_status[int(status_code)] = int(self._rest_errors_by_status.get(int(status_code), 0) or 0) + 1
 
     def get_rest_call_stats(self) -> Dict[str, Any]:
         """Return best-effort REST call stats for the current process/run."""
-        try:
-            return {
-                "total": int(self._rest_calls_total),
-                "time_total_s": float(self._rest_time_total_s),
-                "by_endpoint": dict(sorted(dict(self._rest_calls_by_endpoint or {}).items(), key=lambda kv: (-int(kv[1] or 0), kv[0]))),
-                "time_by_endpoint_s": dict(sorted(dict(self._rest_time_by_endpoint_s or {}).items(), key=lambda kv: (-float(kv[1] or 0.0), kv[0]))),
-                "errors_by_status": dict(sorted(dict(self._rest_errors_by_status or {}).items(), key=lambda kv: (-int(kv[1] or 0), int(kv[0] or 0)))),
-            }
-        except Exception:
-            return {"total": 0, "time_total_s": 0.0, "by_endpoint": {}, "time_by_endpoint_s": {}, "errors_by_status": {}}
+        return {
+            "total": int(self._rest_calls_total),
+            "time_total_s": float(self._rest_time_total_s),
+            "by_endpoint": dict(sorted(dict(self._rest_calls_by_endpoint or {}).items(), key=lambda kv: (-int(kv[1] or 0), kv[0]))),
+            "time_by_endpoint_s": dict(sorted(dict(self._rest_time_by_endpoint_s or {}).items(), key=lambda kv: (-float(kv[1] or 0.0), kv[0]))),
+            "errors_by_status": dict(sorted(dict(self._rest_errors_by_status or {}).items(), key=lambda kv: (-int(kv[1] or 0), int(kv[0] or 0)))),
+        }
 
     def get_cached_registry_images_for_shas(self, project_id: str, registry_id: str,
                                            sha_list: List[str],
@@ -218,7 +212,7 @@ class GitLabAPIClient:
         if cache_path.exists():
             try:
                 cache = json.loads(cache_path.read_text())
-            except Exception:
+            except (OSError, json.JSONDecodeError):
                 pass
 
         # Initialize result for requested SHAs
@@ -330,7 +324,7 @@ class GitLabAPIClient:
                 try:
                     tag_time = datetime.fromisoformat(tag_created.replace('Z', '+00:00'))
                     return tag_time < eight_hours_ago_utc
-                except Exception:
+                except (ValueError, TypeError):
                     return False
 
             # Check if first page has old tags
@@ -479,7 +473,7 @@ class GitLabAPIClient:
         if pipeline_cache_path.exists():
             try:
                 cache = json.loads(pipeline_cache_path.read_text())
-            except Exception:
+            except (OSError, json.JSONDecodeError):
                 pass
 
         # If skip_fetch=True, only return cached data - NO API calls
@@ -514,23 +508,20 @@ class GitLabAPIClient:
 
             def fetch_pipeline_status(sha):
                 """Helper function to fetch pipeline status for a single SHA"""
-                try:
-                    # Get pipelines for this commit
-                    endpoint = f"/api/v4/projects/169905/pipelines"
-                    params = {'sha': sha, 'per_page': 1}
-                    pipelines = self.get(endpoint, params=params)
+                # Get pipelines for this commit
+                endpoint = f"/api/v4/projects/169905/pipelines"
+                params = {'sha': sha, 'per_page': 1}
+                pipelines = self.get(endpoint, params=params)
 
-                    if pipelines and len(pipelines) > 0:
-                        pipeline = pipelines[0]  # Most recent pipeline
-                        status_info = {
-                            'status': pipeline.get('status', 'unknown'),
-                            'id': pipeline.get('id'),
-                            'web_url': pipeline.get('web_url', ''),
-                        }
-                        return (sha, status_info)
-                    else:
-                        return (sha, None)
-                except Exception:
+                if pipelines and len(pipelines) > 0:
+                    pipeline = pipelines[0]  # Most recent pipeline
+                    status_info = {
+                        'status': pipeline.get('status', 'unknown'),
+                        'id': pipeline.get('id'),
+                        'web_url': pipeline.get('web_url', ''),
+                    }
+                    return (sha, status_info)
+                else:
                     return (sha, None)
 
             # Fetch in parallel with 10 workers
@@ -539,18 +530,15 @@ class GitLabAPIClient:
 
                 # Collect results as they complete
                 for future in futures:
-                    try:
-                        sha, status_info = future.result()
-                        result[sha] = status_info
-                        cache[sha] = status_info
-                    except Exception:
-                        pass
+                    sha, status_info = future.result()
+                    result[sha] = status_info
+                    cache[sha] = status_info
 
             # Save updated cache
             try:
                 pipeline_cache_path.parent.mkdir(parents=True, exist_ok=True)
                 pipeline_cache_path.write_text(json.dumps(cache, indent=2))
-            except Exception:
+            except OSError:
                 pass
 
         return result
@@ -606,7 +594,7 @@ class GitLabAPIClient:
                 cache = json.loads(jobs_cache_path.read_text())
                 # Convert string keys back to int
                 cache = {int(k): v for k, v in cache.items()}
-            except Exception:
+            except (OSError, json.JSONDecodeError, ValueError):
                 pass
 
         # Helper function to extract counts from cache entry (handles old and new format)
@@ -637,7 +625,7 @@ class GitLabAPIClient:
             try:
                 fetched_at = datetime.fromisoformat(entry['fetched_at'].replace('Z', '+00:00'))
                 return (now - fetched_at) < age_limit
-            except Exception:
+            except (ValueError, TypeError, KeyError):
                 return False  # Invalid timestamp = stale
 
         now = datetime.now(timezone.utc)
@@ -668,36 +656,33 @@ class GitLabAPIClient:
 
             def fetch_pipeline_jobs(pipeline_id):
                 """Helper function to fetch job counts for a single pipeline"""
-                try:
-                    # Get jobs for this pipeline
-                    endpoint = f"/api/v4/projects/169905/pipelines/{pipeline_id}/jobs"
-                    params = {'per_page': 100}  # Get up to 100 jobs
-                    jobs = self.get(endpoint, params=params)
+                # Get jobs for this pipeline
+                endpoint = f"/api/v4/projects/169905/pipelines/{pipeline_id}/jobs"
+                params = {'per_page': 100}  # Get up to 100 jobs
+                jobs = self.get(endpoint, params=params)
 
-                    if jobs:
-                        # Count jobs by status
-                        counts = {
-                            'success': 0,
-                            'failed': 0,
-                            'running': 0,
-                            'pending': 0
-                        }
+                if jobs:
+                    # Count jobs by status
+                    counts = {
+                        'success': 0,
+                        'failed': 0,
+                        'running': 0,
+                        'pending': 0
+                    }
 
-                        for job in jobs:
-                            status = job.get('status', 'unknown')
-                            if status in counts:
-                                counts[status] += 1
-                            # Map other statuses to main categories
-                            elif status in ('skipped', 'manual', 'canceled'):
-                                pass  # Don't count these
-                            elif status in ('created', 'waiting_for_resource'):
-                                counts['pending'] += 1
+                    for job in jobs:
+                        status = job.get('status', 'unknown')
+                        if status in counts:
+                            counts[status] += 1
+                        # Map other statuses to main categories
+                        elif status in ('skipped', 'manual', 'canceled'):
+                            pass  # Don't count these
+                        elif status in ('created', 'waiting_for_resource'):
+                            counts['pending'] += 1
 
-                        # Return with timestamp
-                        return (pipeline_id, counts, fetch_timestamp)
-                    else:
-                        return (pipeline_id, None, None)
-                except Exception:
+                    # Return with timestamp
+                    return (pipeline_id, counts, fetch_timestamp)
+                else:
                     return (pipeline_id, None, None)
 
             # Fetch in parallel with 10 workers
@@ -706,18 +691,15 @@ class GitLabAPIClient:
 
                 # Collect results as they complete
                 for future in futures:
-                    try:
-                        pipeline_id, counts, timestamp = future.result()
-                        result[pipeline_id] = counts
-                        if counts is not None and timestamp is not None:
-                            cache[pipeline_id] = {
-                                'counts': counts,
-                                'fetched_at': timestamp
-                            }
-                        else:
-                            cache[pipeline_id] = None
-                    except Exception:
-                        pass
+                    pipeline_id, counts, timestamp = future.result()
+                    result[pipeline_id] = counts
+                    if counts is not None and timestamp is not None:
+                        cache[pipeline_id] = {
+                            'counts': counts,
+                            'fetched_at': timestamp
+                        }
+                    else:
+                        cache[pipeline_id] = None
 
             # Save updated cache
             try:
@@ -725,7 +707,7 @@ class GitLabAPIClient:
                 # Convert int keys to string for JSON
                 cache_str_keys = {str(k): v for k, v in cache.items()}
                 jobs_cache_path.write_text(json.dumps(cache_str_keys, indent=2))
-            except Exception:
+            except OSError:
                 pass
 
         return result
@@ -776,7 +758,7 @@ class GitLabAPIClient:
                 raw = json.loads(jobs_cache_path.read_text())
                 # Convert string keys back to int
                 cache = {int(k): v for k, v in raw.items()}
-            except Exception:
+            except (OSError, json.JSONDecodeError, ValueError):
                 cache = {}
 
         def normalize_entry(entry: Any) -> Optional[Dict[str, Any]]:
@@ -845,57 +827,51 @@ class GitLabAPIClient:
             fetch_timestamp = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
             def fetch_pipeline_jobs_details(pipeline_id: int) -> Tuple[int, Optional[Dict[str, Any]]]:
-                try:
-                    endpoint = f"/api/v4/projects/169905/pipelines/{pipeline_id}/jobs"
-                    params = {"per_page": 100}
-                    jobs = self.get(endpoint, params=params)
-                    if not jobs:
-                        return pipeline_id, None
-
-                    counts = {"success": 0, "failed": 0, "running": 0, "pending": 0, "canceled": 0}
-                    slim_jobs: List[Dict[str, Any]] = []
-
-                    for job in jobs:
-                        status = job.get("status", "unknown")
-                        name = job.get("name", "")
-                        stage = job.get("stage", "")
-
-                        # Counts (map GitLab statuses to our buckets)
-                        if status in counts:
-                            counts[status] += 1
-                        elif status in ("created", "waiting_for_resource"):
-                            counts["pending"] += 1
-                        elif status in ("skipped", "manual"):
-                            pass
-                        else:
-                            # Keep unknown statuses out of counts
-                            pass
-
-                        # Tooltip list (keep it light)
-                        if name:
-                            slim_jobs.append({"name": name, "stage": stage, "status": status})
-
-                    details = {"counts": counts, "jobs": slim_jobs, "fetched_at": fetch_timestamp}
-                    return pipeline_id, details
-                except Exception:
+                endpoint = f"/api/v4/projects/169905/pipelines/{pipeline_id}/jobs"
+                params = {"per_page": 100}
+                jobs = self.get(endpoint, params=params)
+                if not jobs:
                     return pipeline_id, None
+
+                counts = {"success": 0, "failed": 0, "running": 0, "pending": 0, "canceled": 0}
+                slim_jobs: List[Dict[str, Any]] = []
+
+                for job in jobs:
+                    status = job.get("status", "unknown")
+                    name = job.get("name", "")
+                    stage = job.get("stage", "")
+
+                    # Counts (map GitLab statuses to our buckets)
+                    if status in counts:
+                        counts[status] += 1
+                    elif status in ("created", "waiting_for_resource"):
+                        counts["pending"] += 1
+                    elif status in ("skipped", "manual"):
+                        pass
+                    else:
+                        # Keep unknown statuses out of counts
+                        pass
+
+                    # Tooltip list (keep it light)
+                    if name:
+                        slim_jobs.append({"name": name, "stage": stage, "status": status})
+
+                details = {"counts": counts, "jobs": slim_jobs, "fetched_at": fetch_timestamp}
+                return pipeline_id, details
 
             with ThreadPoolExecutor(max_workers=10) as executor:
                 futures = [executor.submit(fetch_pipeline_jobs_details, pid) for pid in pipeline_ids_to_fetch]
                 for future in futures:
-                    try:
-                        pid, details = future.result()
-                        result[pid] = details
-                        cache[pid] = details
-                    except Exception:
-                        pass
+                    pid, details = future.result()
+                    result[pid] = details
+                    cache[pid] = details
 
             # Save updated cache
             try:
                 jobs_cache_path.parent.mkdir(parents=True, exist_ok=True)
                 cache_str_keys = {str(k): v for k, v in cache.items()}
                 jobs_cache_path.write_text(json.dumps(cache_str_keys, indent=2))
-            except Exception:
+            except OSError:
                 pass
 
         return result
@@ -934,7 +910,7 @@ class GitLabAPIClient:
             try:
                 raw = json.loads(cache_path.read_text())
                 cache = {int(k): v for k, v in raw.items()}
-            except Exception:
+            except (OSError, json.JSONDecodeError, ValueError):
                 cache = {}
 
         if skip_fetch:
@@ -976,13 +952,10 @@ class GitLabAPIClient:
             with ThreadPoolExecutor(max_workers=10) as executor:
                 futures = [executor.submit(fetch_one, mr) for mr in to_fetch]
                 for fut in futures:
-                    try:
-                        mr_iid, p = fut.result()
-                        result[mr_iid] = p
-                        cache[mr_iid] = p
-                        cache_updated = True
-                    except Exception:
-                        pass
+                    mr_iid, p = fut.result()
+                    result[mr_iid] = p
+                    cache[mr_iid] = p
+                    cache_updated = True
 
         # Save updated cache
         if cache_updated:
@@ -990,7 +963,7 @@ class GitLabAPIClient:
                 cache_path.parent.mkdir(parents=True, exist_ok=True)
                 cache_str = {str(k): v for k, v in cache.items()}
                 cache_path.write_text(json.dumps(cache_str, indent=2))
-            except Exception:
+            except OSError:
                 pass
 
         return result
@@ -1055,7 +1028,7 @@ class GitLabAPIClient:
                 # Keys are stored as strings in JSON, convert back to int
                 cache_raw = json.loads(mr_cache_path.read_text())
                 cache = {int(k): v for k, v in cache_raw.items()}
-            except Exception:
+            except (OSError, json.JSONDecodeError, ValueError):
                 pass
 
         # If skip_fetch=True, only return cached data
@@ -1105,7 +1078,7 @@ class GitLabAPIClient:
                 # Convert int keys to string for JSON
                 cache_str_keys = {str(k): v for k, v in cache.items()}
                 mr_cache_path.write_text(json.dumps(cache_str_keys, indent=2))
-            except Exception:
+            except OSError:
                 pass
 
         return result

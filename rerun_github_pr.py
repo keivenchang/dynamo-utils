@@ -124,7 +124,7 @@ class PRMonitor:
                 jobs = data.get('jobs', [])
                 return [job for job in jobs if job.get('conclusion') == 'failure']
             return []
-        except Exception:
+        except (OSError, subprocess.SubprocessError, json.JSONDecodeError):
             return []
 
     def check_for_code_errors_in_run(self, run_id: str, failed_jobs: List[Dict[str, str]]) -> bool:
@@ -160,7 +160,7 @@ class PRMonitor:
                 timeout=10
             )
             return result.returncode == 0
-        except Exception:
+        except (OSError, subprocess.SubprocessError):
             return False
 
     def get_run_status(self, run_id: str) -> Dict[str, str]:
@@ -176,7 +176,7 @@ class PRMonitor:
             if result.returncode == 0:
                 return json.loads(result.stdout)
             return {}
-        except Exception:
+        except (OSError, subprocess.SubprocessError, json.JSONDecodeError):
             return {}
 
     def get_job_elapsed_time(self, run_id: str, job_name: str) -> Optional[str]:
@@ -218,7 +218,7 @@ class PRMonitor:
                             return f'{minutes}m{seconds}s'
 
                 return None
-        except Exception:
+        except (OSError, subprocess.SubprocessError, json.JSONDecodeError, ValueError):
             return None
 
     def monitor_pr(self, pr_number: int) -> bool:

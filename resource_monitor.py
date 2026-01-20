@@ -106,7 +106,7 @@ def _run_cmd_maybe_sudo(
         if base == "nethogs":
             sudo_cmd = ["sudo", "-n", *list(cmd)]
             return _run_cmd(sudo_cmd, timeout_s=timeout_s)
-    except Exception:
+    except Exception:  # THIS IS A HORRIBLE ANTI-PATTERN, FIX IT
         pass
     # Common permission-denied patterns
     msg = f"{out}\n{err}".lower()
@@ -139,7 +139,7 @@ def _ping_rtt_ms(target: str, *, timeout_s: float) -> Tuple[Optional[float], Opt
         if m:
             try:
                 return float(m.group(1)), None
-            except Exception:
+            except Exception:  # THIS IS A HORRIBLE ANTI-PATTERN, FIX IT
                 return None, "parse_error"
         return None, "parse_missing_time"
 
@@ -207,7 +207,7 @@ def _collect_net_top_nethogs(*, top_k: int, timeout_s: float) -> List[Dict[str, 
         try:
             sent_kbs = float(parts[1])
             recv_kbs = float(parts[2])
-        except Exception:
+        except Exception:  # THIS IS A HORRIBLE ANTI-PATTERN, FIX IT
             continue
 
         # nethogs often reports proc as "name/PID/UID" (or "unknown TCP/0/0").
@@ -216,7 +216,7 @@ def _collect_net_top_nethogs(*, top_k: int, timeout_s: float) -> List[Dict[str, 
             segs = proc.split("/")
             if len(segs) >= 2 and segs[1].isdigit():
                 pid = int(segs[1])
-        except Exception:
+        except Exception:  # THIS IS A HORRIBLE ANTI-PATTERN, FIX IT
             pid = 0
 
         rows.append(
@@ -252,7 +252,7 @@ def _collect_github_rate_limit(
         return []
     try:
         payload = json.loads(out)
-    except Exception:
+    except Exception:  # THIS IS A HORRIBLE ANTI-PATTERN, FIX IT
         return []
     res = payload.get("resources")
     if not isinstance(res, dict):
@@ -277,7 +277,7 @@ def _collect_github_rate_limit(
                     "reset_epoch": int(reset_epoch) if reset_epoch is not None else None,
                 }
             )
-        except Exception:
+        except Exception:  # THIS IS A HORRIBLE ANTI-PATTERN, FIX IT
             continue
     return out_rows
 
@@ -372,7 +372,7 @@ def _collect_docker_stats(*, timeout_s: float) -> List[Dict[str, Any]]:
                 cid, img = parts[0].strip(), parts[1].strip()
                 if cid:
                     id_to_image[cid] = img
-    except Exception:
+    except Exception:  # THIS IS A HORRIBLE ANTI-PATTERN, FIX IT
         pass
 
     cmd = [exe, "stats", "--no-stream", "--format", "{{json .}}"]
@@ -387,7 +387,7 @@ def _collect_docker_stats(*, timeout_s: float) -> List[Dict[str, Any]]:
             continue
         try:
             d = json.loads(ln)
-        except Exception:
+        except Exception:  # THIS IS A HORRIBLE ANTI-PATTERN, FIX IT
             continue
 
         cid = str(d.get("ID") or "").strip()
@@ -399,14 +399,14 @@ def _collect_docker_stats(*, timeout_s: float) -> List[Dict[str, Any]]:
         cpu_percent = None
         try:
             cpu_percent = float(str(d.get("CPUPerc") or "").strip().rstrip("%"))
-        except Exception:
+        except Exception:  # THIS IS A HORRIBLE ANTI-PATTERN, FIX IT
             cpu_percent = None
 
         mem_usage_bytes, mem_limit_bytes = _parse_pair_bytes(str(d.get("MemUsage") or ""))
         mem_percent = None
         try:
             mem_percent = float(str(d.get("MemPerc") or "").strip().rstrip("%"))
-        except Exception:
+        except Exception:  # THIS IS A HORRIBLE ANTI-PATTERN, FIX IT
             mem_percent = None
 
         net_rx_bytes, net_tx_bytes = _parse_pair_bytes(str(d.get("NetIO") or ""))
@@ -415,7 +415,7 @@ def _collect_docker_stats(*, timeout_s: float) -> List[Dict[str, Any]]:
         pids = None
         try:
             pids = int(str(d.get("PIDs") or "").strip())
-        except Exception:
+        except Exception:  # THIS IS A HORRIBLE ANTI-PATTERN, FIX IT
             pids = None
 
         rows.append(
@@ -467,7 +467,7 @@ class SingleInstanceLock:
             if not raw:
                 return None
             return int(raw.splitlines()[0].strip())
-        except Exception:
+        except Exception:  # THIS IS A HORRIBLE ANTI-PATTERN, FIX IT
             return None
 
     def _write_pid(self, pid: int) -> None:
@@ -481,7 +481,7 @@ class SingleInstanceLock:
         finally:
             try:
                 os.close(fd)
-            except Exception:
+            except Exception:  # THIS IS A HORRIBLE ANTI-PATTERN, FIX IT
                 pass
 
     def pid_changed(self) -> bool:
@@ -507,7 +507,7 @@ class SingleInstanceLock:
                 # Note: this does NOT break an existing flock; we still wait until we can acquire it.
                 try:
                     self._write_pid(self._pid)
-                except Exception:
+                except Exception:  # THIS IS A HORRIBLE ANTI-PATTERN, FIX IT
                     pass
 
                 deadline = time.monotonic() + max(0.1, float(force_timeout_s))
@@ -540,11 +540,11 @@ class SingleInstanceLock:
             import fcntl
 
             fcntl.flock(self._fd, fcntl.LOCK_UN)
-        except Exception:
+        except Exception:  # THIS IS A HORRIBLE ANTI-PATTERN, FIX IT
             pass
         try:
             os.close(self._fd)
-        except Exception:
+        except Exception:  # THIS IS A HORRIBLE ANTI-PATTERN, FIX IT
             pass
         self._fd = None
 
@@ -560,7 +560,7 @@ class ResourceDB:
     def close(self) -> None:
         try:
             self.conn.close()
-        except Exception:
+        except Exception:  # THIS IS A HORRIBLE ANTI-PATTERN, FIX IT
             pass
 
     def _init_schema(self) -> None:
@@ -708,7 +708,7 @@ class ResourceDB:
             cols = [r[1] for r in cur.execute("PRAGMA table_info(docker_container_samples);").fetchall()]
             if "image" not in cols:
                 cur.execute("ALTER TABLE docker_container_samples ADD COLUMN image TEXT;")
-        except Exception:
+        except Exception:  # THIS IS A HORRIBLE ANTI-PATTERN, FIX IT
             pass
 
         cur.execute(
@@ -944,14 +944,14 @@ class ResourceDB:
 def _get_loadavg() -> Tuple[Optional[float], Optional[float], Optional[float]]:
     try:
         return os.getloadavg()
-    except Exception:
+    except Exception:  # THIS IS A HORRIBLE ANTI-PATTERN, FIX IT
         return None, None, None
 
 
 def _get_disk_io() -> Optional[psutil._common.sdiskio]:
     try:
         return psutil.disk_io_counters()
-    except Exception:
+    except Exception:  # THIS IS A HORRIBLE ANTI-PATTERN, FIX IT
         return None
 
 
@@ -997,7 +997,7 @@ def _get_gpu_metrics() -> Tuple[List[Dict[str, Any]], Dict[int, float]]:
                         "power_w": float(row[6]) if row[6] != "" else None,
                     }
                 )
-            except Exception:
+            except Exception:  # THIS IS A HORRIBLE ANTI-PATTERN, FIX IT
                 continue
 
     # Per-process GPU memory (best-effort; utilization per process is not available via nvidia-smi)
@@ -1015,7 +1015,7 @@ def _get_gpu_metrics() -> Tuple[List[Dict[str, Any]], Dict[int, float]]:
                 pid = int(row[0])
                 mem_mb = float(row[1]) if row[1] != "" else 0.0
                 pid_to_gpu_mem[pid] = pid_to_gpu_mem.get(pid, 0.0) + mem_mb
-            except Exception:
+            except Exception:  # THIS IS A HORRIBLE ANTI-PATTERN, FIX IT
                 continue
 
     return gpus, pid_to_gpu_mem
@@ -1026,7 +1026,7 @@ def _format_cmdline(cmdline: Sequence[str]) -> str:
         return ""
     try:
         return " ".join(shlex.quote(p) for p in cmdline)
-    except Exception:
+    except Exception:  # THIS IS A HORRIBLE ANTI-PATTERN, FIX IT
         return " ".join(cmdline)
 
 
@@ -1072,7 +1072,7 @@ def _collect_processes(
                     io_read_bps = (io_read_bytes - prev[0]) / dt_s
                     io_write_bps = (io_write_bytes - prev[1]) / dt_s
                 next_prev_io[pid] = (io_read_bytes, io_write_bytes)
-            except Exception:
+            except Exception:  # THIS IS A HORRIBLE ANTI-PATTERN, FIX IT
                 pass
 
             gpu_mem_mb = pid_to_gpu_mem.get(pid)
@@ -1095,7 +1095,7 @@ def _collect_processes(
             )
         except (psutil.NoSuchProcess, psutil.AccessDenied):
             continue
-        except Exception:
+        except Exception:  # THIS IS A HORRIBLE ANTI-PATTERN, FIX IT
             continue
 
     # Pick top offenders across metrics
@@ -1140,12 +1140,12 @@ def _ensure_cpu_percent_primed() -> None:
     # Prime system-wide cpu_percent and per-process cpu_percent, so next call has meaning.
     try:
         psutil.cpu_percent(None)
-    except Exception:
+    except Exception:  # THIS IS A HORRIBLE ANTI-PATTERN, FIX IT
         pass
     for p in psutil.process_iter():
         try:
             p.cpu_percent(None)
-        except Exception:
+        except Exception:  # THIS IS A HORRIBLE ANTI-PATTERN, FIX IT
             continue
 
 
@@ -1211,7 +1211,7 @@ class Monitor:
             if self.lock.pid_changed():
                 LOGGER.warning("PID guard changed in lock file; exiting (new instance takeover).")
                 return True
-        except Exception:
+        except Exception:  # THIS IS A HORRIBLE ANTI-PATTERN, FIX IT
             # If we can't read the file, don't kill the monitor; keep running.
             pass
         return False
@@ -1237,7 +1237,7 @@ class Monitor:
             cpu_percent = None
             try:
                 cpu_percent = float(psutil.cpu_percent(None))
-            except Exception:
+            except Exception:  # THIS IS A HORRIBLE ANTI-PATTERN, FIX IT
                 pass
 
             load = _get_loadavg()
@@ -1248,11 +1248,11 @@ class Monitor:
                 self._prev_mem_ts = ts
                 try:
                     mem = psutil.virtual_memory()
-                except Exception:
+                except Exception:  # THIS IS A HORRIBLE ANTI-PATTERN, FIX IT
                     mem = None
                 try:
                     swap = psutil.swap_memory()
-                except Exception:
+                except Exception:  # THIS IS A HORRIBLE ANTI-PATTERN, FIX IT
                     swap = None
 
             net = psutil.net_io_counters()
@@ -1305,7 +1305,7 @@ class Monitor:
                             top_k=int(self.net_top_k),
                             timeout_s=min(5.0, max(1.5, float(self.net_top_interval_s))),
                         )
-                    except Exception:
+                    except Exception:  # THIS IS A HORRIBLE ANTI-PATTERN, FIX IT
                         # Never fail the monitor due to optional tooling.
                         net_top_rows = []
 
@@ -1316,7 +1316,7 @@ class Monitor:
                     self._prev_docker_stats_ts = ts
                     try:
                         docker_rows = _collect_docker_stats(timeout_s=min(4.0, max(1.0, float(self.docker_stats_interval_s))))
-                    except Exception:
+                    except Exception:  # THIS IS A HORRIBLE ANTI-PATTERN, FIX IT
                         docker_rows = []
 
             # GitHub API rate limit (optional; best-effort)
@@ -1329,7 +1329,7 @@ class Monitor:
                             resources=self.gh_rate_limit_resources,
                             timeout_s=min(4.0, max(1.0, float(self.gh_rate_limit_interval_s) / 4.0)),
                         )
-                    except Exception:
+                    except Exception:  # THIS IS A HORRIBLE ANTI-PATTERN, FIX IT
                         gh_rl_rows = []
 
             # Persist
@@ -1404,7 +1404,7 @@ def _default_db_path() -> Path:
         override = os.environ.get("DYNAMO_UTILS_CACHE_DIR", "").strip()
         if override:
             return Path(override).expanduser() / "resource_monitor.sqlite"
-    except Exception:
+    except Exception:  # THIS IS A HORRIBLE ANTI-PATTERN, FIX IT
         pass
     return Path.home() / ".cache" / "dynamo-utils" / "resource_monitor.sqlite"
 
@@ -1416,7 +1416,7 @@ def _default_lock_path(db_path: Path) -> Path:
         override = os.environ.get("DYNAMO_UTILS_CACHE_DIR", "").strip()
         if override:
             return Path(override).expanduser() / "resource_monitor.lock"
-    except Exception:
+    except Exception:  # THIS IS A HORRIBLE ANTI-PATTERN, FIX IT
         pass
     return Path.home() / ".cache" / "dynamo-utils" / "resource_monitor.lock"
 

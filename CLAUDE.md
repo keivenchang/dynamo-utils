@@ -17,6 +17,7 @@ TABLE OF CONTENTS
   1.3 Commit Policy
   1.4 Permission Policy
   1.5 Python Virtual Environment (Host vs Container)
+  1.6 CRITICAL ANTI-PATTERNS (Review Every 10 Minutes)
 
 2. ENVIRONMENT SETUP
   2.1 All Projects Overview
@@ -79,6 +80,128 @@ source ~/dynamo/venv/bin/activate  # example; adjust to your machine
 ```
 
 If running inside the dev container, the Python environment is already set up.
+
+## 1.6 CRITICAL ANTI-PATTERNS (Review Every 10 Minutes)
+
+**REMINDER: Review this section every 10 minutes during active coding.**
+
+These anti-patterns are ABSOLUTELY FORBIDDEN. Violating them wastes debugging time and creates bugs:
+
+### 1.6.1 ALL IMPORTS AT TOP OF FILE - NO try/except
+
+❌ **ABSOLUTELY FORBIDDEN:**
+```python
+def foo():
+    import json  # NEVER import inside functions!
+    import re
+
+# ALSO FORBIDDEN - Don't hide import errors! Just make sure the 3rd party imports are in requirements.txt.
+try:
+    import requests
+    HAS_REQUESTS = True
+except ImportError:
+    HAS_REQUESTS = False
+    requests = None
+```
+
+✅ **CORRECT:**
+```python
+# At top of file - import directly, fail fast if not available
+import json
+import re
+import requests
+import yaml
+
+def foo():
+    # Use imports directly
+```
+
+**RULES:**
+- ALL imports at module top (never inside functions)
+- ⚠️ EXTREMELY IMPORTANT: Import third-party packages DIRECTLY - don't use try/except to hide ImportError
+- Fail fast if dependencies are missing (add them to requirements.txt)
+- If a package isn't installed, the import will fail immediately with clear error
+
+**ONLY EXCEPTION:** With explicit user permission for lazy imports in rare cases.
+
+### 1.6.2 NO DEFENSIVE getattr() WHEN TYPES ARE KNOWN
+
+❌ **ABSOLUTELY FORBIDDEN:**
+```python
+# If node has job_name attribute:
+getattr(node, "job_name", "")  # REDUNDANT!
+str(getattr(node, "job_name", "") or "")  # Hides None bugs!
+
+# If pr is typed PRInfo:
+getattr(pr, "number", 0)  # REDUNDANT! Don't ever do this if pr is typed.
+```
+
+✅ **CORRECT:**
+```python
+# Type is known, attribute exists - just use it!
+node.job_name
+str(node.job_name)
+pr.number
+```
+
+**WHY:** Using getattr() for known attributes masks AttributeError bugs, makes type checkers useless, and hides None/empty string confusion.
+
+### 1.6.3 FAIL FAST - NEVER HIDE ERRORS
+
+❌ **ABSOLUTELY FORBIDDEN:**
+```python
+try:
+    something()
+except Exception:  # TODO: ❌ Fix me. This is an anti-pattern.
+    pass  # Silent failure!
+
+try:
+    something()
+except Exception as e:  # # TODO: ❌ Fix me. ⚠️ This is NOT preferred, and to be avoided
+    logging.error(f"Error: {e}")  # Log and hide!
+    # Missing raise = hidden error!
+
+try:
+    something()
+except Exception:  # TODO: ❌ Fix me. ❌ Anti-pattern, horrible style.
+    return []  # Return default on error!
+```
+
+✅ **CORRECT:**
+```python
+# Let exceptions propagate:
+result = something()  # If it fails, let it crash!
+
+# Only catch SPECIFIC exceptions you can handle:
+try:
+    result = parse_config(file)
+except FileNotFoundError:
+    result = DEFAULT_CONFIG  # Specific exception we know how to handle
+except ValueError as e:
+    logger.warning(f"Invalid config: {e}")
+    result = DEFAULT_CONFIG
+# Other exceptions propagate up!
+
+# Re-raise after logging if you can't handle it:
+try:
+    result = something()
+except Exception as e:  # TODO: ❌ Fix me. ⚠️ Only do this if you exhausted all possible options.
+    logger.error(f"Failed: {e}")
+    raise  # Re-raise so caller knows it failed!
+```
+
+**CRITICAL: NEVER USE `except Exception:` WITHOUT RE-RAISING**
+
+Using `except Exception:` catches **everything** (ValueError, TypeError, AttributeError, KeyError, etc.) and hides bugs you didn't anticipate.
+
+**THE RULE:**
+1. If you can remove the try/except → DO IT (let it fail fast!)
+2. If you must catch exceptions → Use SPECIFIC types (FileNotFoundError, ValueError, TypeError, etc.)
+3. If you catch Exception → You MUST re-raise it (or have explicit user permission)
+
+**WHY:** Silent failures make debugging impossible, hide bugs until production, waste hours of debugging time, and corrupt data by continuing with invalid state.
+
+**For complete details, see `.cursorrules` section 3.5.3 "Error Handling and Anti-Patterns"**
 
 =============================================================================
 2. ENVIRONMENT SETUP
@@ -481,50 +604,16 @@ grep -n "^[[:space:]]\\{0,2\\}<job_name>:" .github/workflows/*.yml
 grep -n "needs:" .github/workflows/<workflow>.yml
 ```
 
-Note: for `html_pages/update_html_pages.sh` operational troubleshooting, keep that documentation in:
-- `dynamo-utils/html_pages/README.md`
-
 ## 4.8 Dynamo-utils dashboards (operational runbook)
 
-This section is intentionally **ops-focused** (how to run, where outputs/logs land, and how to debug “it didn’t update”). For implementation details, caching internals, and dashboard UX pitfalls, prefer:
-- `README.md` → “Dashboards / log categorization pitfalls”
-- `html_pages/README.md`
+For operational procedures including:
+- Running `update_html_pages.sh`
+- Output verification and troubleshooting
+- Common UI pitfalls
+- Cache statistics understanding
+- GitHub API optimizations
 
-### 4.8.1 Running `update_html_pages.sh`
-```bash
-cd html_pages
-./update_html_pages.sh
-```
-
-Notes:
-- If running from cron, expect most output to go to files under `~/dynamo/logs/<YYYY-MM-DD>/` (not stdout).
-- Use `--run-ignore-lock` only if you’re sure another run isn’t actively writing outputs/caches.
-
-### 4.8.2 Outputs, logs, and “it ran too quickly”
-Quick “did it actually update?” checks (paths vary by environment, but these are typical on the host):
-```bash
-ls -lah ~/dynamo/index.html                     # local branches dashboard
-ls -lah ~/dynamo/dynamo_latest/index.html       # commit history dashboard
-ls -lah ~/dynamo/speedoflight/stats/index.html  # stats landing page
-```
-
-Recent learnings / common foot-guns:
-- There are **two repos**: `dynamo-utils.dev/` (dev) and `dynamo-utils/` (prod). If the user says “dev only”, do **not** read or modify prod paths, and run the dev script: `dynamo-utils.dev/html_pages/update_html_pages.sh`.
-- `update_html_pages.sh --fast` is intentionally **removed**; the supported fast mode is `--fast-debug`. Always confirm flags with `./update_html_pages.sh --help` before running automation.
-- Per-component logs like `show_local_branches.log` are **append-only** and may contain older, non-prefixed lines. When validating “timestamp prefix on every line”, only judge **newly appended** content (or rotate/truncate the log explicitly).
-- If a log message is missing commit SHA context, it usually means the caller didn’t pass `commit_sha` through to helpers (e.g., pass PR `head_sha` into the CI pass pipeline so downstream warnings can include `(commit: <sha>)`).
-
-If `update_html_pages.sh` appears to “finish instantly”, check logs first (common root cause: a generator crashed early due to ImportError):
-```bash
-tail -n 200 ~/dynamo/logs/$(date +%Y-%m-%d)/cron.log
-tail -n 200 ~/dynamo/logs/$(date +%Y-%m-%d)/show_commit_history.log
-tail -n 200 ~/dynamo/logs/$(date +%Y-%m-%d)/show_local_branches.log
-```
-
-### 4.8.3 Common UI pitfalls (links/buttons inside <details>)
-When adding buttons/links inside `<summary>` / `<details>` trees, clicks may toggle the tree unintentionally.
-- Fix pattern: ensure handlers call **both** `event.preventDefault()` and `event.stopPropagation()`.
-- Keep the full implementation guidance in `html_pages/README.md` (so this file stays a runbook, not a UI dev guide).
+**See:** `html_pages/README.md` → "Operational Runbook" section
 
 =============================================================================
 5. GITHUB OPERATIONS
@@ -553,6 +642,9 @@ For Python scripts, use `GitHubAPIClient` from `common.py` which automatically r
 2. `GH_TOKEN` environment variable (preferred)
 3. `GITHUB_TOKEN` environment variable (fallback)
 4. `~/.config/gh/hosts.yml` (GitHub CLI config)
+
+**For GitHub API optimizations and cache statistics details:**
+- See `html_pages/README.md` → "Operational Runbook" section
 
 ## 5.2 Re-running Failed GitHub Actions
 
