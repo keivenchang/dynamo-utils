@@ -3,7 +3,7 @@
 {% set refresh_seconds = 300 %}
 {% set refresh_check_interval_ms = 15000 %}
 
-{% block title %}{{ page_title|default("Local Branch Info", true) }}{% endblock %}
+{% block title %}{{ page_title|default("Local Branch Info", true)|safe }}{% endblock %}
 {% block favicon %}<link rel="icon" type="image/svg+xml" href="favicon.svg">{% endblock %}
 
 {% block css %}
@@ -87,7 +87,7 @@
 {% endblock %}
 
 {% block header_title %}
-<span>{{ header_title|default("Local Branch Info", true) }}</span>
+<span>{{ header_title|default("Local Branch Info", true)|safe }}</span>
 <span class="header-meta">Page generated: {{ generated_time }} <span id="page-age" class="page-age"></span></span>
 {%- endblock -%}
 {%- block header_subtitle -%}{%- endblock -%}

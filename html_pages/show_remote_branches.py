@@ -353,8 +353,8 @@ Environment Variables:
     html = generate_html(
         root,
         page_stats=page_stats,
-        page_title=f"Remote PR Info ({user})",
-        header_title=f"Remote PR Info ({user})",
+        page_title=f'<span style="font-size: smaller; color: #d1d5db;">Augmented</span> Pull Requests [{user}]',
+        header_title=f'<span style="font-size: smaller; color: #d1d5db;">Augmented</span> Pull Requests [{user}]',
         tree_sortable=False,  # No sort controls, render triangles normally
         use_div_trees=not args.use_text_trees,  # Default to div trees unless --use-text-trees is specified
     )

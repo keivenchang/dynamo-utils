@@ -1069,6 +1069,7 @@ class CommitHistoryGenerator:
                     sha_to_pr_number=sha_to_pr_number,
                     pr_to_required_checks=pr_to_required_checks,
                     generation_t0=generation_t0,
+                    branch_name=original_ref if original_ref and not repo.head.is_detached else "main",
                 )
                 phase_t.stop("render_html", t0)
                 output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1120,6 +1121,7 @@ class CommitHistoryGenerator:
         sha_to_pr_number: Optional[Dict[str, int]] = None,
         pr_to_required_checks: Optional[Dict[int, List[str]]] = None,
         generation_t0: Optional[float] = None,
+        branch_name: Optional[str] = None,
     ) -> str:
         """Generate HTML report for commit history with Docker image detection
 
@@ -2221,6 +2223,7 @@ class CommitHistoryGenerator:
             gha_other_count=gha_other_count,
             gha_per_commit_stats=gha_per_commit_stats,
             page_stats=page_stats,
+            branch_name=branch_name or "main",
             # Icons (shared look; legend/tooltips/status bar must match across dashboards)
             **ci_status_icon_context(),
             pass_plus_style=PASS_PLUS_STYLE,

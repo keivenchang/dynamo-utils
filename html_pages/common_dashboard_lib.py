@@ -3244,7 +3244,7 @@ def github_api_stats_rows(
     rows.append(("github.rest.calls", str(int(rest.get("total") or 0)), "Total GitHub REST API calls made"))
     rows.append(("github.rest.ok", str(int(rest.get("success_total") or 0)), "Successful API calls"))
     rows.append(("github.rest.errors", str(int(rest.get("error_total") or 0)), "Failed API calls"))
-    rows.append(("github.rest.time_total_secs", f"{float(rest.get('time_total_s') or 0.0):.2f}s", "Total time spent in API calls"))
+    rows.append(("github.rest.time_total_secs", f"{float(rest.get('time_total_s') or 0.0):.2f}s", "Total time spent in API calls (SUM of all parallel threads - see note below)"))
 
     # ETag stats (conditional requests - 304s don't count against rate limit!)
     etag_304_total = int(GITHUB_API_STATS.etag_304_total or 0)
@@ -3438,6 +3438,17 @@ def github_api_stats_rows(
         if url:
             rows.append(("github.rest.last_error.url", url, "URL of last failed request"))
 
+    # Add explanatory note about timing
+    rows.append(("", None, ""))
+    rows.append(("## Timing Note", None, ""))
+    rows.append(("timing.explanation", "Parallel Execution", "Why github.rest.time_total_secs > generation.total_secs"))
+    rows.append(("timing.detail",
+                 "The dashboard uses ThreadPoolExecutor (up to 32 parallel workers). "
+                 "github.rest.time_total_secs = SUM of all thread times. "
+                 "generation.total_secs = wall-clock elapsed time. "
+                 "Multiple threads running simultaneously means total thread time > elapsed time. This is normal!",
+                 "Explanation of timing difference"))
+
     return rows
 
 
@@ -3501,7 +3512,7 @@ def build_page_stats(
 
     # 1. Generation time (always first)
     if generation_time_secs is not None:
-        page_stats.append(("generation.total_secs", f"{generation_time_secs:.2f}s", "Total HTML generation time"))
+        page_stats.append(("generation.total_secs", f"{generation_time_secs:.2f}s", "Total HTML generation time (wall-clock elapsed time - see note below)"))
 
     # 2. Context info (repo, user, counts)
     if repo_info:

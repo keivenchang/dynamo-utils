@@ -489,8 +489,11 @@ class LocalRepoScanner:
 
         is_dynamo_repo = (DYNAMO_REPO_SLUG in remote_url)
 
-        # Get current branch
-        current_branch = repo.active_branch.name
+        # Get current branch (handle detached HEAD state)
+        if repo.head.is_detached:
+            current_branch = None  # Will be handled appropriately in branch scanning
+        else:
+            current_branch = repo.active_branch.name
 
         # Always capture current HEAD SHA (for display even when we skip "main" branches, or when detached).
         head_commit = repo.head.commit
@@ -992,7 +995,12 @@ Environment Variables:
 
     # Render once to measure render time.
     with phase_t.phase("render"):
-        _ = generate_html(root, page_stats=page_stats)
+        _ = generate_html(
+            root,
+            page_stats=page_stats,
+            page_title=f'<span style="font-size: smaller; color: #d1d5db;">Augmented</span> Local Pull Requests [{base_dir}]',
+            header_title=f'<span style="font-size: smaller; color: #d1d5db;">Augmented</span> Local Pull Requests [{base_dir}]',
+        )
 
     # Update the page stats with the timing breakdown before producing the final HTML.
     tdict = phase_t.as_dict(include_total=True)
@@ -1008,7 +1016,12 @@ Environment Variables:
     if out_path is None:
         out_path = base_dir / "index.html"
     with phase_t.phase("render_final"):
-        html_output2 = generate_html(root, page_stats=page_stats)
+        html_output2 = generate_html(
+            root,
+            page_stats=page_stats,
+            page_title=f'<span style="font-size: smaller; color: #d1d5db;">Augmented</span> Local Pull Requests [{base_dir}]',
+            header_title=f'<span style="font-size: smaller; color: #d1d5db;">Augmented</span> Local Pull Requests [{base_dir}]',
+        )
     with phase_t.phase("write"):
         atomic_write_text(out_path, html_output2, encoding="utf-8")
 
