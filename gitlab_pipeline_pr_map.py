@@ -192,10 +192,9 @@ def pipeline_to_row(
 
     mrs: List[MRInfo] = []
     if sha:
-        try:
-            mrs = fetch_merge_requests_for_sha(client, project, sha)
-        except Exception:
-            # Fall back to parsing MR IID from refs/merge-requests/<iid>/* if present.
+        mrs = fetch_merge_requests_for_sha(client, project, sha)
+        # If API call returns empty, fall back to parsing from ref
+        if not mrs:
             mrs = mr_fallback_from_ref(ref)
     else:
         mrs = mr_fallback_from_ref(ref)

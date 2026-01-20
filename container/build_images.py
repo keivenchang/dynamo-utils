@@ -121,7 +121,7 @@ def _write_html_report_files(html_content: str, primary_html_file: Path) -> None
         try:
             _html_out_file.parent.mkdir(parents=True, exist_ok=True)
             _html_out_file.write_text(_rewrite_html_links_for_repo_root(html_content))
-        except Exception:
+        except Exception:  # THIS IS A HORRIBLE ANTI-PATTERN, FIX IT
             # Best-effort: don't fail the build if the secondary write fails.
             pass
 
@@ -741,7 +741,7 @@ class BaseTask(ABC):
                 timeout=10
             )
             return result.returncode == 0
-        except Exception:
+        except Exception:  # THIS IS A HORRIBLE ANTI-PATTERN, FIX IT
             return False
 
     def format_log_header(self, repo_path: Path) -> str:
@@ -1250,7 +1250,7 @@ def get_docker_image_size(image_name: str) -> Optional[str]:
         if image_info:
             return image_info.size_human
         return None
-    except Exception:
+    except Exception:  # THIS IS A HORRIBLE ANTI-PATTERN, FIX IT
         return None
 
 
@@ -1329,7 +1329,7 @@ def parse_log_file_results(log_file: Path) -> Optional[LogParseResult]:
 
         return None
 
-    except Exception:
+    except Exception:  # THIS IS A HORRIBLE ANTI-PATTERN, FIX IT
         return None
 
 
@@ -1694,7 +1694,7 @@ def execute_task_parallel(
             for proc in subprocesses_to_terminate:
                 try:
                     proc.terminate()
-                except Exception:
+                except Exception:  # THIS IS A HORRIBLE ANTI-PATTERN, FIX IT
                     pass  # Ignore errors if process already exited
 
             # Wait up to 2 seconds for processes to terminate
@@ -1705,7 +1705,7 @@ def execute_task_parallel(
                 try:
                     if proc.poll() is None:  # Still running
                         proc.kill()
-                except Exception:
+                except Exception:  # THIS IS A HORRIBLE ANTI-PATTERN, FIX IT
                     pass
 
         # Mark all running tasks as KILLED
@@ -2438,7 +2438,7 @@ def generate_html_report(
                 commit_info['insertions'] = int(stats.total.get('insertions', 0))
                 commit_info['deletions'] = int(stats.total.get('deletions', 0))
                 commit_info['files_changed'] = dict(stats.files)
-            except Exception:
+            except Exception:  # THIS IS A HORRIBLE ANTI-PATTERN, FIX IT
                 pass
 
         except Exception as e:
@@ -3156,7 +3156,7 @@ def main() -> int:
             for proc in subprocesses_to_terminate:
                 try:
                     proc.terminate()
-                except Exception:
+                except Exception:  # THIS IS A HORRIBLE ANTI-PATTERN, FIX IT
                     pass  # Ignore errors if process already exited
 
             # Wait up to 2 seconds for processes to terminate
@@ -3167,7 +3167,7 @@ def main() -> int:
                 try:
                     if proc.poll() is None:  # Still running
                         proc.kill()
-                except Exception:
+                except Exception:  # THIS IS A HORRIBLE ANTI-PATTERN, FIX IT
                     pass
 
         # Mark all running tasks as KILLED

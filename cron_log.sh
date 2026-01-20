@@ -9,8 +9,12 @@
 #
 # Notes:
 # - Prints timestamps and exit codes for easier debugging from logs.
+# - Set DYNAMO_UTILS_TRACE=1 to enable shell tracing (set -x) for debugging.
 
 set -euo pipefail
+if [ -n "${DYNAMO_UTILS_TRACE:-}" ]; then
+    set -x
+fi
 
 if [ $# -lt 2 ]; then
   echo "Usage: $0 <job_name> <command...>" >&2
