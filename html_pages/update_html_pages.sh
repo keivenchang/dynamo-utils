@@ -32,7 +32,7 @@
 #   --show-remote-branches  Update remote PR dashboards for selected GitHub users (IDENTICAL UI to local branches)
 #   --output-debug-html            Faster runs: outputs to debug.html instead of index.html, uses smaller commit window (10 commits), shorter resource window
 #   --github-token <token>  GitHub token to pass to all show_*.py scripts (preferred).
-#   --gitlab-fetch-skip     Skip fetching from GitLab API (commit-history only); use cached data only (faster).
+#   --skip-gitlab-api     Skip fetching from GitLab API (commit-history only); use cached data only (faster).
 #   --gitlab-fetch          Explicitly allow GitLab fetching (overrides --output-debug-html default).
 #   --dry-run               Print what would be executed without actually running commands
 #   --run-ignore-lock        Bypass the /tmp lock (no flock). Useful for manual runs when a stale lock exists.
@@ -50,7 +50,7 @@
 #   # Full fetch every 30 minutes (minute 0 and 30)
 #   0,30 * * * * NVIDIA_HOME=$HOME/dynamo /path/to/update_html_pages.sh
 #   # Cache-only between full runs (every 4 minutes from minute 8..56)
-#   8-59/4 * * * * NVIDIA_HOME=$HOME/dynamo /path/to/update_html_pages.sh --gitlab-fetch-skip
+#   8-59/4 * * * * NVIDIA_HOME=$HOME/dynamo /path/to/update_html_pages.sh --skip-gitlab-api
 #   # Resource report every minute
 #   * * * * * NVIDIA_HOME=$HOME/dynamo /path/to/update_html_pages.sh --show-local-resources
 
@@ -88,7 +88,7 @@ Flags:
 
   --output-debug-html              Faster runs: outputs to debug.html instead of index.html, uses smaller commit window (10 commits), shorter resource window
   --enable-success-build-test-logs  Opt-in: cache raw logs for successful *-build-test jobs to parse pytest slowest tests under "Run tests" (slower)
-  --gitlab-fetch-skip       Skip fetching from GitLab API (commit-history only); use cached data only (faster).
+  --skip-gitlab-api       Skip fetching from GitLab API (commit-history only); use cached data only (faster).
   --gitlab-fetch            Explicitly allow GitLab fetching (overrides --output-debug-html default).
                            Default: GitLab fetch is skipped in --output-debug-html.
   --github-token <token>    GitHub token to pass to all show_*.py scripts.
@@ -143,7 +143,7 @@ while [ "$#" -gt 0 ]; do
                 exit 2
             fi
             GITHUB_TOKEN_ARG="$2"; shift 2 ;;
-        --gitlab-fetch-skip)
+        --skip-gitlab-api)
             GITLAB_FETCH_SKIP_MODE="skip"; shift ;;
         --gitlab-fetch)
             # Explicitly allow GitLab fetching (overrides --output-debug-html default).
@@ -214,7 +214,7 @@ fi
 # - show_local_resources.py (1 day): ~0.6s
 # - mv operations + cleanup: ~0-2ms each
 # Notes:
-# - show_commit_history.py can dominate if it fetches from GitLab (use --gitlab-fetch-skip for faster runs).
+# - show_commit_history.py can dominate if it fetches from GitLab (use --skip-gitlab-api for faster runs).
 # - Real timings vary with network conditions, repo state, and API responsiveness.
 
 # Create logs directory if it doesn't exist
@@ -454,14 +454,16 @@ run_show_commit_history() {
     SUCCESS_BUILD_TEST_FLAG="--enable-success-build-test-logs"
 
     # Flags (shared by dry-run and real-run paths)
-    MAX_COMMITS="${MAX_COMMITS:-100}"
+    # MAX_COMMITS: default 100, or 25 in --output-debug-html mode (unless overridden by env var)
     if [ "$FAST_DEBUG" = true ]; then
-        MAX_COMMITS=25
+        MAX_COMMITS="${MAX_COMMITS:-25}"
+    else
+        MAX_COMMITS="${MAX_COMMITS:-100}"
     fi
 
     SKIP_FLAG=""
     if [ "$GITLAB_FETCH_SKIP_EFFECTIVE" = true ]; then
-        SKIP_FLAG="--gitlab-fetch-skip"
+        SKIP_FLAG="--skip-gitlab-api"
     fi
 
     MAX_GH_FLAG=""

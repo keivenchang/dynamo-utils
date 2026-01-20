@@ -156,7 +156,22 @@ def get_pr_for_branch(
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Show local branches with PR information (HTML-only)")
+    parser = argparse.ArgumentParser(
+        description="Show local branches with PR information (HTML-only)",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Environment Variables:
+  GH_TOKEN / GITHUB_TOKEN
+      GitHub personal access token (alternative to --github-token)
+      Priority: --github-token > GH_TOKEN > GITHUB_TOKEN > ~/.config/gh/hosts.yml
+
+  DYNAMO_UTILS_CACHE_DIR
+      Override default cache directory (~/.cache/dynamo-utils)
+
+  MAX_GITHUB_API_CALLS
+      Can be set when using update_html_pages.sh to override --max-github-api-calls default
+        """
+    )
     parser.add_argument("--repo-path", type=Path, default=Path.cwd(), help="Path to local Git repository (default: cwd)")
     parser.add_argument("--output", type=Path, default=None, help="Output HTML path (default: <repo-path>/local_branches.html)")
     parser.add_argument(
@@ -287,7 +302,7 @@ def main() -> int:
     
     try:
         from common_dashboard_lib import github_api_stats_rows  # local import
-        
+
         mode = "cache-only" if bool(gh.cache_only_mode) else "normal"
         page_stats.extend(
             list(
@@ -301,7 +316,9 @@ def main() -> int:
                 or []
             )
         )
-    
+    except Exception as e:
+        logging.warning(f"Failed to add GitHub API stats: {e}")
+
     # Generate HTML (same as remote branches)
     html = generate_html(
         root,

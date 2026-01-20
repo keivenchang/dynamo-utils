@@ -126,7 +126,22 @@ class UserNode(BranchNode):
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Show remote PRs for a GitHub user (HTML-only)")
+    parser = argparse.ArgumentParser(
+        description="Show remote PRs for a GitHub user (HTML-only)",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Environment Variables:
+  GH_TOKEN / GITHUB_TOKEN
+      GitHub personal access token (alternative to --github-token)
+      Priority: --github-token > GH_TOKEN > GITHUB_TOKEN > ~/.config/gh/hosts.yml
+
+  DYNAMO_UTILS_CACHE_DIR
+      Override default cache directory (~/.cache/dynamo-utils)
+
+  MAX_GITHUB_API_CALLS
+      Can be set when using update_html_pages.sh to override --max-github-api-calls default
+        """
+    )
     parser.add_argument("--github-user", required=True, help="GitHub username (author of PRs)")
     parser.add_argument("--owner", default=DYNAMO_OWNER, help=f"GitHub owner/org (default: {DYNAMO_OWNER})")
     parser.add_argument("--github-repo", default=DYNAMO_REPO, help=f"GitHub repo (default: {DYNAMO_REPO})")

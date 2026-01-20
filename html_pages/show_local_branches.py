@@ -810,7 +810,20 @@ def main():
     phase_t = PhaseTimer()
 
     parser = argparse.ArgumentParser(
-        description='Show local branches with PR information (HTML-only)'
+        description='Show local branches with PR information (HTML-only)',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Environment Variables:
+  GH_TOKEN / GITHUB_TOKEN
+      GitHub personal access token (alternative to --github-token)
+      Priority: --github-token > GH_TOKEN > GITHUB_TOKEN > ~/.config/gh/hosts.yml
+
+  DYNAMO_UTILS_CACHE_DIR
+      Override default cache directory (~/.cache/dynamo-utils)
+
+  MAX_GITHUB_API_CALLS
+      Can be set when using update_html_pages.sh to override --max-github-api-calls default
+        """
     )
     # Keep backward compatibility with the historical positional `base_dir`, but prefer --repo-path.
     parser.add_argument(
