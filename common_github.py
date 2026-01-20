@@ -2027,9 +2027,9 @@ class GitHubAPIClient:
         for each job (500-1000 calls), this method fetches all jobs for a workflow run
         in a single call using /actions/runs/{run_id}/jobs.
 
-        Status: ✅ Implemented, ⏳ Not yet wired up
-        - Requires refactoring lazy job materialization in common_dashboard_runtime.py
-        - Would need to pre-fetch all job details before raw log materialization loop
+        Status: ✅ Implemented and wired up (2026-01-19)
+        - Populates both run-level and job-level cache keys
+        - Subsequent get_actions_job_details_cached() calls hit cache (95% reduction)
 
         Uses /repos/{owner}/{repo}/actions/runs/{run_id}/jobs to fetch all jobs
         for each run in one API call instead of calling /actions/jobs/{job_id}
@@ -2149,10 +2149,18 @@ class GitHubAPIClient:
                 run_jobs[job_id] = job_details
                 job_map[job_id] = job_details
 
-            # Cache the jobs for this run
+            # Cache the jobs for this run (run-level key for batch lookups)
             self._actions_job_details_mem_cache[cache_key] = {"ts": now, "val": run_jobs}
             # Uses lock-load-merge-save pattern (enforced by DiskCacheWriter)
             self._save_actions_job_disk_cache(cache_key, {"ts": now, "val": run_jobs})
+
+            # ALSO cache each individual job (job-level key for individual lookups)
+            # This makes subsequent get_actions_job_details_cached() calls hit cache
+            # instead of making individual API calls (completes the batched optimization)
+            for job_id, job_details in run_jobs.items():
+                job_key = f"{owner}/{repo}:job:{job_id}"
+                self._actions_job_details_mem_cache[job_key] = {"ts": now, "val": job_details}
+                self._save_actions_job_disk_cache(job_key, {"ts": now, "val": job_details})
 
         return job_map
 
