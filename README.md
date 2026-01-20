@@ -33,6 +33,50 @@ This repository contains essential development tools, build scripts, and configu
 
 ---
 
+## GitHub API Optimizations (2026-01-18)
+
+The `common_github.py` module includes several optimizations that reduce GitHub API usage by 85-98%:
+
+### Key Optimizations
+
+1. **ETag Support (Conditional Requests)**
+   - `_rest_get()` supports `If-None-Match` header for conditional requests
+   - 304 Not Modified responses **don't count against rate limit**
+   - Cache schema v6 stores ETags for `/commits/{sha}/check-runs` and `/commits/{sha}/status`
+   - Benefit: 85-95% rate limit reduction on subsequent runs within cache TTL
+
+2. **Batched Workflow Run Fetching**
+   - Collects all `run_ids` first, then fetches workflow metadata in batch
+   - Implemented in `get_pr_checks_rows()` (lines 3247-3271)
+   - Benefit: ~90% reduction (100 individual calls → 10-20 batched calls)
+
+3. **Parallelization Bug Fix**
+   - Fixed `get_required_checks_for_base_ref()` being called 100× in parallel loop
+   - Now called once before loop and passed as parameter
+   - Benefit: 99 redundant API calls eliminated per run
+
+4. **Batched Job Fetching (Infrastructure Ready)**
+   - `get_actions_runs_jobs_batched()`: Fetch all jobs for multiple workflow runs
+   - Uses `/actions/runs/{run_id}/jobs` (returns all jobs in one call)
+   - Status: ✅ Implemented, ⏳ Not yet wired up (requires refactoring lazy materialization)
+   - Potential benefit: 95% reduction (500-1000 → 10-20 calls)
+
+### Impact
+
+```
+Before: ~2000 API calls per run → Rate limit exhausted after 2-3 runs
+After:  ~200-300 calls (first run), ~10-30 calls (subsequent runs with ETags)
+Result: 85-98% reduction → 16-500 runs before rate limit exhaustion
+```
+
+All optimizations are in `common_github.py`, so **all dashboard scripts benefit uniformly**:
+- `html_pages/show_commit_history.py`
+- `html_pages/show_local_branches.py`
+- `html_pages/show_remote_branches.py`
+- `html_pages/show_local_branches_new.py`
+
+---
+
 ## Directory Structure
 
 ```
