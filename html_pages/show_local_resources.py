@@ -150,12 +150,11 @@ def _wal_checkpoint_truncate(con: sqlite3.Connection) -> List[Tuple[int, int, in
     Returns SQLite's result rows for PRAGMA wal_checkpoint(TRUNCATE):
       [(busy, log, checkpointed)]
     """
-    try:
-        rows = con.execute("PRAGMA wal_checkpoint(TRUNCATE);").fetchall()
-        out: List[Tuple[int, int, int]] = []
-        for r in rows:
-            out.append((int(r[0]), int(r[1]), int(r[2])))
-        return out
+    rows = con.execute("PRAGMA wal_checkpoint(TRUNCATE);").fetchall()
+    out: List[Tuple[int, int, int]] = []
+    for r in rows:
+        out.append((int(r[0]), int(r[1]), int(r[2])))
+    return out
 
 
 def _vacuum_best_effort(db_path: Path) -> bool:
