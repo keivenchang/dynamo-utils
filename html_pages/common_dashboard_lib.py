@@ -102,13 +102,24 @@ import time
 import yaml
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING
+from typing import Any, Dict, List, Optional, Set, Tuple, TYPE_CHECKING
 from datetime import datetime, timezone
 
-from common_github import GitHubAPIClient, classify_ci_kind, GITHUB_CACHE_STATS, COMMIT_HISTORY_PERF_STATS
+from common_github import GitHubAPIClient, classify_ci_kind, GITHUB_CACHE_STATS, GITHUB_API_STATS, COMMIT_HISTORY_PERF_STATS
 from common_types import CIStatus
 from pytest_timings_cache import PYTEST_TIMINGS_CACHE
 from snippet_cache import SNIPPET_CACHE
+
+# Add parent directory to path for common.py imports
+sys.path.insert(0, str(Path(__file__).parent.parent))
+from common import (
+    DEFAULT_UNSTABLE_TTL_S,
+    DEFAULT_STABLE_TTL_S,
+    DEFAULT_OPEN_PRS_TTL_S,
+    DEFAULT_CLOSED_PRS_TTL_S,
+    DEFAULT_NO_PR_TTL_S,
+    DEFAULT_RAW_LOG_TEXT_TTL_S,
+)
 
 # Avoid circular import by importing CIJobNode only for type checking
 if TYPE_CHECKING:
@@ -116,6 +127,26 @@ if TYPE_CHECKING:
 
 # Initialize module logger
 logger = logging.getLogger(__name__)
+
+
+# ======================================================================================
+# Helper Functions
+# ======================================================================================
+
+
+def _format_ttl_duration(seconds: int) -> str:
+    """Convert TTL seconds to human-readable format (e.g., '5m', '1h', '30d', '365d')."""
+    if seconds < 60:
+        return f"{seconds}s"
+    elif seconds < 3600:
+        minutes = seconds // 60
+        return f"{minutes}m"
+    elif seconds < 86400:
+        hours = seconds // 3600
+        return f"{hours}h"
+    else:
+        days = seconds // 86400
+        return f"{days}d"
 
 # ======================================================================================
 # YAML Parsing Cache (Performance Optimization)
@@ -547,11 +578,20 @@ def run_all_passes(
             enable_success_build_test_logs=enable_success_build_test_logs,
             context_prefix=context_prefix,
         )
-    
+
+    # PASS 1.5: Prefetch GitHub Actions job details in batch (batch fetch all jobs by run_id)
+    # This populates the job details cache so individual lookups hit cache instead of making API calls
+    # OPTIMIZATION: Reduces 500-1000 per-job API calls down to 10-20 per-run batch calls (90-95% reduction)
+    ci_nodes = prefetch_actions_job_details_pass(ci_nodes, github_api=github_api)
+
     # PASS 2: Add job steps and pytest tests to CIJobNode children (before conversion to TreeNodeVM)
     # This must run BEFORE augment_ci_with_yaml_info_pass so children are in place
     ci_nodes = add_job_steps_and_tests_pass(ci_nodes, repo_root)
-    
+
+    # PASS 2.5: Verify job details (steps, pytest tests, duration)
+    # This runs right after add_job_steps_and_tests_pass to validate that expected data is present
+    verify_job_details_pass(ci_nodes, commit_sha=commit_sha)
+
     # Parse YAML workflows to build mappings (job names, dependencies, etc.)
     # Note: This is NOT a pass - it doesn't modify nodes, just parses YAML files
     _, yaml_mappings = parse_workflow_yaml_and_build_mapping_pass([], repo_root, commit_sha=commit_sha)
@@ -701,6 +741,77 @@ def add_pr_status_node_pass(
     return nodes
 
 
+def prefetch_actions_job_details_pass(
+    ci_nodes: List,
+    github_api: Optional["common.GitHubAPIClient"] = None,
+) -> List:
+    """Prefetch GitHub Actions job details for all jobs in batch (PASS 1.5).
+
+    OPTIMIZATION (2026-01-18): Instead of fetching job details individually (1 API call per job),
+    this pass extracts all run_ids and batch-fetches all jobs using /actions/runs/{run_id}/jobs
+    (1 API call per run). This populates the job details cache so subsequent individual lookups
+    hit cache instead of making API calls.
+
+    Benefits:
+        - 90-95% reduction in API calls: 500-1000 per-job calls → 10-20 per-run calls
+        - Faster: fewer network round-trips
+        - Rate limit friendly: batched fetching
+
+    This pass runs BEFORE add_job_steps_and_tests_pass so the cache is warm when individual
+    job details are requested.
+
+    Args:
+        ci_nodes: List of BranchNode objects (may contain CIJobNode instances)
+        github_api: Optional GitHubAPIClient for batch fetching
+
+    Returns:
+        Same list of nodes (unmodified; this pass only populates caches)
+    """
+    from common_branch_nodes import CIJobNode
+
+    if not github_api:
+        return ci_nodes
+
+    logger.info(f"[prefetch_actions_job_details_pass] Extracting run_ids from {len(ci_nodes)} nodes")
+
+    # Extract all unique run_ids from CI jobs
+    run_ids: Set[str] = set()
+
+    def extract_run_ids(node):
+        """Recursively extract run_ids from CIJobNode instances."""
+        if isinstance(node, CIJobNode):
+            run_id = str(getattr(node, "run_id", "") or "").strip()
+            if run_id and run_id.isdigit():
+                run_ids.add(run_id)
+        # Recurse into children
+        for child in (getattr(node, "children", []) or []):
+            extract_run_ids(child)
+
+    for node in ci_nodes:
+        extract_run_ids(node)
+
+    if not run_ids:
+        logger.info(f"[prefetch_actions_job_details_pass] No run_ids found, skipping batch fetch")
+        return ci_nodes
+
+    logger.info(f"[prefetch_actions_job_details_pass] Batch fetching job details for {len(run_ids)} unique runs")
+
+    try:
+        # Batch fetch all jobs for these runs (populates cache)
+        job_map = github_api.get_actions_runs_jobs_batched(
+            owner="ai-dynamo",
+            repo="dynamo",
+            run_ids=list(run_ids),
+            ttl_s=30 * 24 * 3600,  # 30 days cache
+        )
+        logger.info(f"[prefetch_actions_job_details_pass] Prefetched {len(job_map)} job details into cache")
+    except Exception as e:
+        logger.warning(f"[prefetch_actions_job_details_pass] Batch fetch failed: {e}")
+
+    logger.info(f"[prefetch_actions_job_details_pass] Complete")
+    return ci_nodes
+
+
 def add_job_steps_and_tests_pass(ci_nodes: List, repo_root: Path) -> List:
     """
     Add job steps and pytest tests as children to CIJobNode objects.
@@ -719,7 +830,7 @@ def add_job_steps_and_tests_pass(ci_nodes: List, repo_root: Path) -> List:
     from common_branch_nodes import CIJobNode, CIStepNode, CIPytestNode, _duration_str_to_seconds
     
     logger.info(f"[add_job_steps_and_tests_pass] Processing {len(ci_nodes)} nodes")
-    
+
     for node in ci_nodes:
         if not isinstance(node, CIJobNode):
             continue
@@ -759,6 +870,14 @@ def add_job_steps_and_tests_pass(ci_nodes: List, repo_root: Path) -> List:
         )
 
         if not step_tuples:
+            # Debug: Log why we skipped this job
+            logger.debug(
+                f"[add_job_steps_and_tests_pass] No step tuples for job: {job_name} "
+                f"(github_api={'present' if github_api else 'MISSING'}, "
+                f"job_url={'present' if job_url else 'MISSING'}, "
+                f"is_build_test={job_name_wants_pytest_details(job_name)}, "
+                f"duration={dur_str})"
+            )
             continue
 
         # Create child nodes for each step
@@ -792,7 +911,7 @@ def add_job_steps_and_tests_pass(ci_nodes: List, repo_root: Path) -> List:
 
                 step_node = CIStepNode(
                     job_id=step_id,
-                    display_name="",
+                    display_name=str(step_name),  # Store original name (without augmentation) for verifier
                     status=step_status,
                     duration=step_dur,
                     log_url="",
@@ -806,7 +925,7 @@ def add_job_steps_and_tests_pass(ci_nodes: List, repo_root: Path) -> List:
                     current_test_parent = step_node
                 else:
                     current_test_parent = None
-        
+
         logger.debug(f"[add_job_steps_and_tests_pass] Added {len(node.children)} step/test children to {node.job_id}")
     
     logger.info(f"[add_job_steps_and_tests_pass] Complete")
@@ -1485,9 +1604,11 @@ def verify_tree_structure_pass(tree_nodes: List[TreeNodeVM], original_ci_nodes: 
     # Check for critical required jobs
     CRITICAL_REQUIRED_JOBS = {"backend-status-check", "dynamo-status-check"}
     missing_critical = CRITICAL_REQUIRED_JOBS - required_jobs_found
-    
+
     if missing_critical:
         logger.error(f"[verify_tree_structure_pass] ❌ CRITICAL: Missing required jobs: {missing_critical}{commit_ref}")
+        logger.debug(f"[verify_tree_structure_pass] Required jobs found: {required_jobs_found}{commit_ref}")
+        logger.debug(f"[verify_tree_structure_pass] All node names: {[node.job_name for node in all_nodes[:20]]}{commit_ref}")
     # Success case: don't log to avoid verbose output for every commit (200 commits × verbose logging = massive slowdown)
     
     if required_count < 2:
@@ -1625,6 +1746,152 @@ def verify_tree_structure_pass(tree_nodes: List[TreeNodeVM], original_ci_nodes: 
         logger.warning(f"[verify_tree_structure_pass] ⚠️  dynamo-status-check node not found")
     
     logger.info(f"[verify_tree_structure_pass] Verification complete")
+
+
+def verify_job_details_pass(ci_nodes: List, commit_sha: str = "") -> None:
+    """
+    Verify that CI jobs have proper step data, pytest listings, and timing information.
+
+    This pass checks for:
+    - Build-test jobs should have step children (job details from GitHub Actions API)
+    - Test steps should have pytest test children (parsed from raw logs)
+    - All jobs should have duration/timing data
+
+    Args:
+        ci_nodes: List of BranchNode objects (CIJobNode instances)
+        commit_sha: Commit SHA for context in error messages
+    """
+    from common_branch_nodes import CIJobNode, CIStepNode, CIPytestNode
+
+    # Temporary exception list (expires ~2026-02-19)
+    # These test steps are known to be missing pytest tests and warnings are suppressed
+    PYTEST_WARNING_EXCEPTIONS = {
+        "trtllm-build-test (cuda13.0, arm64) > Run tests",
+        "Build and Test - dynamo > pytest (parallel)",
+        "Build and Test - dynamo > pytest (serial)",
+    }
+
+    # Format commit ref for logging
+    commit_ref = f" (commit: {commit_sha[:7]})" if commit_sha else ""
+    logger.info(f"[verify_job_details_pass] Verifying job details for {len(ci_nodes)} nodes{commit_ref}")
+
+    # Counters for reporting
+    jobs_checked = 0
+    real_github_jobs_checked = 0
+    synthetic_aggregators_checked = 0
+    jobs_missing_steps = []
+    jobs_missing_duration = []
+    test_steps_missing_pytest = []
+
+    for node in ci_nodes:
+        if not isinstance(node, CIJobNode):
+            continue
+
+        # Skip synthetic nodes (steps and pytest tests themselves)
+        if node.is_synthetic:
+            continue
+
+        jobs_checked += 1
+        job_name = node.display_name or node.job_id or ""
+
+        # Check 1: Build-test jobs should have step children
+        if job_name_wants_pytest_details(job_name):
+            # Skip jobs with template variables (not real jobs yet)
+            if "${{" in job_name:
+                continue
+
+            job_status = str(node.status or "").lower()
+            # Skip cancelled jobs (they don't have step details)
+            if job_status in ("cancelled", "canceled"):
+                continue
+
+            if not node.children or len(node.children) == 0:
+                jobs_missing_steps.append(job_name)
+            else:
+                # Check 2: Test steps should have pytest test children
+                for child in node.children:
+                    if isinstance(child, CIStepNode):
+                        # Use display_name which has the original step name (without augmentation)
+                        step_name = child.display_name or child.job_id or ""
+                        # Skip steps with template variables
+                        if "${{" in step_name:
+                            continue
+
+                        if is_python_test_step(step_name):
+                            # This is a test step, it should have pytest children
+                            has_pytest_children = any(isinstance(c, CIPytestNode) for c in (child.children or []))
+                            if not has_pytest_children:
+                                test_steps_missing_pytest.append(f"{job_name} > {step_name}")
+
+        # Check 3: GitHub Actions workflow jobs should have duration/timing data
+        # GitHub Actions jobs have log_url that points to /actions/runs/.../job/...
+        # GitHub App checks (DCO, CodeRabbit) and external CI (GitLab) don't have duration
+        log_url = str(node.log_url or "").strip()
+        actions_job_id = str(node.actions_job_id or "").strip()
+        is_github_actions_job = "/actions/runs/" in log_url and "/job/" in log_url
+        is_external_check = log_url and not is_github_actions_job  # GitHub App or external CI
+
+        if is_github_actions_job:
+            real_github_jobs_checked += 1
+        elif is_external_check:
+            synthetic_aggregators_checked += 1  # Count external checks separately
+        elif not log_url and not actions_job_id:
+            synthetic_aggregators_checked += 1  # True synthetic aggregators
+        else:
+            real_github_jobs_checked += 1  # Has actions_job_id but no URL
+
+        duration = str(node.duration or "").strip()
+        job_status = str(node.status or "").lower()
+
+        if not duration and is_github_actions_job:
+            # Skip jobs with template variables
+            if "${{" in job_name:
+                pass
+            # Skip cancelled jobs (don't care about duration for cancelled jobs)
+            elif job_status in ("cancelled", "canceled"):
+                pass
+            else:
+                jobs_missing_duration.append(job_name)
+
+    # Filter out exceptions from test_steps_missing_pytest
+    test_steps_missing_pytest_filtered = [
+        step for step in test_steps_missing_pytest
+        if step not in PYTEST_WARNING_EXCEPTIONS
+    ]
+
+    # Summary report (only log if there are issues for this commit)
+    has_issues = jobs_missing_steps or test_steps_missing_pytest_filtered or jobs_missing_duration
+
+    if has_issues:
+        # Group all issues under one commit header
+        logger.warning(f"[verify_job_details_pass] ⚠️  Issues found for commit {commit_sha[:7] if commit_sha else 'unknown'}:")
+
+        if jobs_missing_steps:
+            # Show all on one line, comma-separated
+            jobs_list = ", ".join(jobs_missing_steps)
+            logger.warning(
+                f"[verify_job_details_pass]    {len(jobs_missing_steps)} build-test jobs missing steps (out of {jobs_checked} checked): {jobs_list}"
+            )
+
+        if test_steps_missing_pytest_filtered:
+            # Show all on one line, comma-separated
+            steps_list = ", ".join(test_steps_missing_pytest_filtered)
+            logger.warning(
+                f"[verify_job_details_pass]    {len(test_steps_missing_pytest_filtered)} test steps missing pytest tests: {steps_list}"
+            )
+
+        if jobs_missing_duration:
+            # Show all on one line, comma-separated
+            duration_list = ", ".join(jobs_missing_duration)
+            logger.warning(
+                f"[verify_job_details_pass]    {len(jobs_missing_duration)} jobs missing duration (out of {real_github_jobs_checked} real jobs checked): {duration_list}"
+            )
+
+    # Only log success if there are no issues
+    if not jobs_missing_steps and not test_steps_missing_pytest and not jobs_missing_duration:
+        logger.info(f"[verify_job_details_pass] ✓ All {real_github_jobs_checked} real GitHub jobs have proper details (plus {synthetic_aggregators_checked} synthetic aggregators){commit_ref}")
+
+    logger.info(f"[verify_job_details_pass] Verification complete: {real_github_jobs_checked} real jobs, {synthetic_aggregators_checked} synthetic aggregators")
 
 
 def _compute_parent_status_from_children(children: List[TreeNodeVM]) -> str:
@@ -2244,20 +2511,29 @@ def actions_job_step_tuples(
     github_api: Optional["GitHubAPIClient"],
     job_url: str,
     min_seconds: float = 10.0,
-    ttl_s: int = 7 * 24 * 3600,
+    ttl_s: int = 30 * 24 * 3600,
 ) -> List[Tuple[str, str, str]]:
     """Fetch job details (cached) and return long-running steps (duration >= min_seconds)."""
     if not github_api:
+        logger.debug(f"[actions_job_step_tuples] No github_api provided")
         return []
     jid = extract_actions_job_id_from_url(str(job_url or ""))
     if not jid:
+        logger.debug(f"[actions_job_step_tuples] Could not extract job ID from URL: {job_url}")
         return []
     job = github_api.get_actions_job_details_cached(
         owner="ai-dynamo", repo="dynamo", job_id=jid, ttl_s=int(ttl_s)
     ) or {}
     if not isinstance(job, dict):
+        logger.debug(f"[actions_job_step_tuples] Job data not a dict for job_id={jid}")
         return []
-    return actions_job_steps_over_threshold_from_actions_job(job, min_seconds=float(min_seconds))
+    steps_in_dict = len(job.get('steps', [])) if isinstance(job.get('steps'), list) else 0
+    result = actions_job_steps_over_threshold_from_actions_job(job, min_seconds=float(min_seconds))
+    logger.debug(
+        f"[actions_job_step_tuples] job_id={jid}, steps_in_dict={steps_in_dict}, "
+        f"min_seconds={min_seconds}, filtered_result={len(result)}"
+    )
+    return result
 
 
 _PYTEST_DETAIL_JOB_PREFIXES = ("sglang", "vllm", "trtllm", "operator")
@@ -2267,13 +2543,17 @@ def is_build_test_job(job_name: str) -> bool:
     """
     Check if a job name matches the build-test pattern that should have pytest details extracted.
 
-    Matches two patterns:
+    Matches three patterns:
     1. Jobs with both "build" AND "test" in the name:
        - "Build and Test - dynamo"
        - "sglang-build-test (cuda12.9, amd64)"
        - "vllm-build-test (cuda12.9, arm64)"
 
-    2. Framework jobs with architecture indicator (older pattern):
+    2. Jobs with "pytest" in the name:
+       - "pytest (amd64)"
+       - "[x86_64] pytest"
+
+    3. Framework jobs with architecture indicator (older pattern):
        - "sglang (amd64)"
        - "[x86_64] vllm (amd64)"
        - "[aarch64] trtllm (arm64)"
@@ -2293,7 +2573,11 @@ def is_build_test_job(job_name: str) -> bool:
     if ("build" in nm_lc) and ("test" in nm_lc):
         return True
 
-    # Pattern 2: Framework prefix + architecture indicator (older naming convention)
+    # Pattern 2: "pytest" in name
+    if "pytest" in nm_lc:
+        return True
+
+    # Pattern 3: Framework prefix + architecture indicator (older naming convention)
     # e.g. "sglang (amd64)", "[x86_64] vllm (amd64)"
     for prefix in _PYTEST_DETAIL_JOB_PREFIXES:
         if prefix in nm_lc:
@@ -2314,6 +2598,7 @@ def is_python_test_step(step_name: str) -> bool:
     - "Run unit tests"
     - "test: pytest"
     - "pytest"
+    - "test", "tests" (starts with "test")
 
     Args:
         step_name: The step or phase name to check
@@ -2324,7 +2609,11 @@ def is_python_test_step(step_name: str) -> bool:
     step_lower = str(step_name or "").lower()
     if not step_lower:
         return False
-    return ("run" in step_lower and "test" in step_lower) or "pytest" in step_lower
+    return (
+        ("run" in step_lower and "test" in step_lower)
+        or "pytest" in step_lower
+        or step_lower.startswith("test")
+    )
 
 
 def job_name_wants_pytest_details(job_name: str) -> bool:
@@ -2453,6 +2742,10 @@ def ci_subsection_tuples_for_job(
     if is_build_test:
         # Build/test UX: show all steps (not just slow ones).
         steps = actions_job_step_tuples(github_api=github_api, job_url=str(job_url or ""), min_seconds=0.0)
+        logger.debug(
+            f"[ci_subsection_tuples_for_job] Build-test job '{nm}': "
+            f"fetched {len(steps) if steps else 0} steps from API"
+        )
 
         # For each step, check if it's "Run tests" - if so, add pytest tests as additional entries
         result = []
@@ -2953,16 +3246,30 @@ def github_api_stats_rows(
     rows.append(("github.rest.errors", str(int(rest.get("error_total") or 0)), "Failed API calls"))
     rows.append(("github.rest.time_total_secs", f"{float(rest.get('time_total_s') or 0.0):.2f}s", "Total time spent in API calls"))
 
+    # ETag stats (conditional requests - 304s don't count against rate limit!)
+    etag_304_total = int(GITHUB_API_STATS.etag_304_total or 0)
+    rows.append(("github.rest.etag_304_total", str(etag_304_total), "304 Not Modified responses (FREE - don't count against rate limit!)"))
+    if etag_304_total > 0:
+        # Show top ETag 304 by endpoint
+        etag_304_by_label = dict(GITHUB_API_STATS.etag_304_by_label or {})
+        if etag_304_by_label:
+            sorted_labels = sorted(etag_304_by_label.items(), key=lambda kv: (-kv[1], kv[0]))
+            for lbl, cnt in sorted_labels[:5]:  # Top 5
+                rows.append((f"github.rest.etag_304.{lbl}", str(int(cnt)), f"304 responses for {lbl} (cached, free)"))
+            if len(sorted_labels) > 5:
+                remaining = sum(cnt for lbl, cnt in sorted_labels[5:])
+                rows.append(("github.rest.etag_304.other", str(remaining), "304 responses for other endpoints"))
+
     # Budget & mode (individual flat entries)
     if mode:
         rows.append(("github.mode", mode, "API budget enforcement mode"))
     if mode_reason:
         rows.append(("github.mode_reason", mode_reason, "Reason for current mode"))
-    # Note: github.budget_max is populated from GitHubAPIClient state (same as max_github_api_calls parameter)
+    # Note: github.rest.budget_max is populated from GitHubAPIClient state (same as max_github_api_calls parameter)
     if isinstance(rest, dict) and rest.get("budget_max") is not None:
-        rows.append(("github.budget_max", str(rest.get("budget_max")), "Maximum API calls allowed"))
+        rows.append(("github.rest.budget_max", str(rest.get("budget_max")), "Maximum API calls allowed"))
     if isinstance(rest, dict):
-        rows.append(("github.budget_exhausted", "true" if bool(rest.get("budget_exhausted")) else "false", "Whether API budget was exhausted"))
+        rows.append(("github.rest.budget_exhausted", "true" if bool(rest.get("budget_exhausted")) else "false", "Whether API budget was exhausted"))
     if rem is not None and lim is not None:
         rows.append(("github.core_remaining", f"{rem}/{lim}", "GitHub core rate limit remaining"))
     elif rem is not None:
@@ -2971,26 +3278,133 @@ def github_api_stats_rows(
         rows.append(("github.core_resets", str(reset_pt), "When rate limit resets"))
 
     # Cache summary (individual flat entries)
-    rows.append(("github.cache.hits", str(int(cache.get("hits_total") or 0)), "Total cache hits across all operations"))
-    rows.append(("github.cache.misses", str(int(cache.get("misses_total") or 0)), "Total cache misses"))
-    rows.append(("github.cache.writes_ops", str(int(cache.get("writes_ops_total") or 0)), "Number of cache write operations"))
-    rows.append(("github.cache.writes_entries", str(int(cache.get("writes_entries_total") or 0)), "Number of entries written to cache"))
+    rows.append(("cache.github.hits", str(int(cache.get("hits_total") or 0)), "Total cache hits across all operations"))
+    rows.append(("cache.github.misses", str(int(cache.get("misses_total") or 0)), "Total cache misses"))
+    rows.append(("cache.github.writes_ops", str(int(cache.get("writes_ops_total") or 0)), "Number of cache write operations"))
+    rows.append(("cache.github.writes_entries", str(int(cache.get("writes_entries_total") or 0)), "Number of entries written to cache"))
 
     # Pytest timings cache (individual flat entries)
     st = PYTEST_TIMINGS_CACHE.stats
-    rows.append(("pytest.cache.hit", str(int(st.hit)), "Pytest timing cache hits"))
-    rows.append(("pytest.cache.miss", str(int(st.miss)), "Pytest timing cache misses"))
-    rows.append(("pytest.cache.write", str(int(st.write)), "Pytest cache writes"))
-    rows.append(("pytest.cache.parse_calls", str(int(st.parse_calls)), "Number of pytest timing file parses"))
-    rows.append(("pytest.cache.parse_secs", f"{float(st.parse_secs):.2f}s", "Time spent parsing pytest timings"))
+    rows.append(("cache.pytest.hit", str(int(st.hit)), "Pytest timing cache hits"))
+    rows.append(("cache.pytest.miss", str(int(st.miss)), "Pytest timing cache misses"))
+    rows.append(("cache.pytest.write", str(int(st.write)), "Pytest cache writes"))
+    rows.append(("cache.pytest.parse_calls", str(int(st.parse_calls)), "Number of pytest timing file parses"))
+    rows.append(("cache.pytest.parse_secs", f"{float(st.parse_secs):.2f}s", "Time spent parsing pytest timings"))
 
     # Raw log text cache (individual flat entries)
     hits_by = dict(cache.get("hits_by") or {}) if isinstance(cache, dict) else {}
     misses_by = dict(cache.get("misses_by") or {}) if isinstance(cache, dict) else {}
     raw_hits = int(sum(int(v or 0) for k, v in hits_by.items() if str(k).startswith("raw_log_text.")))
     raw_misses = int(sum(int(v or 0) for k, v in misses_by.items() if str(k).startswith("raw_log_text.")))
-    rows.append(("github.raw_log.cache.hits", str(raw_hits), "Raw CI log text cache hits"))
-    rows.append(("github.raw_log.cache.misses", str(raw_misses), "Raw CI log text cache misses"))
+    rows.append(("cache.github.raw_log.hits", str(raw_hits), "Raw CI log text cache hits"))
+    rows.append(("cache.github.raw_log.misses", str(raw_misses), "Raw CI log text cache misses"))
+
+    # Cache entry counts (how many items are stored in each cache)
+    entries = dict(cache.get("entries") or {}) if isinstance(cache, dict) else {}
+    if entries:
+        rows.append(("## Cache Sizes", None, ""))
+
+        # TTL information for each cache type (using constants from common.py)
+        # Format: human-readable duration (e.g., "5m", "1h", "30d", "365d", "∞")
+        # Constants used: DEFAULT_UNSTABLE_TTL_S, DEFAULT_STABLE_TTL_S, DEFAULT_OPEN_PRS_TTL_S,
+        #                 DEFAULT_CLOSED_PRS_TTL_S, DEFAULT_RAW_LOG_TEXT_TTL_S
+        cache_ttls = {
+            "pr_checks": f"{_format_ttl_duration(DEFAULT_UNSTABLE_TTL_S)} (commit<8h) or {_format_ttl_duration(DEFAULT_STABLE_TTL_S)} (commit>8h, CI can re-run)",
+            "pulls_list": f"{_format_ttl_duration(DEFAULT_OPEN_PRS_TTL_S)} (open) or {_format_ttl_duration(DEFAULT_CLOSED_PRS_TTL_S)} (closed/merged, immutable)",
+            "pr_branch": f"{_format_ttl_duration(DEFAULT_OPEN_PRS_TTL_S)} (open) or {_format_ttl_duration(DEFAULT_CLOSED_PRS_TTL_S)} (closed/merged, immutable)",
+            "raw_log_text": f"{_format_ttl_duration(DEFAULT_RAW_LOG_TEXT_TTL_S)} (immutable once completed)",
+            "actions_job_status": "2m or ∞ (once completed, immutable)",
+            "actions_job_details": "30d",  # Hardcoded in common_github.py:2036, 2180
+            "actions_jobs": "30d",  # Hardcoded in common_github.py:2036, 2180
+            "actions_workflow": "30d",  # Hardcoded in common_github.py:970
+            "actions_workflows": "30d",  # Hardcoded in common_github.py:970
+            "required_checks": "7d",  # Hardcoded in common_github.py:4529
+            "pr_info": f"{_format_ttl_duration(DEFAULT_UNSTABLE_TTL_S)}",  # Uses updated_at comparison
+            "search_issues": "varies",
+            "job_log": "∞ (immutable, no TTL check)",  # Job logs never expire once extracted
+            "job_logs": "∞ (immutable, no TTL check)",  # Job logs never expire once extracted
+            "merge_dates": f"{_format_ttl_duration(DEFAULT_CLOSED_PRS_TTL_S)} (immutable once merged)",
+            "commit_history": "varies",
+            "commit_history_snippets": "365d (immutable, snippet_cache.py:39)",  # snippet_cache.py has 365d TTL
+            "pytest_timings": "varies",
+            "gitlab_pipeline_jobs": "varies",
+            "gitlab_pipeline_status": "varies",
+            "gitlab_mr_pipelines": "varies",
+        }
+
+        # Descriptions for each cache type (without _mem/_disk suffix)
+        # For disk caches, include the JSON filename in parentheses
+        cache_descriptions_mem = {
+            "pr_checks": "PR check runs (workflow runs, conclusions)",
+            "pulls_list": "Pull request list responses",
+            "pr_branch": "PR branch information (head/base refs)",
+            "raw_log_text": "Raw CI log text content (index)",
+            "actions_job_status": "GitHub Actions job status (success/failure)",
+            "actions_job_details": "GitHub Actions job details (steps, durations, status)",
+            "actions_workflow": "Workflow run metadata",
+            "required_checks": "Required PR checks by base branch",
+            "pr_info": "PR metadata (author, labels, etc)",
+            "search_issues": "GitHub issue search results",
+            "job_log": "Parsed job log content",
+        }
+
+        cache_descriptions_disk = {
+            "actions_jobs": "GitHub Actions job details (steps, durations, status) [actions_jobs.json]",
+            "actions_workflows": "GitHub Actions workflow metadata (names, paths) [actions_workflows.json]",
+            "pr_checks": "PR check runs (workflow runs, conclusions) [pr_checks_cache.json]",
+            "pulls_list": "Pull request list responses [pulls_open_cache.json]",
+            "pr_branch": "PR branch information (head/base refs) [pr_branch_cache.json]",
+            "pr_info": "Full PR details with required checks and reviews [pr_info.json]",
+            "search_issues": "GitHub search/issues API results for PR queries [search_issues.json]",
+            "job_logs": "Job log error summaries and snippets [job_logs_cache.json]",
+            "raw_log_text": "Raw CI log text content index [index.json]",
+            "required_checks": "Required PR checks by base branch [required_checks.json]",
+            "merge_dates": "PR merge dates from GitHub API [github_pr_merge_dates.json]",
+            "commit_history": "Commit history with metadata [commit_history.json]",
+            "commit_history_snippets": "Commit message snippets [commit_history_snippets.json]",
+            "pytest_timings": "Pytest test duration timings [pytest-test-timings.json]",
+            "gitlab_pipeline_jobs": "GitLab pipeline job details [gitlab_pipeline_jobs_details_v3.json]",
+            "gitlab_pipeline_status": "GitLab pipeline status [gitlab_pipeline_status.json]",
+            "gitlab_mr_pipelines": "GitLab MR pipeline associations [gitlab_mr_pipelines.json]",
+        }
+
+        # Separate memory and disk caches, then sort within each group
+        mem_caches = []
+        disk_caches = []
+
+        for cache_name in entries.keys():
+            count = int(entries[cache_name])
+            if cache_name.endswith("_mem"):
+                # Memory cache: cache.mem.{name} - only show if count > 0
+                if count > 0:
+                    base_name = cache_name[:-4]  # Remove "_mem" suffix
+                    desc = cache_descriptions_mem.get(base_name, f"Cached entries in {base_name}")
+                    ttl = cache_ttls.get(base_name)
+                    if ttl:
+                        desc = f"{desc} [TTL: {ttl}]"
+                    mem_caches.append((f"cache.mem.{base_name}", str(count), desc))
+            elif cache_name.endswith("_disk"):
+                # Disk cache: cache.disk.{name} - ALWAYS show (even if 0) to verify MERGE pattern
+                base_name = cache_name[:-5]  # Remove "_disk" suffix
+                desc = cache_descriptions_disk.get(base_name, f"Cached entries in {base_name}")
+                ttl = cache_ttls.get(base_name)
+                if ttl:
+                    desc = f"{desc} [TTL: {ttl}]"
+                disk_caches.append((f"cache.disk.{base_name}", str(count), desc))
+            else:
+                # Unknown format, keep as-is - only show if count > 0
+                if count > 0:
+                    desc = cache_descriptions_mem.get(cache_name, f"Cached entries in {cache_name}")
+                    ttl = cache_ttls.get(cache_name)
+                    if ttl:
+                        desc = f"{desc} [TTL: {ttl}]"
+                    mem_caches.append((f"cache.{cache_name}", str(count), desc))
+
+        # Add memory caches first (sorted), then disk caches (sorted)
+        for row in sorted(mem_caches, key=lambda x: x[0]):
+            rows.append(row)
+        for row in sorted(disk_caches, key=lambda x: x[0]):
+            rows.append(row)
 
     # REST by category (top N as individual entries)
     labels = sorted(set(list(by_label.keys()) + list(time_by_label_s.keys())))
@@ -3135,25 +3549,25 @@ def build_page_stats(
 
     # Composite SHA (commit-history-only, show real values when available)
     if perf_stats.composite_sha_cache_hit > 0 or perf_stats.composite_sha_cache_miss > 0:
-        page_stats.append(("composite_sha.cache.hit", str(perf_stats.composite_sha_cache_hit), "Composite SHA cache hits (commit history only)"))
-        page_stats.append(("composite_sha.cache.miss", str(perf_stats.composite_sha_cache_miss), "Composite SHA cache misses (commit history only)"))
+        page_stats.append(("cache.composite_sha.hit", str(perf_stats.composite_sha_cache_hit), "Composite SHA cache hits (commit history only)"))
+        page_stats.append(("cache.composite_sha.miss", str(perf_stats.composite_sha_cache_miss), "Composite SHA cache misses (commit history only)"))
         page_stats.append(("composite_sha.errors", str(perf_stats.composite_sha_errors), "Errors computing composite SHAs (commit history only)"))
         page_stats.append(("composite_sha.total_secs", f"{perf_stats.composite_sha_total_secs:.2f}s", "Total time computing composite SHAs (commit history only)"))
         page_stats.append(("composite_sha.compute_secs", f"{perf_stats.composite_sha_compute_secs:.2f}s", "Time spent in SHA computations (commit history only)"))
     else:
-        page_stats.append(("composite_sha.cache.hit", "(N/A)", "Composite SHA cache hits (commit history only)"))
-        page_stats.append(("composite_sha.cache.miss", "(N/A)", "Composite SHA cache misses (commit history only)"))
+        page_stats.append(("cache.composite_sha.hit", "(N/A)", "Composite SHA cache hits (commit history only)"))
+        page_stats.append(("cache.composite_sha.miss", "(N/A)", "Composite SHA cache misses (commit history only)"))
         page_stats.append(("composite_sha.errors", "(N/A)", "Errors computing composite SHAs (commit history only)"))
         page_stats.append(("composite_sha.total_secs", "(N/A)", "Total time computing composite SHAs (commit history only)"))
         page_stats.append(("composite_sha.compute_secs", "(N/A)", "Time spent in SHA computations (commit history only)"))
 
     # Snippet cache (always show, tracked globally in SNIPPET_CACHE)
     snippet_stats = SNIPPET_CACHE.stats
-    page_stats.append(("snippet.cache.hit", str(int(snippet_stats.hit)), "CI log snippet cache hits"))
-    page_stats.append(("snippet.cache.miss", str(int(snippet_stats.miss)), "CI log snippet cache misses"))
-    page_stats.append(("snippet.cache.write", str(int(snippet_stats.write)), "Snippet cache writes"))
-    page_stats.append(("snippet.cache.compute_secs", f"{float(snippet_stats.compute_secs):.2f}s", "Time extracting snippets from logs"))
-    page_stats.append(("snippet.cache.total_secs", f"{float(snippet_stats.total_secs):.2f}s", "Total time in snippet operations"))
+    page_stats.append(("cache.snippet.hit", str(int(snippet_stats.hit)), "CI log snippet cache hits"))
+    page_stats.append(("cache.snippet.miss", str(int(snippet_stats.miss)), "CI log snippet cache misses"))
+    page_stats.append(("cache.snippet.write", str(int(snippet_stats.write)), "Snippet cache writes"))
+    page_stats.append(("cache.snippet.compute_secs", f"{float(snippet_stats.compute_secs):.2f}s", "Time extracting snippets from logs"))
+    page_stats.append(("cache.snippet.total_secs", f"{float(snippet_stats.total_secs):.2f}s", "Total time in snippet operations"))
 
     # Markers / local build reports (used by all dashboards)
     if perf_stats.marker_composite_with_reports > 0 or perf_stats.marker_composite_without_reports > 0:
@@ -3179,22 +3593,22 @@ def build_page_stats(
         perf_stats.gitlab_cache_pipeline_jobs_miss > 0
     )
     if has_gitlab_stats:
-        page_stats.append(("gitlab.cache.registry_images.hit", str(perf_stats.gitlab_cache_registry_images_hit), "GitLab registry image cache hits (commit history only)"))
-        page_stats.append(("gitlab.cache.registry_images.miss", str(perf_stats.gitlab_cache_registry_images_miss), "GitLab registry image cache misses (commit history only)"))
-        page_stats.append(("gitlab.cache.pipeline_status.hit", str(perf_stats.gitlab_cache_pipeline_status_hit), "GitLab pipeline status cache hits (commit history only)"))
-        page_stats.append(("gitlab.cache.pipeline_status.miss", str(perf_stats.gitlab_cache_pipeline_status_miss), "GitLab pipeline status cache misses (commit history only)"))
-        page_stats.append(("gitlab.cache.pipeline_jobs.hit", str(perf_stats.gitlab_cache_pipeline_jobs_hit), "GitLab pipeline jobs cache hits (commit history only)"))
-        page_stats.append(("gitlab.cache.pipeline_jobs.miss", str(perf_stats.gitlab_cache_pipeline_jobs_miss), "GitLab pipeline jobs cache misses (commit history only)"))
+        page_stats.append(("cache.gitlab.registry_images.hit", str(perf_stats.gitlab_cache_registry_images_hit), "GitLab registry image cache hits (commit history only)"))
+        page_stats.append(("cache.gitlab.registry_images.miss", str(perf_stats.gitlab_cache_registry_images_miss), "GitLab registry image cache misses (commit history only)"))
+        page_stats.append(("cache.gitlab.pipeline_status.hit", str(perf_stats.gitlab_cache_pipeline_status_hit), "GitLab pipeline status cache hits (commit history only)"))
+        page_stats.append(("cache.gitlab.pipeline_status.miss", str(perf_stats.gitlab_cache_pipeline_status_miss), "GitLab pipeline status cache misses (commit history only)"))
+        page_stats.append(("cache.gitlab.pipeline_jobs.hit", str(perf_stats.gitlab_cache_pipeline_jobs_hit), "GitLab pipeline jobs cache hits (commit history only)"))
+        page_stats.append(("cache.gitlab.pipeline_jobs.miss", str(perf_stats.gitlab_cache_pipeline_jobs_miss), "GitLab pipeline jobs cache misses (commit history only)"))
         page_stats.append(("gitlab.registry_images.total_secs", f"{perf_stats.gitlab_registry_images_total_secs:.2f}s", "Time fetching GitLab registry images (commit history only)"))
         page_stats.append(("gitlab.pipeline_status.total_secs", f"{perf_stats.gitlab_pipeline_status_total_secs:.2f}s", "Time fetching GitLab pipeline status (commit history only)"))
         page_stats.append(("gitlab.pipeline_jobs.total_secs", f"{perf_stats.gitlab_pipeline_jobs_total_secs:.2f}s", "Time fetching GitLab pipeline jobs (commit history only)"))
     else:
-        page_stats.append(("gitlab.cache.registry_images.hit", "(N/A)", "GitLab registry image cache hits (commit history only)"))
-        page_stats.append(("gitlab.cache.registry_images.miss", "(N/A)", "GitLab registry image cache misses (commit history only)"))
-        page_stats.append(("gitlab.cache.pipeline_status.hit", "(N/A)", "GitLab pipeline status cache hits (commit history only)"))
-        page_stats.append(("gitlab.cache.pipeline_status.miss", "(N/A)", "GitLab pipeline status cache misses (commit history only)"))
-        page_stats.append(("gitlab.cache.pipeline_jobs.hit", "(N/A)", "GitLab pipeline jobs cache hits (commit history only)"))
-        page_stats.append(("gitlab.cache.pipeline_jobs.miss", "(N/A)", "GitLab pipeline jobs cache misses (commit history only)"))
+        page_stats.append(("cache.gitlab.registry_images.hit", "(N/A)", "GitLab registry image cache hits (commit history only)"))
+        page_stats.append(("cache.gitlab.registry_images.miss", "(N/A)", "GitLab registry image cache misses (commit history only)"))
+        page_stats.append(("cache.gitlab.pipeline_status.hit", "(N/A)", "GitLab pipeline status cache hits (commit history only)"))
+        page_stats.append(("cache.gitlab.pipeline_status.miss", "(N/A)", "GitLab pipeline status cache misses (commit history only)"))
+        page_stats.append(("cache.gitlab.pipeline_jobs.hit", "(N/A)", "GitLab pipeline jobs cache hits (commit history only)"))
+        page_stats.append(("cache.gitlab.pipeline_jobs.miss", "(N/A)", "GitLab pipeline jobs cache misses (commit history only)"))
         page_stats.append(("gitlab.registry_images.total_secs", "(N/A)", "Time fetching GitLab registry images (commit history only)"))
         page_stats.append(("gitlab.pipeline_status.total_secs", "(N/A)", "Time fetching GitLab pipeline status (commit history only)"))
         page_stats.append(("gitlab.pipeline_jobs.total_secs", "(N/A)", "Time fetching GitLab pipeline jobs (commit history only)"))
@@ -3205,19 +3619,19 @@ def build_page_stats(
 
     # Merge dates cache
     if gh_stats.merge_dates_hits > 0 or gh_stats.merge_dates_misses > 0:
-        page_stats.append(("github.cache.merge_dates.hits", str(gh_stats.merge_dates_hits), "PR merge date cache hits (all dashboards)"))
-        page_stats.append(("github.cache.merge_dates.misses", str(gh_stats.merge_dates_misses), "PR merge date cache misses (all dashboards)"))
+        page_stats.append(("cache.github.merge_dates.hits", str(gh_stats.merge_dates_hits), "PR merge date cache hits (all dashboards)"))
+        page_stats.append(("cache.github.merge_dates.misses", str(gh_stats.merge_dates_misses), "PR merge date cache misses (all dashboards)"))
     else:
-        page_stats.append(("github.cache.merge_dates.hits", "(N/A)", "PR merge date cache hits (all dashboards)"))
-        page_stats.append(("github.cache.merge_dates.misses", "(N/A)", "PR merge date cache misses (all dashboards)"))
+        page_stats.append(("cache.github.merge_dates.hits", "(N/A)", "PR merge date cache hits (all dashboards)"))
+        page_stats.append(("cache.github.merge_dates.misses", "(N/A)", "PR merge date cache misses (all dashboards)"))
 
     # Required checks cache
     if gh_stats.required_checks_hits > 0 or gh_stats.required_checks_misses > 0:
-        page_stats.append(("github.cache.required_checks.hits", str(gh_stats.required_checks_hits), "PR-level check runs cache hits (all dashboards)"))
-        page_stats.append(("github.cache.required_checks.misses", str(gh_stats.required_checks_misses), "PR-level check runs cache misses (all dashboards)"))
+        page_stats.append(("cache.github.required_checks.hits", str(gh_stats.required_checks_hits), "PR-level check runs cache hits (all dashboards)"))
+        page_stats.append(("cache.github.required_checks.misses", str(gh_stats.required_checks_misses), "PR-level check runs cache misses (all dashboards)"))
     else:
-        page_stats.append(("github.cache.required_checks.hits", "(N/A)", "PR-level check runs cache hits (all dashboards)"))
-        page_stats.append(("github.cache.required_checks.misses", "(N/A)", "PR-level check runs cache misses (all dashboards)"))
+        page_stats.append(("cache.github.required_checks.hits", "(N/A)", "PR-level check runs cache hits (all dashboards)"))
+        page_stats.append(("cache.github.required_checks.misses", "(N/A)", "PR-level check runs cache misses (all dashboards)"))
 
     # Actions status cache - DEPRECATED (now unified with required_checks)
     # No longer shown - all dashboards use unified required_checks stats

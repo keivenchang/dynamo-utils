@@ -391,3 +391,135 @@ Multiply by number of PRs to estimate total. Budget (`--max-github-api-calls`) c
 - Branch line format → `BranchInfoNode.to_tree_vm()`
 - CI expansion logic → `PRStatusWithJobsNode.to_tree_vm()` or `ci_should_expand_by_default()`
 - Pass customization → `common_dashboard_lib.py` (PASS -1 through PASS 8)
+
+---
+
+## Operational Runbook
+
+### Running `update_html_pages.sh`
+
+```bash
+cd html_pages
+./update_html_pages.sh
+```
+
+**Notes:**
+- If running from cron, expect most output to go to files under `~/dynamo/logs/<YYYY-MM-DD>/` (not stdout)
+- Use `--run-ignore-lock` only if you're sure another run isn't actively writing outputs/caches
+- Default behavior (no flags): Runs all tasks (local branches + commit history + resource report + remote PRs)
+
+**Common flags:**
+- `--show-local-branches` - Update branches dashboard only
+- `--show-commit-history` - Update commit history dashboard only
+- `--show-local-resources` - Update resource report only
+- `--show-remote-branches` - Update remote PRs dashboard only
+- `--output-debug-html` - Fast mode: smaller commit window (25 commits), outputs to debug.html
+- `--skip-gitlab-api` - Skip GitLab fetching (faster, cache-only for registry data)
+- `--github-token <token>` - Override GitHub token
+
+### Outputs and Verification
+
+**Quick "did it actually update?" checks:**
+```bash
+ls -lah ~/dynamo/index.html                     # local branches dashboard
+ls -lah ~/dynamo/dynamo_latest/index.html       # commit history dashboard
+ls -lah ~/dynamo/speedoflight/stats/index.html  # stats landing page
+```
+
+**Common foot-guns:**
+- There are **two repos**: `dynamo-utils.dev/` (dev) and `dynamo-utils/` (prod). If working on dev only, run the dev script: `dynamo-utils.dev/html_pages/update_html_pages.sh`
+- `update_html_pages.sh --fast` is intentionally **removed**; use `--output-debug-html` instead
+- Per-component logs are **append-only** and may contain older, non-prefixed lines from previous runs
+- If a log message is missing commit SHA context, the caller didn't pass `commit_sha` through to helpers
+
+**If `update_html_pages.sh` appears to "finish instantly":**
+
+Check logs first (common root cause: generator crashed early due to ImportError):
+```bash
+tail -n 200 ~/dynamo/logs/$(date +%Y-%m-%d)/cron.log
+tail -n 200 ~/dynamo/logs/$(date +%Y-%m-%d)/show_commit_history.log
+tail -n 200 ~/dynamo/logs/$(date +%Y-%m-%d)/show_local_branches.log
+```
+
+### Common UI Pitfalls
+
+**Links/buttons inside `<details>` trees:**
+
+Clicks may toggle the tree unintentionally. Fix pattern: ensure handlers call **both** `event.preventDefault()` and `event.stopPropagation()`.
+
+**Example:**
+```javascript
+element.addEventListener('click', (event) => {
+    event.preventDefault();     // Prevent default link behavior
+    event.stopPropagation();    // Stop event from bubbling to <details>
+    // Your handler code here
+});
+```
+
+### Cache Statistics Understanding
+
+**CRITICAL: Misleading statistic names in dashboards**
+
+The dashboard shows `cache.github.required_checks.hits` and `cache.github.required_checks.misses`, but these do NOT track the `get_required_checks()` function!
+
+**What these stats actually track:**
+- Located in: `common_github.py` lines 3678, 3707, 3710, 3735
+- Function: `get_pr_checks_rows()` (NOT `get_required_checks()`)
+- Purpose: Track whether PR check rows with `is_required` flags are cached
+- Called: Once per commit (100 times for 100 commits)
+
+**The actual `get_required_checks()` function:**
+- File: `common_github.py` lines 4480-4705
+- Cache: `~/.cache/dynamo-utils/required-checks/required_checks.json`
+- Keys: `required_checks:ai-dynamo/dynamo:pr5478`
+- Stats: **NO statistics tracking** (not in dashboard)
+
+**Production behavior (show_commit_history.py):**
+- Calls `get_required_checks()` ONCE for a single open PR (line 2080-2084)
+- Uses the result as a template for all 100 commits (line 2040)
+- Does NOT query individual PR required checks for each commit
+- Cached entries for merged PRs exist but aren't used in this workflow
+
+**Why "0 hits / 100 misses" appears in production:**
+- First run with 100 new commits → 100 `get_pr_checks_rows()` misses (populating cache)
+- Second run with same commits → 100 `get_pr_checks_rows()` hits (from cache)
+- This is NORMAL and expected behavior
+
+**Negative caching implementation (2026-01-19):**
+- Location: `common_github.py` lines 4565-4571, 4694-4699
+- When PR fetch fails (404, timeout), cache the empty result
+- Prevents retrying non-existent PRs on every run
+- Working correctly (verified with 50/100 commit tests)
+
+### GitHub API Optimizations
+
+**Key optimizations (2026-01-18) that reduce API usage by 85-98%:**
+
+1. **ETag support**: Conditional requests via `If-None-Match` header
+   - 304 responses DON'T count against rate limit
+   - Cache v6 stores ETags for check-runs and status endpoints
+   - Benefit: 85-95% rate limit reduction on subsequent runs
+
+2. **Batched workflow run fetching**: Collects all run_ids first, then batch fetches
+   - Benefit: 90% reduction (100 individual → 10-20 batched calls)
+
+3. **Parallelization bug fix**: `get_required_checks_for_base_ref()` called once instead of 100×
+   - Benefit: 99 redundant API calls eliminated
+
+**Impact:**
+- Before: ~2000 API calls per run → exhausted after 2-3 runs
+- After: ~200-300 calls (first run), ~10-30 calls (subsequent runs with ETags)
+- All dashboard scripts benefit automatically (no changes needed)
+
+**Verify optimizations:**
+```bash
+# Check cache version (v6 has ETag support)
+python3 << 'EOF'
+import json
+with open('~/.cache/dynamo-utils/pr-checks/pr_checks_cache.json') as f:
+    cache = json.load(f)
+v6_count = sum(1 for e in cache.values() if e.get('ver', 0) >= 6)
+etag_count = sum(1 for e in cache.values() if e.get('check_runs_etag'))
+print(f"v6 entries: {v6_count}/{len(cache)}, with ETags: {etag_count}/{len(cache)}")
+EOF
+```

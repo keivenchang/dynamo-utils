@@ -246,7 +246,7 @@ def materialize_job_raw_log_text_local_link(
     # (including `steps[]`). This avoids "cached raw log exists but no step breakdown" when later
     # runs are forced into cache-only mode (budget/rate-limit).
     if allow_fetch and (not bool(github.cache_only_mode)):
-        _ = github.get_actions_job_details_cached(owner=owner, repo=repo, job_id=str(job_id), ttl_s=7 * 24 * 3600)
+        _ = github.get_actions_job_details_cached(owner=owner, repo=repo, job_id=str(job_id), ttl_s=30 * 24 * 3600)
 
     # Ensure we use a canonical /job/<id> URL for fetch APIs that require it.
     job_url_for_fetch = job_url

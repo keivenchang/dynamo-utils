@@ -273,6 +273,8 @@
           <td class="v{% if 'miss' in (k|string)|lower and v != '0' and v != '(N/A)' %} warn-text{% endif %}">
             {% if v is string and '\n' in v %}
             <pre class="stats-pre">{{ v }}</pre>
+            {% elif k in ['github.rest.calls', 'github.rest.budget_max', 'github.rest.ok'] %}
+            <strong>{{ v }}</strong>
             {% else %}
             {{ v }}
             {% endif %}

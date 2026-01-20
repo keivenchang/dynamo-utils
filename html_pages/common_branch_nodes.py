@@ -1871,6 +1871,7 @@ class PRStatusWithJobsNode(BranchNode):
             ci_nodes=ci_branch_nodes,
             repo_root=repo_root,
             commit_sha=str(pr.head_sha or ""),
+            github_api=gh,
         )
 
         # Add special nodes at the end (not processed by pipeline).
