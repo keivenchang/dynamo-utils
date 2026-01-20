@@ -145,7 +145,7 @@ while [ "$#" -gt 0 ]; do
             GITHUB_TOKEN_ARG="$2"; shift 2 ;;
         --skip-gitlab-api)
             GITLAB_FETCH_SKIP_MODE="skip"; shift ;;
-        --gitlab-fetch)
+        --skip-gitlab-api)
             # Explicitly allow GitLab fetching (overrides --output-debug-html default).
             GITLAB_FETCH_SKIP_MODE="fetch"; shift ;;
         --dry-run)
@@ -517,11 +517,11 @@ run_show_commit_history() {
     fi
 }
 
-if [ "$RUN_SHOW_DYNAMO_BRANCHES" = true ]; then
-    run_show_local_branches
-fi
 if [ "$RUN_SHOW_REMOTE_BRANCHES" = true ]; then
     run_show_remote_branches
+fi
+if [ "$RUN_SHOW_DYNAMO_BRANCHES" = true ]; then
+    run_show_local_branches
 fi
 if [ "$RUN_SHOW_COMMIT_HISTORY" = true ]; then
     run_show_commit_history
