@@ -627,6 +627,7 @@ def run_all_passes(
     grouped_nodes = move_jobs_by_prefix_pass(grouped_nodes, prefix="label", parent_name=_FAST, parent_label=_FAST_LABEL, create_if_has_children=True)
     grouped_nodes = move_jobs_by_prefix_pass(grouped_nodes, prefix="lychee", parent_name=_FAST, parent_label=_FAST_LABEL, create_if_has_children=True)
     grouped_nodes = move_jobs_by_prefix_pass(grouped_nodes, prefix="trigger-ci", parent_name=_FAST, parent_label=_FAST_LABEL, create_if_has_children=True)
+    grouped_nodes = move_jobs_by_prefix_pass(grouped_nodes, prefix="Validate PR title", parent_name=_FAST, parent_label=_FAST_LABEL, create_if_has_children=True)
     
     # PASS 5: Sort nodes by name
     sorted_nodes = sort_nodes_by_name_pass(grouped_nodes)
