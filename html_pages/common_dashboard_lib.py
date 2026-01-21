@@ -3309,7 +3309,7 @@ def github_api_stats_rows(
         # Constants used: DEFAULT_UNSTABLE_TTL_S, DEFAULT_STABLE_TTL_S, DEFAULT_OPEN_PRS_TTL_S,
         #                 DEFAULT_CLOSED_PRS_TTL_S, DEFAULT_RAW_LOG_TEXT_TTL_S
         cache_ttls = {
-            "pr_checks": f"{_format_ttl_duration(DEFAULT_UNSTABLE_TTL_S)} (commit<8h) or {_format_ttl_duration(DEFAULT_STABLE_TTL_S)} (commit>8h, CI can re-run)",
+            "pr_checks": "3m (open PR, commit<8h) or 2h (open PR, commit≥8h) or 7d (merged/closed)",
             "pulls_list": f"{_format_ttl_duration(DEFAULT_OPEN_PRS_TTL_S)} (open) or {_format_ttl_duration(DEFAULT_CLOSED_PRS_TTL_S)} (closed/merged, immutable)",
             "pr_branch": f"{_format_ttl_duration(DEFAULT_OPEN_PRS_TTL_S)} (open) or {_format_ttl_duration(DEFAULT_CLOSED_PRS_TTL_S)} (closed/merged, immutable)",
             "raw_log_text": f"{_format_ttl_duration(DEFAULT_RAW_LOG_TEXT_TTL_S)} (immutable once completed)",
@@ -3438,17 +3438,6 @@ def github_api_stats_rows(
         if url:
             rows.append(("github.rest.last_error.url", url, "URL of last failed request"))
 
-    # Add explanatory note about timing
-    rows.append(("", None, ""))
-    rows.append(("## Timing Note", None, ""))
-    rows.append(("timing.explanation", "Parallel Execution", "Why github.rest.time_total_secs > generation.total_secs"))
-    rows.append(("timing.detail",
-                 "The dashboard uses ThreadPoolExecutor (up to 32 parallel workers). "
-                 "github.rest.time_total_secs = SUM of all thread times. "
-                 "generation.total_secs = wall-clock elapsed time. "
-                 "Multiple threads running simultaneously means total thread time > elapsed time. This is normal!",
-                 "Explanation of timing difference"))
-
     return rows
 
 
@@ -3512,7 +3501,7 @@ def build_page_stats(
 
     # 1. Generation time (always first)
     if generation_time_secs is not None:
-        page_stats.append(("generation.total_secs", f"{generation_time_secs:.2f}s", "Total HTML generation time (wall-clock elapsed time - see note below)"))
+        page_stats.append(("generation.total_secs", f"{generation_time_secs:.2f}s", "Total dashboard generation time (wall-clock elapsed time)"))
 
     # 2. Context info (repo, user, counts)
     if repo_info:

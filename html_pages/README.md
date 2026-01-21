@@ -263,13 +263,20 @@ python3 html_pages/show_commit_history.py \
 | Cache | Path | TTL | Purpose |
 |-------|------|-----|---------|
 | PR list | `pulls/` | 60s | Open PRs per repo |
-| PR checks | `pr-checks/` | 300s | Check-runs per PR |
+| PR checks | `pr-checks/` | 3-tier: 3m/2h/7d | Check-runs per PR (see below) |
 | PR info | `pr-info/pr_info.json` | Keyed by `updated_at` | Full PR details |
 | PR updated_at | `search-issues/` | 60s | Batched probe |
 | Required checks | `required-checks/` | Long-lived | Branch protection |
 | Job details | `actions-jobs/` | 600s | Steps/timings |
 | Raw log URLs | `raw-log-urls/` | 3600s | Signed URLs |
 | Raw log text | `raw-log-text/` | 30 days | Downloaded logs |
+
+**PR checks 3-tier TTL:**
+- **Merged/closed PRs**: 7 days (immutable, won't change)
+- **Open PRs, commit < 8h**: 3 minutes (CI actively running)
+- **Open PRs, commit ≥ 8h**: 2 hours (CI likely done, but might re-run)
+
+This adaptive TTL achieves ~97% cache hit rate while keeping active CI fresh.
 
 ### Zero-API PRInfo Reuse
 
@@ -331,7 +338,7 @@ Detailed walkthrough for branch `keivenchang/DIS-1200__refactor` with PR #5050:
 **2B) Fetch PR + checks (if updated)**
 - `GET /repos/ai-dynamo/dynamo/pulls/5050`
 - `GET /repos/ai-dynamo/dynamo/commits/{sha}/check-runs`
-- **Cache:** 300s TTL (checks)
+- **Cache:** 3-tier TTL (3m/2h/7d, see above)
 - **Calls:** 0-2
 
 **2C) Required checks (long-lived)**

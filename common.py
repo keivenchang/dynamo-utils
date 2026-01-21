@@ -152,10 +152,10 @@ DEFAULT_STABLE_AFTER_HOURS: int = 8
 #     so the dashboard updates quickly while CI is still settling.
 #   - If a commit is older than this threshold (e.g., 3 days old), we use `DEFAULT_STABLE_TTL_S`
 #     so we don’t keep re-checking historical commits over and over.
-DEFAULT_UNSTABLE_TTL_S: int = 300
+DEFAULT_UNSTABLE_TTL_S: int = 180
 # ^ "Fast refresh" TTL (seconds) for things that change quickly.
-#   Example: for a commit from ~5 minutes ago, we may re-check GitHub Actions status every 5 minutes.
-DEFAULT_STABLE_TTL_S: int = 3 * 24 * 3600
+#   Example: for a commit from ~3 minutes ago, we may re-check GitHub Actions status every 3 minutes.
+DEFAULT_STABLE_TTL_S: int = 2 * 3600
 # ^ "Stable" TTL (seconds) for older/less-changing data (commits > 8 hours old).
 #   CI can still be re-run even for old commits, so we don't cache forever.
 #   Example: for a commit from yesterday, we cache its GitHub Actions status for 3 days.

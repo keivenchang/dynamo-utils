@@ -643,6 +643,7 @@ class LocalRepoScanner:
                     checks_ttl_s = GitHubAPIClient.compute_checks_cache_ttl_s(
                         branch_dt,
                         refresh=bool(self.refresh_closed_prs),
+                        pr_merged=bool(pr.is_merged),
                     )
                     
                     # Create status node (will contain CI children)

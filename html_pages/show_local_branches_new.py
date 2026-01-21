@@ -278,6 +278,7 @@ Environment Variables:
             checks_ttl_s = GitHubAPIClient.compute_checks_cache_ttl_s(
                 commit_dt,
                 refresh=bool(args.refresh_checks),
+                pr_merged=bool(pr.is_merged),
             )
             
             status_node = PRStatusWithJobsNode(

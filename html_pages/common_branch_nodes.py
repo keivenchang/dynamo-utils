@@ -1839,6 +1839,7 @@ class PRStatusWithJobsNode(BranchNode):
                 GitHubAPIClient.compute_checks_cache_ttl_s(
                     self.branch_commit_dt,
                     refresh=bool(self.refresh_checks),
+                    pr_merged=bool(pr.is_merged),
                 )
             )
             skip_fetch = not bool(self.allow_fetch_checks)

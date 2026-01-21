@@ -284,6 +284,12 @@
         </tr>
         {% endfor %}
       </table>
+      <p style="margin-top: 1em; padding: 0.5em; background-color: #f8f9fa; border-left: 3px solid #007bff;">
+        <strong>Note on Timing:</strong> The dashboard uses ThreadPoolExecutor with up to 32 parallel workers.
+        Metrics marked as "accumulated thread time" represent the SUM of all parallel thread execution times.
+        Metrics marked as "wall-clock time" represent actual elapsed time.
+        Because multiple threads run simultaneously, accumulated thread time can exceed wall-clock time. This is normal and indicates good parallelization.
+      </p>
       </div>
     </details>
   </div>

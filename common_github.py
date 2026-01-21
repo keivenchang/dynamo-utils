@@ -2401,20 +2401,29 @@ class GitHubAPIClient:
         last_change_dt: Optional[datetime],
         *,
         refresh: bool = False,
+        pr_merged: bool = False,
         stable_after_hours: int = DEFAULT_STABLE_AFTER_HOURS,
         short_ttl_s: int = DEFAULT_UNSTABLE_TTL_S,
         stable_ttl_s: int = DEFAULT_STABLE_TTL_S,
     ) -> int:
         """Compute an appropriate cache TTL for CI/checks based on "how recently things changed".
 
-        Heuristic:
-        - If the underlying ref hasn't changed in >stable_after_hours, treat checks as stable and
-          keep cached results for a long time.
-        - If it changed recently, keep a short TTL so in-progress checks update.
-        - If refresh=True, force fetch (TTL=0).
+        3-tier heuristic:
+        1. If PR is merged/closed: 7 days (immutable)
+        2. Else if commit age < stable_after_hours: short_ttl_s (CI still running)
+        3. Else: stable_ttl_s (CI likely done, but might re-run)
+
+        Special cases:
+        - If refresh=True: force fetch (TTL=0)
         """
         if refresh:
             return 0
+
+        # Tier 1: Merged/closed PRs - long TTL (immutable)
+        if pr_merged:
+            return 7 * 24 * 3600  # 7 days
+
+        # Tier 2/3: Open PRs - use commit age to decide
         ttl = int(short_ttl_s)
         try:
             if last_change_dt is None:

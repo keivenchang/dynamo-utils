@@ -28,7 +28,7 @@ import subprocess
 import sys
 import time
 import hashlib
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Dict, Optional, Set, Tuple, Any
 from zoneinfo import ZoneInfo
@@ -1067,6 +1067,7 @@ class CommitHistoryGenerator:
                     logs_dir,
                     output_path,
                     sha_to_pr_number=sha_to_pr_number,
+                    pr_to_merge_date=pr_to_merge_date,
                     pr_to_required_checks=pr_to_required_checks,
                     generation_t0=generation_t0,
                     branch_name=original_ref if original_ref and not repo.head.is_detached else "main",
@@ -1119,6 +1120,7 @@ class CommitHistoryGenerator:
         logs_dir: Path,
         output_path: Path,
         sha_to_pr_number: Optional[Dict[str, int]] = None,
+        pr_to_merge_date: Optional[Dict[int, Optional[str]]] = None,
         pr_to_required_checks: Optional[Dict[int, List[str]]] = None,
         generation_t0: Optional[float] = None,
         branch_name: Optional[str] = None,
@@ -1130,11 +1132,15 @@ class CommitHistoryGenerator:
             logs_dir: Path to logs directory for build reports
             output_path: Path where the HTML file will be written (used for relative path calculation)
             sha_to_pr_number: Mapping full commit SHA -> PR number (if known)
+            pr_to_merge_date: Mapping PR number -> merge date string (if known/merged)
             pr_to_required_checks: Mapping PR number -> list of required check names (if known)
 
         Returns:
             HTML content as string
         """
+        # Initialize optional parameters
+        pr_to_merge_date = pr_to_merge_date or {}
+
         # Get local Docker images containing SHAs
         docker_images = self._get_local_docker_images_by_sha([c['sha_short'] for c in commit_data])
 
@@ -1216,11 +1222,38 @@ class CommitHistoryGenerator:
 
         def fetch_pr_checks(pr_num: int, shas: List[str]) -> Tuple[int, List[str], List[Any]]:
             """Fetch check runs for a single PR (parallelizable worker)."""
+            # Calculate TTL based on 3-tier logic:
+            # 1. If PR is merged/closed: 7 days (immutable)
+            # 2. Else if commit age < 8 hours: 3 minutes (CI still running)
+            # 3. Else if commit age >= 8 hours: 2 hours (CI likely done, but might re-run)
+            merge_date = pr_to_merge_date.get(pr_num)
+            if merge_date:
+                # PR is merged/closed - use long TTL (immutable)
+                ttl_s = 7 * 24 * 3600  # 7 days
+            else:
+                # PR is still open - determine TTL based on commit age
+                # Get the first SHA's commit time to calculate age
+                commit_dt = None
+                if shas:
+                    commit_dt = sha_to_dt.get(shas[0])
+
+                if commit_dt:
+                    now = datetime.now(timezone.utc)
+                    age_hours = (now - commit_dt).total_seconds() / 3600
+                    if age_hours < 8:
+                        ttl_s = 3 * 60  # 3 minutes for recent commits
+                    else:
+                        ttl_s = 2 * 3600  # 2 hours for older commits
+                else:
+                    # Fallback if no commit datetime available
+                    ttl_s = 3 * 60  # Default to 3 minutes
+
             rows = self.github_client.get_pr_checks_rows(
                 owner='ai-dynamo',
                 repo='dynamo',
                 pr_number=pr_num,
                 skip_fetch=bool(cache_only_github),
+                ttl_s=ttl_s,
             )
             return (pr_num, shas, rows)
 
@@ -2154,31 +2187,39 @@ class CommitHistoryGenerator:
         # handled by build_page_stats via the extra_cache_stats parameter (no longer duplicated here).
 
         # Include timing breakdown if available (best-effort).
+        # Add phase timings with descriptions
         t = self._last_timings or {}
+        timing_descriptions = {
+            "cache_load": "Load cached data (merge dates, required checks, etc.)",
+            "git_iter_commits": "Iterate git commits and extract metadata",
+            "github_merge_dates": "Fetch GitHub PR merge dates",
+            "github_required_checks": "Fetch required checks for PRs",
+            "process_commits": "Process commit data and build structures",
+            "cache_save": "Save data to cache files",
+        }
         if isinstance(t, dict) and t:
-            # Note: total/render/write are measured outside this HTML generator; we show those separately
-            # (or via elapsed_s above) to avoid stale/partial totals.
             for k in ["cache_load", "git_iter_commits", "github_merge_dates", "github_required_checks", "process_commits", "cache_save"]:
                 if k in t:
-                    page_stats.append((f"{k}.total_secs", f"{float(t[k]):.2f}s"))
+                    desc = timing_descriptions.get(k, f"{k.replace('_', ' ').title()} time")
+                    page_stats.append((f"phase.{k}.secs", f"{float(t[k]):.2f}s", desc))
 
-        # Timing rows we want to show, but can't know until after rendering. Use placeholders and
-        # patch them into the final HTML string to avoid a second expensive template render.
+        # HTML rendering timing (use placeholders, patched after render completes)
         PH_BUILD = "__TIMING_HTML_BUILD_TREES__"
         PH_TPL = "__TIMING_HTML_TEMPLATE_RENDER__"
         PH_RENDER = "__TIMING_RENDER_HTML__"
-        page_stats.append(("render_html.total_secs", PH_RENDER))
-        page_stats.append(("html_build_trees.total_secs", PH_BUILD))
-        page_stats.append(("html_build_trees_github.total_secs", "__TIMING_HTML_BUILD_TREES_GH__"))
-        page_stats.append(("html_build_trees_gitlab.total_secs", "__TIMING_HTML_BUILD_TREES_GL__"))
-        page_stats.append(("html_template_render.total_secs", PH_TPL))
-        # Top slow commits (helps pinpoint which commit(s) dominate tree-building).
+        page_stats.append(("html.render.total_secs", PH_RENDER, "HTML generation (wall-clock time)"))
+        page_stats.append(("html.build_trees.total_secs", PH_BUILD, "Build CI trees (wall-clock time)"))
+        page_stats.append(("html.build_trees.github_secs", "__TIMING_HTML_BUILD_TREES_GH__", "GitHub tree building (accumulated thread time, parallel)"))
+        page_stats.append(("html.build_trees.gitlab_secs", "__TIMING_HTML_BUILD_TREES_GL__", "GitLab tree building (accumulated thread time, parallel)"))
+        page_stats.append(("html.template.render_secs", PH_TPL, "Jinja2 template rendering (wall-clock time)"))
+
+        # Top slow commits (helps pinpoint which commit(s) dominate tree-building)
         slow_github_sorted = sorted(slow_github, key=lambda x: -float(x[0]))[:5]
         slow_gitlab_sorted = sorted(slow_gitlab, key=lambda x: -float(x[0]))[:5]
         if slow_github_sorted:
-            page_stats.append(("html_slowest_commits_github.total_secs", ", ".join([f"{sha}={dt:.2f}s" for dt, sha in slow_github_sorted])))
+            page_stats.append(("html.slowest_commits.github", ", ".join([f"{sha}={dt:.2f}s" for dt, sha in slow_github_sorted]), "Top 5 slowest commits (GitHub tree building)"))
         if slow_gitlab_sorted:
-            page_stats.append(("html_slowest_commits_gitlab.total_secs", ", ".join([f"{sha}={dt:.2f}s" for dt, sha in slow_gitlab_sorted])))
+            page_stats.append(("html.slowest_commits.gitlab", ", ".join([f"{sha}={dt:.2f}s" for dt, sha in slow_gitlab_sorted]), "Top 5 slowest commits (GitLab tree building)"))
 
         # Sort stats for readability (generation.total_secs first, then other keys grouped by prefix).
         gen = [stat for stat in page_stats if stat[0] == "generation.total_secs"]
