@@ -20,9 +20,9 @@ body { font-family: Arial, sans-serif; margin: 10px; line-height: 1.3; }
 .summary-box.killed { background: #fff3e0; border-left: 4px solid #ff9800; }
 .summary-box .number { font-size: 28px; font-weight: bold; margin: 5px 0; display: block; }
 .summary-box .label { font-size: 13px; color: #7f8c8d; text-transform: uppercase; font-weight: 600; display: block; }
-.framework { margin: 10px 0; padding: 8px; border: 1px solid #dee2e6; border-radius: 4px; background-color: #ffffff; }
-.framework-header { background-color: #007bff; color: white; padding: 8px 12px; margin: -8px -8px 8px -8px; border-radius: 4px 4px 0 0; font-weight: bold; }
-.results-chart { display: grid; grid-template-columns: auto 1fr 1fr auto auto auto auto; width: 100%; border-collapse: collapse; margin: 8px 0; }
+.framework { margin: 10px 0; padding: 0; border: 1px solid #dee2e6; border-radius: 4px; background-color: #ffffff; }
+.framework-header { background-color: #007bff; color: white; padding: 8px 12px; border-radius: 4px 4px 0 0; font-weight: bold; display: grid; grid-column: 1 / -1; }
+.results-chart { display: grid; grid-template-columns: auto 1fr 1fr auto auto auto auto; width: 100%; border-collapse: collapse; margin: 0; }
 .chart-row { display: contents; }
 .chart-cell { padding: 6px 12px; border: 1px solid #dee2e6; vertical-align: middle; }
 .chart-header { background-color: #f8f9fa; font-weight: bold; text-align: center; }
@@ -156,8 +156,8 @@ h2 { margin: 0; font-size: 1.2em; font-weight: bold; }
 {%- set targets = frameworks[framework_name] %}
 
 <div class="framework">
-<div class="framework-header">{{ framework_name }}</div>
 <div class="results-chart">
+<div class="framework-header">{{ framework_name }}</div>
 <div class="chart-row">
 <div class="chart-cell chart-header">Target</div>
 <div class="chart-cell chart-header">Input Image</div>

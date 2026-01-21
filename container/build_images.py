@@ -384,7 +384,7 @@ def create_task_graph(framework: str, sha: str, repo_path: Path, version: Option
     tasks[f"{framework}-dev-compilation"] = CommandTask(
         task_id=f"{framework}-dev-compilation",
         description=f"Run workspace compilation in {framework.upper()} dev container",
-        command=f"{repo_path}/container/run.sh --image {dev_image_tag} --mount-workspace -v {home_dir}/.cargo:/root/.cargo -- bash -c '{cargo_cmd}'",
+        command=f"{repo_path}/container/run.sh --image {dev_image_tag} --mount-workspace -v {home_dir}/.cargo:/root/.cargo -v {repo_path}/target.{framework}:/workspace/target -- bash -c '{cargo_cmd}'",
         input_image=dev_image_tag,
         parents=[dev_compilation_parent],
         run_even_if_deps_fail=framework == "none",  # For none framework, run even if sanity fails
@@ -395,7 +395,8 @@ def create_task_graph(framework: str, sha: str, repo_path: Path, version: Option
     tasks[f"{framework}-dev-chown"] = CommandTask(
         task_id=f"{framework}-dev-chown",
         description=f"Fix file ownership after {framework.upper()} dev compilation",
-        command=f"sudo chown -R $(id -u):$(id -g) {repo_path}/target {repo_path}/lib/bindings/python {home_dir}/.cargo",
+        # chown can race with build outputs being deleted/renamed; don't fail the task on ENOENT.
+        command=f"sudo chown -R $(id -u):$(id -g) {repo_path}/target.{framework} {repo_path}/lib/bindings/python {home_dir}/.cargo || true",
         parents=[f"{framework}-dev-compilation"],
         run_even_if_deps_fail=True,
         timeout=60.0,
@@ -449,7 +450,7 @@ def create_task_graph(framework: str, sha: str, repo_path: Path, version: Option
     tasks[f"{framework}-local-dev-compilation"] = CommandTask(
         task_id=f"{framework}-local-dev-compilation",
         description=f"Run workspace compilation in {framework.upper()} local-dev container",
-        command=f"{repo_path}/container/run.sh --image {local_dev_image_tag} --mount-workspace -v {home_dir}/.cargo:/home/ubuntu/.cargo -- bash -c '{cargo_cmd}'",
+        command=f"{repo_path}/container/run.sh --image {local_dev_image_tag} --mount-workspace -v {home_dir}/.cargo:/home/dynamo/.cargo -v {repo_path}/target.{framework}:/workspace/target -- bash -c '{cargo_cmd}'",
         input_image=local_dev_image_tag,
         parents=local_dev_compilation_parents,
         run_even_if_deps_fail=framework == "none",  # For none framework, run even if sanity fails
@@ -463,7 +464,7 @@ def create_task_graph(framework: str, sha: str, repo_path: Path, version: Option
     tasks[f"{framework}-local-dev-sanity"] = CommandTask(
         task_id=f"{framework}-local-dev-sanity",
         description=f"Run sanity_check.py in {framework.upper()} local-dev container",
-        command=f"{repo_path}/container/run.sh --image {local_dev_image_tag} --mount-workspace -v {home_dir}/.cargo:/home/ubuntu/.cargo -- python3 /workspace/deploy/sanity_check.py{sanity_no_framework_flag}",
+        command=f"{repo_path}/container/run.sh --image {local_dev_image_tag} --mount-workspace -v {home_dir}/.cargo:/home/dynamo/.cargo -- python3 /workspace/deploy/sanity_check.py{sanity_no_framework_flag}",
         input_image=local_dev_image_tag,
         parents=[local_dev_sanity_parent],
         timeout=45.0,  # 45 seconds for sanity checks
@@ -2999,9 +3000,9 @@ def main() -> int:
         logger.info(f"HTML report written: {html_out}")
         return 0
 
-    # Check for lock file to prevent concurrent runs
+    # Check for lock file to prevent concurrent runs (unless --run-ignore-lock is set)
     lock_file = repo_path / ".build_images.lock"
-    if lock_file.exists():
+    if lock_file.exists() and not args.run_ignore_lock:
         try:
             with open(lock_file, 'r') as f:
                 lock_info = f.read().strip().split('\n')
