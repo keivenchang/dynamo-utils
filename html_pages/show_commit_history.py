@@ -807,6 +807,7 @@ class CommitHistoryGenerator:
 
             # Fetch required checks for all PRs (GraphQL per-PR required checks).
             # NOTE: gitlab_fetch_skip only affects GitLab calls, not GitHub calls
+            # TODO: Unhardcode "ai-dynamo"/"dynamo" - should be class attributes or config
             pr_to_required_checks: Dict[int, List[str]] = {}
             if pr_numbers and not cache_only_github:
                 self.logger.info(f"Fetching required checks for {len(pr_numbers)} PRs...")
@@ -1005,6 +1006,7 @@ class CommitHistoryGenerator:
                             pipeline_web_url = p.get("web_url", "")
                             pipeline_status = p.get("status", "")
                             pr_number = sha_to_pr_number.get(sha)
+                            # TODO: Unhardcode github.com/ai-dynamo/dynamo URLs
                             pr_web_url = f"https://github.com/ai-dynamo/dynamo/pull/{pr_number}" if pr_number else ""
                             commit_web_url = f"https://github.com/ai-dynamo/dynamo/commit/{sha}"
                             w.writerow(
@@ -1155,6 +1157,7 @@ class CommitHistoryGenerator:
         pr_numbers = sorted({v for v in sha_to_pr_number.values() if v})
         mr_pipelines: Dict[int, Optional[dict]] = {}
         if pr_numbers:
+            # TODO: Unhardcode project_id="169905" (dl/ai-dynamo/dynamo) - should be config
             mr_pipelines = self.gitlab_client.get_cached_merge_request_pipelines(
                 pr_numbers,
                 project_id="169905",
@@ -1174,6 +1177,7 @@ class CommitHistoryGenerator:
         # Prime required-checks metadata (GitHub) in a capped way:
         # - only allow network fetch for PRs associated with allow_fetch_shas
         # - cache will automatically be checked first (get_required_checks uses 7-day TTL cache)
+        # TODO: Unhardcode "ai-dynamo"/"dynamo" - should be class attributes or config
         pr_to_required_checks: Dict[int, List[str]] = {}
         pr_numbers_allow = sorted({p for p in (sha_to_pr_number.get(sha) for sha in sha_full_list) if p})
         if pr_numbers_allow:
@@ -1419,6 +1423,7 @@ class CommitHistoryGenerator:
             pr_match = re.search(r'\(#(\d+)\)', message)
             if pr_match:
                 pr_number = pr_match.group(1)
+                # TODO: Unhardcode github.com/ai-dynamo/dynamo URL
                 pr_link = f"https://github.com/ai-dynamo/dynamo/pull/{pr_number}"
                 message = re.sub(
                     r'\(#(\d+)\)',
@@ -1743,6 +1748,7 @@ class CommitHistoryGenerator:
             # Note: Sorting is now handled by PASS 4 (sort_by_name_pass) in the centralized pipeline.
             if not check_runs:
                 # Always render a stable placeholder so every commit row can show the dropdown.
+                # TODO: Unhardcode github.com/ai-dynamo/dynamo URL
                 root = TreeNodeVM(
                     node_key=f"gha-root:{sha_full}",
                     label_html=(
@@ -1930,6 +1936,7 @@ class CommitHistoryGenerator:
                 github_api=self.github_client,
             )
 
+            # TODO: Unhardcode github.com/ai-dynamo/dynamo URL
             root = TreeNodeVM(
                 node_key=f"gha-root:{sha_full}",
                 label_html=(
@@ -2098,6 +2105,7 @@ class CommitHistoryGenerator:
             # NOTE (2026-01-19): Branch protection API requires admin perms and returns 403.
             # DO NOT use get_required_checks_for_base_ref() anymore - it doesn't work.
             # Instead: fetch an open PR targeting main and use its required checks as a proxy.
+            # TODO: Unhardcode "ai-dynamo"/"dynamo" - should be class attributes or config
             required_names: List[str] = []
             try:
                 # Get open PRs targeting main and try multiple until we find one with required checks
@@ -2309,6 +2317,7 @@ class CommitHistoryGenerator:
 
         t0 = time.monotonic()
         
+        # TODO: Unhardcode project_id="169905" (dl/ai-dynamo/dynamo) - should be config
         result = self.gitlab_client.get_cached_registry_images_for_shas(
             project_id="169905",  # dl/ai-dynamo/dynamo
             registry_id="85325",  # Main dynamo registry

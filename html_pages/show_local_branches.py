@@ -999,8 +999,8 @@ Environment Variables:
         _ = generate_html(
             root,
             page_stats=page_stats,
-            page_title=f'<span style="font-size: smaller; color: #d1d5db;">Augmented</span> Local Pull Requests [{base_dir}]',
-            header_title=f'<span style="font-size: smaller; color: #d1d5db;">Augmented</span> Local Pull Requests [{base_dir}]',
+            page_title=f'<span style="color: #fbbf24;">Augmented</span> Local Pull Requests [{base_dir}]',
+            header_title=f'<span style="color: #fbbf24;">Augmented</span> Local Pull Requests [{base_dir}]',
         )
 
     # Update the page stats with the timing breakdown before producing the final HTML.
@@ -1020,8 +1020,8 @@ Environment Variables:
         html_output2 = generate_html(
             root,
             page_stats=page_stats,
-            page_title=f'<span style="font-size: smaller; color: #d1d5db;">Augmented</span> Local Pull Requests [{base_dir}]',
-            header_title=f'<span style="font-size: smaller; color: #d1d5db;">Augmented</span> Local Pull Requests [{base_dir}]',
+            page_title=f'<span style="color: #fbbf24;">Augmented</span> Local Pull Requests [{base_dir}]',
+            header_title=f'<span style="color: #fbbf24;">Augmented</span> Local Pull Requests [{base_dir}]',
         )
     with phase_t.phase("write"):
         atomic_write_text(out_path, html_output2, encoding="utf-8")
