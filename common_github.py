@@ -43,7 +43,7 @@ import urllib.parse
 import urllib.request
 import zipfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
@@ -4504,9 +4504,12 @@ class GitHubAPIClient:
           this uses `gh` subprocess calls (separate from this client's REST budget).
         
         Caching:
-        - Results are cached for 7 days to avoid repeated GraphQL calls.
+        - Tiered TTL based on PR age (now - PR.updated_at):
+          - < 8 hours: 60s
+          - 8 hours .. 1 day: 5 min
+          - >= 1 day: 30 days
         - Uses both memory and disk cache for persistence across runs.
-        - Long TTL is appropriate: required checks rarely change after PR creation.
+        - Failed fetches are cached briefly (<= 60s) to avoid retry storms.
 
         Pagination:
         - Fetches up to 500 checks per page, with up to 5 pages (2500 total checks).
@@ -4517,9 +4520,54 @@ class GitHubAPIClient:
         except (ValueError, TypeError):
             return set()
 
-        # Check cache first (7 day TTL - required checks rarely change after PR creation)
+        def _ttl_s_for_pr_age(pr_age_s: int) -> int:
+            """Tiered TTL for required-checks cache based on PR age (seconds)."""
+            try:
+                s = int(pr_age_s)
+            except (ValueError, TypeError):
+                s = 0
+            if s < 8 * 3600:
+                return 60
+            if s < 24 * 3600:
+                return 5 * 60
+            return 30 * 24 * 3600
+
+        def _is_cache_entry_valid(ent: Dict[str, Any], *, now: int) -> bool:
+            """Return True if a cache entry is valid under current tiered TTL policy."""
+            try:
+                ts = int(ent.get("ts", 0) or 0)
+            except (ValueError, TypeError):
+                ts = 0
+            if not ts:
+                return False
+
+            ok = ent.get("ok", True)
+
+            # New entries include PR.updated_at epoch so we can apply tiered TTL without refetching metadata.
+            pr_updated_at_epoch = ent.get("pr_updated_at_epoch", None)
+            try:
+                pr_updated_at_epoch_i = int(pr_updated_at_epoch) if pr_updated_at_epoch is not None else 0
+            except (ValueError, TypeError):
+                pr_updated_at_epoch_i = 0
+            if not pr_updated_at_epoch_i:
+                # If this was a failed fetch, cache briefly to avoid retry storms.
+                if ok is False:
+                    return (int(now) - int(ts)) <= 60
+                # Legacy entries lacked PR.updated_at; treat them as expired so we refresh and populate metadata.
+                # Cache-only mode is handled by the caller.
+                return False
+
+            pr_age_s = max(0, int(now) - int(pr_updated_at_epoch_i))
+            ttl_s = _ttl_s_for_pr_age(pr_age_s)
+
+            # Failed fetches should never be cached long-term.
+            if ok is False:
+                ttl_s = min(int(ttl_s), 60)
+
+            return (int(now) - int(ts)) <= int(ttl_s)
+
+        # Check cache first (tiered TTL based on PR.updated_at age)
         cache_key = f"required_checks:{owner}/{repo}:pr{prn}"
-        ttl_s = 7 * 24 * 3600  # 7 days
         now = int(time.time())
         
         # 1) Memory cache
@@ -4528,9 +4576,8 @@ class GitHubAPIClient:
                 self._required_checks_pr_mem_cache = {}
             ent = self._required_checks_pr_mem_cache.get(cache_key)
             if isinstance(ent, dict):
-                ts = int(ent.get("ts", 0) or 0)
                 val = ent.get("val")
-                if isinstance(val, set) and ts and ((now - ts) <= ttl_s or self.cache_only_mode):
+                if isinstance(val, set) and (self.cache_only_mode or _is_cache_entry_valid(ent, now=now)):
                     return val
         except (ValueError, TypeError):
             pass
@@ -4540,13 +4587,18 @@ class GitHubAPIClient:
             disk = self._load_required_checks_disk_cache()
             ent = disk.get(cache_key) if isinstance(disk, dict) else None
             if isinstance(ent, dict):
-                ts = int(ent.get("ts", 0) or 0)
                 val = ent.get("val")
-                if isinstance(val, list) and ts and ((now - ts) <= ttl_s or self.cache_only_mode):
+                if isinstance(val, list) and (self.cache_only_mode or _is_cache_entry_valid(ent, now=now)):
                     out = set(val)
                     if not hasattr(self, "_required_checks_pr_mem_cache"):
                         self._required_checks_pr_mem_cache = {}
-                    self._required_checks_pr_mem_cache[cache_key] = {"ts": ts, "val": out}
+                    # Preserve metadata so the mem-cache entry obeys the same TTL as disk.
+                    self._required_checks_pr_mem_cache[cache_key] = {
+                        "ts": int(ent.get("ts", 0) or 0),
+                        "val": out,
+                        "ok": ent.get("ok", True),
+                        "pr_updated_at_epoch": ent.get("pr_updated_at_epoch", None),
+                    }
                     return out
         except (ValueError, TypeError):
             pass
@@ -4558,24 +4610,53 @@ class GitHubAPIClient:
         try:
             # Fetch PR node_id via gh (avoids consuming this client's REST budget).
             pr_node_id = ""
+            pr_updated_at_epoch: Optional[int] = None
             try:
                 res0 = subprocess.run(
-                    ["gh", "api", f"repos/{owner}/{repo}/pulls/{prn}", "--jq", ".node_id"],
+                    [
+                        "gh",
+                        "api",
+                        f"repos/{owner}/{repo}/pulls/{prn}",
+                        "--jq",
+                        "{node_id: .node_id, updated_at: .updated_at}",
+                    ],
                 capture_output=True,
                 text=True,
                     timeout=15,
                     check=False,
                 )
                 if res0.returncode == 0:
-                    pr_node_id = str(res0.stdout or "").strip()
+                    meta = {}
+                    try:
+                        meta = json.loads(str(res0.stdout or "").strip() or "{}") or {}
+                    except json.JSONDecodeError:
+                        meta = {}
+                    pr_node_id = str(meta.get("node_id") or "").strip()
+                    updated_at_s = str(meta.get("updated_at") or "").strip()
+                    if updated_at_s:
+                        try:
+                            # GitHub returns ISO 8601 timestamps like "2026-01-21T09:25:31Z"
+                            dt = datetime.fromisoformat(updated_at_s.replace("Z", "+00:00"))
+                            pr_updated_at_epoch = int(dt.timestamp())
+                        except (ValueError, TypeError):
+                            pr_updated_at_epoch = None
             except (OSError, subprocess.SubprocessError):  # subprocess failures
                 pr_node_id = ""
+                pr_updated_at_epoch = None
             if not pr_node_id:
                 # Cache negative result (PR not found / not accessible)
                 if not hasattr(self, "_required_checks_pr_mem_cache"):
                     self._required_checks_pr_mem_cache = {}
-                self._required_checks_pr_mem_cache[cache_key] = {"ts": now, "val": set()}
-                self._save_required_checks_disk_cache(cache_key, {"ts": now, "val": []})
+                self._required_checks_pr_mem_cache[cache_key] = {
+                    "ts": now,
+                    "val": set(),
+                    "ok": False,
+                    "pr_updated_at_epoch": pr_updated_at_epoch,
+                }
+                self._save_required_checks_disk_cache(
+                    cache_key,
+                    {"ts": now, "val": [], "ok": False, "pr_updated_at_epoch": pr_updated_at_epoch},
+                )
                 return set()
 
             # Paginated query: fetch up to 100 checks per page (GitHub's limit), up to 25 pages (2500 total).
@@ -4695,21 +4776,34 @@ query($owner:String!,$name:String!,$number:Int!,$prid:ID!,$after:String) {
                 except (OSError, subprocess.SubprocessError, json.JSONDecodeError):  # subprocess or JSON errors
                     break
             
-            # Cache the results (1 hour TTL)
+            # Cache the results with tiered TTL based on PR.updated_at age.
             if not hasattr(self, "_required_checks_pr_mem_cache"):
                 self._required_checks_pr_mem_cache = {}
-            self._required_checks_pr_mem_cache[cache_key] = {"ts": now, "val": all_required}
+            self._required_checks_pr_mem_cache[cache_key] = {
+                "ts": now,
+                "val": all_required,
+                "ok": True,
+                "pr_updated_at_epoch": pr_updated_at_epoch,
+            }
 
             # Save to disk cache using DiskCacheWriter (enforces lock-load-merge-save)
-            self._save_required_checks_disk_cache(cache_key, {"ts": now, "val": sorted(all_required)})
+            self._save_required_checks_disk_cache(
+                cache_key,
+                {
+                    "ts": now,
+                    "val": sorted(all_required),
+                    "ok": True,
+                    "pr_updated_at_epoch": pr_updated_at_epoch,
+                },
+            )
 
             return all_required
         except (OSError, subprocess.SubprocessError, json.JSONDecodeError):  # subprocess or JSON parsing failures
             # Cache negative result (fetch failed)
             if not hasattr(self, "_required_checks_pr_mem_cache"):
                 self._required_checks_pr_mem_cache = {}
-            self._required_checks_pr_mem_cache[cache_key] = {"ts": now, "val": set()}
-            self._save_required_checks_disk_cache(cache_key, {"ts": now, "val": []})
+            self._required_checks_pr_mem_cache[cache_key] = {"ts": now, "val": set(), "ok": False}
+            self._save_required_checks_disk_cache(cache_key, {"ts": now, "val": [], "ok": False})
             return set()
 
     def _required_checks_cache_key(self, owner: str, repo: str, base_ref: str) -> str:

@@ -291,6 +291,14 @@
         Metrics marked as "wall-clock time" represent actual elapsed time.
         Because multiple threads run simultaneously, accumulated thread time can exceed wall-clock time. This is normal and indicates good parallelization.
       </p>
+      <p style="margin-top: 0.8em; padding: 0.5em; background-color: #f8f9fa; border-left: 3px solid #6f42c1;">
+        <strong>Note on Cache TTLs (cache.*):</strong>
+        Some cache entries use a tiered TTL based on PR age (now - PR.updated_at):
+        <span style="font-family: ui-monospace, SFMono-Regular, SF Mono, Menlo, Consolas, Liberation Mono, monospace;">
+          &lt;8h → 60s, 8h..1d → 5m, ≥1d → 30d
+        </span>.
+        Failed fetches are cached briefly (≤ 60s) to avoid retry storms.
+      </p>
       </div>
     </details>
   </div>

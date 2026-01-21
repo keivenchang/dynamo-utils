@@ -351,7 +351,7 @@ def create_task_graph(framework: str, sha: str, repo_path: Path, version: Option
     tasks[f"{framework}-runtime-sanity"] = CommandTask(
         task_id=f"{framework}-runtime-sanity",
         description=f"Run sanity_check.py in {framework.upper()} runtime container",
-        command=f"{repo_path}/container/run.sh --image {runtime_image_tag} -- python3 /workspace/deploy/sanity_check.py --runtime-check{sanity_no_framework_flag}",
+        command=f"{repo_path}/container/run.sh --image {runtime_image_tag} -- bash -c 'id && python3 /workspace/deploy/sanity_check.py --runtime-check{sanity_no_framework_flag}'",
         input_image=runtime_image_tag,
         parents=[f"{framework}-runtime-build"],
         timeout=45.0,  # 45 seconds for sanity checks
@@ -384,7 +384,7 @@ def create_task_graph(framework: str, sha: str, repo_path: Path, version: Option
     tasks[f"{framework}-dev-compilation"] = CommandTask(
         task_id=f"{framework}-dev-compilation",
         description=f"Run workspace compilation in {framework.upper()} dev container",
-        command=f"{repo_path}/container/run.sh --image {dev_image_tag} --mount-workspace -v {home_dir}/.cargo:/root/.cargo -v {repo_path}/target.{framework}:/workspace/target -- bash -c '{cargo_cmd}'",
+        command=f"{repo_path}/container/run.sh --image {dev_image_tag} --mount-workspace -v {home_dir}/.cargo:/root/.cargo -v {repo_path}/target/.{framework}:/workspace/target -- bash -c '{cargo_cmd}'",
         input_image=dev_image_tag,
         parents=[dev_compilation_parent],
         run_even_if_deps_fail=framework == "none",  # For none framework, run even if sanity fails
@@ -396,7 +396,7 @@ def create_task_graph(framework: str, sha: str, repo_path: Path, version: Option
         task_id=f"{framework}-dev-chown",
         description=f"Fix file ownership after {framework.upper()} dev compilation",
         # chown can race with build outputs being deleted/renamed; don't fail the task on ENOENT.
-        command=f"sudo chown -R $(id -u):$(id -g) {repo_path}/target.{framework} {repo_path}/lib/bindings/python {home_dir}/.cargo || true",
+        command=f"sudo chown -R $(id -u):$(id -g) {repo_path}/target/.{framework} {repo_path}/lib/bindings/python {home_dir}/.cargo || true",
         parents=[f"{framework}-dev-compilation"],
         run_even_if_deps_fail=True,
         timeout=60.0,
@@ -409,7 +409,7 @@ def create_task_graph(framework: str, sha: str, repo_path: Path, version: Option
     tasks[f"{framework}-dev-sanity"] = CommandTask(
         task_id=f"{framework}-dev-sanity",
         description=f"Run sanity_check.py in {framework.upper()} dev container",
-        command=f"{repo_path}/container/run.sh --image {dev_image_tag} --mount-workspace -v {home_dir}/.cargo:/root/.cargo -- python3 /workspace/deploy/sanity_check.py{sanity_no_framework_flag}",
+        command=f"{repo_path}/container/run.sh --image {dev_image_tag} --mount-workspace -v {home_dir}/.cargo:/root/.cargo -- bash -c 'id && python3 /workspace/deploy/sanity_check.py{sanity_no_framework_flag}'",
         input_image=dev_image_tag,
         parents=[dev_sanity_parent],
         timeout=45.0,  # 45 seconds for sanity checks
@@ -450,7 +450,7 @@ def create_task_graph(framework: str, sha: str, repo_path: Path, version: Option
     tasks[f"{framework}-local-dev-compilation"] = CommandTask(
         task_id=f"{framework}-local-dev-compilation",
         description=f"Run workspace compilation in {framework.upper()} local-dev container",
-        command=f"{repo_path}/container/run.sh --image {local_dev_image_tag} --mount-workspace -v {home_dir}/.cargo:/home/dynamo/.cargo -v {repo_path}/target.{framework}:/workspace/target -- bash -c '{cargo_cmd}'",
+        command=f"{repo_path}/container/run.sh --image {local_dev_image_tag} --mount-workspace -v {home_dir}/.cargo:/home/dynamo/.cargo -v {repo_path}/target/.{framework}:/workspace/target -- bash -c '{cargo_cmd}'",
         input_image=local_dev_image_tag,
         parents=local_dev_compilation_parents,
         run_even_if_deps_fail=framework == "none",  # For none framework, run even if sanity fails
@@ -464,7 +464,7 @@ def create_task_graph(framework: str, sha: str, repo_path: Path, version: Option
     tasks[f"{framework}-local-dev-sanity"] = CommandTask(
         task_id=f"{framework}-local-dev-sanity",
         description=f"Run sanity_check.py in {framework.upper()} local-dev container",
-        command=f"{repo_path}/container/run.sh --image {local_dev_image_tag} --mount-workspace -v {home_dir}/.cargo:/home/dynamo/.cargo -- python3 /workspace/deploy/sanity_check.py{sanity_no_framework_flag}",
+        command=f"{repo_path}/container/run.sh --image {local_dev_image_tag} --mount-workspace -v {home_dir}/.cargo:/home/dynamo/.cargo -- bash -c 'id && sudo id && python3 /workspace/deploy/sanity_check.py{sanity_no_framework_flag}'",
         input_image=local_dev_image_tag,
         parents=[local_dev_sanity_parent],
         timeout=45.0,  # 45 seconds for sanity checks
