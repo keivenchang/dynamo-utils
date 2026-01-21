@@ -515,7 +515,19 @@ class LocalRepoScanner:
 
         # Get remote branches
         remote = repo.remote('origin')
-        remote.fetch()
+        try:
+            # Best-effort: fetching can occasionally fail due to local ref lock contention/corruption
+            # (e.g. "cannot lock ref ... is at <sha> but expected <sha>").
+            # We do NOT want one bad repo to kill the entire dashboard generation, so on failure
+            # we continue using whatever remote refs are already present locally.
+            remote.fetch()
+        except Exception as e:
+            # Avoid importing GitCommandError explicitly; GitPython exceptions vary by version.
+            # This is intentionally broad: the caller runs per-repo in a thread pool and MUST NOT raise.
+            try:
+                repo_node.error = f"WARNING: git fetch failed (using cached refs): {e}"
+            except Exception:
+                pass
 
         # Scan all local branches
         for branch in repo.branches:  # type: ignore[attr-defined]

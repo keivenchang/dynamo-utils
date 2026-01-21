@@ -1227,13 +1227,13 @@ class CommitHistoryGenerator:
         def fetch_pr_checks(pr_num: int, shas: List[str]) -> Tuple[int, List[str], List[Any]]:
             """Fetch check runs for a single PR (parallelizable worker)."""
             # Calculate TTL based on 3-tier logic:
-            # 1. If PR is merged/closed: 7 days (immutable)
+            # 1. If PR is merged/closed: 30 days (immutable)
             # 2. Else if commit age < 8 hours: 3 minutes (CI still running)
             # 3. Else if commit age >= 8 hours: 2 hours (CI likely done, but might re-run)
             merge_date = pr_to_merge_date.get(pr_num)
             if merge_date:
                 # PR is merged/closed - use long TTL (immutable)
-                ttl_s = 7 * 24 * 3600  # 7 days
+                ttl_s = 30 * 24 * 3600  # 30 days
             else:
                 # PR is still open - determine TTL based on commit age
                 # Get the first SHA's commit time to calculate age

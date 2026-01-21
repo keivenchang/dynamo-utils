@@ -4504,10 +4504,10 @@ class GitHubAPIClient:
           this uses `gh` subprocess calls (separate from this client's REST budget).
         
         Caching:
-        - Tiered TTL based on PR age (now - PR.updated_at):
-          - < 8 hours: 60s
-          - 8 hours .. 1 day: 5 min
-          - >= 1 day: 30 days
+        - Tiered TTL based on PR state and commit age (matching pr_checks cache):
+          - Merged/closed: 30 days (immutable)
+          - Open PR, commit < 8 hours: 3 minutes
+          - Open PR, commit >= 8 hours: 2 hours
         - Uses both memory and disk cache for persistence across runs.
         - Failed fetches are cached briefly (<= 60s) to avoid retry storms.
 
@@ -4520,17 +4520,21 @@ class GitHubAPIClient:
         except (ValueError, TypeError):
             return set()
 
-        def _ttl_s_for_pr_age(pr_age_s: int) -> int:
-            """Tiered TTL for required-checks cache based on PR age (seconds)."""
-            try:
-                s = int(pr_age_s)
-            except (ValueError, TypeError):
-                s = 0
-            if s < 8 * 3600:
-                return 60
-            if s < 24 * 3600:
-                return 5 * 60
-            return 30 * 24 * 3600
+        def _ttl_s_for_pr_state_and_commit_age(is_merged_or_closed: bool, commit_age_s: int) -> int:
+            """Tiered TTL for required-checks cache (matching pr_checks logic)."""
+            if is_merged_or_closed:
+                # Merged/closed PRs are immutable
+                return 30 * 24 * 3600  # 30 days
+            else:
+                # Open PR - determine by commit age
+                try:
+                    age = int(commit_age_s)
+                except (ValueError, TypeError):
+                    age = 0
+                if age < 8 * 3600:  # < 8 hours
+                    return 3 * 60  # 3 minutes
+                else:  # >= 8 hours
+                    return 2 * 3600  # 2 hours
 
         def _is_cache_entry_valid(ent: Dict[str, Any], *, now: int) -> bool:
             """Return True if a cache entry is valid under current tiered TTL policy."""
@@ -4543,22 +4547,28 @@ class GitHubAPIClient:
 
             ok = ent.get("ok", True)
 
-            # New entries include PR.updated_at epoch so we can apply tiered TTL without refetching metadata.
+            # Cache entries store PR metadata to apply TTL without refetching
+            pr_state = ent.get("pr_state", "open")  # "open", "closed", or "merged"
+            is_merged_or_closed = pr_state in ("closed", "merged")
+            
             pr_updated_at_epoch = ent.get("pr_updated_at_epoch", None)
             try:
                 pr_updated_at_epoch_i = int(pr_updated_at_epoch) if pr_updated_at_epoch is not None else 0
             except (ValueError, TypeError):
                 pr_updated_at_epoch_i = 0
-            if not pr_updated_at_epoch_i:
+            
+            if not pr_updated_at_epoch_i and not is_merged_or_closed:
                 # If this was a failed fetch, cache briefly to avoid retry storms.
                 if ok is False:
                     return (int(now) - int(ts)) <= 60
-                # Legacy entries lacked PR.updated_at; treat them as expired so we refresh and populate metadata.
+                # Legacy entries lacked PR metadata; treat them as expired so we refresh and populate metadata.
                 # Cache-only mode is handled by the caller.
                 return False
 
-            pr_age_s = max(0, int(now) - int(pr_updated_at_epoch_i))
-            ttl_s = _ttl_s_for_pr_age(pr_age_s)
+            # For merged/closed PRs, commit age doesn't matter (use 7d TTL)
+            # For open PRs, use commit age (time since PR.updated_at)
+            commit_age_s = max(0, int(now) - int(pr_updated_at_epoch_i)) if pr_updated_at_epoch_i else 0
+            ttl_s = _ttl_s_for_pr_state_and_commit_age(is_merged_or_closed, commit_age_s)
 
             # Failed fetches should never be cached long-term.
             if ok is False:
@@ -4597,6 +4607,7 @@ class GitHubAPIClient:
                         "ts": int(ent.get("ts", 0) or 0),
                         "val": out,
                         "ok": ent.get("ok", True),
+                        "pr_state": ent.get("pr_state", "open"),
                         "pr_updated_at_epoch": ent.get("pr_updated_at_epoch", None),
                     }
                     return out
@@ -4608,8 +4619,9 @@ class GitHubAPIClient:
             return set()
 
         try:
-            # Fetch PR node_id via gh (avoids consuming this client's REST budget).
+            # Fetch PR node_id and state via gh (avoids consuming this client's REST budget).
             pr_node_id = ""
+            pr_state = "open"
             pr_updated_at_epoch: Optional[int] = None
             try:
                 res0 = subprocess.run(
@@ -4618,10 +4630,10 @@ class GitHubAPIClient:
                         "api",
                         f"repos/{owner}/{repo}/pulls/{prn}",
                         "--jq",
-                        "{node_id: .node_id, updated_at: .updated_at}",
+                        "{node_id: .node_id, state: .state, merged_at: .merged_at, updated_at: .updated_at}",
                     ],
-                capture_output=True,
-                text=True,
+                    capture_output=True,
+                    text=True,
                     timeout=15,
                     check=False,
                 )
@@ -4632,6 +4644,10 @@ class GitHubAPIClient:
                     except json.JSONDecodeError:
                         meta = {}
                     pr_node_id = str(meta.get("node_id") or "").strip()
+                    pr_state = str(meta.get("state") or "open").strip()
+                    # If merged_at is present, state is "merged" (not "closed")
+                    if meta.get("merged_at"):
+                        pr_state = "merged"
                     updated_at_s = str(meta.get("updated_at") or "").strip()
                     if updated_at_s:
                         try:
@@ -4642,6 +4658,7 @@ class GitHubAPIClient:
                             pr_updated_at_epoch = None
             except (OSError, subprocess.SubprocessError):  # subprocess failures
                 pr_node_id = ""
+                pr_state = "open"
                 pr_updated_at_epoch = None
             if not pr_node_id:
                 # Cache negative result (PR not found / not accessible)
@@ -4651,11 +4668,12 @@ class GitHubAPIClient:
                     "ts": now,
                     "val": set(),
                     "ok": False,
+                    "pr_state": pr_state,
                     "pr_updated_at_epoch": pr_updated_at_epoch,
                 }
                 self._save_required_checks_disk_cache(
                     cache_key,
-                    {"ts": now, "val": [], "ok": False, "pr_updated_at_epoch": pr_updated_at_epoch},
+                    {"ts": now, "val": [], "ok": False, "pr_state": pr_state, "pr_updated_at_epoch": pr_updated_at_epoch},
                 )
                 return set()
 
@@ -4776,13 +4794,14 @@ query($owner:String!,$name:String!,$number:Int!,$prid:ID!,$after:String) {
                 except (OSError, subprocess.SubprocessError, json.JSONDecodeError):  # subprocess or JSON errors
                     break
             
-            # Cache the results with tiered TTL based on PR.updated_at age.
+            # Cache the results with tiered TTL based on PR state and commit age.
             if not hasattr(self, "_required_checks_pr_mem_cache"):
                 self._required_checks_pr_mem_cache = {}
             self._required_checks_pr_mem_cache[cache_key] = {
                 "ts": now,
                 "val": all_required,
                 "ok": True,
+                "pr_state": pr_state,
                 "pr_updated_at_epoch": pr_updated_at_epoch,
             }
 
@@ -4793,6 +4812,7 @@ query($owner:String!,$name:String!,$number:Int!,$prid:ID!,$after:String) {
                     "ts": now,
                     "val": sorted(all_required),
                     "ok": True,
+                    "pr_state": pr_state,
                     "pr_updated_at_epoch": pr_updated_at_epoch,
                 },
             )
@@ -4802,8 +4822,8 @@ query($owner:String!,$name:String!,$number:Int!,$prid:ID!,$after:String) {
             # Cache negative result (fetch failed)
             if not hasattr(self, "_required_checks_pr_mem_cache"):
                 self._required_checks_pr_mem_cache = {}
-            self._required_checks_pr_mem_cache[cache_key] = {"ts": now, "val": set(), "ok": False}
-            self._save_required_checks_disk_cache(cache_key, {"ts": now, "val": [], "ok": False})
+            self._required_checks_pr_mem_cache[cache_key] = {"ts": now, "val": set(), "ok": False, "pr_state": "open"}
+            self._save_required_checks_disk_cache(cache_key, {"ts": now, "val": [], "ok": False, "pr_state": "open"})
             return set()
 
     def _required_checks_cache_key(self, owner: str, repo: str, base_ref: str) -> str:

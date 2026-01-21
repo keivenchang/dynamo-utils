@@ -3307,66 +3307,40 @@ def github_api_stats_rows(
 
         # TTL information for each cache type (using constants from common.py)
         # Format: human-readable duration (e.g., "5m", "1h", "30d", "365d", "∞")
-        # Constants used: DEFAULT_UNSTABLE_TTL_S, DEFAULT_STABLE_TTL_S, DEFAULT_OPEN_PRS_TTL_S,
-        #                 DEFAULT_CLOSED_PRS_TTL_S, DEFAULT_RAW_LOG_TEXT_TTL_S
-        cache_ttls = {
-            "pr_checks": "3m (open PR, commit<8h) or 2h (open PR, commit≥8h) or 7d (merged/closed)",
-            "pulls_list": f"{_format_ttl_duration(DEFAULT_OPEN_PRS_TTL_S)} (open) or {_format_ttl_duration(DEFAULT_CLOSED_PRS_TTL_S)} (closed/merged, immutable)",
-            "pr_branch": f"{_format_ttl_duration(DEFAULT_OPEN_PRS_TTL_S)} (open) or {_format_ttl_duration(DEFAULT_CLOSED_PRS_TTL_S)} (closed/merged, immutable)",
-            "raw_log_text": f"{_format_ttl_duration(DEFAULT_RAW_LOG_TEXT_TTL_S)} (immutable once completed)",
-            "actions_job_status": "2m or ∞ (once completed, immutable)",
-            "actions_job_details": "30d",  # Hardcoded in common_github.py:2036, 2180
-            "actions_jobs": "30d",  # Hardcoded in common_github.py:2036, 2180
-            "actions_workflow": "30d",  # Hardcoded in common_github.py:970
-            "actions_workflows": "30d",  # Hardcoded in common_github.py:970
-            "required_checks": "7d",  # Hardcoded in common_github.py:4529
-            "pr_info": f"{_format_ttl_duration(DEFAULT_UNSTABLE_TTL_S)}",  # Uses updated_at comparison
-            "search_issues": "varies",
-            "job_log": "∞ (immutable, no TTL check)",  # Job logs never expire once extracted
-            "job_logs": "∞ (immutable, no TTL check)",  # Job logs never expire once extracted
-            "merge_dates": f"{_format_ttl_duration(DEFAULT_CLOSED_PRS_TTL_S)} (immutable once merged)",
-            "commit_history": "varies",
-            "commit_history_snippets": "365d (immutable, snippet_cache.py:39)",  # snippet_cache.py has 365d TTL
-            "pytest_timings": "varies",
-            "gitlab_pipeline_jobs": "varies",
-            "gitlab_pipeline_status": "varies",
-            "gitlab_mr_pipelines": "varies",
-        }
-
         # Descriptions for each cache type (without _mem/_disk suffix)
-        # For disk caches, include the JSON filename in parentheses
+        # TTL information is integrated directly into descriptions for clarity
         cache_descriptions_mem = {
-            "pr_checks": "PR check runs (workflow runs, conclusions)",
-            "pulls_list": "Pull request list responses",
-            "pr_branch": "PR branch information (head/base refs)",
-            "raw_log_text": "Raw CI log text content (index)",
-            "actions_job_status": "GitHub Actions job status (success/failure)",
-            "actions_job_details": "GitHub Actions job details (steps, durations, status)",
-            "actions_workflow": "Workflow run metadata",
-            "required_checks": "Required PR checks by base branch",
-            "pr_info": "PR metadata (author, labels, etc)",
-            "search_issues": "GitHub issue search results",
-            "job_log": "Parsed job log content",
+            "pr_checks": "PR check runs (workflow runs, conclusions) [TTL: 3m (open PR, commit<8h) or 2h (open PR, commit≥8h) or 30d (merged/closed)]",
+            "pulls_list": "Pull request list responses [TTL: 3m (open PR, commit<8h) or 2h (open PR, commit≥8h) or 30d (merged/closed)]",
+            "pr_branch": "PR branch information (head/base refs) [TTL: 3m (open PR, commit<8h) or 2h (open PR, commit≥8h) or 30d (merged/closed)]",
+            "raw_log_text": f"Raw CI log text content (index) [TTL: {_format_ttl_duration(DEFAULT_RAW_LOG_TEXT_TTL_S)} (immutable once completed)]",
+            "actions_job_status": "GitHub Actions job status (success/failure) [TTL: 2m or ∞ (once completed, immutable)]",
+            "actions_job_details": "GitHub Actions job details (steps, durations, status) [TTL: 30d]",
+            "actions_workflow": "Workflow run metadata [TTL: 30d]",
+            "required_checks": "Required PR check names (per PR, from GraphQL isRequired) [TTL: 3m (open PR, commit<8h) or 2h (open PR, commit≥8h) or 30d (merged/closed)]",
+            "pr_info": "PR metadata (author, labels, etc) [TTL: 3m (open PR, commit<8h) or 2h (open PR, commit≥8h) or 30d (merged/closed)]",
+            "search_issues": "GitHub issue search results [TTL: varies]",
+            "job_log": "Parsed job log content [TTL: ∞ (immutable, no TTL check)]",
         }
 
         cache_descriptions_disk = {
-            "actions_jobs": "GitHub Actions job details (steps, durations, status) [actions_jobs.json]",
-            "actions_workflows": "GitHub Actions workflow metadata (names, paths) [actions_workflows.json]",
-            "pr_checks": "PR check runs (workflow runs, conclusions) [pr_checks_cache.json]",
-            "pulls_list": "Pull request list responses [pulls_open_cache.json]",
-            "pr_branch": "PR branch information (head/base refs) [pr_branch_cache.json]",
-            "pr_info": "Full PR details with required checks and reviews [pr_info.json]",
-            "search_issues": "GitHub search/issues API results for PR queries [search_issues.json]",
-            "job_logs": "Job log error summaries and snippets [job_logs_cache.json]",
-            "raw_log_text": "Raw CI log text content index [index.json]",
-            "required_checks": "Required PR checks by base branch [required_checks.json]",
-            "merge_dates": "PR merge dates from GitHub API [github_pr_merge_dates.json]",
-            "commit_history": "Commit history with metadata [commit_history.json]",
-            "commit_history_snippets": "Commit message snippets [commit_history_snippets.json]",
-            "pytest_timings": "Pytest test duration timings [pytest-test-timings.json]",
-            "gitlab_pipeline_jobs": "GitLab pipeline job details [gitlab_pipeline_jobs_details_v3.json]",
-            "gitlab_pipeline_status": "GitLab pipeline status [gitlab_pipeline_status.json]",
-            "gitlab_mr_pipelines": "GitLab MR pipeline associations [gitlab_mr_pipelines.json]",
+            "actions_jobs": "GitHub Actions job details (steps, durations, status) [actions_jobs.json] [TTL: 30d]",
+            "actions_workflows": "GitHub Actions workflow metadata (names, paths) [actions_workflows.json] [TTL: 30d]",
+            "pr_checks": "PR check runs (workflow runs, conclusions) [pr_checks_cache.json] [TTL: 3m (open PR, commit<8h) or 2h (open PR, commit≥8h) or 30d (merged/closed)]",
+            "pulls_list": "Pull request list responses [pulls_open_cache.json] [TTL: 3m (open PR, commit<8h) or 2h (open PR, commit≥8h) or 30d (merged/closed)]",
+            "pr_branch": "PR branch information (head/base refs) [pr_branch_cache.json] [TTL: 3m (open PR, commit<8h) or 2h (open PR, commit≥8h) or 30d (merged/closed)]",
+            "pr_info": "Full PR details with required checks and reviews [pr_info.json] [TTL: 3m (open PR, commit<8h) or 2h (open PR, commit≥8h) or 30d (merged/closed)]",
+            "search_issues": "GitHub search/issues API results for PR queries [search_issues.json] [TTL: varies]",
+            "job_logs": "Job log error summaries and snippets [job_logs_cache.json] [TTL: ∞ (immutable, no TTL check)]",
+            "raw_log_text": f"Raw CI log text content index [index.json] [TTL: {_format_ttl_duration(DEFAULT_RAW_LOG_TEXT_TTL_S)} (immutable once completed)]",
+            "required_checks": "Required PR check names (per PR, from GraphQL isRequired) [required_checks.json] [TTL: 3m (open PR, commit<8h) or 2h (open PR, commit≥8h) or 30d (merged/closed)]",
+            "merge_dates": f"PR merge dates from GitHub API [github_pr_merge_dates.json] [TTL: {_format_ttl_duration(DEFAULT_CLOSED_PRS_TTL_S)} (immutable once merged)]",
+            "commit_history": "Commit history with metadata [commit_history.json] [TTL: varies]",
+            "commit_history_snippets": "Commit message snippets [commit_history_snippets.json] [TTL: 365d (immutable)]",
+            "pytest_timings": "Pytest test duration timings [pytest-test-timings.json] [TTL: varies]",
+            "gitlab_pipeline_jobs": "GitLab pipeline job details [gitlab_pipeline_jobs_details_v3.json] [TTL: varies]",
+            "gitlab_pipeline_status": "GitLab pipeline status [gitlab_pipeline_status.json] [TTL: varies]",
+            "gitlab_mr_pipelines": "GitLab MR pipeline associations [gitlab_mr_pipelines.json] [TTL: varies]",
         }
 
         # Separate memory and disk caches, then sort within each group
@@ -3380,25 +3354,19 @@ def github_api_stats_rows(
                 if count > 0:
                     base_name = cache_name[:-4]  # Remove "_mem" suffix
                     desc = cache_descriptions_mem.get(base_name, f"Cached entries in {base_name}")
-                    ttl = cache_ttls.get(base_name)
-                    if ttl:
-                        desc = f"{desc} [TTL: {ttl}]"
+                    # TTL is now integrated into descriptions, no need to append
                     mem_caches.append((f"cache.mem.{base_name}", str(count), desc))
             elif cache_name.endswith("_disk"):
                 # Disk cache: cache.disk.{name} - ALWAYS show (even if 0) to verify MERGE pattern
                 base_name = cache_name[:-5]  # Remove "_disk" suffix
                 desc = cache_descriptions_disk.get(base_name, f"Cached entries in {base_name}")
-                ttl = cache_ttls.get(base_name)
-                if ttl:
-                    desc = f"{desc} [TTL: {ttl}]"
+                # TTL is now integrated into descriptions, no need to append
                 disk_caches.append((f"cache.disk.{base_name}", str(count), desc))
             else:
                 # Unknown format, keep as-is - only show if count > 0
                 if count > 0:
                     desc = cache_descriptions_mem.get(cache_name, f"Cached entries in {cache_name}")
-                    ttl = cache_ttls.get(cache_name)
-                    if ttl:
-                        desc = f"{desc} [TTL: {ttl}]"
+                    # TTL is now integrated into descriptions, no need to append
                     mem_caches.append((f"cache.{cache_name}", str(count), desc))
 
         # Add memory caches first (sorted), then disk caches (sorted)
