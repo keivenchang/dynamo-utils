@@ -1859,6 +1859,95 @@ class GitHubAPIClient:
 
         return status_s
 
+    def get_pr_head_sha(self, *, owner: str, repo: str, pr_number: int, ttl_s: int = 86400) -> Optional[str]:
+        """Return PR head SHA with disk cache for closed/merged PRs.
+
+        OPTIMIZATION: Closed/merged PRs are cached to disk permanently since head SHA never changes.
+        This reduces API calls from ~100+ per run to near-zero on subsequent runs.
+
+        Args:
+            owner: Repository owner
+            repo: Repository name
+            pr_number: Pull request number
+            ttl_s: TTL for open PRs (default 1 day; closed PRs cached forever)
+
+        Returns:
+            Head SHA string or None if not found
+        """
+        pr_num = int(pr_number)
+        key = f"{owner}/{repo}:pr:{pr_num}:head_sha"
+        now = int(time.time())
+
+        # Memory cache (all PRs, respects TTL)
+        try:
+            ent = self._pr_info_mem_cache.get(key)
+            if ent and int(ent.get("ts", 0) or 0) + int(ttl_s) > now:
+                head_sha = ent.get("head_sha")
+                return str(head_sha) if head_sha else None
+        except (ValueError, TypeError):
+            pass
+
+        # Disk cache (for closed/merged PRs - they never change!)
+        disk = self._load_pr_info_head_sha_disk_cache()
+        ent = disk.get(key) if isinstance(disk, dict) else None
+        if isinstance(ent, dict):
+            head_sha_cached = ent.get("head_sha")
+            state = ent.get("state")
+            # Closed/merged PRs are cached forever
+            if str(state or "").lower() in ("closed", "merged"):
+                self._pr_info_mem_cache[key] = {"ts": now, "head_sha": head_sha_cached, "state": state}
+                self._cache_hit("pr_head_sha.disk")
+                return str(head_sha_cached) if head_sha_cached else None
+            # For open PRs, check TTL
+            ts = int(ent.get("ts", 0) or 0)
+            if ts and (now - ts) <= int(ttl_s):
+                self._pr_info_mem_cache[key] = {"ts": ts, "head_sha": head_sha_cached, "state": state}
+                self._cache_hit("pr_head_sha.disk")
+                return str(head_sha_cached) if head_sha_cached else None
+
+        # Cache-only mode: don't fetch
+        if self.cache_only_mode:
+            return None
+
+        # Network fetch
+        self._cache_miss("pr_head_sha.network")
+        pr = self.get(f"/repos/{owner}/{repo}/pulls/{pr_num}", timeout=10) or {}
+        head_sha = (((pr.get("head") or {}) if isinstance(pr, dict) else {}) or {}).get("sha")
+        head_sha = str(head_sha or "").strip() if head_sha else None
+        state = str(pr.get("state", "") or "").strip() if isinstance(pr, dict) else None
+
+        if not head_sha:
+            return None
+
+        # Save to memory cache
+        self._pr_info_mem_cache[key] = {"ts": now, "head_sha": head_sha, "state": state}
+
+        # Save to disk cache (closed/merged PRs are cached forever)
+        self._save_pr_info_head_sha_disk_cache(key, {"ts": now, "head_sha": head_sha, "state": state})
+        self._cache_write("pr_head_sha.disk_write", entries=1)
+
+        return head_sha
+
+    def _load_pr_info_head_sha_disk_cache(self) -> Dict[str, Any]:
+        """Load PR head SHA disk cache (separate from enriched PR info cache)."""
+        self._pr_info_cache_dir.mkdir(parents=True, exist_ok=True)
+        p = self._pr_info_cache_dir / "pr_head_sha.json"
+        if not p.exists():
+            return {}
+        return self._json_load_text(p.read_text() or "{}")
+
+    def _save_pr_info_head_sha_disk_cache(self, key: str, value: Dict[str, Any]) -> None:
+        """Atomically update a single entry in PR head SHA disk cache."""
+        _save_single_disk_cache_entry(
+            cache_dir=self._pr_info_cache_dir,
+            cache_filename="pr_head_sha.json",
+            lock_filename="pr_head_sha.lock",
+            load_fn=self._load_pr_info_head_sha_disk_cache,
+            json_dump_fn=lambda d: self._json_dump_text(d, indent=None),
+            key=key,
+            value=value,
+        )
+
     def _load_actions_job_disk_cache(self) -> Dict[str, Any]:
         self._actions_job_cache_dir.mkdir(parents=True, exist_ok=True)
         p = self._actions_job_cache_dir / "actions_jobs.json"
@@ -3765,10 +3854,8 @@ class GitHubAPIClient:
             if head_sha:
                 head_sha = str(head_sha).strip()
             else:
-                # Otherwise fetch PR to get head SHA
-                pr = self.get(f"/repos/{owner}/{repo}/pulls/{int(pr_number)}", timeout=10) or {}
-                head_sha = (((pr.get("head") or {}) if isinstance(pr, dict) else {}) or {}).get("sha")
-                head_sha = str(head_sha or "").strip()
+                # Otherwise fetch PR head SHA from cache (or API if needed)
+                head_sha = self.get_pr_head_sha(owner=owner, repo=repo, pr_number=int(pr_number))
 
             if not head_sha:
                 return []
@@ -4143,9 +4230,8 @@ class GitHubAPIClient:
           - GET /repos/{owner}/{repo}/commits/{head_sha}/check-runs?per_page=100
         """
         try:
-            pr = self.get(f"/repos/{owner}/{repo}/pulls/{int(pr_number)}", timeout=10) or {}
-            head_sha = (((pr.get("head") or {}) if isinstance(pr, dict) else {}) or {}).get("sha")
-            head_sha = str(head_sha or "").strip()
+            # Fetch PR head SHA from cache (or API if needed)
+            head_sha = self.get_pr_head_sha(owner=owner, repo=repo, pr_number=int(pr_number))
             if not head_sha:
                 return None
 
@@ -5425,9 +5511,8 @@ query($owner:String!,$name:String!,$number:Int!,$prid:ID!,$after:String) {
                 return running_checks
 
             # Fallback (no checks_data): derive from REST check-runs for PR head SHA.
-            pr = self.get(f"/repos/{owner}/{repo}/pulls/{int(pr_number)}", timeout=10) or {}
-            head_sha = (((pr.get("head") or {}) if isinstance(pr, dict) else {}) or {}).get("sha")
-            head_sha = str(head_sha or "").strip()
+            # Fetch PR head SHA from cache (or API if needed)
+            head_sha = self.get_pr_head_sha(owner=owner, repo=repo, pr_number=int(pr_number))
             if not head_sha:
                 return []
 
