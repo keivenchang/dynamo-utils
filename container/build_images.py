@@ -88,6 +88,9 @@ DEFAULT_HTML_PATH = "/nvidia/dynamo_ci/logs"
 _frameworks_data_cache: Optional[Dict[str, Dict[str, Any]]] = None
 _html_out_file: Optional[Path] = None
 
+# Global initial SHA tracking for detecting mid-build commits
+_initial_sha: Optional[str] = None
+
 
 def _rewrite_html_links_for_repo_root(html_content: str) -> str:
     """
@@ -124,6 +127,56 @@ def _write_html_report_files(html_content: str, primary_html_file: Path) -> None
         except Exception:  # THIS IS A HORRIBLE ANTI-PATTERN, FIX IT
             # Best-effort: don't fail the build if the secondary write fails.
             pass
+
+
+def check_sha_changed(repo_path: Path, task_id: str) -> Optional[str]:
+    """
+    Check if repository HEAD SHA changed since build started.
+
+    Returns:
+        Warning message if SHA changed, None otherwise
+    """
+    global _initial_sha
+
+    if _initial_sha is None:
+        return None
+
+    if git is None:
+        return None
+
+    try:
+        repo = git.Repo(repo_path)
+        current_sha = repo.head.commit.hexsha[:9]
+
+        if current_sha != _initial_sha:
+            # Get new commits
+            try:
+                new_commits = repo.git.log(f"{_initial_sha}..HEAD", "--oneline").strip()
+            except git.exc.GitCommandError:
+                new_commits = "(unable to list commits - git log failed)"
+
+            warning = (
+                f"⚠️  CRITICAL: Repository SHA changed during build!\n"
+                f"   Build started with: {_initial_sha}\n"
+                f"   Current HEAD:       {current_sha}\n"
+                f"   \n"
+                f"   New commits:\n"
+                f"   {new_commits}\n"
+                f"   \n"
+                f"   This causes image tag mismatches:\n"
+                f"   - Earlier tasks built images with SHA {_initial_sha}\n"
+                f"   - Later tasks (like {task_id}) expect {_initial_sha} but build.sh may use {current_sha}\n"
+                f"   - Result: 'Input image not found' errors\n"
+                f"   \n"
+                f"   RECOMMENDATION: Avoid committing code while builds are running.\n"
+                f"   To fix: Kill build, checkout {_initial_sha}, and rebuild.\n"
+            )
+            return warning
+    except (git.exc.InvalidGitRepositoryError, git.exc.NoSuchPathError):
+        # Not a git repo or path doesn't exist - can't check, return None
+        return None
+
+    return None
 
 
 class TaskStatus(Enum):
@@ -1450,6 +1503,11 @@ def execute_task_sequential(
 
     # Check if input image exists (required for tasks that depend on previous builds)
     if not task.check_input_image_exists():
+        # Check if SHA changed (common cause of missing images)
+        sha_warning = check_sha_changed(repo_path, task_id)
+        if sha_warning:
+            logger.warning(sha_warning)
+
         logger.error(f"✗ Skipping {task_id}: Input image missing ({task.input_image})")
         task.mark_status_as(TaskStatus.FAILED, f"Input image not found: {task.input_image}")  # Also creates .FAILED marker
         executed_tasks.add(task_id)
@@ -1460,7 +1518,31 @@ def execute_task_sequential(
             log_fh.write(f"Task: {task_id}\n")
             log_fh.write(f"Description: {task.description}\n")
             log_fh.write(f"Error: Input image not found: {task.input_image}\n")
+            if sha_warning:
+                log_fh.write("\n")
+                log_fh.write(sha_warning)
+                log_fh.write("\n")
             log_fh.write("=" * 80 + "\n")
+
+        # CRITICAL FIX: Update frameworks cache and regenerate HTML report even on failure
+        # This ensures the HTML report shows the failure instead of blank cells
+        update_frameworks_data_cache(task, use_absolute_urls=False)
+
+        if log_dir and log_date:
+            try:
+                html_content = generate_html_report(
+                    all_tasks=all_tasks,
+                    repo_path=repo_path,
+                    sha=sha,
+                    log_dir=log_dir,
+                    date_str=log_date,
+                    use_absolute_urls=False,
+                )
+                html_file = log_dir / f"{log_date}.{sha}.report.html"
+                _write_html_report_files(html_content, html_file)
+                update_report_status_marker(html_file, all_tasks)
+            except Exception as e:
+                logger.warning(f"Failed to generate HTML report after image-not-found failure: {e}")
 
         return False
 
@@ -1800,6 +1882,12 @@ def execute_task_parallel(
 
         # Check if input image exists (required for tasks that depend on previous builds)
         if not task.check_input_image_exists():
+            # Check if SHA changed (common cause of missing images)
+            sha_warning = check_sha_changed(repo_path, task_id)
+            if sha_warning:
+                with lock:
+                    logger.warning(sha_warning)
+
             with lock:
                 logger.error(f"✗ Skipping {task_id}: Input image missing ({task.input_image})")
             task.mark_status_as(TaskStatus.FAILED, f"Input image not found: {task.input_image}")  # Also creates .FAILED marker
@@ -1809,11 +1897,36 @@ def execute_task_parallel(
                 log_fh.write(f"Task: {task_id}\n")
                 log_fh.write(f"Description: {task.description}\n")
                 log_fh.write(f"Error: Input image not found: {task.input_image}\n")
+                if sha_warning:
+                    log_fh.write("\n")
+                    log_fh.write(sha_warning)
+                    log_fh.write("\n")
                 log_fh.write("=" * 80 + "\n")
 
             with lock:
                 executed_tasks.add(task_id)
                 failed_tasks.add(task_id)
+
+            # CRITICAL FIX: Update frameworks cache and regenerate HTML report even on failure
+            # This ensures the HTML report shows the failure instead of blank cells
+            update_frameworks_data_cache(task, use_absolute_urls=False)
+
+            if log_dir and log_date:
+                try:
+                    html_content = generate_html_report(
+                        all_tasks=all_tasks,
+                        repo_path=repo_path,
+                        sha=sha,
+                        log_dir=log_dir,
+                        date_str=log_date,
+                        use_absolute_urls=False,
+                    )
+                    html_file = log_dir / f"{log_date}.{sha}.report.html"
+                    _write_html_report_files(html_content, html_file)
+                    update_report_status_marker(html_file, all_tasks)
+                except Exception as e:
+                    with lock:
+                        logger.warning(f"Failed to generate HTML report after image-not-found failure: {e}")
 
             return False
 
@@ -2274,7 +2387,8 @@ def update_frameworks_data_cache(task: 'BaseTask', use_absolute_urls: bool = Fal
             target = rest.replace('-sanity', '')
             _frameworks_data_cache[framework][target].sanity = create_task_data_from_task(task)
         elif 'upload' in rest:
-            target = rest.replace('-upload', '')
+            # Don't strip '-upload' - upload tasks update the 'dev-upload' target, not 'dev'
+            target = rest
             _frameworks_data_cache[framework][target].build = create_task_data_from_task(task)
             # Update image info for upload task
             if task.output_image:
@@ -3013,6 +3127,11 @@ def main() -> int:
     except Exception as e:
         logger.error(f"Failed to get/checkout commit SHA: {e}")
         return 1
+
+    # Store initial SHA globally for detecting mid-build commits
+    global _initial_sha
+    _initial_sha = sha
+    logger.info(f"Initial SHA: {sha}")
 
     # Determine which frameworks to build
     if args.framework:
