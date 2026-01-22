@@ -309,14 +309,14 @@ python3 gitlab_pipeline_pr_map.py 40743226 https://gitlab-master.nvidia.com/dl/a
 - Reduces backup churn from frequently-changing git files
 
 **Logging:**
-- Log file: `$NVIDIA_HOME/logs/YYYY-MM-DD/backup.log`
+- Log file: `$DYNAMO_HOME/logs/YYYY-MM-DD/backup.log`
 - Captures all backup operations
 
 #### Cron Setup
 
 ```bash
 # Backup every 6 minutes
-*/6 * * * * NVIDIA_HOME=$HOME/dynamo $HOME/dynamo/dynamo-utils/cron_log.sh backup $HOME/dynamo/dynamo-utils/backup.sh --input-path $HOME/dynamo --output-path /mnt/sda/keivenc/dynamo
+*/6 * * * * DYNAMO_HOME=$HOME/dynamo $HOME/dynamo/dynamo-utils/cron_log.sh backup $HOME/dynamo/dynamo-utils/backup.sh --input-path $HOME/dynamo --output-path /mnt/sda/keivenc/dynamo
 ```
 
 ---

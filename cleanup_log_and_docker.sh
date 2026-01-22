@@ -9,7 +9,7 @@
 #   - Runs dynamo-utils/container/cleanup_old_images.sh --retain <N>
 #   - Runs: docker builder prune -a --force
 # - Log cleanup:
-#   - Deletes $NVIDIA_HOME/logs/YYYY-MM-DD/ directories older than <keep-days> (default: 30)
+#   - Deletes $DYNAMO_HOME/logs/YYYY-MM-DD/ directories older than <keep-days> (default: 30)
 #
 # Safety:
 # - Only deletes directories directly under $LOGS_DIR that match regex: ^20[0-9]{2}-[0-9]{2}-[0-9]{2}$
@@ -17,7 +17,7 @@
 # - Uses a per-user flock to avoid overlapping runs
 #
 # Typical cron (recommended):
-#   0 2 * * * NVIDIA_HOME=$HOME/nvidia $HOME/nvidia/dynamo-utils/cron_log.sh cleanup_log_and_docker $HOME/nvidia/dynamo-utils/cleanup_log_and_docker.sh
+#   0 2 * * * DYNAMO_HOME=$HOME/nvidia $HOME/nvidia/dynamo-utils/cron_log.sh cleanup_log_and_docker $HOME/nvidia/dynamo-utils/cleanup_log_and_docker.sh
 
 set -euo pipefail
 
@@ -64,8 +64,8 @@ if ! [[ "$RETAIN_IMAGES" =~ ^[0-9]+$ ]] || [ "$RETAIN_IMAGES" -lt 0 ]; then
 fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-NVIDIA_HOME="${NVIDIA_HOME:-$(dirname "$SCRIPT_DIR")}"
-LOGS_DIR="${LOGS_DIR:-$NVIDIA_HOME/logs}"
+DYNAMO_HOME="${DYNAMO_HOME:-$(dirname "$SCRIPT_DIR")}"
+LOGS_DIR="${LOGS_DIR:-$DYNAMO_HOME/logs}"
 
 USER_NAME="${USER:-${LOGNAME:-}}"
 if [ -z "$USER_NAME" ]; then
@@ -80,7 +80,7 @@ if ! flock -n 9; then
 fi
 
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] cleanup_log_and_docker.sh starting"
-echo "  NVIDIA_HOME=$NVIDIA_HOME"
+echo "  DYNAMO_HOME=$DYNAMO_HOME"
 echo "  LOGS_DIR=$LOGS_DIR"
 echo "  KEEP_DAYS=$KEEP_DAYS"
 echo "  RETAIN_IMAGES=$RETAIN_IMAGES"

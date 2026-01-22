@@ -4,11 +4,11 @@
 # Off hours: every 20 minutes
 
 # Working hours (8am-6pm PT / 4pm-2am UTC): every 1 minute for kthui,keivenchang
-* 16-23 * * * NVIDIA_HOME=$HOME/nvidia REMOTE_GITHUB_USERS="kthui keivenchang" $HOME/nvidia/dynamo-utils/cron_log.sh remote_prs_working $HOME/nvidia/dynamo-utils/html_pages/update_html_pages.sh --show-remote-branches
-* 0-1 * * * NVIDIA_HOME=$HOME/nvidia REMOTE_GITHUB_USERS="kthui keivenchang" $HOME/nvidia/dynamo-utils/cron_log.sh remote_prs_working $HOME/nvidia/dynamo-utils/html_pages/update_html_pages.sh --show-remote-branches
+* 16-23 * * * DYNAMO_HOME=$HOME/nvidia REMOTE_GITHUB_USERS="kthui keivenchang" $HOME/nvidia/dynamo-utils/cron_log.sh remote_prs_working $HOME/nvidia/dynamo-utils/html_pages/update_html_pages.sh --show-remote-branches
+* 0-1 * * * DYNAMO_HOME=$HOME/nvidia REMOTE_GITHUB_USERS="kthui keivenchang" $HOME/nvidia/dynamo-utils/cron_log.sh remote_prs_working $HOME/nvidia/dynamo-utils/html_pages/update_html_pages.sh --show-remote-branches
 
 # Off hours (6pm-8am PT / 2am-4pm UTC): every 20 minutes for kthui,keivenchang
-*/20 2-15 * * * NVIDIA_HOME=$HOME/nvidia REMOTE_GITHUB_USERS="kthui keivenchang" $HOME/nvidia/dynamo-utils/cron_log.sh remote_prs_offhours $HOME/nvidia/dynamo-utils/html_pages/update_html_pages.sh --show-remote-branches
+*/20 2-15 * * * DYNAMO_HOME=$HOME/nvidia REMOTE_GITHUB_USERS="kthui keivenchang" $HOME/nvidia/dynamo-utils/cron_log.sh remote_prs_offhours $HOME/nvidia/dynamo-utils/html_pages/update_html_pages.sh --show-remote-branches
 
 # Note: Times are in UTC
 # PT to UTC conversion:

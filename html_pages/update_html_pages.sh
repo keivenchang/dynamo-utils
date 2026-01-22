@@ -6,7 +6,7 @@
 # This script is designed to be run by cron.
 #
 # Environment Variables (optional):
-#   NVIDIA_HOME         - Base directory for logs and output files
+#   DYNAMO_HOME         - Base directory for logs and output files
 #                        (default: parent of script dir; for this repo layout that is typically ~/dynamo)
 #                        Note: GitHub fetching is independently capped/cached by the Python scripts.
 #   REFRESH_CLOSED_PRS  - If set, refresh cached closed/merged PR mappings (more GitHub API calls)
@@ -26,9 +26,9 @@
 #   REMOTE_PRS_OUT_FILE - Full output filename override (rare; if set, used for every user).
 #
 # Args (optional; can be combined):
-#   --show-local-branches   Update the branches dashboard ($NVIDIA_HOME/index.html)
-#   --show-commit-history   Update the commit history dashboard ($NVIDIA_HOME/dynamo_latest/index.html)
-#   --show-local-resources  Update the resource report ($NVIDIA_HOME/resource_report.html)
+#   --show-local-branches   Update the branches dashboard ($DYNAMO_HOME/index.html)
+#   --show-commit-history   Update the commit history dashboard ($DYNAMO_HOME/dynamo_latest/index.html)
+#   --show-local-resources  Update the resource report ($DYNAMO_HOME/resource_report.html)
 #   --show-remote-branches  Update remote PR dashboards for selected GitHub users (IDENTICAL UI to local branches)
 #   --debug-html                   Faster runs: outputs to debug.html instead of index.html, uses smaller commit window (25 commits), enables verification passes
 #   --github-token <token>  GitHub token to pass to all show_*.py scripts (preferred).
@@ -48,11 +48,11 @@
 #
 # Cron Example:
 #   # Full fetch every 30 minutes (minute 0 and 30)
-#   0,30 * * * * NVIDIA_HOME=$HOME/dynamo /path/to/update_html_pages.sh
+#   0,30 * * * * DYNAMO_HOME=$HOME/dynamo /path/to/update_html_pages.sh
 #   # Cache-only between full runs (every 4 minutes from minute 8..56)
-#   8-59/4 * * * * NVIDIA_HOME=$HOME/dynamo /path/to/update_html_pages.sh --skip-gitlab-api
+#   8-59/4 * * * * DYNAMO_HOME=$HOME/dynamo /path/to/update_html_pages.sh --skip-gitlab-api
 #   # Resource report every minute
-#   * * * * * NVIDIA_HOME=$HOME/dynamo /path/to/update_html_pages.sh --show-local-resources
+#   * * * * * DYNAMO_HOME=$HOME/dynamo /path/to/update_html_pages.sh --show-local-resources
 
 set -euo pipefail
 if [ -n "${DYNAMO_UTILS_TRACE:-}" ]; then
@@ -64,9 +64,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # Base directory - can be overridden by environment variable
 # Default: parent of dynamo-utils/ (i.e. .../nvidia) because this script lives in dynamo-utils/html_pages/
 UTILS_DIR="$(dirname "$SCRIPT_DIR")"
-NVIDIA_HOME="${NVIDIA_HOME:-$(dirname "$UTILS_DIR")}"
+DYNAMO_HOME="${DYNAMO_HOME:-$(dirname "$UTILS_DIR")}"
 
-LOGS_DIR="$NVIDIA_HOME/logs"
+LOGS_DIR="$DYNAMO_HOME/logs"
 FAST_DEBUG="${FAST_DEBUG:-false}"
 # Back-compat: treat env var like --output-debug-html.
 if [ -n "${DYNAMO_UTILS_TESTING:-}" ]; then
@@ -80,9 +80,9 @@ Usage: update_html_pages.sh [FLAGS]
 If no args are provided, ALL tasks run.
 
 Flags:
-  --show-local-branches     Write: $NVIDIA_HOME/index.html (or debug.html in --debug-html)
-  --show-commit-history     Write: $NVIDIA_HOME/dynamo_latest/index.html (or debug.html in --debug-html)
-  --show-local-resources    Write: $NVIDIA_HOME/resource_report.html (or resource_report_debug.html in --debug-html)
+  --show-local-branches     Write: $DYNAMO_HOME/index.html (or debug.html in --debug-html)
+  --show-commit-history     Write: $DYNAMO_HOME/dynamo_latest/index.html (or debug.html in --debug-html)
+  --show-local-resources    Write: $DYNAMO_HOME/resource_report.html (or resource_report_debug.html in --debug-html)
   --show-remote-branches    Write: $HOME/dynamo/speedoflight/dynamo/users/<user>/index.html (or debug.html in --debug-html)
   --show-remote-history     Alias for --show-remote-branches (back-compat)
 
@@ -100,7 +100,7 @@ Flags:
   -h, --help                Show this help and exit
 
 Notes:
-  - Logs are written under: $NVIDIA_HOME/logs/<YYYY-MM-DD>/
+  - Logs are written under: $DYNAMO_HOME/logs/<YYYY-MM-DD>/
     - cron.log (high-level), plus show_local_branches.log, show_commit_history.log, show_remote_branches.log, resource_report.log
   - Per-component locks allow parallel execution of different components:
     - /tmp/dynamo-utils.show_local_branches.$USER.lock
@@ -196,7 +196,7 @@ BRANCHES_BASENAME="${BRANCHES_BASENAME:-index.html}"
 if [ "$FAST_DEBUG" = true ]; then
     BRANCHES_BASENAME="debug.html"
 fi
-BRANCHES_OUTPUT_FILE="$NVIDIA_HOME/$BRANCHES_BASENAME"
+BRANCHES_OUTPUT_FILE="$DYNAMO_HOME/$BRANCHES_BASENAME"
 
 # Prevent concurrent runs (cron can overlap if a run takes longer than its interval).
 # Use per-component locks in /tmp so different components can run in parallel.
@@ -325,9 +325,9 @@ run_resource_report() {
     # Output to the top-level nvidia directory so nginx can serve it at /
     if [ -z "${RESOURCE_REPORT_HTML:-}" ]; then
         if [ "$FAST_DEBUG" = true ]; then
-            RESOURCE_REPORT_HTML="$NVIDIA_HOME/resource_report_debug.html"
+            RESOURCE_REPORT_HTML="$DYNAMO_HOME/resource_report_debug.html"
         else
-            RESOURCE_REPORT_HTML="$NVIDIA_HOME/resource_report.html"
+            RESOURCE_REPORT_HTML="$DYNAMO_HOME/resource_report.html"
         fi
     fi
 
@@ -375,7 +375,7 @@ dry_echo() {
 }
 
 run_show_local_branches() {
-    cd "$NVIDIA_HOME" || exit 1
+    cd "$DYNAMO_HOME" || exit 1
     REFRESH_CLOSED_FLAG="${REFRESH_CLOSED_PRS:+--refresh-closed-prs}"
     MAX_GH_FLAG=""
     if [ -n "${MAX_GITHUB_API_CALLS:-}" ]; then
@@ -393,13 +393,13 @@ run_show_local_branches() {
     if [ "$DRY_RUN" = true ]; then
         echo "[DRY-RUN] Would generate branches dashboard:"
         echo "[DRY-RUN]   Output: $BRANCHES_OUTPUT_FILE"
-        echo "[DRY-RUN]   Command: python3 $SCRIPT_DIR/show_local_branches.py --repo-path $NVIDIA_HOME --output $BRANCHES_OUTPUT_FILE $TOKEN_FLAG $REFRESH_CLOSED_FLAG $MAX_GH_FLAG $SUCCESS_BUILD_TEST_FLAG"
+        echo "[DRY-RUN]   Command: python3 $SCRIPT_DIR/show_local_branches.py --repo-path $DYNAMO_HOME --output $BRANCHES_OUTPUT_FILE $TOKEN_FLAG $REFRESH_CLOSED_FLAG $MAX_GH_FLAG $SUCCESS_BUILD_TEST_FLAG"
         return 0
     fi
     
     echo "$(date '+%Y-%m-%d %H:%M:%S') - Generating branches dashboard" >> "$LOG_FILE"
     log_line_ts "$BRANCHES_LOG" "===== run_show_local_branches start (output=$BRANCHES_OUTPUT_FILE) ====="
-    if run_cmd_to_log_ts "$BRANCHES_LOG" python3 "$SCRIPT_DIR/show_local_branches.py" --repo-path "$NVIDIA_HOME" --output "$BRANCHES_OUTPUT_FILE" $TOKEN_FLAG $REFRESH_CLOSED_FLAG $MAX_GH_FLAG $SUCCESS_BUILD_TEST_FLAG; then
+    if run_cmd_to_log_ts "$BRANCHES_LOG" python3 "$SCRIPT_DIR/show_local_branches.py" --repo-path "$DYNAMO_HOME" --output "$BRANCHES_OUTPUT_FILE" $TOKEN_FLAG $REFRESH_CLOSED_FLAG $MAX_GH_FLAG $SUCCESS_BUILD_TEST_FLAG; then
         echo "$(date '+%Y-%m-%d %H:%M:%S') - Updated $BRANCHES_OUTPUT_FILE" >> "$LOG_FILE"
     else
         echo "$(date '+%Y-%m-%d %H:%M:%S') - ERROR: Failed to update $BRANCHES_OUTPUT_FILE" >> "$LOG_FILE"
@@ -450,7 +450,7 @@ run_show_remote_branches() {
             fi
             echo "[DRY-RUN]   User: $U"
             echo "[DRY-RUN]     Output: $OUT_FILE"
-            echo "[DRY-RUN]     Command: python3 $SCRIPT_DIR/show_remote_branches.py --github-user $U --base-dir $NVIDIA_HOME/dynamo_latest --output $OUT_FILE $TOKEN_FLAG $MAX_GH_FLAG $SUCCESS_BUILD_TEST_FLAG"
+            echo "[DRY-RUN]     Command: python3 $SCRIPT_DIR/show_remote_branches.py --github-user $U --base-dir $DYNAMO_HOME/dynamo_latest --output $OUT_FILE $TOKEN_FLAG $MAX_GH_FLAG $SUCCESS_BUILD_TEST_FLAG"
         done
         return 0
     fi
@@ -479,7 +479,7 @@ run_show_remote_branches() {
         
         if run_cmd_to_log_ts "$REMOTE_PRS_LOG" python3 "$SCRIPT_DIR/show_remote_branches.py" \
             --github-user "${U}" \
-            --base-dir "$NVIDIA_HOME/dynamo_latest" \
+            --base-dir "$DYNAMO_HOME/dynamo_latest" \
             --output "$OUT_FILE" \
                 $TOKEN_FLAG \
                 $MAX_GH_FLAG \
@@ -493,7 +493,7 @@ run_show_remote_branches() {
 }
 
 run_show_commit_history() {
-    DYNAMO_REPO="$NVIDIA_HOME/dynamo_latest"
+    DYNAMO_REPO="$DYNAMO_HOME/dynamo_latest"
     COMMIT_HISTORY_BASENAME="${COMMIT_HISTORY_BASENAME:-index.html}"
     if [ "$FAST_DEBUG" = true ]; then
         COMMIT_HISTORY_BASENAME="debug.html"

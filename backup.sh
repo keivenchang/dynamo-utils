@@ -13,11 +13,11 @@ DEFAULT_DEST_DIR="/mnt/sda/keivenc/dynamo"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # Default log location (cron-friendly):
-#   $NVIDIA_HOME/logs/YYYY-MM-DD/backup.log
+#   $DYNAMO_HOME/logs/YYYY-MM-DD/backup.log
 # Can be overridden via LOG_FILE env var.
 UTILS_DIR="$(dirname "$SCRIPT_DIR")"
-NVIDIA_HOME="${NVIDIA_HOME:-$(dirname "$UTILS_DIR")}"
-LOGS_DIR="${LOGS_DIR:-$NVIDIA_HOME/logs}"
+DYNAMO_HOME="${DYNAMO_HOME:-$(dirname "$UTILS_DIR")}"
+LOGS_DIR="${LOGS_DIR:-$DYNAMO_HOME/logs}"
 TODAY="$(date +%Y-%m-%d)"
 DAY_LOG_DIR="$LOGS_DIR/$TODAY"
 mkdir -p "$DAY_LOG_DIR"

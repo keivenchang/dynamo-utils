@@ -22,9 +22,9 @@ HTML dashboard generators and shared UI utilities for monitoring Dynamo CI/CD.
 - GitHub token: `~/.config/github-token` or `~/.config/gh/hosts.yml`
 
 **Outputs:**
-- Branches: `$NVIDIA_HOME/index.html`
+- Branches: `$DYNAMO_HOME/index.html`
 - Commit history: `$DYNAMO_REPO/index.html`  
-- Resource report: `$NVIDIA_HOME/resource_report.html`
+- Resource report: `$DYNAMO_HOME/resource_report.html`
 
 ---
 
@@ -153,14 +153,14 @@ python3 show_remote_branches.py \
 **Working hours (8am-6pm PT):** Every 1 minute
 ```cron
 # Working hours: 16:00-23:59 UTC + 00:00-01:59 UTC
-* 16-23 * * * NVIDIA_HOME=$HOME/dynamo REMOTE_GITHUB_USERS="kthui keivenchang" $HOME/dynamo/dynamo-utils/cron_log.sh remote_prs_working $HOME/dynamo/dynamo-utils/html_pages/update_html_pages.sh --show-remote-branches
-* 0-1 * * * NVIDIA_HOME=$HOME/dynamo REMOTE_GITHUB_USERS="kthui keivenchang" $HOME/dynamo/dynamo-utils/cron_log.sh remote_prs_working $HOME/dynamo/dynamo-utils/html_pages/update_html_pages.sh --show-remote-branches
+* 16-23 * * * DYNAMO_HOME=$HOME/dynamo REMOTE_GITHUB_USERS="kthui keivenchang" $HOME/dynamo/dynamo-utils/cron_log.sh remote_prs_working $HOME/dynamo/dynamo-utils/html_pages/update_html_pages.sh --show-remote-branches
+* 0-1 * * * DYNAMO_HOME=$HOME/dynamo REMOTE_GITHUB_USERS="kthui keivenchang" $HOME/dynamo/dynamo-utils/cron_log.sh remote_prs_working $HOME/dynamo/dynamo-utils/html_pages/update_html_pages.sh --show-remote-branches
 ```
 
 **Off hours (6pm-8am PT):** Every 20 minutes
 ```cron
 # Off hours: 02:00-15:59 UTC
-*/20 2-15 * * * NVIDIA_HOME=$HOME/dynamo REMOTE_GITHUB_USERS="kthui keivenchang" $HOME/dynamo/dynamo-utils/cron_log.sh remote_prs_offhours $HOME/dynamo/dynamo-utils/html_pages/update_html_pages.sh --show-remote-branches
+*/20 2-15 * * * DYNAMO_HOME=$HOME/dynamo REMOTE_GITHUB_USERS="kthui keivenchang" $HOME/dynamo/dynamo-utils/cron_log.sh remote_prs_offhours $HOME/dynamo/dynamo-utils/html_pages/update_html_pages.sh --show-remote-branches
 ```
 
 **Output locations:**
@@ -211,20 +211,20 @@ python3 html_pages/show_commit_history.py \
 
 ```cron
 # Full update every 30 minutes
-0,30 * * * * NVIDIA_HOME=$HOME/dynamo $HOME/dynamo/dynamo-utils/cron_log.sh update_html_pages_full $HOME/dynamo/dynamo-utils/html_pages/update_html_pages.sh --show-local-branches --show-commit-history
+0,30 * * * * DYNAMO_HOME=$HOME/dynamo $HOME/dynamo/dynamo-utils/cron_log.sh update_html_pages_full $HOME/dynamo/dynamo-utils/html_pages/update_html_pages.sh --show-local-branches --show-commit-history
 
 # Cache-heavy between full updates (every 4 minutes)
-8-59/4 * * * * NVIDIA_HOME=$HOME/dynamo SKIP_GITLAB_FETCH=1 $HOME/dynamo/dynamo-utils/cron_log.sh update_html_pages_cached $HOME/dynamo/dynamo-utils/html_pages/update_html_pages.sh --show-local-branches --show-commit-history
+8-59/4 * * * * DYNAMO_HOME=$HOME/dynamo SKIP_GITLAB_FETCH=1 $HOME/dynamo/dynamo-utils/cron_log.sh update_html_pages_cached $HOME/dynamo/dynamo-utils/html_pages/update_html_pages.sh --show-local-branches --show-commit-history
 
 # Resource report (every minute)
-* * * * * NVIDIA_HOME=$HOME/dynamo $HOME/dynamo/dynamo-utils/cron_log.sh resource_report $HOME/dynamo/dynamo-utils/html_pages/update_html_pages.sh --show-local-resources
+* * * * * DYNAMO_HOME=$HOME/dynamo $HOME/dynamo/dynamo-utils/cron_log.sh resource_report $HOME/dynamo/dynamo-utils/html_pages/update_html_pages.sh --show-local-resources
 
 # Remote PRs - working hours (8am-6pm PT): every minute
-* 16-23 * * * NVIDIA_HOME=$HOME/dynamo REMOTE_GITHUB_USERS="kthui keivenchang" $HOME/dynamo/dynamo-utils/cron_log.sh remote_prs_working $HOME/dynamo/dynamo-utils/html_pages/update_html_pages.sh --show-remote-branches
-* 0-1 * * * NVIDIA_HOME=$HOME/dynamo REMOTE_GITHUB_USERS="kthui keivenchang" $HOME/dynamo/dynamo-utils/cron_log.sh remote_prs_working $HOME/dynamo/dynamo-utils/html_pages/update_html_pages.sh --show-remote-branches
+* 16-23 * * * DYNAMO_HOME=$HOME/dynamo REMOTE_GITHUB_USERS="kthui keivenchang" $HOME/dynamo/dynamo-utils/cron_log.sh remote_prs_working $HOME/dynamo/dynamo-utils/html_pages/update_html_pages.sh --show-remote-branches
+* 0-1 * * * DYNAMO_HOME=$HOME/dynamo REMOTE_GITHUB_USERS="kthui keivenchang" $HOME/dynamo/dynamo-utils/cron_log.sh remote_prs_working $HOME/dynamo/dynamo-utils/html_pages/update_html_pages.sh --show-remote-branches
 
 # Remote PRs - off hours (6pm-8am PT): every 20 minutes
-*/20 2-15 * * * NVIDIA_HOME=$HOME/dynamo REMOTE_GITHUB_USERS="kthui keivenchang" $HOME/dynamo/dynamo-utils/cron_log.sh remote_prs_offhours $HOME/dynamo/dynamo-utils/html_pages/update_html_pages.sh --show-remote-branches
+*/20 2-15 * * * DYNAMO_HOME=$HOME/dynamo REMOTE_GITHUB_USERS="kthui keivenchang" $HOME/dynamo/dynamo-utils/cron_log.sh remote_prs_offhours $HOME/dynamo/dynamo-utils/html_pages/update_html_pages.sh --show-remote-branches
 ```
 
 ### Logs
