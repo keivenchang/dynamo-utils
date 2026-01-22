@@ -100,8 +100,12 @@ Flags:
 Notes:
   - Logs are written under: $NVIDIA_HOME/logs/<YYYY-MM-DD>/
     - cron.log (high-level), plus show_local_branches.log, show_commit_history.log, show_remote_branches.log, resource_report.log
-  - Lock file defaults to: /tmp/dynamo-utils.update_html_pages.$USER.lock
-    - Resource-only runs use a separate lock: /tmp/dynamo-utils.update_resource_report.$USER.lock
+  - Per-component locks allow parallel execution of different components:
+    - /tmp/dynamo-utils.show_local_branches.$USER.lock
+    - /tmp/dynamo-utils.show_commit_history.$USER.lock
+    - /tmp/dynamo-utils.show_local_resources.$USER.lock
+    - /tmp/dynamo-utils.show_remote_branches.$USER.lock
+  - Each component can run independently without blocking others
 EOF
 }
 
@@ -190,20 +194,60 @@ fi
 BRANCHES_OUTPUT_FILE="$NVIDIA_HOME/$BRANCHES_BASENAME"
 
 # Prevent concurrent runs (cron can overlap if a run takes longer than its interval).
-# Use a per-user lock in /tmp.
-LOCK_FILE="/tmp/dynamo-utils.update_html_pages.${USER_NAME}.lock"
-if [ "$RUN_RESOURCE_REPORT" = true ] && [ "$RUN_SHOW_DYNAMO_BRANCHES" = false ] && [ "$RUN_SHOW_COMMIT_HISTORY" = false ]; then
-    # Separate lock so frequent resource updates aren't blocked by dashboard runs.
-    LOCK_FILE="/tmp/dynamo-utils.update_resource_report.${USER_NAME}.lock"
+# Use per-component locks in /tmp so different components can run in parallel.
+acquire_lock() {
+    local lock_name="$1"
+    local lock_file="/tmp/dynamo-utils.${lock_name}.${USER_NAME}.lock"
+    
+    if [ "$IGNORE_LOCK" = true ]; then
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] WARNING: --run-ignore-lock set; bypassing lock (lock=$lock_file)" >&2
+        return 0
+    fi
+    
+    # Use a file descriptor dynamically (fd 200 + component index)
+    local fd="$2"
+    eval "exec ${fd}>\"${lock_file}\""
+    if ! flock -n "${fd}"; then
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] WARNING: ${lock_name} is locked (lock=${lock_file}); skipping this component" >&2
+        return 1
+    fi
+    return 0
+}
+
+# Acquire locks for each component that will run
+LOCK_FD_BASE=200
+LOCK_FD_BRANCHES=$((LOCK_FD_BASE + 0))
+LOCK_FD_COMMIT_HISTORY=$((LOCK_FD_BASE + 1))
+LOCK_FD_RESOURCE=$((LOCK_FD_BASE + 2))
+LOCK_FD_REMOTE=$((LOCK_FD_BASE + 3))
+
+# Track which components successfully acquired locks
+CAN_RUN_BRANCHES=false
+CAN_RUN_COMMIT_HISTORY=false
+CAN_RUN_RESOURCE=false
+CAN_RUN_REMOTE=false
+
+if [ "$RUN_SHOW_DYNAMO_BRANCHES" = true ]; then
+    if acquire_lock "show_local_branches" "$LOCK_FD_BRANCHES"; then
+        CAN_RUN_BRANCHES=true
+    fi
 fi
-if [ "$IGNORE_LOCK" = true ]; then
-    echo "[$(date '+%Y-%m-%d %H:%M:%S')] WARNING: --run-ignore-lock set; bypassing lock (lock=$LOCK_FILE)" >&2
-else
-    exec 9>"$LOCK_FILE"
-    if ! flock -n 9; then
-        # Another instance is running; log a warning and exit to avoid piling up GitHub/GitLab calls.
-        echo "[$(date '+%Y-%m-%d %H:%M:%S')] WARNING: update_html_pages.sh is locked (lock=$LOCK_FILE); skipping this run" >&2
-        exit 0
+
+if [ "$RUN_SHOW_COMMIT_HISTORY" = true ]; then
+    if acquire_lock "show_commit_history" "$LOCK_FD_COMMIT_HISTORY"; then
+        CAN_RUN_COMMIT_HISTORY=true
+    fi
+fi
+
+if [ "$RUN_RESOURCE_REPORT" = true ]; then
+    if acquire_lock "show_local_resources" "$LOCK_FD_RESOURCE"; then
+        CAN_RUN_RESOURCE=true
+    fi
+fi
+
+if [ "$RUN_SHOW_REMOTE_BRANCHES" = true ]; then
+    if acquire_lock "show_remote_branches" "$LOCK_FD_REMOTE"; then
+        CAN_RUN_REMOTE=true
     fi
 fi
 
@@ -517,16 +561,16 @@ run_show_commit_history() {
     fi
 }
 
-if [ "$RUN_SHOW_REMOTE_BRANCHES" = true ]; then
+if [ "$RUN_SHOW_REMOTE_BRANCHES" = true ] && [ "$CAN_RUN_REMOTE" = true ]; then
     run_show_remote_branches
 fi
-if [ "$RUN_SHOW_DYNAMO_BRANCHES" = true ]; then
+if [ "$RUN_SHOW_DYNAMO_BRANCHES" = true ] && [ "$CAN_RUN_BRANCHES" = true ]; then
     run_show_local_branches
 fi
-if [ "$RUN_SHOW_COMMIT_HISTORY" = true ]; then
+if [ "$RUN_SHOW_COMMIT_HISTORY" = true ] && [ "$CAN_RUN_COMMIT_HISTORY" = true ]; then
     run_show_commit_history
 fi
-if [ "$RUN_RESOURCE_REPORT" = true ]; then
+if [ "$RUN_RESOURCE_REPORT" = true ] && [ "$CAN_RUN_RESOURCE" = true ]; then
     run_resource_report
 fi
 
