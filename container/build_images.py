@@ -391,7 +391,7 @@ def create_task_graph(framework: str, sha: str, repo_path: Path, version: Option
         task_id=f"{framework}-dev-chown",
         description=f"Fix file ownership after {framework.upper()} dev compilation",
         # chown can race with build outputs being deleted/renamed; don't fail the task on ENOENT.
-        command=f"chown -R $(id -u):$(id -g) {repo_path}/target/.{framework} {repo_path}/lib/bindings/python {home_dir}/.cargo || true",
+        command=f"sudo chown -R $(id -u):$(id -g) {repo_path}/target/.{framework} {repo_path}/lib/bindings/python {home_dir}/.cargo || true",
         parents=[f"{framework}-dev-compilation"],
         run_even_if_deps_fail=True,
         timeout=60.0,
