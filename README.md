@@ -73,7 +73,6 @@ All optimizations are in `common_github.py`, so **all dashboard scripts benefit 
 - `html_pages/show_commit_history.py`
 - `html_pages/show_local_branches.py`
 - `html_pages/show_remote_branches.py`
-- `html_pages/show_local_branches_new.py`
 
 ---
 

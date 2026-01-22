@@ -663,7 +663,7 @@ def add_pr_status_node_pass(
     
     This pass runs FIRST and operates on the BranchNode layer.
     It centralizes PR status node creation logic that was previously duplicated
-    across show_local_branches.py, show_remote_branches.py, and show_local_branches_new.py.
+    across show_local_branches.py and show_remote_branches.py.
     
     For each BranchInfoNode that has a PR:
     - Create PRStatusWithJobsNode with the PR
@@ -743,7 +743,7 @@ def add_pr_status_node_pass(
 
 def prefetch_actions_job_details_pass(
     ci_nodes: List,
-    github_api: Optional["common.GitHubAPIClient"] = None,
+    github_api: Optional[GitHubAPIClient] = None,
 ) -> List:
     """Prefetch GitHub Actions job details for all jobs in batch (PASS 1.5).
 

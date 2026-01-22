@@ -36,6 +36,7 @@ import argparse
 import getpass
 import hashlib
 import html
+import logging
 import json
 import os
 import re
@@ -51,6 +52,8 @@ import functools
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 from zoneinfo import ZoneInfo
+
+logger = logging.getLogger(__name__)
 
 # Ensure we can import sibling utilities (common.py) from the parent dynamo-utils directory
 _THIS_DIR = Path(__file__).resolve().parent
@@ -917,7 +920,7 @@ Environment Variables:
     # We only render `[raw log]` links when the local file exists (or was materialized),
     # so pruning won't produce dead links on a freshly generated page.
     with phase_t.phase("prune"):
-        _ = prune_dashboard_raw_logs(page_root_dir=page_root_dir, max_age_days=30)
+        _ = prune_dashboard_raw_logs(page_root_dir=page_root_dir, max_age_days=90)
         _ = prune_partial_raw_log_caches(page_root_dirs=[page_root_dir])
 
     # Scan repositories

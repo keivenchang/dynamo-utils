@@ -196,7 +196,7 @@ Environment Variables:
     # Prune locally-served raw logs to avoid unbounded growth and delete any partial/unverified artifacts.
     # Best-effort: pruning should never block dashboard generation.
     try:
-        _ = prune_dashboard_raw_logs(page_root_dir=page_root_dir, max_age_days=30)
+        _ = prune_dashboard_raw_logs(page_root_dir=page_root_dir, max_age_days=90)
         _ = prune_partial_raw_log_caches(page_root_dirs=[page_root_dir])
     except (OSError, RuntimeError, ValueError) as e:
         logging.getLogger(__name__).warning("Failed to prune dashboard raw logs: %s", e)

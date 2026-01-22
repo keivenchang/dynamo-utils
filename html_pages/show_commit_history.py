@@ -507,20 +507,7 @@ class CommitHistoryGenerator:
                 "items": merged_items
             }
             
-            # Step 3: Size cap - keep at most ~5000 entries (oldest by ts)
-            if len(merged_items) > 5200:
-                pairs = []
-                for k, v in merged_items.items():
-                    if not isinstance(v, dict):
-                        continue
-                    ts = int(v.get("ts", 0) or 0)
-                    pairs.append((ts, k))
-                pairs.sort()
-                # Drop oldest to ~5000
-                for _ts, k in pairs[: max(0, len(pairs) - 5000)]:
-                    merged_items.pop(k, None)
-            
-            # Step 4: Write merged data atomically
+            # Step 3: Write merged data atomically
             atomic_write_text(self.snippet_cache_file, json.dumps(merged_data, indent=2), encoding="utf-8")
             self._snippet_cache_dirty = False
         finally:
@@ -2667,7 +2654,7 @@ Environment Variables:
     # Prune locally-served raw logs to avoid unbounded growth and delete any partial/unverified artifacts.
     # We only render `[raw log]` links when the local file exists (or was materialized),
     # so pruning won't produce dead links on a freshly generated page.
-    _ = prune_dashboard_raw_logs(page_root_dir=args.repo_path, max_age_days=30)
+    _ = prune_dashboard_raw_logs(page_root_dir=args.repo_path, max_age_days=90)
     # Also remove any partial/unverified raw logs (legacy cache artifacts, missing completed=true, etc).
     _ = prune_partial_raw_log_caches(page_root_dirs=[args.repo_path])
 

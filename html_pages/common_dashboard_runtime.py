@@ -81,7 +81,7 @@ def dashboard_served_raw_log_repo_cache_dir(*, page_root_dir: Path) -> Path:
     return served
 
 
-def prune_dashboard_raw_logs(*, page_root_dir: Path, max_age_days: int = 30) -> int:
+def prune_dashboard_raw_logs(*, page_root_dir: Path, max_age_days: int = 90) -> int:
     """Prune dashboard-served raw logs under the consolidated repo-local cache.
 
     Safety: only delete files that look like GitHub Actions job logs:

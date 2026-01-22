@@ -99,24 +99,9 @@ class SnippetCache:
             return
 
         self._cache_file.parent.mkdir(parents=True, exist_ok=True)
-
-        # Size cap: keep at most 5000 entries (oldest by timestamp)
         items = self._data.get("items") if isinstance(self._data, dict) else {}
         if not isinstance(items, dict):
             items = {}
-
-        if len(items) > 5200:
-            pairs = []
-            for k, v in items.items():
-                if not isinstance(v, dict):
-                    continue
-                ts = int(v.get("ts", 0) or 0)
-                pairs.append((ts, k))
-            pairs.sort()
-            # Drop oldest to 5000
-            for _ts, k in pairs[: max(0, len(pairs) - 5000)]:
-                items.pop(k, None)
-
         self._data["items"] = items
 
         # Atomic write
