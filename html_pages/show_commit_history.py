@@ -988,6 +988,7 @@ class CommitHistoryGenerator:
                 for row in rows:
                     check_runs_dicts.append({
                         'name': row.name,
+                        'short_name': row.name,  # Will be overwritten by enrichment step if YAML mapping exists
                         'status': row.status_raw if row.status_raw not in {'pass', 'fail'} else ('completed' if row.status_raw in {'pass', 'fail'} else row.status_raw),
                         'conclusion': 'success' if row.status_raw == 'pass' else ('failure' if row.status_raw == 'fail' else row.status_raw),
                         'html_url': row.url,
