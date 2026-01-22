@@ -88,6 +88,7 @@ Flags:
 
   --output-debug-html              Faster runs: outputs to debug.html instead of index.html, uses smaller commit window (10 commits), shorter resource window
   --enable-success-build-test-logs  Opt-in: cache raw logs for successful *-build-test jobs to parse pytest slowest tests under "Run tests" (slower)
+  --run-verifier-pass               Enable verification passes to validate tree structure and job details (adds logging overhead)
   --skip-gitlab-api       Skip fetching from GitLab API (commit-history only); use cached data only (faster).
   --gitlab-fetch            Explicitly allow GitLab fetching (overrides --output-debug-html default).
                            Default: GitLab fetch is skipped in --output-debug-html.
@@ -117,6 +118,7 @@ ANY_FLAG=false
 IGNORE_LOCK=false
 DRY_RUN=false
 ENABLE_SUCCESS_BUILD_TEST_LOGS=false
+RUN_VERIFIER_PASS=false
 GITLAB_FETCH_SKIP_MODE="auto"  # auto|skip|fetch
 GITHUB_TOKEN_ARG=""
 
@@ -141,6 +143,8 @@ while [ "$#" -gt 0 ]; do
             FAST_DEBUG=true; shift ;;
         --enable-success-build-test-logs)
             ENABLE_SUCCESS_BUILD_TEST_LOGS=true; shift ;;
+        --run-verifier-pass)
+            RUN_VERIFIER_PASS=true; shift ;;
         --github-token)
             if [ "$#" -lt 2 ]; then
                 echo "Missing value for --github-token" >&2
@@ -523,12 +527,17 @@ run_show_commit_history() {
         PARALLEL_FLAG="--parallel-workers ${PARALLEL_WORKERS}"
     fi
 
+    VERIFIER_FLAG=""
+    if [ "$RUN_VERIFIER_PASS" = true ]; then
+        VERIFIER_FLAG="--run-verifier-pass"
+    fi
+
     if [ "$DRY_RUN" = true ]; then
         echo "[DRY-RUN] Would generate commit history dashboard:"
         echo "[DRY-RUN]   Output: $COMMIT_HISTORY_HTML"
         echo "[DRY-RUN]   Max commits: $MAX_COMMITS"
         echo "[DRY-RUN]   Command: cd $DYNAMO_REPO && git checkout main && git pull origin main"
-        echo "[DRY-RUN]   Command: python3 $SCRIPT_DIR/show_commit_history.py --repo-path . --max-commits $MAX_COMMITS --output $COMMIT_HISTORY_HTML $SKIP_FLAG $MAX_GH_FLAG $PARALLEL_FLAG $SUCCESS_BUILD_TEST_FLAG"
+        echo "[DRY-RUN]   Command: python3 $SCRIPT_DIR/show_commit_history.py --repo-path . --max-commits $MAX_COMMITS --output $COMMIT_HISTORY_HTML $SKIP_FLAG $MAX_GH_FLAG $PARALLEL_FLAG $SUCCESS_BUILD_TEST_FLAG $VERIFIER_FLAG"
         return 0
     fi
 
@@ -553,7 +562,7 @@ run_show_commit_history() {
 
     echo "$(date '+%Y-%m-%d %H:%M:%S') - Generating commit history dashboard (max_commits=$MAX_COMMITS)" >> "$LOG_FILE"
     log_line_ts "$COMMIT_HISTORY_LOG" "===== run_show_commit_history start (max_commits=$MAX_COMMITS output=$COMMIT_HISTORY_HTML) ====="
-    if run_cmd_to_log_ts "$COMMIT_HISTORY_LOG" python3 "$SCRIPT_DIR/show_commit_history.py" --repo-path . --max-commits "$MAX_COMMITS" --output "$COMMIT_HISTORY_HTML" $SKIP_FLAG $MAX_GH_FLAG $PARALLEL_FLAG $SUCCESS_BUILD_TEST_FLAG; then
+    if run_cmd_to_log_ts "$COMMIT_HISTORY_LOG" python3 "$SCRIPT_DIR/show_commit_history.py" --repo-path . --max-commits "$MAX_COMMITS" --output "$COMMIT_HISTORY_HTML" $SKIP_FLAG $MAX_GH_FLAG $PARALLEL_FLAG $SUCCESS_BUILD_TEST_FLAG $VERIFIER_FLAG; then
         echo "$(date '+%Y-%m-%d %H:%M:%S') - Updated $COMMIT_HISTORY_HTML" >> "$LOG_FILE"
     else
         echo "$(date '+%Y-%m-%d %H:%M:%S') - ERROR: Failed to update commit-history.html" >> "$LOG_FILE"

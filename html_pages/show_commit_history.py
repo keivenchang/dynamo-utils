@@ -148,6 +148,7 @@ class CommitHistoryGenerator:
         parallel_workers: int = 0,
         disable_snippet_cache_read: bool = False,
         enable_success_build_test_logs: bool = False,
+        run_verifier_pass: bool = False,
     ):
         """
         Initialize the commit history generator
@@ -167,6 +168,7 @@ class CommitHistoryGenerator:
         # Opt-in because downloading successful build-test raw logs can be expensive.
         # When enabled, we cache successful build-test raw logs so we can parse pytest slowest tests.
         self.enable_success_build_test_logs = bool(enable_success_build_test_logs)
+        self.run_verifier_pass = bool(run_verifier_pass)
         self.logger = self._setup_logger()
         # Cache files live in ~/.cache/dynamo-utils to avoid polluting the repo checkout
         self.cache_file = dynamo_utils_cache_dir() / "commit_history.json"
@@ -1681,6 +1683,7 @@ class CommitHistoryGenerator:
                 repo_root=Path(repo_path),
                 commit_sha=sha_full,
                 github_api=self.github_client,
+                run_verifier_pass=self.run_verifier_pass,
             )
 
             # TODO: Unhardcode github.com/ai-dynamo/dynamo URL
@@ -2360,6 +2363,11 @@ Environment Variables:
         help='Opt-in: also cache raw logs for successful *-build-test jobs so we can parse pytest slowest tests under "Run tests" (slower).'
     )
     parser.add_argument(
+        '--run-verifier-pass',
+        action='store_true',
+        help='Enable verification passes (verify_job_details_pass, verify_tree_structure_pass) to validate tree structure and job details'
+    )
+    parser.add_argument(
         '--disable-snippet-cache-read',
         action='store_true',
         help='TESTING ONLY: ignore existing snippet cache contents (forces cache misses; useful for benchmarking --parallel-workers)'
@@ -2449,6 +2457,7 @@ Environment Variables:
         parallel_workers=int(args.parallel_workers or 0),
         disable_snippet_cache_read=bool(args.disable_snippet_cache_read),
         enable_success_build_test_logs=bool(args.enable_success_build_test_logs),
+        run_verifier_pass=bool(args.run_verifier_pass),
     )
     # Fail fast if exhausted; detailed stats are rendered into the HTML Statistics section.
     try:

@@ -534,6 +534,7 @@ def run_all_passes(
     allow_fetch_checks: bool = True,
     enable_success_build_test_logs: bool = False,
     context_prefix: str = "",
+    run_verifier_pass: bool = False,  # NEW: Enable verification passes
 ) -> List[TreeNodeVM]:
     """
     Centralized tree node processing pipeline.
@@ -554,6 +555,7 @@ def run_all_passes(
         allow_fetch_checks: Allow network fetch for checks
         enable_success_build_test_logs: Cache raw logs for successful jobs
         context_prefix: Prefix for context keys (e.g., "remote:", "local:")
+        run_verifier_pass: Enable verification passes (verify_job_details_pass, verify_tree_structure_pass)
     
     Returns:
         Processed list of TreeNodeVM nodes with YAML augmentation applied.
@@ -589,7 +591,9 @@ def run_all_passes(
 
     # PASS 2.5: Verify job details (steps, pytest tests, duration)
     # This runs right after add_job_steps_and_tests_pass to validate that expected data is present
-    verify_job_details_pass(ci_nodes, commit_sha=commit_sha)
+    # Only runs if --run-verifier-pass flag is set
+    if run_verifier_pass:
+        verify_job_details_pass(ci_nodes, commit_sha=commit_sha)
 
     # Parse YAML workflows to build mappings (job names, dependencies, etc.)
     # Note: This is NOT a pass - it doesn't modify nodes, just parses YAML files
@@ -638,7 +642,9 @@ def run_all_passes(
     final_nodes = move_required_jobs_to_top_pass(final_nodes)
     
     # PASS 8: Verify the final tree structure
-    verify_tree_structure_pass(final_nodes, ci_nodes, commit_sha=commit_sha)
+    # Only runs if --run-verifier-pass flag is set
+    if run_verifier_pass:
+        verify_tree_structure_pass(final_nodes, ci_nodes, commit_sha=commit_sha)
     
     logger.info(f"[run_all_passes] All passes complete (1-8), returning {len(final_nodes)} root nodes")
     return final_nodes
