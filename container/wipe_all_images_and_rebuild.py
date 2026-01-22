@@ -280,12 +280,9 @@ class ImageSHAResolver:
         if len(results) < n:
             logger.warning(f"{Colors.YELLOW}Only found {len(results)} unique image SHAs (requested {n}){Colors.RESET}")
 
-        return results
-
-        if len(results) < n:
-            logger.warning(f"{Colors.YELLOW}Only found {len(results)} unique image SHAs (requested {n}){Colors.RESET}")
-
-        return results
+        # Reverse to get chronological order (oldest first, newest last)
+        # Since we walked commits newest→oldest, results are in reverse chronological order
+        return list(reversed(results))
 
 
 class ImageRebuilder:
