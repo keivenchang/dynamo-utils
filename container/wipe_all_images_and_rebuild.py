@@ -213,21 +213,26 @@ class ImageSHAResolver:
     def get_last_n_image_shas(self, n: int) -> List[tuple[str, str]]:
         """
         Get the last N unique image SHAs from git history.
+        
+        Walks backward through commit history and records the LAST commit
+        (chronologically oldest) with each unique image SHA before it changes.
 
         Returns:
             List of tuples: [(commit_sha, image_sha), ...]
         """
-        logger.info(f"{Colors.CYAN}Analyzing git history to find last {n} image SHAs...{Colors.RESET}")
+        logger.info(f"{Colors.CYAN}Analyzing git history to find last {n} unique image SHAs...{Colors.RESET}")
 
-        seen_image_shas = set()
-        results = []
-
+        # First pass: collect all commits with their image SHAs
+        all_commits = []
+        
         # Save current HEAD
         original_head = self.repo.head.commit.hexsha
 
         # Iterate through commits on main branch
         try:
-            for commit in self.repo.iter_commits('HEAD', max_count=500):
+            # Use main branch, not HEAD (which could be detached)
+            ref = 'origin/main' if 'origin/main' in [str(r) for r in self.repo.refs] else 'main'
+            for commit in self.repo.iter_commits(ref, max_count=500):
                 commit_sha = commit.hexsha[:9]
 
                 # Calculate image SHA for this commit by checking out the commit
@@ -238,13 +243,9 @@ class ImageSHAResolver:
                     # Compute image SHA
                     image_sha = self.repo_utils.generate_composite_sha()
 
-                    if image_sha and image_sha not in seen_image_shas:
-                        seen_image_shas.add(image_sha)
-                        results.append((commit_sha, image_sha[:7]))
-                        logger.info(f"  Found: commit {commit_sha} → image SHA {image_sha[:7]}")
-
-                        if len(results) >= n:
-                            break
+                    if image_sha:
+                        all_commits.append((commit_sha, image_sha))
+                        
                 except Exception as e:
                     logger.debug(f"  Skipping commit {commit_sha}: {e}")
                     continue
@@ -256,6 +257,30 @@ class ImageSHAResolver:
                 logger.debug(f"Returned to original HEAD: {original_head[:9]}")
             except Exception as e:
                 logger.warning(f"{Colors.YELLOW}Failed to return to original HEAD: {e}{Colors.RESET}")
+        
+        # Second pass: find the last commit (chronologically oldest) with each unique image SHA
+        results = []
+        seen_image_shas = set()
+        
+        for i, (commit_sha, image_sha) in enumerate(all_commits):
+            # Check if next commit has different image SHA (or if this is the last commit)
+            is_last_with_this_sha = (
+                i == len(all_commits) - 1 or  # Last commit overall
+                all_commits[i + 1][1] != image_sha  # Next commit has different SHA
+            )
+            
+            if is_last_with_this_sha and image_sha not in seen_image_shas:
+                seen_image_shas.add(image_sha)
+                results.append((commit_sha, image_sha[:7]))
+                logger.info(f"  Found: commit {commit_sha} → image SHA {image_sha[:7]}")
+                
+                if len(results) >= n:
+                    break
+
+        if len(results) < n:
+            logger.warning(f"{Colors.YELLOW}Only found {len(results)} unique image SHAs (requested {n}){Colors.RESET}")
+
+        return results
 
         if len(results) < n:
             logger.warning(f"{Colors.YELLOW}Only found {len(results)} unique image SHAs (requested {n}){Colors.RESET}")
