@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -11,6 +12,11 @@ from typing import Dict, List, Optional, Tuple
 import common
 import ci_log_errors
 from ci_log_errors import snippet as ci_snippet
+
+try:
+    import fcntl  # type: ignore
+except Exception:  # pragma: no cover - best-effort on non-POSIX
+    fcntl = None  # type: ignore
 
 
 @dataclass
@@ -49,13 +55,60 @@ class SnippetCache:
         self._initial_disk_count: Optional[int] = None  # Track disk count before modifications
 
     def _compute_ci_log_errors_sha(self) -> str:
-        """Compute fingerprint of ci_log_errors module to invalidate cache on code changes."""
-        src_dir = Path(ci_log_errors.__file__).parent
-        sha_parts = []
-        for pyfile in sorted(src_dir.glob("*.py")):
-            sha_parts.append(f"{pyfile.name}:{pyfile.stat().st_mtime_ns}")
-        # Use hashlib for stable hash across process restarts (Python's hash() uses random seed per process)
-        return hashlib.md5("".join(sha_parts).encode()).hexdigest()
+        """Compute a stable fingerprint for ci_log_errors snippet behavior.
+
+        We intentionally hash file *contents* (not mtimes) so different checkouts/installs
+        with identical code produce the same fingerprint. This makes caches reusable.
+        """
+        base = Path(ci_log_errors.__file__).resolve().parent
+        files = [
+            base / "engine.py",
+            base / "snippet.py",
+            base / "render.py",
+            base / "regexes.py",
+        ]
+        h = hashlib.sha1()
+        for p in files:
+            try:
+                h.update(p.read_bytes())
+            except OSError:
+                # Still include filename so missing files change the fingerprint.
+                h.update(str(p).encode("utf-8", errors="ignore"))
+                h.update(b"\0")
+        return h.hexdigest()[:12]
+
+    def _lock_file_path(self) -> Path:
+        # Keep lock file next to cache so it respects DYNAMO_UTILS_CACHE_DIR.
+        return self._cache_file.with_name(f".{self._cache_file.name}.lock")
+
+    def _acquire_disk_lock(self, *, timeout_s: float = 10.0) -> Optional[object]:
+        """Best-effort inter-process lock for the cache file."""
+        if fcntl is None:
+            return None
+        lock_path = self._lock_file_path()
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        fh = open(lock_path, "w")
+        start = time.monotonic()
+        while time.monotonic() - start < float(timeout_s):
+            try:
+                fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                return fh
+            except (IOError, OSError):
+                time.sleep(0.1)
+        fh.close()
+        return None
+
+    def _release_disk_lock(self, lock_fh: Optional[object]) -> None:
+        if lock_fh is None:
+            return
+        try:
+            if fcntl is not None:
+                fcntl.flock(lock_fh.fileno(), fcntl.LOCK_UN)
+        finally:
+            try:
+                lock_fh.close()
+            except Exception:
+                pass
 
     def _load_once(self) -> None:
         """Load cache from disk (once per instance)."""
@@ -75,18 +128,36 @@ class SnippetCache:
         if not isinstance(data, dict):
             data = {}
 
-        # Invalidate entire cache if ci_log_errors code changed
         got_sha = str(data.get("ci_log_errors_sha", "") or "")
         want_sha = self._ci_log_errors_sha
-        if got_sha != want_sha:
-            self._data = {"ci_log_errors_sha": want_sha, "items": {}}
-            self._dirty = True
-            self._initial_disk_count = 0
-            return
 
         # Ensure items dict exists
         if not isinstance(data.get("items"), dict):
             data["items"] = {}
+
+        # Migration: older versions used a different fingerprint scheme (e.g. 32-char md5).
+        # If the only difference is fingerprint format, re-key entries to the new prefix so
+        # caches remain warm across upgrades.
+        if got_sha and got_sha != want_sha and len(got_sha) != len(want_sha):
+            items_any = data.get("items")
+            if isinstance(items_any, dict):
+                migrated: Dict[str, object] = {}
+                for k, v in items_any.items():
+                    if not isinstance(k, str) or ":" not in k:
+                        continue
+                    prefix, rest = k.split(":", 1)
+                    if prefix != got_sha:
+                        continue
+                    new_k = f"{want_sha}:{rest}"
+                    if new_k not in items_any:
+                        migrated[new_k] = v
+                if migrated:
+                    items_any.update(migrated)
+                    data["items"] = items_any
+                    self._dirty = True
+
+        # Always record the current fingerprint for observability.
+        data["ci_log_errors_sha"] = want_sha
 
         # Track initial disk count before any modifications
         self._initial_disk_count = len(data.get("items", {}))
@@ -94,7 +165,7 @@ class SnippetCache:
         self._data = data
 
     def _persist(self) -> None:
-        """Write cache to disk atomically."""
+        """Persist cache to disk with inter-process merge (best-effort)."""
         if not self._dirty:
             return
 
@@ -102,13 +173,38 @@ class SnippetCache:
         items = self._data.get("items") if isinstance(self._data, dict) else {}
         if not isinstance(items, dict):
             items = {}
-        self._data["items"] = items
+        mem_items: Dict[str, object] = dict(items)
 
-        # Atomic write
-        tmp = str(self._cache_file) + ".tmp"
-        Path(tmp).write_text(json.dumps(self._data, separators=(",", ":")))
-        Path(tmp).replace(self._cache_file)
-        self._dirty = False
+        lock_fh = self._acquire_disk_lock(timeout_s=10.0)
+        try:
+            disk_data: Dict[str, object] = {}
+            if self._cache_file.exists():
+                try:
+                    disk_data = json.loads(self._cache_file.read_text() or "{}")
+                except Exception:
+                    disk_data = {}
+            if not isinstance(disk_data, dict):
+                disk_data = {}
+            disk_items = disk_data.get("items")
+            if not isinstance(disk_items, dict):
+                disk_items = {}
+
+            # Merge: disk first, then memory wins for conflicts.
+            merged_items = {**disk_items, **mem_items}
+            merged = {
+                "ci_log_errors_sha": str(self._ci_log_errors_sha or ""),
+                "items": merged_items,
+            }
+
+            tmp = f"{self._cache_file}.tmp.{os.getpid()}"
+            Path(tmp).write_text(json.dumps(merged, separators=(",", ":")))
+            os.replace(str(tmp), str(self._cache_file))
+
+            # Update in-memory view to match what we wrote.
+            self._data = merged
+            self._dirty = False
+        finally:
+            self._release_disk_lock(lock_fh)
 
     @staticmethod
     def _cache_key_for_raw_log(filename: str, ci_log_errors_sha: str) -> str:
@@ -129,6 +225,78 @@ class SnippetCache:
             snippet_body = lines[1]
             return (snippet_body, categories)
         return (snippet, [])
+
+    def get_if_fresh(self, *, raw_log_path: Path) -> Optional[Tuple[str, List[str]]]:
+        """Return cached (snippet, categories) if fresh, else None (no compute)."""
+        p = Path(raw_log_path)
+        if not p.exists() or not p.is_file():
+            self.stats.miss += 1
+            return None
+        st = p.stat()
+        mtime_ns = int(getattr(st, "st_mtime_ns", int(st.st_mtime * 1e9)))
+        size_bytes = int(st.st_size)
+
+        filename = str(p.name)
+        now_ts = int(time.time())
+
+        with self._mu:
+            self._load_once()
+            key = self._cache_key_for_raw_log(filename, self._ci_log_errors_sha)
+            items = self._data.get("items") if isinstance(self._data, dict) else {}
+            if not isinstance(items, dict):
+                self.stats.miss += 1
+                return None
+            ent = items.get(key)
+            if not isinstance(ent, dict):
+                self.stats.miss += 1
+                return None
+            cached_mtime = int(ent.get("mtime_ns", -1) or -1)
+            cached_size = int(ent.get("size", -1) or -1)
+            cached_ts = int(ent.get("ts", 0) or 0)
+            if cached_ts > 0 and (now_ts - cached_ts) > self._TTL_SECONDS:
+                self.stats.miss += 1
+                return None
+            if cached_mtime != mtime_ns or cached_size != size_bytes:
+                self.stats.miss += 1
+                return None
+            snippet = str(ent.get("snippet", "") or "")
+            categories = list(ent.get("categories", []) or [])
+            if not snippet:
+                self.stats.miss += 1
+                return None
+            self.stats.hit += 1
+            return (snippet, categories)
+
+    def put_raw_snippet(self, *, raw_log_path: Path, snippet_raw: str) -> Tuple[str, List[str]]:
+        """Store a freshly-computed snippet (possibly computed by a worker) and return (body, cats)."""
+        p = Path(raw_log_path)
+        if not p.exists() or not p.is_file():
+            return ("", [])
+        st = p.stat()
+        mtime_ns = int(getattr(st, "st_mtime_ns", int(st.st_mtime * 1e9)))
+        size_bytes = int(st.st_size)
+        now_ts = int(time.time())
+        body, categories = self._split_categories_from_snippet(str(snippet_raw or ""))
+
+        filename = str(p.name)
+        with self._mu:
+            self._load_once()
+            key = self._cache_key_for_raw_log(filename, self._ci_log_errors_sha)
+            items = self._data.get("items") if isinstance(self._data, dict) else {}
+            if not isinstance(items, dict):
+                items = {}
+            items[key] = {
+                "mtime_ns": int(mtime_ns),
+                "size": int(size_bytes),
+                "ts": int(now_ts),
+                "snippet": str(body or ""),
+                "categories": list(categories or []),
+            }
+            self._data["items"] = items
+            self._dirty = True
+            self.stats.write += 1
+            self._persist()
+        return (str(body or ""), list(categories or []))
 
     def get_or_compute(
         self,
@@ -151,63 +319,21 @@ class SnippetCache:
         size_bytes = int(st.st_size)
 
         filename = str(p.name)
-
-        with self._mu:
-            self._load_once()
-
-            key = self._cache_key_for_raw_log(filename, self._ci_log_errors_sha)
-            items = self._data.get("items") if isinstance(self._data, dict) else {}
-            if not isinstance(items, dict):
-                items = {}
-
-            now_ts = int(time.time())
-
-            # Check cache
-            ent = items.get(key)
-            if isinstance(ent, dict):
-                cached_mtime = int(ent.get("mtime_ns", -1) or -1)
-                cached_size = int(ent.get("size", -1) or -1)
-                cached_ts = int(ent.get("ts", 0) or 0)
-
-                # Check TTL
-                if cached_ts > 0 and (now_ts - cached_ts) > self._TTL_SECONDS:
-                    pass  # Expired, compute fresh
-                elif cached_mtime == mtime_ns and cached_size == size_bytes:
-                    snippet = str(ent.get("snippet", "") or "")
-                    categories = list(ent.get("categories", []) or [])
-                    if snippet:
-                        self.stats.hit += 1
-                        self.stats.total_secs += max(0.0, time.monotonic() - t0)
-                        return (snippet, categories)
-
-            # Cache miss: compute snippet
-            self.stats.miss += 1
-            t1 = time.monotonic()
-
-            snippet_raw = ci_snippet.extract_error_snippet_from_log_file(p)
-
-            snippet_body, categories = self._split_categories_from_snippet(snippet_raw)
-
-            dt_compute = max(0.0, time.monotonic() - t1)
-            self.stats.compute_secs += dt_compute
-
-            # Update cache
-            items[key] = {
-                "mtime_ns": mtime_ns,
-                "size": size_bytes,
-                "ts": now_ts,
-                "snippet": str(snippet_body or ""),
-                "categories": list(categories or []),
-            }
-            self._data["items"] = items
-            self._dirty = True
-            self.stats.write += 1
-
-            # Auto-flush to disk immediately (consistent with GitHub API caches)
-            self._persist()
-
+        cached = self.get_if_fresh(raw_log_path=p)
+        if cached is not None:
             self.stats.total_secs += max(0.0, time.monotonic() - t0)
-            return (str(snippet_body or ""), categories)
+            return cached
+
+        # Cache miss: compute outside locks (avoid blocking other readers/writers).
+        self.stats.miss += 1
+        t1 = time.monotonic()
+        snippet_raw = ci_snippet.extract_error_snippet_from_log_file(p)
+        dt_compute = max(0.0, time.monotonic() - t1)
+        self.stats.compute_secs += dt_compute
+
+        snippet_body, categories = self.put_raw_snippet(raw_log_path=p, snippet_raw=str(snippet_raw or ""))
+        self.stats.total_secs += max(0.0, time.monotonic() - t0)
+        return (snippet_body, categories)
 
     def flush(self) -> None:
         """Persist cache to disk."""

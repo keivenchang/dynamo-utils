@@ -164,11 +164,8 @@ class CommitHistoryGenerator:
         self.logger = self._setup_logger()
         # Cache files live in ~/.cache/dynamo-utils to avoid polluting the repo checkout
         self.cache_file = dynamo_utils_cache_dir() / "commit_history.json"
-        # Persistent snippet cache (speeds up repeated runs by avoiding re-parsing the same raw logs).
-        self.snippet_cache_file = dynamo_utils_cache_dir() / "commit_history_snippets.json"
-        self._snippet_cache_dirty = False
-        self._snippet_cache_data: Dict[str, object] = {}
-        self._ci_log_errors_fingerprint: str = ""
+        # NOTE: Snippet caching is handled by the unified SNIPPET_CACHE (snippet-cache.json)
+        # imported from snippet_cache.py and shared across all dashboard generators.
         # Per-run performance counters are now tracked globally in COMMIT_HISTORY_PERF_STATS
         self.gitlab_client = GitLabAPIClient()  # Single instance for all GitLab operations
         require_auth = not bool(allow_anonymous_github)
@@ -184,30 +181,6 @@ class CommitHistoryGenerator:
         # GitHub network fetching is governed by cache TTLs in `common.py`.
         # We allow fetches when entries are missing or stale so the dashboard self-heals and
         # raw logs can be materialized whenever they are needed.
-
-    @staticmethod
-    def _split_categories_from_snippet(snippet: str) -> tuple[str, list[str]]:
-        """Split the optional 'Categories:' header from snippet output.
-
-        Input format:
-        - When `ci_log_errors.snippet.extract_error_snippet_from_log_file(...)` finds categories,
-          it prefixes the snippet with a first line like:
-            "Categories: pytest-error, python-error"
-
-        Returns:
-        - snippet_body (str): snippet text without the "Categories: ..." first line
-        - categories (list[str]): list of category strings, e.g. ["pytest-error", "python-error"]
-        """
-        categories: list[str] = []
-        snippet_body = str(snippet or "")
-        if snippet_body:
-            lines = snippet_body.split("\n", 1)
-            first_line = lines[0] if lines else ""
-            if first_line.startswith("Categories:"):
-                categories_str = first_line.replace("Categories:", "").strip()
-                categories = [c.strip() for c in categories_str.split(",")] if categories_str else []
-                snippet_body = lines[1] if len(lines) > 1 else ""
-        return (snippet_body, categories)
 
     def _snippets_for_raw_hrefs(self, raw_hrefs: List[str]) -> Dict[str, tuple[str, list[str]]]:
         """Batch snippet extraction for raw log hrefs (optionally in multiple processes).
@@ -246,127 +219,50 @@ class CommitHistoryGenerator:
                 continue
             seen.add(hh)
             hrefs.append(hh)
-
-        # Cache is loaded once at start of show_commit_history()
-        data = self._snippet_cache_data if isinstance(self._snippet_cache_data, dict) else {}
-        items = data.get("items") if isinstance(data.get("items"), dict) else {}
-
-        TTL_SECONDS = 365 * 24 * 60 * 60
-        now_ts = int(time.time())
-
-        misses: List[Tuple[str, Path, str, int, int]] = []  # (href, path, key, mtime_ns, size)
+        misses: List[Tuple[str, Path]] = []  # (href, local_path)
         for href in hrefs:
             p = Path(self.repo_path) / href
             if not p.exists() or not p.is_file():
                 out[href] = ("", [])
                 continue
 
-            key = self._snippet_cache_key_for_raw_log(p)
-            st = p.stat()
-            try:
-                mtime_ns = int(st.st_mtime_ns)
-            except AttributeError:
-                mtime_ns = int(float(st.st_mtime) * 1_000_000_000)
-            size = int(st.st_size)
-
             # For testing parallel parsing: treat everything as a miss, regardless of cache contents.
             if bool(self.disable_snippet_cache_read):
-                misses.append((href, p, key, mtime_ns, size))
+                SNIPPET_CACHE.stats.miss += 1
+                misses.append((href, p))
                 continue
 
-            ent = items.get(key) if isinstance(items, dict) else None
-            if isinstance(ent, dict):
-                cached_mtime = int(ent.get("mtime_ns", -1) or -1)
-                cached_size = int(ent.get("size", -1) or -1)
-                cached_ts = int(ent.get("ts", 0) or 0)
-                if cached_ts > 0 and (now_ts - cached_ts) > TTL_SECONDS:
-                    misses.append((href, p, key, mtime_ns, size))
-                elif cached_mtime == mtime_ns and cached_size == size:
-                    sn = str(ent.get("snippet", "") or "")
-                    cats = ent.get("categories", []) or []
-                    if sn:
-                        # Snippet cache hits are automatically tracked by SNIPPET_CACHE.stats
-                        out[href] = (sn, cats)
-                        continue
-                    misses.append((href, p, key, mtime_ns, size))
-                else:
-                    misses.append((href, p, key, mtime_ns, size))
-            else:
-                misses.append((href, p, key, mtime_ns, size))
+            cached = SNIPPET_CACHE.get_if_fresh(raw_log_path=p)
+            if cached is not None:
+                out[href] = cached
+                continue
+
+            misses.append((href, p))
 
         if not misses:
             return out
 
-        # Snippet cache misses are automatically tracked by SNIPPET_CACHE.stats
-        t_compute0 = time.monotonic()
-
-        def store_result(*, href: str, key: str, mtime_ns: int, size: int, snippet_text: str) -> None:
-            body, cats = self._split_categories_from_snippet(snippet_text)
-            out[href] = (body, cats)
-            if isinstance(items, dict):
-                items[key] = {
-                    "mtime_ns": int(mtime_ns),
-                    "size": int(size),
-                    "ts": int(time.time()),
-                    "snippet": str(body or ""),
-                    "categories": list(cats or []),
-                }
-                data["items"] = items
-                self._snippet_cache_data = data
-                self._snippet_cache_dirty = True
-
+        # Compute misses and store into the unified shared snippet cache.
         if int(self.parallel_workers or 0) > 1:
             max_workers = int(self.parallel_workers)
             with concurrent.futures.ProcessPoolExecutor(max_workers=max_workers) as ex:
-                futs: Dict[concurrent.futures.Future, Tuple[str, str, int, int]] = {}
-                for href, p, key, mtime_ns, size in misses:
+                futs: Dict[concurrent.futures.Future, Tuple[str, Path]] = {}
+                for href, p in misses:
                     fut = ex.submit(_extract_error_snippet_worker, str(p))
-                    futs[fut] = (href, key, mtime_ns, size)
+                    futs[fut] = (href, p)
 
                 for fut in concurrent.futures.as_completed(futs):
-                    href, key, mtime_ns, size = futs[fut]
+                    href, p = futs[fut]
                     sn = str(fut.result() or "")
-                    store_result(href=href, key=key, mtime_ns=mtime_ns, size=size, snippet_text=sn)
+                    body, cats = SNIPPET_CACHE.put_raw_snippet(raw_log_path=p, snippet_raw=sn)
+                    out[href] = (body, cats)
         else:
-            for href, p, key, mtime_ns, size in misses:
+            for href, p in misses:
                 sn = str(ci_snippet.extract_error_snippet_from_log_file(p) or "")
-                store_result(href=href, key=key, mtime_ns=mtime_ns, size=size, snippet_text=sn)
+                body, cats = SNIPPET_CACHE.put_raw_snippet(raw_log_path=p, snippet_raw=sn)
+                out[href] = (body, cats)
 
-        dt = max(0.0, time.monotonic() - t_compute0)
-        # Snippet compute time is automatically tracked by SNIPPET_CACHE.stats
-        # Snippet total time is automatically tracked by SNIPPET_CACHE.stats
         return out
-
-    def _ci_log_errors_sha(self) -> str:
-        """Fingerprint the ci_log_errors implementation (used for snippet cache invalidation)."""
-        fp = str(self._ci_log_errors_fingerprint or "")
-        if fp:
-            return fp
-        try:
-            # Hash the core implementation files; this avoids false hits when snippet logic changes.
-            base = _UTILS_DIR / "ci_log_errors"
-            files = [
-                base / "engine.py",
-                base / "snippet.py",
-                base / "render.py",
-                base / "regexes.py",
-            ]
-            h = hashlib.sha1()
-            for p in files:
-                try:
-                    h.update(p.read_bytes())
-                except OSError:
-                    # Still include filename so missing files change the fingerprint.
-                    h.update(str(p).encode("utf-8", errors="ignore"))
-                    h.update(b"\0")
-            fp = h.hexdigest()[:12]
-            self._ci_log_errors_fingerprint = fp
-            return fp
-        except Exception as e:
-            logger.warning(f"Failed to compute ci_log_errors fingerprint: {e}")
-            fp = "unknown"
-            self._ci_log_errors_fingerprint = fp
-            return fp
 
     def _save_commit_cache_with_merge(self, cache: Dict[str, Any]) -> bool:
         """Save commit cache with merge logic to handle concurrent writers.
@@ -417,194 +313,17 @@ class CommitHistoryGenerator:
             self.logger.warning(f"Failed to save commit cache with merge: {e}")
             return False
 
-    def _acquire_cache_lock(self, timeout: float = 10.0) -> Optional[object]:
-        """Acquire file lock for snippet cache. Returns lock file handle or None on failure."""
-        lock_file = self.snippet_cache_file.parent / ".snippet_cache.lock"
-        lock_file.parent.mkdir(parents=True, exist_ok=True)
-        fh = open(lock_file, "w")
-        # Try to acquire exclusive lock with timeout
-        start = time.monotonic()
-        while time.monotonic() - start < timeout:
-            try:
-                fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-                return fh
-            except (IOError, OSError):
-                time.sleep(0.1)
-        # Timeout
-        fh.close()
-        return None
-
-    def _release_cache_lock(self, lock_fh: Optional[object]) -> None:
-        """Release file lock for snippet cache."""
-        if lock_fh is None:
-            return
-        fcntl.flock(lock_fh.fileno(), fcntl.LOCK_UN)
-        lock_fh.close()
-
-    def _load_snippet_cache(self) -> None:
-        """Load persistent snippet cache with file locking (best-effort)."""
-        if self._snippet_cache_data:
-            return
-        
-        lock_fh = self._acquire_cache_lock(timeout=5.0)
-        try:
-            data: Dict[str, object] = {}
-            if self.snippet_cache_file.exists():
-                data = json.loads(self.snippet_cache_file.read_text() or "{}")
-            if not isinstance(data, dict):
-                data = {}
-            # Invalidate on ci_log_errors changes.
-            want_sha = self._ci_log_errors_sha()
-            got_sha = str(data.get("ci_log_errors_sha", "") or "")
-            if got_sha != want_sha:
-                data = {"ci_log_errors_sha": want_sha, "items": {}}
-                self._snippet_cache_dirty = True
-            # Normalize structure.
-            if not isinstance(data.get("items"), dict):
-                data["items"] = {}
-            self._snippet_cache_data = data
-        finally:
-            self._release_cache_lock(lock_fh)
-
-    def _save_snippet_cache(self) -> None:
-        """Persist snippet cache with file locking: lock, read-merge, write, unlock (best-effort)."""
-        if not bool(self._snippet_cache_dirty):
-            return
-        
-        lock_fh = self._acquire_cache_lock(timeout=10.0)
-        if lock_fh is None:
-            # Could not acquire lock, skip save (best-effort)
-            return
-        
-        try:
-            self.snippet_cache_file.parent.mkdir(parents=True, exist_ok=True)
-            
-            # Step 1: Read existing cache from disk
-            disk_data: Dict[str, object] = {}
-            if self.snippet_cache_file.exists():
-                disk_data = json.loads(self.snippet_cache_file.read_text() or "{}")
-            if not isinstance(disk_data, dict):
-                disk_data = {}
-            if not isinstance(disk_data.get("items"), dict):
-                disk_data["items"] = {}
-            
-            # Step 2: Merge in-memory data with disk data (in-memory wins for conflicts)
-            mem_data = self._snippet_cache_data if isinstance(self._snippet_cache_data, dict) else {}
-            mem_items = mem_data.get("items") if isinstance(mem_data, dict) else {}
-            if not isinstance(mem_items, dict):
-                mem_items = {}
-            
-            disk_items = disk_data.get("items")
-            if not isinstance(disk_items, dict):
-                disk_items = {}
-            
-            # Merge: disk items + memory items (memory overwrites disk)
-            merged_items = {**disk_items, **mem_items}
-            
-            # Preserve ci_log_errors fingerprint from memory
-            merged_data = {
-                "ci_log_errors_sha": mem_data.get("ci_log_errors_sha", disk_data.get("ci_log_errors_sha", "")),
-                "items": merged_items
-            }
-            
-            # Step 3: Write merged data atomically
-            atomic_write_text(self.snippet_cache_file, json.dumps(merged_data, indent=2), encoding="utf-8")
-            self._snippet_cache_dirty = False
-        finally:
-            self._release_cache_lock(lock_fh)
-
-    def _snippet_cache_key_for_raw_log(self, raw_log_path: Path) -> str:
-        # Key includes BOTH filename AND ci_log_errors SHA fingerprint.
-        # This allows multiple code versions (e.g., QA + prod) to coexist without conflicts.
-        sha = self._ci_log_errors_sha()
-        filename = str(raw_log_path.name or raw_log_path)
-        return f"{sha}:{filename}"
-
     def _snippet_from_cached_raw_log(self, raw_log_path: Path) -> tuple[str, list[str]]:
         """Return an error snippet and categories for a raw log file, using the persistent cache when possible.
         
         Returns:
             (snippet_text, categories): snippet without "Categories:" prefix, and list of category strings
         """
-        t0 = time.monotonic()
         p = Path(raw_log_path)
         if not p.exists() or not p.is_file():
             return ("", [])
-
-        # Note: Cache is loaded once at the start of show_commit_history(), not per-call
-        data = self._snippet_cache_data if isinstance(self._snippet_cache_data, dict) else {}
-        items = data.get("items") if isinstance(data.get("items"), dict) else {}
-        key = self._snippet_cache_key_for_raw_log(Path(raw_log_path))
-        st = Path(raw_log_path).stat()
-        try:
-            mtime_ns = int(st.st_mtime_ns)
-        except AttributeError:
-            mtime_ns = int(float(st.st_mtime) * 1_000_000_000)
-        size = int(st.st_size)
-
-        # Debug: track cache lookups
-        if not hasattr(self, '_snippet_cache_debug'):
-            self._snippet_cache_debug = {"hits": [], "misses": [], "reasons": {}}
-        
-        # TTL: 365 days (in seconds)
-        TTL_SECONDS = 365 * 24 * 60 * 60
-        now_ts = int(time.time())
-        
-        ent = items.get(key) if isinstance(items, dict) else None
-        if isinstance(ent, dict):
-            try:
-                cached_mtime = int(ent.get("mtime_ns", -1) or -1)
-                cached_size = int(ent.get("size", -1) or -1)
-                cached_ts = int(ent.get("ts", 0) or 0)
-                
-                # Check TTL first
-                if cached_ts > 0 and (now_ts - cached_ts) > TTL_SECONDS:
-                    reason = f"expired (age={(now_ts - cached_ts) / 86400:.1f} days > 365 days TTL)"
-                    self._snippet_cache_debug["misses"].append(key)
-                    self._snippet_cache_debug["reasons"][key] = reason
-                elif cached_mtime == mtime_ns and cached_size == size:
-                    sn = str(ent.get("snippet", "") or "")
-                    cats = ent.get("categories", []) or []
-                    if sn:
-                        # Snippet cache hits are automatically tracked by SNIPPET_CACHE.stats
-                        # Snippet total time is automatically tracked by SNIPPET_CACHE.stats
-                        self._snippet_cache_debug["hits"].append(key)
-                        return (sn, cats)
-                else:
-                    # Cache entry exists but is stale
-                    reason = f"stale (cached_mtime={cached_mtime} != {mtime_ns} or cached_size={cached_size} != {size})"
-                    self._snippet_cache_debug["misses"].append(key)
-                    self._snippet_cache_debug["reasons"][key] = reason
-            except Exception as e:
-                self._snippet_cache_debug["misses"].append(key)
-                self._snippet_cache_debug["reasons"][key] = f"exception: {e}"
-        else:
-            # No cache entry
-            self._snippet_cache_debug["misses"].append(key)
-            self._snippet_cache_debug["reasons"][key] = "no entry" if key not in items else "entry not dict"
-
-        # Cache miss/stale: compute and store.
-        # Snippet cache misses are automatically tracked by SNIPPET_CACHE.stats
-        t1 = time.monotonic()
-        snippet = ci_snippet.extract_error_snippet_from_log_file(Path(raw_log_path))
-
-        snippet_body, categories = self._split_categories_from_snippet(snippet)
-
-        dt_compute = max(0.0, time.monotonic() - t1)
-        # Snippet compute time is automatically tracked by SNIPPET_CACHE.stats
-        if isinstance(items, dict):
-            items[key] = {
-                "mtime_ns": mtime_ns,
-                "size": size,
-                "ts": int(time.time()),
-                "snippet": str(snippet_body or ""),
-                "categories": list(categories or []),
-            }
-            data["items"] = items
-            self._snippet_cache_data = data
-            self._snippet_cache_dirty = True
-        # Snippet total time is automatically tracked by SNIPPET_CACHE.stats
-        return (str(snippet_body or ""), categories)
+        # Unified snippet cache (disk-backed with lock+merge).
+        return SNIPPET_CACHE.get_or_compute(raw_log_path=p)
 
     def _setup_logger(self) -> logging.Logger:
         """Setup logging configuration"""
@@ -686,9 +405,8 @@ class CommitHistoryGenerator:
         # Initialize repo utils for this operation
         repo_utils = DynamoRepositoryUtils(self.repo_path, dry_run=False, verbose=self.verbose)
 
-        # Load snippet cache once at start (speeds up repeated snippet extraction)
-        if not bool(self.disable_snippet_cache_read):
-            self._load_snippet_cache()
+        # NOTE: Snippet cache is now automatically managed by SNIPPET_CACHE (unified cache)
+        # and doesn't require explicit loading at startup.
 
         meta_stats: Dict[str, int] = {"full_hit": 0, "miss": 0}
 
@@ -1084,8 +802,13 @@ class CommitHistoryGenerator:
                     self.logger.warning(f"Failed to save cache (final)")
                 phase_t.stop("cache_save", t0)
 
-            # Persist snippet cache (best-effort).
-            self._save_snippet_cache()
+            # Persist snippet cache to disk (best-effort).
+            # The unified SNIPPET_CACHE automatically flushes on program exit,
+            # but we do it explicitly here to ensure data is saved.
+            try:
+                SNIPPET_CACHE.flush()
+            except Exception:
+                pass
 
             # Persist timings for HTML page stats / debugging (best-effort).
             self._last_timings = dict(phase_t.as_dict(include_total=True))
@@ -1701,6 +1424,14 @@ class CommitHistoryGenerator:
         def _build_github_checks_tree_html(*, repo_path: Path, sha_full: str, required_names: List[str]) -> str:
             gha = github_actions_status.get(sha_full) if github_actions_status else None
             check_runs = (gha.get("check_runs") if isinstance(gha, dict) else None) or []
+            
+            # Debug: log when check_runs is empty but gha exists
+            if self.debug and gha and not check_runs:
+                logger.debug(f"GitHub tree for {sha_full[:9]}: gha exists but check_runs is empty. gha keys: {list(gha.keys()) if isinstance(gha, dict) else 'not dict'}")
+            elif self.debug and not gha:
+                logger.debug(f"GitHub tree for {sha_full[:9]}: No gha data in github_actions_status")
+            elif self.debug and check_runs:
+                logger.debug(f"GitHub tree for {sha_full[:9]}: Found {len(check_runs)} check runs")
             # Inject "expected but missing" placeholder checks so the commit-history tree matches
             # the local-branches tree UX (and makes missing required checks visible).
             present_norm = {
@@ -1875,8 +1606,16 @@ class CommitHistoryGenerator:
                     }
                 )
 
-            snippets_by_href = self._snippets_for_raw_hrefs(raw_hrefs_for_commit) if raw_hrefs_for_commit else {}
-
+            try:
+                logger.debug(f"[_build_github_checks_tree_html] {sha_full[:9]}: About to call self._snippets_for_raw_hrefs with {len(raw_hrefs_for_commit)} hrefs")
+                logger.debug(f"[_build_github_checks_tree_html] {sha_full[:9]}: type(self._snippets_for_raw_hrefs) = {type(self._snippets_for_raw_hrefs)}")
+                logger.debug(f"[_build_github_checks_tree_html] {sha_full[:9]}: self._snippets_for_raw_hrefs = {self._snippets_for_raw_hrefs}")
+                snippets_by_href = self._snippets_for_raw_hrefs(raw_hrefs_for_commit) if raw_hrefs_for_commit else {}
+            except TypeError as e:
+                logger.error(f"[_build_github_checks_tree_html] {sha_full[:9]}: TypeError calling _snippets_for_raw_hrefs: {e}. self={self}, raw_hrefs_for_commit={len(raw_hrefs_for_commit) if raw_hrefs_for_commit else 0}")
+                import traceback
+                traceback.print_exc()
+                raise
             for info in check_infos:
                 name = str(info.get("name", "") or "")
                 disambiguated_name = str(info.get("disambiguated_name", "") or name)
@@ -1940,7 +1679,10 @@ class CommitHistoryGenerator:
                 triangle_tooltip="GitHub Actions",
             )
             # Return the div-based tree HTML
-            return render_tree_divs([root])
+            logger.debug(f"[_build_github_checks_tree_html] {sha_full[:9]}: Rendering tree with {len(children)} children nodes")
+            tree_html = render_tree_divs([root])
+            logger.debug(f"[_build_github_checks_tree_html] {sha_full[:9]}: render_tree_divs returned {len(tree_html)} chars")
+            return tree_html
 
         def _build_gitlab_checks_tree_html(*, sha_full: str, sha_short: str) -> str:
             pr_num = sha_to_pr_number.get(sha_full) if sha_to_pr_number else None
@@ -2066,14 +1808,23 @@ class CommitHistoryGenerator:
             sha_short = str(commit_dict.get("sha_short", "") or "")
             t0 = time.monotonic()
             try:
+                logger.debug(f"[build_github_tree] Starting for {sha_short} ({sha_full[:12]})")
                 tree_html = _build_github_checks_tree_html(
                     repo_path=self.repo_path,
                     sha_full=sha_full,
                     required_names=required_names  # Fetched once before parallel loop
                 )
+                if tree_html:
+                    logger.debug(f"[build_github_tree] SUCCESS for {sha_short}: Generated {len(tree_html)} chars of HTML")
+                else:
+                    logger.warning(f"[build_github_tree] EMPTY tree_html for {sha_short} ({sha_full[:12]}) - check_runs may be empty or render failed")
             except (KeyError, ValueError, TypeError) as e:
                 # Best-effort: tree building is optional
-                logger.debug(f"Failed to build GitHub tree for {sha_full[:8]}: {e}")
+                logger.warning(f"[build_github_tree] EXCEPTION for {sha_full[:8]}: {type(e).__name__}: {e}")
+                tree_html = ""
+            except Exception as e:
+                # Catch any other exception
+                logger.error(f"[build_github_tree] UNEXPECTED EXCEPTION for {sha_full[:8]}: {type(e).__name__}: {e}", exc_info=True)
                 tree_html = ""
             dt = max(0.0, time.monotonic() - t0)
             return (sha_full, sha_short, tree_html, dt)
@@ -2140,6 +1891,8 @@ class CommitHistoryGenerator:
                     github_results[sha_full] = (tree_html, dt)
                     build_github_s += dt
                     slow_github.append((dt, sha_short or sha_full[:9]))
+                    if not tree_html:
+                        logger.warning(f"[collect_github_results] {sha_short} ({sha_full[:12]}): tree_html is EMPTY")
 
                 # Collect GitLab results
                 for future in concurrent.futures.as_completed(gitlab_futures):
@@ -2149,10 +1902,17 @@ class CommitHistoryGenerator:
                     slow_gitlab.append((dt, sha_short or sha_full[:9]))
 
             # Attach results to commit dictionaries
+            logger.debug(f"[attach_results] Attaching tree HTML to {len(commit_data)} commits. github_results has {len(github_results)} entries")
             for c in commit_data:
                 sha_full = str(c.get("sha_full", "") or "")
+                sha_short = str(c.get("sha_short", "") or "")
                 if sha_full in github_results:
-                    c["github_checks_tree_html"] = github_results[sha_full][0]
+                    tree_html = github_results[sha_full][0]
+                    c["github_checks_tree_html"] = tree_html
+                    if not tree_html:
+                        logger.warning(f"[attach_results] {sha_short} ({sha_full[:12]}): Attaching EMPTY github_checks_tree_html")
+                else:
+                    logger.debug(f"[attach_results] {sha_short} ({sha_full[:12]}): NOT in github_results dict")
                 if sha_full in gitlab_results:
                     c["gitlab_checks_tree_html"] = gitlab_results[sha_full][0]
 
