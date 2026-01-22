@@ -234,19 +234,15 @@ def resolve_cache_path(cache_file: str) -> Path:
 
     return dynamo_utils_cache_dir() / rel
 
+# Third-party imports
 try:
     import docker  # type: ignore[import-untyped]
 except ImportError:
     docker = None  # type: ignore[assignment]
 
+import git  # type: ignore[import-not-found]
 import requests
 import yaml
-
-# GitPython is required - hard error if not installed
-try:
-    import git  # type: ignore[import-not-found]
-except ImportError as e:
-    raise ImportError("GitPython is required. Install with: pip install gitpython") from e
 
 # Supported frameworks
 # Used by V2 for default framework list and validation

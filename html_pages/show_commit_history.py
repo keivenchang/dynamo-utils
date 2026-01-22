@@ -13,21 +13,19 @@ import argparse
 import concurrent.futures
 import csv
 import fcntl
-import logging
-from collections import Counter, defaultdict
-try:
-    import git  # type: ignore[import-not-found]
-except Exception:  # pragma: no cover
-    git = None  # type: ignore[assignment]
 import glob
+import hashlib
 import html
 import json
+import logging
 import os
 import re
 import subprocess
 import sys
 import time
-import hashlib
+from collections import Counter, defaultdict
+
+import git  # type: ignore[import-not-found]
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Dict, Optional, Set, Tuple, Any
@@ -106,6 +104,9 @@ from common_gitlab import (
 
 # Jinja2 for HTML template rendering
 from jinja2 import Environment, FileSystemLoader, select_autoescape
+
+# Global logger
+logger = logging.getLogger(__name__)
 
 # Constants for build status values
 STATUS_UNKNOWN = 'unknown'
@@ -1837,8 +1838,10 @@ class CommitHistoryGenerator:
                         )
                         if allow_fetch:
                             raw_log_prefetch_budget["n"] = int(raw_log_prefetch_budget.get("n", 0) or 0) - 1
-                    except Exception:  # THIS IS A HORRIBLE ANTI-PATTERN, FIX IT
-                        pass  # Best-effort: raw log materialization is optional
+                    except (OSError, ValueError, KeyError) as e:
+                        # Best-effort: raw log materialization is optional
+                        logger.debug(f"Failed to materialize raw log: {e}")
+                        pass
 
                 if raw_href:
                     page_root_dir = (output_path.parent if output_path else Path(self.repo_path)).resolve()
@@ -2081,8 +2084,10 @@ class CommitHistoryGenerator:
                     sha_full=sha_full,
                     required_names=required_names  # Fetched once before parallel loop
                 )
-            except Exception:  # THIS IS A HORRIBLE ANTI-PATTERN, FIX IT
-                tree_html = ""  # Best-effort: tree building is optional
+            except (KeyError, ValueError, TypeError) as e:
+                # Best-effort: tree building is optional
+                logger.debug(f"Failed to build GitHub tree for {sha_full[:8]}: {e}")
+                tree_html = ""
             dt = max(0.0, time.monotonic() - t0)
             return (sha_full, sha_short, tree_html, dt)
 
@@ -2439,8 +2444,10 @@ class CommitHistoryGenerator:
                 hit = sum(1 for k in keys if k in cache0)
                 COMMIT_HISTORY_PERF_STATS.gitlab_cache_pipeline_jobs_hit += int(hit)
                 COMMIT_HISTORY_PERF_STATS.gitlab_cache_pipeline_jobs_miss += int(max(0, len(keys) - hit))
-        except Exception:  # THIS IS A HORRIBLE ANTI-PATTERN, FIX IT
-            pass  # Best-effort: cache accounting is optional
+        except (ValueError, TypeError, KeyError) as e:
+            # Best-effort: cache accounting is optional
+            logger.debug(f"Failed to update cache stats: {e}")
+            pass
 
         t0 = time.monotonic()
 
@@ -2680,8 +2687,9 @@ Environment Variables:
     # Fail fast if exhausted; detailed stats are rendered into the HTML Statistics section.
     try:
         generator.github_client.check_core_rate_limit_or_raise()
-    except Exception:  # THIS IS A HORRIBLE ANTI-PATTERN, FIX IT
+    except RuntimeError as e:
         # Switch to cache-only mode (no new GitHub network calls).
+        logger.warning(f"GitHub rate limit exceeded, switching to cache-only mode: {e}")
         generator.github_client.set_cache_only_mode(True)
 
     rc = 1

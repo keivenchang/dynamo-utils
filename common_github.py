@@ -1337,8 +1337,11 @@ class GitHubAPIClient:
                 self._initial_disk_counts["merge_dates_disk"] = len(merge_dates) if isinstance(merge_dates, dict) else 0
             else:
                 self._initial_disk_counts["merge_dates_disk"] = 0
-        except Exception:
-            # If any error occurs, just use empty counts - don't fail initialization
+        except (OSError, json.JSONDecodeError, ValueError) as e:
+            # If any error occurs, log and use empty counts - don't fail initialization
+            logger = logging.getLogger("github_client")
+            logger.debug(f"Failed to load initial disk counts: {e}")
+            # Continue with empty counts
             pass
 
     def set_cache_only_mode(self, on: bool = True) -> None:

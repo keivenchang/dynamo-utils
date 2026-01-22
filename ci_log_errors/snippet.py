@@ -99,7 +99,7 @@ def extract_error_snippet_from_text(
                         if m:
                             return str(m.group(2) or "")
                     return ""
-                except Exception:  # THIS IS A HORRIBLE ANTI-PATTERN, FIX IT
+                except (AttributeError, IndexError, ValueError):
                     return ""
 
             def extract_vanilla_pytest_from_shell(line: str) -> str:
@@ -112,7 +112,7 @@ def extract_error_snippet_from_text(
                     if not re.search(r"\\bpytest\\b", inner, flags=re.IGNORECASE):
                         return ""
                     return _unescape_nested_shell_quotes(inner).strip()
-                except Exception:  # THIS IS A HORRIBLE ANTI-PATTERN, FIX IT
+                except (AttributeError, IndexError, ValueError):
                     return ""
 
             def normalize_cmd_line(raw: str) -> str:
@@ -190,7 +190,7 @@ def extract_error_snippet_from_text(
                     parts = [x.rstrip() for x in blk.splitlines() if x.strip()]
                     if parts:
                         blk = "\n".join(parts).strip()
-                except Exception:  # THIS IS A HORRIBLE ANTI-PATTERN, FIX IT
+                except (AttributeError, ValueError):
                     pass
                 # Cap length so commands don't drown out the actual failure lines.
                 cap = 2200
@@ -320,7 +320,7 @@ def extract_error_snippet_from_text(
                 try:
                     if re.search(r"^E\s+ModuleNotFoundError:\s*No\s+module\s+named\b", s_norm):
                         last_e_module_not_found = i
-                except Exception:  # THIS IS A HORRIBLE ANTI-PATTERN, FIX IT
+                except (AttributeError, ValueError):
                     pass
             if SNIPPET_PYTHON_EXCEPTION_LINE_RE.search(s_norm):
                 last_python_exception_line = i

@@ -106,7 +106,8 @@ def _run_cmd_maybe_sudo(
         if base == "nethogs":
             sudo_cmd = ["sudo", "-n", *list(cmd)]
             return _run_cmd(sudo_cmd, timeout_s=timeout_s)
-    except Exception:  # THIS IS A HORRIBLE ANTI-PATTERN, FIX IT
+    except (IndexError, OSError):
+        # Failed to check command name or run sudo
         pass
     # Common permission-denied patterns
     msg = f"{out}\n{err}".lower()
@@ -139,7 +140,7 @@ def _ping_rtt_ms(target: str, *, timeout_s: float) -> Tuple[Optional[float], Opt
         if m:
             try:
                 return float(m.group(1)), None
-            except Exception:  # THIS IS A HORRIBLE ANTI-PATTERN, FIX IT
+            except (ValueError, TypeError):
                 return None, "parse_error"
         return None, "parse_missing_time"
 
@@ -207,7 +208,7 @@ def _collect_net_top_nethogs(*, top_k: int, timeout_s: float) -> List[Dict[str, 
         try:
             sent_kbs = float(parts[1])
             recv_kbs = float(parts[2])
-        except Exception:  # THIS IS A HORRIBLE ANTI-PATTERN, FIX IT
+        except (ValueError, IndexError):
             continue
 
         # nethogs often reports proc as "name/PID/UID" (or "unknown TCP/0/0").
@@ -216,7 +217,7 @@ def _collect_net_top_nethogs(*, top_k: int, timeout_s: float) -> List[Dict[str, 
             segs = proc.split("/")
             if len(segs) >= 2 and segs[1].isdigit():
                 pid = int(segs[1])
-        except Exception:  # THIS IS A HORRIBLE ANTI-PATTERN, FIX IT
+        except (ValueError, IndexError):
             pid = 0
 
         rows.append(
@@ -252,7 +253,7 @@ def _collect_github_rate_limit(
         return []
     try:
         payload = json.loads(out)
-    except Exception:  # THIS IS A HORRIBLE ANTI-PATTERN, FIX IT
+    except (json.JSONDecodeError, ValueError):
         return []
     res = payload.get("resources")
     if not isinstance(res, dict):

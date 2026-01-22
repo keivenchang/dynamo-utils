@@ -463,24 +463,23 @@ def create_dummy_nodes_from_yaml_pass(nodes: List[TreeNodeVM]) -> List[TreeNodeV
     # Helper function to format arch text with colors
     def _format_arch_text_for_placeholder(text: str) -> str:
         """Format job name with architecture colors and annotations."""
-        import html as html_module
         raw = str(text or "")
         # Detect arch token - handle both standalone and matrix format like "(cuda12.9, amd64)"
         m = re.search(r"\((?:[^,)]+,\s*)?(arm64|aarch64|amd64)\)", raw, flags=re.IGNORECASE)
         if not m:
-            return html_module.escape(raw)
+            return html.escape(raw)
         
         arch = str(m.group(1) or "").strip().lower()
         # Determine color and prefix with arch alias
         if arch in {"arm64", "aarch64"}:
             color = "#b8860b"  # Dark yellow/gold for arm64
             raw2 = f"[aarch64] {raw}"
-            return f'<span style="color: {color};">{html_module.escape(raw2)}</span>'
+            return f'<span style="color: {color};">{html.escape(raw2)}</span>'
         elif arch == "amd64":
             color = "#0969da"  # Blue for amd64
             raw2 = f"[x86_64] {raw}"
-            return f'<span style="color: {color};">{html_module.escape(raw2)}</span>'
-        return html_module.escape(raw)
+            return f'<span style="color: {color};">{html.escape(raw2)}</span>'
+        return html.escape(raw)
     
     # Create minimal TreeNodeVM for each job
     skeleton_nodes = []
@@ -2042,14 +2041,12 @@ def render_tree_divs(root_nodes: List[TreeNodeVM]) -> str:
         return f"tree_children_{render_call_id:x}_{next_dom_id:x}"
 
     def _sha7_from_key(s: str) -> str:
-        import re
         m = re.findall(r"\b[0-9a-f]{7,40}\b", str(s or ""), re.IGNORECASE)
         if not m:
             return ""
         return str(m[-1])[:7].lower()
 
     def _repo_token_from_key(s: str) -> str:
-        import re
         txt = str(s or "")
         m = re.search(r"\b(?:PRStatus|CI|repo):([^:>]+)", txt)
         if not m:
@@ -2830,7 +2827,6 @@ def pytest_slowest_tests_from_raw_log(
         #   ERROR  tests/foo.py::test_baz - ...
         #   SKIPPED tests/foo.py::test_qux - ...
         #   XFAIL tests/foo.py::test_x - ...
-        import re
         status_by_test: Dict[str, str] = {}
 
         def _norm_test_id(s: str) -> str:

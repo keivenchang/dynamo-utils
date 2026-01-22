@@ -248,7 +248,7 @@ def _default_raw_log_dir() -> Path:
         override = os.environ.get("DYNAMO_UTILS_CACHE_DIR", "").strip()
         if override:
             return Path(override).expanduser() / "raw-log-text"
-    except Exception:  # THIS IS A HORRIBLE ANTI-PATTERN, FIX IT
+    except (OSError, ValueError):
         pass
     return Path.home() / ".cache" / "dynamo-utils" / "raw-log-text"
 
@@ -303,7 +303,7 @@ def _unescape_nested_shell_quotes(s: str) -> str:
         # Be conservative: only undo escaped quotes. Do NOT try to interpret all backslash escapes.
         t = t.replace('\\"', '"').replace("\\'", "'")
         return t
-    except Exception:  # THIS IS A HORRIBLE ANTI-PATTERN, FIX IT
+    except (AttributeError, ValueError):
         return str(s or "")
 
 
@@ -325,7 +325,7 @@ def _extract_log_level(line: str) -> Optional[str]:
         if not m:
             return None
         return str(m.group(1) or "").upper() or None
-    except Exception:  # THIS IS A HORRIBLE ANTI-PATTERN, FIX IT
+    except (AttributeError, ValueError):
         return None
 
 
@@ -355,7 +355,7 @@ def _has_huggingface_auth_error_signal(lines: Sequence[str]) -> bool:
             if _line_is_warn_or_lower(str(raw or "")):
                 continue
             return True
-    except Exception:  # THIS IS A HORRIBLE ANTI-PATTERN, FIX IT
+    except (AttributeError, ValueError):
         return False
     return False
 

@@ -476,7 +476,7 @@ class LocalRepoScanner:
 
         try:
             repo = git.Repo(repo_dir)
-        except Exception as e:
+        except (git.exc.InvalidGitRepositoryError, git.exc.NoSuchPathError) as e:
             repo_node.error = f"Not a valid git repository: {e}"
             return repo_node
 
@@ -521,8 +521,8 @@ class LocalRepoScanner:
             # We do NOT want one bad repo to kill the entire dashboard generation, so on failure
             # we continue using whatever remote refs are already present locally.
             remote.fetch()
-        except Exception as e:
-            # Avoid importing GitCommandError explicitly; GitPython exceptions vary by version.
+        except (git.exc.GitCommandError, OSError) as e:
+            # GitPython exceptions for git command failures or OS errors.
             # This is intentionally broad: the caller runs per-repo in a thread pool and MUST NOT raise.
             repo_node.error = f"WARNING: git fetch failed (using cached refs): {e}"
 
@@ -935,8 +935,9 @@ Environment Variables:
     # Cache-only fallback if exhausted.
     try:
         scanner.github_api.check_core_rate_limit_or_raise()
-    except Exception as e:
+    except RuntimeError as e:
         # Switch to cache-only mode (no new network calls; use existing caches).
+        logger.warning(f"GitHub rate limit exceeded, switching to cache-only mode: {e}")
         scanner.cache_only_github = True
         scanner.github_api.set_cache_only_mode(True)
         # Also disable refresh knobs in cache-only mode.

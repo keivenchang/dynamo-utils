@@ -239,7 +239,6 @@ def mock_get_open_pr_info_for_author(
         updated_dt = now - timedelta(hours=i + 1)
         
         # Generate realistic-looking SHAs (deterministic for testing)
-        import hashlib
         sha_seed = f"{owner}/{repo}/{branch}/{i}"
         sha = hashlib.sha1(sha_seed.encode()).hexdigest()
         

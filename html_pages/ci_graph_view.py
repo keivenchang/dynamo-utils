@@ -439,7 +439,6 @@ def render_graph_html(graph: CIGraph, pr_number: int) -> str:
             'parents': list(node.parents),
         }
     
-    import json
     html_parts.append(f'<script>window.ciGraphData = {json.dumps(graph_data_json)};</script>')
     
     html_parts.append('</div>')
