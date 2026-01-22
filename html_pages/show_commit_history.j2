@@ -306,6 +306,7 @@ a.image-sha-badge:hover {
 #commits-table.hide-col-composite td.col-composite,
 #commits-table.hide-col-github td.col-github,
 #commits-table.hide-col-gitlab td.col-gitlab,
+#commits-table.hide-col-grafana td.col-grafana,
 #commits-table.hide-col-date td.col-date,
 #commits-table.hide-col-author td.col-author,
 #commits-table.hide-col-email td.col-email,
@@ -321,6 +322,7 @@ a.image-sha-badge:hover {
 #commits-table.hide-col-composite td.col-composite .col-body,
 #commits-table.hide-col-github td.col-github .col-body,
 #commits-table.hide-col-gitlab td.col-gitlab .col-body,
+#commits-table.hide-col-grafana td.col-grafana .col-body,
 #commits-table.hide-col-date td.col-date .col-body,
 #commits-table.hide-col-author td.col-author .col-body,
 #commits-table.hide-col-email td.col-email .col-body,
@@ -331,6 +333,7 @@ a.image-sha-badge:hover {
 #commits-table.hide-col-composite th.col-composite .col-title-text,
 #commits-table.hide-col-github th.col-github .col-title-text,
 #commits-table.hide-col-gitlab th.col-gitlab .col-title-text,
+#commits-table.hide-col-grafana th.col-grafana .col-title-text,
 /* Date column special-case: keep "PST" visible even when collapsed (requested). */
 #commits-table.hide-col-author th.col-author .col-title-text,
 #commits-table.hide-col-email th.col-email .col-title-text,
@@ -341,6 +344,7 @@ a.image-sha-badge:hover {
 #commits-table.hide-col-composite th.col-composite,
 #commits-table.hide-col-github th.col-github,
 #commits-table.hide-col-gitlab th.col-gitlab,
+#commits-table.hide-col-grafana th.col-grafana,
 #commits-table.hide-col-date th.col-date,
 #commits-table.hide-col-author th.col-author,
 #commits-table.hide-col-email th.col-email,
@@ -795,6 +799,17 @@ window.__dashboardOnReadyQueue.push(function() {
                     }
                     return;
                 }
+                if (ks.startsWith('ci.')) {
+                    var sha1 = ks.slice('ci.'.length);
+                    if (!sha1) return;
+                    var r1 = document.getElementById('commit-info-row-' + sha1);
+                    var t1 = document.getElementById('commit-info-toggle-' + sha1);
+                    if (r1) r1.style.display = wantOpen ? 'table-row' : 'none';
+                    if (t1) {
+                        try { t1.classList.toggle('expanded', wantOpen); } catch (e) {}
+                    }
+                    return;
+                }
                 if (ks.startsWith('gh.')) {
                     var sha2 = ks.slice('gh.'.length);
                     if (!sha2) return;
@@ -840,7 +855,7 @@ window.__dashboardOnReadyQueue.push(function() {
      Match the branches dashboard legend style (no border/box). -->
 <div class="legend" style="margin-bottom: 0px; padding: 8px; background-color: #f6f8fa;">
 <details style="margin-top: 0;" data-url-state="1" data-url-key="legend">
-{{ summary_with_toggle('Legend &amp; Help', right_html='<button type="button" onclick="event.preventDefault(); event.stopPropagation(); try { DashboardUrlState.resetView({reload: false}); } catch (e) {}" style="padding: 2px 8px; font-size: 11px; line-height: 1.2; background: transparent; color: #0969da; border: 1px solid #0969da; border-radius: 999px; cursor: pointer;" title="Reset view state (clears URL params and restores defaults)">Reset view</button>') }}
+{{ summary_with_toggle('Legend &amp; Help', right_html='<button type="button" onclick="event.preventDefault(); event.stopPropagation(); try { DashboardUrlState.resetView({reload: true}); } catch (e) {}" style="padding: 2px 8px; font-size: 11px; line-height: 1.2; background: transparent; color: #0969da; border: 1px solid #0969da; border-radius: 999px; cursor: pointer;" title="Reset view state (clears URL params and restores defaults)">Reset view</button>') }}
 <div class="details-body">
 <div style="margin-top: 10px; font-size: 12px; line-height: 1.55;">
 <div style="margin-bottom: 12px;">
@@ -873,6 +888,13 @@ window.__dashboardOnReadyQueue.push(function() {
 </div>
 
 <div style="margin-bottom: 12px;">
+<div style="font-weight: 600; margin-bottom: 6px; color: #24292f;">Grafana:</div>
+<ul style="margin: 4px 0; padding-left: 20px;">
+<li><strong>📊 PR</strong> - Opens Grafana Individual Job Details dashboard for the PR associated with this commit</li>
+</ul>
+</div>
+
+<div style="margin-bottom: 12px;">
 <div style="font-weight: 600; margin-bottom: 6px; color: #24292f;">Images &amp; Links:</div>
 <ul style="margin: 4px 0; padding-left: 20px;">
 <li><strong>IMAGE:xxxxxx</strong> - Image SHA for container builds</li>
@@ -889,8 +911,8 @@ window.__dashboardOnReadyQueue.push(function() {
 </div>
 
 <div class="container">
-{# Default UX: collapse Image SHA + GitLab Status columns on first load (users can re-enable via checkbox / URL state / localStorage). #}
-<table id="commits-table" class="hide-col-composite hide-col-gitlab hide-col-email">
+{# Default UX: collapse Image SHA + GitLab Status + Grafana columns on first load (users can re-enable via checkbox / URL state / localStorage). #}
+<table id="commits-table" class="hide-col-composite hide-col-gitlab hide-col-grafana hide-col-email">
 <thead>
 <tr>
 <th style="width: 30px;"></th>
@@ -901,6 +923,7 @@ window.__dashboardOnReadyQueue.push(function() {
 <th class="col-composite"><label class="col-toggle"><input class="commit-col-toggle" type="checkbox" data-col="composite" data-url-state="1" data-url-default="0" data-url-key="col.composite" onchange="toggleCommitColumn(this)"><span class="col-icon" title="Image SHA"></span><span class="col-title-text">Image SHA</span></label></th>
 <th class="col-github"><label class="col-toggle"><input class="commit-col-toggle" type="checkbox" checked data-col="github" data-url-state="1" data-url-default="1" data-url-key="col.github" onchange="toggleCommitColumn(this)"><span class="col-icon" title="GitHub Status"><svg height="14" width="14" viewBox="0 0 16 16" fill="currentColor" style="display: inline-block; vertical-align: middle;"><path fill-rule="evenodd" clip-rule="evenodd" d="M8 0C3.58 0 0 3.58 0 8C0 11.54 2.29 14.53 5.47 15.59C5.87 15.66 6.02 15.42 6.02 15.21C6.02 15.02 6.01 14.39 6.01 13.72C4 14.09 3.48 13.23 3.32 12.78C3.23 12.55 2.84 11.84 2.5 11.65C2.22 11.5 1.82 11.13 2.49 11.12C3.12 11.11 3.57 11.7 3.72 11.94C4.44 13.15 5.59 12.81 6.05 12.6C6.12 12.08 6.33 11.73 6.56 11.53C4.78 11.33 2.92 10.64 2.92 7.58C2.92 6.71 3.23 5.99 3.74 5.43C3.66 5.23 3.38 4.41 3.82 3.31C3.82 3.31 4.49 3.1 6.02 4.13C6.66 3.95 7.34 3.86 8.02 3.86C8.7 3.86 9.38 3.95 10.02 4.13C11.55 3.09 12.22 3.31 12.22 3.31C12.66 4.41 12.38 5.23 12.3 5.43C12.81 5.99 13.12 6.7 13.12 7.58C13.12 10.65 11.25 11.33 9.47 11.53C9.76 11.78 10.01 12.26 10.01 13.01C10.01 14.08 10 14.94 10 15.21C10 15.42 10.15 15.67 10.55 15.59C13.71 14.53 16 11.53 16 8C16 3.58 12.42 0 8 0Z"></path></svg></span><span class="col-title-text">GitHub Status</span></label></th>
 <th class="col-gitlab"><label class="col-toggle"><input class="commit-col-toggle" type="checkbox" data-col="gitlab" data-url-state="1" data-url-default="0" data-url-key="col.gitlab" onchange="toggleCommitColumn(this)"><span class="col-icon" title="GitLab Status">🦊</span><span class="col-title-text">GitLab Status</span></label></th>
+<th class="col-grafana"><label class="col-toggle"><input class="commit-col-toggle" type="checkbox" data-col="grafana" data-url-state="1" data-url-default="0" data-url-key="col.grafana" onchange="toggleCommitColumn(this)"><span class="col-icon" title="Grafana">📊</span><span class="col-title-text">Grafana</span></label></th>
 <th class="col-date">
   <span class="date-header-controls">
     <label class="col-toggle">
@@ -1237,6 +1260,30 @@ window.__dashboardOnReadyQueue.push(function() {
 {%- endif -%}
 {%- endif -%}
 </span></td>
+<td class="sha col-grafana"><span class="col-body">
+{# Grafana section - Individual Job Details Dashboard #}
+<span class="grafana-icons">
+{%- if commit.pr_number -%}
+<a href="{{ grafana_pr_url_template.format(pr_number=commit.pr_number) }}" 
+   target="_blank" 
+   class="grafana-pr-button" 
+   style="display: inline-block; padding: 1px 6px; background: linear-gradient(180deg, #FF7A28 0%, #F05A28 100%); color: white; text-decoration: none; border-radius: 8px; font-weight: 600; font-size: 9px; border: 1px solid #D94A1F; box-shadow: 0 1px 2px rgba(240,90,40,0.3); line-height: 1.2;"
+   onmouseover="this.style.background='linear-gradient(180deg, #FF8A38 0%, #FF7A28 100%)'; this.style.boxShadow='0 2px 4px rgba(240,90,40,0.4)'; this.style.transform='translateY(-1px)';"
+   onmouseout="this.style.background='linear-gradient(180deg, #FF7A28 0%, #F05A28 100%)'; this.style.boxShadow='0 1px 2px rgba(240,90,40,0.3)'; this.style.transform='translateY(0)';"
+   onmousedown="this.style.boxShadow='0 1px 2px rgba(0,0,0,0.2) inset'; this.style.transform='translateY(1px)';"
+   onmouseup="this.style.boxShadow='0 2px 4px rgba(240,90,40,0.4)'; this.style.transform='translateY(-1px)';"
+   title="View PR {{ commit.pr_number }} in Grafana Individual Job Details dashboard">
+  PR
+</a>
+{%- else -%}
+<span class="grafana-pr-button" 
+      style="display: inline-block; padding: 1px 6px; background-color: #eaeef2; color: #8c959f; border-radius: 8px; font-weight: 600; font-size: 9px; border: 1px solid #d0d7de; box-shadow: 0 1px 2px rgba(0,0,0,0.05); cursor: not-allowed; opacity: 0.65; line-height: 1.2;"
+      title="No PR number found for this commit">
+  PR
+</span>
+{%- endif -%}
+</span>
+</span></td>
 </td>
 <td class="date col-date">
   <span class="col-body">
@@ -1261,7 +1308,7 @@ window.__dashboardOnReadyQueue.push(function() {
 
 {# Commit info dropdown row (message, files changed, stats) #}
 <tr class="commit-info-row" id="commit-info-row-{{ sha_short }}" style="display: none;">
-<td colspan="9" style="padding: 0; background-color: #f6f8fa;">
+<td colspan="10" style="padding: 0; background-color: #f6f8fa;">
 <div style="padding: 8px 12px; border-top: 1px solid #d0d7de;">
   <div style="display: flex; align-items: center; justify-content: flex-start; margin-bottom: 6px;">
     <button type="button"
@@ -1272,7 +1319,7 @@ window.__dashboardOnReadyQueue.push(function() {
   <div style="margin: 0; padding: 0 14px;">
     <div style="margin: 8px 0 12px 0; padding: 8px; background-color: white; border: 1px solid #d0d7de; border-radius: 4px;">
       <div style="font-weight: 600; margin-bottom: 6px; font-size: 13px;">Commit Message:</div>
-      <div style="font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace; font-size: 12px; color: #24292f; white-space: pre-wrap; margin-bottom: 8px;">{{ full_msg | e }}</div>
+      <div style="font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace; font-size: 12px; color: #24292f; white-space: pre-wrap; margin-bottom: 8px;">{{ full_msg | safe }}</div>
       <div style="font-size: 12px; color: #57606a; margin-top: 6px;">
         <span style="color: #1a7f37; font-weight: 500;">+{{ insertions }}</span>
         <span style="color: #cf222e; font-weight: 500;">-{{ deletions }}</span>
@@ -1297,7 +1344,7 @@ window.__dashboardOnReadyQueue.push(function() {
 {# GitHub checks tree row (hidden by default) #}
 {%- if commit.github_checks_tree_html -%}
 <tr id="github-tree-row-{{ sha_short }}" style="display: none;">
-<td colspan="9" style="padding: 0;">
+<td colspan="10" style="padding: 0;">
 <div style="padding: 0; border-top: 0;">
           <div style="display: flex; align-items: center; justify-content: flex-start; padding: 6px 8px 0 8px;">
             <button type="button"
@@ -1314,7 +1361,7 @@ window.__dashboardOnReadyQueue.push(function() {
 {# GitLab dropdown row (hidden by default): GitLab + commit details + registry info. #}
 {%- if commit.gitlab_checks_tree_html or has_gitlab -%}
 <tr id="gitlab-tree-row-{{ sha_short }}" style="display: none;">
-<td colspan="9" style="padding: 0;">
+<td colspan="10" style="padding: 0;">
 <div style="padding: 0; border-top: 0;">
           <div style="display: flex; align-items: center; justify-content: flex-start; padding: 6px 8px 0 8px;">
             <button type="button"
@@ -1371,7 +1418,7 @@ Framework: {{ img.framework }}">{{ display_tag }}</td>
 {%- set images = docker_images.get(sha_short, []) -%}
 
 <tr class="docker-images-row" id="docker-row-{{ sha_short }}" style="display: none;">
-<td colspan="9" style="padding: 0; background-color: #f6f8fa;">
+<td colspan="10" style="padding: 0; background-color: #f6f8fa;">
 <div style="padding: 8px 12px; border-top: 1px solid #d0d7de;">
 <div style="display: flex; align-items: center; justify-content: flex-start; margin-bottom: 6px;">
   <button type="button"

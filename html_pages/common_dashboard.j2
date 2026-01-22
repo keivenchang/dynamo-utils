@@ -685,6 +685,7 @@
             if (ks.startsWith('t.')) { toDelete.push(ks); return; }      // tree toggles
             if (ks.startsWith('s.')) { toDelete.push(ks); return; }      // snippet toggles
             if (ks.startsWith('d.')) { toDelete.push(ks); return; }      // commit-history docker rows
+            if (ks.startsWith('ci.')) { toDelete.push(ks); return; }     // commit-history commit info
             if (ks.startsWith('gh.')) { toDelete.push(ks); return; }     // commit-history github tree
             if (ks.startsWith('gl.')) { toDelete.push(ks); return; }     // commit-history gitlab tree
           });
