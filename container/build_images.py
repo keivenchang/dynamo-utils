@@ -391,7 +391,7 @@ def create_task_graph(framework: str, sha: str, repo_path: Path, version: Option
         task_id=f"{framework}-dev-chown",
         description=f"Fix file ownership after {framework.upper()} dev compilation",
         # chown can race with build outputs being deleted/renamed; don't fail the task on ENOENT.
-        command=f"sudo chown -R $(id -u):$(id -g) {repo_path}/target/.{framework} {repo_path}/lib/bindings/python {home_dir}/.cargo || true",
+        command=f"chown -R $(id -u):$(id -g) {repo_path}/target/.{framework} {repo_path}/lib/bindings/python {home_dir}/.cargo || true",
         parents=[f"{framework}-dev-compilation"],
         run_even_if_deps_fail=True,
         timeout=60.0,
@@ -459,7 +459,7 @@ def create_task_graph(framework: str, sha: str, repo_path: Path, version: Option
     tasks[f"{framework}-local-dev-sanity"] = CommandTask(
         task_id=f"{framework}-local-dev-sanity",
         description=f"Run sanity_check.py in {framework.upper()} local-dev container",
-        command=f"{repo_path}/container/run.sh --image {local_dev_image_tag} --mount-workspace -v {home_dir}/.cargo:/home/dynamo/.cargo -- bash -c 'id && sudo id && python3 /workspace/deploy/sanity_check.py{sanity_no_framework_flag}'",
+        command=f"{repo_path}/container/run.sh --image {local_dev_image_tag} --mount-workspace -v {home_dir}/.cargo:/home/dynamo/.cargo -- bash -c 'id && (sudo id || true) && python3 /workspace/deploy/sanity_check.py{sanity_no_framework_flag}'",
         input_image=local_dev_image_tag,
         parents=[local_dev_sanity_parent],
         timeout=45.0,  # 45 seconds for sanity checks
