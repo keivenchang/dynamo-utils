@@ -1250,11 +1250,6 @@ class GitHubAPIClient:
         # Format: {"remaining": 1234, "limit": 5000, "reset_epoch": 1766947200, ...}
         self._cached_rate_limit_info: Optional[Dict[str, Any]] = None
 
-        # Cache for Actions workflow metadata (name/path), used to render "suite / job" labels
-        # similar to GitHub's Checks UI.
-        self._actions_workflow_mem_cache: Dict[str, Dict[str, Any]] = {}
-        self._actions_workflow_cache_dir = dynamo_utils_cache_dir() / "actions-workflows"
-
         # Cache for required status checks (branch protection). This changes rarely and is safe to cache
         # for a long time. Keyed by (owner, repo, base_ref).
         self._required_checks_mem_cache: Dict[str, Dict[str, Any]] = {}
@@ -1272,10 +1267,79 @@ class GitHubAPIClient:
         # If search/issues is returning 422 for a repo (common with certain tokens), disable it temporarily
         # so dashboards don't spam errors for an optimization-only call.
         self._search_issues_disabled_mem_cache: Dict[str, Dict[str, Any]] = {}
+        
+        # Track initial disk cache sizes before any modifications (for accurate stats reporting)
+        self._initial_disk_counts: Dict[str, int] = {}
+        self._capture_initial_disk_counts()
 
         # Inflight request deduplication: per-key locks to prevent concurrent identical API calls.
         self._inflight_locks_mu = threading.Lock()
         self._inflight_locks: Dict[str, threading.Lock] = {}
+
+    def _capture_initial_disk_counts(self) -> None:
+        """Capture disk cache sizes before any modifications for accurate stats reporting."""
+        try:
+            # Actions jobs (status and details in same file, separated by key prefix)
+            disk = self._load_actions_job_disk_cache()
+            if isinstance(disk, dict):
+                self._initial_disk_counts["actions_job_status_disk"] = sum(1 for k in disk.keys() if ":jobstatus:" in str(k))
+                self._initial_disk_counts["actions_job_details_disk"] = sum(1 for k in disk.keys() if ":job:" in str(k) and ":jobstatus:" not in str(k))
+            else:
+                self._initial_disk_counts["actions_job_status_disk"] = 0
+                self._initial_disk_counts["actions_job_details_disk"] = 0
+            
+            # PR checks
+            pr_checks_disk = self._load_pr_checks_disk_cache()
+            self._initial_disk_counts["pr_checks_disk"] = len(pr_checks_disk) if isinstance(pr_checks_disk, dict) else 0
+            
+            # Pulls list
+            pulls_disk = self._load_pulls_list_disk_cache()
+            self._initial_disk_counts["pulls_list_disk"] = len(pulls_disk) if isinstance(pulls_disk, dict) else 0
+            
+            # PR branch
+            pr_branch_disk = self._load_pr_branch_disk_cache()
+            self._initial_disk_counts["pr_branch_disk"] = len(pr_branch_disk) if isinstance(pr_branch_disk, dict) else 0
+            
+            # PR info
+            pr_info_disk = self._load_pr_info_disk_cache()
+            self._initial_disk_counts["pr_info_disk"] = len(pr_info_disk) if isinstance(pr_info_disk, dict) else 0
+            
+            # Search issues
+            search_issues_disk = self._load_search_issues_disk_cache()
+            self._initial_disk_counts["search_issues_disk"] = len(search_issues_disk) if isinstance(search_issues_disk, dict) else 0
+            
+            # Job logs
+            job_logs_disk = self._load_disk_cache()
+            self._initial_disk_counts["job_log_disk"] = len(job_logs_disk) if isinstance(job_logs_disk, dict) else 0
+            
+            # Raw log text
+            if self._raw_log_text_index_file.exists():
+                with open(self._raw_log_text_index_file, 'r') as f:
+                    raw_log_index = json.load(f)
+                self._initial_disk_counts["raw_log_text_disk"] = len(raw_log_index) if isinstance(raw_log_index, dict) else 0
+            else:
+                self._initial_disk_counts["raw_log_text_disk"] = 0
+            
+            # Required checks
+            required_checks_file = self._required_checks_cache_dir / "required_checks.json"
+            if required_checks_file.exists():
+                with open(required_checks_file, 'r') as f:
+                    req_checks = json.load(f)
+                self._initial_disk_counts["required_checks_disk"] = len(req_checks) if isinstance(req_checks, dict) else 0
+            else:
+                self._initial_disk_counts["required_checks_disk"] = 0
+            
+            # Merge dates
+            merge_dates_file = dynamo_utils_cache_dir() / "github_pr_merge_dates.json"
+            if merge_dates_file.exists():
+                with open(merge_dates_file, 'r') as f:
+                    merge_dates = json.load(f)
+                self._initial_disk_counts["merge_dates_disk"] = len(merge_dates) if isinstance(merge_dates, dict) else 0
+            else:
+                self._initial_disk_counts["merge_dates_disk"] = 0
+        except Exception:
+            # If any error occurs, just use empty counts - don't fail initialization
+            pass
 
     def set_cache_only_mode(self, on: bool = True) -> None:
         """Enable/disable cache-only mode (best-effort)."""
@@ -1455,64 +1519,20 @@ class GitHubAPIClient:
             "raw_log_text_mem": len(self._raw_log_text_mem_cache),
             "actions_job_status_mem": len(self._actions_job_status_mem_cache),
             "actions_job_details_mem": len(self._actions_job_details_mem_cache),
-            "actions_workflow_mem": len(self._actions_workflow_mem_cache),
             "required_checks_mem": len(self._required_checks_mem_cache),
             "pr_info_mem": len(self._pr_info_mem_cache),
             "search_issues_mem": len(self._search_issues_mem_cache),
             "job_log_mem": len(self._job_log_cache),
         }
 
-        # Disk cache counts - show all caches to verify MERGE pattern working
+        # Disk cache counts - show initial counts before this run's modifications
         # Always show count even if 0 to verify no caches are missing
-        disk = self._load_actions_job_disk_cache()
-        cache_sizes["actions_jobs_disk"] = len(disk) if isinstance(disk, dict) else 0
-
-        actions_workflow_disk = self._load_actions_workflow_disk_cache()
-        cache_sizes["actions_workflows_disk"] = len(actions_workflow_disk) if isinstance(actions_workflow_disk, dict) else 0
-
-        pr_checks_disk = self._load_pr_checks_disk_cache()
-        cache_sizes["pr_checks_disk"] = len(pr_checks_disk) if isinstance(pr_checks_disk, dict) else 0
-
-        pulls_disk = self._load_pulls_list_disk_cache()
-        cache_sizes["pulls_list_disk"] = len(pulls_disk) if isinstance(pulls_disk, dict) else 0
-
-        pr_branch_disk = self._load_pr_branch_disk_cache()
-        cache_sizes["pr_branch_disk"] = len(pr_branch_disk) if isinstance(pr_branch_disk, dict) else 0
-
-        pr_info_disk = self._load_pr_info_disk_cache()
-        cache_sizes["pr_info_disk"] = len(pr_info_disk) if isinstance(pr_info_disk, dict) else 0
-
-        search_issues_disk = self._load_search_issues_disk_cache()
-        cache_sizes["search_issues_disk"] = len(search_issues_disk) if isinstance(search_issues_disk, dict) else 0
-
-        job_logs_disk = self._load_disk_cache()
-        cache_sizes["job_logs_disk"] = len(job_logs_disk) if isinstance(job_logs_disk, dict) else 0
-
-        # Raw log text cache (index file tracks all raw logs)
-        if self._raw_log_text_index_file.exists():
-            with open(self._raw_log_text_index_file, 'r') as f:
-                raw_log_index = json.load(f)
-            cache_sizes["raw_log_text_disk"] = len(raw_log_index) if isinstance(raw_log_index, dict) else 0
-        else:
-            cache_sizes["raw_log_text_disk"] = 0
-
-        # Required checks disk cache
-        required_checks_file = self._required_checks_cache_dir / "required_checks.json"
-        if required_checks_file.exists():
-            with open(required_checks_file, 'r') as f:
-                req_checks = json.load(f)
-            cache_sizes["required_checks_disk"] = len(req_checks) if isinstance(req_checks, dict) else 0
-        else:
-            cache_sizes["required_checks_disk"] = 0
-
-        # Merge dates disk cache
-        merge_dates_file = dynamo_utils_cache_dir() / "github_pr_merge_dates.json"
-        if merge_dates_file.exists():
-            with open(merge_dates_file, 'r') as f:
-                merge_dates = json.load(f)
-            cache_sizes["merge_dates_disk"] = len(merge_dates) if isinstance(merge_dates, dict) else 0
-        else:
-            cache_sizes["merge_dates_disk"] = 0
+        
+        # Use initial counts captured at initialization
+        for key in ["actions_job_status_disk", "actions_job_details_disk", "pr_checks_disk", "pulls_list_disk",
+                    "pr_branch_disk", "pr_info_disk", "search_issues_disk", "job_log_disk", 
+                    "raw_log_text_disk", "required_checks_disk", "merge_dates_disk"]:
+            cache_sizes[key] = self._initial_disk_counts.get(key, 0)
 
         return {
             "hits_total": hits_total,
@@ -1781,11 +1801,13 @@ class GitHubAPIClient:
                 "time_by_label_s": {},
             }
 
-    def get_actions_job_status(self, *, owner: str, repo: str, job_id: str, ttl_s: int = 120) -> Optional[str]:
+    def get_actions_job_status(self, *, owner: str, repo: str, job_id: str, ttl_s: int = 60) -> Optional[str]:
         """Return GitHub Actions job status ("completed", "in_progress", ...) with disk cache for completed jobs.
 
         OPTIMIZATION: Completed jobs are cached to disk permanently since their status never changes.
         This reduces API calls from ~300+ per run to near-zero on subsequent runs.
+        
+        TTL: 1m for non-completed jobs, ∞ for completed jobs (immutable).
         """
 
         job_id_s = str(job_id or "").strip()
@@ -1800,7 +1822,9 @@ class GitHubAPIClient:
             ent = self._actions_job_status_mem_cache.get(key)
             if ent and int(ent.get("ts", 0) or 0) + int(ttl_s) > now:
                 st = ent.get("status")
-                return str(st) if st is not None else None
+                if st is not None:
+                    self._cache_hit("actions_job_status.mem")
+                    return str(st)
         except (ValueError, TypeError):
             pass
 
@@ -1826,7 +1850,7 @@ class GitHubAPIClient:
             return None
 
         # Network fetch
-        self._cache_miss("actions_job_status.network")
+        self._cache_miss("actions_job_status")
         url = f"{self.base_url}/repos/{owner}/{repo}/actions/jobs/{job_id_s}"
         try:
             resp = self._rest_get(url, timeout=10)
@@ -1896,13 +1920,11 @@ class GitHubAPIClient:
             # Closed/merged PRs are cached forever
             if str(state or "").lower() in ("closed", "merged"):
                 self._pr_info_mem_cache[key] = {"ts": now, "head_sha": head_sha_cached, "state": state}
-                self._cache_hit("pr_head_sha.disk")
                 return str(head_sha_cached) if head_sha_cached else None
             # For open PRs, check TTL
             ts = int(ent.get("ts", 0) or 0)
             if ts and (now - ts) <= int(ttl_s):
                 self._pr_info_mem_cache[key] = {"ts": ts, "head_sha": head_sha_cached, "state": state}
-                self._cache_hit("pr_head_sha.disk")
                 return str(head_sha_cached) if head_sha_cached else None
 
         # Cache-only mode: don't fetch
@@ -1910,7 +1932,6 @@ class GitHubAPIClient:
             return None
 
         # Network fetch
-        self._cache_miss("pr_head_sha.network")
         pr = self.get(f"/repos/{owner}/{repo}/pulls/{pr_num}", timeout=10) or {}
         head_sha = (((pr.get("head") or {}) if isinstance(pr, dict) else {}) or {}).get("sha")
         head_sha = str(head_sha or "").strip() if head_sha else None
@@ -2011,7 +2032,9 @@ class GitHubAPIClient:
                 if ts and (now - ts) <= int(ttl_s):
                     val = ent.get("val")
                     if _is_completed_job_details(val):
-                        return val if isinstance(val, dict) else None
+                        if isinstance(val, dict):
+                            self._cache_hit("actions_job_details.mem")
+                            return val
         except (ValueError, TypeError):
             pass
 
@@ -2025,6 +2048,7 @@ class GitHubAPIClient:
                 if isinstance(val, dict):
                     if _is_completed_job_details(val):
                         self._actions_job_details_mem_cache[key] = {"ts": ts, "val": val}
+                        self._cache_hit("actions_job_details.disk")
                         return val
             # Cache-only mode: allow stale disk cache.
             if self.cache_only_mode:
@@ -2033,11 +2057,15 @@ class GitHubAPIClient:
                     # Even in cache-only mode, do not return incomplete job details (they hide steps).
                     if _is_completed_job_details(val):
                         self._actions_job_details_mem_cache[key] = {"ts": ts, "val": val}
+                        self._cache_hit("actions_job_details.disk_stale_cache_only")
                         return val
 
         # Cache-only mode: do not fetch.
         if self.cache_only_mode:
+            self._cache_miss("actions_job_details.cache_only_empty")
             return None
+
+        self._cache_miss("actions_job_details")
 
         url = f"{self.base_url}/repos/{owner}/{repo}/actions/jobs/{job_id_s}"
         try:
@@ -2295,91 +2323,6 @@ class GitHubAPIClient:
             ttl_s=ttl_s,
         )
 
-    def _load_actions_workflow_disk_cache(self) -> Dict[str, Any]:
-        self._actions_workflow_cache_dir.mkdir(parents=True, exist_ok=True)
-        p = self._actions_workflow_cache_dir / "actions_workflows.json"
-        if p.exists():
-            with open(p, "r") as f:
-                return json.load(f)
-        return {}
-
-    def _save_actions_workflow_disk_cache(self, key: str, value: Dict[str, Any]) -> None:
-        """Atomically update a single entry in actions_workflows disk cache."""
-        _save_single_disk_cache_entry(
-            cache_dir=self._actions_workflow_cache_dir,
-            cache_filename="actions_workflows.json",
-            lock_filename="actions_workflows.lock",
-            load_fn=self._load_actions_workflow_disk_cache,
-            json_dump_fn=lambda d: self._json_dump_text(d, indent=None),
-            key=key,
-            value=value,
-        )
-
-    def get_actions_workflow_metadata_cached(
-        self,
-        *,
-        owner: str,
-        repo: str,
-        workflow_id: str,
-        ttl_s: int = 180 * 24 * 3600,
-        timeout: int = 10,
-    ) -> Optional[Dict[str, Any]]:
-        """Fetch and cache Actions workflow metadata (name/path) by workflow_id."""
-        wid = str(workflow_id or "").strip()
-        if not wid:
-            return None
-        key = f"{owner}/{repo}:{wid}"
-        now = int(datetime.now(timezone.utc).timestamp())
-
-        # memory cache
-        try:
-            ent = self._actions_workflow_mem_cache.get(key)
-            if ent and isinstance(ent, dict):
-                ts = int(ent.get("ts", 0) or 0)
-                if ts and (now - ts) <= int(ttl_s):
-                    val = ent.get("val")
-                    return val if isinstance(val, dict) else None
-        except (ValueError, TypeError):
-            pass
-
-        # disk cache
-        disk = self._load_actions_workflow_disk_cache()
-        ent = disk.get(key) if isinstance(disk, dict) else None
-        if ent and isinstance(ent, dict):
-            ts = int(ent.get("ts", 0) or 0)
-            if ts and ((now - ts) <= int(ttl_s) or self.cache_only_mode):
-                val = ent.get("val")
-                if isinstance(val, dict):
-                    self._actions_workflow_mem_cache[key] = {"ts": ts, "val": val}
-                    return val
-
-        # Cache-only mode
-        if self.cache_only_mode:
-            return None
-
-        # fetch
-        try:
-            data = self.get(f"/repos/{owner}/{repo}/actions/workflows/{wid}", timeout=timeout) or {}
-            if not isinstance(data, dict):
-                data = {}
-            val = {
-                "id": data.get("id"),
-                "name": data.get("name"),
-                "path": data.get("path"),
-                "state": data.get("state"),
-                "html_url": data.get("html_url"),
-            }
-            self._actions_workflow_mem_cache[key] = {"ts": now, "val": val}
-            # Uses lock-load-merge-save pattern (enforced by DiskCacheWriter)
-            self._save_actions_workflow_disk_cache(key, {"ts": now, "val": val})
-            return val
-        except AttributeError:  # .get() on non-dict
-            return None
-
-        self._actions_job_status_mem_cache[job_id_s] = {"ts": now, "status": status_s}
-        return status_s
-
-    @staticmethod
     def _format_seconds_delta(seconds: int) -> str:
         """Format a positive/negative seconds delta as a short human string."""
         s = int(seconds)
@@ -3439,6 +3382,7 @@ class GitHubAPIClient:
                                     pr = self._pr_info_min_from_dict(d)
                                     if pr is not None:
                                         prs.append(pr)
+                            self._cache_hit("pr_branch.mem")
                             result[b] = prs
                             continue
 
@@ -3457,9 +3401,11 @@ class GitHubAPIClient:
                                     if pr is not None:
                                         prs.append(pr)
                             self._pr_branch_mem_cache[key] = {"ts": ts, "prs": prs_d}
+                            self._cache_hit("pr_branch.disk")
                             result[b] = prs
                             continue
 
+            self._cache_miss("pr_branch")
             missing.append(b)
 
         if not missing:
@@ -3665,6 +3611,7 @@ class GitHubAPIClient:
         if isinstance(ent_mem, dict) and str(ent_mem.get("updated_at") or "").strip() == upd:
             pr = _hydrate_entry(ent_mem)
             if pr is not None:
+                self._cache_hit("pr_info.mem")
                 return _maybe_backfill_and_persist(pr)
 
         # Disk cache (deserialize -> PRInfo only)
@@ -3676,7 +3623,9 @@ class GitHubAPIClient:
                 pr = _maybe_backfill_and_persist(pr)
                 # Ensure mem is populated (serialization boundary, no disk write needed here).
                 self._pr_info_mem_cache[key] = {"updated_at": upd, "pr": self._pr_info_full_to_dict(pr)}
+                self._cache_hit("pr_info.disk")
                 return pr
+        self._cache_miss("pr_info")
         return None
 
     def _save_pr_info_cache(
@@ -3721,7 +3670,7 @@ class GitHubAPIClient:
             json_dump_fn=lambda d: self._json_dump_text(d, indent=None),
             key=key,
             value=value,
-            stats_fn=lambda entries: self._cache_write("pr_checks_rows.disk_write", entries=entries),
+            stats_fn=lambda entries: self._cache_write("pr_checks.disk_write", entries=entries),
         )
 
     def get_pr_checks_rows(
@@ -3780,8 +3729,7 @@ class GitHubAPIClient:
                 if ts and (now - ts) <= max(0, int(ttl_s)) and not incomplete:
                     # Accept any version >= MIN_CACHE_VER (additive schema = backward/forward compatible)
                     if ver >= MIN_CACHE_VER:
-                        self._cache_hit("pr_checks_rows.mem")
-                        GITHUB_CACHE_STATS.required_checks_hits += 1
+                        self._cache_hit("pr_checks.mem")
                     else:
                         raise RuntimeError("stale pr_checks_rows cache schema (too old)")
                     out: List[GHPRCheckRow] = []
@@ -3809,11 +3757,9 @@ class GitHubAPIClient:
                     # Accept any version >= MIN_CACHE_VER (additive schema = backward/forward compatible)
                     if ver >= MIN_CACHE_VER:
                         if (now - ts) <= max(0, int(ttl_s)):
-                            self._cache_hit("pr_checks_rows.disk")
-                            GITHUB_CACHE_STATS.required_checks_hits += 1
+                            self._cache_hit("pr_checks.disk")
                         else:
-                            self._cache_hit("pr_checks_rows.disk_stale_cache_only")
-                            GITHUB_CACHE_STATS.required_checks_hits += 1
+                            self._cache_hit("pr_checks.disk_stale_cache_only")
                     else:
                         raise RuntimeError("stale pr_checks_rows cache schema (too old)")
                     out: List[GHPRCheckRow] = []
@@ -3830,15 +3776,14 @@ class GitHubAPIClient:
 
         # Cache-only mode: do not fetch network; return empty if no cached entry was usable.
         if self.cache_only_mode:
-            self._cache_miss("pr_checks_rows.cache_only_empty")
+            self._cache_miss("pr_checks.cache_only_empty")
             return []
 
         if skip_fetch:
             return []
 
         # 3) REST check-runs for PR head SHA (best-effort; works for public repos without auth)
-        self._cache_miss("pr_checks_rows.network")
-        GITHUB_CACHE_STATS.required_checks_misses += 1
+        self._cache_miss("pr_checks")
 
         # Extract ETags from stale cache entry if available (for conditional requests)
         cached_check_runs_etag = ""
@@ -3885,7 +3830,7 @@ class GitHubAPIClient:
             if check_runs_resp and check_runs_resp.status_code == 304:
                 # Return cached rows with updated timestamp but same ETags
                 if stale_ent is not None:
-                    self._cache_hit("pr_checks_rows.etag_304")
+                    self._cache_hit("pr_checks.etag_304")
                     # Update cache timestamp but keep same data and ETags (preserve incomplete flag)
                     updated_ent = GHPRChecksCacheEntry(
                         ts=now,
@@ -5151,6 +5096,7 @@ query($owner:String!,$name:String!,$number:Int!,$prid:ID!,$after:String) {
 
             # Check in-memory cache first (fastest)
             if job_id in self._job_log_cache:
+                self._cache_hit("job_log.mem")
                 return self._job_log_cache[job_id]
 
             # Check disk cache second
@@ -5158,7 +5104,10 @@ query($owner:String!,$name:String!,$number:Int!,$prid:ID!,$after:String) {
             if job_id in disk_cache:
                 # Load into memory cache for faster subsequent access
                 self._job_log_cache[job_id] = disk_cache[job_id]
+                self._cache_hit("job_log.disk")
                 return disk_cache[job_id]
+
+            self._cache_miss("job_log")
 
             # Download raw log text via REST (ZIP), then extract a high-signal snippet.
             txt = self.get_job_raw_log_text_cached(job_url=job_url, owner=owner, repo=repo, assume_completed=True)
@@ -5750,8 +5699,10 @@ query($owner:String!,$name:String!,$number:Int!,$prid:ID!,$after:String) {
         for pr_num in pr_numbers_unique:
             if pr_num in cache:
                 result[pr_num] = cache[pr_num]
+                self._cache_hit("merge_dates.disk")
             else:
                 prs_to_fetch.append(pr_num)
+                self._cache_miss("merge_dates")
 
         # Fetch uncached PRs using list endpoint (much more efficient!)
         if prs_to_fetch:
@@ -5870,11 +5821,7 @@ query($owner:String!,$name:String!,$number:Int!,$prid:ID!,$after:String) {
                         except Exception as e:
                             logger.debug(f"Failed to get future result: {e}")
 
-        # Update global cache statistics
-        GITHUB_CACHE_STATS.merge_dates_hits += len(pr_numbers_unique) - len(prs_to_fetch)
-        GITHUB_CACHE_STATS.merge_dates_misses += len(prs_to_fetch)
-        GITHUB_CACHE_STATS.merge_dates_miss_reason = "not_in_cache" if prs_to_fetch else ""
-        GITHUB_CACHE_STATS.merge_dates_miss_prs_sample = [int(x) for x in prs_to_fetch[:10]]
+        # Remove old GITHUB_CACHE_STATS tracking (now using standard _cache_hit/_cache_miss)
 
         return result
 

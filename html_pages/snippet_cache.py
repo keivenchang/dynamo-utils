@@ -46,6 +46,7 @@ class SnippetCache:
         self._dirty = False
         self._ci_log_errors_sha = ""
         self.stats = SnippetCacheStats()
+        self._initial_disk_count: Optional[int] = None  # Track disk count before modifications
 
     def _compute_ci_log_errors_sha(self) -> str:
         """Compute fingerprint of ci_log_errors module to invalidate cache on code changes."""
@@ -67,6 +68,7 @@ class SnippetCache:
 
         if not self._cache_file.exists():
             self._data = {"ci_log_errors_sha": self._ci_log_errors_sha, "items": {}}
+            self._initial_disk_count = 0
             return
 
         data = json.loads(self._cache_file.read_text() or "{}")
@@ -79,12 +81,16 @@ class SnippetCache:
         if got_sha != want_sha:
             self._data = {"ci_log_errors_sha": want_sha, "items": {}}
             self._dirty = True
+            self._initial_disk_count = 0
             return
 
         # Ensure items dict exists
         if not isinstance(data.get("items"), dict):
             data["items"] = {}
 
+        # Track initial disk count before any modifications
+        self._initial_disk_count = len(data.get("items", {}))
+        
         self._data = data
 
     def _persist(self) -> None:
@@ -222,6 +228,18 @@ class SnippetCache:
         """Persist cache to disk."""
         with self._mu:
             self._persist()
+
+    def get_cache_sizes(self) -> Tuple[int, int]:
+        """Return (mem_count, disk_count) for cache entries.
+        
+        disk_count is the initial count before this run's modifications.
+        """
+        with self._mu:
+            self._load_once()
+            mem_count = len(self._data.get("items", {})) if isinstance(self._data, dict) else 0
+            disk_count = self._initial_disk_count if self._initial_disk_count is not None else 0
+            
+            return (mem_count, disk_count)
 
 
 # Singleton cache used by all dashboard generators

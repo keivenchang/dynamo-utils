@@ -524,10 +524,7 @@ class LocalRepoScanner:
         except Exception as e:
             # Avoid importing GitCommandError explicitly; GitPython exceptions vary by version.
             # This is intentionally broad: the caller runs per-repo in a thread pool and MUST NOT raise.
-            try:
-                repo_node.error = f"WARNING: git fetch failed (using cached refs): {e}"
-            except Exception:
-                pass
+            repo_node.error = f"WARNING: git fetch failed (using cached refs): {e}"
 
         # Scan all local branches
         for branch in repo.branches:  # type: ignore[attr-defined]

@@ -59,19 +59,27 @@ class PytestTimingCache:
         self._entries: Dict[str, PytestTimingCacheEntry] = {}
         self._loaded = False
         self.stats = PytestTimingCacheStats()
+        self._initial_disk_count: Optional[int] = None  # Track disk count before modifications
 
     def _load_once(self) -> None:
         if self._loaded:
             return
         self._loaded = True
         if not self._cache_file.exists():
+            self._initial_disk_count = 0
             return
         data = json.loads(self._cache_file.read_text() or "{}")
         if not isinstance(data, dict):
+            self._initial_disk_count = 0
             return
         entries = data.get("entries")
         if not isinstance(entries, dict):
+            self._initial_disk_count = 0
             return
+        
+        # Track initial disk count before modifications
+        self._initial_disk_count = len(entries)
+        
         for k, v in entries.items():
             if not isinstance(k, str) or not isinstance(v, dict):
                 continue
@@ -170,6 +178,18 @@ class PytestTimingCache:
             )
             self.stats.write += 1
             self._persist()
+
+    def get_cache_sizes(self) -> Tuple[int, int]:
+        """Return (mem_count, disk_count) for cache entries.
+        
+        disk_count is the initial count before this run's modifications.
+        """
+        with self._mu:
+            self._load_once()
+            mem_count = len(self._entries)
+            disk_count = self._initial_disk_count if self._initial_disk_count is not None else 0
+            
+            return (mem_count, disk_count)
 
 
 # Singleton cache used by all dashboard generators.

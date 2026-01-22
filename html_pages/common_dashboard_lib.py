@@ -3279,101 +3279,121 @@ def github_api_stats_rows(
         rows.append(("github.core_resets", str(reset_pt), "When rate limit resets"))
 
     # Cache summary (individual flat entries)
-    rows.append(("cache.github.hits", str(int(cache.get("hits_total") or 0)), "Total cache hits across all operations"))
-    rows.append(("cache.github.misses", str(int(cache.get("misses_total") or 0)), "Total cache misses"))
-    rows.append(("cache.github.writes_ops", str(int(cache.get("writes_ops_total") or 0)), "Number of cache write operations"))
-    rows.append(("cache.github.writes_entries", str(int(cache.get("writes_entries_total") or 0)), "Number of entries written to cache"))
+    rows.append(("github.cache.all.hits", str(int(cache.get("hits_total") or 0)), "Total cache hits across all operations"))
+    rows.append(("github.cache.all.misses", str(int(cache.get("misses_total") or 0)), "Total cache misses"))
+    rows.append(("github.cache.all.writes_ops", str(int(cache.get("writes_ops_total") or 0)), "Number of cache write operations"))
+    rows.append(("github.cache.all.writes_entries", str(int(cache.get("writes_entries_total") or 0)), "Number of entries written to cache"))
 
     # Pytest timings cache (individual flat entries)
     st = PYTEST_TIMINGS_CACHE.stats
-    rows.append(("cache.pytest.hit", str(int(st.hit)), "Pytest timing cache hits"))
-    rows.append(("cache.pytest.miss", str(int(st.miss)), "Pytest timing cache misses"))
-    rows.append(("cache.pytest.write", str(int(st.write)), "Pytest cache writes"))
-    rows.append(("cache.pytest.parse_calls", str(int(st.parse_calls)), "Number of pytest timing file parses"))
-    rows.append(("cache.pytest.parse_secs", f"{float(st.parse_secs):.2f}s", "Time spent parsing pytest timings"))
-
-    # Raw log text cache (individual flat entries)
-    hits_by = dict(cache.get("hits_by") or {}) if isinstance(cache, dict) else {}
-    misses_by = dict(cache.get("misses_by") or {}) if isinstance(cache, dict) else {}
-    raw_hits = int(sum(int(v or 0) for k, v in hits_by.items() if str(k).startswith("raw_log_text.")))
-    raw_misses = int(sum(int(v or 0) for k, v in misses_by.items() if str(k).startswith("raw_log_text.")))
-    rows.append(("cache.github.raw_log.hits", str(raw_hits), "Raw CI log text cache hits"))
-    rows.append(("cache.github.raw_log.misses", str(raw_misses), "Raw CI log text cache misses"))
+    pytest_mem_count, pytest_disk_count = PYTEST_TIMINGS_CACHE.get_cache_sizes()
+    rows.append(("pytest.cache.disk", str(pytest_disk_count), "Pytest test duration timings [pytest-test-timings.json] [key: job_id:step_name] [TTL: invalidated by mtime/size]"))
+    rows.append(("pytest.cache.mem", str(pytest_mem_count), ""))
+    rows.append(("pytest.cache.hits", str(int(st.hit)), ""))
+    rows.append(("pytest.cache.misses", str(int(st.miss)), ""))
+    rows.append(("pytest.cache.writes", str(int(st.write)), ""))
+    rows.append(("pytest.parse_calls", str(int(st.parse_calls)), "Number of pytest timing file parses"))
+    rows.append(("pytest.parse_secs", f"{float(st.parse_secs):.2f}s", "Time spent parsing pytest timings"))
 
     # Cache entry counts (how many items are stored in each cache)
+    # Organized by cache name with all related stats grouped together:
+    # cache.github.{name}.disk, cache.github.{name}.mem, cache.github.{name}.hits, cache.github.{name}.misses
     entries = dict(cache.get("entries") or {}) if isinstance(cache, dict) else {}
+    
+    # Get hits/misses by cache type
+    hits_by = dict(cache.get("hits_by") or {}) if isinstance(cache, dict) else {}
+    misses_by = dict(cache.get("misses_by") or {}) if isinstance(cache, dict) else {}
+    
     if entries:
         rows.append(("## Cache Sizes", None, ""))
 
         # TTL information for each cache type (using constants from common.py)
         # Format: human-readable duration (e.g., "5m", "1h", "30d", "365d", "∞")
         # Descriptions for each cache type (without _mem/_disk suffix)
-        # TTL information is integrated directly into descriptions for clarity
+        # TTL information and cache key format integrated into descriptions
         cache_descriptions_mem = {
-            "pr_checks": "PR check runs (workflow runs, conclusions) [TTL: 3m (open PR, commit<8h) or 2h (open PR, commit≥8h) or 30d (merged/closed)]",
-            "pulls_list": "Pull request list responses [TTL: 3m (open PR, commit<8h) or 2h (open PR, commit≥8h) or 30d (merged/closed)]",
-            "pr_branch": "PR branch information (head/base refs) [TTL: 3m (open PR, commit<8h) or 2h (open PR, commit≥8h) or 30d (merged/closed)]",
-            "raw_log_text": f"Raw CI log text content (index) [TTL: {_format_ttl_duration(DEFAULT_RAW_LOG_TEXT_TTL_S)} (immutable once completed)]",
-            "actions_job_status": "GitHub Actions job status (success/failure) [TTL: 2m or ∞ (once completed, immutable)]",
-            "actions_job_details": "GitHub Actions job details (steps, durations, status) [TTL: 30d]",
-            "actions_workflow": "Workflow run metadata [TTL: 30d]",
-            "required_checks": "Required PR check names (per PR, from GraphQL isRequired) [TTL: 3m (open PR, commit<8h) or 2h (open PR, commit≥8h) or 30d (merged/closed)]",
-            "pr_info": "PR metadata (author, labels, etc) [TTL: 3m (open PR, commit<8h) or 2h (open PR, commit≥8h) or 30d (merged/closed)]",
-            "search_issues": "GitHub issue search results [TTL: varies]",
-            "job_log": "Parsed job log content [TTL: ∞ (immutable, no TTL check)]",
+            "pr_checks": "PR check runs [key: owner/repo#PR or owner/repo#PR:sha]",
+            "pulls_list": "Pull request list responses [key: owner/repo:state]",
+            "pr_branch": "PR branch information [key: owner/repo:branch]",
+            "raw_log_text": "Raw CI log text content index [key: job_id]",
+            "actions_job_status": "GitHub Actions job status [key: job_id]",
+            "actions_job_details": "GitHub Actions job details [key: owner/repo:run_id:job_id]",
+            "actions_workflow": "Workflow run metadata [key: owner/repo:run_id]",
+            "required_checks": "Required PR check names [key: owner/repo:pr#]",
+            "pr_info": "PR metadata (author, labels, reviews) [key: owner/repo#PR]",
+            "search_issues": "GitHub issue search results [key: query_hash]",
+            "job_log": "Parsed job log content [key: job_id]",
         }
 
         cache_descriptions_disk = {
-            "actions_jobs": "GitHub Actions job details (steps, durations, status) [actions_jobs.json] [TTL: 30d]",
-            "actions_workflows": "GitHub Actions workflow metadata (names, paths) [actions_workflows.json] [TTL: 30d]",
-            "pr_checks": "PR check runs (workflow runs, conclusions) [pr_checks_cache.json] [TTL: 3m (open PR, commit<8h) or 2h (open PR, commit≥8h) or 30d (merged/closed)]",
-            "pulls_list": "Pull request list responses [pulls_open_cache.json] [TTL: 3m (open PR, commit<8h) or 2h (open PR, commit≥8h) or 30d (merged/closed)]",
-            "pr_branch": "PR branch information (head/base refs) [pr_branch_cache.json] [TTL: 3m (open PR, commit<8h) or 2h (open PR, commit≥8h) or 30d (merged/closed)]",
-            "pr_info": "Full PR details with required checks and reviews [pr_info.json] [TTL: 3m (open PR, commit<8h) or 2h (open PR, commit≥8h) or 30d (merged/closed)]",
-            "search_issues": "GitHub search/issues API results for PR queries [search_issues.json] [TTL: varies]",
-            "job_logs": "Job log error summaries and snippets [job_logs_cache.json] [TTL: ∞ (immutable, no TTL check)]",
-            "raw_log_text": f"Raw CI log text content index [index.json] [TTL: {_format_ttl_duration(DEFAULT_RAW_LOG_TEXT_TTL_S)} (immutable once completed)]",
-            "required_checks": "Required PR check names (per PR, from GraphQL isRequired) [required_checks.json] [TTL: 3m (open PR, commit<8h) or 2h (open PR, commit≥8h) or 30d (merged/closed)]",
-            "merge_dates": f"PR merge dates from GitHub API [github_pr_merge_dates.json] [TTL: {_format_ttl_duration(DEFAULT_CLOSED_PRS_TTL_S)} (immutable once merged)]",
-            "commit_history": "Commit history with metadata [commit_history.json] [TTL: varies]",
-            "commit_history_snippets": "Commit message snippets [commit_history_snippets.json] [TTL: 365d (immutable)]",
-            "pytest_timings": "Pytest test duration timings [pytest-test-timings.json] [TTL: varies]",
-            "gitlab_pipeline_jobs": "GitLab pipeline job details [gitlab_pipeline_jobs_details_v3.json] [TTL: varies]",
-            "gitlab_pipeline_status": "GitLab pipeline status [gitlab_pipeline_status.json] [TTL: varies]",
-            "gitlab_mr_pipelines": "GitLab MR pipeline associations [gitlab_mr_pipelines.json] [TTL: varies]",
+            "actions_job_status": "GitHub Actions job status [actions_jobs.json] [key: owner/repo:jobstatus:job_id] [TTL: 1m or ∞ (once completed, immutable)]",
+            "actions_job_details": "GitHub Actions job details [actions_jobs.json] [key: owner/repo:job:job_id] [TTL: 30d]",
+            "pr_checks": "PR check runs [pr_checks_cache.json] [key: owner/repo#PR or owner/repo#PR:sha] [TTL: 3m (open PR, commit<8h) or 2h (open PR, commit≥8h) or 30d (merged/closed)]",
+            "pulls_list": "Pull request list responses [pulls_open_cache.json] [key: owner/repo:state] [TTL: 3m (open PR, commit<8h) or 2h (open PR, commit≥8h) or 30d (merged/closed)]",
+            "pr_branch": "PR branch information [pr_branch_cache.json] [key: owner/repo:branch] [TTL: 3m (open PR, commit<8h) or 2h (open PR, commit≥8h) or 30d (merged/closed)]",
+            "pr_info": "Full PR details with required checks and reviews [pr_info.json] [key: owner/repo#PR] [TTL: 3m (open PR, commit<8h) or 2h (open PR, commit≥8h) or 30d (merged/closed)]",
+            "search_issues": "GitHub search/issues API results [search_issues.json] [key: query_hash] [TTL: varies]",
+            "job_log": "Job log error summaries and snippets [job_logs_cache.json] [key: job_id] [TTL: ∞ (immutable, no TTL check)]",
+            "raw_log_text": f"Raw CI log text content index [index.json] [key: job_id] [TTL: {_format_ttl_duration(DEFAULT_RAW_LOG_TEXT_TTL_S)} (immutable once completed)]",
+            "required_checks": "Required PR check names [required_checks.json] [key: owner/repo:pr#] [TTL: 3m (open PR, commit<8h) or 2h (open PR, commit≥8h) or 30d (merged/closed)]",
+            "merge_dates": f"PR merge dates from GitHub API [github_pr_merge_dates.json] [key: owner/repo#PR] [TTL: {_format_ttl_duration(DEFAULT_CLOSED_PRS_TTL_S)} (immutable once merged)]",
+            "commit_history": "Commit history with metadata [commit_history.json] [key: varies] [TTL: varies]",
+            "commit_history_snippets": "Commit message snippets [commit_history_snippets.json] [key: commit_sha] [TTL: 365d (immutable)]",
+            "pytest_timings": "Pytest test duration timings [pytest-test-timings.json] [key: test_name] [TTL: varies]",
+            "gitlab_pipeline_jobs": "GitLab pipeline job details [gitlab_pipeline_jobs_details_v3.json] [key: project_id:pipeline_id] [TTL: varies]",
+            "gitlab_pipeline_status": "GitLab pipeline status [gitlab_pipeline_status.json] [key: project_id:pipeline_id] [TTL: varies]",
+            "gitlab_mr_pipelines": "GitLab MR pipeline associations [gitlab_mr_pipelines.json] [key: project_id:mr_iid] [TTL: varies]",
         }
 
-        # Separate memory and disk caches, then sort within each group
-        mem_caches = []
-        disk_caches = []
-
+        # Build a unified dict of cache stats: {cache_name: {disk, mem, hits, misses}}
+        cache_stats = {}
+        
         for cache_name in entries.keys():
             count = int(entries[cache_name])
             if cache_name.endswith("_mem"):
-                # Memory cache: cache.mem.{name} - only show if count > 0
-                if count > 0:
-                    base_name = cache_name[:-4]  # Remove "_mem" suffix
-                    desc = cache_descriptions_mem.get(base_name, f"Cached entries in {base_name}")
-                    # TTL is now integrated into descriptions, no need to append
-                    mem_caches.append((f"cache.mem.{base_name}", str(count), desc))
+                base_name = cache_name[:-4]  # Remove "_mem" suffix
+                if base_name not in cache_stats:
+                    cache_stats[base_name] = {}
+                cache_stats[base_name]["mem"] = (count, cache_descriptions_mem.get(base_name, f"Cached entries in {base_name}"))
             elif cache_name.endswith("_disk"):
-                # Disk cache: cache.disk.{name} - ALWAYS show (even if 0) to verify MERGE pattern
                 base_name = cache_name[:-5]  # Remove "_disk" suffix
-                desc = cache_descriptions_disk.get(base_name, f"Cached entries in {base_name}")
-                # TTL is now integrated into descriptions, no need to append
-                disk_caches.append((f"cache.disk.{base_name}", str(count), desc))
-            else:
-                # Unknown format, keep as-is - only show if count > 0
-                if count > 0:
-                    desc = cache_descriptions_mem.get(cache_name, f"Cached entries in {cache_name}")
-                    # TTL is now integrated into descriptions, no need to append
-                    mem_caches.append((f"cache.{cache_name}", str(count), desc))
-
-        # Add memory caches first (sorted), then disk caches (sorted)
-        for row in sorted(mem_caches, key=lambda x: x[0]):
-            rows.append(row)
-        for row in sorted(disk_caches, key=lambda x: x[0]):
-            rows.append(row)
+                if base_name not in cache_stats:
+                    cache_stats[base_name] = {}
+                cache_stats[base_name]["disk"] = (count, cache_descriptions_disk.get(base_name, f"Cached entries in {base_name}"))
+        
+        # Add hits/misses from GITHUB_API_STATS for all caches
+        # This uses the standard _cache_hit()/_cache_miss() tracking mechanism
+        for cache_name in cache_stats.keys():
+            # Aggregate all hits/misses for this cache (handles .mem, .disk, .network, etc.)
+            # Include both exact matches (e.g., "pr_checks") and prefixed matches (e.g., "pr_checks.mem")
+            cache_hits = int(sum(int(v or 0) for k, v in hits_by.items() if str(k) == cache_name or str(k).startswith(f"{cache_name}.")))
+            cache_misses = int(sum(int(v or 0) for k, v in misses_by.items() if str(k) == cache_name or str(k).startswith(f"{cache_name}.")))
+            
+            # Always add hits/misses entries (even if 0) for consistency (no descriptions needed)
+            cache_stats[cache_name]["hits"] = (cache_hits, "")
+            cache_stats[cache_name]["misses"] = (cache_misses, "")
+        
+        # Output cache stats grouped by cache name, with disk/mem/hits/misses together
+        for cache_name in sorted(cache_stats.keys()):
+            stats = cache_stats[cache_name]
+            
+            # Show in order: .disk (always), .mem (if >0), .hits (if exists), .misses (if exists)
+            if "disk" in stats:
+                count, desc = stats["disk"]
+                rows.append((f"github.cache.{cache_name}.disk", str(count), desc))
+            
+            if "mem" in stats:
+                count, desc = stats["mem"]
+                if count > 0:  # Only show mem if count > 0
+                    rows.append((f"github.cache.{cache_name}.mem", str(count), ""))
+            
+            if "hits" in stats:
+                count, desc = stats["hits"]
+                rows.append((f"github.cache.{cache_name}.hits", str(count), desc))
+            
+            if "misses" in stats:
+                count, desc = stats["misses"]
+                rows.append((f"github.cache.{cache_name}.misses", str(count), desc))
 
     # REST by category (top N as individual entries)
     labels = sorted(set(list(by_label.keys()) + list(time_by_label_s.keys())))
@@ -3518,25 +3538,32 @@ def build_page_stats(
 
     # Composite SHA (commit-history-only, show real values when available)
     if perf_stats.composite_sha_cache_hit > 0 or perf_stats.composite_sha_cache_miss > 0:
-        page_stats.append(("cache.composite_sha.hit", str(perf_stats.composite_sha_cache_hit), "Composite SHA cache hits (commit history only)"))
-        page_stats.append(("cache.composite_sha.miss", str(perf_stats.composite_sha_cache_miss), "Composite SHA cache misses (commit history only)"))
+        # Show disk cache size (from commit_history.json)
+        composite_sha_disk_count = perf_stats.composite_sha_cache_hit + perf_stats.composite_sha_cache_miss
+        page_stats.append(("composite_sha.cache.disk", str(composite_sha_disk_count), "Composite SHA cache entries in commit_history.json"))
+        page_stats.append(("composite_sha.cache.hits", str(perf_stats.composite_sha_cache_hit), ""))
+        page_stats.append(("composite_sha.cache.misses", str(perf_stats.composite_sha_cache_miss), ""))
         page_stats.append(("composite_sha.errors", str(perf_stats.composite_sha_errors), "Errors computing composite SHAs (commit history only)"))
         page_stats.append(("composite_sha.total_secs", f"{perf_stats.composite_sha_total_secs:.2f}s", "Total time computing composite SHAs (commit history only)"))
         page_stats.append(("composite_sha.compute_secs", f"{perf_stats.composite_sha_compute_secs:.2f}s", "Time spent in SHA computations (commit history only)"))
     else:
-        page_stats.append(("cache.composite_sha.hit", "(N/A)", "Composite SHA cache hits (commit history only)"))
-        page_stats.append(("cache.composite_sha.miss", "(N/A)", "Composite SHA cache misses (commit history only)"))
+        page_stats.append(("composite_sha.cache.disk", "(N/A)", "Composite SHA cache entries in commit_history.json"))
+        page_stats.append(("composite_sha.cache.hits", "(N/A)", ""))
+        page_stats.append(("composite_sha.cache.misses", "(N/A)", ""))
         page_stats.append(("composite_sha.errors", "(N/A)", "Errors computing composite SHAs (commit history only)"))
         page_stats.append(("composite_sha.total_secs", "(N/A)", "Total time computing composite SHAs (commit history only)"))
         page_stats.append(("composite_sha.compute_secs", "(N/A)", "Time spent in SHA computations (commit history only)"))
 
     # Snippet cache (always show, tracked globally in SNIPPET_CACHE)
     snippet_stats = SNIPPET_CACHE.stats
-    page_stats.append(("cache.snippet.hit", str(int(snippet_stats.hit)), "CI log snippet cache hits"))
-    page_stats.append(("cache.snippet.miss", str(int(snippet_stats.miss)), "CI log snippet cache misses"))
-    page_stats.append(("cache.snippet.write", str(int(snippet_stats.write)), "Snippet cache writes"))
-    page_stats.append(("cache.snippet.compute_secs", f"{float(snippet_stats.compute_secs):.2f}s", "Time extracting snippets from logs"))
-    page_stats.append(("cache.snippet.total_secs", f"{float(snippet_stats.total_secs):.2f}s", "Total time in snippet operations"))
+    snippet_mem_count, snippet_disk_count = SNIPPET_CACHE.get_cache_sizes()
+    page_stats.append(("snippet.cache.disk", str(snippet_disk_count), "CI log snippet cache [snippet-cache.json] [key: ci_log_errors_sha:log_filename] [TTL: 365d]"))
+    page_stats.append(("snippet.cache.mem", str(snippet_mem_count), ""))
+    page_stats.append(("snippet.cache.hits", str(int(snippet_stats.hit)), ""))
+    page_stats.append(("snippet.cache.misses", str(int(snippet_stats.miss)), ""))
+    page_stats.append(("snippet.cache.writes", str(int(snippet_stats.write)), ""))
+    page_stats.append(("snippet.compute_secs", f"{float(snippet_stats.compute_secs):.2f}s", "Time extracting snippets from logs"))
+    page_stats.append(("snippet.total_secs", f"{float(snippet_stats.total_secs):.2f}s", "Total time in snippet operations"))
 
     # Markers / local build reports (used by all dashboards)
     if perf_stats.marker_composite_with_reports > 0 or perf_stats.marker_composite_without_reports > 0:
@@ -3562,48 +3589,30 @@ def build_page_stats(
         perf_stats.gitlab_cache_pipeline_jobs_miss > 0
     )
     if has_gitlab_stats:
-        page_stats.append(("cache.gitlab.registry_images.hit", str(perf_stats.gitlab_cache_registry_images_hit), "GitLab registry image cache hits (commit history only)"))
-        page_stats.append(("cache.gitlab.registry_images.miss", str(perf_stats.gitlab_cache_registry_images_miss), "GitLab registry image cache misses (commit history only)"))
-        page_stats.append(("cache.gitlab.pipeline_status.hit", str(perf_stats.gitlab_cache_pipeline_status_hit), "GitLab pipeline status cache hits (commit history only)"))
-        page_stats.append(("cache.gitlab.pipeline_status.miss", str(perf_stats.gitlab_cache_pipeline_status_miss), "GitLab pipeline status cache misses (commit history only)"))
-        page_stats.append(("cache.gitlab.pipeline_jobs.hit", str(perf_stats.gitlab_cache_pipeline_jobs_hit), "GitLab pipeline jobs cache hits (commit history only)"))
-        page_stats.append(("cache.gitlab.pipeline_jobs.miss", str(perf_stats.gitlab_cache_pipeline_jobs_miss), "GitLab pipeline jobs cache misses (commit history only)"))
+        page_stats.append(("gitlab.cache.registry_images.hits", str(perf_stats.gitlab_cache_registry_images_hit), ""))
+        page_stats.append(("gitlab.cache.registry_images.misses", str(perf_stats.gitlab_cache_registry_images_miss), ""))
+        page_stats.append(("gitlab.cache.pipeline_status.hits", str(perf_stats.gitlab_cache_pipeline_status_hit), ""))
+        page_stats.append(("gitlab.cache.pipeline_status.misses", str(perf_stats.gitlab_cache_pipeline_status_miss), ""))
+        page_stats.append(("gitlab.cache.pipeline_jobs.hits", str(perf_stats.gitlab_cache_pipeline_jobs_hit), ""))
+        page_stats.append(("gitlab.cache.pipeline_jobs.misses", str(perf_stats.gitlab_cache_pipeline_jobs_miss), ""))
         page_stats.append(("gitlab.registry_images.total_secs", f"{perf_stats.gitlab_registry_images_total_secs:.2f}s", "Time fetching GitLab registry images (commit history only)"))
         page_stats.append(("gitlab.pipeline_status.total_secs", f"{perf_stats.gitlab_pipeline_status_total_secs:.2f}s", "Time fetching GitLab pipeline status (commit history only)"))
         page_stats.append(("gitlab.pipeline_jobs.total_secs", f"{perf_stats.gitlab_pipeline_jobs_total_secs:.2f}s", "Time fetching GitLab pipeline jobs (commit history only)"))
     else:
-        page_stats.append(("cache.gitlab.registry_images.hit", "(N/A)", "GitLab registry image cache hits (commit history only)"))
-        page_stats.append(("cache.gitlab.registry_images.miss", "(N/A)", "GitLab registry image cache misses (commit history only)"))
-        page_stats.append(("cache.gitlab.pipeline_status.hit", "(N/A)", "GitLab pipeline status cache hits (commit history only)"))
-        page_stats.append(("cache.gitlab.pipeline_status.miss", "(N/A)", "GitLab pipeline status cache misses (commit history only)"))
-        page_stats.append(("cache.gitlab.pipeline_jobs.hit", "(N/A)", "GitLab pipeline jobs cache hits (commit history only)"))
-        page_stats.append(("cache.gitlab.pipeline_jobs.miss", "(N/A)", "GitLab pipeline jobs cache misses (commit history only)"))
+        page_stats.append(("gitlab.cache.registry_images.hits", "(N/A)", ""))
+        page_stats.append(("gitlab.cache.registry_images.misses", "(N/A)", ""))
+        page_stats.append(("gitlab.cache.pipeline_status.hits", "(N/A)", ""))
+        page_stats.append(("gitlab.cache.pipeline_status.misses", "(N/A)", ""))
+        page_stats.append(("gitlab.cache.pipeline_jobs.hits", "(N/A)", ""))
+        page_stats.append(("gitlab.cache.pipeline_jobs.misses", "(N/A)", ""))
         page_stats.append(("gitlab.registry_images.total_secs", "(N/A)", "Time fetching GitLab registry images (commit history only)"))
         page_stats.append(("gitlab.pipeline_status.total_secs", "(N/A)", "Time fetching GitLab pipeline status (commit history only)"))
         page_stats.append(("gitlab.pipeline_jobs.total_secs", "(N/A)", "Time fetching GitLab pipeline jobs (commit history only)"))
 
     # 6b. GitHub cache statistics (reads from global GITHUB_CACHE_STATS)
-    # Always show these, even if N/A (for consistency across dashboards)
-    gh_stats = GITHUB_CACHE_STATS
-
-    # Merge dates cache
-    if gh_stats.merge_dates_hits > 0 or gh_stats.merge_dates_misses > 0:
-        page_stats.append(("cache.github.merge_dates.hits", str(gh_stats.merge_dates_hits), "PR merge date cache hits (all dashboards)"))
-        page_stats.append(("cache.github.merge_dates.misses", str(gh_stats.merge_dates_misses), "PR merge date cache misses (all dashboards)"))
-    else:
-        page_stats.append(("cache.github.merge_dates.hits", "(N/A)", "PR merge date cache hits (all dashboards)"))
-        page_stats.append(("cache.github.merge_dates.misses", "(N/A)", "PR merge date cache misses (all dashboards)"))
-
-    # Required checks cache
-    if gh_stats.required_checks_hits > 0 or gh_stats.required_checks_misses > 0:
-        page_stats.append(("cache.github.required_checks.hits", str(gh_stats.required_checks_hits), "PR-level check runs cache hits (all dashboards)"))
-        page_stats.append(("cache.github.required_checks.misses", str(gh_stats.required_checks_misses), "PR-level check runs cache misses (all dashboards)"))
-    else:
-        page_stats.append(("cache.github.required_checks.hits", "(N/A)", "PR-level check runs cache hits (all dashboards)"))
-        page_stats.append(("cache.github.required_checks.misses", "(N/A)", "PR-level check runs cache misses (all dashboards)"))
-
-    # Actions status cache - DEPRECATED (now unified with required_checks)
-    # No longer shown - all dashboards use unified required_checks stats
+    # Note: Individual cache stats (disk/mem/hits/misses) are now grouped together
+    # in build_github_cache_stats() and included via page_stats.extend(api_rows) above.
+    # No need to add merge_dates or required_checks hits/misses here separately.
 
     # 7. GitLab API stats (commit history only)
     if gitlab_client is not None:
