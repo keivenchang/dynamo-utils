@@ -13,8 +13,8 @@
 #   MAX_GITHUB_API_CALLS - If set, pass --max-github-api-calls to the Python generators.
 #                          Useful to keep cron runs predictable; defaults remain script-side.
 #   DYNAMO_UTILS_TRACE  - If set (non-empty), enable shell tracing (set -x). Off by default to avoid noisy logs / secrets.
-#   DYNAMO_UTILS_TESTING - (deprecated) If set, behave like --output-debug-html (write debug.html and fewer commits).
-#   MAX_COMMITS         - If set, cap commits for commit-history (default: 200; overridden by --output-debug-html).
+#   DYNAMO_UTILS_TESTING - (deprecated) If set, behave like --debug-html (write debug.html and fewer commits).
+#   MAX_COMMITS         - If set, cap commits for commit-history (default: 200; overridden by --debug-html).
 #   DYNAMO_UTILS_CACHE_DIR - If set, overrides ~/.cache/dynamo-utils for the resource report DB lookup.
 #   RESOURCE_DB         - If set, explicit SQLite path for resource report (default: $DYNAMO_UTILS_CACHE_DIR/resource_monitor.sqlite).
 #
@@ -30,10 +30,10 @@
 #   --show-commit-history   Update the commit history dashboard ($NVIDIA_HOME/dynamo_latest/index.html)
 #   --show-local-resources  Update the resource report ($NVIDIA_HOME/resource_report.html)
 #   --show-remote-branches  Update remote PR dashboards for selected GitHub users (IDENTICAL UI to local branches)
-#   --output-debug-html            Faster runs: outputs to debug.html instead of index.html, uses smaller commit window (10 commits), shorter resource window
+#   --debug-html                   Faster runs: outputs to debug.html instead of index.html, uses smaller commit window (25 commits), enables verification passes
 #   --github-token <token>  GitHub token to pass to all show_*.py scripts (preferred).
 #   --skip-gitlab-api     Skip fetching from GitLab API (commit-history only); use cached data only (faster).
-#   --gitlab-fetch          Explicitly allow GitLab fetching (overrides --output-debug-html default).
+#   --gitlab-fetch          Explicitly allow GitLab fetching (overrides --debug-html default).
 #   --dry-run               Print what would be executed without actually running commands
 #   --run-ignore-lock        Bypass the /tmp lock (no flock). Useful for manual runs when a stale lock exists.
 #
@@ -80,18 +80,19 @@ Usage: update_html_pages.sh [FLAGS]
 If no args are provided, ALL tasks run.
 
 Flags:
-  --show-local-branches     Write: $NVIDIA_HOME/index.html (or debug.html in --output-debug-html)
-  --show-commit-history     Write: $NVIDIA_HOME/dynamo_latest/index.html (or debug.html in --output-debug-html)
-  --show-local-resources    Write: $NVIDIA_HOME/resource_report.html (or resource_report_debug.html in --output-debug-html)
-  --show-remote-branches    Write: $HOME/dynamo/speedoflight/dynamo/users/<user>/index.html (or debug.html in --output-debug-html)
+  --show-local-branches     Write: $NVIDIA_HOME/index.html (or debug.html in --debug-html)
+  --show-commit-history     Write: $NVIDIA_HOME/dynamo_latest/index.html (or debug.html in --debug-html)
+  --show-local-resources    Write: $NVIDIA_HOME/resource_report.html (or resource_report_debug.html in --debug-html)
+  --show-remote-branches    Write: $HOME/dynamo/speedoflight/dynamo/users/<user>/index.html (or debug.html in --debug-html)
   --show-remote-history     Alias for --show-remote-branches (back-compat)
 
-  --output-debug-html              Faster runs: outputs to debug.html instead of index.html, uses smaller commit window (10 commits), shorter resource window
+  --debug-html                      Debug mode: outputs to debug.html, enables verification passes, smaller commit window (25 commits), shorter resource window
+  --output-debug-html               Alias for --debug-html (back-compat)
   --enable-success-build-test-logs  Opt-in: cache raw logs for successful *-build-test jobs to parse pytest slowest tests under "Run tests" (slower)
   --run-verifier-pass               Enable verification passes to validate tree structure and job details (adds logging overhead)
   --skip-gitlab-api       Skip fetching from GitLab API (commit-history only); use cached data only (faster).
-  --gitlab-fetch            Explicitly allow GitLab fetching (overrides --output-debug-html default).
-                           Default: GitLab fetch is skipped in --output-debug-html.
+  --gitlab-fetch            Explicitly allow GitLab fetching (overrides --debug-html default).
+                           Default: GitLab fetch is skipped in --debug-html.
   --github-token <token>    GitHub token to pass to all show_*.py scripts.
 
   --dry-run                 Print what would be executed without actually running commands
@@ -139,8 +140,8 @@ while [ "$#" -gt 0 ]; do
             RUN_RESOURCE_REPORT=true; ANY_FLAG=true; shift ;;
         --show-remote-branches)
             RUN_SHOW_REMOTE_BRANCHES=true; ANY_FLAG=true; shift ;;
-        --output-debug-html)
-            FAST_DEBUG=true; shift ;;
+        --debug-html|--output-debug-html)
+            FAST_DEBUG=true; RUN_VERIFIER_PASS=true; shift ;;
         --enable-success-build-test-logs)
             ENABLE_SUCCESS_BUILD_TEST_LOGS=true; shift ;;
         --run-verifier-pass)
