@@ -20,11 +20,13 @@ import glob
 import logging
 import os
 import re
+import shutil
 import signal
 import subprocess
 import sys
 import threading
 import time
+import traceback
 from abc import ABC, abstractmethod
 from concurrent.futures import ThreadPoolExecutor, as_completed, wait
 from dataclasses import dataclass, field
@@ -36,17 +38,9 @@ from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 # Add parent directory to path to import common.py
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-# Third-party imports (optional, with error handling)
-try:
-    import git
-except ImportError:
-    git = None  # type: ignore
-
-try:
-    from jinja2 import Environment, FileSystemLoader, select_autoescape
-except ImportError:
-    Environment = None  # type: ignore
-    FileSystemLoader = None  # type: ignore
+# Third-party imports
+import git
+from jinja2 import Environment, FileSystemLoader, select_autoescape
 
 # Global set to track running subprocesses for signal handling
 _running_subprocesses: Set[subprocess.Popen] = set()
@@ -124,9 +118,10 @@ def _write_html_report_files(html_content: str, primary_html_file: Path) -> None
         try:
             _html_out_file.parent.mkdir(parents=True, exist_ok=True)
             _html_out_file.write_text(_rewrite_html_links_for_repo_root(html_content))
-        except Exception:  # THIS IS A HORRIBLE ANTI-PATTERN, FIX IT
+        except (OSError, IOError) as e:
             # Best-effort: don't fail the build if the secondary write fails.
-            pass
+            logger = logging.getLogger("html")
+            logger.warning(f"Failed to write secondary HTML file {_html_out_file}: {e}")
 
 
 def check_sha_changed(repo_path: Path, task_id: str) -> Optional[str]:
@@ -290,9 +285,9 @@ def extract_version_from_build_sh(framework: str, repo_path: Path) -> str:
         # Fallback: if we can't find version, raise error
         raise RuntimeError(f"Could not extract version from build.sh output. Output: {output[:200]}")
 
-    except subprocess.TimeoutExpired:
-        raise RuntimeError("build.sh --dry-run timed out while extracting version")
-    except Exception as e:
+    except subprocess.TimeoutExpired as e:
+        raise RuntimeError(f"build.sh --dry-run timed out while extracting version: {e}")
+    except (subprocess.CalledProcessError, OSError) as e:
         raise RuntimeError(f"Failed to extract version from build.sh: {e}")
 
 
@@ -625,11 +620,11 @@ class BaseTask(ABC):
                     with _subprocesses_lock:
                         _running_subprocesses.discard(process)
 
-        except Exception as e:
+        except (OSError, IOError, ValueError) as e:
             self.error_message = str(e)
-            self.logger.error(f"Command execution failed: {e}")
             self.exit_code = -1
-            return self.exit_code
+            self.logger.error(f"Command execution failed: {e}")
+            raise
 
     @abstractmethod
     def execute(self, repo_path: Path, dry_run: bool = False) -> bool:
@@ -795,7 +790,7 @@ class BaseTask(ABC):
                 timeout=10
             )
             return result.returncode == 0
-        except Exception:  # THIS IS A HORRIBLE ANTI-PATTERN, FIX IT
+        except (subprocess.TimeoutExpired, subprocess.CalledProcessError, OSError):
             return False
 
     def format_log_header(self, repo_path: Path) -> str:
@@ -882,7 +877,7 @@ class BaseTask(ABC):
             if file_to_clean.exists():
                 try:
                     file_to_clean.unlink()
-                except Exception as e:
+                except (OSError, PermissionError) as e:
                     logger = logging.getLogger("task")
                     logger.warning(f"Failed to remove {file_to_clean}: {e}")
 
@@ -949,7 +944,7 @@ class BuildTask(BaseTask):
                 text=True
             )
             return result.returncode == 0
-        except Exception as e:
+        except (subprocess.CalledProcessError, OSError) as e:
             self.logger.warning(f"Error checking image existence: {e}")
             return False
 
@@ -1235,6 +1230,12 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Skip all compilation tasks",
     )
+    parser.add_argument(
+        "--max-workers",
+        type=int,
+        default=None,
+        help="Maximum number of parallel workers (default: CPU count, currently %(default)s)",
+    )
 
     # Output options
     parser.add_argument(
@@ -1277,8 +1278,6 @@ def sanitize_token(text: str) -> str:
     Returns:
         Text with tokens replaced by asterisks
     """
-    import re
-
     # Pattern for GitHub tokens (gho_..., ghp_..., etc.)
     text = re.sub(r'(gho_|ghp_|ghs_|ghr_)[A-Za-z0-9_]{36,}', r'\1' + '*' * 40, text)
 
@@ -1304,7 +1303,8 @@ def get_docker_image_size(image_name: str) -> Optional[str]:
         if image_info:
             return image_info.size_human
         return None
-    except Exception:  # THIS IS A HORRIBLE ANTI-PATTERN, FIX IT
+    except (subprocess.CalledProcessError, OSError, ValueError):
+        # Image doesn't exist or docker command failed
         return None
 
 
@@ -1383,7 +1383,9 @@ def parse_log_file_results(log_file: Path) -> Optional[LogParseResult]:
 
         return None
 
-    except Exception:  # THIS IS A HORRIBLE ANTI-PATTERN, FIX IT
+    except (OSError, ValueError) as e:
+        logger = logging.getLogger("log_parser")
+        logger.debug(f"Failed to parse log file {log_file}: {e}")
         return None
 
 
@@ -2471,14 +2473,6 @@ def generate_html_report(
     Returns:
         HTML string
     """
-    # Check if jinja2 is available (imported at top of file)
-    if Environment is None:
-        logging.getLogger("html").error("Jinja2 not installed. Install with: pip install jinja2")
-        return "<html><body><h1>Error: Jinja2 not installed</h1></body></html>"
-
-    # Check if git is available (imported at top of file)
-    if git is None:
-        logging.getLogger("html").warning("GitPython not installed, skipping git information")
 
     # Count task statistics
     # Exclude none-compilation and none-sanity from pass/fail counts
@@ -3075,7 +3069,6 @@ def main() -> int:
                                 if file_path.is_file():
                                     file_path.unlink()
                                 elif file_path.is_dir():
-                                    import shutil
                                     shutil.rmtree(file_path)
                                 logger.debug(f"  Removed {file}")
                             except Exception as e:
@@ -3323,6 +3316,10 @@ def main() -> int:
     # Execute based on mode
     if args.parallel:
         # Parallel execution
+        # Determine max_workers: use CLI arg, or default to CPU count
+        max_workers = args.max_workers if args.max_workers is not None else os.cpu_count()
+        logger.info(f"Using {max_workers} worker threads for parallel execution")
+        
         executed_tasks, failed_tasks = execute_task_parallel(
             all_tasks=all_tasks,
             root_tasks=root_tasks,
@@ -3333,7 +3330,7 @@ def main() -> int:
             dry_run=args.dry_run,
             skip_if_passed=args.skip_action_if_already_passed,
             no_compile=args.no_compile,
-            max_workers=4,  # TODO: make this configurable
+            max_workers=max_workers,
         )
     else:
         # Sequential execution
@@ -3475,7 +3472,6 @@ def main() -> int:
                     logger.warning(f"⚠️  Email notification was not sent successfully")
             except Exception as e:
                 logger.error(f"Failed to send email notification: {e}")
-                import traceback
                 logger.debug(traceback.format_exc())
 
         return exit_status
