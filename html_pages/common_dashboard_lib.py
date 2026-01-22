@@ -3961,7 +3961,11 @@ def build_and_test_dynamo_phase_tuples(
     phases3: List[Tuple[str, str, str]] = []
     jid = extract_actions_job_id_from_url(str(job_url or ""))
     if github_api and jid:
-        job = github_api.get_actions_job_details_cached(owner="ai-dynamo", repo="dynamo", job_id=jid, ttl_s=600) or {}
+        # Use 30-day TTL to match prefetch_actions_job_details_pass (prevents cache misses).
+        # Job details are immutable once completed (verified by get_actions_job_details_cached),
+        # so there's no correctness benefit to a shorter TTL. The old 600s (10min) TTL caused
+        # ~94 cache misses per dashboard render when prefetched data (30d TTL) was >10min old.
+        job = github_api.get_actions_job_details_cached(owner="ai-dynamo", repo="dynamo", job_id=jid, ttl_s=30 * 24 * 3600) or {}
         if isinstance(job, dict):
             phases3 = build_and_test_dynamo_phases_from_actions_job(job) or []
 

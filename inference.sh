@@ -180,8 +180,9 @@ resolve_model() {
 validate_model() {
     local model="$1"
 
-    # Try to validate the model using Python
-    if python -c "
+    # Try online validation first (allows downloads if needed)
+    local online_result
+    online_result=$(python -c "
 import sys
 try:
     from transformers import AutoTokenizer
@@ -189,14 +190,44 @@ try:
     print('Model validation successful')
     sys.exit(0)
 except Exception as e:
-    print(f'Model validation failed: {e}')
+    print(f'VALIDATION_ERROR: {e}')
+    sys.exit(1)
+" 2>&1)
+
+    if [ $? -eq 0 ]; then
+        echo "✅ Model(s) found: $model"
+        return 0
+    fi
+
+    # Check if it's a rate limit error and print it
+    if echo "$online_result" | grep -q "429.*Too Many Requests"; then
+        echo "⚠️  HuggingFace API rate limit hit, falling back to offline validation..."
+        echo "    (Rate limit error: $(echo "$online_result" | grep -oP '429.*?(?= for url)' | head -n 1))"
+    else
+        echo "⚠️  Online validation failed, falling back to offline validation..."
+    fi
+
+    # Fall back to offline validation and set HF_HUB_OFFLINE=1 globally for the rest of the script
+    if HF_HUB_OFFLINE=1 python -c "
+import sys
+try:
+    from transformers import AutoTokenizer
+    tokenizer = AutoTokenizer.from_pretrained('$model', trust_remote_code=True, local_files_only=True)
+    print('Model validation successful (offline)')
+    sys.exit(0)
+except Exception as e:
+    print(f'Offline validation failed: {e}')
     sys.exit(1)
 " >/dev/null 2>&1; then
-        echo "✅ Model(s) found: $model"
+        echo "✅ Model(s) found in local cache: $model"
+        # Set offline mode globally for the rest of the script execution
+        export HF_HUB_OFFLINE=1
+        echo "   (Set HF_HUB_OFFLINE=1 to avoid rate limits for the rest of this run)"
         return 0
     else
         echo "❌ Error: Model '$model' not found or not accessible"
-        echo "Please ensure the model exists and is accessible"
+        echo "   Online validation failed, and model not found in local cache"
+        echo "   Please download the model first or check HuggingFace cache at ~/.cache/huggingface/hub/"
         return 1
     fi
 }

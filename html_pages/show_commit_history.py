@@ -104,6 +104,7 @@ from common_gitlab import (
 
 # Jinja2 for HTML template rendering
 from jinja2 import Environment, FileSystemLoader, select_autoescape
+from markupsafe import Markup
 
 # Global logger
 logger = logging.getLogger(__name__)
@@ -113,6 +114,11 @@ STATUS_UNKNOWN = 'unknown'
 STATUS_SUCCESS = 'success'
 STATUS_FAILED = 'failed'
 STATUS_BUILDING = 'building'
+
+# Grafana Individual Job Details dashboard URL template
+# Example: https://grafana.nvidia.com/d/beyv28rcnhs74b/individual-job-details?orgId=283&var-branch=pull-request%2F5516&var-job=All&var-job_status=All&${__url_time_range}&var-repo=All&var-commit=All&var-workflow=All
+GRAFANA_PR_URL_TEMPLATE = "https://grafana.nvidia.com/d/beyv28rcnhs74b/individual-job-details?orgId=283&var-branch=pull-request%2F{pr_number}&var-job=All&var-job_status=All&${{__url_time_range}}&var-repo=All&var-commit=All&var-workflow=All"
+
 
 _normalize_check_name = normalize_check_name
 _is_required_check_name = is_required_check_name
@@ -1143,6 +1149,16 @@ class CommitHistoryGenerator:
                     message
                 )
                 commit['message'] = message
+
+                # Apply same PR link transformation to full_message (for commit dropdown)
+                if 'full_message' in commit:
+                    full_message = commit['full_message']
+                    full_message = re.sub(
+                        r'\(#(\d+)\)',
+                        f'(<a href=\"{pr_link}\" class=\"pr-link\" target=\"_blank\">#{pr_number}</a>)',
+                        full_message
+                    )
+                    commit['full_message'] = full_message
                 commit['pr_number'] = int(pr_number)
             else:
                 commit['pr_number'] = sha_to_pr_number.get(commit.get("sha_full", ""))
@@ -1451,6 +1467,7 @@ class CommitHistoryGenerator:
                     check_runs.append(
                         {
                             "name": str(nm0),
+                            "short_name": str(nm0),  # Will be overwritten by enrichment if YAML mapping exists
                             "status": "queued",
                             "conclusion": "",
                             "html_url": "",
@@ -2029,6 +2046,7 @@ class CommitHistoryGenerator:
             # Icons (shared look; legend/tooltips/status bar must match across dashboards)
             **ci_status_icon_context(),
             pass_plus_style=PASS_PLUS_STYLE,
+            grafana_pr_url_template=GRAFANA_PR_URL_TEMPLATE,
         )
         tpl_render_s = max(0.0, time.monotonic() - t0_tpl)
 
