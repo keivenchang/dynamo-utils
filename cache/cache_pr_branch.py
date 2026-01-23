@@ -1,95 +1,76 @@
-"""Cache for PR branch names (head ref for each PR).
-
-Caching strategy:
-  - Key: <owner>/<repo>#<pr_number>
-  - Value: Dict with 'ts', 'branch' (branch name string)
-  - Medium TTL (branch name rarely changes, but PRs can be rebased)
 """
-from __future__ import annotations
+Cache for PR branch lookups.
 
-import sys
-import time
+Stores PR information for branches (both open and closed/merged PRs).
+Cache key format: "{owner}/{repo}:{branch}"
+Cache value: {"ts": timestamp, "prs": [list of PR dicts]}
+
+TTL:
+- Branches with no PRs: shorter TTL (no_pr_ttl_s, default 3600s)
+- Branches with closed/merged PRs: longer TTL (closed_ttl_s, default 86400s)
+"""
+
 from pathlib import Path
-from typing import Optional
+from typing import Any, Dict, Optional
+import sys
 
-# Ensure imports work from both html_pages/ and parent directory
-_module_dir = Path(__file__).resolve().parent
-if str(_module_dir) not in sys.path:
-    sys.path.insert(0, str(_module_dir))
+# Add parent directory to path for imports
+sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from cache_base import BaseDiskCache
+from cache.cache_base import BaseDiskCache
+from common import dynamo_utils_cache_dir
 
 
 class PRBranchCache(BaseDiskCache):
-    """Cache for PR branch names (head ref).
+    """Cache for PR branch lookups with TTL-based invalidation."""
     
-    Stores the branch name for each PR to avoid redundant API calls.
+    def __init__(self):
+        cache_file = dynamo_utils_cache_dir() / "pr-branches" / "pr_branch_cache.json"
+        super().__init__(cache_file=cache_file)
     
-    Stats (hit/miss/write) are tracked automatically by BaseDiskCache.
-    """
-    
-    _SCHEMA_VERSION = 1
-    _DEFAULT_TTL = 7 * 24 * 60 * 60  # 7 days
-    
-    def __init__(self, *, cache_file: Path):
-        super().__init__(cache_file=cache_file, schema_version=self._SCHEMA_VERSION)
-    
-    def get_if_fresh(self, key: str, ttl_s: int) -> Optional[str]:
-        """Get cached branch name if fresh.
+    def get_if_fresh(
+        self,
+        *,
+        owner: str,
+        repo: str,
+        branch: str,
+        ttl_s: int,
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Get cached PR branch data if fresh.
         
         Args:
-            key: Cache key (e.g., "owner/repo#123")
+            owner: Repository owner
+            repo: Repository name
+            branch: Branch name
             ttl_s: TTL in seconds
             
         Returns:
-            Branch name, or None if not cached/stale
+            {"ts": timestamp, "prs": [list of PR dicts]} or None if not found/stale
         """
-        with self._mu:
-            self._load_once()
-            ent = self._check_item(key)  # Automatically tracks hit/miss
-            
-            if not isinstance(ent, dict):
-                return None
-            
-            ts = int(ent.get("ts", 0) or 0)
-            now = int(time.time())
-            
-            if ts and (now - ts) <= max(0, int(ttl_s)):
-                branch = ent.get("branch")
-                if branch:
-                    return str(branch)
-            
-            return None
+        cache_key = f"{owner}/{repo}:{branch}"
+        return super().get_if_fresh(cache_key, ttl_s=ttl_s)
     
-    def put(self, key: str, branch: str) -> None:
-        """Store branch name.
+    def put(
+        self,
+        *,
+        owner: str,
+        repo: str,
+        branch: str,
+        value: Dict[str, Any],
+    ) -> None:
+        """
+        Store PR branch data.
         
         Args:
-            key: Cache key
+            owner: Repository owner
+            repo: Repository name
             branch: Branch name
+            value: {"ts": timestamp, "prs": [list of PR dicts]}
         """
-        now = int(time.time())
-        with self._mu:
-            self._load_once()
-            entry = {
-                "ts": now,
-                "branch": branch,
-            }
-            self._set_item(key, entry)  # Automatically tracks write
-            self._persist()
+        cache_key = f"{owner}/{repo}:{branch}"
+        super().put(cache_key, value)
 
 
-# Singleton cache instance
-def _get_cache_file() -> Path:
-    """Get cache file path, handling imports from different contexts."""
-    try:
-        parent_dir = _module_dir.parent
-        if str(parent_dir) not in sys.path:
-            sys.path.insert(0, str(parent_dir))
-        import common
-        return common.dynamo_utils_cache_dir() / "pr-branches" / "pr_branch.json"
-    except ImportError:
-        return Path.home() / ".cache" / "dynamo-utils" / "pr-branches" / "pr_branch.json"
-
-
-PR_BRANCH_CACHE = PRBranchCache(cache_file=_get_cache_file())
+# Global singleton
+PR_BRANCH_CACHE = PRBranchCache()

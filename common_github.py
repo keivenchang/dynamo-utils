@@ -74,6 +74,7 @@ from common import (
 # Cache modules - incremental migration in progress
 from cache.cache_merge_dates import MERGE_DATES_CACHE
 from cache.cache_pulls_list import PULLS_LIST_CACHE
+from cache.cache_pr_branch import PR_BRANCH_CACHE
 
 # Module logger
 _logger = logging.getLogger(__name__)
@@ -1234,9 +1235,6 @@ class GitHubAPIClient:
         self._pulls_list_cache_dir = dynamo_utils_cache_dir() / "pulls"
 
         # Cache for "closed/merged PRs per branch" lookups (long TTL; these don't change often).
-        self._pr_branch_mem_cache: Dict[str, Dict[str, Any]] = {}
-        self._pr_branch_cache_dir = dynamo_utils_cache_dir() / "pr-branches"
-
         # Cache for downloaded raw log text (two-tier: memory + disk).
         self._raw_log_text_mem_cache: Dict[str, Dict[str, Any]] = {}
         self._raw_log_text_cache_dir = dynamo_utils_cache_dir() / "raw-log-text"
@@ -1301,9 +1299,6 @@ class GitHubAPIClient:
             self._initial_disk_counts["pulls_list_disk"] = len(pulls_disk) if isinstance(pulls_disk, dict) else 0
             
             # PR branch
-            pr_branch_disk = self._load_pr_branch_disk_cache()
-            self._initial_disk_counts["pr_branch_disk"] = len(pr_branch_disk) if isinstance(pr_branch_disk, dict) else 0
-            
             # PR info
             pr_info_disk = self._load_pr_info_disk_cache()
             self._initial_disk_counts["pr_info_disk"] = len(pr_info_disk) if isinstance(pr_info_disk, dict) else 0
@@ -1519,10 +1514,14 @@ class GitHubAPIClient:
 
         # Cache entry counts (memory + disk)
         # These are internal attributes initialized in __init__, so they always exist
+        
+        # Get pr_branch counts from PR_BRANCH_CACHE
+        pr_branch_mem, pr_branch_disk = PR_BRANCH_CACHE.get_cache_sizes()
+        
         cache_sizes = {
             "pr_checks_mem": len(self._pr_checks_mem_cache),
             "pulls_list_mem": len(self._pulls_list_mem_cache),
-            "pr_branch_mem": len(self._pr_branch_mem_cache),
+            "pr_branch_mem": pr_branch_mem,
             "raw_log_text_mem": len(self._raw_log_text_mem_cache),
             "actions_job_status_mem": len(self._actions_job_status_mem_cache),
             "actions_job_details_mem": len(self._actions_job_details_mem_cache),
@@ -1530,6 +1529,7 @@ class GitHubAPIClient:
             "pr_info_mem": len(self._pr_info_mem_cache),
             "search_issues_mem": len(self._search_issues_mem_cache),
             "job_log_mem": len(self._job_log_cache),
+            "pr_branch_disk": pr_branch_disk,
         }
 
         # Disk cache counts - show initial counts before this run's modifications
@@ -1537,7 +1537,7 @@ class GitHubAPIClient:
         
         # Use initial counts captured at initialization
         for key in ["actions_job_status_disk", "actions_job_details_disk", "pr_checks_disk", "pulls_list_disk",
-                    "pr_branch_disk", "pr_info_disk", "search_issues_disk", "job_log_disk", 
+                    "pr_info_disk", "search_issues_disk", "job_log_disk", 
                     "raw_log_text_disk", "required_checks_disk", "merge_dates_disk"]:
             cache_sizes[key] = self._initial_disk_counts.get(key, 0)
 
@@ -2533,29 +2533,6 @@ class GitHubAPIClient:
     def _pulls_list_cache_key(self, owner: str, repo: str, state: str) -> str:
         return f"{owner}/{repo}:{state}"
 
-    def _pr_branch_cache_key(self, owner: str, repo: str, branch: str) -> str:
-        return f"{owner}/{repo}:{branch}"
-
-    def _load_pr_branch_disk_cache(self) -> Dict[str, Any]:
-        cache_file = self._pr_branch_cache_dir / "pr_branch_cache.json"
-        if cache_file.exists():
-            with open(cache_file, "r") as f:
-                data = json.load(f)
-                return data if isinstance(data, dict) else {}
-        return {}
-
-    def _save_pr_branch_disk_cache(self, key: str, value: Dict[str, Any]) -> None:
-        """Atomically update a single entry in pr_branch disk cache."""
-        _save_single_disk_cache_entry(
-            cache_dir=self._pr_branch_cache_dir,
-            cache_filename="pr_branch_cache.json",
-            lock_filename="pr_branch_cache.lock",
-            load_fn=self._load_pr_branch_disk_cache,
-            json_dump_fn=lambda d: self._json_dump_text(d, indent=None),
-            key=key,
-            value=value,
-        )
-
     @staticmethod
     def _pr_info_min_to_dict(pr: "PRInfo") -> Dict[str, Any]:
         return {
@@ -3289,7 +3266,6 @@ class GitHubAPIClient:
 
         # Resolve closed/merged PRs for branches with no OPEN PR match.
         now = int(time.time())
-        disk = self._load_pr_branch_disk_cache()
 
         missing: List[str] = []
         for b in branch_set:
@@ -3297,15 +3273,22 @@ class GitHubAPIClient:
                 # Branch already has at least one open PR; we don't additionally fetch historical PRs by default.
                 continue
 
-            key = self._pr_branch_cache_key(owner, repo, b)
-
             if not refresh_closed:
-                # Memory cache
-                mem = self._pr_branch_mem_cache.get(key)
-                if isinstance(mem, dict):
-                    ts = int(mem.get("ts") or 0)
-                    prs_d = mem.get("prs")
+                # Try cache with appropriate TTL
+                # We need to determine TTL, but we don't know if there are PRs yet
+                # Use the longer TTL initially, then validate
+                cached_entry = PR_BRANCH_CACHE.get_if_fresh(
+                    owner=owner,
+                    repo=repo,
+                    branch=b,
+                    ttl_s=int(closed_ttl_s),  # Use longer TTL for initial check
+                )
+                
+                if cached_entry is not None:
+                    ts = int(cached_entry.get("ts") or 0)
+                    prs_d = cached_entry.get("prs")
                     if isinstance(prs_d, list):
+                        # Now check with the correct TTL based on whether PRs exist
                         ttl = int(no_pr_ttl_s) if len(prs_d) == 0 else int(closed_ttl_s)
                         if (now - ts) <= ttl:
                             prs: List[PRInfo] = []
@@ -3314,26 +3297,7 @@ class GitHubAPIClient:
                                     pr = self._pr_info_min_from_dict(d)
                                     if pr is not None:
                                         prs.append(pr)
-                            self._cache_hit("pr_branch.mem")
-                            result[b] = prs
-                            continue
-
-                # Disk cache
-                entry = disk.get(key) if isinstance(disk, dict) else None
-                if isinstance(entry, dict):
-                    ts = int(entry.get("ts") or 0)
-                    prs_d = entry.get("prs")
-                    if isinstance(prs_d, list):
-                        ttl = int(no_pr_ttl_s) if len(prs_d) == 0 else int(closed_ttl_s)
-                        if (now - ts) <= ttl:
-                            prs = []
-                            for d in prs_d:
-                                if isinstance(d, dict):
-                                    pr = self._pr_info_min_from_dict(d)
-                                    if pr is not None:
-                                        prs.append(pr)
-                            self._pr_branch_mem_cache[key] = {"ts": ts, "prs": prs_d}
-                            self._cache_hit("pr_branch.disk")
+                            self._cache_hit("pr_branch")
                             result[b] = prs
                             continue
 
@@ -3390,10 +3354,15 @@ class GitHubAPIClient:
                     branch_name, prs_d = fut.result()
                 except AttributeError:  # .get() on non-dict
                     continue
-                key = self._pr_branch_cache_key(owner, repo, branch_name)
-                self._pr_branch_mem_cache[key] = {"ts": now, "prs": prs_d}
-                # Save individual entry to disk cache using DiskCacheWriter (enforces lock-load-merge-save)
-                self._save_pr_branch_disk_cache(key, {"ts": now, "prs": prs_d})
+                
+                # Save to cache
+                PR_BRANCH_CACHE.put(
+                    owner=owner,
+                    repo=repo,
+                    branch=branch_name,
+                    value={"ts": now, "prs": prs_d},
+                )
+                
                 prs: List[PRInfo] = []
                 for d in prs_d:
                     if isinstance(d, dict):
