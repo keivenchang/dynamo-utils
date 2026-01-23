@@ -143,6 +143,16 @@ DO NOT use these BS words in docs/comments:
 - Cache expensive computations
 - Monitor resource usage in production
 
+**CRITICAL: CACHE DELETION POLICY**
+- **NEVER EVER delete caches unless explicitly requested and granted permission**
+- This includes but is not limited to:
+  - Python `__pycache__` directories
+  - Build caches (cargo target/, node_modules/, etc.)
+  - Application caches (.cache/, tmp/, etc.)
+  - Any other cached data or temporary files
+- Always ask for explicit permission before deleting any cache
+- Deleting caches without permission can break workflows and cause unnecessary rebuilds
+
 ## 2.3 UNIX Command Execution and Workflow
 
 ### 2.3.1 Command Chaining

@@ -14,7 +14,7 @@
 #                          Useful to keep cron runs predictable; defaults remain script-side.
 #   DYNAMO_UTILS_TRACE  - If set (non-empty), enable shell tracing (set -x). Off by default to avoid noisy logs / secrets.
 #   DYNAMO_UTILS_TESTING - (deprecated) If set, behave like --debug-html (write debug.html and fewer commits).
-#   MAX_COMMITS         - If set, cap commits for commit-history (default: 200; overridden by --debug-html).
+#   MAX_COMMITS         - If set, cap commits for commit-history (default: 100; 25 for --debug-html).
 #   DYNAMO_UTILS_CACHE_DIR - If set, overrides ~/.cache/dynamo-utils for the resource report DB lookup.
 #   RESOURCE_DB         - If set, explicit SQLite path for resource report (default: $DYNAMO_UTILS_CACHE_DIR/resource_monitor.sqlite).
 #
@@ -26,24 +26,19 @@
 #   REMOTE_PRS_OUT_FILE - Full output filename override (rare; if set, used for every user).
 #
 # Args (optional; can be combined):
-#   --show-local-branches   Update the branches dashboard ($DYNAMO_HOME/index.html)
-#   --show-commit-history   Update the commit history dashboard ($DYNAMO_HOME/dynamo_latest/index.html)
 #   --show-local-resources  Update the resource report ($DYNAMO_HOME/resource_report.html)
+#   --show-local-branches   Update the branches dashboard ($DYNAMO_HOME/index.html)
 #   --show-remote-branches  Update remote PR dashboards for selected GitHub users (IDENTICAL UI to local branches)
+#   --show-commit-history   Update the commit history dashboard ($DYNAMO_HOME/dynamo_latest/index.html)
 #   --debug-html                   Faster runs: outputs to debug.html instead of index.html, uses smaller commit window (25 commits), enables verification passes
 #   --github-token <token>  GitHub token to pass to all show_*.py scripts (preferred).
 #   --skip-gitlab-api     Skip fetching from GitLab API (commit-history only); use cached data only (faster).
 #   --gitlab-fetch          Explicitly allow GitLab fetching (overrides --debug-html default).
 #   --dry-run               Print what would be executed without actually running commands
 #   --run-ignore-lock        Bypass the /tmp lock (no flock). Useful for manual runs when a stale lock exists.
-#
-# Back-compat aliases (deprecated; kept for existing cron):
-#   --run-show-dynamo-branches  (alias for --show-local-branches)
-#   --run-show-commit-history   (alias for --show-commit-history)
-#   --run-resource-report       (alias for --show-local-resources)
-#   --show-remote-history       (alias for --show-remote-branches)
-#
 # Behavior:
+# - On failure, errors are printed to stderr AND logged to component log files
+#   (e.g., show_local_branches.log, show_commit_history.log)
 # - If no args are provided, ALL tasks run (local branches + commit history + resource report + remote PRs).
 #
 # Cron Example:
@@ -68,7 +63,7 @@ DYNAMO_HOME="${DYNAMO_HOME:-$(dirname "$UTILS_DIR")}"
 
 LOGS_DIR="$DYNAMO_HOME/logs"
 FAST_DEBUG="${FAST_DEBUG:-false}"
-# Back-compat: treat env var like --output-debug-html.
+# Back-compat: treat env var like --debug-html.
 if [ -n "${DYNAMO_UTILS_TESTING:-}" ]; then
     FAST_DEBUG=true
 fi
@@ -80,19 +75,17 @@ Usage: update_html_pages.sh [FLAGS]
 If no args are provided, ALL tasks run.
 
 Flags:
-  --show-local-branches     Write: $DYNAMO_HOME/index.html (or debug.html in --debug-html)
-  --show-commit-history     Write: $DYNAMO_HOME/dynamo_latest/index.html (or debug.html in --debug-html)
   --show-local-resources    Write: $DYNAMO_HOME/resource_report.html (or resource_report_debug.html in --debug-html)
+  --show-local-branches     Write: $DYNAMO_HOME/index.html (or debug.html in --debug-html)
   --show-remote-branches    Write: $HOME/dynamo/speedoflight/dynamo/users/<user>/index.html (or debug.html in --debug-html)
-  --show-remote-history     Alias for --show-remote-branches (back-compat)
+  --show-commit-history     Write: $DYNAMO_HOME/dynamo_latest/index.html (or debug.html in --debug-html)
 
-  --debug-html                      Debug mode: outputs to debug.html, enables verification passes, smaller commit window (25 commits), shorter resource window
-  --output-debug-html               Alias for --debug-html (back-compat)
+  --debug-html              Debug mode: outputs to debug.html, enables verification passes, smaller commit window (25 commits), shorter resource window
   --enable-success-build-test-logs  Opt-in: cache raw logs for successful *-build-test jobs to parse pytest slowest tests under "Run tests" (slower)
-  --run-verifier-pass               Enable verification passes to validate tree structure and job details (adds logging overhead)
-  --skip-gitlab-api       Skip fetching from GitLab API (commit-history only); use cached data only (faster).
+  --run-verifier-pass       Enable verification passes to validate tree structure and job details (adds logging overhead)
+  --skip-gitlab-api         Skip fetching from GitLab API (commit-history only); use cached data only (faster).
   --gitlab-fetch            Explicitly allow GitLab fetching (overrides --debug-html default).
-                           Default: GitLab fetch is skipped in --debug-html.
+                            Default: GitLab fetch is skipped in --debug-html.
   --github-token <token>    GitHub token to pass to all show_*.py scripts.
 
   --dry-run                 Print what would be executed without actually running commands
@@ -100,6 +93,7 @@ Flags:
   -h, --help                Show this help and exit
 
 Notes:
+  - On failure, errors are printed to stderr AND logged to component log files
   - Logs are written under: $DYNAMO_HOME/logs/<YYYY-MM-DD>/
     - cron.log (high-level), plus show_local_branches.log, show_commit_history.log, show_remote_branches.log, resource_report.log
   - Per-component locks allow parallel execution of different components:
@@ -110,6 +104,7 @@ Notes:
   - Each component can run independently without blocking others
 EOF
 }
+
 
 RUN_SHOW_DYNAMO_BRANCHES=false
 RUN_SHOW_COMMIT_HISTORY=false
@@ -134,13 +129,11 @@ while [ "$#" -gt 0 ]; do
             RUN_SHOW_DYNAMO_BRANCHES=true; ANY_FLAG=true; shift ;;
         --show-commit-history)
             RUN_SHOW_COMMIT_HISTORY=true; ANY_FLAG=true; shift ;;
-        --show-remote-history)
-            RUN_SHOW_REMOTE_BRANCHES=true; ANY_FLAG=true; shift ;;
         --show-local-resources)
             RUN_RESOURCE_REPORT=true; ANY_FLAG=true; shift ;;
         --show-remote-branches)
             RUN_SHOW_REMOTE_BRANCHES=true; ANY_FLAG=true; shift ;;
-        --debug-html|--output-debug-html)
+        --debug-html)
             FAST_DEBUG=true; RUN_VERIFIER_PASS=true; shift ;;
         --enable-success-build-test-logs)
             ENABLE_SUCCESS_BUILD_TEST_LOGS=true; shift ;;
@@ -154,8 +147,8 @@ while [ "$#" -gt 0 ]; do
             GITHUB_TOKEN_ARG="$2"; shift 2 ;;
         --skip-gitlab-api)
             GITLAB_FETCH_SKIP_MODE="skip"; shift ;;
-        --skip-gitlab-api)
-            # Explicitly allow GitLab fetching (overrides --output-debug-html default).
+        --gitlab-fetch)
+            # Explicitly allow GitLab fetching (overrides --debug-html default).
             GITLAB_FETCH_SKIP_MODE="fetch"; shift ;;
         --dry-run)
             DRY_RUN=true; shift ;;
@@ -185,13 +178,13 @@ if [ "$GITLAB_FETCH_SKIP_MODE" = "skip" ]; then
 elif [ "$GITLAB_FETCH_SKIP_MODE" = "fetch" ]; then
     GITLAB_FETCH_SKIP_EFFECTIVE=false
 else
-    # auto mode: In --output-debug-html, default to skip GitLab fetch (much faster; good for interactive debugging).
+    # auto mode: In --debug-html, default to skip GitLab fetch (much faster; good for interactive debugging).
     if [ "$FAST_DEBUG" = true ]; then
         GITLAB_FETCH_SKIP_EFFECTIVE=true
     fi
 fi
 
-# Compute branches output path after parsing flags so `--output-debug-html` is honored.
+# Compute branches output path after parsing flags so `--debug-html` is honored.
 BRANCHES_BASENAME="${BRANCHES_BASENAME:-index.html}"
 if [ "$FAST_DEBUG" = true ]; then
     BRANCHES_BASENAME="debug.html"
@@ -360,6 +353,8 @@ run_resource_report() {
             echo "$(date '+%Y-%m-%d %H:%M:%S') - Updated $RESOURCE_REPORT_HTML" >> "$LOG_FILE"
         else
             echo "$(date '+%Y-%m-%d %H:%M:%S') - WARNING: Failed to update $RESOURCE_REPORT_HTML" >> "$LOG_FILE"
+        echo "ERROR: Failed to update $RESOURCE_REPORT_HTML" >&2
+        echo "See log for details: $RESOURCE_REPORT_LOG" >&2
             exit 1
         fi
     else
@@ -403,6 +398,8 @@ run_show_local_branches() {
         echo "$(date '+%Y-%m-%d %H:%M:%S') - Updated $BRANCHES_OUTPUT_FILE" >> "$LOG_FILE"
     else
         echo "$(date '+%Y-%m-%d %H:%M:%S') - ERROR: Failed to update $BRANCHES_OUTPUT_FILE" >> "$LOG_FILE"
+        echo "ERROR: Failed to update $BRANCHES_OUTPUT_FILE" >&2
+        echo "See log for details: $BRANCHES_LOG" >&2
         exit 1
     fi
 }
@@ -487,6 +484,8 @@ run_show_remote_branches() {
             echo "$(date '+%Y-%m-%d %H:%M:%S') - Updated $OUT_FILE" >> "$LOG_FILE"
         else
             echo "$(date '+%Y-%m-%d %H:%M:%S') - ERROR: Failed to update $OUT_FILE" >> "$LOG_FILE"
+            echo "ERROR: Failed to update $OUT_FILE" >&2
+            echo "See log for details: $REMOTE_PRS_LOG" >&2
             exit 1
         fi
     done
@@ -503,7 +502,7 @@ run_show_commit_history() {
     SUCCESS_BUILD_TEST_FLAG="--enable-success-build-test-logs"
 
     # Flags (shared by dry-run and real-run paths)
-    # MAX_COMMITS: default 100, or 25 in --output-debug-html mode (unless overridden by env var)
+    # MAX_COMMITS: default 100, or 25 in --debug-html mode (unless overridden by env var)
     if [ "$FAST_DEBUG" = true ]; then
         MAX_COMMITS="${MAX_COMMITS:-25}"
     else
@@ -567,6 +566,8 @@ run_show_commit_history() {
         echo "$(date '+%Y-%m-%d %H:%M:%S') - Updated $COMMIT_HISTORY_HTML" >> "$LOG_FILE"
     else
         echo "$(date '+%Y-%m-%d %H:%M:%S') - ERROR: Failed to update commit-history.html" >> "$LOG_FILE"
+        echo "ERROR: Failed to update commit-history.html" >&2
+        echo "See log for details: $COMMIT_HISTORY_LOG" >&2
         exit 1
     fi
 }

@@ -32,7 +32,7 @@ HTML dashboard generators and shared UI utilities for monitoring Dynamo CI/CD.
 
 Scans local git repositories and displays branch status with GitHub integration.
 
-### Features (Updated 2026-01-07)
+### Features
 
 - **Branch discovery** under `--repo-path` (scans direct children)
 - **PR integration** with CI checks from GitHub
@@ -102,7 +102,7 @@ python3 html_pages/show_local_branches.py \
 
 Shows PRs by GitHub username (not tied to local repos).
 
-### Features (Updated 2026-01-08)
+### Features
 
 - Fetches PRs via GitHub API
 - **IDENTICAL tree structure and UI as local branches** *(FIXED)*
@@ -153,14 +153,14 @@ python3 show_remote_branches.py \
 **Working hours (8am-6pm PT):** Every 1 minute
 ```cron
 # Working hours: 16:00-23:59 UTC + 00:00-01:59 UTC
-* 16-23 * * * DYNAMO_HOME=$HOME/dynamo REMOTE_GITHUB_USERS="kthui keivenchang" $HOME/dynamo/dynamo-utils/cron_log.sh remote_prs_working $HOME/dynamo/dynamo-utils/html_pages/update_html_pages.sh --show-remote-branches
-* 0-1 * * * DYNAMO_HOME=$HOME/dynamo REMOTE_GITHUB_USERS="kthui keivenchang" $HOME/dynamo/dynamo-utils/cron_log.sh remote_prs_working $HOME/dynamo/dynamo-utils/html_pages/update_html_pages.sh --show-remote-branches
+* 16-23 * * * DYNAMO_HOME=$HOME/dynamo REMOTE_GITHUB_USERS="kthui keivenchang" $HOME/dynamo/dynamo-utils.dev/cron_log.sh remote_prs_working $HOME/dynamo/dynamo-utils.dev/html_pages/update_html_pages.sh --show-remote-branches
+* 0-1 * * * DYNAMO_HOME=$HOME/dynamo REMOTE_GITHUB_USERS="kthui keivenchang" $HOME/dynamo/dynamo-utils.dev/cron_log.sh remote_prs_working $HOME/dynamo/dynamo-utils.dev/html_pages/update_html_pages.sh --show-remote-branches
 ```
 
 **Off hours (6pm-8am PT):** Every 20 minutes
 ```cron
 # Off hours: 02:00-15:59 UTC
-*/20 2-15 * * * DYNAMO_HOME=$HOME/dynamo REMOTE_GITHUB_USERS="kthui keivenchang" $HOME/dynamo/dynamo-utils/cron_log.sh remote_prs_offhours $HOME/dynamo/dynamo-utils/html_pages/update_html_pages.sh --show-remote-branches
+*/20 2-15 * * * DYNAMO_HOME=$HOME/dynamo REMOTE_GITHUB_USERS="kthui keivenchang" $HOME/dynamo/dynamo-utils.dev/cron_log.sh remote_prs_offhours $HOME/dynamo/dynamo-utils.dev/html_pages/update_html_pages.sh --show-remote-branches
 ```
 
 **Output locations:**
@@ -197,13 +197,75 @@ python3 html_pages/show_commit_history.py \
 # Cache-only (skip GitLab)
 python3 html_pages/show_commit_history.py \
   --repo-path ~/dynamo/dynamo_latest \
-  --skip-gitlab-fetch \
+  --skip-gitlab-api \
   --output ~/dynamo/dynamo_latest/index.html
 ```
 
 ---
 
+
+## Performance & API Usage
+
+### Caching Architecture
+
+All dashboards use aggressive caching to minimize GitHub API usage:
+
+**Cache Types:**
+- **Memory cache** - Fast, per-process, short TTL
+- **Disk cache** - Persistent JSON files in `~/.cache/dynamo-utils/`
+- **ETag support** - 304 responses don't count against rate limit
+
+**Cache TTLs:**
+- Open PRs (recent commits <8h): 3 minutes
+- Open PRs (older commits ≥8h): 2 hours  
+- Closed/merged PRs: 30 days (immutable)
+- Completed jobs: ∞ (never changes)
+- In-progress jobs: 1 minute
+
+### API Consumption Patterns
+
+**Typical run (show_local_branches with warm cache):**
+- Total API calls: ~50-60
+- ETag 304 responses: ~4 (FREE)
+- Effective cost: ~45-55 calls
+
+**What consumes APIs:**
+1. **Batch prefetch (10-20 calls)** - Fetches all jobs for workflow runs to populate cache (optimization that avoids 500+ individual calls)
+2. **In-progress job checks (10-15 calls)** - Monitors running jobs for completion
+3. **Log downloads (5-10 calls)** - Fetches logs for new failures
+4. **Metadata refresh (10-20 calls)** - PR lists, check runs, workflow details
+
+**Cache hit rates (typical):**
+- actions_job_details: 97-99% (batch prefetch working)
+- pr_checks: 70-100% (depends on PR activity)
+- raw_log_text: 95-99% (failure logs cached)
+
+### ETag Optimization
+
+When cache TTL expires, ETag support minimizes actual data transfer:
+- Send request with `If-None-Match: <etag>`
+- GitHub returns 304 if data unchanged (FREE!)
+- Only 200 OK responses count against rate limit
+
+**ETag effectiveness:**
+- check_runs: 60-70% return 304
+- Completed workflow runs: ~100% return 304 (immutable)
+- In-progress jobs: 0% (data changing, can't use ETags)
+
+### Batch Prefetch
+
+Instead of fetching job details individually (500+ calls):
+1. Collect all run_ids from check-runs
+2. Batch fetch using `/actions/runs/{run_id}/jobs`
+3. Populate cache with all jobs (10-20 calls total)
+4. Individual lookups hit cache (100% hit rate)
+
+**Result:** 95%+ reduction in API calls
+
 ## Cron Wrapper
+
+
+**Error Handling:** When commands fail, errors are printed to stderr (terminal) in addition to being logged. This makes debugging interactive runs easier while maintaining clean cron behavior.
 
 `update_html_pages.sh` runs generators with atomic file updates.
 
@@ -211,20 +273,20 @@ python3 html_pages/show_commit_history.py \
 
 ```cron
 # Full update every 30 minutes
-0,30 * * * * DYNAMO_HOME=$HOME/dynamo $HOME/dynamo/dynamo-utils/cron_log.sh update_html_pages_full $HOME/dynamo/dynamo-utils/html_pages/update_html_pages.sh --show-local-branches --show-commit-history
+0,30 * * * * DYNAMO_HOME=$HOME/dynamo $HOME/dynamo/dynamo-utils.dev/cron_log.sh update_html_pages_full $HOME/dynamo/dynamo-utils.dev/html_pages/update_html_pages.sh --show-local-branches --show-commit-history
 
 # Cache-heavy between full updates (every 4 minutes)
-8-59/4 * * * * DYNAMO_HOME=$HOME/dynamo SKIP_GITLAB_FETCH=1 $HOME/dynamo/dynamo-utils/cron_log.sh update_html_pages_cached $HOME/dynamo/dynamo-utils/html_pages/update_html_pages.sh --show-local-branches --show-commit-history
+8-59/4 * * * * DYNAMO_HOME=$HOME/dynamo $HOME/dynamo/dynamo-utils.dev/cron_log.sh update_html_pages_cached $HOME/dynamo/dynamo-utils.dev/html_pages/update_html_pages.sh --show-local-branches --show-commit-history --skip-gitlab-api
 
 # Resource report (every minute)
-* * * * * DYNAMO_HOME=$HOME/dynamo $HOME/dynamo/dynamo-utils/cron_log.sh resource_report $HOME/dynamo/dynamo-utils/html_pages/update_html_pages.sh --show-local-resources
+* * * * * DYNAMO_HOME=$HOME/dynamo $HOME/dynamo/dynamo-utils.dev/cron_log.sh resource_report $HOME/dynamo/dynamo-utils.dev/html_pages/update_html_pages.sh --show-local-resources
 
 # Remote PRs - working hours (8am-6pm PT): every minute
-* 16-23 * * * DYNAMO_HOME=$HOME/dynamo REMOTE_GITHUB_USERS="kthui keivenchang" $HOME/dynamo/dynamo-utils/cron_log.sh remote_prs_working $HOME/dynamo/dynamo-utils/html_pages/update_html_pages.sh --show-remote-branches
-* 0-1 * * * DYNAMO_HOME=$HOME/dynamo REMOTE_GITHUB_USERS="kthui keivenchang" $HOME/dynamo/dynamo-utils/cron_log.sh remote_prs_working $HOME/dynamo/dynamo-utils/html_pages/update_html_pages.sh --show-remote-branches
+* 16-23 * * * DYNAMO_HOME=$HOME/dynamo REMOTE_GITHUB_USERS="kthui keivenchang" $HOME/dynamo/dynamo-utils.dev/cron_log.sh remote_prs_working $HOME/dynamo/dynamo-utils.dev/html_pages/update_html_pages.sh --show-remote-branches
+* 0-1 * * * DYNAMO_HOME=$HOME/dynamo REMOTE_GITHUB_USERS="kthui keivenchang" $HOME/dynamo/dynamo-utils.dev/cron_log.sh remote_prs_working $HOME/dynamo/dynamo-utils.dev/html_pages/update_html_pages.sh --show-remote-branches
 
 # Remote PRs - off hours (6pm-8am PT): every 20 minutes
-*/20 2-15 * * * DYNAMO_HOME=$HOME/dynamo REMOTE_GITHUB_USERS="kthui keivenchang" $HOME/dynamo/dynamo-utils/cron_log.sh remote_prs_offhours $HOME/dynamo/dynamo-utils/html_pages/update_html_pages.sh --show-remote-branches
+*/20 2-15 * * * DYNAMO_HOME=$HOME/dynamo REMOTE_GITHUB_USERS="kthui keivenchang" $HOME/dynamo/dynamo-utils.dev/cron_log.sh remote_prs_offhours $HOME/dynamo/dynamo-utils.dev/html_pages/update_html_pages.sh --show-remote-branches
 ```
 
 ### Logs
@@ -234,181 +296,25 @@ python3 html_pages/show_commit_history.py \
 
 ### Troubleshooting
 
-**Script exits too quickly?** Usually means a generator crashed.
+**Script reports failure?** Errors are now printed to stderr with log file location.
 
-1. Check per-generator logs:
-   ```bash
-   tail -200 html_pages/show_local_branches.log
-   tail -200 html_pages/show_commit_history.log
-   ```
-
-2. Run generator directly:
-   ```bash
-   # Debug-mode output (debug.html):
-   ./html_pages/update_html_pages.sh --fast-debug --show-local-branches
-   ```
-
-3. Common cause: Missing/renamed exports in `common_dashboard_lib.py`
-
----
-
-## Caching
-
-**Location:**
-- `~/.cache/dynamo-utils/` (default)
-- `$DYNAMO_UTILS_CACHE_DIR/` (override)
-
-**Key caches:**
-
-| Cache | Path | TTL | Purpose |
-|-------|------|-----|---------|
-| PR list | `pulls/` | 60s | Open PRs per repo |
-| PR checks | `pr-checks/` | 3-tier: 3m/2h/7d | Check-runs per PR (see below) |
-| PR info | `pr-info/pr_info.json` | Keyed by `updated_at` | Full PR details |
-| PR updated_at | `search-issues/` | 60s | Batched probe |
-| Required checks | `required-checks/` | Long-lived | Branch protection |
-| Job details | `actions-jobs/` | 600s | Steps/timings |
-| Raw log URLs | `raw-log-urls/` | 3600s | Signed URLs |
-| Raw log text | `raw-log-text/` | 30 days | Downloaded logs |
-
-**PR checks 3-tier TTL:**
-- **Merged/closed PRs**: 7 days (immutable, won't change)
-- **Open PRs, commit < 8h**: 3 minutes (CI actively running)
-- **Open PRs, commit ≥ 8h**: 2 hours (CI likely done, but might re-run)
-
-This adaptive TTL achieves ~97% cache hit rate while keeping active CI fresh.
-
-### Zero-API PRInfo Reuse
-
-For unchanged PRs, we skip all per-PR API calls:
-
-1. Batch probe `updated_at` via `/search/issues` (1 call for all PRs)
-2. Cache `PRInfo` keyed by `(pr_number, updated_at)`
-3. Reuse cached `PRInfo` if `updated_at` matches → **0 API calls**
-
-In cache-only/budget-exhausted mode, stale `PRInfo` is reused even when TTLs expire.
-
----
-
-## API Call Types
-
-Dashboards report GitHub REST usage by label (see `common.py`):
-
-**Common labels:**
-- `rate_limit` - Quota check
-- `search_issues` - Batched PR probe
-- `pulls_list` - Open PRs per repo
-- `pull_request` - PR details
-- `check_runs` - Check-runs per commit
-- `actions_run` - Workflow run metadata
-- `actions_job_status` - Job details
-- `actions_job_logs_zip` - Raw log download
-- `pr_review_comments` - Conversation count
-
-**Why calls happen "when nothing changed":**
-- Short TTL on check-runs (refreshes unsettled CI)
-- New workflow reruns (new `run_id`)
-- Missing raw logs (triggers download)
-- Phase breakdown fetch (job steps API)
-
----
-
-## API Call Example (One PR)
-
-Detailed walkthrough for branch `keivenchang/DIS-1200__refactor` with PR #5050:
-
-### Step 0: Rate Limit Check
-- `GET /rate_limit` (observability only)
-- **Calls:** 1-2 per run
-
-### Step 1: List Open PRs
-- `GET /repos/ai-dynamo/dynamo/pulls?state=open&per_page=100`
-- **Cache:** 60s TTL
-- **Calls:** 0 (cached) or 1
-
-### Step 2: Per-PR Enrichment
-
-**2A) Probe updated_at (batched)**
-- `GET /search/issues?q=repo:ai-dynamo/dynamo type:pr number:5050 ...`
-- Returns `updated_at` for all PRs in one call
-- If matches cached `PRInfo` → **skip all remaining per-PR calls**
-- **Cache:** 60s TTL
-- **Calls:** 0 (cached) or 1
-
-**2B) Fetch PR + checks (if updated)**
-- `GET /repos/ai-dynamo/dynamo/pulls/5050`
-- `GET /repos/ai-dynamo/dynamo/commits/{sha}/check-runs`
-- **Cache:** 3-tier TTL (3m/2h/7d, see above)
-- **Calls:** 0-2
-
-**2C) Required checks (long-lived)**
-- GraphQL via `gh api graphql`
-- **Cache:** Persistent (rarely changes)
-- **Calls:** 0-1
-
-**2D) Review comments**
-- `GET /repos/ai-dynamo/dynamo/pulls/5050/comments`
-- **Cache:** None (not cached today)
-- **Calls:** 0-1
-
-### Step 3: Failed Job Logs (on failures)
-
-**3A) Job status**
-- `GET /repos/ai-dynamo/dynamo/actions/jobs/{job_id}`
-- **Cache:** 120s TTL (memory)
-- **Calls:** 0-2 (per failed job)
-
-**3B) Download logs**
-- `GET /repos/ai-dynamo/dynamo/actions/jobs/{job_id}/logs`
-- **Cache:** 30 days (persistent)
-- **Calls:** 0-2 (download once, reuse forever)
-
-**3C) Job details (for phase breakdown)**
-- `GET /repos/ai-dynamo/dynamo/actions/jobs/{job_id}`
-- **Cache:** 600s TTL
-- **Calls:** 0-1 (for `Build and Test - dynamo` jobs)
-
-### Call Count Summary (One PR)
-
-**Best case (warm caches, nothing changed):**
-- Total: **1-2 calls** (just rate_limit)
-
-**Worst case (cold caches):**
-- `rate_limit`: 1-2
-- `pulls_list`: 1
-- `search_issues`: 1
-- `pull_request`: 2
-- `check_runs`: 2
-- `required_status_checks`: 1
-- `pr_review_comments`: 1
-- `actions_run`: 3 (per unique run_id)
-- `actions_job_status`: 2
-- `actions_job_logs_zip`: 2
-- Total: **15-16 calls**
-
-Multiply by number of PRs to estimate total. Budget (`--max-github-api-calls`) caps total and switches to cache-only mode when exhausted.
-
----
-
-## Quick Reference
-
-**Node hierarchy:** See `common_dashboard_lib.py` module docstring for complete tree structure and creation flow
-
-**Common modifications:**
-- Branch line format → `BranchInfoNode.to_tree_vm()`
-- CI expansion logic → `PRStatusWithJobsNode.to_tree_vm()` or `ci_should_expand_by_default()`
-- Pass customization → `common_dashboard_lib.py` (PASS -1 through PASS 8)
-
----
-
-## Operational Runbook
-
-### Running `update_html_pages.sh`
-
+Example output:
 ```bash
-cd html_pages
-./update_html_pages.sh
+$ ./html_pages/update_html_pages.sh --show-local-branches
+ERROR: Failed to update /home/keivenc/dynamo/index.html
+See log for details: /home/keivenc/dynamo/logs/2026-01-23/show_local_branches.log
 ```
+
+1. Check the log file path shown in the error message
+2. Look for Python tracebacks or error messages:
+   ```bash
+   tail -50 /home/keivenc/dynamo/logs/2026-01-23/show_local_branches.log
+   ```
+
+3. Run with --debug-html for faster iteration:
+   ```bash
+   ./html_pages/update_html_pages.sh --debug-html --show-local-branches
+   ```
 
 **Notes:**
 - If running from cron, expect most output to go to files under `~/dynamo/logs/<YYYY-MM-DD>/` (not stdout)
@@ -416,11 +322,11 @@ cd html_pages
 - Default behavior (no flags): Runs all tasks (local branches + commit history + resource report + remote PRs)
 
 **Common flags:**
-- `--show-local-branches` - Update branches dashboard only
-- `--show-commit-history` - Update commit history dashboard only
 - `--show-local-resources` - Update resource report only
+- `--show-local-branches` - Update branches dashboard only
 - `--show-remote-branches` - Update remote PRs dashboard only
-- `--output-debug-html` - Fast mode: smaller commit window (25 commits), outputs to debug.html
+- `--show-commit-history` - Update commit history dashboard only
+- `--debug-html` - Fast mode: smaller commit window (25 commits), outputs to debug.html
 - `--skip-gitlab-api` - Skip GitLab fetching (faster, cache-only for registry data)
 - `--github-token <token>` - Override GitHub token
 
@@ -435,7 +341,7 @@ ls -lah ~/dynamo/speedoflight/stats/index.html  # stats landing page
 
 **Common foot-guns:**
 - There are **two repos**: `dynamo-utils.dev/` (dev) and `dynamo-utils/` (prod). If working on dev only, run the dev script: `dynamo-utils.dev/html_pages/update_html_pages.sh`
-- `update_html_pages.sh --fast` is intentionally **removed**; use `--output-debug-html` instead
+- `update_html_pages.sh --fast` is intentionally **removed**; use `--debug-html` instead
 - Per-component logs are **append-only** and may contain older, non-prefixed lines from previous runs
 - If a log message is missing commit SHA context, the caller didn't pass `commit_sha` through to helpers
 
