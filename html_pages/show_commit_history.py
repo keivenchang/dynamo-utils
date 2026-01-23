@@ -925,6 +925,8 @@ class CommitHistoryGenerator:
                         'conclusion': 'success' if row.status_raw == 'pass' else ('failure' if row.status_raw == 'fail' else row.status_raw),
                         'html_url': row.url,
                         'details_url': row.url,
+                        'run_id': row.run_id,  # Pass through for prefetching
+                        'job_id': row.job_id,  # Pass through for stable identity
                     })
 
                 # Assign same check runs to all SHAs in this PR
@@ -1484,6 +1486,8 @@ class CommitHistoryGenerator:
                 url = "" if is_expected_placeholder else str(cr.get("html_url", "") or cr.get("details_url", "") or "").strip()
                 st = _status_norm_for_check_run(status=str(cr.get("status", "") or ""), conclusion=str(cr.get("conclusion", "") or ""))
                 is_req = bool(cr.get("is_required", False))
+                run_id = str(cr.get("run_id", "") or "").strip()
+                job_id = str(cr.get("job_id", "") or "").strip()
 
                 raw_href = ""
                 raw_size = 0
@@ -1571,6 +1575,8 @@ class CommitHistoryGenerator:
                         "is_required": is_req,
                         "raw_href": raw_href,
                         "raw_size": raw_size,
+                        "run_id": run_id,
+                        "job_id": job_id,
                     }
                 )
 
@@ -1601,6 +1607,9 @@ class CommitHistoryGenerator:
                 is_req = bool(info.get("is_required", False))
                 raw_href = str(info.get("raw_href", "") or "")
                 raw_size = int(info.get("raw_size", 0) or 0)
+                run_id = str(info.get("run_id", "") or "")
+                job_id = str(info.get("job_id", "") or "")
+                
                 snippet, snippet_categories = snippets_by_href.get(raw_href, ("", [])) if raw_href else ("", [])
 
                 # Duration already calculated earlier (from raw log or API), stored in check_infos
@@ -1612,6 +1621,8 @@ class CommitHistoryGenerator:
                     status=st,
                     duration=dur,
                     log_url=url,
+                    actions_job_id=job_id,  # Pass job_id for stable identity
+                    run_id=run_id,  # Pass run_id for batch prefetching
                     is_required=is_req,
                     children=[],
                     page_root_dir=(output_path.parent if output_path else Path(self.repo_path)).resolve(),

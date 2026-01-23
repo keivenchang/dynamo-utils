@@ -1906,11 +1906,32 @@ class GitHubAPIClient:
         return head_sha
 
     def _load_actions_job_disk_cache(self) -> Dict[str, Any]:
+        """Load actions jobs disk cache with in-memory caching to avoid repeated file I/O."""
+        # Check if we have a cached copy in memory (invalidate based on file mtime)
         self._actions_job_cache_dir.mkdir(parents=True, exist_ok=True)
         p = self._actions_job_cache_dir / "actions_jobs.json"
+        
         if not p.exists():
             return {}
-        return self._json_load_text(p.read_text() or "{}")
+        
+        # Check if we have a fresh in-memory copy
+        try:
+            current_mtime = p.stat().st_mtime_ns
+            if hasattr(self, '_actions_job_disk_cache_snapshot'):
+                cached_mtime, cached_data = self._actions_job_disk_cache_snapshot
+                if cached_mtime == current_mtime:
+                    # File hasn't changed, use cached copy
+                    return cached_data
+        except (OSError, AttributeError):
+            pass
+        
+        # Load from disk and cache in memory
+        data = self._json_load_text(p.read_text() or "{}")
+        try:
+            self._actions_job_disk_cache_snapshot = (p.stat().st_mtime_ns, data)
+        except OSError:
+            pass
+        return data
 
     def _save_actions_job_disk_cache(self, key: str, value: Dict[str, Any]) -> None:
         """Atomically update a single entry in actions_jobs disk cache."""

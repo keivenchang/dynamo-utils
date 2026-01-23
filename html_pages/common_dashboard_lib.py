@@ -868,9 +868,18 @@ def add_job_steps_and_tests_pass(ci_nodes: List, repo_root: Path) -> List:
     Returns:
         Same list of nodes, with CIJobNode.children populated with step/test nodes
     """
+    import time  # For detailed timing
     from common_branch_nodes import CIJobNode, CIStepNode, CIPytestNode, _duration_str_to_seconds
     
     logger.info(f"[add_job_steps_and_tests_pass] Processing {len(ci_nodes)} nodes")
+    
+    # Track timing breakdown
+    timing_stats = {
+        'ci_subsection_tuples_for_job': 0.0,
+        'create_step_nodes': 0.0,
+        'total_jobs_processed': 0,
+        'total_steps_created': 0,
+    }
 
     for node in ci_nodes:
         if not isinstance(node, CIJobNode):
@@ -880,6 +889,8 @@ def add_job_steps_and_tests_pass(ci_nodes: List, repo_root: Path) -> List:
         if node.children:
             logger.debug(f"[add_job_steps_and_tests_pass] Skipping {node.job_id} (already has {len(node.children)} children)")
             continue
+
+        timing_stats['total_jobs_processed'] += 1
 
         # Extract parameters from the CIJobNode
         job_name = node.display_name or node.job_id or ""
@@ -898,7 +909,8 @@ def add_job_steps_and_tests_pass(ci_nodes: List, repo_root: Path) -> List:
         dur_str = node.duration or ""
         dur_seconds = _duration_str_to_seconds(dur_str)
 
-        # Get step tuples using the centralized logic
+        # Get step tuples using the centralized logic (TIME THIS)
+        t0 = time.monotonic()
         step_tuples = ci_subsection_tuples_for_job(
             github_api=github_api,
             job_name=job_name,
@@ -909,6 +921,8 @@ def add_job_steps_and_tests_pass(ci_nodes: List, repo_root: Path) -> List:
             long_job_threshold_s=10.0 * 60.0,
             step_min_s=10.0,
         )
+        timing_stats['ci_subsection_tuples_for_job'] += time.monotonic() - t0
+        timing_stats['ci_subsection_tuples_for_job'] += time.monotonic() - t0
 
         if not step_tuples:
             # Debug: Log why we skipped this job
@@ -921,7 +935,8 @@ def add_job_steps_and_tests_pass(ci_nodes: List, repo_root: Path) -> List:
             )
             continue
 
-        # Create child nodes for each step
+        # Create child nodes for each step (TIME THIS)
+        t0 = time.monotonic()
         # Pytest tests (with └─ prefix) should be children of the "Run tests" step
         current_test_parent: Optional[CIJobNode] = None
         for (step_name, step_dur, step_status) in step_tuples:
@@ -967,7 +982,18 @@ def add_job_steps_and_tests_pass(ci_nodes: List, repo_root: Path) -> List:
                 else:
                     current_test_parent = None
 
+        timing_stats['create_step_nodes'] += time.monotonic() - t0
+        timing_stats['total_steps_created'] += len(node.children)
         logger.debug(f"[add_job_steps_and_tests_pass] Added {len(node.children)} step/test children to {node.job_id}")
+    
+    # Log detailed timing breakdown
+    logger.debug(
+        f"[add_job_steps_and_tests_pass] Timing breakdown: "
+        f"jobs_processed={timing_stats['total_jobs_processed']}, "
+        f"steps_created={timing_stats['total_steps_created']}, "
+        f"ci_subsection_tuples={timing_stats['ci_subsection_tuples_for_job']:.3f}s, "
+        f"create_nodes={timing_stats['create_step_nodes']:.3f}s"
+    )
     
     logger.info(f"[add_job_steps_and_tests_pass] Complete")
     return ci_nodes
@@ -2662,25 +2688,43 @@ def actions_job_step_tuples(
     ttl_s: int = 30 * 24 * 3600,
 ) -> List[Tuple[str, str, str]]:
     """Fetch job details (cached) and return long-running steps (duration >= min_seconds)."""
+    import time  # For timing analysis
+    t_start = time.monotonic()
+    
     if not github_api:
         logger.debug(f"[actions_job_step_tuples] No github_api provided")
         return []
+    
+    t0 = time.monotonic()
     jid = extract_actions_job_id_from_url(str(job_url or ""))
+    t_extract_jid = time.monotonic() - t0
+    
     if not jid:
         logger.debug(f"[actions_job_step_tuples] Could not extract job ID from URL: {job_url}")
         return []
+    
+    t0 = time.monotonic()
     job = github_api.get_actions_job_details_cached(
         owner="ai-dynamo", repo="dynamo", job_id=jid, ttl_s=int(ttl_s)
     ) or {}
+    t_get_cached = time.monotonic() - t0
+    
     if not isinstance(job, dict):
         logger.debug(f"[actions_job_step_tuples] Job data not a dict for job_id={jid}")
         return []
     steps_in_dict = len(job.get('steps', [])) if isinstance(job.get('steps'), list) else 0
+    
+    t0 = time.monotonic()
     result = actions_job_steps_over_threshold_from_actions_job(job, min_seconds=float(min_seconds))
-    logger.debug(
-        f"[actions_job_step_tuples] job_id={jid}, steps_in_dict={steps_in_dict}, "
-        f"min_seconds={min_seconds}, filtered_result={len(result)}"
-    )
+    t_filter = time.monotonic() - t0
+    
+    t_total = time.monotonic() - t_start
+    if t_total > 0.05:  # Log if >50ms
+        logger.debug(
+            f"[actions_job_step_tuples] job_id={jid}, total={t_total:.3f}s "
+            f"(extract={t_extract_jid:.3f}s, get_cached={t_get_cached:.3f}s, filter={t_filter:.3f}s), "
+            f"steps_in_dict={steps_in_dict}, min_seconds={min_seconds}, filtered_result={len(result)}"
+        )
     return result
 
 
@@ -2817,6 +2861,9 @@ def ci_subsection_tuples_for_job(
     - Other build/test jobs: return all job steps (vllm-build-test, sglang-build-test, trtllm-build-test, etc.).
     - Other long-running Actions jobs: return job steps >= step_min_s.
     """
+    import time  # For detailed timing
+    t_start = time.monotonic()
+    
     nm = str(job_name or "").strip()
     if not nm:
         return []
@@ -2826,22 +2873,27 @@ def ci_subsection_tuples_for_job(
 
     # Special case: "Build and Test - dynamo" has custom phase extraction
     if nm == "Build and Test - dynamo":
+        t0 = time.monotonic()
         phases = build_and_test_dynamo_phase_tuples(
             github_api=github_api,
             job_url=str(job_url or ""),
             raw_log_path=raw_log_path,
             is_required=bool(is_required),
         )
+        t_phases = time.monotonic() - t0
+        
         # Also include *non-phase* steps so we can surface useful failures like
         # "Copy test report..." without duplicating the phase rows.
         #
         # Policy for REQUIRED jobs: show all failing steps + steps >= threshold; ignore the rest.
+        t0 = time.monotonic()
         steps = actions_job_step_tuples(
             github_api=github_api,
             job_url=str(job_url or ""),
             # Build/test UX: show all steps (not just slow ones).
             min_seconds=0.0,
         )
+        t_steps = time.monotonic() - t0
 
         def _covered_by_phase(step_name: str) -> bool:
             s = str(step_name or "").strip().lower()
@@ -2863,11 +2915,13 @@ def ci_subsection_tuples_for_job(
 
         # Apply pytest test extraction to "Run tests" steps and "test: pytest" phases (same as other build-test jobs)
         result = []
+        t_pytest_total = 0.0
         for step_name, step_dur, step_status in out:
             result.append((step_name, step_dur, step_status))
 
             # If this is a "Run tests" step or a "test: pytest" phase, parse pytest slowest tests from raw log
             if is_python_test_step(step_name) and raw_log_path:
+                t0 = time.monotonic()
                 pytest_tests = pytest_slowest_tests_from_raw_log(
                     raw_log_path=raw_log_path,
                     # Tests: list *all* per-test timings in order (do not filter).
@@ -2875,10 +2929,17 @@ def ci_subsection_tuples_for_job(
                     include_all=True,
                     step_name=step_name,
                 )
+                t_pytest_total += time.monotonic() - t0
                 # Add pytest tests as indented entries
                 for test_name, test_dur, test_status in pytest_tests:
                     result.append((f"  └─ {test_name}", test_dur, test_status))
 
+        t_total = time.monotonic() - t_start
+        if t_total > 0.1:  # Log only if >100ms
+            logger.debug(
+                f"[ci_subsection_tuples_for_job] '{nm}' took {t_total:.3f}s: "
+                f"phases={t_phases:.3f}s, steps={t_steps:.3f}s, pytest={t_pytest_total:.3f}s"
+            )
         return result
 
     # REQUIRED jobs: always show failing steps + steps >= threshold (even if job isn't "long-running").
@@ -2889,19 +2950,24 @@ def ci_subsection_tuples_for_job(
     # This covers: vllm-build-test, sglang-build-test, trtllm-build-test (with cuda/arch variants), etc.
     if is_build_test:
         # Build/test UX: show all steps (not just slow ones).
+        t0 = time.monotonic()
         steps = actions_job_step_tuples(github_api=github_api, job_url=str(job_url or ""), min_seconds=0.0)
+        t_steps = time.monotonic() - t0
+        
         logger.debug(
             f"[ci_subsection_tuples_for_job] Build-test job '{nm}': "
-            f"fetched {len(steps) if steps else 0} steps from API"
+            f"fetched {len(steps) if steps else 0} steps from API in {t_steps:.3f}s"
         )
 
         # For each step, check if it's "Run tests" - if so, add pytest tests as additional entries
         result = []
+        t_pytest_total = 0.0
         for step_name, step_dur, step_status in (steps or []):
             result.append((step_name, step_dur, step_status))
 
             # If this is a "Run tests" step, parse pytest slowest tests from raw log
             if is_python_test_step(step_name) and raw_log_path:
+                t0 = time.monotonic()
                 pytest_tests = pytest_slowest_tests_from_raw_log(
                     raw_log_path=raw_log_path,
                     # Tests: list *all* per-test timings in order (do not filter).
@@ -2909,11 +2975,18 @@ def ci_subsection_tuples_for_job(
                     include_all=True,
                     step_name=step_name,
                 )
+                t_pytest_total += time.monotonic() - t0
                 # Add pytest tests as indented/prefixed entries
                 for test_name, test_dur, test_status in pytest_tests:
                     # Prefix with indentation to show hierarchy
                     result.append((f"  └─ {test_name}", test_dur, test_status))
 
+        t_total = time.monotonic() - t_start
+        if t_total > 0.1:  # Log only if >100ms
+            logger.debug(
+                f"[ci_subsection_tuples_for_job] '{nm}' took {t_total:.3f}s: "
+                f"steps={t_steps:.3f}s, pytest={t_pytest_total:.3f}s"
+            )
         return result
 
     # Non-required jobs: show steps only for long-running jobs (avoid noise).

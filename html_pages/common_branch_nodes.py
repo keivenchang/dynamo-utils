@@ -570,6 +570,7 @@ class CIJobNode(BranchNode):
         duration: str = "",
         log_url: str = "",
         actions_job_id: str = "",  # GitHub Actions job id (from checks rows), for stable identity across reruns
+        run_id: str = "",  # GitHub Actions run id (workflow run), for batch prefetching job details
         core_job_name: str = "",  # Optional "core" display name (without workflow prefix/event suffix)
         is_required: bool = False,
         is_synthetic: bool = False,  # Synthetic nodes (steps / parsed tests) should be visually distinct
@@ -591,6 +592,7 @@ class CIJobNode(BranchNode):
         self.duration = str(duration or "")
         self.log_url = str(log_url or "")
         self.actions_job_id = str(actions_job_id or "")
+        self.run_id = str(run_id or "")
         self.core_job_name = str(core_job_name or "")
         self.is_required = bool(is_required)
         self.is_synthetic = bool(is_synthetic)
@@ -1389,6 +1391,7 @@ def build_ci_nodes_from_pr(
             duration=str(r.duration or ""),
             log_url=job_url,
             actions_job_id=str(r.job_id or ""),
+            run_id=str(r.run_id or ""),  # Pass run_id for batch prefetching
             is_required=bool(r.is_required),
             children=[],
             # Use base_dir (page_root_dir if provided, else repo_path) so downstream passes can resolve raw_log_href.
