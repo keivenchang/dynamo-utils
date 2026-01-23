@@ -4047,6 +4047,7 @@ def check_line_html(
     icon_px: int = 12,
     short_job_name: str = "",  # Short YAML job name (e.g., "build-test")
     yaml_dependencies: Optional[List[str]] = None,  # List of dependencies from YAML
+    is_pytest_node: bool = False,  # True if this is a CIPytestNode (for Grafana links)
 ) -> str:
     # Expected placeholder checks:
     # - Use a normal gray dot (same as queued/pending) instead of the special ◇ symbol
@@ -4191,12 +4192,10 @@ def check_line_html(
             links += _tag_pill_html(text=cmd, monospace=True, kind="command", snippet_key=snippet_key)
 
     # Detect pytest tests and add Grafana button
-    # Pattern: [call] tests/serve/test_vllm.py::test_serve_deployment[aggregated] (1m 41s)
-    # We want to extract "test_serve_deployment[aggregated]" and create a Grafana link
-    pytest_match = re.match(r'\[call\]\s+tests/[^:]+::(.+)', str(job_id or ""))
-    if pytest_match:
-        # Extract the test name (e.g., "test_serve_deployment[aggregated]")
-        test_name = pytest_match.group(1).strip()
+    # Only add the button if this is explicitly a CIPytestNode
+    if is_pytest_node and '::' in str(job_id or ""):
+        # Extract the test name after the last "::"
+        test_name = str(job_id or "").split('::')[-1].strip()
         if test_name:
             # URL-encode the test name for the Grafana URL
             test_name_encoded = urllib.parse.quote(test_name)

@@ -611,6 +611,10 @@ class CIJobNode(BranchNode):
         # Use pre-materialized raw log data (set during build_ci_nodes_from_pr)
         # No need to re-materialize here - it's already been done
         
+        # Check if this is a CIPytestNode (for Grafana test links)
+        from common_branch_nodes import CIPytestNode
+        is_pytest = isinstance(self, CIPytestNode)
+        
         # Use shared check_line_html to generate the HTML (without snippet inline)
         label_html = check_line_html(
             job_id=self.job_id,
@@ -628,6 +632,7 @@ class CIJobNode(BranchNode):
             icon_px=(7 if self.is_synthetic else 12),
             short_job_name=self.short_job_name,
             yaml_dependencies=self.yaml_dependencies,
+            is_pytest_node=is_pytest,
         )
         
         # Build children: existing children + snippet node (if present)
