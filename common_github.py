@@ -75,6 +75,7 @@ from common import (
 from cache.cache_merge_dates import MERGE_DATES_CACHE
 from cache.cache_pulls_list import PULLS_LIST_CACHE
 from cache.cache_pr_branch import PR_BRANCH_CACHE
+from cache.cache_required_checks import REQUIRED_CHECKS_CACHE
 
 # Module logger
 _logger = logging.getLogger(__name__)
@@ -1254,9 +1255,6 @@ class GitHubAPIClient:
 
         # Cache for required status checks (branch protection). This changes rarely and is safe to cache
         # for a long time. Keyed by (owner, repo, base_ref).
-        self._required_checks_mem_cache: Dict[str, Dict[str, Any]] = {}
-        self._required_checks_cache_dir = dynamo_utils_cache_dir() / "required-checks"
-
         # Cache for enriched PRInfo objects keyed by (owner/repo, pr_number, updated_at).
         # This is the main knob that allows "0 API calls" for stable PRs: if the PR wasn't updated,
         # we reuse the cached enrichment (ci_status, failed checks, etc).
@@ -1318,15 +1316,6 @@ class GitHubAPIClient:
                 self._initial_disk_counts["raw_log_text_disk"] = len(raw_log_index) if isinstance(raw_log_index, dict) else 0
             else:
                 self._initial_disk_counts["raw_log_text_disk"] = 0
-            
-            # Required checks
-            required_checks_file = self._required_checks_cache_dir / "required_checks.json"
-            if required_checks_file.exists():
-                with open(required_checks_file, 'r') as f:
-                    req_checks = json.load(f)
-                self._initial_disk_counts["required_checks_disk"] = len(req_checks) if isinstance(req_checks, dict) else 0
-            else:
-                self._initial_disk_counts["required_checks_disk"] = 0
             
             # Merge dates
             merge_dates_file = dynamo_utils_cache_dir() / "github_pr_merge_dates.json"
@@ -1518,6 +1507,9 @@ class GitHubAPIClient:
         # Get pr_branch counts from PR_BRANCH_CACHE
         pr_branch_mem, pr_branch_disk = PR_BRANCH_CACHE.get_cache_sizes()
         
+        # Get required_checks counts from REQUIRED_CHECKS_CACHE
+        required_checks_mem, required_checks_disk = REQUIRED_CHECKS_CACHE.get_cache_sizes()
+        
         cache_sizes = {
             "pr_checks_mem": len(self._pr_checks_mem_cache),
             "pulls_list_mem": len(self._pulls_list_mem_cache),
@@ -1525,11 +1517,12 @@ class GitHubAPIClient:
             "raw_log_text_mem": len(self._raw_log_text_mem_cache),
             "actions_job_status_mem": len(self._actions_job_status_mem_cache),
             "actions_job_details_mem": len(self._actions_job_details_mem_cache),
-            "required_checks_mem": len(self._required_checks_mem_cache),
+            "required_checks_mem": required_checks_mem,
             "pr_info_mem": len(self._pr_info_mem_cache),
             "search_issues_mem": len(self._search_issues_mem_cache),
             "job_log_mem": len(self._job_log_cache),
             "pr_branch_disk": pr_branch_disk,
+            "required_checks_disk": required_checks_disk,
         }
 
         # Disk cache counts - show initial counts before this run's modifications
@@ -1538,7 +1531,7 @@ class GitHubAPIClient:
         # Use initial counts captured at initialization
         for key in ["actions_job_status_disk", "actions_job_details_disk", "pr_checks_disk", "pulls_list_disk",
                     "pr_info_disk", "search_issues_disk", "job_log_disk", 
-                    "raw_log_text_disk", "required_checks_disk", "merge_dates_disk"]:
+                    "raw_log_text_disk", "merge_dates_disk"]:
             cache_sizes[key] = self._initial_disk_counts.get(key, 0)
 
         return {
@@ -4426,39 +4419,12 @@ class GitHubAPIClient:
         cache_key = f"required_checks:{owner}/{repo}:pr{prn}"
         now = int(time.time())
         
-        # 1) Memory cache
-        try:
-            if not hasattr(self, "_required_checks_pr_mem_cache"):
-                self._required_checks_pr_mem_cache = {}
-            ent = self._required_checks_pr_mem_cache.get(cache_key)
-            if isinstance(ent, dict):
-                val = ent.get("val")
-                if isinstance(val, set) and (self.cache_only_mode or _is_cache_entry_valid(ent, now=now)):
-                    return val
-        except (ValueError, TypeError):
-            pass
-        
-        # 2) Disk cache
-        try:
-            disk = self._load_required_checks_disk_cache()
-            ent = disk.get(cache_key) if isinstance(disk, dict) else None
-            if isinstance(ent, dict):
-                val = ent.get("val")
-                if isinstance(val, list) and (self.cache_only_mode or _is_cache_entry_valid(ent, now=now)):
-                    out = set(val)
-                    if not hasattr(self, "_required_checks_pr_mem_cache"):
-                        self._required_checks_pr_mem_cache = {}
-                    # Preserve metadata so the mem-cache entry obeys the same TTL as disk.
-                    self._required_checks_pr_mem_cache[cache_key] = {
-                        "ts": int(ent.get("ts", 0) or 0),
-                        "val": out,
-                        "ok": ent.get("ok", True),
-                        "pr_state": ent.get("pr_state", "open"),
-                        "pr_updated_at_epoch": ent.get("pr_updated_at_epoch", None),
-                    }
-                    return out
-        except (ValueError, TypeError):
-            pass
+        # Try cache (uses get_if_valid which handles TTL validation)
+        cached_entry = REQUIRED_CHECKS_CACHE.get_if_valid(cache_key, cache_only_mode=self.cache_only_mode, check_ttl=False)
+        if cached_entry is not None:
+            # Custom TTL validation
+            if self.cache_only_mode or _is_cache_entry_valid(cached_entry, now=now):
+                return cached_entry.get("val", set())
         
         # Cache-only mode: do not fetch network; return empty if we have nothing.
         if self.cache_only_mode:
@@ -4508,18 +4474,12 @@ class GitHubAPIClient:
                 pr_updated_at_epoch = None
             if not pr_node_id:
                 # Cache negative result (PR not found / not accessible)
-                if not hasattr(self, "_required_checks_pr_mem_cache"):
-                    self._required_checks_pr_mem_cache = {}
-                self._required_checks_pr_mem_cache[cache_key] = {
-                    "ts": now,
-                    "val": set(),
-                    "ok": False,
-                    "pr_state": pr_state,
-                    "pr_updated_at_epoch": pr_updated_at_epoch,
-                }
-                self._save_required_checks_disk_cache(
+                REQUIRED_CHECKS_CACHE.put(
                     cache_key,
-                    {"ts": now, "val": [], "ok": False, "pr_state": pr_state, "pr_updated_at_epoch": pr_updated_at_epoch},
+                    set(),
+                    ok=False,
+                    pr_state=pr_state,
+                    pr_updated_at_epoch=pr_updated_at_epoch,
                 )
                 return set()
 
@@ -4641,59 +4601,24 @@ query($owner:String!,$name:String!,$number:Int!,$prid:ID!,$after:String) {
                     break
             
             # Cache the results with tiered TTL based on PR state and commit age.
-            if not hasattr(self, "_required_checks_pr_mem_cache"):
-                self._required_checks_pr_mem_cache = {}
-            self._required_checks_pr_mem_cache[cache_key] = {
-                "ts": now,
-                "val": all_required,
-                "ok": True,
-                "pr_state": pr_state,
-                "pr_updated_at_epoch": pr_updated_at_epoch,
-            }
-
-            # Save to disk cache using DiskCacheWriter (enforces lock-load-merge-save)
-            self._save_required_checks_disk_cache(
+            REQUIRED_CHECKS_CACHE.put(
                 cache_key,
-                {
-                    "ts": now,
-                    "val": sorted(all_required),
-                    "ok": True,
-                    "pr_state": pr_state,
-                    "pr_updated_at_epoch": pr_updated_at_epoch,
-                },
+                all_required,
+                ok=True,
+                pr_state=pr_state,
+                pr_updated_at_epoch=pr_updated_at_epoch,
             )
 
             return all_required
         except (OSError, subprocess.SubprocessError, json.JSONDecodeError):  # subprocess or JSON parsing failures
             # Cache negative result (fetch failed)
-            if not hasattr(self, "_required_checks_pr_mem_cache"):
-                self._required_checks_pr_mem_cache = {}
-            self._required_checks_pr_mem_cache[cache_key] = {"ts": now, "val": set(), "ok": False, "pr_state": "open"}
-            self._save_required_checks_disk_cache(cache_key, {"ts": now, "val": [], "ok": False, "pr_state": "open"})
+            REQUIRED_CHECKS_CACHE.put(
+                cache_key,
+                set(),
+                ok=False,
+                pr_state="open",
+            )
             return set()
-
-    def _required_checks_cache_key(self, owner: str, repo: str, base_ref: str) -> str:
-        return f"{owner}/{repo}:required_checks:{str(base_ref or '').strip()}"
-
-    def _load_required_checks_disk_cache(self) -> Dict[str, Any]:
-        p = self._required_checks_cache_dir / "required_checks.json"
-        if not p.exists():
-            return {}
-        return self._json_load_text(p.read_text() or "{}")
-
-    def _save_required_checks_disk_cache(self, key: str, value: Dict[str, Any]) -> None:
-        """Atomically update a single entry in required_checks disk cache."""
-        _save_single_disk_cache_entry(
-            cache_dir=self._required_checks_cache_dir,
-            cache_filename="required_checks.json",
-            lock_filename="required_checks.lock",
-            load_fn=self._load_required_checks_disk_cache,
-            json_dump_fn=lambda d: self._json_dump_text(d, indent=None),
-            key=key,
-            value=value,
-            stats_fn=lambda entries: self._cache_write("required_checks.disk_write", entries=entries),
-        )
-
 
     def _pr_info_cache_key(self, owner: str, repo: str, pr_number: int) -> str:
         return f"{owner}/{repo}#pr:{int(pr_number)}"
