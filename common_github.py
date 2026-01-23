@@ -73,6 +73,7 @@ from common import (
 
 # Cache modules - incremental migration in progress
 from cache.cache_merge_dates import MERGE_DATES_CACHE
+from cache.cache_pulls_list import PULLS_LIST_CACHE
 
 # Module logger
 _logger = logging.getLogger(__name__)
@@ -2820,113 +2821,42 @@ class GitHubAPIClient:
 
         Returns:
             List of PR dicts (GitHub REST API /pulls response objects).
+            
+        Note: ETag support removed for simplification. Can be re-added later if needed.
+              Implementation: Store ETag in cache value, use If-None-Match header,
+              handle 304 responses to avoid re-downloading unchanged data.
         """
         cache_key = self._pulls_list_cache_key(owner, repo, state)
-        now = int(time.time())
 
-        # Memory cache
-        mem = self._pulls_list_mem_cache.get(cache_key)
-        if mem and isinstance(mem, dict):
-            ts = int(mem.get("ts") or 0)
-            if (now - ts) <= int(ttl_s):
-                items = mem.get("items")
-                if isinstance(items, list):
-                    self._cache_hit("pulls_list.mem")
-                    return items  # type: ignore[return-value]
+        # Check cache (PULLS_LIST_CACHE handles both mem and disk internally)
+        cached = PULLS_LIST_CACHE.get_if_fresh(cache_key, ttl_s=ttl_s)
+        if cached is not None:
+            self._cache_hit("pulls_list.disk")
+            return cached
 
-        # Disk cache
-        disk = self._load_pulls_list_disk_cache()
-        entry = disk.get(cache_key) if isinstance(disk, dict) else None
-        if isinstance(entry, dict):
-            ts = int(entry.get("ts") or 0)
-            if (now - ts) <= int(ttl_s):
-                items = entry.get("items")
-                if isinstance(items, list):
-                    etag = str(entry.get("etag", "") or "")
-                    self._pulls_list_mem_cache[cache_key] = {"ts": ts, "items": items, "etag": etag}
-                    self._cache_hit("pulls_list.disk")
-                    return items  # type: ignore[return-value]
-            # Cache-only mode: return stale disk cache if present.
-            if self.cache_only_mode:
-                items = entry.get("items")
-                if isinstance(items, list):
-                    etag = str(entry.get("etag", "") or "")
-                    self._pulls_list_mem_cache[cache_key] = {"ts": ts, "items": items, "etag": etag}
-                    self._cache_hit("pulls_list.disk_stale_cache_only")
-                    return items  # type: ignore[return-value]
-
-        # Cache-only mode: return stale memory cache if present, else empty (no network).
+        # Cache-only mode: return empty (no network)
         if self.cache_only_mode:
-            mem = self._pulls_list_mem_cache.get(cache_key)
-            if isinstance(mem, dict) and isinstance(mem.get("items"), list):
-                self._cache_hit("pulls_list.mem_stale_cache_only")
-                return mem.get("items")  # type: ignore[return-value]
             self._cache_miss("pulls_list.cache_only_empty")
             return []
 
         # Fetch from API (paginate), but dedupe concurrent fetches across threads.
         lock = self._inflight_lock(f"pulls_list:{cache_key}")
         with lock:
-            # Re-check memory cache (another thread may have populated it).
-            mem = self._pulls_list_mem_cache.get(cache_key)
-            if mem and isinstance(mem, dict):
-                ts = int(mem.get("ts") or 0)
-                if (now - ts) <= int(ttl_s):
-                    items = mem.get("items")
-                    if isinstance(items, list):
-                        self._cache_hit("pulls_list.mem")
-                        return items  # type: ignore[return-value]
-
-            # Re-check disk cache too (cheap, avoids extra network when threads race).
-            disk = self._load_pulls_list_disk_cache()
-            entry = disk.get(cache_key) if isinstance(disk, dict) else None
-            if isinstance(entry, dict):
-                ts = int(entry.get("ts") or 0)
-                if (now - ts) <= int(ttl_s):
-                    items = entry.get("items")
-                    if isinstance(items, list):
-                        etag = str(entry.get("etag", "") or "")
-                        self._pulls_list_mem_cache[cache_key] = {"ts": ts, "items": items, "etag": etag}
-                        self._cache_hit("pulls_list.disk")
-                        return items  # type: ignore[return-value]
-
-            # Extract ETag from stale cache for conditional request (304 Not Modified = FREE!)
-            old_etag = ""
-            old_items = []
-            if isinstance(entry, dict):
-                old_etag = str(entry.get("etag", "") or "").strip()
-                old_items_check = entry.get("items", [])
-                if isinstance(old_items_check, list):
-                    old_items = old_items_check
+            # Re-check cache (another thread may have populated it)
+            cached = PULLS_LIST_CACHE.get_if_fresh(cache_key, ttl_s=ttl_s)
+            if cached is not None:
+                self._cache_hit("pulls_list.disk")
+                return cached
 
             self._cache_miss("pulls_list.network")
             endpoint = f"/repos/{owner}/{repo}/pulls"
             items = []
-            new_etag = ""
             try:
                 page = 1
                 while True:
                     params = {"state": state, "per_page": 100, "page": page}
-                    # Use ETag for first page only (most PRs fit in one page)
-                    page_etag = old_etag if page == 1 else None
-
                     url = f"{self.base_url}{endpoint}"
-                    resp = self._rest_get(url, params=params, etag=page_etag)
-
-                    # Handle 304 Not Modified (content unchanged - FREE!)
-                    if resp.status_code == 304:
-                        self._cache_hit("pulls_list.etag_304")
-                        items = old_items
-                        new_etag = old_etag
-                        # Update timestamp but keep old data
-                        self._pulls_list_mem_cache[cache_key] = {"ts": now, "items": items, "etag": new_etag}
-                        # Uses lock-load-merge-save pattern (enforced by DiskCacheWriter)
-                        self._save_pulls_list_disk_cache(cache_key, {"ts": now, "items": items, "etag": new_etag})
-                        return items  # type: ignore[return-value]
-
-                    # Extract new ETag from first page
-                    if page == 1:
-                        new_etag = str(resp.headers.get("ETag", "") or "").strip()
+                    resp = self._rest_get(url, params=params)
 
                     # Parse response
                     chunk = resp.json() if resp.status_code >= 200 and resp.status_code < 300 else None
@@ -2944,15 +2874,11 @@ class GitHubAPIClient:
                 # Also negative-cache the failure for a short window to avoid spamming retries when
                 # scanning multiple clones of the same repo in one run.
                 _logger.warning("Error listing PRs for %s/%s: %s", str(owner), str(repo), str(e))
-                self._pulls_list_mem_cache[cache_key] = {"ts": now, "items": [], "etag": ""}
-                # Uses lock-load-merge-save pattern (enforced by DiskCacheWriter)
-                self._save_pulls_list_disk_cache(cache_key, {"ts": now, "items": [], "etag": ""})
+                PULLS_LIST_CACHE.put(cache_key, [])
                 return []
 
-            # Save caches with ETag
-            self._pulls_list_mem_cache[cache_key] = {"ts": now, "items": items, "etag": new_etag}
-            # Uses lock-load-merge-save pattern (enforced by DiskCacheWriter)
-            self._save_pulls_list_disk_cache(cache_key, {"ts": now, "items": items, "etag": new_etag})
+            # Save to cache
+            PULLS_LIST_CACHE.put(cache_key, items)
             return items
 
     def get_open_prs(
