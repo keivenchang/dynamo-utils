@@ -1881,7 +1881,7 @@ class GitHubAPIClient:
         now = int(time.time())
 
         # Check cache (handles both memory + disk with TTL)
-        cached_entry = PR_HEAD_SHA_CACHE.get_if_fresh(key, ttl_s=ttl_s, cache_only_mode=self.cache_only_mode)
+        cached_entry = PR_HEAD_SHA_CACHE.get_if_fresh(key, ttl_s=ttl_s)
         if cached_entry is not None:
             self._cache_hit("pr_info")
             head_sha = cached_entry.get("head_sha")
