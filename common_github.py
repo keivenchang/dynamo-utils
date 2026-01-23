@@ -76,6 +76,9 @@ from cache.cache_merge_dates import MERGE_DATES_CACHE
 from cache.cache_pulls_list import PULLS_LIST_CACHE
 from cache.cache_pr_branch import PR_BRANCH_CACHE
 from cache.cache_required_checks import REQUIRED_CHECKS_CACHE
+from cache.cache_pr_checks import PR_CHECKS_CACHE
+from cache.cache_pr_info import PR_INFO_CACHE, PR_HEAD_SHA_CACHE
+from cache.cache_job_log import JOB_LOG_CACHE
 
 # Module logger
 _logger = logging.getLogger(__name__)
@@ -1224,13 +1227,6 @@ class GitHubAPIClient:
         #     "53317461976": "Failed unit tests:\n ...",
         #     "53317461234": null
         #   }
-        self._job_log_cache: Dict[str, Optional[str]] = {}
-        self._cache_dir = dynamo_utils_cache_dir() / "job-logs"
-
-        # Cache for PR check rows (two-tier: memory + disk, short TTL because status changes).
-        self._pr_checks_mem_cache: Dict[str, GHPRChecksCacheEntry] = {}
-        self._pr_checks_cache_dir = dynamo_utils_cache_dir() / "pr-checks"
-
         # Cache for repo-wide pull request listing (short TTL; used to avoid per-branch API calls).
         self._pulls_list_mem_cache: Dict[str, Dict[str, Any]] = {}
         self._pulls_list_cache_dir = dynamo_utils_cache_dir() / "pulls"
@@ -1258,9 +1254,6 @@ class GitHubAPIClient:
         # Cache for enriched PRInfo objects keyed by (owner/repo, pr_number, updated_at).
         # This is the main knob that allows "0 API calls" for stable PRs: if the PR wasn't updated,
         # we reuse the cached enrichment (ci_status, failed checks, etc).
-        self._pr_info_mem_cache: Dict[str, Dict[str, Any]] = {}
-        self._pr_info_cache_dir = dynamo_utils_cache_dir() / "pr-info"
-
         # Cache for search/issues results used to probe updated_at for a list of PRs.
         self._search_issues_mem_cache: Dict[str, Dict[str, Any]] = {}
         self._search_issues_cache_dir = dynamo_utils_cache_dir() / "search-issues"
@@ -1288,26 +1281,13 @@ class GitHubAPIClient:
                 self._initial_disk_counts["actions_job_status_disk"] = 0
                 self._initial_disk_counts["actions_job_details_disk"] = 0
             
-            # PR checks
-            pr_checks_disk = self._load_pr_checks_disk_cache()
-            self._initial_disk_counts["pr_checks_disk"] = len(pr_checks_disk) if isinstance(pr_checks_disk, dict) else 0
-            
             # Pulls list
             pulls_disk = self._load_pulls_list_disk_cache()
             self._initial_disk_counts["pulls_list_disk"] = len(pulls_disk) if isinstance(pulls_disk, dict) else 0
             
-            # PR branch
-            # PR info
-            pr_info_disk = self._load_pr_info_disk_cache()
-            self._initial_disk_counts["pr_info_disk"] = len(pr_info_disk) if isinstance(pr_info_disk, dict) else 0
-            
             # Search issues
             search_issues_disk = self._load_search_issues_disk_cache()
             self._initial_disk_counts["search_issues_disk"] = len(search_issues_disk) if isinstance(search_issues_disk, dict) else 0
-            
-            # Job logs
-            job_logs_disk = self._load_disk_cache()
-            self._initial_disk_counts["job_log_disk"] = len(job_logs_disk) if isinstance(job_logs_disk, dict) else 0
             
             # Raw log text
             if self._raw_log_text_index_file.exists():
@@ -1504,34 +1484,37 @@ class GitHubAPIClient:
         # Cache entry counts (memory + disk)
         # These are internal attributes initialized in __init__, so they always exist
         
-        # Get pr_branch counts from PR_BRANCH_CACHE
+        # Get cache counts from dedicated cache modules
         pr_branch_mem, pr_branch_disk = PR_BRANCH_CACHE.get_cache_sizes()
-        
-        # Get required_checks counts from REQUIRED_CHECKS_CACHE
         required_checks_mem, required_checks_disk = REQUIRED_CHECKS_CACHE.get_cache_sizes()
+        pr_checks_mem, pr_checks_disk = PR_CHECKS_CACHE.get_cache_sizes()
+        pr_info_mem, pr_info_disk = PR_INFO_CACHE.get_cache_sizes()
+        job_log_mem, job_log_disk = JOB_LOG_CACHE.get_cache_sizes()
         
         cache_sizes = {
-            "pr_checks_mem": len(self._pr_checks_mem_cache),
+            "pr_checks_mem": pr_checks_mem,
             "pulls_list_mem": len(self._pulls_list_mem_cache),
             "pr_branch_mem": pr_branch_mem,
             "raw_log_text_mem": len(self._raw_log_text_mem_cache),
             "actions_job_status_mem": len(self._actions_job_status_mem_cache),
             "actions_job_details_mem": len(self._actions_job_details_mem_cache),
             "required_checks_mem": required_checks_mem,
-            "pr_info_mem": len(self._pr_info_mem_cache),
+            "pr_info_mem": pr_info_mem,
             "search_issues_mem": len(self._search_issues_mem_cache),
-            "job_log_mem": len(self._job_log_cache),
+            "job_log_mem": job_log_mem,
             "pr_branch_disk": pr_branch_disk,
             "required_checks_disk": required_checks_disk,
+            "pr_checks_disk": pr_checks_disk,
+            "pr_info_disk": pr_info_disk,
+            "job_log_disk": job_log_disk,
         }
 
         # Disk cache counts - show initial counts before this run's modifications
         # Always show count even if 0 to verify no caches are missing
         
         # Use initial counts captured at initialization
-        for key in ["actions_job_status_disk", "actions_job_details_disk", "pr_checks_disk", "pulls_list_disk",
-                    "pr_info_disk", "search_issues_disk", "job_log_disk", 
-                    "raw_log_text_disk", "merge_dates_disk"]:
+        for key in ["actions_job_status_disk", "actions_job_details_disk", "pulls_list_disk",
+                    "search_issues_disk", "raw_log_text_disk", "merge_dates_disk"]:
             cache_sizes[key] = self._initial_disk_counts.get(key, 0)
 
         return {
@@ -3540,32 +3523,7 @@ class GitHubAPIClient:
         # Save to disk cache using DiskCacheWriter (enforces lock-load-merge-save)
         self._save_pr_info_disk_cache(key, {"updated_at": upd, "pr": prd})
 
-    def _load_pr_checks_disk_cache(self) -> Dict[str, Any]:
-        cache_file = self._pr_checks_cache_dir / "pr_checks_cache.json"
-        if cache_file.exists():
-            try:
-                with open(cache_file, "r") as f:
-                    data = json.load(f)
-                if not isinstance(data, dict):
-                    raise RuntimeError(f"Invalid pr_checks cache file (expected dict): {cache_file}")
-                return data
-            except Exception as e:
-                # Fail fast: unknown fields / schema drift / corruption should be visible so we can fix it.
-                raise RuntimeError(f"Failed to read pr_checks cache file: {cache_file}: {e}") from e
-        return {}
 
-    def _save_pr_checks_disk_cache(self, key: str, value: Dict[str, Any]) -> None:
-        """Atomically update a single entry in pr_checks disk cache."""
-        _save_single_disk_cache_entry(
-            cache_dir=self._pr_checks_cache_dir,
-            cache_filename="pr_checks_cache.json",
-            lock_filename=".pr_checks_cache.lock",
-            load_fn=self._load_pr_checks_disk_cache,
-            json_dump_fn=lambda d: self._json_dump_text(d, indent=None),
-            key=key,
-            value=value,
-            stats_fn=lambda entries: self._cache_write("pr_checks.disk_write", entries=entries),
-        )
 
     def get_pr_checks_rows(
         self,
@@ -4303,33 +4261,8 @@ class GitHubAPIClient:
             return "APPROVED"
         return "REVIEW_REQUIRED"
 
-    def _load_disk_cache(self) -> Dict[str, Optional[str]]:
-        """Load job logs cache from disk."""
-        cache_file = self._cache_dir / "job_logs_cache.json"
-        if cache_file.exists():
-            try:
-                with open(cache_file, 'r') as f:
-                    return json.load(f)
-            except (OSError, json.JSONDecodeError):
-                pass
-        return {}
 
-    def _save_disk_cache(self, key: str, value: Optional[str]) -> None:
-        """Atomically update a single entry in job logs disk cache."""
-        _save_single_disk_cache_entry(
-            cache_dir=self._cache_dir,
-            cache_filename="job_logs_cache.json",
-            lock_filename="job_logs_cache.lock",
-            load_fn=self._load_disk_cache,
-            json_dump_fn=lambda d: self._json_dump_text(d, indent=None),
-            key=key,
-            value=value,
-        )
 
-    def _save_to_disk_cache(self, job_id: str, error_summary: str) -> None:
-        """Save a single job log to disk cache."""
-        # Save using DiskCacheWriter (enforces lock-load-merge-save)
-        self._save_disk_cache(job_id, error_summary)
 
     def get_required_checks(self, owner: str, repo: str, pr_number: int) -> set:
         """Return the set of required check names for a PR (best-effort).
@@ -4623,25 +4556,7 @@ query($owner:String!,$name:String!,$number:Int!,$prid:ID!,$after:String) {
     def _pr_info_cache_key(self, owner: str, repo: str, pr_number: int) -> str:
         return f"{owner}/{repo}#pr:{int(pr_number)}"
 
-    def _load_pr_info_disk_cache(self) -> Dict[str, Any]:
-        self._pr_info_cache_dir.mkdir(parents=True, exist_ok=True)
-        p = self._pr_info_cache_dir / "pr_info.json"
-        if not p.exists():
-            return {}
-        return self._json_load_text(p.read_text() or "{}")
 
-    def _save_pr_info_disk_cache(self, key: str, value: Dict[str, Any]) -> None:
-        """Atomically update a single entry in pr_info disk cache."""
-        _save_single_disk_cache_entry(
-            cache_dir=self._pr_info_cache_dir,
-            cache_filename="pr_info.json",
-            lock_filename="pr_info.lock",
-            load_fn=self._load_pr_info_disk_cache,
-            json_dump_fn=lambda d: self._json_dump_text(d, indent=None),
-            key=key,
-            value=value,
-            stats_fn=lambda entries: self._cache_write("pr_info.disk_write", entries=entries),
-        )
 
     def _search_issues_cache_key(self, owner: str, repo: str, pr_numbers: List[int]) -> str:
         ns = sorted({_safe_int(x, 0) for x in (pr_numbers or []) if _safe_int(x, 0) > 0})
@@ -4920,18 +4835,11 @@ query($owner:String!,$name:String!,$number:Int!,$prid:ID!,$after:String) {
 
             job_id = job_url.split('/job/')[1].split('?')[0]
 
-            # Check in-memory cache first (fastest)
-            if job_id in self._job_log_cache:
-                self._cache_hit("job_log.mem")
-                return self._job_log_cache[job_id]
-
-            # Check disk cache second
-            disk_cache = self._load_disk_cache()
-            if job_id in disk_cache:
-                # Load into memory cache for faster subsequent access
-                self._job_log_cache[job_id] = disk_cache[job_id]
-                self._cache_hit("job_log.disk")
-                return disk_cache[job_id]
+            # Check cache
+            cached_snippet = JOB_LOG_CACHE.get(job_id)
+            if cached_snippet is not None:
+                self._cache_hit("job_log")
+                return cached_snippet
 
             self._cache_miss("job_log")
 
@@ -4945,8 +4853,7 @@ query($owner:String!,$name:String!,$number:Int!,$prid:ID!,$after:String) {
                 snippet = ci_snippet.extract_error_snippet_from_text(txt)
                 snippet = (snippet or "").strip()
                 if snippet:
-                    self._job_log_cache[job_id] = snippet
-                    self._save_to_disk_cache(job_id, snippet)
+                    JOB_LOG_CACHE.put(job_id, snippet)
                     return snippet
             except (ValueError, TypeError, AttributeError):  # String/type manipulation failures
                 pass
@@ -4957,8 +4864,7 @@ query($owner:String!,$name:String!,$number:Int!,$prid:ID!,$after:String) {
             # First, try to extract pytest short test summary (most useful for test failures)
             pytest_summary = self._extract_pytest_summary(all_lines)
             if pytest_summary:
-                self._job_log_cache[job_id] = pytest_summary
-                self._save_to_disk_cache(job_id, pytest_summary)
+                JOB_LOG_CACHE.put(job_id, pytest_summary)
                 return pytest_summary
 
             # Filter for error-related lines with surrounding context
@@ -5001,8 +4907,7 @@ query($owner:String!,$name:String!,$number:Int!,$prid:ID!,$after:String) {
                 if len(summary) > 5000:
                     summary = summary[:5000] + '\n\n...(truncated, view full logs at job URL above)'
 
-                self._job_log_cache[job_id] = summary
-                self._save_to_disk_cache(job_id, summary)
+                JOB_LOG_CACHE.put(job_id, summary)
                 return summary
 
             # If no error keywords found, get last 40 lines as fallback
@@ -5011,13 +4916,11 @@ query($owner:String!,$name:String!,$number:Int!,$prid:ID!,$after:String) {
                 summary = '\n'.join(last_lines)
                 if len(summary) > 5000:
                     summary = summary[:5000] + '\n\n...(truncated)'
-                self._job_log_cache[job_id] = summary
-                self._save_to_disk_cache(job_id, summary)
+                JOB_LOG_CACHE.put(job_id, summary)
                 return summary
 
             error_summary = f"No error details found in logs.\n\nView full logs at:\n{job_url}"
-            self._job_log_cache[job_id] = error_summary
-            self._save_to_disk_cache(job_id, error_summary)
+            JOB_LOG_CACHE.put(job_id, error_summary)
             return error_summary
 
         except Exception as e:
