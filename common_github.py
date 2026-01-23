@@ -71,6 +71,9 @@ from common import (
     resolve_cache_path,
 )
 
+# Cache modules - incremental migration in progress
+from cache.cache_merge_dates import MERGE_DATES_CACHE
+
 # Module logger
 _logger = logging.getLogger(__name__)
 
@@ -5631,7 +5634,7 @@ query($owner:String!,$name:String!,$number:Int!,$prid:ID!,$after:String) {
             pr_numbers: List of PR numbers
             owner: Repository owner (default: ai-dynamo)
             repo: Repository name (default: dynamo)
-            cache_file: Path to cache file
+            cache_file: Path to cache file (deprecated, kept for compatibility)
 
         Returns:
             Dictionary mapping PR number to merge date string (YYYY-MM-DD HH:MM:SS)
@@ -5642,48 +5645,11 @@ query($owner:String!,$name:String!,$number:Int!,$prid:ID!,$after:String) {
             >>> merge_dates = client.get_cached_pr_merge_dates([4965, 5009])
             >>> merge_dates
             {4965: "2025-12-18 12:34:56", 5009: None}
-
-        Cache file format (.github_pr_merge_dates_cache.json):
-        {
-            "4965": "2025-12-18 12:34:56",
-            "5009": null
-        }
         """
-
-        # Load cache
-        cache = {}
-        pr_cache_path = resolve_cache_path(cache_file)
-        if pr_cache_path.exists():
-            try:
-                cache_raw = json.loads(pr_cache_path.read_text())
-                cache = {int(k): v for k, v in cache_raw.items()}
-            except (ValueError, TypeError):
-                pass
 
         # Prepare result
         result = {}
         logger = logging.getLogger('common')
-
-        # Helper to save individual PR merge dates using lock-load-merge-save
-        def save_merge_date_to_cache(pr_num: int, merge_date: Optional[str]):
-            def load_cache_fn():
-                if pr_cache_path.exists():
-                    try:
-                        cache_raw = json.loads(pr_cache_path.read_text())
-                        return {int(k): v for k, v in cache_raw.items()}
-                    except (ValueError, TypeError):
-                        return {}
-                return {}
-
-            _save_single_disk_cache_entry(
-                cache_dir=pr_cache_path.parent,
-                cache_filename=pr_cache_path.name,
-                lock_filename=pr_cache_path.name + ".lock",
-                load_fn=load_cache_fn,
-                json_dump_fn=lambda d: json.dumps({str(k): v for k, v in d.items()}, indent=2),
-                key=pr_num,
-                value=merge_date,
-            )
 
         # First pass: collect cached results and PRs to fetch
         prs_to_fetch = []
@@ -5700,8 +5666,10 @@ query($owner:String!,$name:String!,$number:Int!,$prid:ID!,$after:String) {
             pr_numbers_unique.append(pr_i)
 
         for pr_num in pr_numbers_unique:
-            if pr_num in cache:
-                result[pr_num] = cache[pr_num]
+            cache_key = f"{owner}/{repo}:{pr_num}"
+            cached = MERGE_DATES_CACHE.get_if_fresh(cache_key, ttl_s=365*24*3600)  # 1 year TTL (immutable)
+            if cached is not None:
+                result[pr_num] = cached
                 self._cache_hit("merge_dates.disk")
             else:
                 prs_to_fetch.append(pr_num)
@@ -5737,11 +5705,11 @@ query($owner:String!,$name:String!,$number:Int!,$prid:ID!,$after:String) {
                         merge_date = dt_pacific.strftime('%Y-%m-%d %H:%M:%S')
 
                         result[pr_num] = merge_date
-                        save_merge_date_to_cache(pr_num, merge_date)
+                        MERGE_DATES_CACHE.put(f"{owner}/{repo}:{pr_num}", merge_date)
                     elif pr_data:
                         # PR exists but not merged
                         result[pr_num] = None
-                        save_merge_date_to_cache(pr_num, None)
+                        MERGE_DATES_CACHE.put(f"{owner}/{repo}:{pr_num}", None)
                     else:
                         # PR not found in list (might be very old or doesn't exist)
                         still_missing.append(pr_num)
@@ -5781,7 +5749,7 @@ query($owner:String!,$name:String!,$number:Int!,$prid:ID!,$after:String) {
                             try:
                                 pr_num, merge_date = future.result()
                                 result[pr_num] = merge_date
-                                save_merge_date_to_cache(pr_num, merge_date)
+                                MERGE_DATES_CACHE.put(f"{owner}/{repo}:{pr_num}", merge_date)
                             except Exception as e:
                                 logger.debug(f"Failed to get future result: {e}")
 
@@ -5820,7 +5788,7 @@ query($owner:String!,$name:String!,$number:Int!,$prid:ID!,$after:String) {
                         try:
                             pr_num, merge_date = future.result()
                             result[pr_num] = merge_date
-                            save_merge_date_to_cache(pr_num, merge_date)
+                            MERGE_DATES_CACHE.put(f"{owner}/{repo}:{pr_num}", merge_date)
                         except Exception as e:
                             logger.debug(f"Failed to get future result: {e}")
 

@@ -1,0 +1,286 @@
+# syntax=docker/dockerfile:1.10.0
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Standalone dev image built from a runtime image.
+# Template for build_dev_from_runtime.py
+#
+# This is a simplified version of dynamo1/container/dev/Dockerfile.dev
+# that doesn't depend on concatenated framework stages.
+#
+# Version sync notes (source of truth Dockerfiles):
+# - Ubuntu base tag for `dynamo_tools`: sync with `dynamo_ci/container/Dockerfile.docs` (and any repo-wide Ubuntu bump).
+# - Tooling apt package list + copied paths into `dev`: sync with `dynamo_ci/container/dev/Dockerfile.dev`.
+# - Rust toolchain versions (`RUST_VERSION`, rustup-init archive version): sync with `dynamo_ci/container/Dockerfile`
+#   (and keep consistent with `dynamo_ci/container/Dockerfile.{vllm,sglang,trtllm}` per that file's header note).
+# - `uv` image tag (`ghcr.io/astral-sh/uv:<tag>`): sync with `dynamo_ci/container/Dockerfile` and `dynamo_ci/container/dev/Dockerfile.dev`.
+
+# ======================================================================
+# STAGE: dynamo_tools for developers
+# ======================================================================
+# Installs developer tools in a separate stage for better caching
+# NOTE(version-sync): keep this Ubuntu tag in sync with `dynamo_ci/container/Dockerfile.docs`.
+FROM ubuntu:24.04 AS dynamo_tools
+
+ARG ARCH=amd64
+ARG ARCH_ALT=x86_64
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV PATH=/usr/local/bin:${PATH}
+
+USER root
+SHELL ["/bin/bash", "-c"]
+
+# Disable NVIDIA CUDA apt repos to avoid transient mirror sync issues
+# Install developer tools
+RUN set -eux; \
+    if [ -d /etc/apt/sources.list.d ]; then \
+        mkdir -p /tmp/apt-disabled; \
+        for f in /etc/apt/sources.list.d/*.list; do \
+            [ -e "$f" ] || continue; \
+            if grep -q "developer.download.nvidia.com/compute/cuda/repos" "$f"; then \
+                mv "$f" "/tmp/apt-disabled/$(basename "$f")"; \
+            fi; \
+        done; \
+    fi; \
+    for i in 1 2 3 4 5; do \
+        apt-get update -y && break; \
+        rm -rf /var/lib/apt/lists/*; \
+        sleep $((i * 5)); \
+    done; \
+    apt-get install -y --no-install-recommends \
+        # Core CLI utilities
+        ca-certificates \
+        curl \
+        wget \
+        git \
+        git-lfs \
+        less \
+        grep \
+        sed \
+        # Editors / shells
+        vim \
+        nano \
+        htop \
+        tmux \
+        screen \
+        zsh \
+        fish \
+        bash-completion \
+        # Networking / transfers
+        net-tools \
+        openssh-client \
+        iproute2 \
+        iputils-ping \
+        zip \
+        unzip \
+        rsync \
+        # Build toolchain
+        build-essential \
+        cmake \
+        autoconf \
+        automake \
+        libtool \
+        meson \
+        ninja-build \
+        pybind11-dev \
+        pkg-config \
+        protobuf-compiler \
+        # Debugging / tracing
+        gdb \
+        valgrind \
+        strace \
+        ltrace \
+        # JSON/YAML + filesystem helpers
+        jq \
+        yq \
+        tree \
+        fd-find \
+        ripgrep \
+        # Privilege escalation + crypto tooling
+        sudo \
+        gnupg2 \
+        gnupg1 \
+        # GPU / perf helpers
+        nvtop \
+        # Python
+        python3 \
+        python3-pip \
+        python3-venv \
+        # Native deps for Python/Rust wheels
+        patchelf \
+        clang \
+        libclang-dev && \
+    rm -rf /var/lib/apt/lists/* && \
+    git lfs install
+
+# Install awk separately with fault tolerance
+RUN (apt-get update && \
+     (apt-get install -y --no-install-recommends gawk || \
+      apt-get install -y --no-install-recommends mawk || \
+      apt-get install -y --no-install-recommends original-awk || \
+      echo "Warning: Could not install any awk implementation") && \
+     rm -rf /var/lib/apt/lists/*) && \
+    (command -v awk >/dev/null 2>&1 && echo "awk available: $(command -v awk)" || echo "awk not available")
+
+# Install Rust, Cargo, and Maturin
+# NOTE(version-sync): keep these Rust versions aligned with `dynamo_ci/container/Dockerfile` (base stage).
+ENV RUSTUP_HOME=/usr/local/rustup \
+    CARGO_HOME=/usr/local/cargo \
+    PATH=/usr/local/cargo/bin:$PATH \
+    RUST_VERSION=1.90.0
+
+# Define Rust target based on ARCH_ALT ARG
+ARG RUSTARCH=${ARCH_ALT}-unknown-linux-gnu
+
+# Install Rust via rustup
+# NOTE(version-sync): keep the rustup-init archive version aligned with `dynamo_ci/container/Dockerfile`.
+RUN wget --tries=3 --waitretry=5 "https://static.rust-lang.org/rustup/archive/1.28.1/${RUSTARCH}/rustup-init" && \
+    chmod +x rustup-init && \
+    ./rustup-init -y --no-modify-path --profile minimal --default-toolchain $RUST_VERSION --default-host ${RUSTARCH} && \
+    rm rustup-init && \
+    chmod -R a+w $RUSTUP_HOME $CARGO_HOME
+
+# Install maturin using pip
+# Ubuntu 24.04 marks the system Python environment as externally managed (PEP 668),
+# so we must pass --break-system-packages for system-wide installs in this tools stage.
+RUN python3 -m pip install --no-cache-dir --break-system-packages maturin[patchelf]
+
+# ======================================================================
+# TARGET: dev (root-based development)
+# ======================================================================
+FROM runtime AS dev
+
+USER root
+
+# Ensure /usr/bin/python3 exists
+RUN if [ ! -e /usr/bin/python3 ]; then \
+        if [ -x /opt/dynamo/venv/bin/python3 ]; then \
+            ln -s /opt/dynamo/venv/bin/python3 /usr/bin/python3; \
+        elif [ -x /opt/dynamo/venv/bin/python ]; then \
+            ln -s /opt/dynamo/venv/bin/python /usr/bin/python3; \
+        elif command -v python3 >/dev/null 2>&1; then \
+            ln -s $(command -v python3) /usr/bin/python3; \
+        elif command -v python >/dev/null 2>&1; then \
+            ln -s $(command -v python) /usr/bin/python3; \
+        else \
+            echo "ERROR: Could not find Python to symlink to /usr/bin/python3" >&2; \
+            exit 1; \
+        fi; \
+    fi
+
+# Set umask for group-writable files in dev stage
+RUN mkdir -p /etc/profile.d && echo 'umask 002' > /etc/profile.d/00-umask.sh
+SHELL ["/bin/bash", "-l", "-o", "pipefail", "-c"]
+
+# Copy developer tools from dynamo_tools
+# Stash pre-tools python3 to avoid clobbering runtime python
+RUN if [ -e /usr/bin/python3 ]; then cp -a /usr/bin/python3 /tmp/python3.pretools; fi
+COPY --from=dynamo_tools /usr/bin/ /usr/bin/
+COPY --from=dynamo_tools /usr/sbin/ /usr/sbin/
+COPY --from=dynamo_tools /usr/lib/ /usr/lib/
+COPY --from=dynamo_tools /usr/libexec/ /usr/libexec/
+COPY --from=dynamo_tools /lib/ /lib/
+COPY --from=dynamo_tools /usr/share/ /usr/share/
+COPY --from=dynamo_tools /etc/alternatives/ /etc/alternatives/
+COPY --from=dynamo_tools /etc/bash_completion.d/ /etc/bash_completion.d/
+COPY --from=dynamo_tools /etc/sudoers /etc/sudoers
+COPY --from=dynamo_tools /etc/sudoers.d/ /etc/sudoers.d/
+
+# Restore pre-tools python3
+RUN if [ -e /tmp/python3.pretools ]; then cp -af /tmp/python3.pretools /usr/bin/python3; fi
+
+# Copy Rust/Cargo/Maturin from dynamo_tools
+COPY --from=dynamo_tools /usr/local/rustup /usr/local/rustup
+COPY --from=dynamo_tools /usr/local/cargo /usr/local/cargo
+COPY --from=dynamo_tools /usr/local/bin/maturin /usr/local/bin/maturin
+COPY --from=dynamo_tools /usr/local/lib/python3.*/dist-packages/maturin* /usr/local/lib/python3.12/dist-packages/
+
+# Provide an `uv` binary
+# NOTE(version-sync): keep the uv image tag aligned with `dynamo_ci/container/Dockerfile` and `dynamo_ci/container/dev/Dockerfile.dev`.
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
+
+# Set Rust environment variables
+ENV RUSTUP_HOME=/usr/local/rustup \
+    CARGO_HOME=/usr/local/cargo \
+    CARGO_TARGET_DIR=/workspace/target
+
+# Dev environment
+ENV WORKSPACE_DIR=/workspace \
+    DYNAMO_HOME=/workspace \
+    VIRTUAL_ENV=/opt/dynamo/venv \
+    PATH=/opt/dynamo/venv/bin:/usr/local/cargo/bin:$PATH
+
+# Initialize Git LFS
+RUN git lfs install
+
+# Set workspace
+WORKDIR ${WORKSPACE_DIR}
+
+ENTRYPOINT ["/bin/bash"]
+CMD []
+
+# ======================================================================
+# TARGET: local-dev (non-root development with UID/GID remapping)
+# ======================================================================
+FROM dev AS local-dev
+
+ENV USERNAME=dynamo
+ARG USER_UID=1000
+ARG USER_GID=1000
+
+# Copy rustup home into a writable per-user location
+RUN cp -r /usr/local/rustup /home/dynamo/.rustup && \
+    mkdir -p /home/dynamo/.cargo && \
+    chown -R dynamo:0 /home/dynamo/.rustup /home/dynamo/.cargo
+
+# Put rustup state under the user's home (writable) while still using /usr/local/cargo/bin shims
+ENV RUSTUP_HOME=/home/${USERNAME}/.rustup
+ENV CARGO_HOME=/home/${USERNAME}/.cargo
+ENV PATH=/usr/local/cargo/bin:/usr/local/bin:${CARGO_HOME}/bin:${PATH}
+
+# Configure user with sudo access for Dev Container workflows
+# PERFORMANCE / PERMISSIONS MEMO: NEVER use `chown -R` or `chmod -R` in local-dev images
+RUN mkdir -p /etc/sudoers.d \
+    && echo "$USERNAME ALL=(root) NOPASSWD:ALL" > /etc/sudoers.d/$USERNAME \
+    && chmod 0440 /etc/sudoers.d/$USERNAME \
+    && mkdir -p /home/$USERNAME \
+    # Handle GID conflicts: if target GID exists and it's not our group, remove it
+    && (getent group $USER_GID | grep -v "^$USERNAME:" && groupdel $(getent group $USER_GID | cut -d: -f1) || true) \
+    # Create group if it doesn't exist, otherwise modify existing group
+    && (getent group $USERNAME > /dev/null 2>&1 && groupmod -g $USER_GID $USERNAME || groupadd -g $USER_GID $USERNAME) \
+    && usermod -u $USER_UID -g $USER_GID -G 0 $USERNAME \
+    && chown $USERNAME:$USER_GID /home/$USERNAME \
+    && chsh -s /bin/bash $USERNAME
+
+# Set workspace directory variable
+ENV WORKSPACE_DIR=${WORKSPACE_DIR}
+
+# Development environment variables for the local-dev target
+ENV HOME=/home/$USERNAME
+ENV DYNAMO_HOME=${WORKSPACE_DIR}
+ENV CARGO_TARGET_DIR=${WORKSPACE_DIR}/target
+ENV PATH=${CARGO_HOME}/bin:$PATH
+
+# Switch to dynamo user
+USER $USERNAME
+WORKDIR $HOME
+
+# Create user-level cargo/rustup state dirs as the target user
+RUN mkdir -p "${CARGO_HOME}" "${RUSTUP_HOME}"
+
+# Ensure Python user site-packages exists and is writable
+RUN python3 -c 'import os, site; p = site.getusersitepackages(); os.makedirs(p, exist_ok=True); print(p)'
+
+# Persist bash history
+RUN SNIPPET="export PROMPT_COMMAND='history -a' && export HISTFILE=$HOME/.commandhistory/.bash_history" \
+    && mkdir -p $HOME/.commandhistory \
+    && chmod g+w $HOME/.commandhistory \
+    && touch $HOME/.commandhistory/.bash_history \
+    && echo "$SNIPPET" >> "$HOME/.bashrc"
+
+RUN mkdir -p /home/$USERNAME/.cache/ \
+    && chmod g+w /home/$USERNAME/.cache/
+
+ENTRYPOINT ["/bin/bash"]
+CMD []
