@@ -149,7 +149,7 @@ class PytestTimingCache(BaseDiskCache):
         Returns:
             List of (display_name, duration_str, status_norm) tuples or None if not found/stale
             
-        Note: Stats (hit/miss) are tracked automatically via _check_item()
+        Note: Stats (hit/miss) are tracked AFTER freshness validation
         """
         p = Path(raw_log_path)
         st = p.stat()
@@ -160,18 +160,27 @@ class PytestTimingCache(BaseDiskCache):
         
         with self._mu:
             self._load_once()
-            entry_dict = self._check_item(key)  # Automatically tracks hit/miss
+            # Get item directly without tracking stats (we need to validate freshness first)
+            items = self._get_items()
+            entry_dict = items.get(key)
             
             if entry_dict is None:
+                self.stats.miss += 1
                 return None
             
             # Validate freshness
             if not isinstance(entry_dict, dict):
+                self.stats.miss += 1
                 return None
             if int(entry_dict.get("raw_log_mtime_ns", 0)) != mtime_ns:
+                self.stats.miss += 1  # Stale entry = miss
                 return None
             if int(entry_dict.get("raw_log_size_bytes", 0)) != size_b:
+                self.stats.miss += 1  # Stale entry = miss
                 return None
+            
+            # Entry is fresh! Count as hit
+            self.stats.hit += 1
             
             # Deserialize rows
             rows_in = entry_dict.get("rows")
