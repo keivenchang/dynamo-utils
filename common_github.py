@@ -1885,30 +1885,12 @@ class GitHubAPIClient:
         key = f"{owner}/{repo}:pr:{pr_num}:head_sha"
         now = int(time.time())
 
-        # Memory cache (all PRs, respects TTL)
-        try:
-            ent = self._pr_info_mem_cache.get(key)
-            if ent and int(ent.get("ts", 0) or 0) + int(ttl_s) > now:
-                head_sha = ent.get("head_sha")
-                return str(head_sha) if head_sha else None
-        except (ValueError, TypeError):
-            pass
-
-        # Disk cache (for closed/merged PRs - they never change!)
-        disk = self._load_pr_info_head_sha_disk_cache()
-        ent = disk.get(key) if isinstance(disk, dict) else None
-        if isinstance(ent, dict):
-            head_sha_cached = ent.get("head_sha")
-            state = ent.get("state")
-            # Closed/merged PRs are cached forever
-            if str(state or "").lower() in ("closed", "merged"):
-                self._pr_info_mem_cache[key] = {"ts": now, "head_sha": head_sha_cached, "state": state}
-                return str(head_sha_cached) if head_sha_cached else None
-            # For open PRs, check TTL
-            ts = int(ent.get("ts", 0) or 0)
-            if ts and (now - ts) <= int(ttl_s):
-                self._pr_info_mem_cache[key] = {"ts": ts, "head_sha": head_sha_cached, "state": state}
-                return str(head_sha_cached) if head_sha_cached else None
+        # Check cache (handles both memory + disk with TTL)
+        cached_entry = PR_HEAD_SHA_CACHE.get_if_fresh(key, ttl_s=ttl_s, cache_only_mode=self.cache_only_mode)
+        if cached_entry is not None:
+            self._cache_hit("pr_info")
+            head_sha = cached_entry.get("head_sha")
+            return str(head_sha) if head_sha else None
 
         # Cache-only mode: don't fetch
         if self.cache_only_mode:
@@ -1923,34 +1905,10 @@ class GitHubAPIClient:
         if not head_sha:
             return None
 
-        # Save to memory cache
-        self._pr_info_mem_cache[key] = {"ts": now, "head_sha": head_sha, "state": state}
-
-        # Save to disk cache (closed/merged PRs are cached forever)
-        self._save_pr_info_head_sha_disk_cache(key, {"ts": now, "head_sha": head_sha, "state": state})
-        self._cache_write("pr_head_sha.disk_write", entries=1)
+        # Save to cache
+        PR_HEAD_SHA_CACHE.put(key, head_sha=head_sha, state=state)
 
         return head_sha
-
-    def _load_pr_info_head_sha_disk_cache(self) -> Dict[str, Any]:
-        """Load PR head SHA disk cache (separate from enriched PR info cache)."""
-        self._pr_info_cache_dir.mkdir(parents=True, exist_ok=True)
-        p = self._pr_info_cache_dir / "pr_head_sha.json"
-        if not p.exists():
-            return {}
-        return self._json_load_text(p.read_text() or "{}")
-
-    def _save_pr_info_head_sha_disk_cache(self, key: str, value: Dict[str, Any]) -> None:
-        """Atomically update a single entry in PR head SHA disk cache."""
-        _save_single_disk_cache_entry(
-            cache_dir=self._pr_info_cache_dir,
-            cache_filename="pr_head_sha.json",
-            lock_filename="pr_head_sha.lock",
-            load_fn=self._load_pr_info_head_sha_disk_cache,
-            json_dump_fn=lambda d: self._json_dump_text(d, indent=None),
-            key=key,
-            value=value,
-        )
 
     def _load_actions_job_disk_cache(self) -> Dict[str, Any]:
         self._actions_job_cache_dir.mkdir(parents=True, exist_ok=True)
@@ -3475,33 +3433,16 @@ class GitHubAPIClient:
             if changed:
                 # Serialize once at the cache boundary.
                 self._save_pr_info_cache(owner=owner, repo=repo, pr_number=int(pr_number), updated_at=upd, pr=pr)
-            else:
-                # Ensure mem cache has a normalized full serialization (no disk write).
-                try:
-                    self._pr_info_mem_cache[key] = {"updated_at": upd, "pr": self._pr_info_full_to_dict(pr)}
-                except (ValueError, TypeError):
-                    pass
             return pr
 
-        # Memory cache (deserialize -> PRInfo only)
-        ent_mem = self._pr_info_mem_cache.get(key)
-        if isinstance(ent_mem, dict) and str(ent_mem.get("updated_at") or "").strip() == upd:
-            pr = _hydrate_entry(ent_mem)
+        # Check cache (handles both memory + disk)
+        cached_entry = PR_INFO_CACHE.get_if_matches_updated_at(key, updated_at=upd)
+        if cached_entry is not None:
+            pr = _hydrate_entry(cached_entry)
             if pr is not None:
-                self._cache_hit("pr_info.mem")
+                self._cache_hit("pr_info")
                 return _maybe_backfill_and_persist(pr)
-
-        # Disk cache (deserialize -> PRInfo only)
-        disk = self._load_pr_info_disk_cache()
-        ent_disk = disk.get(key) if isinstance(disk, dict) else None
-        if isinstance(ent_disk, dict) and str(ent_disk.get("updated_at") or "").strip() == upd:
-            pr = _hydrate_entry(ent_disk)
-            if pr is not None:
-                pr = _maybe_backfill_and_persist(pr)
-                # Ensure mem is populated (serialization boundary, no disk write needed here).
-                self._pr_info_mem_cache[key] = {"updated_at": upd, "pr": self._pr_info_full_to_dict(pr)}
-                self._cache_hit("pr_info.disk")
-                return pr
+        
         self._cache_miss("pr_info")
         return None
 
@@ -3519,9 +3460,7 @@ class GitHubAPIClient:
         if not upd:
             return
         prd = self._pr_info_full_to_dict(pr)
-        self._pr_info_mem_cache[key] = {"updated_at": upd, "pr": prd}
-        # Save to disk cache using DiskCacheWriter (enforces lock-load-merge-save)
-        self._save_pr_info_disk_cache(key, {"updated_at": upd, "pr": prd})
+        PR_INFO_CACHE.put(key, updated_at=upd, pr_dict=prd)
 
 
 
