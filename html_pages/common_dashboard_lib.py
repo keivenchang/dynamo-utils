@@ -604,34 +604,38 @@ def run_all_passes(
     # This pass also converts BranchNode to TreeNodeVM
     augmented_nodes = augment_ci_with_yaml_info_pass(ci_nodes, yaml_mappings)
     
-    # PASS 4: Move jobs under parent nodes
-    grouped_nodes = augmented_nodes
-    grouped_nodes = move_jobs_by_prefix_pass(grouped_nodes, prefix="vllm", parent_name="backend-status-check")
-    grouped_nodes = move_jobs_by_prefix_pass(grouped_nodes, prefix="sglang", parent_name="backend-status-check")
-    grouped_nodes = move_jobs_by_prefix_pass(grouped_nodes, prefix="trtllm", parent_name="backend-status-check")
-    grouped_nodes = move_jobs_by_prefix_pass(grouped_nodes, prefix="operator", parent_name="backend-status-check")
-
-    # Group other jobs under parent nodes
-    grouped_nodes = move_jobs_by_prefix_pass(grouped_nodes, prefix="deploy-", parent_name="deploy")
-    grouped_nodes = move_jobs_by_prefix_pass(grouped_nodes, prefix="build-test", parent_name="dynamo-status-check")
-    grouped_nodes = move_jobs_by_prefix_pass(grouped_nodes, prefix="Post-Merge CI / ", parent_name="post-merge-ci", parent_label="Post-Merge CI", create_if_has_children=True)
-    grouped_nodes = move_jobs_by_prefix_pass(grouped_nodes, prefix="Nightly CI / ", parent_name="nightly-ci", parent_label="Nightly CI", create_if_has_children=True)
+    # PASS 4: Move jobs under parent nodes (BATCHED for performance)
+    # Instead of calling move_jobs_by_prefix_pass 25+ times (O(25×n)), we batch all groupings
+    # into a single pass that processes all prefixes in one iteration (O(n))
+    grouping_rules = [
+        # Backend status checks
+        ("vllm", "backend-status-check", "", False),
+        ("sglang", "backend-status-check", "", False),
+        ("trtllm", "backend-status-check", "", False),
+        ("operator", "backend-status-check", "", False),
+        
+        # Other parent nodes
+        ("deploy-", "deploy", "", False),
+        ("build-test", "dynamo-status-check", "", False),
+        ("Post-Merge CI / ", "post-merge-ci", "Post-Merge CI", True),
+        ("Nightly CI / ", "nightly-ci", "Nightly CI", True),
+        
+        # Fast jobs (create parent only if has children)
+        ("broken-links-check", "_fast", "Jobs that tend to run fast", True),
+        ("build-docs", "_fast", "Jobs that tend to run fast", True),
+        ("changed-files", "_fast", "Jobs that tend to run fast", True),
+        ("clean", "_fast", "Jobs that tend to run fast", True),
+        ("clippy", "_fast", "Jobs that tend to run fast", True),
+        ("CodeRabbit", "_fast", "Jobs that tend to run fast", True),
+        ("dco-comment", "_fast", "Jobs that tend to run fast", True),
+        ("event_file", "_fast", "Jobs that tend to run fast", True),
+        ("label", "_fast", "Jobs that tend to run fast", True),
+        ("lychee", "_fast", "Jobs that tend to run fast", True),
+        ("trigger-ci", "_fast", "Jobs that tend to run fast", True),
+        ("Validate PR title", "_fast", "Jobs that tend to run fast", True),
+    ]
     
-    # Group fast jobs under _fast parent
-    _FAST = "_fast"
-    _FAST_LABEL = "Jobs that tend to run fast"
-    grouped_nodes = move_jobs_by_prefix_pass(grouped_nodes, prefix="broken-links-check", parent_name=_FAST, parent_label=_FAST_LABEL, create_if_has_children=True)
-    grouped_nodes = move_jobs_by_prefix_pass(grouped_nodes, prefix="build-docs", parent_name=_FAST, parent_label=_FAST_LABEL, create_if_has_children=True)
-    grouped_nodes = move_jobs_by_prefix_pass(grouped_nodes, prefix="changed-files", parent_name=_FAST, parent_label=_FAST_LABEL, create_if_has_children=True)
-    grouped_nodes = move_jobs_by_prefix_pass(grouped_nodes, prefix="clean", parent_name=_FAST, parent_label=_FAST_LABEL, create_if_has_children=True)
-    grouped_nodes = move_jobs_by_prefix_pass(grouped_nodes, prefix="clippy", parent_name=_FAST, parent_label=_FAST_LABEL, create_if_has_children=True)
-    grouped_nodes = move_jobs_by_prefix_pass(grouped_nodes, prefix="CodeRabbit", parent_name=_FAST, parent_label=_FAST_LABEL, create_if_has_children=True)
-    grouped_nodes = move_jobs_by_prefix_pass(grouped_nodes, prefix="dco-comment", parent_name=_FAST, parent_label=_FAST_LABEL, create_if_has_children=True)
-    grouped_nodes = move_jobs_by_prefix_pass(grouped_nodes, prefix="event_file", parent_name=_FAST, parent_label=_FAST_LABEL, create_if_has_children=True)
-    grouped_nodes = move_jobs_by_prefix_pass(grouped_nodes, prefix="label", parent_name=_FAST, parent_label=_FAST_LABEL, create_if_has_children=True)
-    grouped_nodes = move_jobs_by_prefix_pass(grouped_nodes, prefix="lychee", parent_name=_FAST, parent_label=_FAST_LABEL, create_if_has_children=True)
-    grouped_nodes = move_jobs_by_prefix_pass(grouped_nodes, prefix="trigger-ci", parent_name=_FAST, parent_label=_FAST_LABEL, create_if_has_children=True)
-    grouped_nodes = move_jobs_by_prefix_pass(grouped_nodes, prefix="Validate PR title", parent_name=_FAST, parent_label=_FAST_LABEL, create_if_has_children=True)
+    grouped_nodes = move_jobs_by_prefix_batch_pass(augmented_nodes, grouping_rules)
     
     # PASS 5: Sort nodes by name
     sorted_nodes = sort_nodes_by_name_pass(grouped_nodes)
@@ -1203,6 +1207,115 @@ def augment_ci_with_yaml_info_pass(
         augmented_tree_nodes.append(node.to_tree_vm())
     
     return augmented_tree_nodes
+
+
+def move_jobs_by_prefix_batch_pass(
+    nodes: List[TreeNodeVM],
+    grouping_rules: List[Tuple[str, str, str, bool]],
+) -> List[TreeNodeVM]:
+    """
+    OPTIMIZED: Batch version of move_jobs_by_prefix_pass that processes all grouping rules
+    in a single pass instead of iterating through nodes multiple times.
+    
+    Performance: O(n) instead of O(n×m) where m=number of rules (~25)
+    
+    Args:
+        nodes: List of TreeNodeVM nodes (root level)
+        grouping_rules: List of (prefix, parent_name, parent_label, create_if_has_children) tuples
+    
+    Returns:
+        List of TreeNodeVM nodes with all matching jobs moved under parents
+    """
+    logger.info(f"[move_jobs_by_prefix_batch_pass] Processing {len(grouping_rules)} grouping rules in single pass")
+    
+    # Build lookup structures for all rules
+    # parent_name -> {prefix_set, label, create_if_has_children, matched_jobs}
+    parent_info: Dict[str, dict] = {}
+    for prefix, parent_name, parent_label, create_if_has_children in grouping_rules:
+        if parent_name not in parent_info:
+            parent_info[parent_name] = {
+                "prefixes": [],
+                "label": parent_label or parent_name,
+                "create_if_has_children": create_if_has_children,
+                "matched_jobs": [],
+                "existing_parent": None,
+            }
+        parent_info[parent_name]["prefixes"].append(prefix)
+    
+    # Single pass through all nodes
+    remaining_nodes = []
+    for node in nodes:
+        job_name = node.job_name
+        core_name = node.core_job_name
+        short_name = node.short_job_name
+        
+        matched = False
+        
+        # Check if this node is a parent for any of our grouping rules
+        for parent_name, info in parent_info.items():
+            if job_name == parent_name or core_name == parent_name or short_name == parent_name:
+                info["existing_parent"] = node
+                remaining_nodes.append(node)  # Keep parent at root level
+                matched = True
+                break
+        
+        if matched:
+            continue
+        
+        # Check if this node matches any prefix
+        for parent_name, info in parent_info.items():
+            for prefix in info["prefixes"]:
+                if job_name.startswith(prefix) or core_name.startswith(prefix) or short_name.startswith(prefix):
+                    info["matched_jobs"].append(node)
+                    matched = True
+                    break
+            if matched:
+                break
+        
+        if not matched:
+            remaining_nodes.append(node)
+    
+    # Now process each parent and add matched jobs
+    for parent_name, info in parent_info.items():
+        matched_jobs = info["matched_jobs"]
+        
+        if not matched_jobs:
+            continue  # No matches for this parent
+        
+        if info["create_if_has_children"] and not matched_jobs:
+            continue  # Skip parent creation if no children
+        
+        existing_parent = info["existing_parent"]
+        
+        # Check if parent is synthetic
+        is_synthetic = parent_name not in _workflow_job_to_file and parent_name not in _workflow_job_name_to_id.values()
+        
+        # Determine styling
+        label_color = "#57606a" if is_synthetic else "#0969da"
+        label_weight = "font-weight: 600;" if is_synthetic else ""
+        
+        if existing_parent:
+            # Add to existing parent
+            existing_parent.children.extend(matched_jobs)
+            logger.info(f"[move_jobs_by_prefix_batch_pass] Added {len(matched_jobs)} jobs to existing parent '{parent_name}'")
+        else:
+            # Create new parent
+            parent_label = info["label"]
+            parent_node = TreeNodeVM(
+                node_key=f"parent:{parent_name}",
+                label_html=f'<span style="color: {label_color}; {label_weight}">{html.escape(parent_label)}</span>',
+                children=matched_jobs,
+                job_name=parent_name,
+                core_job_name=parent_name,
+                short_job_name=parent_name,
+                collapsible=True,
+                default_expanded=False,
+            )
+            remaining_nodes.append(parent_node)
+            logger.info(f"[move_jobs_by_prefix_batch_pass] Created new parent '{parent_name}' with {len(matched_jobs)} jobs")
+    
+    logger.info(f"[move_jobs_by_prefix_batch_pass] Returning {len(remaining_nodes)} root nodes")
+    return remaining_nodes
 
 
 def move_jobs_by_prefix_pass(
