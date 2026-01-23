@@ -1,0 +1,137 @@
+CI Log Error Category Frequency Statistics
+===========================================
+Scan Date: 2026-01-23
+Total Logs: 1,698
+Total Categorized Errors: 425 (25.0% of logs have categorized errors)
+Workers: 32 (parallelized)
+Cache: SHA ad009ca0295d
+Cache Hit Rate: ~6x speedup on second run (3min -> 28sec)
+
+Snippet Coverage
+----------------
+- Snippets extracted: 1,698/1,698 (100.0%)
+- No snippet found: 0 logs
+
+Error Category Distribution (Snippet-Derived)
+----------------------------------------------
+Percentages normalized to sum to 100% of all categorized errors.
+Total: 34 distinct error types, 425 categorized errors
+
+Top Categories (% of all errors):
+  1. docker-daemon-error-response-error    102 (24.00%)
+  2. pytest-error                           67 (15.76%)
+  3. python-error                           42 ( 9.88%)
+  4. k8s-error                              30 ( 7.06%)
+  5. backend-failure                        21 ( 4.94%)
+  6. trtllm-error                           17 ( 4.00%)
+  7. etcd-error                             15 ( 3.53%)
+  8. sglang-error                           14 ( 3.29%)
+  9. docker-build-error                     12 ( 2.82%)
+ 10. invalid-task-type                      10 ( 2.35%)
+ 11. vllm-error                             10 ( 2.35%)
+ 12. cuda-error                              9 ( 2.12%)
+ 13. build-status-check-error                8 ( 1.88%)
+ 14. pytest-timeout-error                    8 ( 1.88%)
+ 15. network-timeout-generic                 7 ( 1.65%)
+ 16. network-download-error                  6 ( 1.41%)
+ 17. network-timeout-gitlab-mirror           6 ( 1.41%)
+ 18. k8s-network-timeout-pod                 5 ( 1.18%)
+ 19. network-timeout-https                   5 ( 1.18%)
+ 20. copyright-header-error                  4 ( 0.94%)
+ 21. docker-image-error                      4 ( 0.94%)
+ 22. network-port-conflict-error             4 ( 0.94%)
+ 23. github-lfs-error                        3 ( 0.71%)
+ 24. huggingface-auth-error                  3 ( 0.71%)
+ 25. rust-error                              3 ( 0.71%)
+ 26. oom                                     2 ( 0.47%)
+ 27. broken-links                            1 ( 0.24%)
+ 28. ci-filter-coverage-error                1 ( 0.24%)
+ 29. exit-127-cmd-not-found                  1 ( 0.24%)
+ 30. exit-139-sigsegv                        1 ( 0.24%)
+ 31. helm-error                              1 ( 0.24%)
+ 32. k8s-network-timeout-portfwd             1 ( 0.24%)
+ 33. network-error                           1 ( 0.24%)
+ 34. network-timeout-github-action           1 ( 0.24%)
+
+Aggregated Error Distribution (% of all errors)
+------------------------------------------------
+Percentages represent proportion of all 425 categorized errors.
+
+- Docker-related:          118 (27.76%)
+  └─ docker-daemon-error-response-error: 102
+  └─ docker-build-error: 12
+  └─ docker-image-error: 4
+
+- Python/Testing:          118 (27.76%)
+  └─ pytest-error: 67
+  └─ python-error: 42
+  └─ pytest-timeout-error: 8
+  └─ ci-filter-coverage-error: 1
+
+- System errors:            46 (10.82%)
+  └─ backend-failure: 21
+  └─ etcd-error: 15
+  └─ invalid-task-type: 10
+
+- Backend engines:          41 ( 9.65%)
+  └─ trtllm-error: 17
+  └─ sglang-error: 14
+  └─ vllm-error: 10
+
+- Network errors:           37 ( 8.71%)
+  └─ network-timeout-generic: 7
+  └─ network-timeout-gitlab-mirror: 6
+  └─ network-download-error: 6
+  └─ network-timeout-https: 5
+  └─ network-port-conflict-error: 4
+  └─ github-lfs-error: 3
+  └─ huggingface-auth-error: 3
+  └─ network-timeout-github-action: 1
+  └─ network-error: 1
+  └─ broken-links: 1
+
+- Kubernetes errors:        36 ( 8.47%)
+  └─ k8s-error: 30
+  └─ k8s-network-timeout-pod: 5
+  └─ k8s-network-timeout-portfwd: 1
+
+- Other:                    16 ( 3.76%)
+  └─ build-status-check-error: 8
+  └─ copyright-header-error: 4
+  └─ oom: 2
+  └─ exit-139-sigsegv: 1
+  └─ helm-error: 1
+
+- Build/Compile errors:     13 ( 3.06%)
+  └─ cuda-error: 9
+  └─ rust-error: 3
+  └─ exit-127-cmd-not-found: 1
+
+Total: 425 errors (100.00%)
+
+Key Insights
+------------
+1. Docker and Python/Testing errors each account for ~28% of all failures
+   - Docker daemon errors alone are 24% of all categorized errors
+   - Pytest failures are 15.76% of all categorized errors
+
+2. Infrastructure errors (System + K8s + Network) = 28% of all errors
+   - System errors (backend-failure, etcd, invalid-task): 10.82%
+   - Network issues: 8.71%
+   - Kubernetes problems: 8.47%
+
+3. Backend engine errors (trtllm, sglang, vllm) = 9.65% of all errors
+
+4. Only 25% of logs have categorized errors (425/1698)
+   - 75% of logs either passed or have uncategorized failure modes
+
+5. Cache provides 6x speedup for repeated scans (3min -> 28sec)
+
+6. 100% snippet extraction success rate
+
+Notes
+-----
+- Run command: python3 -m ci_log_errors --scan-all-logs
+- Cache location: /home/keivenc/.cache/dynamo-utils/snippet-cache.json
+- Log source: /home/keivenc/.cache/dynamo-utils/raw-log-text
+- This replaces the old stats from engine.py lines 81-112

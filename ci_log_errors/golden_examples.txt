@@ -1,0 +1,112 @@
+Snippet UX (what it should look like)
+------------------------------------
+- Snippets are **timestamp/ANSI stripped**. They should NOT show `2026-...Z` prefixes.
+- Snippets may include **.github/workflows/** and **.github/actions/** lines *preceding the failure*
+  (breadcrumbs for "what workflow/action was running").
+- Snippets may include one or more **multi-line command blocks** (docker/cargo/pytest) preceding the
+  failure. These are rendered inline in blue with a Copy button.
+- Snippets use literal `...` lines to indicate omitted content.
+- Error emphasis:
+  - Full-line error signals like `FAILED ...`, `[TIMEOUT]`, `assertion failed:`, `ERROR: failed to build`,
+    and `[FAIL] incorrect date:` render the entire line in red (not bold).
+
+Log files to error markers -- training examples:
+Grouped (best-effort) so it's easier to find the golden log for a given category:
+
+CI / tooling:
+- 59030780729.log => build-status-check-error
+- 59652435193.log => ci-filter-coverage-error
+- 58887254616.log => broken-links
+- 57945094461.log => copyright-header-error
+- 56859612414.log => invalid-task-type  # invalid/missing task type (commit message policy)
+- 59030172010.log => helm-error, k8s-error
+
+Docker:
+- 58861726335.log => network-timeout-https, docker-build-error, !pytest-error
+- 58745798050.log => network-download-error, docker-build-error
+- 58818079816.log => github-lfs-error, docker-build-error, !git-fetch, !pytest-error
+- 58861639352.log => docker-image-error
+
+Infra / system:
+- 57877945100.log => cuda-error
+- 59975400792.log => pytest-error, cuda-error  # 'cuda' not found in `markers` configuration option
+- 56700029731.log => etcd-error
+- 59347193958.log => etcd-error
+- 59418212320.log => etcd-error, pytest-error
+- 57521050539.log => pytest-error, etcd-error, python-error
+- 59520885010.log => pytest-error  # router decisions disagg failures (ea9503559 merge)
+- 59520513875.log => copyright-header-error, etcd-error  # includes "[FAIL] incorrect date: ..."
+- 59525400060.log => copyright-header-error, etcd-error  # includes "[FAIL] incorrect date: ..."
+- 59539777738.log => copyright-header-error, etcd-error  # includes "[FAIL] incorrect date: ..." (container/dev/*.sh)
+- 58588864118.log => k8s-error, k8s-network-timeout-pod, !pytest-error
+- 57877945085.log => exit-127-cmd-not-found
+- 57521050554.log => exit-139-sigsegv, !huggingface-auth-error
+- 58412373114.log => oom
+
+Network / timeouts:
+- 57930774858.log => network-error
+- 58745798050.log => network-download-error, docker-build-error
+- 57930747559.log => network-timeout-gitlab-mirror
+- 58575902063.log => network-timeout-github-action, !network-timeout-generic
+- 58861726335.log => network-timeout-https, docker-build-error
+- 59386365389.log => network-timeout-https, !broken-links
+- 58572103421.log => k8s-network-timeout-pod, k8s-error
+- 58463784363.log => k8s-network-timeout-portfwd, k8s-error, !network-timeout-generic
+
+Tests / languages:
+- 58906141961.log => !pytest-error  # success run (passed/skipped), should not be tagged as pytest-error
+- 58097278528.log => pytest-error, !python-error, !huggingface-auth-error
+- 58179788784.log => pytest-error, pytest-timeout-error, !python-error, !huggingface-auth-error
+- 56700023895.log => pytest-error, python-error  # ModuleNotFoundError: sniffio (pytest parallel)
+- 58457161045.log => python-error, !pytest-error, !huggingface-auth-error
+- 58465471934.log => rust-error, !huggingface-auth-error
+- 59493756549.log => rust-error, !pytest-error
+
+VLLM/SGLang/TRTLLM backends:
+- 56701494636.log => backend-failure, trtllm-error
+- 57524186105.log => backend-failure, trtllm-error, sglang-error
+- 58471383691.log => vllm-error
+
+HuggingFace auth:
+- 58604176773.log => pytest-error, network-download-error, build-status-check-error, huggingface-auth-error
+
+Category frequency summary:
+See ci_log_errors/stats.txt for latest statistics.
+Run `python3 -m ci_log_errors --scan-all-logs` to regenerate for your local cache.
+
+Golden-log workflow (IMPORTANT for future edits):
+- These example logs are treated as *golden training set* for regression testing. Keep them read-only:
+  - `chmod a-w /home/keivenc/nvidia/raw-log-text/<job_id>.log`
+- After changing rules/regexes/snippet logic, run the built-in self-test:
+  - `cd dynamo-utils && python3 -m ci_log_errors --self-test-examples`
+  - This parses the "Examples:" list above, loads each log from `~/.cache/dynamo-utils/raw-log-text/`
+    (or `$DYNAMO_UTILS_CACHE_DIR/raw-log-text`), and reports
+    missing/extra categories for both full-log categorization and snippet-derived categorization.
+- If mismatches show up, adjust categorization/snippet anchors until the example logs match again,
+  then re-run the self-test until it's clean.
+
+Snippet output assertions (extra self-test)
+------------------------------------------
+Grammar:
+  * `<job_id>.log => +must_contain1, +must_contain2, !must_not_contain1, !must_not_contain2`
+  * Optional HTML full-line-red assertions:
+    - `+RED:<substr>` means the rendered snippet HTML must contain `<substr>` inside a full-line red span.
+    - `!RED:<substr>` means the rendered snippet HTML must NOT contain `<substr>` inside a full-line red span.
+Notes:
+  - These assertions validate snippet **text output** (not HTML).
+  - Prefer stable substrings (avoid volatile IDs/timings).
+
+* 58887254616.log => +Run the broken links detection script and capture exit code, +set +e, +python3 .github/workflows/detect_broken_links.py, +--check-symlinks, +--output broken-links-report.json, +📄 File: docs/kubernetes/installation_guide.md, +1 broken link(s) found, +Problematic symlink: Suspicious symlink: target requires many directory traversals, +1. docs/examples/runtime/hello_world/README.md, +→ ../../../../examples/custom_backend/hello_world/README.md
+* 59520885010.log => +docker run -w /workspace, +bash -c "pytest, +FAILED tests/router/test_router_e2e_with_mockers.py::test_router_decisions_disagg, !2026-
+* 57521050539.log => +FAILED tests/router/test_router_e2e_with_sglang.py::test_sglang_kv_router_basic, +FAILED tests/router/test_router_e2e_with_sglang.py::test_router_decisions_sglang_multiple_workers, +FAILED tests/router/test_router_e2e_with_sglang.py::test_sglang_indexers_sync, +pytest -v --tb=short --basetemp=/tmp -o cache_dir=/tmp/.pytest_cache --junitxml=/workspace/test-results/pytest_test_report.xml --durations=10 -m, +tests/router/test_router_e2e_with_sglang.py::test_sglang_kv_router_basic, +tests/router/test_router_e2e_with_sglang.py::test_router_decisions_sglang_multiple_workers, +tests/router/test_router_e2e_with_sglang.py::test_sglang_indexers_sync, +====== 3 failed, 8 passed, 4 skipped, 626 deselected
+* 56700029731.log => +docker run --runtime=nvidia, +bash -c "mkdir -p /workspace/test-results && pytest -v --tb=short --basetemp=/tmp, +pytest -v --tb=short --basetemp=/tmp -o cache_dir=/tmp/.pytest_cache --junitxml=/workspace/test-results/pytest_test_report.xml, +not slow, +Caught signal 11, +Segmentation fault (11), +RED:Caught signal 11, +RED:Segmentation fault (11), !unit and trtllm_marker, !pytest     = <module 'pytest'
+* 59332716597.log => +docker run -w /workspace, +bash -c "pytest --basetemp=/tmp/pytest-parallel, +pytest --basetemp=/tmp/pytest-parallel --junitxml=pytest_parallel.xml, +-m \"pre_merge and parallel, !pytest     = <module 'pytest'
+* 59539777738.log => +[FAIL] incorrect date:, !2026-
+* 59540519012.log => +docker buildx create --name builder-, +docker buildx inspect --bootstrap, !2026-
+* 58465491442.log => +docker buildx create --name builder-, +cp /tmp/deps/vllm/install_vllm.sh /tmp/install_vllm.sh, +--cuda-version $CUDA_VERSION, !2026-
+* 58818079816.log => +Git operation failed, +failed to fetch LFS objects, +RED:Git operation failed, +RED:failed to fetch LFS objects
+* 56700023895.log => +E   ModuleNotFoundError: No module named 'sniffio'
+* 56859612414.log => +Invalid or missing task type:, +RED:Invalid or missing task type:
+* 59652435193.log => +CI_FILTER_UNCOVERED, +Please add these paths to .github/filters.yaml, +RED:CI filter, +RED:CI_FILTER_UNCOVERED
+* 58465471934.log => +failures:, +recorder::tests::test_recorder_streams_events_to_file, +RED:failures:, +RED:    recorder::tests::test_recorder_streams_events_to_file
+* 59520885010.log => +FAILED tests/router/test_router_e2e_with_mockers.py::test_router_decisions_disagg, +# pytest --basetemp=/tmp/pytest-parallel --junitxml=pytest_parallel.xml -n 4, +# suggested, +-m \"pre_merge and parallel, +tests/router/test_router_e2e_with_mockers.py::test_router_decisions_disagg[with_bootstrap-decode_first], +'tests/router/test_router_e2e_with_mockers.py::test_router_decisions_disagg[with_bootstrap-decode_first]', !RED:__________ test_router_decisions_disagg[with_bootstrap-prefill_first] __________
