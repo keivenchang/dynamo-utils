@@ -6,148 +6,13 @@ This module is intentionally dependency-light so it can be shared by:
 - `dynamo-utils/common.py` (log/snippet extraction, cache logic)
 - `dynamo-utils/html_pages/common_dashboard_lib.py` (HTML rendering for snippets/tags)
 
-Snippet UX (what it should look like)
-------------------------------------
-- Snippets are **timestamp/ANSI stripped**. They should NOT show `2026-...Z` prefixes.
-- Snippets may include **.github/workflows/** and **.github/actions/** lines *preceding the failure*
-  (breadcrumbs for "what workflow/action was running").
-- Snippets may include one or more **multi-line command blocks** (docker/cargo/pytest) preceding the
-  failure. These are rendered inline in blue with a Copy button.
-- Snippets use literal `...` lines to indicate omitted content.
-- Error emphasis:
-  - Full-line error signals like `FAILED ...`, `[TIMEOUT]`, `assertion failed:`, `ERROR: failed to build`,
-    and `[FAIL] incorrect date:` render the entire line in red (not bold).
+For golden examples, training data, and self-test documentation, see:
+- ci_log_errors/golden_examples.txt
 
-Log files to error markers -- training examples:
-Grouped (best-effort) so it’s easier to find the golden log for a given category:
-
-CI / tooling:
-- 59030780729.log => build-status-check-error
-- 59652435193.log => ci-filter-coverage-error
-- 58887254616.log => broken-links
-- 57945094461.log => copyright-header-error
-- 56859612414.log => invalid-task-type  # invalid/missing task type (commit message policy)
-- 59030172010.log => helm-error, k8s-error
-
-Docker:
-- 58861726335.log => network-timeout-https, docker-build-error, !pytest-error
-- 58745798050.log => network-download-error, docker-build-error
-- 58818079816.log => github-lfs-error, docker-build-error, !git-fetch, !pytest-error
-- 58861639352.log => docker-image-error
-
-Infra / system:
-- 57877945100.log => cuda-error
-- 59975400792.log => pytest-error, cuda-error  # 'cuda' not found in `markers` configuration option
-- 56700029731.log => etcd-error
-- 59347193958.log => etcd-error
-- 59418212320.log => etcd-error, pytest-error
-- 57521050539.log => pytest-error, etcd-error, python-error
-- 59520885010.log => pytest-error  # router decisions disagg failures (ea9503559 merge)
-- 59520513875.log => copyright-header-error, etcd-error  # includes "[FAIL] incorrect date: ..."
-- 59525400060.log => copyright-header-error, etcd-error  # includes "[FAIL] incorrect date: ..."
-- 59539777738.log => copyright-header-error, etcd-error  # includes "[FAIL] incorrect date: ..." (container/dev/*.sh)
-- 58588864118.log => k8s-error, k8s-network-timeout-pod, !pytest-error
-- 57877945085.log => exit-127-cmd-not-found
-- 57521050554.log => exit-139-sigsegv, !huggingface-auth-error
-- 58412373114.log => oom
-
-Network / timeouts:
-- 57930774858.log => network-error
-- 58745798050.log => network-download-error, docker-build-error
-- 57930747559.log => network-timeout-gitlab-mirror
-- 58575902063.log => network-timeout-github-action, !network-timeout-generic
-- 58861726335.log => network-timeout-https, docker-build-error
-- 59386365389.log => network-timeout-https, !broken-links
-- 58572103421.log => k8s-network-timeout-pod, k8s-error
-- 58463784363.log => k8s-network-timeout-portfwd, k8s-error, !network-timeout-generic
-
-Tests / languages:
-- 58906141961.log => !pytest-error  # success run (passed/skipped), should not be tagged as pytest-error
-- 58097278528.log => pytest-error, !python-error, !huggingface-auth-error
-- 58179788784.log => pytest-error, pytest-timeout-error, !python-error, !huggingface-auth-error
-- 56700023895.log => pytest-error, python-error  # ModuleNotFoundError: sniffio (pytest parallel)
-- 58457161045.log => python-error, !pytest-error, !huggingface-auth-error
-- 58465471934.log => rust-error, !huggingface-auth-error
-- 59493756549.log => rust-error, !pytest-error
-
-VLLM/SGLang/TRTLLM backends:
-- 56701494636.log => backend-failure, trtllm-error
-- 57524186105.log => backend-failure, trtllm-error, sglang-error
-- 58471383691.log => vllm-error
-
-HuggingFace auth:
-- 58604176773.log => pytest-error, network-download-error, build-status-check-error, huggingface-auth-error
-
-Category frequency summary (snapshot from one scan of 867 logs; run `python3 -m ci_log_errors --scan-all-logs` to regenerate for your local cache):
-    1. k8s-error                           356/867 (41.1%) - Kubernetes/kubectl failure signal (cluster-related failures)
-    2. k8s-network-timeout-pod             255/867 (29.4%) - kubectl wait timeout (pods condition)
-    3. build-status-check-error            218/867 (25.1%) - CI gate checking upstream builds
-    4. pytest-error                        166/867 (19.1%) - Pytest test failures
-    5. python-error                        125/867 (14.4%) - Python exceptions/tracebacks
-    6. exit-127-cmd-not-found               68/867  (7.8%) - Exit code 127 (command not found / missing binary in PATH)
-    7. network-timeout-gitlab-mirror        65/867  (7.5%) - GitLab mirror sync infra timeout
-    8. docker-build-error                   33/867  (3.8%) - Docker/BuildKit failures
-    9. network-download-error               33/867  (3.8%) - Failed downloads (pip/cargo/curl)
-   10. cuda-error                           23/867  (2.7%) - CUDA version/driver issues
-   11. etcd-error                           18/867  (2.1%) - Etcd lease/connection issues
-   12. huggingface-auth-error               18/867  (2.1%) - HF token/gated model access
-   13. pytest-timeout-error                 16/867  (1.8%) - Pytest per-test timeout (pytest-timeout plugin)
-   14. backend-failure                      15/867  (1.7%) - vllm/sglang/trtllm failures
-   15. network-timeout-https                14/867  (1.6%) - HTTP(S) gateway timeouts + link-checker timeouts
-   16. docker-image-error                   13/867  (1.5%) - Missing Docker images
-   17. github-lfs-error                     12/867  (1.4%) - Git LFS fetch failures
-   18. network-error                        12/867  (1.4%) - Network connectivity failures
-   19. oom                                  10/867  (1.2%) - Out of memory
-   20. helm-error                            9/867  (1.0%) - Helm chart failures
-   21. vllm-error                            9/867  (1.0%) - VLLM backend failures
-   22. trtllm-error                          7/867  (0.8%) - TensorRT-LLM failures
-   23. copyright-header-error                5/867  (0.6%) - Missing copyright headers
-   24. network-timeout-github-action         5/867  (0.6%) - GitHub Actions step timed out
-   25. broken-links                          3/867  (0.3%) - Dead links in documentation
-   26. sglang-error                          3/867  (0.3%) - SGLang backend failures
-   27. rust-error                            2/867  (0.2%) - Cargo test failures
-   28. ci-filter-coverage-error              1/867  (0.1%) - Files not covered by any CI filter
-   29. exit-139-sigsegv                      1/867  (0.1%) - Exit code 139 (SIGSEGV / signal 11)
-   30. k8s-network-timeout-portfwd           1/867  (0.1%) - kubectl port-forward connect timeout
-   31. network-timeout-generic               1/867  (0.1%) - Generic timeout signal
-
-Golden-log workflow (IMPORTANT for future edits):
-- These example logs are treated as *golden training set* for regression testing. Keep them read-only:
-  - `chmod a-w /home/keivenc/nvidia/raw-log-text/<job_id>.log`
-- After changing rules/regexes/snippet logic, run the built-in self-test:
-  - `cd dynamo-utils && python3 -m ci_log_errors --self-test-examples`
-  - This parses the "Examples:" list above, loads each log from `~/.cache/dynamo-utils/raw-log-text/`
-    (or `$DYNAMO_UTILS_CACHE_DIR/raw-log-text`), and reports
-    missing/extra categories for both full-log categorization and snippet-derived categorization.
-- If mismatches show up, adjust categorization/snippet anchors until the example logs match again,
-  then re-run the self-test until it’s clean.
-
-Snippet output assertions (extra self-test)
-------------------------------------------
-Grammar:
-  * `<job_id>.log => +must_contain1, +must_contain2, !must_not_contain1, !must_not_contain2`
-  * Optional HTML full-line-red assertions:
-    - `+RED:<substr>` means the rendered snippet HTML must contain `<substr>` inside a full-line red span.
-    - `!RED:<substr>` means the rendered snippet HTML must NOT contain `<substr>` inside a full-line red span.
-Notes:
-  - These assertions validate snippet **text output** (not HTML).
-  - Prefer stable substrings (avoid volatile IDs/timings).
-
-* 58887254616.log => +Run the broken links detection script and capture exit code, +set +e, +python3 .github/workflows/detect_broken_links.py, +--check-symlinks, +--output broken-links-report.json, +📄 File: docs/kubernetes/installation_guide.md, +1 broken link(s) found, +Problematic symlink: Suspicious symlink: target requires many directory traversals, +1. docs/examples/runtime/hello_world/README.md, +→ ../../../../examples/custom_backend/hello_world/README.md
-* 59520885010.log => +docker run -w /workspace, +bash -c "pytest, +FAILED tests/router/test_router_e2e_with_mockers.py::test_router_decisions_disagg, !2026-
-* 57521050539.log => +FAILED tests/router/test_router_e2e_with_sglang.py::test_sglang_kv_router_basic, +FAILED tests/router/test_router_e2e_with_sglang.py::test_router_decisions_sglang_multiple_workers, +FAILED tests/router/test_router_e2e_with_sglang.py::test_sglang_indexers_sync, +pytest -v --tb=short --basetemp=/tmp -o cache_dir=/tmp/.pytest_cache --junitxml=/workspace/test-results/pytest_test_report.xml --durations=10 -m, +tests/router/test_router_e2e_with_sglang.py::test_sglang_kv_router_basic, +tests/router/test_router_e2e_with_sglang.py::test_router_decisions_sglang_multiple_workers, +tests/router/test_router_e2e_with_sglang.py::test_sglang_indexers_sync, +====== 3 failed, 8 passed, 4 skipped, 626 deselected
-* 56700029731.log => +docker run --runtime=nvidia, +bash -c "mkdir -p /workspace/test-results && pytest -v --tb=short --basetemp=/tmp, +pytest -v --tb=short --basetemp=/tmp -o cache_dir=/tmp/.pytest_cache --junitxml=/workspace/test-results/pytest_test_report.xml, +not slow, +Caught signal 11, +Segmentation fault (11), +RED:Caught signal 11, +RED:Segmentation fault (11), !unit and trtllm_marker, !pytest     = <module 'pytest'
-* 59332716597.log => +docker run -w /workspace, +bash -c "pytest --basetemp=/tmp/pytest-parallel, +pytest --basetemp=/tmp/pytest-parallel --junitxml=pytest_parallel.xml, +-m \\\"pre_merge and parallel, !pytest     = <module 'pytest'
-* 59539777738.log => +[FAIL] incorrect date:, !2026-
-* 59540519012.log => +docker buildx create --name builder-, +docker buildx inspect --bootstrap, !2026-
-* 58465491442.log => +docker buildx create --name builder-, +cp /tmp/deps/vllm/install_vllm.sh /tmp/install_vllm.sh, +--cuda-version $CUDA_VERSION, !2026-
-* 58818079816.log => +Git operation failed, +failed to fetch LFS objects, +RED:Git operation failed, +RED:failed to fetch LFS objects
-* 56700023895.log => +E   ModuleNotFoundError: No module named 'sniffio'
-* 56859612414.log => +Invalid or missing task type:, +RED:Invalid or missing task type:
-* 59652435193.log => +CI_FILTER_UNCOVERED, +Please add these paths to .github/filters.yaml, +RED:CI filter, +RED:CI_FILTER_UNCOVERED
-* 58465471934.log => +failures:, +recorder::tests::test_recorder_streams_events_to_file, +RED:failures:, +RED:    recorder::tests::test_recorder_streams_events_to_file
-* 59520885010.log => +FAILED tests/router/test_router_e2e_with_mockers.py::test_router_decisions_disagg, +# pytest --basetemp=/tmp/pytest-parallel --junitxml=pytest_parallel.xml -n 4, +# suggested, +-m \"pre_merge and parallel, +tests/router/test_router_e2e_with_mockers.py::test_router_decisions_disagg[with_bootstrap-decode_first], +'tests/router/test_router_e2e_with_mockers.py::test_router_decisions_disagg[with_bootstrap-decode_first]', !RED:__________ test_router_decisions_disagg[with_bootstrap-prefill_first] __________
+Run `python3 -m ci_log_errors --self-test-examples` to validate categorization rules
+against the golden training set.
 """
+
 
 from __future__ import annotations
 
@@ -155,6 +20,7 @@ import argparse
 import functools
 import html
 import json
+import multiprocessing
 import os
 import re
 import shlex
@@ -435,14 +301,22 @@ def _norm_cat(s: str) -> str:
 
 
 def _parse_examples_from_docstring() -> list[tuple[str, list[str], list[str]]]:
-    """Parse the module docstring's Examples list.
+    """Parse the golden examples from ci_log_errors/golden_examples.txt.
 
     Grammar:
       - `<file>.log => cat1, cat2, !forbidden1, !forbidden2`
       - Inline comments after `#` are allowed and ignored (useful for occurrence counts).
     """
     out: list[tuple[str, list[str], list[str]]] = []
-    doc = (__doc__ or "").splitlines()
+    
+    # Read from external file instead of module docstring
+    try:
+        examples_file = Path(__file__).parent / "golden_examples.txt"
+        doc = examples_file.read_text(encoding="utf-8").splitlines()
+    except Exception:
+        # Fall back to empty list if file doesn't exist
+        return out
+    
     for ln in doc:
         s = (ln or "").strip()
         if not s.startswith("- "):
@@ -468,7 +342,7 @@ def _parse_examples_from_docstring() -> list[tuple[str, list[str], list[str]]]:
 
 
 def _parse_snippet_assertions_from_docstring() -> list[tuple[str, list[str], list[str], list[str], list[str]]]:
-    """Parse snippet output assertions from the module docstring.
+    """Parse snippet output assertions from ci_log_errors/golden_examples.txt.
 
     Grammar:
       * `<file>.log => +must_contain1, +must_contain2, !must_not_contain1, !must_not_contain2`
@@ -477,7 +351,15 @@ def _parse_snippet_assertions_from_docstring() -> list[tuple[str, list[str], lis
         - `!RED:<substr>` means the rendered snippet HTML must NOT contain `<substr>` inside a full-line red span.
     """
     out: list[tuple[str, list[str], list[str], list[str], list[str]]] = []
-    doc = (__doc__ or "").splitlines()
+    
+    # Read from external file instead of module docstring
+    try:
+        examples_file = Path(__file__).parent / "golden_examples.txt"
+        doc = examples_file.read_text(encoding="utf-8").splitlines()
+    except Exception:
+        # Fall back to empty list if file doesn't exist
+        return out
+    
     for ln in doc:
         s = (ln or "").strip()
         if not s.startswith("* "):
@@ -513,8 +395,77 @@ def _parse_snippet_assertions_from_docstring() -> list[tuple[str, list[str], lis
     return out
 
 
-def _self_test_examples(*, raw_log_path: Path) -> int:
-    """Self-test: load the example logs and report category match coverage."""
+def _download_missing_golden_log(*, job_id: str, output_path: Path, owner: str = "ai-dynamo", repo: str = "dynamo") -> bool:
+    """Download a missing golden log file from GitHub Actions.
+    
+    Args:
+        job_id: The GitHub Actions job ID (e.g., "59030780729")
+        output_path: Path where the log should be saved
+        owner: GitHub repository owner (default: "ai-dynamo")
+        repo: GitHub repository name (default: "dynamo")
+        
+    Returns:
+        True if download succeeded, False otherwise
+    """
+    try:
+        # Import here to avoid circular dependency
+        import sys
+        sys.path.insert(0, str(Path(__file__).parent.parent))
+        from common_github import GitHubAPIClient
+        
+        # Get GitHub token using the same method as the rest of the codebase
+        # (prefers ~/.github_token, falls back to GitHub CLI config)
+        github_token = GitHubAPIClient.get_github_token_from_file()
+        if not github_token:
+            print(f"  [download] GitHub token not found (checked ~/.github_token and gh CLI), skipping download for {job_id}")
+            return False
+        
+        print(f"  [download] Downloading log for job {job_id} from GitHub Actions...")
+        api = GitHubAPIClient(token=github_token)
+        
+        # Construct a fake job_url (only the job ID is needed by get_job_raw_log_text_cached)
+        job_url = f"https://github.com/{owner}/{repo}/actions/runs/0/job/{job_id}"
+        
+        # Download the raw log (assume_completed=True since these are golden historical logs)
+        log_text = api.get_job_raw_log_text_cached(
+            job_url=job_url,
+            owner=owner,
+            repo=repo,
+            ttl_s=365 * 24 * 3600,  # Long TTL for golden logs
+            assume_completed=True,  # Skip status check for historical logs
+            max_bytes=32 * 1024 * 1024,  # 32MB max
+        )
+        
+        if not log_text:
+            print(f"  [download] Failed to download log for job {job_id} (API returned empty)")
+            return False
+        
+        # Ensure parent directory exists
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        
+        # Write the log to disk
+        output_path.write_text(log_text, encoding="utf-8")
+        print(f"  [download] Successfully downloaded log for job {job_id} ({len(log_text)} bytes)")
+        
+        # Make it read-only (golden log policy)
+        try:
+            _ = _chmod_remove_write_bits(output_path)
+        except Exception:
+            pass
+        
+        return True
+    except Exception as e:
+        print(f"  [download] Error downloading log for job {job_id}: {type(e).__name__}: {e}")
+        return False
+
+
+def _self_test_examples(*, raw_log_path: Path, auto_download: bool = True) -> int:
+    """Self-test: load the example logs and report category match coverage.
+    
+    Args:
+        raw_log_path: Directory containing golden log files
+        auto_download: If True, attempt to download missing golden logs from GitHub Actions
+    """
     examples = _parse_examples_from_docstring()
     if not examples:
         print("Self-test: no Examples found in module docstring.")
@@ -523,17 +474,34 @@ def _self_test_examples(*, raw_log_path: Path) -> int:
 
     root = Path(raw_log_path).expanduser().resolve()
     missing_files: list[str] = []
+    downloaded_files: list[str] = []
     failures: int = 0
 
     print(f"Self-test: raw_log_path={root}")
     print(f"Self-test: cases={len(examples)}")
+    print(f"Self-test: auto_download={'enabled' if auto_download else 'disabled'}")
     print("")
 
     for log_name, expected_raw, forbidden_raw in examples:
         p = (root / log_name).resolve()
         if not p.exists():
-            missing_files.append(str(p))
-            continue
+            # Try to download if auto_download is enabled
+            if auto_download:
+                # Extract job_id from log_name (e.g., "59030780729.log" -> "59030780729")
+                job_id = str(log_name).replace(".log", "").strip()
+                if job_id.isdigit():
+                    if _download_missing_golden_log(job_id=job_id, output_path=p):
+                        downloaded_files.append(log_name)
+                        # Continue with testing if download succeeded
+                    else:
+                        missing_files.append(str(p))
+                        continue
+                else:
+                    missing_files.append(str(p))
+                    continue
+            else:
+                missing_files.append(str(p))
+                continue
 
         # Golden-log workflow: keep the example logs read-only.
         # This should ONLY happen during the self-check process (per policy).
@@ -592,8 +560,26 @@ def _self_test_examples(*, raw_log_path: Path) -> int:
         for log_name, must, must_not, must_red, must_not_red in snippet_assertions:
             p = (root / log_name).resolve()
             if not p.exists():
-                missing_files.append(str(p))
-                continue
+                # Try to download if auto_download is enabled
+                if auto_download:
+                    job_id = str(log_name).replace(".log", "").strip()
+                    if job_id.isdigit():
+                        if _download_missing_golden_log(job_id=job_id, output_path=p):
+                            if log_name not in downloaded_files:
+                                downloaded_files.append(log_name)
+                            # Continue with testing if download succeeded
+                        else:
+                            if str(p) not in missing_files:
+                                missing_files.append(str(p))
+                            continue
+                    else:
+                        if str(p) not in missing_files:
+                            missing_files.append(str(p))
+                        continue
+                else:
+                    if str(p) not in missing_files:
+                        missing_files.append(str(p))
+                    continue
             try:
                 _ = _chmod_remove_write_bits(p)
             except Exception:  # THIS IS A HORRIBLE ANTI-PATTERN, FIX IT
@@ -882,8 +868,14 @@ def _self_test_examples(*, raw_log_path: Path) -> int:
     except Exception:  # THIS IS A HORRIBLE ANTI-PATTERN, FIX IT
         pass
 
+    if downloaded_files:
+        print(f"Self-test: downloaded {len(downloaded_files)} missing golden log(s):")
+        for x in sorted(downloaded_files):
+            print(f"  - {x}")
+        print("")
+
     if missing_files:
-        print("Self-test: missing example log files:")
+        print("Self-test: missing example log files (could not download):")
         for x in missing_files:
             print(f"  - {x}")
         print("")
@@ -968,6 +960,65 @@ def _chmod_add_user_write_bit(path: Path) -> bool:
         return False
 
 
+def _scan_single_log(*, log_path: Path, tail_bytes: int, cache_file_path: Optional[str] = None) -> Tuple[List[str], List[str], bool, str]:
+    """Process a single log file and return categorization results.
+    
+    Args:
+        log_path: Path to the log file
+        tail_bytes: Number of bytes to read from end
+        cache_file_path: If provided, use snippet cache at this path (SHA-keyed, preserves old versions)
+    
+    Returns:
+        (cats_full, cats_snip, has_snippet, log_name)
+    """
+    # Enforce log permissions:
+    # - golden/training logs must remain non-writable
+    # - all other logs should be user-writable (to allow cleanup/editing)
+    try:
+        job_id = str(log_path.stem or "")
+        if is_golden_log_job_id(job_id):
+            _ = _chmod_remove_write_bits(log_path)
+        else:
+            _ = _chmod_add_user_write_bit(log_path)
+    except Exception:  # THIS IS A HORRIBLE ANTI-PATTERN, FIX IT
+        pass
+
+    from . import snippet as _snippet
+    
+    # Read full log for full-log categorization (always needed)
+    txt = _snippet._read_text_tail(log_path, max_bytes=int(tail_bytes))
+    lines = (txt or "").splitlines()
+    cats_full = [_norm_cat(x) for x in categorize_error_log_lines(lines) if _norm_cat(x)]
+
+    # For snippet: use cache if provided, otherwise compute directly
+    if cache_file_path:
+        try:
+            # Import cache_snippet in worker process (acceptable: each worker needs its own cache instance).
+            # This avoids serializing the cache object across process boundaries and ensures
+            # each worker independently reads/writes the shared cache file with proper file locking.
+            html_pages_dir = Path(__file__).parent.parent / "html_pages"
+            if str(html_pages_dir) not in sys.path:
+                sys.path.insert(0, str(html_pages_dir))
+            from cache_snippet import SNIPPET_CACHE
+            
+            # get_or_compute handles: cache lookup (SHA-keyed), compute if miss, store result
+            snippet_body, cats_snip = SNIPPET_CACHE.get_or_compute(raw_log_path=log_path)
+            has_snippet = bool((snippet_body or "").strip())
+            return (cats_full, cats_snip, has_snippet, log_path.name)
+        except Exception as e:
+            # Fall back to direct computation if cache fails
+            print(f"Cache error for {log_path.name}: {e}", file=sys.stderr)
+    
+    # Direct computation without cache
+    snip = _snippet.extract_error_snippet_from_text(txt)
+    has_snippet = bool((snip or "").strip())
+    
+    from . import render as _render
+    cats_snip = [_norm_cat(x) for x in _render.categorize_error_snippet_text(snip) if _norm_cat(x)]
+
+    return (cats_full, cats_snip, has_snippet, log_path.name)
+
+
 def _scan_all_logs(*, logs_root: Path, tail_bytes: int = 512 * 1024) -> int:
     """Scan a directory of `*.log` files and report categorization + snippet coverage.
 
@@ -979,6 +1030,11 @@ def _scan_all_logs(*, logs_root: Path, tail_bytes: int = 512 * 1024) -> int:
     - Golden training-example logs must be preserved (non-writable).
     - All other logs in the directory should be user-writable so they can be edited/cleaned up.
     - This scan enforces permissions on each `*.log` it touches (best-effort).
+    
+    Caching:
+    - Uses SNIPPET_CACHE (keyed by ci_log_errors SHA) for snippet extraction
+    - Preserves cache entries from different code versions (no invalidation)
+    - Each worker process reads from and writes to the shared cache file (with file locking)
     """
     root = Path(logs_root).expanduser().resolve()
     if not root.exists():
@@ -990,8 +1046,33 @@ def _scan_all_logs(*, logs_root: Path, tail_bytes: int = 512 * 1024) -> int:
 
     logs = sorted([p for p in root.glob("*.log") if p.is_file()])
     total = len(logs)
+    
+    # Detect CPU count
+    try:
+        cpu_count = multiprocessing.cpu_count()
+    except NotImplementedError:
+        cpu_count = 1
+    
+    # Check if snippet cache is available and get its SHA
+    cache_file_path = None
+    cache_sha = ""
+    try:
+        sys.path.insert(0, str(Path(__file__).parent.parent / "html_pages"))
+        from cache_snippet import SNIPPET_CACHE
+        # Force cache to load so we can get the SHA
+        SNIPPET_CACHE._load_once()
+        cache_sha = SNIPPET_CACHE._ci_log_errors_sha or ""
+        cache_file_path = str(SNIPPET_CACHE._cache_file)
+    except Exception as e:
+        print(f"Warning: snippet cache unavailable ({e}), running without cache", file=sys.stderr)
+    
     print(f"Scan-all: logs_root={root}")
     print(f"Scan-all: files={total}")
+    print(f"Scan-all: workers={cpu_count}")
+    print(f"Scan-all: cache={'enabled' if cache_file_path else 'disabled'}")
+    if cache_file_path:
+        print(f"Scan-all: cache_sha={cache_sha[:16]}..." if len(cache_sha) > 16 else f"Scan-all: cache_sha={cache_sha}")
+        print(f"Scan-all: cache_file={cache_file_path}")
     print("")
 
     if total == 0:
@@ -1001,43 +1082,38 @@ def _scan_all_logs(*, logs_root: Path, tail_bytes: int = 512 * 1024) -> int:
     cats_snip_counts: Dict[str, int] = {}
     snippet_found = 0
     no_snippet_samples: List[str] = []
-    for p in logs:
-        # Enforce log permissions:
-        # - golden/training logs must remain non-writable
-        # - all other logs should be user-writable (to allow cleanup/editing)
-        try:
-            job_id = str(p.stem or "")
-            if is_golden_log_job_id(job_id):
-                _ = _chmod_remove_write_bits(p)
+
+    # Parallel processing
+    with multiprocessing.Pool(processes=cpu_count) as pool:
+        # Create tasks for all log files
+        tasks = [
+            pool.apply_async(_scan_single_log, kwds={"log_path": p, "tail_bytes": tail_bytes, "cache_file_path": cache_file_path})
+            for p in logs
+        ]
+        
+        # Collect results with progress indicator
+        processed = 0
+        for task in tasks:
+            cats_full, cats_snip, has_snippet, log_name = task.get()
+            
+            # Aggregate full-log categories
+            for c in cats_full:
+                cats_full_counts[c] = int(cats_full_counts.get(c, 0)) + 1
+
+            # Aggregate snippet results
+            if has_snippet:
+                snippet_found += 1
             else:
-                _ = _chmod_add_user_write_bit(p)
-        except Exception:  # THIS IS A HORRIBLE ANTI-PATTERN, FIX IT
-            pass
+                if len(no_snippet_samples) < 12:
+                    no_snippet_samples.append(log_name)
 
-        from . import snippet as _snippet
-        txt = _snippet._read_text_tail(p, max_bytes=int(tail_bytes))
-        lines = (txt or "").splitlines()
-
-        cats_full = [_norm_cat(x) for x in categorize_error_log_lines(lines)]
-        for c in cats_full:
-            if not c:
-                continue
-            cats_full_counts[c] = int(cats_full_counts.get(c, 0)) + 1
-
-        snip = _snippet.extract_error_snippet_from_text(txt)
-        if (snip or "").strip():
-            snippet_found += 1
-        else:
-            # Keep a small sample for debugging if snippet anchoring regresses.
-            if len(no_snippet_samples) < 12:
-                no_snippet_samples.append(p.name)
-
-        from . import render as _render
-        cats_snip = [_norm_cat(x) for x in _render.categorize_error_snippet_text(snip)]
-        for c in cats_snip:
-            if not c:
-                continue
-            cats_snip_counts[c] = int(cats_snip_counts.get(c, 0)) + 1
+            # Aggregate snippet-derived categories
+            for c in cats_snip:
+                cats_snip_counts[c] = int(cats_snip_counts.get(c, 0)) + 1
+            
+            processed += 1
+            if processed % 100 == 0:
+                print(f"Scan-all: processed {processed}/{total} logs...", file=sys.stderr, flush=True)
 
     def _top_items(d: Dict[str, int], n: int = 25) -> List[Tuple[str, int]]:
         return sorted(d.items(), key=lambda kv: (-int(kv[1]), str(kv[0])))
@@ -1528,6 +1604,11 @@ def _cli(argv: Optional[Sequence[str]] = None) -> int:
         help="Run the Examples self-test (parses module docstring Examples and validates categories).",
     )
     parser.add_argument(
+        "--no-auto-download",
+        action="store_true",
+        help="Disable automatic download of missing golden logs during self-test (requires --self-test-examples).",
+    )
+    parser.add_argument(
         "--raw-log-path",
         default=str(_default_raw_log_dir()),
         help="Directory containing raw-log-text/*.log for --self-test-examples (default: ~/.cache/dynamo-utils/raw-log-text).",
@@ -1550,7 +1631,10 @@ def _cli(argv: Optional[Sequence[str]] = None) -> int:
     args = parser.parse_args(list(argv) if argv is not None else None)
 
     if bool(args.self_test_examples):
-        return _self_test_examples(raw_log_path=Path(str(args.raw_log_path)))
+        return _self_test_examples(
+            raw_log_path=Path(str(args.raw_log_path)),
+            auto_download=(not bool(args.no_auto_download)),
+        )
     if bool(args.scan_all_logs):
         return _scan_all_logs(
             logs_root=Path(str(args.logs_root)),

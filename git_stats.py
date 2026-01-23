@@ -39,11 +39,11 @@ class ContributorStats:
         return self.lines_added - self.lines_deleted
 
 
-def run_git_command(cmd: List[str]) -> str:
+def run_git_command(cmd: List[str], cwd: str = None) -> str:
     """Run a git command and return output."""
     try:
         result = subprocess.run(
-            cmd, capture_output=True, text=True, check=True, cwd="/workspace"
+            cmd, capture_output=True, text=True, check=True, cwd=cwd
         )
         return result.stdout.strip()
     except subprocess.CalledProcessError as e:
@@ -66,13 +66,13 @@ def get_time_range_arg(days: int = None, since: str = None, until: str = None) -
     return args
 
 
-def get_contributors(time_args: List[str]) -> Dict[str, ContributorStats]:
+def get_contributors(time_args: List[str], cwd: str = None) -> Dict[str, ContributorStats]:
     """Get all contributors and their commit counts."""
     contributors: Dict[str, ContributorStats] = {}
 
     # Get commit log with author info
     cmd = ["git", "log", "--format=%ae|%an"] + time_args
-    output = run_git_command(cmd)
+    output = run_git_command(cmd, cwd=cwd)
 
     if not output:
         print("No commits found in the specified time range.", file=sys.stderr)
@@ -91,11 +91,11 @@ def get_contributors(time_args: List[str]) -> Dict[str, ContributorStats]:
     return contributors
 
 
-def get_line_stats(contributors: Dict[str, ContributorStats], time_args: List[str]) -> None:
+def get_line_stats(contributors: Dict[str, ContributorStats], time_args: List[str], cwd: str = None) -> None:
     """Update contributors with line change statistics."""
     # Get detailed stats per author
     cmd = ["git", "log", "--numstat", "--format=%ae"] + time_args
-    output = run_git_command(cmd)
+    output = run_git_command(cmd, cwd=cwd)
 
     current_author = None
     for line in output.split("\n"):
@@ -217,6 +217,9 @@ Examples:
     parser.add_argument(
         "--until", type=str, help='End date (format: "YYYY-MM-DD" or "N days ago")'
     )
+    parser.add_argument(
+        "--repo", type=str, help="Path to git repository (defaults to current directory)"
+    )
 
     args = parser.parse_args()
 
@@ -242,12 +245,13 @@ Examples:
     time_args = get_time_range_arg(days=args.days, since=args.since, until=args.until)
 
     # Collect statistics
+    repo_path = args.repo if args.repo else None
     print("Analyzing repository...", file=sys.stderr)
-    contributors = get_contributors(time_args)
+    contributors = get_contributors(time_args, cwd=repo_path)
 
     if contributors:
         print("Calculating line statistics...", file=sys.stderr)
-        get_line_stats(contributors, time_args)
+        get_line_stats(contributors, time_args, cwd=repo_path)
 
     # Print results
     print_statistics(contributors, time_desc)
