@@ -199,15 +199,18 @@ except Exception as e:
         return 0
     fi
 
-    # Check if it's a rate limit error and print it
-    if echo "$online_result" | grep -q "429.*Too Many Requests"; then
-        echo "⚠️  HuggingFace API rate limit hit, falling back to offline validation..."
-        echo "    (Rate limit error: $(echo "$online_result" | grep -oP '429.*?(?= for url)' | head -n 1))"
+    # Check if it's a rate limit error or auth error and print it
+    if echo "$online_result" | grep -qE "429.*Too Many Requests|401.*Unauthorized|403.*Forbidden"; then
+        echo "⚠️  HuggingFace API access failed (rate limit or auth error), falling back to offline validation..."
+        local error_line=$(echo "$online_result" | grep -oP '(429|401|403).*?(?= for url)' | head -n 1)
+        if [ -n "$error_line" ]; then
+            echo "    (Error: $error_line)"
+        fi
     else
         echo "⚠️  Online validation failed, falling back to offline validation..."
     fi
 
-    # Fall back to offline validation and set HF_HUB_OFFLINE=1 globally for the rest of the script
+    # Fall back to offline validation with HF_HUB_OFFLINE=1
     if HF_HUB_OFFLINE=1 python -c "
 import sys
 try:
@@ -458,23 +461,35 @@ if [ "$DRY_RUN" = true ]; then
 fi
 
 # Function to clean up dynamo processes
+# Parameters: cleanup_frontend (true/false), cleanup_backend (true/false)
 cleanup_dynamo_processes() {
+    local cleanup_frontend="${1:-true}"
+    local cleanup_backend="${2:-true}"
+
     if [ "$DRY_RUN" = false ]; then
-        (ps -ef --forest|grep multiprocess|awk '{print $2}'|xargs -r kill) 2>/dev/null || true
-        (ps -ef|grep "python3.*\/tmp"|awk '{print $2}'|xargs -r kill) 2>/dev/null || true
-        (ps -ef|grep "VLLM::EngineCore"|awk '{print $2}'|xargs -r kill) 2>/dev/null || true
-        (ps -ef|grep "python -m dynamo.sglang.main"|awk '{print $2}'|xargs -r kill) 2>/dev/null || true
-        (ps -ef|grep "python -m dynamo.frontend"|grep -v grep|awk '{print $2}'|xargs -r kill) 2>/dev/null || true
-        pkill -f "python -m dynamo.frontend" 2>/dev/null || true
-        pkill -f "python3 -m dynamo.vllm" 2>/dev/null || true
-        pkill -f "python3 -m dynamo.sglang" 2>/dev/null || true
-        pkill -f "python3 -m dynamo.trtllm" 2>/dev/null || true
+        if [ "$cleanup_backend" = true ]; then
+            (ps -ef --forest|grep multiprocess|awk '{print $2}'|xargs -r kill) 2>/dev/null || true
+            (ps -ef|grep "python3.*\/tmp"|awk '{print $2}'|xargs -r kill) 2>/dev/null || true
+            (ps -ef|grep "VLLM::EngineCore"|awk '{print $2}'|xargs -r kill) 2>/dev/null || true
+            (ps -ef|grep "python -m dynamo.sglang.main"|awk '{print $2}'|xargs -r kill) 2>/dev/null || true
+            pkill -f "python3 -m dynamo.vllm" 2>/dev/null || true
+            pkill -f "python3 -m dynamo.sglang" 2>/dev/null || true
+            pkill -f "python3 -m dynamo.trtllm" 2>/dev/null || true
+        fi
+        if [ "$cleanup_frontend" = true ]; then
+            (ps -ef|grep "python -m dynamo.frontend"|grep -v grep|awk '{print $2}'|xargs -r kill) 2>/dev/null || true
+            pkill -f "python -m dynamo.frontend" 2>/dev/null || true
+        fi
     else
-        dry_run_echo "Would kill multiprocess processes: \$(ps -ef --forest|grep multiprocess|awk '{print \$2}')"
-        dry_run_echo "Would kill python3 temp processes: \$(ps -ef|grep \"python3.*\/tmp\"|awk '{print \$2}')"
-        dry_run_echo "Would kill VLLM processes: \$(ps -ef|grep \"VLLM::EngineCore\"|awk '{print \$2}')"
-        dry_run_echo "Would kill sglang processes: \$(ps -ef|grep \"python -m dynamo.sglang.main\"|awk '{print \$2}')"
-        dry_run_echo "Would kill frontend processes: \$(ps -ef|grep \"python -m dynamo.frontend\"|grep -v grep|awk '{print \$2}')"
+        if [ "$cleanup_backend" = true ]; then
+            dry_run_echo "Would kill multiprocess processes: \$(ps -ef --forest|grep multiprocess|awk '{print \$2}')"
+            dry_run_echo "Would kill python3 temp processes: \$(ps -ef|grep \"python3.*\/tmp\"|awk '{print \$2}')"
+            dry_run_echo "Would kill VLLM processes: \$(ps -ef|grep \"VLLM::EngineCore\"|awk '{print \$2}')"
+            dry_run_echo "Would kill sglang processes: \$(ps -ef|grep \"python -m dynamo.sglang.main\"|awk '{print \$2}')"
+        fi
+        if [ "$cleanup_frontend" = true ]; then
+            dry_run_echo "Would kill frontend processes: \$(ps -ef|grep \"python -m dynamo.frontend\"|grep -v grep|awk '{print \$2}')"
+        fi
     fi
 }
 
@@ -483,8 +498,8 @@ if [ ! -e /.dockerenv ]; then
     exit 1
 fi
 
-# Clean up any existing processes before starting
-cleanup_dynamo_processes
+# Clean up any existing processes before starting - only kill what we're about to launch
+cleanup_dynamo_processes "$RUN_FRONTEND" "$RUN_BACKEND"
 if [ -d "~/dynamo" ]; then
     WORKSPACE_DIR="~/dynamo"
 elif [ -d "/workspace" ]; then
@@ -806,7 +821,8 @@ fi
 
 # Start backend FIRST (so it's ready before frontend accepts requests)
 if [ "$RUN_BACKEND" = true ]; then
-    cmd unset HF_TOKEN
+    # Keep HF_TOKEN set so ModelExpress can authenticate with HuggingFace API
+    # cmd unset HF_TOKEN  # DO NOT unset - causes 429 rate limit errors
     metrics="true"
 
     if [ "$DISAGG_MODE" = true ]; then
