@@ -561,6 +561,9 @@ def run_all_passes(
     Returns:
         Processed list of TreeNodeVM nodes with YAML augmentation applied.
     """
+    import time  # For per-pass timing
+    pass_timings = {}  # Track timing for each pass
+    
     logger.info(f"[run_all_passes] Starting with {len(ci_nodes)} nodes")
     
     # PASS 1: Add PRStatusWithJobsNode as children to BranchInfoNode (if PR exists)
@@ -570,6 +573,7 @@ def run_all_passes(
     has_branch_info_nodes = any(isinstance(n, BranchInfoNode) for n in ci_nodes)
     
     if has_branch_info_nodes and github_api and page_root_dir:
+        t0 = time.monotonic()
         ci_nodes = add_pr_status_node_pass(
             nodes=ci_nodes,
             github_api=github_api,
@@ -580,29 +584,40 @@ def run_all_passes(
             enable_success_build_test_logs=enable_success_build_test_logs,
             context_prefix=context_prefix,
         )
+        pass_timings['pass1_add_pr_status'] = time.monotonic() - t0
 
     # PASS 1.5: Prefetch GitHub Actions job details in batch (batch fetch all jobs by run_id)
     # This populates the job details cache so individual lookups hit cache instead of making API calls
     # OPTIMIZATION: Reduces 500-1000 per-job API calls down to 10-20 per-run batch calls (90-95% reduction)
+    t0 = time.monotonic()
     ci_nodes = prefetch_actions_job_details_pass(ci_nodes, github_api=github_api)
+    pass_timings['pass1.5_prefetch_job_details'] = time.monotonic() - t0
 
     # PASS 2: Add job steps and pytest tests to CIJobNode children (before conversion to TreeNodeVM)
     # This must run BEFORE augment_ci_with_yaml_info_pass so children are in place
+    t0 = time.monotonic()
     ci_nodes = add_job_steps_and_tests_pass(ci_nodes, repo_root)
+    pass_timings['pass2_add_steps_and_tests'] = time.monotonic() - t0
 
     # PASS 2.5: Verify job details (steps, pytest tests, duration)
     # This runs right after add_job_steps_and_tests_pass to validate that expected data is present
     # Only runs if --run-verifier-pass flag is set
     if run_verifier_pass:
+        t0 = time.monotonic()
         verify_job_details_pass(ci_nodes, commit_sha=commit_sha)
+        pass_timings['pass2.5_verify_job_details'] = time.monotonic() - t0
 
     # Parse YAML workflows to build mappings (job names, dependencies, etc.)
     # Note: This is NOT a pass - it doesn't modify nodes, just parses YAML files
+    t0 = time.monotonic()
     _, yaml_mappings = parse_workflow_yaml_and_build_mapping_pass([], repo_root, commit_sha=commit_sha)
+    pass_timings['yaml_parse'] = time.monotonic() - t0
     
     # PASS 3: Augment CI nodes with YAML information (short names, dependencies)
     # This pass also converts BranchNode to TreeNodeVM
+    t0 = time.monotonic()
     augmented_nodes = augment_ci_with_yaml_info_pass(ci_nodes, yaml_mappings)
+    pass_timings['pass3_augment_yaml_info'] = time.monotonic() - t0
     
     # PASS 4: Move jobs under parent nodes (BATCHED for performance)
     # Instead of calling move_jobs_by_prefix_pass 25+ times (O(25×n)), we batch all groupings
@@ -635,21 +650,36 @@ def run_all_passes(
         ("Validate PR title", "_fast", "Jobs that tend to run fast", True),
     ]
     
+    t0 = time.monotonic()
     grouped_nodes = move_jobs_by_prefix_batch_pass(augmented_nodes, grouping_rules)
+    pass_timings['pass4_batch_grouping'] = time.monotonic() - t0
     
     # PASS 5: Sort nodes by name
+    t0 = time.monotonic()
     sorted_nodes = sort_nodes_by_name_pass(grouped_nodes)
+    pass_timings['pass5_sort_by_name'] = time.monotonic() - t0
     
     # PASS 6: Expand nodes with required failures in descendants
+    t0 = time.monotonic()
     final_nodes = expand_required_failure_descendants_pass(sorted_nodes)
+    pass_timings['pass6_expand_required_failures'] = time.monotonic() - t0
     
     # PASS 7: Move required jobs to the top (alphabetically sorted)
+    t0 = time.monotonic()
     final_nodes = move_required_jobs_to_top_pass(final_nodes)
+    pass_timings['pass7_move_required_to_top'] = time.monotonic() - t0
     
     # PASS 8: Verify the final tree structure
     # Only runs if --run-verifier-pass flag is set
     if run_verifier_pass:
+        t0 = time.monotonic()
         verify_tree_structure_pass(final_nodes, ci_nodes, commit_sha=commit_sha)
+        pass_timings['pass8_verify_structure'] = time.monotonic() - t0
+    
+    # Log per-pass timing breakdown
+    if pass_timings:
+        timing_str = ", ".join([f"{k}={v:.3f}s" for k, v in pass_timings.items()])
+        logger.debug(f"[run_all_passes] Pass timing breakdown: {timing_str}")
     
     logger.info(f"[run_all_passes] All passes complete (1-8), returning {len(final_nodes)} root nodes")
     return final_nodes
