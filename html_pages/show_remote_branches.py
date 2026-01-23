@@ -87,7 +87,7 @@ from typing import Optional as Opt  # noqa: E402
 import html as html_module  # noqa: E402
 from common_dashboard_lib import github_api_stats_rows  # noqa: E402
 from common_branch_nodes import mock_get_open_pr_info_for_author  # noqa: E402
-from snippet_cache import SNIPPET_CACHE  # noqa: E402
+from cache_snippet import SNIPPET_CACHE  # noqa: E402
 
 
 @dataclass

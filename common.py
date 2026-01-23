@@ -170,6 +170,10 @@ DEFAULT_NO_PR_TTL_S: int = 24 * 3600
 # ^ TTL (seconds) for "negative cache" entries (when we *didn't* find something).
 #   Example: if SHA→PR mapping wasn't found, we remember that for 24 hours so we don't re-query constantly,
 #   but we retry later in case the mapping appears.
+DEFAULT_RAW_LOG_URL_TTL_S: int = 3600
+# ^ TTL (seconds) for cached raw log *redirect URL* (GitHub Actions provides time-limited signed URLs).
+#   The redirect URL expires quickly, so we keep TTL short (1 hour).
+#   Example: the redirect URL for job `59030780729` is valid for ~1 hour before needing refresh.
 DEFAULT_RAW_LOG_TEXT_TTL_S: int = 365 * 24 * 3600
 # ^ TTL (seconds) for cached raw log *content* (the downloaded text we parse/snippet locally).
 #   Completed job logs are IMMUTABLE and never change, so we cache them for 1 year (effectively forever).

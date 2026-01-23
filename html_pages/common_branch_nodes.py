@@ -80,7 +80,7 @@ from common_dashboard_runtime import (
 )
 
 # Snippet cache (shared across all dashboards)
-from snippet_cache import SNIPPET_CACHE
+from cache_snippet import SNIPPET_CACHE
 
 # Import GitHub utilities from common_github module
 from common_github import (

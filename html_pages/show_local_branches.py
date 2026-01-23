@@ -94,7 +94,7 @@ from common_dashboard_runtime import (
 from ci_log_errors import snippet as ci_snippet
 
 # Snippet cache (shared across all dashboards)
-from snippet_cache import SNIPPET_CACHE
+from cache_snippet import SNIPPET_CACHE
 
 # Jinja2 for HTML template rendering
 from jinja2 import Environment, FileSystemLoader, select_autoescape

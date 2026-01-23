@@ -192,6 +192,14 @@ def materialize_job_raw_log_text_local_link(
     Returned href points into the page-root served cache:
       "raw-log-text/<job_id>.log"   (from <page_root_dir>/index.html)
     """
+    import time
+    t_total = time.monotonic()
+    t_extract = 0.0
+    t_api = 0.0
+    t_path_setup = 0.0
+    t_exists_check = 0.0
+    t_symlink_check = 0.0
+    
     def _extract_job_id(u: str) -> str:
         if "/job/" not in (u or ""):
             return ""
@@ -212,12 +220,15 @@ def materialize_job_raw_log_text_local_link(
         x = re.sub(r"\\s+", " ", x).strip()
         return x
 
+    t0 = time.monotonic()
     job_url = str(job_url or "")
     job_id = _extract_job_id(job_url)
     run_id = _extract_run_id(job_url)
+    t_extract = time.monotonic() - t0
 
     # If we only have a run URL, try to resolve job_id using the Actions "list jobs for a workflow run" API.
     if not job_id and run_id and job_name and allow_fetch:
+        t0 = time.monotonic()
         data = github.get(
             f"/repos/{owner}/{repo}/actions/runs/{run_id}/jobs",
             params={"per_page": 100},
@@ -238,6 +249,7 @@ def materialize_job_raw_log_text_local_link(
                 if want in nm or nm in want:
                     best = jid
         job_id = best
+        t_api += time.monotonic() - t0
 
     if not job_id:
         return None
@@ -246,7 +258,9 @@ def materialize_job_raw_log_text_local_link(
     # (including `steps[]`). This avoids "cached raw log exists but no step breakdown" when later
     # runs are forced into cache-only mode (budget/rate-limit).
     if allow_fetch and (not bool(github.cache_only_mode)):
+        t0 = time.monotonic()
         _ = github.get_actions_job_details_cached(owner=owner, repo=repo, job_id=str(job_id), ttl_s=30 * 24 * 3600)
+        t_api += time.monotonic() - t0
 
     # Ensure we use a canonical /job/<id> URL for fetch APIs that require it.
     job_url_for_fetch = job_url
@@ -257,39 +271,66 @@ def materialize_job_raw_log_text_local_link(
             # Best-effort fallback (no run_id): still build a canonical URL; it should work for log download.
             job_url_for_fetch = f"https://github.com/{owner}/{repo}/actions/job/{job_id}"
 
+    t0 = time.monotonic()
     page_root_dir = Path(page_root_dir)
 
     # Destination path: consolidated repo-local served cache.
     dest_dir = dashboard_served_raw_log_repo_cache_dir(page_root_dir=page_root_dir)
-    # If dest_dir is a symlink, mkdir would fail; ensure the resolved target exists instead.
-    try:
-        dest_dir.mkdir(parents=True, exist_ok=True)
-    except OSError:
-        Path(dest_dir).resolve().mkdir(parents=True, exist_ok=True)
+    
+    # NOTE: mkdir is intentionally NOT called here per-job.
+    # The directory should be created once by the caller before parallel execution.
+    # Calling mkdir(parents=True, exist_ok=True) 100+ times in parallel is expensive
+    # even with exist_ok=True (each call does filesystem stat checks).
+    
     dest_path = dest_dir / f"{job_id}.log"
     # Always link under the dashboard root (never to /.cache/...).
     href = f"raw-log-text/{job_id}.log"
+    t_path_setup = time.monotonic() - t0
 
     # Enforce "completed-only" policy even if a stale file already exists.
     if not bool(assume_completed):
+        t0 = time.monotonic()
         st = str(github.get_actions_job_status(owner=owner, repo=repo, job_id=job_id) or "").lower()
+        t_api += time.monotonic() - t0
         if not st or st != "completed":
             if dest_path.exists():
                 dest_path.unlink()
             return None
 
     # If already materialized, return immediately (no IO / network).
+    t0 = time.monotonic()
     if dest_path.exists():
+        t_exists_check = time.monotonic() - t0
         # Count this as a raw-log cache hit (served page cache already has <job_id>.log).
         github._cache_hit("raw_log_text.page")
+        # Track timing breakdown
+        if hasattr(github, '_raw_log_timing_stats'):
+            github._raw_log_timing_stats['extract'] += t_extract
+            github._raw_log_timing_stats['api'] += t_api
+            github._raw_log_timing_stats['path_setup'] += t_path_setup
+            github._raw_log_timing_stats['exists_check'] += t_exists_check
+            github._raw_log_timing_stats['symlink_check'] += 0
+            github._raw_log_timing_stats['count'] += 1
         return href
+    t_exists_check = time.monotonic() - t0
 
     # If the served dir is just a symlink to the global cache, no copying is needed.
+    t0 = time.monotonic()
     global_dir = (common.dynamo_utils_cache_dir() / "raw-log-text").resolve()
     if Path(dest_dir).resolve() == global_dir:
         # Ensure the file exists in the global cache (fetch if allowed).
         if dest_path.exists():
+            t_symlink_check = time.monotonic() - t0
+            # Track timing breakdown
+            if hasattr(github, '_raw_log_timing_stats'):
+                github._raw_log_timing_stats['extract'] += t_extract
+                github._raw_log_timing_stats['api'] += t_api
+                github._raw_log_timing_stats['path_setup'] += t_path_setup
+                github._raw_log_timing_stats['exists_check'] += t_exists_check
+                github._raw_log_timing_stats['symlink_check'] += t_symlink_check
+                github._raw_log_timing_stats['count'] += 1
             return href
+    t_symlink_check = time.monotonic() - t0
 
     # If we already have the global cached file, just copy it into the served cache (or symlink target).
     global_txt = github._raw_log_text_cache_dir / f"{job_id}.log"  # type: ignore[attr-defined]

@@ -107,8 +107,9 @@ from datetime import datetime, timezone
 
 from common_github import GitHubAPIClient, classify_ci_kind, GITHUB_CACHE_STATS, GITHUB_API_STATS, COMMIT_HISTORY_PERF_STATS
 from common_types import CIStatus
-from pytest_timings_cache import PYTEST_TIMINGS_CACHE
-from snippet_cache import SNIPPET_CACHE
+from cache_pytest_timings import PYTEST_TIMINGS_CACHE
+from cache_snippet import SNIPPET_CACHE
+from cache_commit_history import COMMIT_HISTORY_CACHE
 
 # Add parent directory to path for common.py imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -2810,7 +2811,7 @@ def pytest_slowest_tests_from_raw_log(
         return []
 
     # Parsed pytest timings cache (disk-backed). Cache boundary is JSON-on-disk; in-memory uses dataclasses.
-    from pytest_timings_cache import PYTEST_TIMINGS_CACHE  # local file import
+    from cache_pytest_timings import PYTEST_TIMINGS_CACHE  # local file import
 
     cached = PYTEST_TIMINGS_CACHE.get_if_fresh(raw_log_path=Path(raw_log_path), step_name=step_name)
     if cached is not None:
@@ -2926,7 +2927,7 @@ def pytest_slowest_tests_from_raw_log(
                         test_times.append((full_name, dur_str, status_norm))
         
         # Persist parsed rows (best-effort).
-        from pytest_timings_cache import PYTEST_TIMINGS_CACHE  # local file import
+        from cache_pytest_timings import PYTEST_TIMINGS_CACHE  # local file import
 
         # Record parse timing on the concrete cache object.
         PYTEST_TIMINGS_CACHE.stats.parse_calls += 1
@@ -3297,6 +3298,17 @@ def github_api_stats_rows(
     rows.append(("pytest.parse_calls", str(int(st.parse_calls)), "Number of pytest timing file parses"))
     rows.append(("pytest.parse_secs", f"{float(st.parse_secs):.2f}s", "Time spent parsing pytest timings"))
 
+    # Duration cache (individual flat entries)
+    from cache.cache_duration import DURATION_CACHE
+    duration_stats = DURATION_CACHE.stats
+    duration_mem_count, duration_disk_count = DURATION_CACHE.get_cache_sizes()
+    rows.append(("duration.cache.disk", str(duration_disk_count), "Job duration cache [duration-cache.json] [key: job_id or mtime:size:filename] [TTL: ∞ (immutable)]"))
+    rows.append(("duration.cache.mem", str(duration_mem_count), ""))
+    rows.append(("duration.cache.hits", str(int(duration_stats.hit)), ""))
+    rows.append(("duration.cache.misses", str(int(duration_stats.miss)), ""))
+    rows.append(("duration.cache.writes", str(int(duration_stats.write)), ""))
+
+
     # Cache entry counts (how many items are stored in each cache)
     # Organized by cache name with all related stats grouped together:
     # cache.github.{name}.disk, cache.github.{name}.mem, cache.github.{name}.hits, cache.github.{name}.misses
@@ -3540,16 +3552,19 @@ def build_page_stats(
 
     # Composite SHA (commit-history-only, show real values when available)
     if perf_stats.composite_sha_cache_hit > 0 or perf_stats.composite_sha_cache_miss > 0:
-        # Show disk cache size (from commit_history.json)
-        composite_sha_disk_count = perf_stats.composite_sha_cache_hit + perf_stats.composite_sha_cache_miss
-        page_stats.append(("composite_sha.cache.disk", str(composite_sha_disk_count), "Composite SHA cache entries in commit_history.json"))
+        # Show disk cache size (from COMMIT_HISTORY_CACHE)
+        commit_mem_count, commit_disk_count = COMMIT_HISTORY_CACHE.get_cache_sizes()
+        page_stats.append(("composite_sha.cache.mem", str(commit_mem_count), "Commit history cache entries (in memory)"))
+        page_stats.append(("composite_sha.cache.disk", str(commit_disk_count), "Commit history cache entries (on disk before run)"))
         page_stats.append(("composite_sha.cache.hits", str(perf_stats.composite_sha_cache_hit), ""))
         page_stats.append(("composite_sha.cache.misses", str(perf_stats.composite_sha_cache_miss), ""))
         page_stats.append(("composite_sha.errors", str(perf_stats.composite_sha_errors), "Errors computing composite SHAs (commit history only)"))
         page_stats.append(("composite_sha.total_secs", f"{perf_stats.composite_sha_total_secs:.2f}s", "Total time computing composite SHAs (commit history only)"))
         page_stats.append(("composite_sha.compute_secs", f"{perf_stats.composite_sha_compute_secs:.2f}s", "Time spent in SHA computations (commit history only)"))
     else:
-        page_stats.append(("composite_sha.cache.disk", "(N/A)", "Composite SHA cache entries in commit_history.json"))
+        commit_mem_count, commit_disk_count = COMMIT_HISTORY_CACHE.get_cache_sizes()
+        page_stats.append(("composite_sha.cache.mem", str(commit_mem_count), "Commit history cache entries (in memory)"))
+        page_stats.append(("composite_sha.cache.disk", str(commit_disk_count), "Commit history cache entries (on disk before run)"))
         page_stats.append(("composite_sha.cache.hits", "(N/A)", ""))
         page_stats.append(("composite_sha.cache.misses", "(N/A)", ""))
         page_stats.append(("composite_sha.errors", "(N/A)", "Errors computing composite SHAs (commit history only)"))
