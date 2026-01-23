@@ -98,6 +98,7 @@ import logging
 import os
 import re
 import sys
+import urllib.parse
 import time
 import yaml
 from dataclasses import dataclass, field
@@ -128,6 +129,15 @@ if TYPE_CHECKING:
 
 # Initialize module logger
 logger = logging.getLogger(__name__)
+
+# ======================================================================================
+# Grafana URL Templates
+# ======================================================================================
+
+# Grafana Test Details dashboard URL template (for individual pytest tests)
+# Example: https://grafana.nvidia.com/d/bf0set70vqygwb/test-details?orgId=283&var-branch=All&var-test_status=All&var-test=test_serve_deployment%5Baggregated%5D
+# Note: Multiple var-test parameters can be present, but only the last one is used for single-select variables
+GRAFANA_TEST_URL_TEMPLATE = "https://grafana.nvidia.com/d/bf0set70vqygwb/test-details?orgId=283&var-branch=All&var-test_status=All&var-test={test_name}"
 
 
 # ======================================================================================
@@ -4179,6 +4189,35 @@ def check_line_html(
         cmd = _snippet_first_command(snippet_text)
         if cmd:
             links += _tag_pill_html(text=cmd, monospace=True, kind="command", snippet_key=snippet_key)
+
+    # Detect pytest tests and add Grafana button
+    # Pattern: [call] tests/serve/test_vllm.py::test_serve_deployment[aggregated] (1m 41s)
+    # We want to extract "test_serve_deployment[aggregated]" and create a Grafana link
+    pytest_match = re.match(r'\[call\]\s+tests/[^:]+::(.+)', str(job_id or ""))
+    if pytest_match:
+        # Extract the test name (e.g., "test_serve_deployment[aggregated]")
+        test_name = pytest_match.group(1).strip()
+        if test_name:
+            # URL-encode the test name for the Grafana URL
+            test_name_encoded = urllib.parse.quote(test_name)
+            grafana_url = GRAFANA_TEST_URL_TEMPLATE.format(test_name=test_name_encoded)
+            # Add a Grafana button similar to the PR button in show_commit_history.j2
+            grafana_button = (
+                f' <a href="{html.escape(grafana_url)}" '
+                f'target="_blank" '
+                f'style="display: inline-block; padding: 1px 6px; background: linear-gradient(180deg, #FF7A28 0%, #F05A28 100%); '
+                f'color: white; text-decoration: none; border-radius: 8px; font-weight: 600; font-size: 9px; '
+                f'border: 1px solid #D94A1F; box-shadow: 0 1px 2px rgba(240,90,40,0.3); line-height: 1.2;" '
+                f'onmouseover="this.style.background=\'linear-gradient(180deg, #FF8A38 0%, #FF7A28 100%)\'; '
+                f'this.style.boxShadow=\'0 2px 4px rgba(240,90,40,0.4)\'; this.style.transform=\'translateY(-1px)\';" '
+                f'onmouseout="this.style.background=\'linear-gradient(180deg, #FF7A28 0%, #F05A28 100%)\'; '
+                f'this.style.boxShadow=\'0 1px 2px rgba(240,90,40,0.3)\'; this.style.transform=\'translateY(0)\';" '
+                f'onmousedown="this.style.boxShadow=\'0 1px 2px rgba(0,0,0,0.2) inset\'; this.style.transform=\'translateY(1px)\';" '
+                f'onmouseup="this.style.boxShadow=\'0 2px 4px rgba(240,90,40,0.4)\'; this.style.transform=\'translateY(-1px)\';" '
+                f'title="View test {html.escape(test_name)} in Grafana Test Details dashboard">'
+                f'grafana</a>'
+            )
+            links += grafana_button
 
     # Format: [REQUIRED] short-name "long-name" (duration) [log] ...
     return f"{icon} {req_html}{id_html}{name_html}{dur_html}{links}"
