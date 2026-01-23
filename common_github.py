@@ -79,6 +79,7 @@ from cache.cache_required_checks import REQUIRED_CHECKS_CACHE
 from cache.cache_pr_checks import PR_CHECKS_CACHE
 from cache.cache_pr_info import PR_INFO_CACHE, PR_HEAD_SHA_CACHE
 from cache.cache_job_log import JOB_LOG_CACHE
+from cache.cache_duration import DURATION_CACHE
 
 # Module logger
 _logger = logging.getLogger(__name__)
@@ -848,12 +849,6 @@ def format_gh_check_run_duration(check_run: Dict[str, Any]) -> str:
         return ""
 
 
-# Cache for raw log duration calculations (in-memory, persists across calls within same process)
-_RAW_LOG_DURATION_CACHE: Dict[str, str] = {}
-# Cache for API job duration calculations (in-memory, persists across calls within same process)
-_API_JOB_DURATION_CACHE: Dict[str, str] = {}
-
-
 def calculate_duration_from_raw_log(raw_log_path: Path) -> str:
     """Calculate job duration from timestamps in a GitHub Actions raw log file.
 
@@ -868,16 +863,16 @@ def calculate_duration_from_raw_log(raw_log_path: Path) -> str:
     Returns:
         A short duration string like "28m 15s", "1h 4m", or "" if unable to parse
 
-    Note: Results are cached in-memory to avoid re-parsing the same log file.
+    Note: Results are cached to disk (via DURATION_CACHE) to avoid re-parsing.
     """
-    # Check cache first (keyed by absolute path as string)
-    cache_key = str(raw_log_path.resolve())
-    if cache_key in _RAW_LOG_DURATION_CACHE:
-        return _RAW_LOG_DURATION_CACHE[cache_key]
+    # Check disk cache first (keyed by mtime/size)
+    cached_duration = DURATION_CACHE.get_raw_log_duration(raw_log_path=raw_log_path)
+    if cached_duration is not None:
+        return cached_duration
 
     try:
         if not raw_log_path.exists():
-            _RAW_LOG_DURATION_CACHE[cache_key] = ""
+            DURATION_CACHE.put_raw_log_duration(raw_log_path=raw_log_path, duration="")
             return ""
 
         # Read first line with valid timestamp
@@ -892,7 +887,7 @@ def calculate_duration_from_raw_log(raw_log_path: Path) -> str:
                     break
 
         if not first_ts:
-            _RAW_LOG_DURATION_CACHE[cache_key] = ""
+            DURATION_CACHE.put_raw_log_duration(raw_log_path=raw_log_path, duration="")
             return ""
 
         # Read last line with valid timestamp (read last ~50 lines to avoid incomplete lines)
@@ -912,7 +907,7 @@ def calculate_duration_from_raw_log(raw_log_path: Path) -> str:
             last_ts = timestamps[-1]
 
         if not first_ts or not last_ts:
-            _RAW_LOG_DURATION_CACHE[cache_key] = ""
+            DURATION_CACHE.put_raw_log_duration(raw_log_path=raw_log_path, duration="")
             return ""
 
         # Parse timestamps and calculate duration
@@ -922,10 +917,10 @@ def calculate_duration_from_raw_log(raw_log_path: Path) -> str:
 
         # Use same formatting as GitHub check runs
         duration = GitHubAPIClient._format_seconds_delta(delta_s)
-        _RAW_LOG_DURATION_CACHE[cache_key] = duration
+        DURATION_CACHE.put_raw_log_duration(raw_log_path=raw_log_path, duration=duration)
         return duration
     except (OSError, ValueError):  # File operations or invalid datetime format
-        _RAW_LOG_DURATION_CACHE[cache_key] = ""
+        DURATION_CACHE.put_raw_log_duration(raw_log_path=raw_log_path, duration="")
         return ""
 
 
@@ -950,36 +945,34 @@ def calculate_duration_from_job_url(
     Returns:
         A short duration string like "28m 15s", "1h 4m", or "" if unable to fetch
 
-    Note: Results are cached in-memory to avoid redundant API calls.
+    Note: Results are cached to disk (via DURATION_CACHE) to avoid redundant API calls.
     """
-    # Check cache first (keyed by job URL)
-    cache_key = str(job_url or "").strip()
-    if cache_key in _API_JOB_DURATION_CACHE:
-        return _API_JOB_DURATION_CACHE[cache_key]
-
     try:
         if not job_url or not github_api:
-            _API_JOB_DURATION_CACHE[cache_key] = ""
             return ""
 
         # Extract job ID from URL
         match = re.search(r'/job/(\d+)', job_url)
         if not match:
-            _API_JOB_DURATION_CACHE[cache_key] = ""
             return ""
 
-        job_id = match.group(1)
+        job_id = int(match.group(1))
+
+        # Check disk cache first (keyed by job ID)
+        cached_duration = DURATION_CACHE.get_job_duration(job_id=job_id)
+        if cached_duration is not None:
+            return cached_duration
 
         # Fetch job details from API (cached via get_actions_job_details_cached)
         job = github_api.get_actions_job_details_cached(
             owner=owner,
             repo=repo,
-            job_id=job_id,
+            job_id=str(job_id),
             ttl_s=30 * 24 * 3600  # 30 days cache
         )
 
         if not job:
-            _API_JOB_DURATION_CACHE[cache_key] = ""
+            DURATION_CACHE.put_job_duration(job_id=job_id, duration="")
             return ""
 
         # Extract timestamps
@@ -987,7 +980,7 @@ def calculate_duration_from_job_url(
         completed = str(job.get("completed_at", "") or "")
 
         if not started or not completed:
-            _API_JOB_DURATION_CACHE[cache_key] = ""
+            DURATION_CACHE.put_job_duration(job_id=job_id, duration="")
             return ""
 
         # Calculate duration
@@ -997,10 +990,12 @@ def calculate_duration_from_job_url(
 
         # Use same formatting as GitHub check runs
         duration = GitHubAPIClient._format_seconds_delta(delta_s)
-        _API_JOB_DURATION_CACHE[cache_key] = duration
+        DURATION_CACHE.put_job_duration(job_id=job_id, duration=duration)
         return duration
     except (AttributeError, ValueError):  # job.get() on non-dict or invalid datetime
-        _API_JOB_DURATION_CACHE[cache_key] = ""
+        # Only cache empty result if we have a valid job_id
+        if 'job_id' in locals():
+            DURATION_CACHE.put_job_duration(job_id=job_id, duration="")
         return ""
 
 
