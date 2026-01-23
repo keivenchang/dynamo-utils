@@ -247,6 +247,71 @@ class BaseDiskCache:
         self._dirty = True
         self.stats.write += 1
 
+    def get_etag(self, key: str) -> Optional[str]:
+        """
+        Get ETag from a cached entry (if present).
+        
+        Useful for conditional requests (If-None-Match header).
+        Returns None if entry doesn't exist or doesn't have an ETag.
+        
+        Example:
+            etag = cache.get_etag("owner/repo#123")
+            if etag:
+                # Send conditional request with If-None-Match: etag
+                # GitHub returns 304 Not Modified if unchanged (doesn't count against rate limit)
+        """
+        with self._mu:
+            self._load_once()
+            items = self._get_items()
+            entry = items.get(key)
+            
+            if not isinstance(entry, dict):
+                return None
+            
+            etag = entry.get("etag")
+            if isinstance(etag, str) and etag.strip():
+                return etag.strip()
+            
+            return None
+    
+    def put_with_etag(self, key: str, value: Any, etag: Optional[str] = None) -> None:
+        """
+        Store an item with optional ETag for future conditional requests.
+        
+        Args:
+            key: Cache key
+            value: Value to store (should be a dict for most cache types)
+            etag: Optional ETag from response headers (for 304 Not Modified support)
+        
+        Example:
+            response = requests.get(url, headers={"If-None-Match": cached_etag})
+            if response.status_code == 304:
+                # Use cached data
+            else:
+                new_etag = response.headers.get("ETag")
+                cache.put_with_etag(key, response.json(), etag=new_etag)
+        """
+        with self._mu:
+            self._load_once()
+            
+            # If value is already a dict with 'ts', preserve it; otherwise add timestamp
+            if isinstance(value, dict):
+                if "ts" not in value:
+                    value["ts"] = int(time.time())
+                if etag:
+                    value["etag"] = etag.strip()
+            else:
+                # Wrap non-dict values
+                value = {
+                    "ts": int(time.time()),
+                    "data": value,
+                }
+                if etag:
+                    value["etag"] = etag.strip()
+            
+            self._set_item(key, value)
+            self._persist()
+
     def __enter__(self) -> Dict[str, Any]:
         """
         Context manager entry: acquire lock and load cache.

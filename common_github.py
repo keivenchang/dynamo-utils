@@ -80,6 +80,8 @@ from cache.cache_pr_checks import PR_CHECKS_CACHE
 from cache.cache_pr_info import PR_INFO_CACHE, PR_HEAD_SHA_CACHE
 from cache.cache_job_log import JOB_LOG_CACHE
 from cache.cache_duration import DURATION_CACHE
+from cache.cache_pr_comments import PR_COMMENTS_CACHE
+from cache.cache_pr_reviews import PR_REVIEWS_CACHE
 
 # Module logger
 _logger = logging.getLogger(__name__)
@@ -1480,28 +1482,34 @@ class GitHubAPIClient:
         # These are internal attributes initialized in __init__, so they always exist
         
         # Get cache counts from dedicated cache modules
-        pr_branch_mem, pr_branch_disk = PR_BRANCH_CACHE.get_cache_sizes()
-        required_checks_mem, required_checks_disk = REQUIRED_CHECKS_CACHE.get_cache_sizes()
-        pr_checks_mem, pr_checks_disk = PR_CHECKS_CACHE.get_cache_sizes()
-        pr_info_mem, pr_info_disk = PR_INFO_CACHE.get_cache_sizes()
         job_log_mem, job_log_disk = JOB_LOG_CACHE.get_cache_sizes()
+        pr_branch_mem, pr_branch_disk = PR_BRANCH_CACHE.get_cache_sizes()
+        pr_checks_mem, pr_checks_disk = PR_CHECKS_CACHE.get_cache_sizes()
+        pr_comments_mem, pr_comments_disk = PR_COMMENTS_CACHE.get_cache_sizes()
+        pr_info_mem, pr_info_disk = PR_INFO_CACHE.get_cache_sizes()
+        pr_reviews_mem, pr_reviews_disk = PR_REVIEWS_CACHE.get_cache_sizes()
+        required_checks_mem, required_checks_disk = REQUIRED_CHECKS_CACHE.get_cache_sizes()
         
         cache_sizes = {
-            "pr_checks_mem": pr_checks_mem,
-            "pulls_list_mem": len(self._pulls_list_mem_cache),
-            "pr_branch_mem": pr_branch_mem,
-            "raw_log_text_mem": len(self._raw_log_text_mem_cache),
-            "actions_job_status_mem": len(self._actions_job_status_mem_cache),
             "actions_job_details_mem": len(self._actions_job_details_mem_cache),
-            "required_checks_mem": required_checks_mem,
-            "pr_info_mem": pr_info_mem,
-            "search_issues_mem": len(self._search_issues_mem_cache),
+            "actions_job_status_mem": len(self._actions_job_status_mem_cache),
+            "job_log_disk": job_log_disk,
             "job_log_mem": job_log_mem,
             "pr_branch_disk": pr_branch_disk,
-            "required_checks_disk": required_checks_disk,
+            "pr_branch_mem": pr_branch_mem,
             "pr_checks_disk": pr_checks_disk,
+            "pr_checks_mem": pr_checks_mem,
+            "pr_comments_disk": pr_comments_disk,
+            "pr_comments_mem": pr_comments_mem,
             "pr_info_disk": pr_info_disk,
-            "job_log_disk": job_log_disk,
+            "pr_info_mem": pr_info_mem,
+            "pr_reviews_disk": pr_reviews_disk,
+            "pr_reviews_mem": pr_reviews_mem,
+            "pulls_list_mem": len(self._pulls_list_mem_cache),
+            "raw_log_text_mem": len(self._raw_log_text_mem_cache),
+            "required_checks_disk": required_checks_disk,
+            "required_checks_mem": required_checks_mem,
+            "search_issues_mem": len(self._search_issues_mem_cache),
         }
 
         # Disk cache counts - show initial counts before this run's modifications
@@ -1513,15 +1521,15 @@ class GitHubAPIClient:
             cache_sizes[key] = self._initial_disk_counts.get(key, 0)
 
         return {
-            "hits_total": hits_total,
-            "misses_total": misses_total,
-            "writes_ops_total": writes_ops_total,
-            "writes_entries_total": writes_entries_total,
-            "hits_by": hits_by,
-            "misses_by": misses_by,
-            "writes_ops_by": writes_ops_by,
-            "writes_entries_by": writes_entries_by,
             "entries": cache_sizes,
+            "hits_by": hits_by,
+            "hits_total": hits_total,
+            "misses_by": misses_by,
+            "misses_total": misses_total,
+            "writes_entries_by": writes_entries_by,
+            "writes_entries_total": writes_entries_total,
+            "writes_ops_by": writes_ops_by,
+            "writes_ops_total": writes_ops_total,
         }
 
     def _rest_get(
@@ -4138,29 +4146,53 @@ class GitHubAPIClient:
             return None
 
 
-    def count_unresolved_conversations(self, owner: str, repo: str, pr_number: int) -> int:
+    def count_unresolved_conversations(self, owner: str, repo: str, pr_number: int, ttl_s: int = 300) -> int:
         """Count unresolved conversation threads in a PR.
 
         Args:
             owner: Repository owner
             repo: Repository name
             pr_number: Pull request number
+            ttl_s: Cache TTL in seconds (default: 300s = 5 minutes)
 
         Returns:
             Count of unresolved conversations (approximated as top-level comments)
         """
+        cache_key = f"{owner}/{repo}#{pr_number}"
+        
+        # Check cache first
+        cached = PR_COMMENTS_CACHE.get_if_fresh(cache_key, ttl_s=ttl_s)
+        if cached is not None:
+            self._cache_hit("pr_comments")
+            comments = cached.get("comments", [])
+            try:
+                return sum(1 for comment in comments if not comment.get('in_reply_to_id'))
+            except (ValueError, TypeError):
+                return 0
+        
+        # Cache-only mode
+        if self.cache_only_mode:
+            self._cache_miss("pr_comments.cache_only_empty")
+            return 0
+        
+        # Fetch from API
+        self._cache_miss("pr_comments")
         endpoint = f"/repos/{owner}/{repo}/pulls/{pr_number}/comments"
         try:
             comments = self.get(endpoint)
             if not comments:
-                return 0
+                comments = []
+            
+            # Store in cache
+            PR_COMMENTS_CACHE.put(cache_key, comments=comments)
+            
             # Count top-level comments (those without in_reply_to_id are conversation starters)
             unresolved = sum(1 for comment in comments if not comment.get('in_reply_to_id'))
             return unresolved
         except (ValueError, TypeError):  # Type conversions or malformed data
             return 0
 
-    def _review_decision_from_reviews(self, owner: str, repo: str, pr_number: int) -> Optional[str]:
+    def _review_decision_from_reviews(self, owner: str, repo: str, pr_number: int, ttl_s: int = 300) -> Optional[str]:
         """Best-effort review decision from REST reviews.
 
         GitHub's REST `/pulls` endpoints do not include GraphQL `reviewDecision`.
@@ -4168,12 +4200,37 @@ class GitHubAPIClient:
         - If any latest review is CHANGES_REQUESTED => CHANGES_REQUESTED
         - Else if any latest review is APPROVED => APPROVED
         - Else => REVIEW_REQUIRED
+        
+        Args:
+            ttl_s: Cache TTL in seconds (default: 300s = 5 minutes)
         """
-        endpoint = f"/repos/{owner}/{repo}/pulls/{int(pr_number)}/reviews"
-        try:
-            reviews = self.get(endpoint, params={"per_page": 100})
-        except AttributeError:  # .get() on non-dict
-            return None
+        cache_key = f"{owner}/{repo}#{pr_number}"
+        
+        # Check cache first
+        cached = PR_REVIEWS_CACHE.get_if_fresh(cache_key, ttl_s=ttl_s)
+        if cached is not None:
+            self._cache_hit("pr_reviews")
+            reviews = cached.get("reviews", [])
+        else:
+            # Cache-only mode
+            if self.cache_only_mode:
+                self._cache_miss("pr_reviews.cache_only_empty")
+                return None
+            
+            # Fetch from API
+            self._cache_miss("pr_reviews")
+            endpoint = f"/repos/{owner}/{repo}/pulls/{int(pr_number)}/reviews"
+            try:
+                reviews = self.get(endpoint, params={"per_page": 100})
+            except AttributeError:  # .get() on non-dict
+                return None
+            
+            if not isinstance(reviews, list):
+                reviews = []
+            
+            # Store in cache
+            PR_REVIEWS_CACHE.put(cache_key, reviews=reviews)
+        
         if not isinstance(reviews, list) or not reviews:
             return "REVIEW_REQUIRED"
 
