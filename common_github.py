@@ -3509,11 +3509,35 @@ class GitHubAPIClient:
         CACHE_VER = 7
         MIN_CACHE_VER = 2  # Minimum supported cache version (reject anything older)
 
-        # 1) memory cache - TEMPORARILY DISABLED (being migrated to PR_CHECKS_CACHE)
-        # TODO: Complete migration to PR_CHECKS_CACHE module
-        
-        # 2) disk cache - TEMPORARILY DISABLED (being migrated to PR_CHECKS_CACHE)
-        # TODO: Complete migration to PR_CHECKS_CACHE module
+        # 1) Check PR_CHECKS_CACHE
+        cached_entry_dict = PR_CHECKS_CACHE.get_entry_dict(key)
+        if cached_entry_dict is not None:
+            try:
+                # Deserialize from cache
+                ent = GHPRChecksCacheEntry.from_disk_dict_strict(
+                    d=cached_entry_dict,
+                    cache_file=PR_CHECKS_CACHE._cache_file,
+                    entry_key=key
+                )
+                ts = int(ent.ts)
+                ver = int(ent.ver)
+                incomplete = bool(ent.incomplete)
+                
+                # Check TTL (or cache_only_mode overrides TTL)
+                if ts and ((now - ts) <= max(0, int(ttl_s)) or self.cache_only_mode) and not incomplete:
+                    if ver >= MIN_CACHE_VER:
+                        self._cache_hit("pr_checks")
+                        # Apply required_checks overlay
+                        out: List[GHPRCheckRow] = []
+                        for r in ent.rows:
+                            if r.is_required or (r.name in required_checks):
+                                out.append(r if r.is_required else replace(r, is_required=True))
+                            else:
+                                out.append(r)
+                        return out
+            except (ValueError, TypeError, RuntimeError):
+                # Cache entry invalid/corrupted, continue to fetch
+                pass
 
         # Cache-only mode: do not fetch network; return empty if no cached entry was usable.
         if self.cache_only_mode:
@@ -3780,7 +3804,7 @@ class GitHubAPIClient:
                 if missing_pct > 30:
                     incomplete = True
 
-            # persist caches (NOTE: ETags removed, keeping other fields)
+            # persist to cache (without ETags)
             entry = GHPRChecksCacheEntry(
                 ts=int(now),
                 ver=int(CACHE_VER),
@@ -3789,9 +3813,7 @@ class GitHubAPIClient:
                 status_etag="",  # Empty string (ETags removed)
                 incomplete=incomplete,
             )
-            # TODO: Migrate to PR_CHECKS_CACHE module
-            # For now, skip cache write since methods were removed
-            # self._pr_checks_mem_cache[key] = entry
+            PR_CHECKS_CACHE.put_entry_dict(key, entry.to_disk_dict())
         except (ValueError, TypeError):
             pass
 
