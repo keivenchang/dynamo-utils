@@ -170,6 +170,15 @@ class _GitHubAPIStats:
         self.cache_writes_ops = {}  # Dict[str, int] - write operations by cache name
         self.cache_writes_entries = {}  # Dict[str, int] - entries written by cache name
 
+        # Job-details "uncached" tracking
+        #
+        # We intentionally do NOT cache Actions job details until the job is completed
+        # (see get_actions_job_details_cached). When a job is still in_progress, we
+        # return None and skip writing a cache entry. This counter helps distinguish
+        # "real" cache misses from "not cacheable yet" cases in dashboards.
+        self.actions_job_details_in_progress_uncached_total = 0  # int
+        self.actions_job_details_in_progress_uncached_job_ids = set()  # Set[str]
+
         # Rate limit info
         self.core_rate_limit = None  # Optional[Dict] - {remaining, limit, reset_pt}
 
@@ -1794,7 +1803,7 @@ class GitHubAPIClient:
         OPTIMIZATION: Completed jobs are cached to disk permanently since their status never changes.
         This reduces API calls from ~300+ per run to near-zero on subsequent runs.
         
-        TTL: 1m for non-completed jobs, ∞ for completed jobs (immutable).
+        TTL: Adaptive for non-completed jobs based on job age (1m/2m/4m/8m then 60m), ∞ for completed jobs (immutable).
         """
 
         job_id_s = str(job_id or "").strip()
@@ -1804,14 +1813,50 @@ class GitHubAPIClient:
         key = f"{owner}/{repo}:jobstatus:{job_id_s}"
         now = int(time.time())
 
-        # Memory cache (all statuses, short TTL for in-progress jobs)
+        def _adaptive_in_progress_ttl_s(*, started_at_epoch: int, default_ttl_s: int) -> int:
+            """Adaptive polling TTL for non-completed jobs.
+
+            Schedule:
+              - age < 1h   -> 1m
+              - age < 2h   -> 2m
+              - age < 4h   -> 4m
+              - age < 8h   -> 8m
+              - age >= 8h  -> 60m (until completed)
+
+            If started_at is unknown, fall back to default_ttl_s.
+            """
+            try:
+                sa = int(started_at_epoch or 0)
+            except (ValueError, TypeError):
+                sa = 0
+            if sa <= 0 or sa > now:
+                return int(default_ttl_s)
+            age = int(now) - sa
+            if age < 3600:
+                return 60
+            if age < 7200:
+                return 120
+            if age < 14400:
+                return 240
+            if age < 28800:
+                return 480
+            return 3600
+
+        # Memory cache (all statuses)
         try:
             ent = self._actions_job_status_mem_cache.get(key)
-            if ent and int(ent.get("ts", 0) or 0) + int(ttl_s) > now:
-                st = ent.get("status")
-                if st is not None:
-                    self._cache_hit("actions_job_status.mem")
-                    return str(st)
+            if isinstance(ent, dict):
+                ts = int(ent.get("ts", 0) or 0)
+                st = str(ent.get("status") or "")
+                started_at_epoch = int(ent.get("started_at_epoch", 0) or 0)
+                if st:
+                    if st.lower() == "completed":
+                        self._cache_hit("actions_job_status.mem")
+                        return st
+                    eff_ttl = _adaptive_in_progress_ttl_s(started_at_epoch=started_at_epoch, default_ttl_s=int(ttl_s))
+                    if ts and (ts + eff_ttl) > now:
+                        self._cache_hit("actions_job_status.mem")
+                        return st
         except (ValueError, TypeError):
             pass
 
@@ -1822,13 +1867,15 @@ class GitHubAPIClient:
             status_cached = ent.get("status")
             # Completed jobs are cached forever; non-completed jobs respect TTL
             if str(status_cached or "").lower() == "completed":
-                self._actions_job_status_mem_cache[key] = {"ts": now, "status": status_cached}
+                self._actions_job_status_mem_cache[key] = {"ts": now, "status": status_cached, "started_at_epoch": int(ent.get("started_at_epoch", 0) or 0)}
                 self._cache_hit("actions_job_status.disk")
                 return str(status_cached)
             # For non-completed status, check TTL
             ts = int(ent.get("ts", 0) or 0)
-            if ts and (now - ts) <= int(ttl_s):
-                self._actions_job_status_mem_cache[key] = {"ts": ts, "status": status_cached}
+            started_at_epoch = int(ent.get("started_at_epoch", 0) or 0)
+            eff_ttl = _adaptive_in_progress_ttl_s(started_at_epoch=started_at_epoch, default_ttl_s=int(ttl_s))
+            if ts and (now - ts) <= int(eff_ttl):
+                self._actions_job_status_mem_cache[key] = {"ts": ts, "status": status_cached, "started_at_epoch": int(started_at_epoch or 0)}
                 self._cache_hit("actions_job_status.disk")
                 return str(status_cached) if status_cached is not None else None
 
@@ -1848,6 +1895,7 @@ class GitHubAPIClient:
         try:
             resp = self._rest_get(url, timeout=10, etag=etag)
         except AttributeError:  # .get() on non-dict
+            _dbg("fetch_failed", job_id=job_id_s, key=key, error="AttributeError", url=url)
             return None
 
         # Handle 304 Not Modified - data hasn't changed
@@ -1856,8 +1904,8 @@ class GitHubAPIClient:
             if isinstance(ent, dict) and ent.get("status"):
                 status_cached = ent.get("status")
                 # Update timestamp to extend TTL
-                self._save_actions_job_disk_cache(key, {"ts": int(now), "status": status_cached, "etag": etag})
-                self._actions_job_status_mem_cache[key] = {"ts": now, "status": status_cached}
+                self._save_actions_job_disk_cache(key, {"ts": int(now), "status": status_cached, "etag": etag, "started_at_epoch": int(ent.get("started_at_epoch", 0) or 0)})
+                self._actions_job_status_mem_cache[key] = {"ts": now, "status": status_cached, "started_at_epoch": int(ent.get("started_at_epoch", 0) or 0)}
                 return str(status_cached)
 
         # 404 can happen if job id is invalid / perm issue; just treat as unknown.
@@ -1870,7 +1918,16 @@ class GitHubAPIClient:
             if status is None:
                 return None
             status_s = str(status)
+            started_at_s = str((data.get("started_at") if isinstance(data, dict) else "") or "").strip()
+            started_at_epoch = 0
+            if started_at_s:
+                try:
+                    dt = datetime.fromisoformat(started_at_s.replace("Z", "+00:00"))
+                    started_at_epoch = int(dt.timestamp())
+                except Exception:
+                    started_at_epoch = 0
         except AttributeError:  # .get() on non-dict
+            _dbg("fetch_failed", job_id=job_id_s, key=key, error="AttributeError", url=url)
             return None
 
         # Extract ETag from response headers
@@ -1878,12 +1935,12 @@ class GitHubAPIClient:
 
         # Save to memory cache
         try:
-            self._actions_job_status_mem_cache[key] = {"ts": int(now), "status": status_s}
+            self._actions_job_status_mem_cache[key] = {"ts": int(now), "status": status_s, "started_at_epoch": int(started_at_epoch or 0)}
         except json.JSONDecodeError:
             pass
 
         # Save to disk cache with ETag (completed jobs are cached forever)
-        cache_entry = {"ts": int(now), "status": status_s}
+        cache_entry = {"ts": int(now), "status": status_s, "started_at_epoch": int(started_at_epoch or 0)}
         if new_etag:
             cache_entry["etag"] = new_etag
         self._save_actions_job_disk_cache(key, cache_entry)
@@ -1994,6 +2051,20 @@ class GitHubAPIClient:
             return None
         key = f"{owner}/{repo}:job:{job_id_s}"
         now = int(time.time())
+        debug_misses = bool(os.environ.get("DYNAMO_UTILS_DEBUG_ACTIONS_JOB_DETAILS_MISSES"))
+
+        def _dbg(event: str, **kv: Any) -> None:
+            """Debug tracer for actions_job_details misses (dev-only).
+
+            Enable with: DYNAMO_UTILS_DEBUG_ACTIONS_JOB_DETAILS_MISSES=1
+            """
+            if not debug_misses:
+                return
+            try:
+                parts = [f"{k}={v}" for k, v in kv.items()]
+                _logger.warning("[actions_job_details_miss] %s %s", event, " ".join(parts))
+            except Exception:
+                return
 
         def _is_completed_job_details(v: Any) -> bool:
             """We only trust/caches job details once the job is completed.
@@ -2012,12 +2083,21 @@ class GitHubAPIClient:
             return True
 
         # Memory cache
+        mem_ts: int = 0
+        mem_has_entry: bool = False
+        mem_val_status: str = ""
+        mem_val_completed_at: bool = False
         try:
             ent = self._actions_job_details_mem_cache.get(key)
             if isinstance(ent, dict):
+                mem_has_entry = True
                 ts = int(ent.get("ts", 0) or 0)
+                mem_ts = ts
                 if ts and (now - ts) <= int(ttl_s):
                     val = ent.get("val")
+                    if isinstance(val, dict):
+                        mem_val_status = str(val.get("status", "") or "")
+                        mem_val_completed_at = bool(str(val.get("completed_at", "") or "").strip())
                     if _is_completed_job_details(val):
                         if isinstance(val, dict):
                             self._cache_hit("actions_job_details.mem")
@@ -2027,6 +2107,9 @@ class GitHubAPIClient:
 
         # Check ACTIONS_JOBS_CACHE (unified with batch fetch)
         cached = ACTIONS_JOBS_CACHE.get_if_fresh(key, ttl_s=ttl_s)
+        cached_present = cached is not None
+        cached_job_status: str = ""
+        cached_job_completed_at: bool = False
         if cached is not None:
             # Extract job data from cache structure
             # Both batch fetch and individual fetch store: {ts, jobs: {job_id: {...}}, etag}
@@ -2036,6 +2119,9 @@ class GitHubAPIClient:
                 if isinstance(jobs_dict, dict):
                     job_data = jobs_dict.get(job_id_s)
                     
+            if isinstance(job_data, dict):
+                cached_job_status = str(job_data.get("status", "") or "")
+                cached_job_completed_at = bool(str(job_data.get("completed_at", "") or "").strip())
             if _is_completed_job_details(job_data):
                 self._actions_job_details_mem_cache[key] = {"ts": now, "val": job_data}
                 self._cache_hit("actions_job_details.disk")
@@ -2044,12 +2130,43 @@ class GitHubAPIClient:
         # Cache-only mode: do not fetch.
         if self.cache_only_mode:
             self._cache_miss("actions_job_details.cache_only_empty")
+            _dbg(
+                "cache_only_empty",
+                job_id=job_id_s,
+                key=key,
+                ttl_s=int(ttl_s),
+                mem_has_entry=mem_has_entry,
+                mem_age_s=(now - mem_ts) if mem_ts else None,
+                mem_status=mem_val_status or None,
+                mem_completed_at=mem_val_completed_at,
+                disk_fresh=cached_present,
+                disk_status=cached_job_status or None,
+                disk_completed_at=cached_job_completed_at,
+            )
             return None
-
-        self._cache_miss("actions_job_details")
 
         # Get ETag from stale cache for conditional request
         etag = ACTIONS_JOBS_CACHE.get_stale_etag(key)
+        # Record miss *after* gathering state; but before network fetch.
+        self._cache_miss("actions_job_details")
+        miss_reason = "no_fresh_cache"
+        if cached_present:
+            miss_reason = "fresh_cache_incomplete_or_not_completed"
+        _dbg(
+            "pre_fetch",
+            job_id=job_id_s,
+            key=key,
+            reason=miss_reason,
+            ttl_s=int(ttl_s),
+            stale_etag=bool(etag),
+            mem_has_entry=mem_has_entry,
+            mem_age_s=(now - mem_ts) if mem_ts else None,
+            mem_status=mem_val_status or None,
+            mem_completed_at=mem_val_completed_at,
+            disk_fresh=cached_present,
+            disk_status=cached_job_status or None,
+            disk_completed_at=cached_job_completed_at,
+        )
 
         url = f"{self.base_url}/repos/{owner}/{repo}/actions/jobs/{job_id_s}"
         try:
@@ -2068,11 +2185,13 @@ class GitHubAPIClient:
                 if _is_completed_job_details(job_data):
                     self._actions_job_details_mem_cache[key] = {"ts": now, "val": job_data}
                     return job_data
+            _dbg("etag_304_but_no_completed_job_details", job_id=job_id_s, key=key)
             return None
             
         if resp.status_code < 200 or resp.status_code >= 300:
             # Do NOT negative-cache failures (None). If the API temporarily fails (budget, rate limit,
             # permission, etc), we want a later attempt to succeed without waiting for a negative TTL.
+            _dbg("http_error", job_id=job_id_s, key=key, status_code=int(resp.status_code))
             return None
 
         try:
@@ -2080,15 +2199,30 @@ class GitHubAPIClient:
         except (json.JSONDecodeError, ValueError):  # requests.Response.json() can raise ValueError or JSONDecodeError
             data = {}
         if not isinstance(data, dict):
+            _dbg("bad_json", job_id=job_id_s, key=key)
             return None
 
         # Never cache incomplete job details (see `_is_completed_job_details` above).
         try:
-            if str(data.get("status", "") or "").lower() != "completed":
+            api_status = str(data.get("status", "") or "").lower()
+            api_completed_at = str(data.get("completed_at", "") or "").strip()
+            if api_status != "completed":
+                try:
+                    GITHUB_API_STATS.actions_job_details_in_progress_uncached_total = int(
+                        getattr(GITHUB_API_STATS, "actions_job_details_in_progress_uncached_total", 0) or 0
+                    ) + 1
+                    s = getattr(GITHUB_API_STATS, "actions_job_details_in_progress_uncached_job_ids", None)
+                    if isinstance(s, set) and len(s) < 64:
+                        s.add(str(job_id_s))
+                except Exception:
+                    pass
+                _dbg("api_not_completed", job_id=job_id_s, key=key, api_status=api_status or None)
                 return None
-            if not str(data.get("completed_at", "") or "").strip():
+            if not api_completed_at:
+                _dbg("api_missing_completed_at", job_id=job_id_s, key=key, api_status=api_status or None)
                 return None
         except (json.JSONDecodeError, ValueError, TypeError):
+            _dbg("api_parse_error", job_id=job_id_s, key=key)
             return None
 
         # Keep only the fields we need (keep cache small + stable).

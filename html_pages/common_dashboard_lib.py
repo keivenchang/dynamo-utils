@@ -3513,6 +3513,29 @@ def github_api_stats_rows(
     rows.append(("github.cache.all.writes_ops", str(int(cache.get("writes_ops_total") or 0)), "Number of cache write operations"))
     rows.append(("github.cache.all.writes_entries", str(int(cache.get("writes_entries_total") or 0)), "Number of entries written to cache"))
 
+    # TTL documentation (always show; independent of whether counters are non-zero in this run).
+    rows.append(("github.cache.actions_job_details.ttl.completed", "30d", "Typical TTL used for completed job-details cache (dashboards pass 30d; only cached once completed)"))
+    rows.append(("github.cache.actions_job_details.ttl.in_progress", "uncached", "While a job is in_progress, job-details are not cached (so there is no TTL)"))
+    rows.append(("github.cache.actions_job_status.ttl.in_progress", "adaptive", "Adaptive TTL for non-completed jobs: <1h=1m, <2h=2m, <4h=4m, <8h=8m, >=8h=60m (until completed)"))
+
+    # In-progress job-details (uncached)
+    #
+    # Job details are intentionally NOT cached until a job is completed
+    # (steps and completed_at can be missing/incomplete while running).
+    inprog = int(getattr(GITHUB_API_STATS, "actions_job_details_in_progress_uncached_total", 0) or 0)
+    if inprog:
+        rows.append((
+            "github.cache.actions_job_details.in_progress_uncached",
+            str(inprog),
+            "Actions job-details fetches that returned in_progress (not cacheable yet; no TTL; retried on subsequent runs)"
+        ))
+        try:
+            job_ids = sorted(str(x) for x in (getattr(GITHUB_API_STATS, "actions_job_details_in_progress_uncached_job_ids", set()) or set()))
+            if job_ids:
+                rows.append(("github.cache.actions_job_details.in_progress_uncached.sample_job_ids", ",".join(job_ids[:8]), "Sample job_ids (max 8)"))
+        except Exception:
+            pass
+
     # Pytest timings cache (individual flat entries)
     st = PYTEST_TIMINGS_CACHE.stats
     pytest_mem_count, pytest_disk_count = PYTEST_TIMINGS_CACHE.get_cache_sizes()
