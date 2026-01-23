@@ -2225,18 +2225,76 @@ class GitHubAPIClient:
 
             # Cache the jobs for this run (run-level key for batch lookups)
             self._actions_job_details_mem_cache[cache_key] = {"ts": now, "val": run_jobs}
-            # Uses lock-load-merge-save pattern (enforced by DiskCacheWriter)
-            self._save_actions_job_disk_cache(cache_key, {"ts": now, "val": run_jobs})
-
-            # ALSO cache each individual job (job-level key for individual lookups)
+            
+            # ALSO cache each individual job IN MEMORY (job-level key for individual lookups)
             # This makes subsequent get_actions_job_details_cached() calls hit cache
             # instead of making individual API calls (completes the batched optimization)
             for job_id, job_details in run_jobs.items():
                 job_key = f"{owner}/{repo}:job:{job_id}"
                 self._actions_job_details_mem_cache[job_key] = {"ts": now, "val": job_details}
-                self._save_actions_job_disk_cache(job_key, {"ts": now, "val": job_details})
+            
+            # Flush to disk periodically (every 15-30 seconds) to balance performance vs crash safety
+            self._maybe_flush_actions_job_cache_to_disk(force_interval_s=15)
 
         return job_map
+    
+    def _maybe_flush_actions_job_cache_to_disk(self, force_interval_s: int = 15) -> None:
+        """Conditionally flush in-memory cache to disk based on time interval.
+        
+        Args:
+            force_interval_s: Minimum seconds between flushes (default 15s)
+        """
+        import time
+        
+        # Check if it's time to flush
+        now = time.time()
+        last_flush = getattr(self, '_last_actions_job_cache_flush_time', 0)
+        
+        if now - last_flush >= force_interval_s:
+            self._flush_actions_job_cache_to_disk()
+            self._last_actions_job_cache_flush_time = now
+    
+    def _flush_actions_job_cache_to_disk(self) -> None:
+        """Flush all in-memory actions job cache entries to disk in one atomic operation.
+        
+        Simple lock->read->merge->write pattern. Called every 15s so overhead is acceptable.
+        Much more efficient than per-entry writes (1 flush vs 360 individual writes).
+        """
+        from threading import Lock
+        import json
+        
+        # Skip if no entries to flush
+        if not self._actions_job_details_mem_cache:
+            return
+        
+        self._actions_job_cache_dir.mkdir(parents=True, exist_ok=True)
+        cache_path = self._actions_job_cache_dir / "actions_jobs.json"
+        
+        lock = Lock()
+        with lock:
+            # Load existing cache
+            if cache_path.exists():
+                try:
+                    existing = self._json_load_text(cache_path.read_text() or "{}")
+                except (OSError, json.JSONDecodeError):
+                    existing = {}
+            else:
+                existing = {}
+            
+            # Merge all in-memory entries
+            existing.update(self._actions_job_details_mem_cache)
+            
+            # Write atomically
+            tmp_path = cache_path.with_suffix(".tmp")
+            try:
+                tmp_path.write_text(self._json_dump_text(existing, indent=None))
+                tmp_path.replace(cache_path)
+                # Invalidate snapshot so next read gets fresh data
+                if hasattr(self, '_actions_job_disk_cache_snapshot'):
+                    delattr(self, '_actions_job_disk_cache_snapshot')
+            except OSError:
+                if tmp_path.exists():
+                    tmp_path.unlink()
 
     def enrich_check_runs_with_job_details(
         self,
