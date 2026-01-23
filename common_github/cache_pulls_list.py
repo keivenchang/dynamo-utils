@@ -17,7 +17,7 @@ _module_dir = Path(__file__).resolve().parent
 if str(_module_dir) not in sys.path:
     sys.path.insert(0, str(_module_dir))
 
-from cache_base import BaseDiskCache
+from cache.cache_base import BaseDiskCache
 
 
 class PullsListCache(BaseDiskCache):

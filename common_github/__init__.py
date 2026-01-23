@@ -71,18 +71,18 @@ from common import (
     resolve_cache_path,
 )
 
-# Cache modules - incremental migration in progress
-from cache.cache_merge_dates import MERGE_DATES_CACHE
-from cache.cache_pulls_list import PULLS_LIST_CACHE
-from cache.cache_pr_branch import PR_BRANCH_CACHE
-from cache.cache_required_checks import REQUIRED_CHECKS_CACHE
-from cache.cache_pr_checks import PR_CHECKS_CACHE
-from cache.cache_pr_info import PR_INFO_CACHE, PR_HEAD_SHA_CACHE
+# Cache modules - GitHub API caches now in common_github/
+from .cache_merge_dates import MERGE_DATES_CACHE
+from .cache_pulls_list import PULLS_LIST_CACHE
+from .cache_pr_branch import PR_BRANCH_CACHE
+from .cache_required_checks import REQUIRED_CHECKS_CACHE
+from .cache_pr_checks import PR_CHECKS_CACHE
+from .cache_pr_info import PR_INFO_CACHE, PR_HEAD_SHA_CACHE
 from cache.cache_job_log import JOB_LOG_CACHE
 from cache.cache_duration import DURATION_CACHE
-from cache.cache_pr_comments import PR_COMMENTS_CACHE
-from cache.cache_pr_reviews import PR_REVIEWS_CACHE
-from cache.cache_actions_jobs import ACTIONS_JOBS_CACHE
+from .cache_pr_comments import PR_COMMENTS_CACHE
+from .cache_pr_reviews import PR_REVIEWS_CACHE
+from .cache_actions_jobs import ACTIONS_JOBS_CACHE
 
 # Module logger
 _logger = logging.getLogger(__name__)
