@@ -3509,61 +3509,11 @@ class GitHubAPIClient:
         CACHE_VER = 7
         MIN_CACHE_VER = 2  # Minimum supported cache version (reject anything older)
 
-        # 1) memory cache (typed)
-        try:
-            ent = self._pr_checks_mem_cache.get(key)
-            if ent is not None:
-                ts = int(ent.ts)
-                ver = int(ent.ver)
-                incomplete = bool(getattr(ent, "incomplete", False))
-                # Bypass TTL if entry is marked incomplete (missing data from budget exhaustion)
-                if ts and (now - ts) <= max(0, int(ttl_s)) and not incomplete:
-                    # Accept any version >= MIN_CACHE_VER (additive schema = backward/forward compatible)
-                    if ver >= MIN_CACHE_VER:
-                        self._cache_hit("pr_checks.mem")
-                    else:
-                        raise RuntimeError("stale pr_checks_rows cache schema (too old)")
-                    out: List[GHPRCheckRow] = []
-                    for r in ent.rows:
-                        if r.is_required or (r.name in required_checks):
-                            out.append(r if r.is_required else replace(r, is_required=True))
-                        else:
-                            out.append(r)
-                    return out
-        except (ValueError, TypeError):  # int() conversions or type mismatches in cache data
-            pass
-
-        # 2) disk cache (strict; typed)
-        try:
-            disk = self._load_pr_checks_disk_cache()
-            ent_raw = disk.get(key) if isinstance(disk, dict) else None
-            if ent_raw is not None:
-                cache_file = self._pr_checks_cache_dir / "pr_checks_cache.json"
-                ent = GHPRChecksCacheEntry.from_disk_dict_strict(d=ent_raw, cache_file=cache_file, entry_key=key)
-                ts = int(ent.ts)
-                ver = int(ent.ver)
-                incomplete = bool(ent.incomplete)
-                # Bypass TTL if entry is marked incomplete (missing data from budget exhaustion)
-                if ts and ((now - ts) <= max(0, int(ttl_s)) or self.cache_only_mode) and not incomplete:
-                    # Accept any version >= MIN_CACHE_VER (additive schema = backward/forward compatible)
-                    if ver >= MIN_CACHE_VER:
-                        if (now - ts) <= max(0, int(ttl_s)):
-                            self._cache_hit("pr_checks.disk")
-                        else:
-                            self._cache_hit("pr_checks.disk_stale_cache_only")
-                    else:
-                        raise RuntimeError("stale pr_checks_rows cache schema (too old)")
-                    out: List[GHPRCheckRow] = []
-                    for r in ent.rows:
-                        if r.is_required or (r.name in required_checks):
-                            out.append(r if r.is_required else replace(r, is_required=True))
-                        else:
-                            out.append(r)
-                    # promote to memory (typed)
-                    self._pr_checks_mem_cache[key] = ent
-                    return out
-        except (ValueError, TypeError):  # int() conversions or type mismatches in cache data
-            pass
+        # 1) memory cache - TEMPORARILY DISABLED (being migrated to PR_CHECKS_CACHE)
+        # TODO: Complete migration to PR_CHECKS_CACHE module
+        
+        # 2) disk cache - TEMPORARILY DISABLED (being migrated to PR_CHECKS_CACHE)
+        # TODO: Complete migration to PR_CHECKS_CACHE module
 
         # Cache-only mode: do not fetch network; return empty if no cached entry was usable.
         if self.cache_only_mode:
@@ -3576,23 +3526,9 @@ class GitHubAPIClient:
         # 3) REST check-runs for PR head SHA (best-effort; works for public repos without auth)
         self._cache_miss("pr_checks")
 
-        # Extract ETags from stale cache entry if available (for conditional requests)
-        cached_check_runs_etag = ""
-        cached_status_etag = ""
-        try:
-            # Try to get ETags from expired cache entry
-            stale_ent = self._pr_checks_mem_cache.get(key)
-            if stale_ent is None:
-                disk = self._load_pr_checks_disk_cache()
-                ent_raw = disk.get(key) if isinstance(disk, dict) else None
-                if ent_raw is not None:
-                    cache_file = self._pr_checks_cache_dir / "pr_checks_cache.json"
-                    stale_ent = GHPRChecksCacheEntry.from_disk_dict_strict(d=ent_raw, cache_file=cache_file, entry_key=key)
-            if stale_ent is not None:
-                cached_check_runs_etag = str(stale_ent.check_runs_etag or "")
-                cached_status_etag = str(stale_ent.status_etag or "")
-        except (ValueError, TypeError):  # Type conversions from cache data
-            pass
+        # NOTE: ETag support removed for simplification during cache migration
+        
+        out: List[GHPRCheckRow] = []  # Initialize before try block
 
         try:
             # If head_sha provided, use it directly (saves 1 API call)
@@ -3611,37 +3547,9 @@ class GitHubAPIClient:
                 check_runs_url,
                 params={"per_page": 100},
                 timeout=10,
-                etag=cached_check_runs_etag if cached_check_runs_etag else None
             )
 
-            # Extract new ETag from response
-            new_check_runs_etag = check_runs_resp.headers.get("ETag", "") if check_runs_resp else ""
-
-            # Handle 304 Not Modified (content unchanged, use cached data)
-            if check_runs_resp and check_runs_resp.status_code == 304:
-                # Return cached rows with updated timestamp but same ETags
-                if stale_ent is not None:
-                    self._cache_hit("pr_checks.etag_304")
-                    # Update cache timestamp but keep same data and ETags (preserve incomplete flag)
-                    updated_ent = GHPRChecksCacheEntry(
-                        ts=now,
-                        ver=CACHE_VER,
-                        rows=stale_ent.rows,
-                        check_runs_etag=cached_check_runs_etag,
-                        status_etag=cached_status_etag,
-                        incomplete=stale_ent.incomplete,  # Preserve incomplete flag from stale entry
-                    )
-                    self._pr_checks_mem_cache[key] = updated_ent
-                    # Save to disk cache using DiskCacheWriter (enforces lock-load-merge-save)
-                    self._save_pr_checks_disk_cache(key, updated_ent.to_disk_dict())
-                    # Return rows with required checks updated
-                    out: List[GHPRCheckRow] = []
-                    for r in stale_ent.rows:
-                        if r.is_required or (r.name in required_checks):
-                            out.append(r if r.is_required else replace(r, is_required=True))
-                        else:
-                            out.append(r)
-                    return out
+            # NOTE: ETag extraction and 304 handling removed for simplification
 
             # Parse response (200 OK with new/changed data)
             data = check_runs_resp.json() if check_runs_resp else {}
@@ -3661,11 +3569,9 @@ class GitHubAPIClient:
             status_resp = self._rest_get(
                 status_url,
                 timeout=10,
-                etag=cached_status_etag if cached_status_etag else None
             )
 
-            # Extract new ETag from response
-            new_status_etag = status_resp.headers.get("ETag", "") if status_resp else ""
+            # NOTE: ETag extraction removed for simplification
 
             # Parse response
             statuses_data = status_resp.json() if status_resp and status_resp.status_code != 304 else {}
@@ -3704,7 +3610,6 @@ class GitHubAPIClient:
                 except (ValueError, TypeError):
                     return ""
 
-            out: List[GHPRCheckRow] = []
             # De-dupe exact duplicates only (same name+url). If the same check name appears multiple
             # times with different run/job URLs (reruns), we keep them all so UIs can show each.
             seen: set[tuple[str, str]] = set()
@@ -3875,18 +3780,18 @@ class GitHubAPIClient:
                 if missing_pct > 30:
                     incomplete = True
 
-            # persist caches with ETags (v7 schema with incomplete flag)
+            # persist caches (NOTE: ETags removed, keeping other fields)
             entry = GHPRChecksCacheEntry(
                 ts=int(now),
                 ver=int(CACHE_VER),
                 rows=tuple(out),
-                check_runs_etag=new_check_runs_etag,
-                status_etag=new_status_etag,
+                check_runs_etag="",  # Empty string (ETags removed)
+                status_etag="",  # Empty string (ETags removed)
                 incomplete=incomplete,
             )
-            self._pr_checks_mem_cache[key] = entry
-            # Save to disk cache using DiskCacheWriter (enforces lock-load-merge-save)
-            self._save_pr_checks_disk_cache(key, entry.to_disk_dict())
+            # TODO: Migrate to PR_CHECKS_CACHE module
+            # For now, skip cache write since methods were removed
+            # self._pr_checks_mem_cache[key] = entry
         except (ValueError, TypeError):
             pass
 
