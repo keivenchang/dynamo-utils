@@ -88,9 +88,9 @@ def _get_cache_file() -> Path:
         if str(parent_dir) not in sys.path:
             sys.path.insert(0, str(parent_dir))
         import common
-        return common.dynamo_utils_cache_dir() / "search-issues" / "search_issues.json"
+        return common.dynamo_utils_cache_dir() / "search_issues.json"
     except ImportError:
-        return Path.home() / ".cache" / "dynamo-utils" / "search-issues" / "search_issues.json"
+        return Path.home() / ".cache" / "dynamo-utils" / "search_issues.json"
 
 
 SEARCH_ISSUES_CACHE = SearchIssuesCache(cache_file=_get_cache_file())

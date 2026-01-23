@@ -88,9 +88,9 @@ def _get_cache_file() -> Path:
         if str(parent_dir) not in sys.path:
             sys.path.insert(0, str(parent_dir))
         import common
-        return common.dynamo_utils_cache_dir() / "merge-dates" / "merge_dates.json"
+        return common.dynamo_utils_cache_dir() / "merge_dates.json"
     except ImportError:
-        return Path.home() / ".cache" / "dynamo-utils" / "merge-dates" / "merge_dates.json"
+        return Path.home() / ".cache" / "dynamo-utils" / "merge_dates.json"
 
 
 MERGE_DATES_CACHE = MergeDatesCache(cache_file=_get_cache_file())

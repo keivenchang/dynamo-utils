@@ -87,9 +87,9 @@ def _get_cache_file() -> Path:
         if str(parent_dir) not in sys.path:
             sys.path.insert(0, str(parent_dir))
         import common
-        return common.dynamo_utils_cache_dir() / "pulls-list" / "pulls_list.json"
+        return common.dynamo_utils_cache_dir() / "pulls_list.json"
     except ImportError:
-        return Path.home() / ".cache" / "dynamo-utils" / "pulls-list" / "pulls_list.json"
+        return Path.home() / ".cache" / "dynamo-utils" / "pulls_list.json"
 
 
 PULLS_LIST_CACHE = PullsListCache(cache_file=_get_cache_file())

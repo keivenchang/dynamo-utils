@@ -122,9 +122,9 @@ def _get_cache_file() -> Path:
         if str(parent_dir) not in sys.path:
             sys.path.insert(0, str(parent_dir))
         import common
-        return common.dynamo_utils_cache_dir() / "actions-jobs" / "actions_jobs_cache.json"
+        return common.dynamo_utils_cache_dir() / "actions_jobs.json"
     except ImportError:
-        return Path.home() / ".cache" / "dynamo-utils" / "actions-jobs" / "actions_jobs_cache.json"
+        return Path.home() / ".cache" / "dynamo-utils" / "actions_jobs.json"
 
 
 ACTIONS_JOBS_CACHE = ActionsJobsCache(cache_file=_get_cache_file())

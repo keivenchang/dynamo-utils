@@ -126,9 +126,9 @@ def _get_cache_file() -> Path:
         if str(parent_dir) not in sys.path:
             sys.path.insert(0, str(parent_dir))
         import common
-        return common.dynamo_utils_cache_dir() / "required-checks" / "required_checks.json"
+        return common.dynamo_utils_cache_dir() / "required_checks.json"
     except ImportError:
-        return Path.home() / ".cache" / "dynamo-utils" / "required-checks" / "required_checks.json"
+        return Path.home() / ".cache" / "dynamo-utils" / "required_checks.json"
 
 
 REQUIRED_CHECKS_CACHE = RequiredChecksCache(cache_file=_get_cache_file())

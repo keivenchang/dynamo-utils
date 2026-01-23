@@ -116,9 +116,9 @@ def _get_cache_file() -> Path:
         if str(parent_dir) not in sys.path:
             sys.path.insert(0, str(parent_dir))
         import common
-        return common.dynamo_utils_cache_dir() / "pr-reviews" / "pr_reviews_cache.json"
+        return common.dynamo_utils_cache_dir() / "pr_reviews.json"
     except ImportError:
-        return Path.home() / ".cache" / "dynamo-utils" / "pr-reviews" / "pr_reviews_cache.json"
+        return Path.home() / ".cache" / "dynamo-utils" / "pr_reviews.json"
 
 
 PR_REVIEWS_CACHE = PRReviewsCache(cache_file=_get_cache_file())

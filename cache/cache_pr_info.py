@@ -41,28 +41,34 @@ class PRInfoCache(BaseDiskCache):
         super().__init__(cache_file=cache_file, schema_version=self._SCHEMA_VERSION)
     
     def get_if_matches_updated_at(self, key: str, updated_at: str) -> Optional[Dict[str, Any]]:
-        """Get cached PR info if updated_at matches.
+        """Get cached PR info entry if updated_at matches.
         
         Args:
             key: Cache key (e.g., "owner/repo#pr:123")
             updated_at: Expected updated_at timestamp
             
         Returns:
-            Cached PR dict, or None if not cached/stale
+            Cached entry dict (with 'updated_at' and 'pr'), or None if not cached/stale
         """
         with self._mu:
             self._load_once()
-            ent = self._check_item(key)  # Automatically tracks hit/miss
+            items = self._get_items()
+            ent = items.get(key)  # Don't use _check_item() - we'll track stats manually
             
             if not isinstance(ent, dict):
+                self.stats.miss += 1
                 return None
             
             cached_updated_at = str(ent.get("updated_at", "") or "").strip()
             if cached_updated_at == str(updated_at or "").strip():
                 pr_dict = ent.get("pr")
                 if isinstance(pr_dict, dict):
-                    return pr_dict
+                    self.stats.hit += 1
+                    # IMPORTANT: callers expect the full entry dict so they can hydrate from ent["pr"].
+                    return ent
             
+            # Entry exists but updated_at doesn't match - this is a miss
+            self.stats.miss += 1
             return None
     
     def put(self, key: str, updated_at: str, pr_dict: Dict[str, Any]) -> None:

@@ -25,7 +25,7 @@ class PRBranchCache(BaseDiskCache):
     """Cache for PR branch lookups with TTL-based invalidation."""
     
     def __init__(self):
-        cache_file = dynamo_utils_cache_dir() / "pr-branches" / "pr_branch_cache.json"
+        cache_file = dynamo_utils_cache_dir() / "pr_branches.json"
         super().__init__(cache_file=cache_file)
     
     def get_if_fresh(
@@ -48,8 +48,23 @@ class PRBranchCache(BaseDiskCache):
         Returns:
             {"ts": timestamp, "prs": [list of PR dicts]} or None if not found/stale
         """
+        import time
         cache_key = f"{owner}/{repo}:{branch}"
-        return super().get_if_fresh(cache_key, ttl_s=ttl_s)
+        
+        with self._mu:
+            self._load_once()
+            ent = self._check_item(cache_key)
+            
+            if not isinstance(ent, dict):
+                return None
+            
+            ts = int(ent.get("ts", 0) or 0)
+            now = int(time.time())
+            
+            if ts and (now - ts) <= max(0, int(ttl_s)):
+                return ent
+            
+            return None
     
     def put(
         self,
@@ -69,7 +84,11 @@ class PRBranchCache(BaseDiskCache):
             value: {"ts": timestamp, "prs": [list of PR dicts]}
         """
         cache_key = f"{owner}/{repo}:{branch}"
-        super().put(cache_key, value)
+        
+        with self._mu:
+            self._load_once()
+            self._set_item(cache_key, value)
+            self._persist()
 
 
 # Global singleton

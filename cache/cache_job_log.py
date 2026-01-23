@@ -71,10 +71,10 @@ def _get_cache_file() -> Path:
         if str(parent_dir) not in sys.path:
             sys.path.insert(0, str(parent_dir))
         import common
-        return common.dynamo_utils_cache_dir() / "job-logs" / "job_log_cache.json"
+        return common.dynamo_utils_cache_dir() / "job_logs.json"
     except ImportError:
         # Fallback for testing
-        return Path.home() / ".cache" / "dynamo-utils" / "job-logs" / "job_log_cache.json"
+        return Path.home() / ".cache" / "dynamo-utils" / "job_logs.json"
 
 
 JOB_LOG_CACHE = JobLogCache(cache_file=_get_cache_file())
