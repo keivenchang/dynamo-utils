@@ -12,6 +12,7 @@ The caller is responsible for deserialization via GHPRChecksCacheEntry.from_disk
 """
 from __future__ import annotations
 
+import json
 import sys
 import time
 from pathlib import Path
@@ -38,6 +39,73 @@ class PRChecksCache(BaseDiskCache):
     
     def __init__(self, *, cache_file: Path):
         super().__init__(cache_file=cache_file, schema_version=self._SCHEMA_VERSION)
+    
+    def _load_once(self) -> None:
+        """Load cache with migration from old format.
+        
+        Old format (pre-migration):
+            {
+                "version": 7,
+                "owner/repo#123:abc123": {...entry...},
+                "owner/repo#456:def456": {...entry...}
+            }
+        
+        New format (BaseDiskCache):
+            {
+                "version": 1,
+                "items": {
+                    "owner/repo#123:abc123": {...entry...},
+                    "owner/repo#456:def456": {...entry...}
+                }
+            }
+        """
+        if self._loaded:
+            return
+        self._loaded = True
+
+        if not self._cache_file.exists():
+            self._data = self._create_empty_cache()
+            self._initial_disk_count = 0
+            return
+
+        try:
+            data = json.loads(self._cache_file.read_text() or "{}")
+        except Exception:
+            data = {}
+
+        if not isinstance(data, dict):
+            data = {}
+
+        # Migration: Check for any top-level entries (keys that aren't "version" or "items")
+        items_dict = data.get("items")
+        if not isinstance(items_dict, dict):
+            items_dict = {}
+        
+        # Find any orphaned top-level entries
+        migrated_count = 0
+        for key, value in list(data.items()):
+            if key not in ["version", "items"]:
+                # Move to items dict
+                items_dict[key] = value
+                migrated_count += 1
+        
+        # Clean up: remove old top-level entries
+        if migrated_count > 0:
+            # Create clean new structure
+            data = {
+                "version": self._schema_version,
+                "items": items_dict
+            }
+            self._dirty = True
+        else:
+            # No migration needed, just ensure proper structure
+            data["items"] = items_dict
+            data["version"] = self._schema_version
+
+        # Track initial disk count
+        self._initial_disk_count = len(data.get("items", {}))
+        
+        self._data = data
     
     def get_entry_dict(self, key: str) -> Optional[Dict[str, Any]]:
         """Get raw cache entry dict (GHPRChecksCacheEntry.to_disk_dict() format).
