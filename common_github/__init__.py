@@ -36,7 +36,10 @@ import json
 import logging
 import os
 import re
+import shutil
 import subprocess
+import sys
+import traceback
 import threading
 import time
 import urllib.parse
@@ -206,6 +209,18 @@ class _GitHubAPIStats:
         # ETag stats (conditional requests)
         self.etag_304_total = 0  # 304 Not Modified responses (don't count against rate limit!)
         self.etag_304_by_label = {}  # Dict[str, int] - 304s by API endpoint label
+
+        # GitHub CLI (`gh`) API stats
+        #
+        # These calls DO consume GitHub rate limit, but they bypass our Python REST client,
+        # so they must be tracked separately from github.rest.*.
+        #
+        # - gh.core.*: `gh api <REST endpoint>` calls hitting api.github.com (core bucket)
+        # - gh.graphql.*: `gh api graphql` calls (graphql bucket, point-based)
+        self.gh_core_calls_total = 0  # int - number of `gh api <rest>` invocations
+        self.gh_core_304_total = 0  # int - gh REST invocations that returned 304 (free)
+        self.gh_graphql_calls_total = 0  # int - number of `gh api graphql` invocations
+        self.gh_graphql_cost_total = 0  # int - sum of GraphQL `rateLimit.cost` across calls (best-effort)
 
 
 # Global instance - all code writes to this
@@ -1277,6 +1292,11 @@ class GitHubAPIClient:
         # Format: {"remaining": 1234, "limit": 5000, "reset_epoch": 1766947200, ...}
         self._cached_rate_limit_info: Optional[Dict[str, Any]] = None
 
+        # Optional per-run rate limit snapshots for dashboards ("before" and "after" the work).
+        # These are populated by callers (e.g., show_commit_history.py) and rendered in Statistics.
+        self._rate_limit_snapshot_before: Optional[Dict[str, Any]] = None
+        self._rate_limit_snapshot_after: Optional[Dict[str, Any]] = None
+
         # Cache for required status checks (branch protection). This changes rarely and is safe to cache
         # for a long time. Keyed by (owner, repo, base_ref).
         # Cache for enriched PRInfo objects keyed by (owner/repo, pr_number, updated_at).
@@ -1512,44 +1532,92 @@ class GitHubAPIClient:
         # Cache entry counts (memory + disk)
         # These are internal attributes initialized in __init__, so they always exist
         
-        # Get cache counts from dedicated cache modules
-        job_log_mem, job_log_disk = JOB_LOG_CACHE.get_cache_sizes()
-        pr_branch_mem, pr_branch_disk = PR_BRANCH_CACHE.get_cache_sizes()
-        pr_checks_mem, pr_checks_disk = PR_CHECKS_CACHE.get_cache_sizes()
-        pr_comments_mem, pr_comments_disk = PR_COMMENTS_CACHE.get_cache_sizes()
-        pr_info_mem, pr_info_disk = PR_INFO_CACHE.get_cache_sizes()
-        pr_reviews_mem, pr_reviews_disk = PR_REVIEWS_CACHE.get_cache_sizes()
-        required_checks_mem, required_checks_disk = REQUIRED_CHECKS_CACHE.get_cache_sizes()
+        # Get cache counts from dedicated cache modules.
+        #
+        # NOTE: BaseDiskCache.get_cache_sizes() returns (mem_count, disk_count_before_run).
+        # For dashboard stats we want "what's on disk now" (post-run), so we report disk_count
+        # using the current in-memory item count (which reflects what was persisted).
+        job_log_mem, _job_log_disk_before = JOB_LOG_CACHE.get_cache_sizes()
+        pr_branch_mem, _pr_branch_disk_before = PR_BRANCH_CACHE.get_cache_sizes()
+        pr_checks_mem, _pr_checks_disk_before = PR_CHECKS_CACHE.get_cache_sizes()
+        pr_comments_mem, _pr_comments_disk_before = PR_COMMENTS_CACHE.get_cache_sizes()
+        pr_info_mem, _pr_info_disk_before = PR_INFO_CACHE.get_cache_sizes()
+        pr_reviews_mem, _pr_reviews_disk_before = PR_REVIEWS_CACHE.get_cache_sizes()
+        required_checks_mem, _required_checks_disk_before = REQUIRED_CHECKS_CACHE.get_cache_sizes()
+        actions_jobs_mem, _actions_jobs_disk_before = ACTIONS_JOBS_CACHE.get_cache_sizes()
         
         cache_sizes = {
             "actions_job_details_mem": len(self._actions_job_details_mem_cache),
             "actions_job_status_mem": len(self._actions_job_status_mem_cache),
-            "job_log_disk": job_log_disk,
+            "actions_jobs_disk": actions_jobs_mem,
+            "actions_jobs_mem": actions_jobs_mem,
+            "job_log_disk": job_log_mem,
             "job_log_mem": job_log_mem,
-            "pr_branch_disk": pr_branch_disk,
+            "pr_branch_disk": pr_branch_mem,
             "pr_branch_mem": pr_branch_mem,
-            "pr_checks_disk": pr_checks_disk,
+            "pr_checks_disk": pr_checks_mem,
             "pr_checks_mem": pr_checks_mem,
-            "pr_comments_disk": pr_comments_disk,
+            "pr_comments_disk": pr_comments_mem,
             "pr_comments_mem": pr_comments_mem,
-            "pr_info_disk": pr_info_disk,
+            "pr_info_disk": pr_info_mem,
             "pr_info_mem": pr_info_mem,
-            "pr_reviews_disk": pr_reviews_disk,
+            "pr_reviews_disk": pr_reviews_mem,
             "pr_reviews_mem": pr_reviews_mem,
             "pulls_list_mem": len(self._pulls_list_mem_cache),
             "raw_log_text_mem": len(self._raw_log_text_mem_cache),
-            "required_checks_disk": required_checks_disk,
+            "required_checks_disk": required_checks_mem,
             "required_checks_mem": required_checks_mem,
             "search_issues_mem": len(self._search_issues_mem_cache),
         }
 
-        # Disk cache counts - show initial counts before this run's modifications
-        # Always show count even if 0 to verify no caches are missing
-        
-        # Use initial counts captured at initialization
-        for key in ["actions_job_status_disk", "actions_job_details_disk", "pulls_list_disk",
-                    "search_issues_disk", "raw_log_text_disk", "merge_dates_disk"]:
-            cache_sizes[key] = self._initial_disk_counts.get(key, 0)
+        # Disk cache counts (post-run, current view).
+        #
+        # These caches are not BaseDiskCache instances, so compute counts directly from disk.
+        try:
+            disk = self._load_actions_job_disk_cache()
+            if isinstance(disk, dict):
+                items = disk.get("items") if isinstance(disk.get("items"), dict) else disk
+                cache_sizes["actions_job_status_disk"] = sum(1 for k in items.keys() if ":jobstatus:" in str(k))
+                cache_sizes["actions_job_details_disk"] = sum(1 for k in items.keys() if ":job:" in str(k) and ":jobstatus:" not in str(k))
+            else:
+                cache_sizes["actions_job_status_disk"] = 0
+                cache_sizes["actions_job_details_disk"] = 0
+        except Exception:
+            cache_sizes["actions_job_status_disk"] = 0
+            cache_sizes["actions_job_details_disk"] = 0
+
+        try:
+            pulls_disk = self._load_pulls_list_disk_cache()
+            cache_sizes["pulls_list_disk"] = len(pulls_disk) if isinstance(pulls_disk, dict) else 0
+        except Exception:
+            cache_sizes["pulls_list_disk"] = 0
+
+        try:
+            search_issues_disk = self._load_search_issues_disk_cache()
+            cache_sizes["search_issues_disk"] = len(search_issues_disk) if isinstance(search_issues_disk, dict) else 0
+        except Exception:
+            cache_sizes["search_issues_disk"] = 0
+
+        try:
+            if self._raw_log_text_index_file.exists():
+                with open(self._raw_log_text_index_file, "r") as f:
+                    raw_log_index = json.load(f)
+                cache_sizes["raw_log_text_disk"] = len(raw_log_index) if isinstance(raw_log_index, dict) else 0
+            else:
+                cache_sizes["raw_log_text_disk"] = 0
+        except Exception:
+            cache_sizes["raw_log_text_disk"] = 0
+
+        try:
+            merge_dates_file = dynamo_utils_cache_dir() / "github_pr_merge_dates.json"
+            if merge_dates_file.exists():
+                with open(merge_dates_file, "r") as f:
+                    merge_dates = json.load(f)
+                cache_sizes["merge_dates_disk"] = len(merge_dates) if isinstance(merge_dates, dict) else 0
+            else:
+                cache_sizes["merge_dates_disk"] = 0
+        except Exception:
+            cache_sizes["merge_dates_disk"] = 0
 
         return {
             "entries": cache_sizes,
@@ -1572,6 +1640,7 @@ class GitHubAPIClient:
         stream: bool = False,
         params: Optional[Dict[str, Any]] = None,
         etag: Optional[str] = None,
+        use_etag: bool = True,
     ):
         """requests.get wrapper that increments per-run counters and supports ETags.
 
@@ -1604,20 +1673,16 @@ class GitHubAPIClient:
         # Enforce per-invocation budget.
         self._budget_maybe_consume_or_raise()
 
-        try:
-            GITHUB_API_STATS.rest_calls_total += 1
-            GITHUB_API_STATS.rest_calls_by_label[label] = int(GITHUB_API_STATS.rest_calls_by_label.get(label, 0) or 0) + 1
-        except (ValueError, TypeError):
-            pass
+        GITHUB_API_STATS.rest_calls_total += 1
+        GITHUB_API_STATS.rest_calls_by_label[label] = int(GITHUB_API_STATS.rest_calls_by_label.get(label, 0) or 0) + 1
         if self._debug_rest:
-            try:
-                self.logger.debug("GH REST GET [%s] %s", label, url)
-            except (ValueError, TypeError):
-                pass
+            # Explicit per-request debug output (stdout/stderr capture-friendly).
+            print(f"[API_CALL#{GITHUB_API_STATS.rest_calls_total}] {label} {url}", file=sys.stderr, flush=True)
+            self.logger.debug("GH REST GET [%s] %s", label, url)
         headers = dict(self.headers or {})
 
-        # Add ETag support for conditional requests
-        if etag:
+        # Add ETag support for conditional requests (unless explicitly disabled).
+        if use_etag and etag:
             headers['If-None-Match'] = etag
 
         t0_req = time.monotonic()
@@ -1817,6 +1882,18 @@ class GitHubAPIClient:
                 "time_total_s": 0.0,
                 "time_by_label_s": {},
             }
+
+    def get_gh_call_stats(self) -> Dict[str, Any]:
+        """Return best-effort stats for `gh` CLI calls made by this process."""
+        try:
+            return {
+                "core_calls_total": int(getattr(GITHUB_API_STATS, "gh_core_calls_total", 0) or 0),
+                "core_304_total": int(getattr(GITHUB_API_STATS, "gh_core_304_total", 0) or 0),
+                "graphql_calls_total": int(getattr(GITHUB_API_STATS, "gh_graphql_calls_total", 0) or 0),
+                "graphql_cost_total": int(getattr(GITHUB_API_STATS, "gh_graphql_cost_total", 0) or 0),
+            }
+        except (ValueError, TypeError):
+            return {"core_calls_total": 0, "core_304_total": 0, "graphql_calls_total": 0, "graphql_cost_total": 0}
 
     def get_actions_job_status(self, *, owner: str, repo: str, job_id: str, ttl_s: int = 60) -> Optional[str]:
         """Return GitHub Actions job status ("completed", "in_progress", ...) with disk cache for completed jobs.
@@ -2678,6 +2755,133 @@ class GitHubAPIClient:
             + "). "
             f"Resets at {reset_local} (in {self._format_seconds_delta(seconds_until)})."
         )
+
+    def get_rate_limit_snapshot(self) -> Optional[Dict[str, Any]]:
+        """Return a best-effort /rate_limit snapshot including core + graphql buckets.
+
+        This makes exactly one REST call (GET /rate_limit) unless cache_only_mode/budget prevents it.
+        The snapshot shape is intentionally compact for embedding in HTML Statistics.
+        """
+        # Prefer `gh api rate_limit` when available: it has proven more reliable than
+        # parsing the REST /rate_limit response in some environments.
+        try:
+            if shutil.which("gh"):
+                env = dict(os.environ)
+                if getattr(self, "token", None):
+                    env["GH_TOKEN"] = str(self.token)
+                res = subprocess.run(
+                    ["gh", "api", "rate_limit"],
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                    timeout=15,
+                    check=False,
+                )
+                if res.returncode == 0:
+                    try:
+                        data = json.loads(str(res.stdout or "").strip() or "{}") or {}
+                    except json.JSONDecodeError:
+                        data = {}
+                    resources = (data or {}).get("resources", {}) if isinstance(data, dict) else {}
+                    core = (resources.get("core") or {}) if isinstance(resources, dict) else {}
+                    graphql = (resources.get("graphql") or {}) if isinstance(resources, dict) else {}
+                    def _bucket(d: Any) -> Dict[str, Any]:
+                        if not isinstance(d, dict):
+                            return {}
+                        out: Dict[str, Any] = {}
+                        for k in ("remaining", "limit", "reset", "used"):
+                            if k in d:
+                                out[k] = d.get(k)
+                        return out
+                    # Count this as a `gh` core REST call (it consumes core quota).
+                    GITHUB_API_STATS.gh_core_calls_total = int(getattr(GITHUB_API_STATS, "gh_core_calls_total", 0) or 0) + 1
+                    return {
+                        "ts_epoch": int(time.time()),
+                        "core": _bucket(core),
+                        "graphql": _bucket(graphql),
+                    }
+        except Exception:
+            pass
+
+        url = f"{self.base_url}/rate_limit"
+        try:
+            # Avoid conditional requests here: we want a true before/after reading.
+            resp = self._rest_get(url, timeout=10, use_etag=False)
+        except RuntimeError:
+            # In cache-only mode we cannot call /rate_limit; return best-effort core-only info
+            # from cached headers, and omit graphql.
+            if isinstance(self._cached_rate_limit_info, dict) and self._cached_rate_limit_info:
+                return {
+                    "ts_epoch": int(time.time()),
+                    "core": dict(self._cached_rate_limit_info),
+                    "graphql": {},
+                }
+            return None
+        # Prefer headers for core (authoritative for the request that just happened).
+        # The JSON body can sometimes report a value that doesn't reflect the decrement
+        # semantics we want for a "before/after" diff.
+        core_hdr: Dict[str, Any] = {}
+        try:
+            rh = resp.headers.get("X-RateLimit-Remaining")
+            lh = resp.headers.get("X-RateLimit-Limit")
+            sh = resp.headers.get("X-RateLimit-Reset")
+            uh = resp.headers.get("X-RateLimit-Used")
+            if rh is not None:
+                core_hdr["remaining"] = int(rh)
+            if lh is not None:
+                core_hdr["limit"] = int(lh)
+            if sh is not None:
+                core_hdr["reset"] = int(sh)
+            if uh is not None:
+                core_hdr["used"] = int(uh)
+        except (ValueError, TypeError, AttributeError):
+            core_hdr = {}
+
+        try:
+            data = resp.json()
+        except Exception:
+            data = {}
+
+        resources = (data or {}).get("resources", {}) if isinstance(data, dict) else {}
+        core_json = (resources.get("core") or {}) if isinstance(resources, dict) else {}
+        graphql_json = (resources.get("graphql") or {}) if isinstance(resources, dict) else {}
+
+        def _bucket(d: Any) -> Dict[str, Any]:
+            if not isinstance(d, dict):
+                return {}
+            out: Dict[str, Any] = {}
+            for k in ("remaining", "limit", "reset", "used"):
+                if k in d:
+                    out[k] = d.get(k)
+            return out
+
+        # Merge: header values override JSON for core.
+        core_out = {**_bucket(core_json), **core_hdr} if (core_hdr or isinstance(core_json, dict)) else core_hdr
+
+        return {
+            "ts_epoch": int(time.time()),
+            "core": core_out,
+            "graphql": _bucket(graphql_json),
+        }
+
+    def capture_rate_limit_before(self) -> None:
+        """Capture the 'before' /rate_limit snapshot for this run (best-effort)."""
+        snap = self.get_rate_limit_snapshot()
+        if snap is not None:
+            self._rate_limit_snapshot_before = snap
+
+    def capture_rate_limit_after(self) -> None:
+        """Capture the 'after' /rate_limit snapshot for this run (best-effort)."""
+        snap = self.get_rate_limit_snapshot()
+        if snap is not None:
+            self._rate_limit_snapshot_after = snap
+
+    def get_rate_limit_snapshots(self) -> Dict[str, Any]:
+        """Return {before, after} snapshots for Statistics rendering."""
+        return {
+            "before": dict(self._rate_limit_snapshot_before or {}),
+            "after": dict(self._rate_limit_snapshot_after or {}),
+        }
 
     def get_core_rate_limit_info(self) -> Optional[Dict[str, Any]]:
         """Return GitHub REST (core) rate limit info.
@@ -4661,6 +4865,12 @@ class GitHubAPIClient:
         except (ValueError, TypeError):
             return set()
 
+        if self._debug_rest:
+            # Trace where required-checks lookups are coming from (helps explain "why PR=5626?")
+            # This is diagnostic only; it does not perform any network calls.
+            stack = "".join(traceback.format_stack(limit=12))
+            print(f"[REQUIRED_CHECKS_CALL] owner={owner} repo={repo} pr={prn}\n{stack}", file=sys.stderr, flush=True)
+
         def _is_cache_entry_valid(ent: Dict[str, Any], *, now: int) -> bool:
             """Return True if a cache entry is valid under current tiered TTL policy."""
             try:
@@ -4709,11 +4919,20 @@ class GitHubAPIClient:
         now = int(time.time())
         
         # Try cache (uses get_if_valid which handles TTL validation)
-        cached_entry = REQUIRED_CHECKS_CACHE.get_if_valid(cache_key, cache_only_mode=self.cache_only_mode, check_ttl=False)
+        # We do custom TTL validation here (tiered TTL based on PR.updated_at age), but we still
+        # need the cached entry timestamp (`ts`) to decide freshness, so keep check_ttl=True.
+        cached_entry = REQUIRED_CHECKS_CACHE.get_if_valid(cache_key, cache_only_mode=self.cache_only_mode, check_ttl=True)
         if cached_entry is not None:
             # Custom TTL validation
             if self.cache_only_mode or _is_cache_entry_valid(cached_entry, now=now):
+                # Cache HIT: required-checks already present and valid (or cache-only mode).
+                self._cache_hit("required_checks")
                 return cached_entry.get("val", set())
+            # Cache entry exists but is stale under TTL policy.
+            self._cache_miss("required_checks.expired")
+        else:
+            # Cache MISS: no entry present.
+            self._cache_miss("required_checks.missing")
         
         # Cache-only mode: do not fetch network; return empty if we have nothing.
         if self.cache_only_mode:
@@ -4725,23 +4944,56 @@ class GitHubAPIClient:
             pr_state = "open"
             pr_updated_at_epoch: Optional[int] = None
             try:
+                cmd0 = [
+                    "gh",
+                    "api",
+                    f"repos/{owner}/{repo}/pulls/{prn}",
+                    "--jq",
+                    "{node_id: .node_id, state: .state, merged_at: .merged_at, updated_at: .updated_at}",
+                ]
+                # This is a REST (core) call via `gh` (not counted in github.rest.*).
+                GITHUB_API_STATS.gh_core_calls_total = int(getattr(GITHUB_API_STATS, "gh_core_calls_total", 0) or 0) + 1
+                if self._debug_rest:
+                    # --include prints HTTP status + headers before the body. This lets us see
+                    # whether the call was 200 vs 304 (304 won't decrement core.remaining).
+                    cmd0 = list(cmd0) + ["--include"]
+                    print(
+                        f"[GH_CLI_CALL] {' '.join(cmd0)}",
+                        file=sys.stderr,
+                        flush=True,
+                    )
                 res0 = subprocess.run(
-                    [
-                        "gh",
-                        "api",
-                        f"repos/{owner}/{repo}/pulls/{prn}",
-                        "--jq",
-                        "{node_id: .node_id, state: .state, merged_at: .merged_at, updated_at: .updated_at}",
-                    ],
+                    cmd0,
                     capture_output=True,
                     text=True,
                     timeout=15,
                     check=False,
                 )
                 if res0.returncode == 0:
+                    out0 = str(res0.stdout or "")
+                    if self._debug_rest and "\n\n" in out0:
+                        hdr0, body0 = out0.split("\n\n", 1)
+                        # Print status line + remaining header if present.
+                        status_line = (hdr0.splitlines()[0] if hdr0.splitlines() else "").strip()
+                        # Track 304s separately (free; does not decrement core.remaining).
+                        if status_line:
+                            try:
+                                code_i = int(status_line.split()[1])
+                                if code_i == 304:
+                                    GITHUB_API_STATS.gh_core_304_total = int(getattr(GITHUB_API_STATS, "gh_core_304_total", 0) or 0) + 1
+                            except (IndexError, ValueError, TypeError):
+                                pass
+                        remaining_line = ""
+                        for ln in hdr0.splitlines():
+                            if ln.lower().startswith("x-ratelimit-remaining:"):
+                                remaining_line = ln.strip()
+                                break
+                        if status_line or remaining_line:
+                            print(f"[GH_CLI_RESP] {status_line} {remaining_line}".strip(), file=sys.stderr, flush=True)
+                        out0 = body0
                     meta = {}
                     try:
-                        meta = json.loads(str(res0.stdout or "").strip() or "{}") or {}
+                        meta = json.loads(out0.strip() or "{}") or {}
                     except json.JSONDecodeError:
                         meta = {}
                     pr_node_id = str(meta.get("node_id") or "").strip()
@@ -4770,6 +5022,8 @@ class GitHubAPIClient:
                     pr_state=pr_state,
                     pr_updated_at_epoch=pr_updated_at_epoch,
                 )
+                # We wrote one cache entry (negative caching).
+                self._cache_write("required_checks", entries=1)
                 return set()
 
             # Paginated query: fetch up to 100 checks per page (GitHub's limit), up to 25 pages (2500 total).
@@ -4799,6 +5053,7 @@ query($owner:String!,$name:String!,$number:Int!,$prid:ID!,$after:String) {
       }
     }
   }
+  rateLimit { cost remaining resetAt }
 }
 """
 
@@ -4835,6 +5090,15 @@ query($owner:String!,$name:String!,$number:Int!,$prid:ID!,$after:String) {
                     # NOTE: we intentionally use `gh` here because it handles GraphQL auth and
                     # enterprise oddities; required-ness is not reliably available via REST without
                     # admin branch-protection permissions.
+                    GITHUB_API_STATS.gh_graphql_calls_total = int(getattr(GITHUB_API_STATS, "gh_graphql_calls_total", 0) or 0) + 1
+                    if self._debug_rest:
+                        cursor_desc = after_cursor if after_cursor else "null"
+                        cmd_desc = " ".join(cmd)
+                        print(
+                            f"[GH_CLI_CALL] {cmd_desc}  # required_checks page={page_num + 1} after={cursor_desc}",
+                            file=sys.stderr,
+                            flush=True,
+                        )
                     res = subprocess.run(
                         cmd,
                         capture_output=True,
@@ -4845,11 +5109,32 @@ query($owner:String!,$name:String!,$number:Int!,$prid:ID!,$after:String) {
                     if res.returncode != 0:
                         break
                     
+                    out = str(res.stdout or "")
+                    if self._debug_rest and "\n\n" in out:
+                        hdr, body = out.split("\n\n", 1)
+                        status_line = (hdr.splitlines()[0] if hdr.splitlines() else "").strip()
+                        remaining_line = ""
+                        for ln in hdr.splitlines():
+                            if ln.lower().startswith("x-ratelimit-remaining:"):
+                                remaining_line = ln.strip()
+                                break
+                        if status_line or remaining_line:
+                            print(f"[GH_CLI_RESP] {status_line} {remaining_line}".strip(), file=sys.stderr, flush=True)
+                        out = body
                     data = {}
                     try:
-                        data = json.loads(res.stdout or "{}") or {}
+                        data = json.loads(out or "{}") or {}
                     except json.JSONDecodeError:
                         break
+
+                    # Best-effort: GraphQL cost accounting (separate bucket from core).
+                    try:
+                        rl = ((data.get("data") or {}).get("rateLimit") or {})
+                        cost = int(rl.get("cost") or 0)
+                        if cost > 0:
+                            GITHUB_API_STATS.gh_graphql_cost_total = int(getattr(GITHUB_API_STATS, "gh_graphql_cost_total", 0) or 0) + cost
+                    except (ValueError, TypeError, AttributeError):
+                        pass
                     
                     nodes = (
                         (((((data.get("data") or {}).get("repository") or {}).get("pullRequest") or {}).get("commits") or {}).get("nodes") or [])
@@ -4897,6 +5182,8 @@ query($owner:String!,$name:String!,$number:Int!,$prid:ID!,$after:String) {
                 pr_state=pr_state,
                 pr_updated_at_epoch=pr_updated_at_epoch,
             )
+            # We wrote one cache entry (required-checks set for this PR).
+            self._cache_write("required_checks", entries=1)
 
             return all_required
         except (OSError, subprocess.SubprocessError, json.JSONDecodeError):  # subprocess or JSON parsing failures
@@ -4907,6 +5194,8 @@ query($owner:String!,$name:String!,$number:Int!,$prid:ID!,$after:String) {
                 ok=False,
                 pr_state="open",
             )
+            # We wrote one cache entry (negative caching).
+            self._cache_write("required_checks", entries=1)
             return set()
 
     def _pr_info_cache_key(self, owner: str, repo: str, pr_number: int) -> str:

@@ -1542,7 +1542,7 @@ def _build_html(payload: Dict[str, Any]) -> str:
     </div>
 
     <!-- GitHub rate limit (recorded by resource_monitor.py into SQLite) -->
-    <div class="grid onecol" style="margin-top: 16px;">
+    <div class="grid" style="grid-template-columns: 3fr 2fr; margin-top: 16px;">
       <div class="card chart">
         <div class="hdr">
           <div class="title">GitHub API rate limit</div>
@@ -1552,6 +1552,8 @@ def _build_html(payload: Dict[str, Any]) -> str:
           <div id="gh_rate_limit_graph" class="plot"></div>
         </div>
       </div>
+      <!-- right side intentionally empty (for now) -->
+      <div></div>
     </div>
   </div>
 
@@ -2928,12 +2930,29 @@ def _build_html(payload: Dict[str, Any]) -> str:
     const d = PAYLOAD.gh_rate_limit || {{}};
     const keys = Object.keys(d || {{}});
     const traces = [];
+    // Total "hits since previous sample" across all resources, keyed by timestamp.
+    // If a resource resets (remaining goes up), we intentionally do not count that as hits.
+    const hitsByX = {{}};
     for (let i = 0; i < keys.length; i++) {{
       const k = keys[i];
       const row = d[k] || {{}};
       const x = row.x || [];
       const rem = row.remaining || [];
       const lim = row.limit || [];
+      // Count "hits" using the drop in remaining requests.
+      for (let j = 0; j < rem.length; j++) {{
+        const xi = x[j];
+        if (!xi) continue;
+        const cur = rem[j];
+        const prev = j > 0 ? rem[j - 1] : null;
+        const curN = cur === null || cur === undefined ? null : Number(cur);
+        const prevN = prev === null || prev === undefined ? null : Number(prev);
+        if (!Number.isFinite(curN) || !Number.isFinite(prevN)) continue;
+        const dRem = prevN - curN;
+        if (dRem > 0) {{
+          hitsByX[xi] = (Number(hitsByX[xi]) || 0) + dRem;
+        }}
+      }}
       // Remaining
       traces.push({{
         x,
@@ -2956,8 +2975,38 @@ def _build_html(payload: Dict[str, Any]) -> str:
         }});
       }}
     }}
+    // Bars on RHS axis = total hits since previous sample (across all resources).
+    const xHits = Object.keys(hitsByX || {{}}).sort();
+    if (xHits.length) {{
+      const yHits = xHits.map(t => {{
+        const v = Number(hitsByX[t] || 0);
+        return Number.isFinite(v) && v > 0 ? v : null;
+      }});
+      traces.unshift({{
+        x: xHits,
+        y: yHits,
+        name: 'hits',
+        type: 'bar',
+        yaxis: 'y2',
+        marker: {{ opacity: 0.20 }},
+        hovertemplate: `hits=%{{y}}<extra></extra>`,
+      }});
+    }}
     const layout = commonLayout('');
     layout.yaxis = {{ title: 'requests remaining', rangemode: 'tozero', gridcolor: 'rgba(255,255,255,0.09)' }};
+    layout.yaxis2 = {{
+      title: 'hits (Δremaining)',
+      rangemode: 'tozero',
+      overlaying: 'y',
+      side: 'right',
+      anchor: 'free',
+      position: 1.00,
+      showgrid: false,
+      tickfont: {{ size: 10 }},
+      titlefont: {{ size: 10 }},
+      automargin: true,
+    }};
+    layout.barmode = 'overlay';
     const config = {{ displayModeBar: true, responsive: true }};
     if (!keys.length) {{
       return Plotly.newPlot('gh_rate_limit_graph', [{{x: [PAYLOAD.window_end], y: [0], mode:'text', text:['No GitHub rate-limit samples in window'], textfont:{{size:14}}, hoverinfo:'skip'}}], layout, config)

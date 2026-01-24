@@ -122,24 +122,31 @@ class BaseDiskCache:
             return
 
         try:
-            data = json.loads(self._cache_file.read_text() or "{}")
+            raw = json.loads(self._cache_file.read_text() or "{}")
         except Exception:
-            data = {}
+            raw = {}
 
-        if not isinstance(data, dict):
-            data = {}
+        # Support both:
+        #  - New schema: {"version": <int>, "items": {...}}
+        #  - Legacy schema: {"key1": <val>, "key2": <val>, ...}
+        data: Dict[str, Any] = raw if isinstance(raw, dict) else {}
 
-        # Ensure items dict exists
-        if not isinstance(data.get("items"), dict):
-            data["items"] = {}
+        items: Dict[str, Any] = {}
+        if isinstance(data.get("items"), dict):
+            items = dict(data.get("items") or {})
+        else:
+            # Legacy: treat all top-level keys (except "version") as cache items.
+            try:
+                items = {k: v for (k, v) in data.items() if str(k) != "version"}
+            except Exception:
+                items = {}
 
-        # Update version
-        data["version"] = self._schema_version
+        # Normalize to new schema in memory (we don't force-write migration here).
+        normalized = {"version": self._schema_version, "items": items}
 
-        # Track initial disk count
-        self._initial_disk_count = len(data.get("items", {}))
-        
-        self._data = data
+        # Track initial disk count (how many entries existed on disk at process start).
+        self._initial_disk_count = len(items)
+        self._data = normalized
 
     def _create_empty_cache(self) -> Dict[str, Any]:
         """Create empty cache structure. Subclasses can override."""

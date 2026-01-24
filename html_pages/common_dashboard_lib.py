@@ -3441,6 +3441,7 @@ def github_api_stats_rows(
     rest = github_api.get_rest_call_stats() or {}
     errs = github_api.get_rest_error_stats() or {}
     cache = github_api.get_cache_stats() or {}
+    gh_stats = github_api.get_gh_call_stats() or {}
 
     by_label = dict(rest.get("by_label") or {}) if isinstance(rest, dict) else {}
     time_by_label_s = dict(rest.get("time_by_label_s") or {}) if isinstance(rest, dict) else {}
@@ -3457,10 +3458,32 @@ def github_api_stats_rows(
         if rest.get("budget_max") is not None:
             budget["budget_max"] = rest.get("budget_max")
         budget["budget_exhausted"] = "true" if bool(rest.get("budget_exhausted")) else "false"
-    rl = github_api.get_core_rate_limit_info() or {}
-    rem = rl.get("remaining")
-    lim = rl.get("limit")
-    reset_pt = rl.get("reset_pt")
+    # Rate limit values for the compact "Budget & mode" block:
+    # - Prefer the "after" snapshot (if captured), to avoid extra /rate_limit calls.
+    # - Otherwise fall back to get_core_rate_limit_info() (unless disabled).
+    try:
+        snaps0 = github_api.get_rate_limit_snapshots() if github_api is not None else {}
+    except Exception:
+        snaps0 = {}
+    after0 = (snaps0.get("after") or {}) if isinstance(snaps0, dict) else {}
+    after0_core = (after0.get("core") or {}) if isinstance(after0, dict) else {}
+    rem = after0_core.get("remaining")
+    lim = after0_core.get("limit")
+    reset_pt = None
+    # (reset_pt is optional; we keep it only in the budget block, not as a standalone row)
+    try:
+        if after0_core.get("reset") is not None:
+            reset_epoch = int(after0_core.get("reset"))
+            reset_pt = datetime.fromtimestamp(reset_epoch).astimezone().strftime("%Y-%m-%d %H:%M:%S %Z")
+    except (ValueError, TypeError, OSError):
+        reset_pt = None
+
+    if rem is None and lim is None and not os.environ.get("DYNAMO_UTILS_DISABLE_INTERNAL_RATE_LIMIT_CHECKS"):
+        rl = github_api.get_core_rate_limit_info() or {}
+        rem = rl.get("remaining")
+        lim = rl.get("limit")
+        reset_pt = rl.get("reset_pt")
+
     if rem is not None and lim is not None:
         budget["core_remaining"] = f"{rem}/{lim}"
     elif rem is not None:
@@ -3475,6 +3498,25 @@ def github_api_stats_rows(
     rows.append(("github.rest.ok", str(int(rest.get("success_total") or 0)), "Successful API calls"))
     rows.append(("github.rest.errors", str(int(rest.get("error_total") or 0)), "Failed API calls"))
     rows.append(("github.rest.time_total_secs", f"{float(rest.get('time_total_s') or 0.0):.2f}s", "Total time spent in API calls (SUM of all parallel threads - see note below)"))
+
+    # `gh` CLI API stats (separate buckets: REST core vs GraphQL).
+    gh_core_calls = int(gh_stats.get("core_calls_total") or 0)
+    gh_core_304 = int(gh_stats.get("core_304_total") or 0)
+    gh_core_billable = max(0, gh_core_calls - gh_core_304)
+    gh_gql_calls = int(gh_stats.get("graphql_calls_total") or 0)
+    gh_gql_cost = int(gh_stats.get("graphql_cost_total") or 0)
+
+    rows.append(("github.gh.core.calls", str(gh_core_calls), "Number of `gh api <REST endpoint>` calls (core bucket)"))
+    rows.append(("github.gh.core.etag_304_total", str(gh_core_304), "304 responses from `gh` REST calls (free; do not decrement core)"))
+    rows.append(("github.gh.core.billable_calls", str(gh_core_billable), "Estimated billable core calls from `gh` REST (calls - 304)"))
+    rows.append(("github.gh.graphql.calls", str(gh_gql_calls), "Number of `gh api graphql` calls (GraphQL bucket)"))
+    rows.append(("github.gh.graphql.cost_total", str(gh_gql_cost), "Sum of GraphQL rateLimit.cost across `gh api graphql` calls"))
+
+    # Helpful combined estimate for core consumption (excludes rate_limit polling).
+    rest_total = int(rest.get("total") or 0)
+    rest_304 = int(GITHUB_API_STATS.etag_304_total or 0)
+    rest_billable = max(0, rest_total - rest_304)
+    rows.append(("github.core.billable_calls_estimate", str(rest_billable + gh_core_billable), "Estimated total billable core calls (python REST + gh REST; excludes 304s)"))
 
     # ETag stats (conditional requests - 304s don't count against rate limit!)
     etag_304_total = int(GITHUB_API_STATS.etag_304_total or 0)
@@ -3500,12 +3542,51 @@ def github_api_stats_rows(
         rows.append(("github.rest.budget_max", str(rest.get("budget_max")), "Maximum API calls allowed"))
     if isinstance(rest, dict):
         rows.append(("github.rest.budget_exhausted", "true" if bool(rest.get("budget_exhausted")) else "false", "Whether API budget was exhausted"))
-    if rem is not None and lim is not None:
-        rows.append(("github.core_remaining", f"{rem}/{lim}", "GitHub core rate limit remaining"))
-    elif rem is not None:
-        rows.append(("github.core_remaining", str(rem), "GitHub core rate limit remaining"))
-    if reset_pt:
-        rows.append(("github.core_resets", str(reset_pt), "When rate limit resets"))
+    # NOTE: `github.core_remaining` / `github.core_resets` are intentionally omitted when
+    # before/after snapshots are present (those rows are redundant). The compact budget block
+    # still shows core_remaining/core_resets as a convenience.
+
+    # Before/after rate limit snapshots (if captured by the caller).
+    # These should NOT trigger any /rate_limit calls during rendering.
+    try:
+        snaps = github_api.get_rate_limit_snapshots() if github_api is not None else {}
+    except Exception:
+        snaps = {}
+    before = (snaps.get("before") or {}) if isinstance(snaps, dict) else {}
+    after = (snaps.get("after") or {}) if isinstance(snaps, dict) else {}
+    if before or after:
+        rows.append(("## Rate Limit (before/after)", None, ""))
+        for bucket in ("core", "graphql"):
+            b = (before.get(bucket) or {}) if isinstance(before, dict) else {}
+            a = (after.get(bucket) or {}) if isinstance(after, dict) else {}
+            b_rem = b.get("remaining")
+            a_rem = a.get("remaining")
+            b_used = b.get("used")
+            a_used = a.get("used")
+            if b_rem is not None:
+                rows.append((f"github.rate_limit.before.{bucket}.remaining", str(b_rem), f"{bucket} remaining before"))
+            if a_rem is not None:
+                rows.append((f"github.rate_limit.after.{bucket}.remaining", str(a_rem), f"{bucket} remaining after"))
+            if b_used is not None:
+                rows.append((f"github.rate_limit.before.{bucket}.used", str(b_used), f"{bucket} used before"))
+            if a_used is not None:
+                rows.append((f"github.rate_limit.after.{bucket}.used", str(a_used), f"{bucket} used after"))
+            try:
+                # Prefer used-based delta when available (more robust for /rate_limit semantics).
+                if b_used is not None and a_used is not None:
+                    rows.append((
+                        f"github.rate_limit.delta.{bucket}.consumed",
+                        str(int(a_used) - int(b_used)),
+                        f"{bucket} consumed between snapshots (excludes BEFORE call; includes AFTER call)",
+                    ))
+                elif b_rem is not None and a_rem is not None:
+                    rows.append((
+                        f"github.rate_limit.delta.{bucket}.consumed",
+                        str(int(b_rem) - int(a_rem)),
+                        f"{bucket} consumed between snapshots (excludes BEFORE call; includes AFTER call)",
+                    ))
+            except (ValueError, TypeError):
+                pass
 
     # Cache summary (individual flat entries)
     rows.append(("github.cache.all.hits", str(int(cache.get("hits_total") or 0)), "Total cache hits across all operations"))
@@ -3581,6 +3662,7 @@ def github_api_stats_rows(
             "raw_log_text": "Raw CI log text content index [key: job_id]",
             "actions_job_status": "GitHub Actions job status [key: job_id]",
             "actions_job_details": "GitHub Actions job details [key: owner/repo:run_id:job_id]",
+            "actions_jobs": "Actions workflow run jobs [key: owner/repo:run_jobs:run_id or owner/repo:job:job_id]",
             "actions_workflow": "Workflow run metadata [key: owner/repo:run_id]",
             "required_checks": "Required PR check names [key: owner/repo:pr#]",
             "pr_info": "PR metadata (author, labels, reviews) [key: owner/repo#PR]",
@@ -3591,6 +3673,7 @@ def github_api_stats_rows(
         cache_descriptions_disk = {
             "actions_job_status": "GitHub Actions job status [actions_jobs.json] [key: owner/repo:jobstatus:job_id]",
             "actions_job_details": "GitHub Actions job details [actions_jobs.json] [key: owner/repo:job:job_id]",
+            "actions_jobs": "Actions workflow run jobs [actions_jobs.json] [key: owner/repo:run_jobs:run_id or owner/repo:job:job_id]",
             "pr_checks": "PR check runs [pr_checks_cache.json] [key: owner/repo#PR or owner/repo#PR:sha]",
             "pulls_list": "Pull request list responses [pulls_open_cache.json] [key: owner/repo:state]",
             "pr_branch": "PR branch information [pr_branch_cache.json] [key: owner/repo:branch]",
@@ -3612,6 +3695,7 @@ def github_api_stats_rows(
         cache_ttl_descriptions = {
             "actions_job_status": "adaptive (in_progress: <1h=2m, <2h=4m, <4h=30m, <8h=60m, <12h=80m, >=12h=120m; completed: ∞)",
             "actions_job_details": "30d (only cached once completed)",
+            "actions_jobs": "30d (completed workflow runs never change; ETag-friendly)",
             "pr_checks": "adaptive (<1h=2m, <2h=4m, <4h=30m, <8h=60m, <12h=80m, >=12h=120m; closed/merged: 360d)",
             "pulls_list": "adaptive (<1h=2m, <2h=4m, <4h=30m, <8h=60m, <12h=80m, >=12h=120m)",
             "pr_branch": "adaptive (<1h=2m, <2h=4m, <4h=30m, <8h=60m, <12h=80m, >=12h=120m; closed/merged: 360d)",
@@ -3857,7 +3941,7 @@ def build_page_stats(
         # Show disk cache size (from COMMIT_HISTORY_CACHE)
         commit_mem_count, commit_disk_count = COMMIT_HISTORY_CACHE.get_cache_sizes()
         page_stats.append(("composite_sha.cache.mem", str(commit_mem_count), "Commit history cache entries (in memory)"))
-        page_stats.append(("composite_sha.cache.disk", str(commit_disk_count), "Commit history cache entries (on disk before run)"))
+        page_stats.append(("composite_sha.cache.disk", str(commit_disk_count), "Commit history cache entries (on disk)"))
         page_stats.append(("composite_sha.cache.hits", str(perf_stats.composite_sha_cache_hit), ""))
         page_stats.append(("composite_sha.cache.misses", str(perf_stats.composite_sha_cache_miss), ""))
         page_stats.append(("composite_sha.errors", str(perf_stats.composite_sha_errors), "Errors computing composite SHAs (commit history only)"))
@@ -3866,7 +3950,7 @@ def build_page_stats(
     else:
         commit_mem_count, commit_disk_count = COMMIT_HISTORY_CACHE.get_cache_sizes()
         page_stats.append(("composite_sha.cache.mem", str(commit_mem_count), "Commit history cache entries (in memory)"))
-        page_stats.append(("composite_sha.cache.disk", str(commit_disk_count), "Commit history cache entries (on disk before run)"))
+        page_stats.append(("composite_sha.cache.disk", str(commit_disk_count), "Commit history cache entries (on disk)"))
         page_stats.append(("composite_sha.cache.hits", "(N/A)", ""))
         page_stats.append(("composite_sha.cache.misses", "(N/A)", ""))
         page_stats.append(("composite_sha.errors", "(N/A)", "Errors computing composite SHAs (commit history only)"))

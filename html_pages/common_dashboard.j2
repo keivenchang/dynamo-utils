@@ -133,6 +133,11 @@
       font-family: ui-monospace, SFMono-Regular, SF Mono, Menlo, Consolas, Liberation Mono, monospace;
       word-break: break-word;
     }
+    /* Highlight API call counters (e.g. github.*.calls) in blue. */
+    .stats-table td.v.call-text {
+      color: #0969da;
+      font-weight: 600;
+    }
     .stats-table td.v.warn-text {
       color: #cf222e;
       font-weight: 600;
@@ -265,12 +270,14 @@
         {% set k = stat[0] %}
         {% set v = stat[1] %}
         {% set desc = stat[2] if stat|length > 2 else '' %}
+        {% set kl = (k|string)|lower %}
+        {% set last = kl.split('.')[-1] %}
         <tr>
           {% if v is none and (k|string)[:3] == '## ' %}
           <td class="section" colspan="3">{{ (k|string)[3:] }}</td>
           {% else %}
           <td class="k">{{ k }}</td>
-          <td class="v{% if 'miss' in (k|string)|lower and v != '0' and v != '(N/A)' %} warn-text{% endif %}">
+          <td class="v{% if 'miss' in kl and v != '0' and v != '(N/A)' %} warn-text{% endif %}{% if 'call' in last %} call-text{% endif %}">
             {% if v is string and '\n' in v %}
             <pre class="stats-pre">{{ v }}</pre>
             {% elif k in ['github.rest.calls', 'github.rest.budget_max', 'github.rest.ok'] %}

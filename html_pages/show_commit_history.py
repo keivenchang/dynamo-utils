@@ -927,6 +927,7 @@ class CommitHistoryGenerator:
                         'check_runs': check_runs_dicts,
                     }
 
+
         # OPTIMIZATION (2026-01-18): Batch prefetch job details for all runs
         # Extract all unique run_ids from check_runs and batch fetch them in one call per run
         # instead of 1 call per job. This reduces API calls by 90-95% (500-1000 → 10-20 calls).
@@ -1866,30 +1867,38 @@ class CommitHistoryGenerator:
             # DO NOT use get_required_checks_for_base_ref() anymore - it doesn't work.
             # Instead: fetch an open PR targeting main and use its required checks as a proxy.
             # TODO: Unhardcode "ai-dynamo"/"dynamo" - should be class attributes or config
+            # Prefer required-checks metadata already fetched for the commit window (avoids extra `gh` calls).
             required_names: List[str] = []
             try:
-                # Get open PRs targeting main and try multiple until we find one with required checks
-                # (Some PRs may be from forks or have different required check configurations)
-                open_prs = self.github_client.get_open_prs(
-                    owner="ai-dynamo",
-                    repo="dynamo",
-                    max_prs=20,
-                )
-                # Filter for PRs targeting main
-                main_prs = [pr for pr in open_prs if pr.base_ref == "main"]
+                if isinstance(pr_to_required_checks, dict) and pr_to_required_checks:
+                    for _prn, reqs in pr_to_required_checks.items():
+                        if reqs:
+                            required_names = sorted([str(x) for x in reqs if str(x)])
+                            break
+            except (TypeError, ValueError):
+                required_names = []
 
-                # Try up to 5 PRs to find one with required checks
-                for pr in main_prs[:5]:
-                    required_set = self.github_client.get_required_checks(
+            # Fallback: fetch an open PR targeting main and use its required checks as a proxy.
+            if not required_names:
+                try:
+                    open_prs = self.github_client.get_open_prs(
                         owner="ai-dynamo",
                         repo="dynamo",
-                        pr_number=pr.number
+                        max_prs=20,
                     )
-                    if required_set:
-                        required_names = sorted(required_set)
-                        break  # Found required checks, stop searching
-            except (OSError, subprocess.SubprocessError):  # Network/subprocess errors only
-                required_names = []  # Best-effort: continue even if this fails
+                    main_prs = [pr for pr in open_prs if pr.base_ref == "main"]
+
+                    for pr in main_prs[:5]:
+                        required_set = self.github_client.get_required_checks(
+                            owner="ai-dynamo",
+                            repo="dynamo",
+                            pr_number=pr.number
+                        )
+                        if required_set:
+                            required_names = sorted(required_set)
+                            break
+                except (OSError, subprocess.SubprocessError):
+                    required_names = []
 
             # Build trees in parallel using ThreadPoolExecutor
             max_workers = min(32, len(commit_data) or 1)
@@ -1948,6 +1957,13 @@ class CommitHistoryGenerator:
         # Expose shared formatters to the template so the GitHub column summary matches other dashboards.
         env.globals["compact_ci_summary_html"] = compact_ci_summary_html
         template = env.get_template('show_commit_history.j2')
+
+        # Capture "after" /rate_limit snapshot BEFORE building Statistics so it's included in HTML.
+        if not os.environ.get("DYNAMO_UTILS_DISABLE_INTERNAL_RATE_LIMIT_CHECKS"):
+            try:
+                self.github_client.capture_rate_limit_after()
+            except Exception:
+                pass
 
         # Page statistics (shown in an expandable block at the bottom of the HTML).
         elapsed_s = None
@@ -2493,13 +2509,29 @@ Environment Variables:
         enable_success_build_test_logs=bool(args.enable_success_build_test_logs),
         run_verifier_pass=bool(args.run_verifier_pass),
     )
-    # Fail fast if exhausted; detailed stats are rendered into the HTML Statistics section.
-    try:
-        generator.github_client.check_core_rate_limit_or_raise()
-    except RuntimeError as e:
-        # Switch to cache-only mode (no new GitHub network calls).
-        logger.warning(f"GitHub rate limit exceeded, switching to cache-only mode: {e}")
-        generator.github_client.set_cache_only_mode(True)
+    # Rate limit "before/after" snapshots (rendered in HTML Statistics).
+    #
+    # For strict quota experiments driven by an outer harness, set:
+    #   DYNAMO_UTILS_DISABLE_INTERNAL_RATE_LIMIT_CHECKS=1
+    # so the subprocess does not perform any /rate_limit requests (the caller owns those).
+    disable_rl = bool(os.environ.get("DYNAMO_UTILS_DISABLE_INTERNAL_RATE_LIMIT_CHECKS"))
+    if not disable_rl:
+        try:
+            generator.github_client.capture_rate_limit_before()
+            # Fail fast if exhausted (based on the snapshot we just captured).
+            # If the call failed, fall back to existing behavior.
+            b = (generator.github_client.get_rate_limit_snapshots() or {}).get("before") or {}
+            core = (b.get("core") or {}) if isinstance(b, dict) else {}
+            rem = core.get("remaining")
+            if rem is not None:
+                try:
+                    if int(rem) <= 0:
+                        raise RuntimeError("GitHub API core (REST) quota exhausted (remaining=0).")
+                except (ValueError, TypeError):
+                    pass
+        except RuntimeError as e:
+            logger.warning(f"GitHub rate limit exceeded, switching to cache-only mode: {e}")
+            generator.github_client.set_cache_only_mode(True)
 
     rc = 1
     try:
