@@ -107,6 +107,15 @@ from typing import Any, Dict, List, Optional, Set, Tuple, TYPE_CHECKING
 from datetime import datetime, timezone
 
 from common_github import GitHubAPIClient, classify_ci_kind, GITHUB_CACHE_STATS, GITHUB_API_STATS, COMMIT_HISTORY_PERF_STATS
+from common_github.api.merge_dates_cached import TTL_POLICY_DESCRIPTION as MERGE_DATES_TTL_POLICY_DESCRIPTION
+from common_github.api.pr_branch_cached import TTL_POLICY_DESCRIPTION as PR_BRANCH_TTL_POLICY_DESCRIPTION
+from common_github.api.pr_checks_cached import TTL_POLICY_DESCRIPTION as PR_CHECKS_TTL_POLICY_DESCRIPTION
+from common_github.api.pr_comments_cached import TTL_POLICY_DESCRIPTION as PR_COMMENTS_TTL_POLICY_DESCRIPTION
+from common_github.api.pr_reviews_cached import TTL_POLICY_DESCRIPTION as PR_REVIEWS_TTL_POLICY_DESCRIPTION
+from common_github.api.pulls_list_cached import TTL_POLICY_DESCRIPTION as PULLS_LIST_TTL_POLICY_DESCRIPTION
+from common_github.api.search_issues_cached import TTL_POLICY_DESCRIPTION as SEARCH_ISSUES_TTL_POLICY_DESCRIPTION
+from common_github.api.required_checks_cached import TTL_POLICY_DESCRIPTION as REQUIRED_CHECKS_TTL_POLICY_DESCRIPTION
+from common_github.api.pr_head_sha_cached import TTL_POLICY_DESCRIPTION as PR_HEAD_SHA_TTL_POLICY_DESCRIPTION
 from common_types import CIStatus
 from cache_pytest_timings import PYTEST_TIMINGS_CACHE
 from cache_snippet import SNIPPET_CACHE
@@ -3696,15 +3705,18 @@ def github_api_stats_rows(
             "actions_job_status": "adaptive (in_progress: <1h=2m, <2h=4m, <4h=30m, <8h=60m, <12h=80m, >=12h=120m; completed: ∞)",
             "actions_job_details": "30d (only cached once completed)",
             "actions_jobs": "30d (completed workflow runs never change; ETag-friendly)",
-            "pr_checks": "adaptive (<1h=2m, <2h=4m, <4h=30m, <8h=60m, <12h=80m, >=12h=120m; closed/merged: 360d)",
-            "pulls_list": "adaptive (<1h=1m, <2h=2m, <4h=4m, >=4h=8m)",
-            "pr_branch": "adaptive (<1h=2m, <2h=4m, <4h=30m, <8h=60m, <12h=80m, >=12h=120m; closed/merged: 360d)",
+            "pr_checks": PR_CHECKS_TTL_POLICY_DESCRIPTION,
+            "pulls_list": PULLS_LIST_TTL_POLICY_DESCRIPTION,
+            "pr_branch": PR_BRANCH_TTL_POLICY_DESCRIPTION,
             "pr_info": "by updated_at timestamp (invalidated when PR changes)",
-            "search_issues": "varies",
+            "search_issues": SEARCH_ISSUES_TTL_POLICY_DESCRIPTION,
+            "pr_comments": PR_COMMENTS_TTL_POLICY_DESCRIPTION,
+            "pr_reviews": PR_REVIEWS_TTL_POLICY_DESCRIPTION,
+            "pr_head_sha": PR_HEAD_SHA_TTL_POLICY_DESCRIPTION,
             "job_log": "∞ (immutable, no TTL check)",
             "raw_log_text": f"{_format_ttl_duration(DEFAULT_RAW_LOG_TEXT_TTL_S)} (immutable once completed)",
-            "required_checks": "adaptive (<1h=2m, <2h=4m, <4h=30m, <8h=60m, <12h=80m, >=12h=120m; closed/merged: 360d)",
-            "merge_dates": f"{_format_ttl_duration(DEFAULT_CLOSED_PRS_TTL_S)} (immutable once merged)",
+            "required_checks": REQUIRED_CHECKS_TTL_POLICY_DESCRIPTION,
+            "merge_dates": MERGE_DATES_TTL_POLICY_DESCRIPTION,
             "commit_history": "varies",
             "commit_history_snippets": "365d (immutable)",
             "pytest_timings": "varies",

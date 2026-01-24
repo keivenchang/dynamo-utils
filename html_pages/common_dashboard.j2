@@ -138,6 +138,11 @@
       color: #0969da;
       font-weight: 600;
     }
+    /* Highlight cache hits (>0) in green. */
+    .stats-table td.v.hit-text {
+      color: #2da44e;
+      font-weight: 600;
+    }
     .stats-table td.v.warn-text {
       color: #cf222e;
       font-weight: 600;
@@ -287,7 +292,7 @@
             <td class="section" colspan="3">{{ (k|string)[3:] }}</td>
             {% else %}
             <td class="k">{{ k }}</td>
-            <td class="v{% if 'miss' in kl and v != '0' and v != '(N/A)' %} warn-text{% endif %}{% if 'call' in last %} call-text{% endif %}">
+            <td class="v{% if 'miss' in kl and v != '0' and v != '(N/A)' %} warn-text{% endif %}{% if last == 'hits' and v != '0' and v != '(N/A)' %} hit-text{% endif %}{% if 'call' in last %} call-text{% endif %}">
               {% if v is string and '\n' in v %}
               <pre class="stats-pre">{{ v }}</pre>
               {% elif k in ['github.rest.calls', 'github.rest.budget_max', 'github.rest.ok'] %}

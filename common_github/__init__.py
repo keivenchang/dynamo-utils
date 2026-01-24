@@ -87,6 +87,17 @@ from .cache_pr_comments import PR_COMMENTS_CACHE
 from .cache_pr_reviews import PR_REVIEWS_CACHE
 from .cache_actions_jobs import ACTIONS_JOBS_CACHE
 
+# Cached-resource facades (kept at module scope when safe: no import cycles)
+from .api.pr_comments_cached import count_unresolved_conversations_cached
+from .api.pr_head_sha_cached import get_pr_head_sha_cached
+from .api.merge_dates_cached import get_cached_pr_merge_dates_cached
+from .pr_checks_types import (
+    GHPRCheckRow,
+    GHPRChecksCacheEntry,
+    parse_actions_job_id_from_url,
+    parse_actions_run_id_from_url,
+)
+
 # Module logger
 _logger = logging.getLogger(__name__)
 
@@ -254,6 +265,9 @@ class _GitHubAPIStats:
 # Global instance - all code writes to this
 GITHUB_API_STATS = _GitHubAPIStats()
 
+# Cached resources that need `GITHUB_API_STATS` at import time.
+from .api.pr_checks_cached import get_pr_checks_rows_cached
+
 
 class _CommitHistoryPerfStats:
     """Global singleton for commit-history-specific performance statistics."""
@@ -330,35 +344,6 @@ COMMIT_HISTORY_PERF_STATS = _CommitHistoryPerfStats()
 # - GET /api/v4/projects/{project}/pipelines/{pipeline_id}
 # - GET /api/v4/projects/{project}/repository/commits/{sha}/merge_requests
 # ======================================================================================
-
-def parse_actions_run_id_from_url(url: str) -> str:
-    """Extract a GitHub Actions run_id from a typical Actions/check URL.
-
-    Examples:
-      - https://github.com/owner/repo/actions/runs/18697156351
-      - https://github.com/owner/repo/actions/runs/18697156351/job/53317461976
-    """
-    s = str(url or "")
-    if "/actions/runs/" not in s:
-        return ""
-    rest = s.split("/actions/runs/", 1)[1]
-    run_id = rest.split("/", 1)[0].split("?", 1)[0].strip()
-    return run_id if run_id.isdigit() else ""
-
-
-def parse_actions_job_id_from_url(url: str) -> str:
-    """Extract a GitHub Actions job_id from a typical Actions job URL.
-
-    Examples:
-      https://github.com/OWNER/REPO/actions/runs/20732129035/job/59522167110 -> 59522167110
-    """
-    s = str(url or "").strip()
-    if "/job/" not in s:
-        return ""
-    rest = s.split("/job/", 1)[1]
-    job_id = rest.split("/", 1)[0].split("?", 1)[0].strip()
-    return job_id if job_id.isdigit() else ""
-
 
 def _safe_int(x: Any, default: int = 0) -> int:
     try:
@@ -442,161 +427,6 @@ class PRInfo:
     # Optional: cached PR checks rows (used by some dashboards to show a compact status pill).
     # Keeping this on the concrete type avoids hasattr/getattr patterns downstream.
     check_rows: List['GHPRCheckRow'] = field(default_factory=list)
-
-
-@dataclass(frozen=True)
-class GHPRCheckRow:
-    """A single PR check row (derived from GitHub REST check-runs)."""
-
-    name: str
-    status_raw: str
-    duration: str = ""
-    url: str = ""
-    # GitHub Actions workflow run_id (best-effort parsed from `url`/`target_url`).
-    # Useful for UI affordances like "Restart failed jobs".
-    run_id: str = ""
-    # GitHub Actions job_id (best-effort parsed from `url` when it points at a specific job).
-    job_id: str = ""
-    description: str = ""
-    is_required: bool = False
-    # Workflow name (e.g., "NVIDIA Dynamo Github Validation") - populated for GitHub Actions checks
-    workflow_name: str = ""
-    # Event type (e.g., "pull_request", "push") - populated for GitHub Actions checks
-    event: str = ""
-
-    @property
-    def status_norm(self) -> str:
-        s = (self.status_raw or "").strip().lower()
-        # We normalize GitHub check-run states into gh-like buckets:
-        # pass, fail, skipped, cancelled, pending, in_progress, queued, neutral, timed_out, action_required, unknown
-        if s in {"pass", CIStatus.SUCCESS.value}:
-            return CIStatus.SUCCESS.value
-        # Treat "skipped"/"neutral" as success-like for UI aggregation.
-        if s in {CIStatus.SKIPPED.value, "skip", CIStatus.NEUTRAL.value}:
-            return CIStatus.SUCCESS.value
-        if s in {"fail", "failure", "timed_out", "action_required"}:
-            return CIStatus.FAILURE.value
-        if s in {"in_progress", "running"}:
-            return CIStatus.IN_PROGRESS.value
-        if s in {"pending", "queued"}:
-            return CIStatus.PENDING.value
-        if s in {"cancelled", "canceled"}:
-            return CIStatus.CANCELLED.value
-        return CIStatus.UNKNOWN.value
-
-
-_GHPR_CHECK_ROW_DISK_KEYS: set[str] = {
-    # NOTE: Additive schema only. New keys must have defaults in `GHPRCheckRow`.
-    # Missing keys are allowed (backward-compatible). Unknown keys are NOT allowed and should
-    # fail fast so schema drift is caught early.
-    "name",
-    "status_raw",
-    "duration",
-    "url",
-    "run_id",
-    "job_id",
-    "description",
-    "is_required",
-    "workflow_name",
-    "event",
-}
-
-
-def _ghpr_check_row_to_disk_dict(row: GHPRCheckRow) -> Dict[str, Any]:
-    # Keep this stable: it defines the on-disk cache schema for pr-check rows.
-    return {
-        "name": row.name,
-        "status_raw": row.status_raw,
-        "duration": row.duration,
-        "url": row.url,
-        "run_id": row.run_id,
-        "job_id": row.job_id,
-        "description": row.description,
-        "is_required": bool(row.is_required),
-        "workflow_name": row.workflow_name,
-        "event": row.event,
-    }
-
-
-def _ghpr_check_row_from_disk_dict_strict(*, d: Any, cache_file: Path, entry_key: str) -> GHPRCheckRow:
-    if not isinstance(d, dict):
-        raise RuntimeError(f"Invalid pr_checks cache entry row type in {cache_file}: key={entry_key!r} type={type(d)}")
-    extra = set(d.keys()) - _GHPR_CHECK_ROW_DISK_KEYS
-    if extra:
-        raise RuntimeError(
-            f"Unknown pr_checks row fields in {cache_file}: key={entry_key!r} extra={sorted(extra)}; "
-            f"expected subset of {sorted(_GHPR_CHECK_ROW_DISK_KEYS)}"
-        )
-    return GHPRCheckRow(
-        name=str(d.get("name", "") or ""),
-        status_raw=str(d.get("status_raw", "") or ""),
-        duration=str(d.get("duration", "") or ""),
-        url=str(d.get("url", "") or ""),
-        run_id=str(d.get("run_id", "") or ""),
-        job_id=str(d.get("job_id", "") or ""),
-        description=str(d.get("description", "") or ""),
-        is_required=bool(d.get("is_required", False)),
-        workflow_name=str(d.get("workflow_name", "") or ""),
-        event=str(d.get("event", "") or ""),
-    )
-
-
-@dataclass(frozen=True, slots=True)
-class GHPRChecksCacheEntry:
-    """Typed cache entry for PR check rows.
-
-    Schema rules (Protobuf-style):
-    - **ADDITIVE ONLY**: New fields MUST have defaults. Never remove or rename fields.
-    - Backward-compat: Missing fields are allowed when loading from disk (defaults used).
-    - Forward-compat: Older code can read newer cache entries (ignores unknown fields).
-    - Strictness: Unknown fields on disk are a hard error to catch schema drift quickly.
-
-    **CRITICAL**: Just like Protobuf, all schema changes MUST be additive (add new optional
-    fields with defaults). Always additive, never subtractive. This ensures cache entries
-    written by any version can be read by any other version (>= MIN_CACHE_VER). Never change
-    the type or meaning of existing fields.
-    """
-
-    ts: int
-    ver: int
-    rows: Tuple[GHPRCheckRow, ...]
-    check_runs_etag: str = ""  # v6: ETag for /commits/{sha}/check-runs
-    status_etag: str = ""      # v6: ETag for /commits/{sha}/status
-    incomplete: bool = False   # v7: True if this entry was written during budget exhaustion (missing job details/duration)
-
-    _DISK_KEYS: set[str] = field(default_factory=lambda: {"ts", "ver", "rows", "check_runs_etag", "status_etag", "incomplete"}, init=False, repr=False)
-
-    def to_disk_dict(self) -> Dict[str, Any]:
-        return {
-            "ts": int(self.ts),
-            "ver": int(self.ver),
-            "rows": [_ghpr_check_row_to_disk_dict(r) for r in self.rows],
-            "check_runs_etag": str(self.check_runs_etag or ""),
-            "status_etag": str(self.status_etag or ""),
-            "incomplete": bool(self.incomplete),
-        }
-
-    @classmethod
-    def from_disk_dict_strict(cls, *, d: Any, cache_file: Path, entry_key: str) -> "GHPRChecksCacheEntry":
-        if not isinstance(d, dict):
-            raise RuntimeError(f"Invalid pr_checks cache entry type in {cache_file}: key={entry_key!r} type={type(d)}")
-        extra = set(d.keys()) - {"ts", "ver", "rows", "check_runs_etag", "status_etag", "incomplete"}
-        if extra:
-            raise RuntimeError(
-                f"Unknown pr_checks cache entry fields in {cache_file}: key={entry_key!r} extra={sorted(extra)}; "
-                f"expected subset of {sorted({'ts','ver','rows','check_runs_etag','status_etag','incomplete'})}"
-            )
-        ts = int(d.get("ts", 0) or 0)
-        ver = int(d.get("ver", 0) or 0)
-        rows_in = d.get("rows") or []
-        if not isinstance(rows_in, list):
-            raise RuntimeError(f"Invalid pr_checks cache entry rows type in {cache_file}: key={entry_key!r} type={type(rows_in)}")
-        rows = tuple(_ghpr_check_row_from_disk_dict_strict(d=r, cache_file=cache_file, entry_key=entry_key) for r in rows_in)
-        # ETags and incomplete flag are optional (backward-compat with v5, v6)
-        check_runs_etag = str(d.get("check_runs_etag", "") or "")
-        status_etag = str(d.get("status_etag", "") or "")
-        incomplete = bool(d.get("incomplete", False))
-        return cls(ts=ts, ver=ver, rows=rows, check_runs_etag=check_runs_etag, status_etag=status_etag, incomplete=incomplete)
 
 
 @dataclass(frozen=True)
@@ -1969,17 +1799,8 @@ class GitHubAPIClient:
         
         TTL: Adaptive for non-completed jobs based on job age (2m/4m/30m/60m/80m then 120m), ∞ for completed jobs (immutable).
         """
-
-        job_id_s = str(job_id or "").strip()
-        if not job_id_s:
-            return None
-
-        key = f"{owner}/{repo}:jobstatus:{job_id_s}"
-        now = int(time.time())
-
-        def _adaptive_in_progress_ttl_s(*, started_at_epoch: int, default_ttl_s: int) -> int:
-            """Adaptive polling TTL for non-completed jobs (uses shared _adaptive_ttl_s logic)."""
-            return self._adaptive_ttl_s(timestamp_epoch=started_at_epoch, default_ttl_s=default_ttl_s)
+        from .api.actions_job_status_cached import get_actions_job_status_cached
+        return get_actions_job_status_cached(self, owner=owner, repo=repo, job_id=job_id, ttl_s=int(ttl_s))
 
     def _adaptive_ttl_s(self, *, timestamp_epoch: int, default_ttl_s: int = 180) -> int:
         """Unified adaptive TTL for all time-based caches (jobs, PRs, etc.).
@@ -2004,112 +1825,6 @@ class GitHubAPIClient:
         from common_github.cache_ttl_utils import adaptive_ttl_s
         return adaptive_ttl_s(timestamp_epoch, default_ttl_s)
 
-        # Memory cache (all statuses)
-        try:
-            ent = self._actions_job_status_mem_cache.get(key)
-            if isinstance(ent, dict):
-                ts = int(ent.get("ts", 0) or 0)
-                st = str(ent.get("status") or "")
-                started_at_epoch = int(ent.get("started_at_epoch", 0) or 0)
-                if st:
-                    if st.lower() == "completed":
-                        self._cache_hit("actions_job_status.mem")
-                        return st
-                    eff_ttl = _adaptive_in_progress_ttl_s(started_at_epoch=started_at_epoch, default_ttl_s=int(ttl_s))
-                    if ts and (ts + eff_ttl) > now:
-                        self._cache_hit("actions_job_status.mem")
-                        return st
-        except (ValueError, TypeError):
-            pass
-
-        # Disk cache (only for completed jobs - they never change!)
-        disk = self._load_actions_job_disk_cache()
-        ent = disk.get(key) if isinstance(disk, dict) else None
-        if isinstance(ent, dict):
-            status_cached = ent.get("status")
-            # Completed jobs are cached forever; non-completed jobs respect TTL
-            if str(status_cached or "").lower() == "completed":
-                self._actions_job_status_mem_cache[key] = {"ts": now, "status": status_cached, "started_at_epoch": int(ent.get("started_at_epoch", 0) or 0)}
-                self._cache_hit("actions_job_status.disk")
-                return str(status_cached)
-            # For non-completed status, check TTL
-            ts = int(ent.get("ts", 0) or 0)
-            started_at_epoch = int(ent.get("started_at_epoch", 0) or 0)
-            eff_ttl = _adaptive_in_progress_ttl_s(started_at_epoch=started_at_epoch, default_ttl_s=int(ttl_s))
-            if ts and (now - ts) <= int(eff_ttl):
-                self._actions_job_status_mem_cache[key] = {"ts": ts, "status": status_cached, "started_at_epoch": int(started_at_epoch or 0)}
-                self._cache_hit("actions_job_status.disk")
-                return str(status_cached) if status_cached is not None else None
-
-        # Cache-only mode: don't fetch
-        if self.cache_only_mode:
-            return None
-
-        # Network fetch with ETag support
-        self._cache_miss("actions_job_status")
-        
-        # Get ETag from disk cache for conditional request
-        etag = None
-        if isinstance(ent, dict):
-            etag = ent.get("etag")
-        
-        url = f"{self.base_url}/repos/{owner}/{repo}/actions/jobs/{job_id_s}"
-        try:
-            resp = self._rest_get(url, timeout=10, etag=etag)
-        except AttributeError:  # .get() on non-dict
-            _dbg("fetch_failed", job_id=job_id_s, key=key, error="AttributeError", url=url)
-            return None
-
-        # Handle 304 Not Modified - data hasn't changed
-        if resp.status_code == 304:
-            # Refresh timestamp in disk cache and return cached status
-            if isinstance(ent, dict) and ent.get("status"):
-                status_cached = ent.get("status")
-                # Update timestamp to extend TTL
-                self._save_actions_job_disk_cache(key, {"ts": int(now), "status": status_cached, "etag": etag, "started_at_epoch": int(ent.get("started_at_epoch", 0) or 0)})
-                self._actions_job_status_mem_cache[key] = {"ts": now, "status": status_cached, "started_at_epoch": int(ent.get("started_at_epoch", 0) or 0)}
-                return str(status_cached)
-
-        # 404 can happen if job id is invalid / perm issue; just treat as unknown.
-        if resp.status_code < 200 or resp.status_code >= 300:
-            return None
-
-        try:
-            data = resp.json() or {}
-            status = data.get("status")
-            if status is None:
-                return None
-            status_s = str(status)
-            started_at_s = str((data.get("started_at") if isinstance(data, dict) else "") or "").strip()
-            started_at_epoch = 0
-            if started_at_s:
-                try:
-                    dt = datetime.fromisoformat(started_at_s.replace("Z", "+00:00"))
-                    started_at_epoch = int(dt.timestamp())
-                except Exception:
-                    started_at_epoch = 0
-        except AttributeError:  # .get() on non-dict
-            _dbg("fetch_failed", job_id=job_id_s, key=key, error="AttributeError", url=url)
-            return None
-
-        # Extract ETag from response headers
-        new_etag = resp.headers.get("ETag") if hasattr(resp, "headers") else None
-
-        # Save to memory cache
-        try:
-            self._actions_job_status_mem_cache[key] = {"ts": int(now), "status": status_s, "started_at_epoch": int(started_at_epoch or 0)}
-        except json.JSONDecodeError:
-            pass
-
-        # Save to disk cache with ETag (completed jobs are cached forever)
-        cache_entry = {"ts": int(now), "status": status_s, "started_at_epoch": int(started_at_epoch or 0)}
-        if new_etag:
-            cache_entry["etag"] = new_etag
-        self._save_actions_job_disk_cache(key, cache_entry)
-        self._cache_write("actions_job_status.disk_write", entries=1)
-
-        return status_s
-
     def get_pr_head_sha(self, *, owner: str, repo: str, pr_number: int, ttl_s: int = 86400) -> Optional[str]:
         """Return PR head SHA with disk cache for closed/merged PRs.
 
@@ -2125,34 +1840,7 @@ class GitHubAPIClient:
         Returns:
             Head SHA string or None if not found
         """
-        pr_num = int(pr_number)
-        key = f"{owner}/{repo}:pr:{pr_num}:head_sha"
-        now = int(time.time())
-
-        # Check cache (handles both memory + disk with TTL)
-        cached_entry = PR_HEAD_SHA_CACHE.get_if_fresh(key, ttl_s=ttl_s)
-        if cached_entry is not None:
-            self._cache_hit("pr_info")
-            head_sha = cached_entry.get("head_sha")
-            return str(head_sha) if head_sha else None
-
-        # Cache-only mode: don't fetch
-        if self.cache_only_mode:
-            return None
-
-        # Network fetch
-        pr = self.get(f"/repos/{owner}/{repo}/pulls/{pr_num}", timeout=10) or {}
-        head_sha = (((pr.get("head") or {}) if isinstance(pr, dict) else {}) or {}).get("sha")
-        head_sha = str(head_sha or "").strip() if head_sha else None
-        state = str(pr.get("state", "") or "").strip() if isinstance(pr, dict) else None
-
-        if not head_sha:
-            return None
-
-        # Save to cache
-        PR_HEAD_SHA_CACHE.put(key, head_sha=head_sha, state=state)
-
-        return head_sha
+        return get_pr_head_sha_cached(self, owner=owner, repo=repo, pr_number=int(pr_number), ttl_s=int(ttl_s))
 
     def _load_actions_job_disk_cache(self) -> Dict[str, Any]:
         """Load actions jobs disk cache with in-memory caching to avoid repeated file I/O."""
@@ -3307,127 +2995,9 @@ class GitHubAPIClient:
               Implementation: Store ETag in cache value, use If-None-Match header,
               handle 304 responses to avoid re-downloading unchanged data.
         """
-        cache_key = self._pulls_list_cache_key(owner, repo, state)
+        from .api.pulls_list_cached import list_pull_requests_cached
 
-        # Check cache (PULLS_LIST_CACHE handles both mem and disk internally)
-        cached = PULLS_LIST_CACHE.get_if_fresh(cache_key, ttl_s=ttl_s)
-        if cached is not None:
-            self._cache_hit("pulls_list.disk")
-            return cached
-
-        # Cache-only mode: return empty (no network)
-        if self.cache_only_mode:
-            self._cache_miss("pulls_list.cache_only_empty")
-            return []
-
-        # Fetch from API (paginate), but dedupe concurrent fetches across threads.
-        lock = self._inflight_lock(f"pulls_list:{cache_key}")
-        with lock:
-            # Re-check cache (another thread may have populated it)
-            cached = PULLS_LIST_CACHE.get_if_fresh(cache_key, ttl_s=ttl_s)
-            if cached is not None:
-                self._cache_hit("pulls_list.disk")
-                return cached
-
-            self._cache_miss("pulls_list.network")
-            endpoint = f"/repos/{owner}/{repo}/pulls"
-            items = []
-
-            # Attribute pulls_list calls to stale-cache age buckets.
-            now = int(time.time())
-            stale_ts = None
-            try:
-                # Best-effort: inspect existing on-disk entry without counting this as a cache hit/miss.
-                with PULLS_LIST_CACHE._mu:  # type: ignore[attr-defined]
-                    PULLS_LIST_CACHE._load_once()  # type: ignore[attr-defined]
-                    ent = (PULLS_LIST_CACHE._get_items() or {}).get(cache_key)  # type: ignore[attr-defined]
-                    if isinstance(ent, dict):
-                        ts_raw = ent.get("ts", None)
-                        try:
-                            ts_i = int(ts_raw) if ts_raw is not None else 0
-                        except (ValueError, TypeError):
-                            ts_i = 0
-                        if ts_i > 0:
-                            stale_ts = ts_i
-            except Exception:
-                stale_ts = None
-
-            cache_age_bucket = "no_cache"
-            if stale_ts is not None:
-                age_s = max(0, int(now) - int(stale_ts))
-                if age_s < 3600:
-                    cache_age_bucket = "<1h"
-                elif age_s < 2 * 3600:
-                    cache_age_bucket = "<2h"
-                elif age_s < 3 * 3600:
-                    cache_age_bucket = "<3h"
-                else:
-                    cache_age_bucket = ">=3h"
-
-            try:
-                page = 1
-                while True:
-                    params = {"state": state, "per_page": 100, "page": page}
-                    url = f"{self.base_url}{endpoint}"
-
-                    # Counters: each page fetch is one REST call (label: pulls_list).
-                    try:
-                        GITHUB_API_STATS.pulls_list_network_page_calls_total += 1
-                        st = str(state or "").strip().lower() or "open"
-                        GITHUB_API_STATS.pulls_list_network_page_calls_by_state[st] = int(
-                            GITHUB_API_STATS.pulls_list_network_page_calls_by_state.get(st, 0) or 0
-                        ) + 1
-                        b = str(cache_age_bucket)
-                        GITHUB_API_STATS.pulls_list_network_page_calls_by_cache_age_bucket[b] = int(
-                            GITHUB_API_STATS.pulls_list_network_page_calls_by_cache_age_bucket.get(b, 0) or 0
-                        ) + 1
-                        per_state = GITHUB_API_STATS.pulls_list_network_page_calls_by_state_cache_age_bucket.get(st)
-                        if not isinstance(per_state, dict):
-                            per_state = {}
-                            GITHUB_API_STATS.pulls_list_network_page_calls_by_state_cache_age_bucket[st] = per_state
-                        per_state[b] = int(per_state.get(b, 0) or 0) + 1
-                    except Exception:
-                        pass
-
-                    resp = self._rest_get(url, params=params)
-
-                    # Parse response
-                    chunk = resp.json() if resp.status_code >= 200 and resp.status_code < 300 else None
-                    if not chunk:
-                        break
-                    if isinstance(chunk, list):
-                        items.extend(chunk)
-                    else:
-                        break
-                    if len(chunk) < 100:
-                        break
-                    page += 1
-            except Exception as e:
-                # Best-effort: if we can't list PRs (rate limit, network, auth), just return empty.
-                # Also negative-cache the failure for a short window to avoid spamming retries when
-                # scanning multiple clones of the same repo in one run.
-                _logger.warning("Error listing PRs for %s/%s: %s", str(owner), str(repo), str(e))
-                PULLS_LIST_CACHE.put(cache_key, [], updated_at_epoch=None)
-                return []
-
-            # Save to cache (include most recent PR's updated_at for adaptive TTL)
-            most_recent_updated_at = None
-            if items:
-                for pr in items:
-                    if isinstance(pr, dict):
-                        upd_str = pr.get("updated_at")
-                        if upd_str:
-                            try:
-                                from datetime import datetime
-                                dt = datetime.fromisoformat(str(upd_str).replace("Z", "+00:00"))
-                                upd_epoch = int(dt.timestamp())
-                                if most_recent_updated_at is None or upd_epoch > most_recent_updated_at:
-                                    most_recent_updated_at = upd_epoch
-                            except (ValueError, TypeError):
-                                pass
-            
-            PULLS_LIST_CACHE.put(cache_key, items, updated_at_epoch=most_recent_updated_at)
-            return items
+        return list_pull_requests_cached(self, owner=owner, repo=repo, state=state, ttl_s=int(ttl_s))
 
     def get_open_prs(
         self,
@@ -3836,105 +3406,31 @@ class GitHubAPIClient:
             return result
 
         # Resolve closed/merged PRs for branches with no OPEN PR match.
-        now = int(time.time())
-
-        missing: List[str] = []
-        for b in branch_set:
-            if result.get(b):
-                # Branch already has at least one open PR; we don't additionally fetch historical PRs by default.
-                continue
-
-            if not refresh_closed:
-                # Try cache with appropriate TTL
-                # We need to determine TTL, but we don't know if there are PRs yet
-                # Use the longer TTL initially, then validate
-                cached_entry = PR_BRANCH_CACHE.get_if_fresh(
-                    owner=owner,
-                    repo=repo,
-                    branch=b,
-                    ttl_s=int(closed_ttl_s),  # Use longer TTL for initial check
-                )
-                
-                if cached_entry is not None:
-                    ts = int(cached_entry.get("ts") or 0)
-                    prs_d = cached_entry.get("prs")
-                    if isinstance(prs_d, list):
-                        # Now check with the correct TTL based on whether PRs exist
-                        ttl = int(no_pr_ttl_s) if len(prs_d) == 0 else int(closed_ttl_s)
-                        if (now - ts) <= ttl:
-                            prs: List[PRInfo] = []
-                            for d in prs_d:
-                                if isinstance(d, dict):
-                                    pr = self._pr_info_min_from_dict(d)
-                                    if pr is not None:
-                                        prs.append(pr)
-                            self._cache_hit("pr_branch")
-                            result[b] = prs
-                            continue
-
-            self._cache_miss("pr_branch")
-            missing.append(b)
-
-        if not missing:
+        branches_to_resolve: List[str] = [b for b in branch_set if not result.get(b)]
+        if not branches_to_resolve:
             return result
 
-        # Cache-only mode: do NOT perform any network fetches for closed PRs.
-        # We still want to leverage the on-disk/memory closed-pr cache above (so local dashboards can
-        # mark branches as merged even when max_github_api_calls=0), but we must not call GitHub here.
-        if self.cache_only_mode:
-            return result
+        from .api.pr_branch_cached import get_pr_branch_cached
 
         def fetch_branch(branch_name: str) -> Tuple[str, List[Dict[str, Any]]]:
-            endpoint = f"/repos/{owner}/{repo}/pulls"
-            # Try the normal "same-repo" head first, then fall back to fork-style "owner/branch" naming.
-            prs_data = self.get(endpoint, params={"head": f"{owner}:{branch_name}", "state": "all", "per_page": 30})
-            if (not prs_data) and "/" in (branch_name or ""):
-                pre, rest = branch_name.split("/", 1)
-                pre = (pre or "").strip()
-                rest = (rest or "").strip()
-                if pre and rest:
-                    prs_data = self.get(endpoint, params={"head": f"{pre}:{rest}", "state": "all", "per_page": 30})
-            out_prs: List[Dict[str, Any]] = []
-            if isinstance(prs_data, list):
-                for pr_data in prs_data:
-                    if not isinstance(pr_data, dict):
-                        continue
-                    st = str(pr_data.get("state") or "").lower()
-                    is_merged = pr_data.get("merged_at") is not None
-                    if st != "open" or is_merged:
-                        out_prs.append(
-                            {
-                                "number": pr_data.get("number"),
-                                "title": pr_data.get("title") or "",
-                                "url": pr_data.get("html_url") or "",
-                                "state": pr_data.get("state") or "",
-                                "is_merged": bool(is_merged),
-                                "mergeable_state": pr_data.get("mergeable_state") or "unknown",
-                                "head_sha": (pr_data.get("head") or {}).get("sha"),
-                                "base_ref": (pr_data.get("base") or {}).get("ref", "main"),
-                                "created_at": pr_data.get("created_at"),
-                                "updated_at": pr_data.get("updated_at"),
-                            }
-                        )
-            out_prs.sort(key=lambda d: int(d.get("number") or 0), reverse=True)
-            return branch_name, out_prs
+            prs_d = get_pr_branch_cached(
+                self,
+                owner=owner,
+                repo=repo,
+                branch=branch_name,
+                closed_ttl_s=int(closed_ttl_s),
+                no_pr_ttl_s=int(no_pr_ttl_s),
+                refresh=bool(refresh_closed),
+            )
+            return branch_name, prs_d
 
         with ThreadPoolExecutor(max_workers=6) as executor:
-            futs = [executor.submit(fetch_branch, b) for b in missing]
+            futs = [executor.submit(fetch_branch, b) for b in branches_to_resolve]
             for fut in as_completed(futs):
                 try:
                     branch_name, prs_d = fut.result()
                 except AttributeError:  # .get() on non-dict
                     continue
-                
-                # Save to cache
-                PR_BRANCH_CACHE.put(
-                    owner=owner,
-                    repo=repo,
-                    branch=branch_name,
-                    value={"ts": now, "prs": prs_d},
-                )
-                
                 prs: List[PRInfo] = []
                 for d in prs_d:
                     if isinstance(d, dict):
@@ -4142,60 +3638,70 @@ class GitHubAPIClient:
             pr_updated_at_epoch: Optional PR updated_at timestamp (epoch seconds). If provided, used for adaptive TTL.
             ttl_s: Fallback TTL if pr_updated_at_epoch is not provided (default: 300s = 5m).
         """
+        return get_pr_checks_rows_cached(
+            self,
+            owner=owner,
+            repo=repo,
+            pr_number=int(pr_number),
+            commit_sha=commit_sha,
+            head_sha=head_sha,
+            required_checks=required_checks,
+            ttl_s=int(ttl_s),
+            pr_updated_at_epoch=pr_updated_at_epoch,
+            skip_fetch=bool(skip_fetch),
+        )
+
+    def _get_pr_checks_rows_legacy(
+        self,
+        owner: str,
+        repo: str,
+        pr_number: int,
+        *,
+        commit_sha: Optional[str] = None,
+        head_sha: Optional[str] = None,
+        required_checks: Optional[set] = None,
+        ttl_s: int = 300,
+        pr_updated_at_epoch: Optional[int] = None,
+        skip_fetch: bool = False,
+    ) -> List[GHPRCheckRow]:
+        # Legacy implementation retained temporarily for comparison/debugging.
+        # NOTE: This should be removed once the cached resource is proven stable.
         required_checks = required_checks or set()
         key = self._pr_checks_cache_key(owner, repo, pr_number, commit_sha=commit_sha)
         now = int(datetime.now(timezone.utc).timestamp())
-        
+
         # Compute adaptive TTL if PR updated_at is available
         if pr_updated_at_epoch is not None:
             effective_ttl_s = self._adaptive_ttl_s(timestamp_epoch=pr_updated_at_epoch, default_ttl_s=ttl_s)
         else:
             effective_ttl_s = int(ttl_s)
-        # Cache schema version. Bump this when adding new optional fields (additive changes only).
-        # v2 adds status-context checks (GET /commits/<sha>/status) in addition to check-runs.
-        # v3 added name-level dedupe (later reverted) and persisted `run_id`.
-        # v4 persists both `run_id` and `job_id` per row so UIs can disambiguate duplicates.
-        # v5 adds `workflow_name` and `event` fields for full check display names.
-        # v6 adds `check_runs_etag` and `status_etag` for conditional requests (304 Not Modified).
-        # v7 adds `incomplete` flag for entries written during budget exhaustion (missing job details/duration).
-        #
-        # **CRITICAL**: All schema changes are ADDITIVE ONLY (new optional fields with defaults).
-        # This ensures backward/forward compatibility. Cache entries from any version >= MIN_CACHE_VER
-        # can be read by any other version. Never remove or change existing fields.
         CACHE_VER = 7
-        MIN_CACHE_VER = 2  # Minimum supported cache version (reject anything older)
+        MIN_CACHE_VER = 2
 
-        # 1) Check PR_CHECKS_CACHE
         cached_entry_dict = PR_CHECKS_CACHE.get_entry_dict(key)
         if cached_entry_dict is not None:
             try:
-                # Deserialize from cache
                 ent = GHPRChecksCacheEntry.from_disk_dict_strict(
                     d=cached_entry_dict,
                     cache_file=PR_CHECKS_CACHE._cache_file,
-                    entry_key=key
+                    entry_key=key,
                 )
                 ts = int(ent.ts)
                 ver = int(ent.ver)
                 incomplete = bool(ent.incomplete)
-                
-                # Check TTL (or cache_only_mode overrides TTL)
                 if ts and ((now - ts) <= max(0, int(effective_ttl_s)) or self.cache_only_mode) and not incomplete:
                     if ver >= MIN_CACHE_VER:
                         self._cache_hit("pr_checks")
-                        # Apply required_checks overlay
-                        out: List[GHPRCheckRow] = []
+                        out2: List[GHPRCheckRow] = []
                         for r in ent.rows:
                             if r.is_required or (r.name in required_checks):
-                                out.append(r if r.is_required else replace(r, is_required=True))
+                                out2.append(r if r.is_required else replace(r, is_required=True))
                             else:
-                                out.append(r)
-                        return out
+                                out2.append(r)
+                        return out2
             except (ValueError, TypeError, RuntimeError):
-                # Cache entry invalid/corrupted, continue to fetch
                 pass
 
-        # Extract stale ETags from cache for conditional requests (even if TTL expired)
         stale_check_runs_etag = ""
         stale_status_etag = ""
         if cached_entry_dict is not None:
@@ -4203,14 +3709,13 @@ class GitHubAPIClient:
                 ent = GHPRChecksCacheEntry.from_disk_dict_strict(
                     d=cached_entry_dict,
                     cache_file=PR_CHECKS_CACHE._cache_file,
-                    entry_key=key
+                    entry_key=key,
                 )
                 stale_check_runs_etag = str(ent.check_runs_etag or "")
                 stale_status_etag = str(ent.status_etag or "")
             except (ValueError, TypeError, RuntimeError):
                 pass
 
-        # Cache-only mode: do not fetch network; return empty if no cached entry was usable.
         if self.cache_only_mode:
             self._cache_miss("pr_checks.cache_only_empty")
             return []
@@ -4218,25 +3723,17 @@ class GitHubAPIClient:
         if skip_fetch:
             return []
 
-        # 3) REST check-runs for PR head SHA (best-effort; works for public repos without auth)
         self._cache_miss("pr_checks")
-
-        # NOTE: ETag support removed for simplification during cache migration
-        
-        out: List[GHPRCheckRow] = []  # Initialize before try block
-
+        out: List[GHPRCheckRow] = []
         try:
-            # If head_sha provided, use it directly (saves 1 API call)
             if head_sha:
                 head_sha = str(head_sha).strip()
             else:
-                # Otherwise fetch PR head SHA from cache (or API if needed)
                 head_sha = self.get_pr_head_sha(owner=owner, repo=repo, pr_number=int(pr_number))
 
             if not head_sha:
                 return []
 
-            # Fetch check-runs with ETag support
             check_runs_url = f"{self.base_url}/repos/{owner}/{repo}/commits/{head_sha}/check-runs"
             check_runs_resp = self._rest_get(
                 check_runs_url,
@@ -4245,75 +3742,50 @@ class GitHubAPIClient:
                 etag=stale_check_runs_etag if stale_check_runs_etag else None,
             )
 
-            # Extract ETag from response
             new_check_runs_etag = check_runs_resp.headers.get("ETag", "") if hasattr(check_runs_resp, "headers") else ""
 
-            # Handle 304 Not Modified for check-runs
             if check_runs_resp and check_runs_resp.status_code == 304:
-                # Data hasn't changed, return cached entry with refreshed timestamp
                 if cached_entry_dict is not None:
-                    try:
-                        ent = GHPRChecksCacheEntry.from_disk_dict_strict(
-                            d=cached_entry_dict,
-                            cache_file=PR_CHECKS_CACHE._cache_file,
-                            entry_key=key
-                        )
-                        # Refresh timestamp and return
-                        refreshed_entry = GHPRChecksCacheEntry(
-                            ts=int(now),
-                            ver=int(ent.ver),
-                            rows=ent.rows,
-                            check_runs_etag=stale_check_runs_etag,
-                            status_etag=ent.status_etag,  # Keep existing status ETag
-                            incomplete=ent.incomplete,
-                        )
-                        PR_CHECKS_CACHE.put_entry_dict(key, refreshed_entry.to_disk_dict())
-                        
-                        # Apply required_checks overlay and return
-                        out: List[GHPRCheckRow] = []
-                        for r in ent.rows:
-                            if r.is_required or (r.name in required_checks):
-                                out.append(r if r.is_required else replace(r, is_required=True))
-                            else:
-                                out.append(r)
-                        return out
-                    except (ValueError, TypeError, RuntimeError):
-                        pass
-                # If we can't load cached entry, fall through to fetch new data
+                    ent = GHPRChecksCacheEntry.from_disk_dict_strict(
+                        d=cached_entry_dict,
+                        cache_file=PR_CHECKS_CACHE._cache_file,
+                        entry_key=key,
+                    )
+                    refreshed_entry = GHPRChecksCacheEntry(
+                        ts=int(now),
+                        ver=int(ent.ver),
+                        rows=ent.rows,
+                        check_runs_etag=stale_check_runs_etag,
+                        status_etag=ent.status_etag,
+                        incomplete=ent.incomplete,
+                    )
+                    PR_CHECKS_CACHE.put_entry_dict(key, refreshed_entry.to_disk_dict())
+                    out2: List[GHPRCheckRow] = []
+                    for r in ent.rows:
+                        if r.is_required or (r.name in required_checks):
+                            out2.append(r if r.is_required else replace(r, is_required=True))
+                        else:
+                            out2.append(r)
+                    return out2
                 return []
 
-            # Parse response (200 OK with new/changed data)
             data = check_runs_resp.json() if check_runs_resp else {}
             check_runs = data.get("check_runs") if isinstance(data, dict) else None
             if not isinstance(check_runs, list) or not check_runs:
                 check_runs = []
 
-            # Also fetch "status contexts" (aka classic commit statuses) with ETag.
-            #
-            # GitHub's PR Checks UI mixes:
-            # - check-runs (Actions, some apps)
-            # - status contexts (many GitHub Apps / integrations)
-            #
-            # Some checks (e.g. CodeRabbit "Review skipped") may only show up as status contexts,
-            # not as check-runs. If we only fetch /check-runs, those appear "missing" in dashboards.
             status_url = f"{self.base_url}/repos/{owner}/{repo}/commits/{head_sha}/status"
             status_resp = self._rest_get(
                 status_url,
                 timeout=10,
                 etag=stale_status_etag if stale_status_etag else None,
             )
-
-            # Extract ETag from response
             new_status_etag = status_resp.headers.get("ETag", "") if hasattr(status_resp, "headers") and status_resp else ""
 
-            # Handle 304 Not Modified for status
             statuses = []
             if status_resp and status_resp.status_code == 304:
-                # Status hasn't changed, use empty list (or load from cache if needed)
-                # For now, treat 304 as "no new statuses" since we already have check_runs data
                 statuses = []
             else:
-                # Parse response
                 statuses_data = status_resp.json() if status_resp and status_resp.status_code != 304 else {}
                 statuses = statuses_data.get("statuses") if isinstance(statuses_data, dict) else None
                 if not isinstance(statuses, list):
@@ -4324,7 +3796,6 @@ class GitHubAPIClient:
                     ss = str(s or "").strip()
                     if not ss:
                         return None
-                    # GitHub timestamps look like "2025-12-29T10:52:07Z"
                     if ss.endswith("Z"):
                         ss = ss[:-1] + "+00:00"
                     return datetime.fromisoformat(ss)
@@ -4350,14 +3821,7 @@ class GitHubAPIClient:
                 except (ValueError, TypeError):
                     return ""
 
-            # De-dupe exact duplicates only (same name+url). If the same check name appears multiple
-            # times with different run/job URLs (reruns), we keep them all so UIs can show each.
             seen: set[tuple[str, str]] = set()
-
-            # OPTIMIZATION (2026-01-18): Batch fetch workflow run metadata
-            # Instead of fetching run metadata inside the check-runs loop (100 individual calls),
-            # collect all run_ids first, then batch fetch them (10-20 calls).
-            # Benefit: ~90% reduction in API calls for workflow runs
             run_ids_to_fetch: set[str] = set()
             for cr in check_runs:
                 if not isinstance(cr, dict):
@@ -4367,22 +3831,15 @@ class GitHubAPIClient:
                 if run_id:
                     run_ids_to_fetch.add(run_id)
 
-            # Batch fetch workflow run metadata (name, event) for all runs
-            workflow_info_cache: Dict[str, tuple[str, str]] = {}  # run_id -> (workflow_name, event)
+            workflow_info_cache: Dict[str, tuple[str, str]] = {}
             for run_id in run_ids_to_fetch:
-                try:
-                    # Counter: track /actions/runs/{run_id} calls (category: actions_run).
-                    try:
-                        GITHUB_API_STATS.actions_run_prefetch_total += 1
-                    except Exception:
-                        pass
-                    run_data = self.get(f"/repos/{owner}/{repo}/actions/runs/{run_id}", timeout=5) or {}
-                    if isinstance(run_data, dict):
-                        workflow_info_cache[run_id] = (
-                            str(run_data.get("name", "") or "").strip(),
-                            str(run_data.get("event", "") or "").strip()
-                        )
-                except AttributeError:  # Object not dict-like (indicates data structure bug)
+                run_data = self.get(f"/repos/{owner}/{repo}/actions/runs/{run_id}", timeout=5) or {}
+                if isinstance(run_data, dict):
+                    workflow_info_cache[run_id] = (
+                        str(run_data.get("name", "") or "").strip(),
+                        str(run_data.get("event", "") or "").strip(),
+                    )
+                else:
                     workflow_info_cache[run_id] = ("", "")
 
             for cr in check_runs:
@@ -4391,14 +3848,10 @@ class GitHubAPIClient:
                 name = str(cr.get("name", "") or "").strip()
                 status = str(cr.get("status", "") or "").strip().lower()
                 conclusion = str(cr.get("conclusion", "") or "").strip().lower()
-
-                # Map REST check-run (status+conclusion) into a gh-like status_raw.
                 status_raw = ""
                 if status and status != "completed":
-                    # in_progress / queued
                     status_raw = status
                 else:
-                    # completed; use conclusion
                     if conclusion in {"success"}:
                         status_raw = "pass"
                     elif conclusion in {"failure"}:
@@ -4431,13 +3884,11 @@ class GitHubAPIClient:
                     seen.add(key2)
                 run_id = parse_actions_run_id_from_url(url)
                 job_id = parse_actions_job_id_from_url(url)
-                
-                # Extract workflow name and event from pre-fetched cache
                 workflow_name = ""
                 event = ""
                 if run_id and run_id in workflow_info_cache:
                     workflow_name, event = workflow_info_cache[run_id]
-                
+
                 out.append(
                     GHPRCheckRow(
                         name=name,
@@ -4453,8 +3904,6 @@ class GitHubAPIClient:
                     )
                 )
 
-            # Merge in status contexts (best-effort).
-            # These don't have step timings; duration remains empty.
             for st in statuses:
                 if not isinstance(st, dict):
                     continue
@@ -4465,9 +3914,6 @@ class GitHubAPIClient:
                 desc = str(st.get("description", "") or "").strip()
                 target = str(st.get("target_url", "") or "").strip()
 
-                # Map status API states into our status_raw.
-                # Note: status contexts don't have a "skipped" state, but some integrations
-                # encode it in the description.
                 status_raw = "unknown"
                 if state in {"success"}:
                     status_raw = "pass"
@@ -4485,7 +3931,6 @@ class GitHubAPIClient:
                 seen.add(key2)
                 run_id = parse_actions_run_id_from_url(target)
                 job_id = parse_actions_job_id_from_url(target)
-                # Status contexts don't have workflow names
                 out.append(
                     GHPRCheckRow(
                         name=name,
@@ -4504,9 +3949,6 @@ class GitHubAPIClient:
             if not out:
                 return []
 
-            # Detect if data appears incomplete (missing job details that should be present)
-            # A completed job (pass/fail/skipped) with GitHub Actions URL should have duration.
-            # If many jobs are missing duration, the entry is likely incomplete (budget exhaustion).
             incomplete = False
             completed_jobs_without_duration = 0
             completed_jobs_total = 0
@@ -4514,18 +3956,15 @@ class GitHubAPIClient:
                 status = str(row.status_raw or "").lower()
                 duration = str(row.duration or "").strip()
                 url = str(row.url or "").strip()
-                # Count completed GitHub Actions jobs
                 if status in {"pass", "fail", "skipped"} and "/actions/runs/" in url and "/job/" in url:
                     completed_jobs_total += 1
                     if not duration:
                         completed_jobs_without_duration += 1
-            # Mark incomplete if >30% of completed GitHub Actions jobs are missing duration
             if completed_jobs_total > 0 and completed_jobs_without_duration > 0:
                 missing_pct = (completed_jobs_without_duration / completed_jobs_total) * 100
                 if missing_pct > 30:
                     incomplete = True
 
-            # persist to cache (with ETags)
             entry = GHPRChecksCacheEntry(
                 ts=int(now),
                 ver=int(CACHE_VER),
@@ -4797,39 +4236,9 @@ class GitHubAPIClient:
         Returns:
             Count of unresolved conversations (approximated as top-level comments)
         """
-        cache_key = f"{owner}/{repo}#{pr_number}"
-        
-        # Check cache first
-        cached = PR_COMMENTS_CACHE.get_if_fresh(cache_key, ttl_s=ttl_s)
-        if cached is not None:
-            self._cache_hit("pr_comments")
-            comments = cached.get("comments", [])
-            try:
-                return sum(1 for comment in comments if not comment.get('in_reply_to_id'))
-            except (ValueError, TypeError):
-                return 0
-        
-        # Cache-only mode
-        if self.cache_only_mode:
-            self._cache_miss("pr_comments.cache_only_empty")
-            return 0
-        
-        # Fetch from API
-        self._cache_miss("pr_comments")
-        endpoint = f"/repos/{owner}/{repo}/pulls/{pr_number}/comments"
-        try:
-            comments = self.get(endpoint)
-            if not comments:
-                comments = []
-            
-            # Store in cache
-            PR_COMMENTS_CACHE.put(cache_key, comments=comments)
-            
-            # Count top-level comments (those without in_reply_to_id are conversation starters)
-            unresolved = sum(1 for comment in comments if not comment.get('in_reply_to_id'))
-            return unresolved
-        except (ValueError, TypeError):  # Type conversions or malformed data
-            return 0
+        return count_unresolved_conversations_cached(
+            self, owner=owner, repo=repo, pr_number=int(pr_number), ttl_s=int(ttl_s)
+        )
 
     def _review_decision_from_reviews(self, owner: str, repo: str, pr_number: int, ttl_s: int = 300) -> Optional[str]:
         """Best-effort review decision from REST reviews.
@@ -4843,32 +4252,14 @@ class GitHubAPIClient:
         Args:
             ttl_s: Cache TTL in seconds (default: 300s = 5 minutes)
         """
-        cache_key = f"{owner}/{repo}#{pr_number}"
-        
-        # Check cache first
-        cached = PR_REVIEWS_CACHE.get_if_fresh(cache_key, ttl_s=ttl_s)
-        if cached is not None:
-            self._cache_hit("pr_reviews")
-            reviews = cached.get("reviews", [])
-        else:
-            # Cache-only mode
-            if self.cache_only_mode:
-                self._cache_miss("pr_reviews.cache_only_empty")
-                return None
-            
-            # Fetch from API
-            self._cache_miss("pr_reviews")
-            endpoint = f"/repos/{owner}/{repo}/pulls/{int(pr_number)}/reviews"
-            try:
-                reviews = self.get(endpoint, params={"per_page": 100})
-            except AttributeError:  # .get() on non-dict
-                return None
-            
-            if not isinstance(reviews, list):
-                reviews = []
-            
-            # Store in cache
-            PR_REVIEWS_CACHE.put(cache_key, reviews=reviews)
+        if self.cache_only_mode:
+            # Preserve existing behavior: in cache-only mode, don't try to fetch reviews.
+            self._cache_miss("pr_reviews.cache_only_empty")
+            return None
+
+        from .api.pr_reviews_cached import get_pr_reviews_cached
+
+        reviews = get_pr_reviews_cached(self, owner=owner, repo=repo, pr_number=int(pr_number), ttl_s=int(ttl_s))
         
         if not isinstance(reviews, list) or not reviews:
             return "REVIEW_REQUIRED"
@@ -4901,388 +4292,9 @@ class GitHubAPIClient:
 
 
     def get_required_checks(self, owner: str, repo: str, pr_number: int) -> set:
-        """Return the set of required check names for a PR (best-effort).
+        from .api.required_checks_cached import get_required_checks_cached
 
-        We intentionally derive this from GitHub's merge-box required-ness:
-        GraphQL `statusCheckRollup.contexts.nodes[].isRequired(pullRequestId: ...)`.
-
-        Rationale:
-        - Branch protection endpoints often require admin perms and can return 403.
-        - We want REQUIRED to keep working even when our internal REST budget is exhausted:
-          this uses `gh` subprocess calls (separate from this client's REST budget).
-        
-        Caching:
-        - Adaptive TTL based on PR age:
-          - age < 1h -> 2m
-          - age < 2h -> 4m
-          - age < 4h -> 30m
-          - age < 8h -> 60m
-          - age < 12h -> 80m
-          - age >= 12h -> 120m
-        - Merged/closed PRs: 360 days (immutable)
-        - Uses both memory and disk cache for persistence across runs.
-        - Failed fetches are cached briefly (<= 60s) to avoid retry storms.
-
-        Pagination:
-        - Fetches up to 500 checks per page, with up to 5 pages (2500 total checks).
-        - This ensures all checks are captured even for PRs with many status checks.
-        """
-        try:
-            prn = int(pr_number)
-        except (ValueError, TypeError):
-            return set()
-
-        if self._debug_rest:
-            # Trace where required-checks lookups are coming from (helps explain "why PR=5626?")
-            # This is diagnostic only; it does not perform any network calls.
-            stack = "".join(traceback.format_stack(limit=12))
-            print(f"[REQUIRED_CHECKS_CALL] owner={owner} repo={repo} pr={prn}\n{stack}", file=sys.stderr, flush=True)
-
-        def _is_cache_entry_valid(ent: Dict[str, Any], *, now: int) -> bool:
-            """Return True if a cache entry is valid under current tiered TTL policy."""
-            try:
-                ts = int(ent.get("ts", 0) or 0)
-            except (ValueError, TypeError):
-                ts = 0
-            if not ts:
-                return False
-
-            ok = ent.get("ok", True)
-
-            # Cache entries store PR metadata to apply TTL without refetching
-            pr_state = ent.get("pr_state", "open")  # "open", "closed", or "merged"
-            is_merged_or_closed = pr_state in ("closed", "merged")
-            
-            pr_updated_at_epoch = ent.get("pr_updated_at_epoch", None)
-            try:
-                pr_updated_at_epoch_i = int(pr_updated_at_epoch) if pr_updated_at_epoch is not None else 0
-            except (ValueError, TypeError):
-                pr_updated_at_epoch_i = 0
-            
-            if not pr_updated_at_epoch_i and not is_merged_or_closed:
-                # If this was a failed fetch, cache briefly to avoid retry storms.
-                if ok is False:
-                    return (int(now) - int(ts)) <= 60
-                # Legacy entries lacked PR metadata; treat them as expired so we refresh and populate metadata.
-                # Cache-only mode is handled by the caller.
-                return False
-
-            # For merged/closed PRs, use long TTL (360 days)
-            # For open PRs, use adaptive TTL based on PR age (via shared _adaptive_ttl_s)
-            if is_merged_or_closed:
-                ttl_s = 360 * 24 * 3600  # 360 days (immutable)
-            else:
-                # Delegate to shared adaptive TTL logic
-                ttl_s = self._adaptive_ttl_s(timestamp_epoch=pr_updated_at_epoch_i, default_ttl_s=180)
-
-            # Failed fetches should never be cached long-term.
-            if ok is False:
-                ttl_s = min(int(ttl_s), 60)
-
-            return (int(now) - int(ts)) <= int(ttl_s)
-
-        # Check cache first (tiered TTL based on PR.updated_at age)
-        cache_key = f"required_checks:{owner}/{repo}:pr{prn}"
-        now = int(time.time())
-        
-        # Try cache (uses get_if_valid which handles TTL validation)
-        # We do custom TTL validation here (tiered TTL based on PR.updated_at age), but we still
-        # need the cached entry timestamp (`ts`) to decide freshness, so keep check_ttl=True.
-        cached_entry = REQUIRED_CHECKS_CACHE.get_if_valid(cache_key, cache_only_mode=self.cache_only_mode, check_ttl=True)
-        if cached_entry is not None:
-            # Custom TTL validation
-            if self.cache_only_mode or _is_cache_entry_valid(cached_entry, now=now):
-                # Cache HIT: required-checks already present and valid (or cache-only mode).
-                self._cache_hit("required_checks")
-                return cached_entry.get("val", set())
-            # Cache entry exists but is stale under TTL policy.
-            self._cache_miss("required_checks.expired")
-        else:
-            # Cache MISS: no entry present.
-            self._cache_miss("required_checks.missing")
-        
-        # Cache-only mode: do not fetch network; return empty if we have nothing.
-        if self.cache_only_mode:
-            return set()
-
-        try:
-            # Fetch PR node_id and state via gh (avoids consuming this client's REST budget).
-            pr_node_id = ""
-            pr_state = "open"
-            pr_updated_at_epoch: Optional[int] = None
-            try:
-                cmd0 = [
-                    "gh",
-                    "api",
-                    f"repos/{owner}/{repo}/pulls/{prn}",
-                    "--jq",
-                    "{node_id: .node_id, state: .state, merged_at: .merged_at, updated_at: .updated_at}",
-                ]
-                # This is a REST (core) call via `gh` (not counted in github.rest.*).
-                GITHUB_API_STATS.gh_core_calls_total = int(getattr(GITHUB_API_STATS, "gh_core_calls_total", 0) or 0) + 1
-                # Record the literal `gh` call (ordered list).
-                GITHUB_API_STATS.log_actual_api_call(
-                    kind="gh.core",
-                    text=f"gh api repos/{owner}/{repo}/pulls/{prn} --jq <expr>",
-                )
-                if self._debug_rest:
-                    # --include prints HTTP status + headers before the body. This lets us see
-                    # whether the call was 200 vs 304 (304 won't decrement core.remaining).
-                    cmd0 = list(cmd0) + ["--include"]
-                    print(
-                        f"[GH_CLI_CALL] {' '.join(cmd0)}",
-                        file=sys.stderr,
-                        flush=True,
-                    )
-                res0 = subprocess.run(
-                    cmd0,
-                    capture_output=True,
-                    text=True,
-                    timeout=15,
-                    check=False,
-                )
-                if res0.returncode == 0:
-                    out0 = str(res0.stdout or "")
-                    if self._debug_rest and "\n\n" in out0:
-                        hdr0, body0 = out0.split("\n\n", 1)
-                        # Print status line + remaining header if present.
-                        status_line = (hdr0.splitlines()[0] if hdr0.splitlines() else "").strip()
-                        # Track 304s separately (free; does not decrement core.remaining).
-                        if status_line:
-                            try:
-                                code_i = int(status_line.split()[1])
-                                if code_i == 304:
-                                    GITHUB_API_STATS.gh_core_304_total = int(getattr(GITHUB_API_STATS, "gh_core_304_total", 0) or 0) + 1
-                            except (IndexError, ValueError, TypeError):
-                                pass
-                        remaining_line = ""
-                        for ln in hdr0.splitlines():
-                            if ln.lower().startswith("x-ratelimit-remaining:"):
-                                remaining_line = ln.strip()
-                                break
-                        if status_line or remaining_line:
-                            print(f"[GH_CLI_RESP] {status_line} {remaining_line}".strip(), file=sys.stderr, flush=True)
-                        out0 = body0
-                    meta = {}
-                    try:
-                        meta = json.loads(out0.strip() or "{}") or {}
-                    except json.JSONDecodeError:
-                        meta = {}
-                    pr_node_id = str(meta.get("node_id") or "").strip()
-                    pr_state = str(meta.get("state") or "open").strip()
-                    # If merged_at is present, state is "merged" (not "closed")
-                    if meta.get("merged_at"):
-                        pr_state = "merged"
-                    updated_at_s = str(meta.get("updated_at") or "").strip()
-                    if updated_at_s:
-                        try:
-                            # GitHub returns ISO 8601 timestamps like "2026-01-21T09:25:31Z"
-                            dt = datetime.fromisoformat(updated_at_s.replace("Z", "+00:00"))
-                            pr_updated_at_epoch = int(dt.timestamp())
-                        except (ValueError, TypeError):
-                            pr_updated_at_epoch = None
-            except (OSError, subprocess.SubprocessError):  # subprocess failures
-                pr_node_id = ""
-                pr_state = "open"
-                pr_updated_at_epoch = None
-            if not pr_node_id:
-                # Cache negative result (PR not found / not accessible)
-                REQUIRED_CHECKS_CACHE.put(
-                    cache_key,
-                    set(),
-                    ok=False,
-                    pr_state=pr_state,
-                    pr_updated_at_epoch=pr_updated_at_epoch,
-                )
-                # We wrote one cache entry (negative caching).
-                self._cache_write("required_checks", entries=1)
-                return set()
-
-            # Paginated query: fetch up to 100 checks per page (GitHub's limit), up to 25 pages (2500 total).
-            # NOTE: `isRequired` needs an explicit `pullRequestId`, otherwise GitHub errors.
-            query_template = """\
-query($owner:String!,$name:String!,$number:Int!,$prid:ID!,$after:String) {
-  repository(owner: $owner, name: $name) {
-    pullRequest(number: $number) {
-      commits(last: 1) {
-        nodes {
-          commit {
-            statusCheckRollup {
-              contexts(first: 100, after: $after) {
-                pageInfo {
-                  hasNextPage
-                  endCursor
-                }
-                nodes {
-                  __typename
-                  ... on CheckRun { name isRequired(pullRequestId: $prid) }
-                  ... on StatusContext { context isRequired(pullRequestId: $prid) }
-                }
-              }
-            }
-          }
-        }
-      }
-    }
-  }
-  rateLimit { cost remaining resetAt }
-}
-"""
-
-            all_required: set = set()
-            after_cursor = None
-            max_pages = 25  # 25 pages * 100 checks/page = 2500 total checks
-            
-            for page_num in range(max_pages):
-                try:
-                    # Build gh command with pagination cursor
-                    cmd = [
-                        "gh",
-                        "api",
-                        "graphql",
-                        "-f",
-                        f"query={query_template}",
-                        "-f",
-                        f"owner={owner}",
-                        "-f",
-                        f"name={repo}",
-                        "-F",
-                        f"number={int(prn)}",
-                        "-f",
-                        f"prid={pr_node_id}",
-                    ]
-                    
-                    # Only add after cursor if we have one (null/None on first page)
-                    if after_cursor:
-                        cmd.extend(["-f", f"after={after_cursor}"])
-                    else:
-                        # Explicitly pass null for first page
-                        cmd.extend(["-f", "after=null"])
-                    
-                    # NOTE: we intentionally use `gh` here because it handles GraphQL auth and
-                    # enterprise oddities; required-ness is not reliably available via REST without
-                    # admin branch-protection permissions.
-                    GITHUB_API_STATS.gh_graphql_calls_total = int(getattr(GITHUB_API_STATS, "gh_graphql_calls_total", 0) or 0) + 1
-                    # Record the `gh api graphql` call without embedding the full query text.
-                    cursor_desc = after_cursor if after_cursor else "null"
-                    # Keep the original argument ordering, but redact the huge query payload.
-                    cmd_redacted = []
-                    for a in cmd:
-                        s = str(a)
-                        if s.startswith("query="):
-                            cmd_redacted.append("query=<omitted>")
-                        else:
-                            cmd_redacted.append(s)
-                    GITHUB_API_STATS.log_actual_api_call(
-                        kind="gh.graphql",
-                        text=f"{' '.join(cmd_redacted)}  # required_checks page={page_num + 1} after={cursor_desc}",
-                    )
-                    if self._debug_rest:
-                        cursor_desc = after_cursor if after_cursor else "null"
-                        cmd_desc = " ".join(cmd)
-                        print(
-                            f"[GH_CLI_CALL] {cmd_desc}  # required_checks page={page_num + 1} after={cursor_desc}",
-                            file=sys.stderr,
-                            flush=True,
-                        )
-                    res = subprocess.run(
-                        cmd,
-                        capture_output=True,
-                        text=True,
-                        timeout=15,
-                        check=False,
-                    )
-                    if res.returncode != 0:
-                        break
-                    
-                    out = str(res.stdout or "")
-                    if self._debug_rest and "\n\n" in out:
-                        hdr, body = out.split("\n\n", 1)
-                        status_line = (hdr.splitlines()[0] if hdr.splitlines() else "").strip()
-                        remaining_line = ""
-                        for ln in hdr.splitlines():
-                            if ln.lower().startswith("x-ratelimit-remaining:"):
-                                remaining_line = ln.strip()
-                                break
-                        if status_line or remaining_line:
-                            print(f"[GH_CLI_RESP] {status_line} {remaining_line}".strip(), file=sys.stderr, flush=True)
-                        out = body
-                    data = {}
-                    try:
-                        data = json.loads(out or "{}") or {}
-                    except json.JSONDecodeError:
-                        break
-
-                    # Best-effort: GraphQL cost accounting (separate bucket from core).
-                    try:
-                        rl = ((data.get("data") or {}).get("rateLimit") or {})
-                        cost = int(rl.get("cost") or 0)
-                        if cost > 0:
-                            GITHUB_API_STATS.gh_graphql_cost_total = int(getattr(GITHUB_API_STATS, "gh_graphql_cost_total", 0) or 0) + cost
-                    except (ValueError, TypeError, AttributeError):
-                        pass
-                    
-                    nodes = (
-                        (((((data.get("data") or {}).get("repository") or {}).get("pullRequest") or {}).get("commits") or {}).get("nodes") or [])
-                    )
-                    if not (isinstance(nodes, list) and nodes):
-                        break
-                    
-                    commit0 = nodes[0].get("commit") if isinstance(nodes[0], dict) else None
-                    scr = commit0.get("statusCheckRollup") if isinstance(commit0, dict) else None
-                    ctxs = (scr.get("contexts") or {}) if isinstance(scr, dict) else {}
-                    
-                    # Extract required checks from this page
-                    ctx_nodes = ctxs.get("nodes") if isinstance(ctxs, dict) else None
-                    if isinstance(ctx_nodes, list):
-                        for n in ctx_nodes:
-                            if not isinstance(n, dict):
-                                continue
-                            if n.get("isRequired") is not True:
-                                continue
-                            nm = str(n.get("name") or n.get("context") or "").strip()
-                            if nm:
-                                all_required.add(nm)
-                    
-                    # Check if there are more pages
-                    page_info = ctxs.get("pageInfo") if isinstance(ctxs, dict) else None
-                    if not isinstance(page_info, dict):
-                        break
-                    
-                    has_next = page_info.get("hasNextPage")
-                    if not has_next:
-                        break
-                    
-                    after_cursor = page_info.get("endCursor")
-                    if not after_cursor:
-                        break
-
-                except (OSError, subprocess.SubprocessError, json.JSONDecodeError):  # subprocess or JSON errors
-                    break
-            
-            # Cache the results with tiered TTL based on PR state and commit age.
-            REQUIRED_CHECKS_CACHE.put(
-                cache_key,
-                all_required,
-                ok=True,
-                pr_state=pr_state,
-                pr_updated_at_epoch=pr_updated_at_epoch,
-            )
-            # We wrote one cache entry (required-checks set for this PR).
-            self._cache_write("required_checks", entries=1)
-
-            return all_required
-        except (OSError, subprocess.SubprocessError, json.JSONDecodeError):  # subprocess or JSON parsing failures
-            # Cache negative result (fetch failed)
-            REQUIRED_CHECKS_CACHE.put(
-                cache_key,
-                set(),
-                ok=False,
-                pr_state="open",
-            )
-            # We wrote one cache entry (negative caching).
-            self._cache_write("required_checks", entries=1)
-            return set()
+        return get_required_checks_cached(self, owner=owner, repo=repo, pr_number=pr_number)
 
     def _pr_info_cache_key(self, owner: str, repo: str, pr_number: int) -> str:
         return f"{owner}/{repo}#pr:{int(pr_number)}"
@@ -5322,161 +4334,26 @@ query($owner:String!,$name:String!,$number:Int!,$prid:ID!,$after:String) {
         ttl_s: int = 60,
         timeout: int = 15,
     ) -> Dict[int, str]:
-        """Return {pr_number: updated_at} for the given PR numbers using GitHub search/issues.
+        from .api.search_issues_cached import get_pr_updated_at_via_search_issues_cached
 
-        Endpoint:
-          GET /search/issues?q=repo:OWNER/REPO type:pr number:123 number:456 ...
-        """
-        nums = sorted({_safe_int(x, 0) for x in (pr_numbers or []) if _safe_int(x, 0) > 0})
-        if not nums:
-            return {}
+        return get_pr_updated_at_via_search_issues_cached(
+            self, owner=owner, repo=repo, pr_numbers=pr_numbers, ttl_s=int(ttl_s), timeout=int(timeout)
+        )
 
-        # If search/issues is known-broken for this repo, skip (this is only an optimization).
-        disabled_key = f"{owner}/{repo}:search_issues_disabled"
-        disable_ttl_s = 6 * 3600
-        now = int(time.time())
-        try:
-            ent = self._search_issues_disabled_mem_cache.get(disabled_key)
-            if isinstance(ent, dict):
-                ts = int(ent.get("ts", 0) or 0)
-                if ts and (now - ts) <= int(disable_ttl_s):
-                    self._cache_hit("search_issues.disabled_mem")
-                    return {}
-        except (ValueError, TypeError):
-            pass
+    def _get_pr_updated_at_via_search_issues_legacy(
+        self,
+        *,
+        owner: str,
+        repo: str,
+        pr_numbers: List[int],
+        ttl_s: int = 60,
+        timeout: int = 15,
+    ) -> Dict[int, str]:
+        from .api.search_issues_cached import get_pr_updated_at_via_search_issues_cached
 
-        key = self._search_issues_cache_key(owner, repo, nums)
-
-        # 1) memory
-        try:
-            ent = self._search_issues_mem_cache.get(key)
-            if isinstance(ent, dict):
-                ts = int(ent.get("ts", 0) or 0)
-                val = ent.get("val")
-                if isinstance(val, dict) and ts and ((now - ts) <= int(ttl_s) or self.cache_only_mode):
-                    if (now - ts) <= int(ttl_s):
-                        self._cache_hit("search_issues.mem")
-                    else:
-                        self._cache_hit("search_issues.mem_stale_cache_only")
-                    return {int(k): str(v) for k, v in val.items() if str(k).isdigit() and str(v).strip()}
-        except (ValueError, TypeError):
-            pass
-
-        # 2) disk
-        disk = self._load_search_issues_disk_cache()
-        try:
-            dis = disk.get(disabled_key) if isinstance(disk, dict) else None
-            if isinstance(dis, dict):
-                ts = int(dis.get("ts", 0) or 0)
-                if ts and (now - ts) <= int(disable_ttl_s):
-                    self._cache_hit("search_issues.disabled_disk")
-                    self._search_issues_disabled_mem_cache[disabled_key] = {"ts": ts, "val": True}
-                    return {}
-        except (ValueError, TypeError):
-            pass
-        ent = disk.get(key) if isinstance(disk, dict) else None
-        if isinstance(ent, dict):
-            ts = int(ent.get("ts", 0) or 0)
-            val = ent.get("val")
-            if isinstance(val, dict) and ts and ((now - ts) <= int(ttl_s) or self.cache_only_mode):
-                if (now - ts) <= int(ttl_s):
-                    self._cache_hit("search_issues.disk")
-                else:
-                    self._cache_hit("search_issues.disk_stale_cache_only")
-                out = {int(k): str(v) for k, v in val.items() if str(k).isdigit() and str(v).strip()}
-                self._search_issues_mem_cache[key] = {"ts": ts, "val": dict(out)}
-                return out
-
-        # cache-only: no network
-        if self.cache_only_mode:
-            self._cache_miss("search_issues.cache_only_empty")
-            return {}
-
-        # 3) network (chunk to avoid overly long query strings), but dedupe concurrent fetches across threads.
-        lock = self._inflight_lock(f"search_issues:{key}")
-        with lock:
-            # Re-check memory cache (another thread may have populated it).
-            try:
-                ent = self._search_issues_mem_cache.get(key)
-                if isinstance(ent, dict):
-                    ts = int(ent.get("ts", 0) or 0)
-                    val = ent.get("val")
-                    if isinstance(val, dict) and ts and ((now - ts) <= int(ttl_s) or self.cache_only_mode):
-                        if (now - ts) <= int(ttl_s):
-                            self._cache_hit("search_issues.mem")
-                        else:
-                            self._cache_hit("search_issues.mem_stale_cache_only")
-                        return {int(k): str(v) for k, v in val.items() if str(k).isdigit() and str(v).strip()}
-            except (ValueError, TypeError):
-                pass
-
-            # Re-check disk cache too.
-            disk = self._load_search_issues_disk_cache()
-            ent = disk.get(key) if isinstance(disk, dict) else None
-            if isinstance(ent, dict):
-                ts = int(ent.get("ts", 0) or 0)
-                val = ent.get("val")
-                if isinstance(val, dict) and ts and ((now - ts) <= int(ttl_s) or self.cache_only_mode):
-                    if (now - ts) <= int(ttl_s):
-                        self._cache_hit("search_issues.disk")
-                    else:
-                        self._cache_hit("search_issues.disk_stale_cache_only")
-                    out = {int(k): str(v) for k, v in val.items() if str(k).isdigit() and str(v).strip()}
-                    self._search_issues_mem_cache[key] = {"ts": ts, "val": dict(out)}
-                    return out
-
-            self._cache_miss("search_issues.network")
-            out: Dict[int, str] = {}
-            try:
-                chunks: List[List[int]] = []
-                cur: List[int] = []
-                # conservative chunk size
-                for n in nums:
-                    cur.append(n)
-                    if len(cur) >= 25:
-                        chunks.append(cur)
-                        cur = []
-                if cur:
-                    chunks.append(cur)
-
-                for ch in chunks:
-                    q = f"repo:{owner}/{repo} type:pr " + " ".join([f"number:{n}" for n in ch])
-                    # Use _rest_get so we can handle 422 without throwing (this is an optimization call).
-                    url = f"{self.base_url}/search/issues"
-                    resp = self._rest_get(url, timeout=int(timeout), params={"q": q, "per_page": 100})
-                    if int(resp.status_code) == 422:
-                        # Disable search/issues temporarily for this repo; caller will fall back to PR payload updated_at.
-                        self._search_issues_disabled_mem_cache[disabled_key] = {"ts": now, "val": True}
-                        # Save to disk cache using DiskCacheWriter (enforces lock-load-merge-save)
-                        self._save_search_issues_disk_cache(disabled_key, {"ts": now, "val": True, "code": 422})
-                        return {}
-                    if resp.status_code < 200 or resp.status_code >= 300:
-                        continue
-                    try:
-                        data = resp.json() or {}
-                    except (json.JSONDecodeError, ValueError):  # requests.Response.json() can raise ValueError or JSONDecodeError
-                        data = {}
-                    items = data.get("items") if isinstance(data, dict) else None
-                    if not isinstance(items, list):
-                        continue
-                    for it in items:
-                        if not isinstance(it, dict):
-                            continue
-                        num = it.get("number")
-                        upd = it.get("updated_at")
-                        if num is None or upd is None:
-                            continue
-                        try:
-                            out[int(num)] = str(upd)
-                        except json.JSONDecodeError:
-                            continue
-            except (ValueError, TypeError):
-                out = {}
-
-        self._search_issues_mem_cache[key] = {"ts": now, "val": dict(out)}
-        # Save to disk cache using DiskCacheWriter (enforces lock-load-merge-save)
-        self._save_search_issues_disk_cache(key, {"ts": now, "val": dict(out)})
-        return out
+        return get_pr_updated_at_via_search_issues_cached(
+            self, owner=owner, repo=repo, pr_numbers=pr_numbers, ttl_s=int(ttl_s), timeout=int(timeout)
+        )
 
     def _extract_pytest_summary(self, all_lines: list) -> Optional[str]:
         """Extract pytest short test summary from log lines.
@@ -6101,6 +4978,17 @@ query($owner:String!,$name:String!,$number:Int!,$prid:ID!,$after:String) {
             {4965: "2025-12-18 12:34:56", 5009: None}
         """
 
+        return get_cached_pr_merge_dates_cached(api=self, pr_numbers=pr_numbers, owner=owner, repo=repo)
+
+    def _get_cached_pr_merge_dates_legacy(
+        self,
+        pr_numbers: List[int],
+        owner: str = "ai-dynamo",
+        repo: str = "dynamo",
+        cache_file: str = ".github_pr_merge_dates_cache.json",
+    ) -> Dict[int, Optional[str]]:
+        # Legacy implementation retained temporarily for comparison/debugging.
+        # NOTE: This should be removed once the cached resource is proven stable.
         # Prepare result
         result = {}
         logger = logging.getLogger('common')
@@ -6245,8 +5133,6 @@ query($owner:String!,$name:String!,$number:Int!,$prid:ID!,$after:String) {
                             MERGE_DATES_CACHE.put(f"{owner}/{repo}:{pr_num}", merge_date)
                         except Exception as e:
                             logger.debug(f"Failed to get future result: {e}")
-
-        # Remove old GITHUB_CACHE_STATS tracking (now using standard _cache_hit/_cache_miss)
 
         return result
 

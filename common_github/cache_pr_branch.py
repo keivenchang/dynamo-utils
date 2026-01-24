@@ -109,6 +109,24 @@ class PRBranchCache(BaseDiskCache):
                 return ent
             
             return None
+
+    def get_entry_dict(
+        self,
+        *,
+        owner: str,
+        repo: str,
+        branch: str,
+    ) -> Optional[Dict[str, Any]]:
+        """Get raw cache entry dict without TTL filtering.
+
+        Note: this still uses the BaseDiskCache hit/miss accounting semantics
+        (presence-based), but does not apply any freshness logic.
+        """
+        cache_key = f"{owner}/{repo}:{branch}"
+        with self._mu:
+            self._load_once()
+            ent = self._check_item(cache_key)
+            return ent if isinstance(ent, dict) else None
     
     def put(
         self,
