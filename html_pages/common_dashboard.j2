@@ -265,6 +265,9 @@
     <details data-url-state="1" data-url-key="stats">
       {{ summary_with_toggle('Statistics') }}
       <div class="details-body">
+      {# Pull `github.api.calls` out of the stats rows so it can render as a dedicated section
+         after the table (not as a table row / "counter" value). #}
+      {% set ns = namespace(api_calls_text='') %}
       <table class="stats-table">
         {% for stat in page_stats %}
         {% set k = stat[0] %}
@@ -272,25 +275,39 @@
         {% set desc = stat[2] if stat|length > 2 else '' %}
         {% set kl = (k|string)|lower %}
         {% set last = kl.split('.')[-1] %}
-        <tr>
-          {% if v is none and (k|string)[:3] == '## ' %}
-          <td class="section" colspan="3">{{ (k|string)[3:] }}</td>
-          {% else %}
-          <td class="k">{{ k }}</td>
-          <td class="v{% if 'miss' in kl and v != '0' and v != '(N/A)' %} warn-text{% endif %}{% if 'call' in last %} call-text{% endif %}">
-            {% if v is string and '\n' in v %}
-            <pre class="stats-pre">{{ v }}</pre>
-            {% elif k in ['github.rest.calls', 'github.rest.budget_max', 'github.rest.ok'] %}
-            <strong>{{ v }}</strong>
+        {# Capture API call log separately (rendered after the table). #}
+        {% if (k|string) == 'github.api.calls' %}
+          {% set ns.api_calls_text = (v|string) %}
+        {# If we previously emitted a section header for API calls, skip it too. #}
+        {% elif v is none and (k|string)[:3] == '## ' and (k|string)[3:] == 'API Calls (ordered)' %}
+        {# no-op #}
+        {% else %}
+          <tr>
+            {% if v is none and (k|string)[:3] == '## ' %}
+            <td class="section" colspan="3">{{ (k|string)[3:] }}</td>
             {% else %}
-            {{ v }}
+            <td class="k">{{ k }}</td>
+            <td class="v{% if 'miss' in kl and v != '0' and v != '(N/A)' %} warn-text{% endif %}{% if 'call' in last %} call-text{% endif %}">
+              {% if v is string and '\n' in v %}
+              <pre class="stats-pre">{{ v }}</pre>
+              {% elif k in ['github.rest.calls', 'github.rest.budget_max', 'github.rest.ok'] %}
+              <strong>{{ v }}</strong>
+              {% else %}
+              {{ v }}
+              {% endif %}
+            </td>
+            <td class="desc">{{ desc }}</td>
             {% endif %}
-          </td>
-          <td class="desc">{{ desc }}</td>
-          {% endif %}
-        </tr>
+          </tr>
+        {% endif %}
         {% endfor %}
       </table>
+      {% if ns.api_calls_text and ns.api_calls_text|trim %}
+      <div style="margin-top: 1em; padding: 0.5em; background-color: #f8f9fa; border-left: 3px solid #0a3069;">
+        <strong>API Calls (ordered):</strong>
+        <pre class="stats-pre" style="margin-top: 0.5em;">{{ ns.api_calls_text }}</pre>
+      </div>
+      {% endif %}
       <p style="margin-top: 1em; padding: 0.5em; background-color: #f8f9fa; border-left: 3px solid #007bff;">
         <strong>Note on Timing:</strong> The dashboard uses ThreadPoolExecutor with up to 32 parallel workers.
         Metrics marked as "accumulated thread time" represent the SUM of all parallel thread execution times.

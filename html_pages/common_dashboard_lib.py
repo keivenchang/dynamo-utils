@@ -3697,7 +3697,7 @@ def github_api_stats_rows(
             "actions_job_details": "30d (only cached once completed)",
             "actions_jobs": "30d (completed workflow runs never change; ETag-friendly)",
             "pr_checks": "adaptive (<1h=2m, <2h=4m, <4h=30m, <8h=60m, <12h=80m, >=12h=120m; closed/merged: 360d)",
-            "pulls_list": "adaptive (<1h=2m, <2h=4m, <4h=30m, <8h=60m, <12h=80m, >=12h=120m)",
+            "pulls_list": "adaptive (<1h=1m, <2h=2m, <4h=4m, >=4h=8m)",
             "pr_branch": "adaptive (<1h=2m, <2h=4m, <4h=30m, <8h=60m, <12h=80m, >=12h=120m; closed/merged: 360d)",
             "pr_info": "by updated_at timestamp (invalidated when PR changes)",
             "search_issues": "varies",
@@ -3826,6 +3826,17 @@ def github_api_stats_rows(
         url = str(last.get("url") or "").strip()
         if url:
             rows.append(("github.rest.last_error.url", url, "URL of last failed request"))
+
+    # Ordered list of literal API calls (REST URLs + `gh` commands) for debugging.
+    #
+    # Always render this section so it's obvious whether we recorded anything.
+    api_calls_txt = ""
+    if github_api is not None and hasattr(github_api, "get_actual_api_calls_text"):
+        api_calls_txt = str(github_api.get_actual_api_calls_text() or "").strip()
+    if not api_calls_txt:
+        api_calls_txt = "(none recorded)"
+    rows.append(("## API Calls (ordered)", None, ""))
+    rows.append(("github.api.calls", api_calls_txt, "Literal API calls executed (in order)"))
 
     return rows
 

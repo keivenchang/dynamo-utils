@@ -222,6 +222,34 @@ class _GitHubAPIStats:
         self.gh_graphql_calls_total = 0  # int - number of `gh api graphql` invocations
         self.gh_graphql_cost_total = 0  # int - sum of GraphQL `rateLimit.cost` across calls (best-effort)
 
+        # Actual API call log (ordered).
+        #
+        # This captures the literal REST URLs and `gh api ...` commands executed during a run,
+        # in the order the client *issued* them. This is meant purely for debugging and for
+        # reconciling stats vs. observed quota deltas.
+        #
+        # Each entry is a dict like:
+        #   {"seq": 1, "kind": "rest"|"gh.core"|"gh.graphql", "text": "..."}
+        self._api_call_log_seq = 0
+        self._api_call_log = []  # List[Dict[str, Any]]
+        self._api_call_log_mu = threading.Lock()
+
+    def log_actual_api_call(self, *, kind: str, text: str) -> None:
+        """Append an ordered, human-readable API call record."""
+        k = str(kind or "").strip() or "unknown"
+        t = str(text or "").strip()
+        if not t:
+            return
+        with self._api_call_log_mu:
+            self._api_call_log_seq = int(self._api_call_log_seq) + 1
+            seq = int(self._api_call_log_seq)
+            self._api_call_log.append({"seq": seq, "kind": k, "text": t})
+
+    def get_actual_api_call_log(self) -> List[Dict[str, Any]]:
+        """Return a copy of ordered API call records."""
+        with self._api_call_log_mu:
+            return list(self._api_call_log)
+
 
 # Global instance - all code writes to this
 GITHUB_API_STATS = _GitHubAPIStats()
@@ -1675,6 +1703,14 @@ class GitHubAPIClient:
 
         GITHUB_API_STATS.rest_calls_total += 1
         GITHUB_API_STATS.rest_calls_by_label[label] = int(GITHUB_API_STATS.rest_calls_by_label.get(label, 0) or 0) + 1
+        # Record the literal URL we are about to hit (debug aid; ordered list).
+        url_full = str(url or "")
+        if params:
+            q = urllib.parse.urlencode(params, doseq=True)
+            if q:
+                sep = "&" if ("?" in url_full) else "?"
+                url_full = f"{url_full}{sep}{q}"
+        GITHUB_API_STATS.log_actual_api_call(kind="rest", text=f"REST GET {url_full}  # {label}")
         if self._debug_rest:
             # Explicit per-request debug output (stdout/stderr capture-friendly).
             print(f"[API_CALL#{GITHUB_API_STATS.rest_calls_total}] {label} {url}", file=sys.stderr, flush=True)
@@ -1780,6 +1816,13 @@ class GitHubAPIClient:
                             self.logger.debug("GH REST GET [%s] retrying without Authorization (auth failure; public access may still work)", label)
                         except (ValueError, TypeError):
                             pass
+                    url_full2 = str(url or "")
+                    if params:
+                        q2 = urllib.parse.urlencode(params, doseq=True)
+                        if q2:
+                            sep2 = "&" if ("?" in url_full2) else "?"
+                            url_full2 = f"{url_full2}{sep2}{q2}"
+                    GITHUB_API_STATS.log_actual_api_call(kind="rest", text=f"REST GET {url_full2}  # {label} (retry_no_auth)")
                     t0_req2 = time.monotonic()
                     resp2 = requests.get(url, headers=headers_no_auth, params=params, timeout=timeout, allow_redirects=allow_redirects, stream=stream)
                     dt2 = max(0.0, time.monotonic() - t0_req2)
@@ -1894,6 +1937,29 @@ class GitHubAPIClient:
             }
         except (ValueError, TypeError):
             return {"core_calls_total": 0, "core_304_total": 0, "graphql_calls_total": 0, "graphql_cost_total": 0}
+
+    def get_actual_api_calls_text(self) -> str:
+        """Return a human-readable ordered list of actual API calls (REST URLs + `gh` commands)."""
+        try:
+            entries = GITHUB_API_STATS.get_actual_api_call_log()
+        except Exception:
+            entries = []
+        lines: List[str] = []
+        for ent in (entries or []):
+            if not isinstance(ent, dict):
+                continue
+            try:
+                seq = int(ent.get("seq") or 0)
+            except (ValueError, TypeError):
+                seq = 0
+            txt = str(ent.get("text") or "").strip()
+            if not txt:
+                continue
+            if seq > 0:
+                lines.append(f"{seq}. {txt}")
+            else:
+                lines.append(txt)
+        return "\n".join(lines)
 
     def get_actions_job_status(self, *, owner: str, repo: str, job_id: str, ttl_s: int = 60) -> Optional[str]:
         """Return GitHub Actions job status ("completed", "in_progress", ...) with disk cache for completed jobs.
@@ -2769,6 +2835,7 @@ class GitHubAPIClient:
                 env = dict(os.environ)
                 if getattr(self, "token", None):
                     env["GH_TOKEN"] = str(self.token)
+                GITHUB_API_STATS.log_actual_api_call(kind="gh.core", text="gh api rate_limit")
                 res = subprocess.run(
                     ["gh", "api", "rate_limit"],
                     env=env,
@@ -4953,6 +5020,11 @@ class GitHubAPIClient:
                 ]
                 # This is a REST (core) call via `gh` (not counted in github.rest.*).
                 GITHUB_API_STATS.gh_core_calls_total = int(getattr(GITHUB_API_STATS, "gh_core_calls_total", 0) or 0) + 1
+                # Record the literal `gh` call (ordered list).
+                GITHUB_API_STATS.log_actual_api_call(
+                    kind="gh.core",
+                    text=f"gh api repos/{owner}/{repo}/pulls/{prn} --jq <expr>",
+                )
                 if self._debug_rest:
                     # --include prints HTTP status + headers before the body. This lets us see
                     # whether the call was 200 vs 304 (304 won't decrement core.remaining).
@@ -5091,6 +5163,20 @@ query($owner:String!,$name:String!,$number:Int!,$prid:ID!,$after:String) {
                     # enterprise oddities; required-ness is not reliably available via REST without
                     # admin branch-protection permissions.
                     GITHUB_API_STATS.gh_graphql_calls_total = int(getattr(GITHUB_API_STATS, "gh_graphql_calls_total", 0) or 0) + 1
+                    # Record the `gh api graphql` call without embedding the full query text.
+                    cursor_desc = after_cursor if after_cursor else "null"
+                    # Keep the original argument ordering, but redact the huge query payload.
+                    cmd_redacted = []
+                    for a in cmd:
+                        s = str(a)
+                        if s.startswith("query="):
+                            cmd_redacted.append("query=<omitted>")
+                        else:
+                            cmd_redacted.append(s)
+                    GITHUB_API_STATS.log_actual_api_call(
+                        kind="gh.graphql",
+                        text=f"{' '.join(cmd_redacted)}  # required_checks page={page_num + 1} after={cursor_desc}",
+                    )
                     if self._debug_rest:
                         cursor_desc = after_cursor if after_cursor else "null"
                         cmd_desc = " ".join(cmd)

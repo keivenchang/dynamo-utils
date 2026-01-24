@@ -4,12 +4,10 @@ Caching strategy:
   - Key: <owner>/<repo>:pulls:<state>:<base>
   - Value: Dict with 'ts', 'pulls' (list of PR summary objects), 'updated_at_epoch' (optional)
   - Adaptive TTL based on most recent PR's updated_at:
-    - age < 1h -> 2m
-    - age < 2h -> 4m
-    - age < 4h -> 30m
-    - age < 8h -> 60m
-    - age < 12h -> 80m
-    - age >= 12h -> 120m
+    - age < 1h -> 1m
+    - age < 2h -> 2m
+    - age < 4h -> 4m
+    - age >= 4h -> 8m
 """
 from __future__ import annotations
 
@@ -25,7 +23,7 @@ if str(_module_dir) not in sys.path:
     sys.path.insert(0, str(_module_dir))
 
 from cache.cache_base import BaseDiskCache
-from cache_ttl_utils import adaptive_ttl_s
+from cache_ttl_utils import pulls_list_adaptive_ttl_s
 
 
 class PullsListCache(BaseDiskCache):
@@ -65,7 +63,7 @@ class PullsListCache(BaseDiskCache):
             # Adaptive TTL: use stored updated_at_epoch if available
             updated_at_epoch = ent.get("updated_at_epoch")
             if updated_at_epoch is not None:
-                effective_ttl = adaptive_ttl_s(updated_at_epoch, default_ttl_s=ttl_s)
+                effective_ttl = pulls_list_adaptive_ttl_s(updated_at_epoch, default_ttl_s=ttl_s)
             else:
                 effective_ttl = ttl_s
             

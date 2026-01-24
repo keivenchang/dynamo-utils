@@ -44,3 +44,33 @@ def adaptive_ttl_s(timestamp_epoch: Union[int, None], default_ttl_s: int = 180) 
     if age < 43200:
         return 4800
     return 7200
+
+
+def pulls_list_adaptive_ttl_s(timestamp_epoch: Union[int, None], default_ttl_s: int = 180) -> int:
+    """Adaptive TTL schedule for the pulls list cache.
+
+    This is intentionally *more aggressive* than the generic adaptive_ttl_s()
+    because open PR lists can change at any time and we want fresher "is PR updated?"
+    behavior without forcing other caches (jobs, required checks, etc.) to refresh more often.
+
+    Schedule:
+      - age < 1h   -> 1m (60s)
+      - age < 2h   -> 2m (120s)
+      - age < 4h   -> 4m (240s)
+      - age >= 4h  -> 8m (480s)
+    """
+    now = int(time.time())
+    try:
+        ts = int(timestamp_epoch or 0)
+    except (ValueError, TypeError):
+        ts = 0
+    if ts <= 0 or ts > now:
+        return int(default_ttl_s)
+    age = int(now) - ts
+    if age < 3600:
+        return 60
+    if age < 7200:
+        return 120
+    if age < 14400:
+        return 240
+    return 480
