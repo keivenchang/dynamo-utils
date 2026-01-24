@@ -13,7 +13,7 @@ TTL:
   - age < 8h -> 60m
   - age < 12h -> 80m
   - age >= 12h -> 120m
-- Closed/merged PRs: 60d (longer TTL for immutable PRs)
+- Closed/merged PRs: 360d (longer TTL for immutable PRs)
 - Branches with no PRs: fallback TTL (default 3600s)
 """
 
@@ -96,7 +96,7 @@ class PRBranchCache(BaseDiskCache):
                         for pr in prs_list if isinstance(pr, dict)
                     )
                     if is_closed:
-                        effective_ttl = 60 * 24 * 3600  # 60d for closed/merged
+                        effective_ttl = 360 * 24 * 3600  # 360d for closed/merged
                     else:
                         effective_ttl = adaptive_ttl_s(most_recent_epoch, default_ttl_s=ttl_s)
                 else:

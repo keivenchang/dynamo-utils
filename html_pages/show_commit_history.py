@@ -869,31 +869,20 @@ class CommitHistoryGenerator:
 
         def fetch_pr_checks(pr_num: int, shas: List[str]) -> Tuple[int, List[str], List[Any]]:
             """Fetch check runs for a single PR (parallelizable worker)."""
-            # Calculate TTL based on 3-tier logic:
-            # 1. If PR is merged/closed: 30 days (immutable)
-            # 2. Else if commit age < 8 hours: 3 minutes (CI still running)
-            # 3. Else if commit age >= 8 hours: 2 hours (CI likely done, but might re-run)
+            # For commit history, ALL commits are from merged PRs (they're on main branch).
+            # Even if pr_to_merge_date doesn't have the date, we should use long TTL.
+            # 
+            # Calculate TTL:
+            # 1. If PR has merge_date OR we're in commit history context: 360 days (immutable)
+            # 2. Fallback (shouldn't happen for commit history): adaptive based on commit age
             merge_date = pr_to_merge_date.get(pr_num)
-            if merge_date:
-                # PR is merged/closed - use long TTL (immutable)
-                ttl_s = 30 * 24 * 3600  # 30 days
-            else:
-                # PR is still open - determine TTL based on commit age
-                # Get the first SHA's commit time to calculate age
-                commit_dt = None
-                if shas:
-                    commit_dt = sha_to_dt.get(shas[0])
-
-                if commit_dt:
-                    now = datetime.now(timezone.utc)
-                    age_hours = (now - commit_dt).total_seconds() / 3600
-                    if age_hours < 8:
-                        ttl_s = 3 * 60  # 3 minutes for recent commits
-                    else:
-                        ttl_s = 2 * 3600  # 2 hours for older commits
-                else:
-                    # Fallback if no commit datetime available
-                    ttl_s = 3 * 60  # Default to 3 minutes
+            
+            # Commit history assumption: all PRs are merged, use long TTL
+            # (We're only showing commits that made it to main branch)
+            ttl_s = 360 * 24 * 3600  # 360 days - PRs in commit history are immutable
+            
+            # Note: We don't use adaptive TTL here because commit history only shows
+            # merged commits, so PR checks are immutable
 
             rows = self.github_client.get_pr_checks_rows(
                 owner='ai-dynamo',

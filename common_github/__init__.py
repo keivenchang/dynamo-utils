@@ -4648,7 +4648,7 @@ class GitHubAPIClient:
           - age < 8h -> 60m
           - age < 12h -> 80m
           - age >= 12h -> 120m
-        - Merged/closed PRs: 60 days (immutable)
+        - Merged/closed PRs: 360 days (immutable)
         - Uses both memory and disk cache for persistence across runs.
         - Failed fetches are cached briefly (<= 60s) to avoid retry storms.
 
@@ -4690,10 +4690,10 @@ class GitHubAPIClient:
                 # Cache-only mode is handled by the caller.
                 return False
 
-            # For merged/closed PRs, use long TTL (60 days)
+            # For merged/closed PRs, use long TTL (360 days)
             # For open PRs, use adaptive TTL based on PR age (via shared _adaptive_ttl_s)
             if is_merged_or_closed:
-                ttl_s = 60 * 24 * 3600  # 60 days (immutable)
+                ttl_s = 360 * 24 * 3600  # 360 days (immutable)
             else:
                 # Delegate to shared adaptive TTL logic
                 ttl_s = self._adaptive_ttl_s(timestamp_epoch=pr_updated_at_epoch_i, default_ttl_s=180)
