@@ -179,6 +179,27 @@ class _GitHubAPIStats:
         self.actions_job_details_in_progress_uncached_total = 0  # int
         self.actions_job_details_in_progress_uncached_job_ids = set()  # Set[str]
 
+        # pulls_list network call attribution (for understanding why pulls_list can dominate)
+        #
+        # This counts *page fetches* inside list_pull_requests() (each page is one REST call).
+        # The buckets attribute how "old" the existing on-disk cache entry was at the moment we
+        # decided to go to network:
+        #   - no_cache: no existing entry on disk
+        #   - <1h, <2h, <3h, >=3h: stale cache age
+        #
+        # These should sum to github.rest.by_category.pulls_list.calls for that run.
+        self.pulls_list_network_page_calls_total = 0  # int
+        self.pulls_list_network_page_calls_by_state = {}  # Dict[str, int] - "open"/"all"
+        self.pulls_list_network_page_calls_by_cache_age_bucket = {}  # Dict[str, int]
+        self.pulls_list_network_page_calls_by_state_cache_age_bucket = {}  # Dict[str, Dict[str, int]]
+
+        # actions_run call attribution (workflow metadata prefetch)
+        #
+        # /actions/runs/{run_id} calls are made in _fetch_pr_checks_data() to batch-prefetch
+        # workflow metadata (name, event) for all check-runs in one go instead of fetching
+        # individually during check-run iteration. This counters the actual "actions_run" calls.
+        self.actions_run_prefetch_total = 0  # int - total /actions/runs/{run_id} calls for workflow metadata
+
         # Rate limit info
         self.core_rate_limit = None  # Optional[Dict] - {remaining, limit, reset_pt}
 
@@ -1803,7 +1824,7 @@ class GitHubAPIClient:
         OPTIMIZATION: Completed jobs are cached to disk permanently since their status never changes.
         This reduces API calls from ~300+ per run to near-zero on subsequent runs.
         
-        TTL: Adaptive for non-completed jobs based on job age (1m/2m/4m/8m then 60m), ∞ for completed jobs (immutable).
+        TTL: Adaptive for non-completed jobs based on job age (2m/4m/30m/60m/80m then 120m), ∞ for completed jobs (immutable).
         """
 
         job_id_s = str(job_id or "").strip()
@@ -1814,33 +1835,31 @@ class GitHubAPIClient:
         now = int(time.time())
 
         def _adaptive_in_progress_ttl_s(*, started_at_epoch: int, default_ttl_s: int) -> int:
-            """Adaptive polling TTL for non-completed jobs.
+            """Adaptive polling TTL for non-completed jobs (uses shared _adaptive_ttl_s logic)."""
+            return self._adaptive_ttl_s(timestamp_epoch=started_at_epoch, default_ttl_s=default_ttl_s)
 
-            Schedule:
-              - age < 1h   -> 1m
-              - age < 2h   -> 2m
-              - age < 4h   -> 4m
-              - age < 8h   -> 8m
-              - age >= 8h  -> 60m (until completed)
+    def _adaptive_ttl_s(self, *, timestamp_epoch: int, default_ttl_s: int = 180) -> int:
+        """Unified adaptive TTL for all time-based caches (jobs, PRs, etc.).
 
-            If started_at is unknown, fall back to default_ttl_s.
-            """
-            try:
-                sa = int(started_at_epoch or 0)
-            except (ValueError, TypeError):
-                sa = 0
-            if sa <= 0 or sa > now:
-                return int(default_ttl_s)
-            age = int(now) - sa
-            if age < 3600:
-                return 60
-            if age < 7200:
-                return 120
-            if age < 14400:
-                return 240
-            if age < 28800:
-                return 480
-            return 3600
+        Delegates to shared cache_ttl_utils.adaptive_ttl_s() for consistent behavior.
+
+        Schedule:
+          - age < 1h   -> 2m (120s)
+          - age < 2h   -> 4m (240s)
+          - age < 4h   -> 30m (1800s)
+          - age < 8h   -> 60m (3600s)
+          - age < 12h  -> 80m (4800s)
+          - age >= 12h -> 120m (7200s)
+
+        Args:
+            timestamp_epoch: Entity's timestamp (job started_at, PR updated_at, etc.) in epoch seconds
+            default_ttl_s: Fallback TTL if timestamp is unknown or invalid
+
+        Returns:
+            TTL in seconds
+        """
+        from common_github.cache_ttl_utils import adaptive_ttl_s
+        return adaptive_ttl_s(timestamp_epoch, default_ttl_s)
 
         # Memory cache (all statuses)
         try:
@@ -3042,11 +3061,63 @@ class GitHubAPIClient:
             self._cache_miss("pulls_list.network")
             endpoint = f"/repos/{owner}/{repo}/pulls"
             items = []
+
+            # Attribute pulls_list calls to stale-cache age buckets.
+            now = int(time.time())
+            stale_ts = None
+            try:
+                # Best-effort: inspect existing on-disk entry without counting this as a cache hit/miss.
+                with PULLS_LIST_CACHE._mu:  # type: ignore[attr-defined]
+                    PULLS_LIST_CACHE._load_once()  # type: ignore[attr-defined]
+                    ent = (PULLS_LIST_CACHE._get_items() or {}).get(cache_key)  # type: ignore[attr-defined]
+                    if isinstance(ent, dict):
+                        ts_raw = ent.get("ts", None)
+                        try:
+                            ts_i = int(ts_raw) if ts_raw is not None else 0
+                        except (ValueError, TypeError):
+                            ts_i = 0
+                        if ts_i > 0:
+                            stale_ts = ts_i
+            except Exception:
+                stale_ts = None
+
+            cache_age_bucket = "no_cache"
+            if stale_ts is not None:
+                age_s = max(0, int(now) - int(stale_ts))
+                if age_s < 3600:
+                    cache_age_bucket = "<1h"
+                elif age_s < 2 * 3600:
+                    cache_age_bucket = "<2h"
+                elif age_s < 3 * 3600:
+                    cache_age_bucket = "<3h"
+                else:
+                    cache_age_bucket = ">=3h"
+
             try:
                 page = 1
                 while True:
                     params = {"state": state, "per_page": 100, "page": page}
                     url = f"{self.base_url}{endpoint}"
+
+                    # Counters: each page fetch is one REST call (label: pulls_list).
+                    try:
+                        GITHUB_API_STATS.pulls_list_network_page_calls_total += 1
+                        st = str(state or "").strip().lower() or "open"
+                        GITHUB_API_STATS.pulls_list_network_page_calls_by_state[st] = int(
+                            GITHUB_API_STATS.pulls_list_network_page_calls_by_state.get(st, 0) or 0
+                        ) + 1
+                        b = str(cache_age_bucket)
+                        GITHUB_API_STATS.pulls_list_network_page_calls_by_cache_age_bucket[b] = int(
+                            GITHUB_API_STATS.pulls_list_network_page_calls_by_cache_age_bucket.get(b, 0) or 0
+                        ) + 1
+                        per_state = GITHUB_API_STATS.pulls_list_network_page_calls_by_state_cache_age_bucket.get(st)
+                        if not isinstance(per_state, dict):
+                            per_state = {}
+                            GITHUB_API_STATS.pulls_list_network_page_calls_by_state_cache_age_bucket[st] = per_state
+                        per_state[b] = int(per_state.get(b, 0) or 0) + 1
+                    except Exception:
+                        pass
+
                     resp = self._rest_get(url, params=params)
 
                     # Parse response
@@ -3065,11 +3136,26 @@ class GitHubAPIClient:
                 # Also negative-cache the failure for a short window to avoid spamming retries when
                 # scanning multiple clones of the same repo in one run.
                 _logger.warning("Error listing PRs for %s/%s: %s", str(owner), str(repo), str(e))
-                PULLS_LIST_CACHE.put(cache_key, [])
+                PULLS_LIST_CACHE.put(cache_key, [], updated_at_epoch=None)
                 return []
 
-            # Save to cache
-            PULLS_LIST_CACHE.put(cache_key, items)
+            # Save to cache (include most recent PR's updated_at for adaptive TTL)
+            most_recent_updated_at = None
+            if items:
+                for pr in items:
+                    if isinstance(pr, dict):
+                        upd_str = pr.get("updated_at")
+                        if upd_str:
+                            try:
+                                from datetime import datetime
+                                dt = datetime.fromisoformat(str(upd_str).replace("Z", "+00:00"))
+                                upd_epoch = int(dt.timestamp())
+                                if most_recent_updated_at is None or upd_epoch > most_recent_updated_at:
+                                    most_recent_updated_at = upd_epoch
+                            except (ValueError, TypeError):
+                                pass
+            
+            PULLS_LIST_CACHE.put(cache_key, items, updated_at_epoch=most_recent_updated_at)
             return items
 
     def get_open_prs(
@@ -3556,6 +3642,7 @@ class GitHubAPIClient:
                                 "head_sha": (pr_data.get("head") or {}).get("sha"),
                                 "base_ref": (pr_data.get("base") or {}).get("ref", "main"),
                                 "created_at": pr_data.get("created_at"),
+                                "updated_at": pr_data.get("updated_at"),
                             }
                         )
             out_prs.sort(key=lambda d: int(d.get("number") or 0), reverse=True)
@@ -3754,9 +3841,10 @@ class GitHubAPIClient:
         head_sha: Optional[str] = None,
         required_checks: Optional[set] = None,
         ttl_s: int = 300,
+        pr_updated_at_epoch: Optional[int] = None,
         skip_fetch: bool = False,
     ) -> List[GHPRCheckRow]:
-        """Get structured PR check rows (GitHub REST check-runs), with a short-lived persistent cache.
+        """Get structured PR check rows (GitHub REST check-runs), with adaptive TTL cache.
 
         Note: the raw-log links are time-limited, but the checks rows themselves are cheap to cache
         for a short TTL to speed repeated HTML generation.
@@ -3768,13 +3856,30 @@ class GitHubAPIClient:
         - Cache v6 stores ETags for both /check-runs and /status endpoints
         - Benefit: 85-95% rate limit reduction on subsequent runs
 
+        OPTIMIZATION (2026-01-24): This method uses adaptive TTL based on PR age:
+        - age < 1h -> 2m
+        - age < 2h -> 4m
+        - age < 4h -> 30m
+        - age < 8h -> 60m
+        - age < 12h -> 80m
+        - age >= 12h -> 120m
+        If pr_updated_at_epoch is not provided, falls back to ttl_s parameter.
+
         Args:
             commit_sha: Optional commit SHA to cache per-commit. If not provided, caches per-PR only.
             head_sha: Optional PR head SHA. If provided, skips the PR fetch to get head SHA (saves 1 API call).
+            pr_updated_at_epoch: Optional PR updated_at timestamp (epoch seconds). If provided, used for adaptive TTL.
+            ttl_s: Fallback TTL if pr_updated_at_epoch is not provided (default: 300s = 5m).
         """
         required_checks = required_checks or set()
         key = self._pr_checks_cache_key(owner, repo, pr_number, commit_sha=commit_sha)
         now = int(datetime.now(timezone.utc).timestamp())
+        
+        # Compute adaptive TTL if PR updated_at is available
+        if pr_updated_at_epoch is not None:
+            effective_ttl_s = self._adaptive_ttl_s(timestamp_epoch=pr_updated_at_epoch, default_ttl_s=ttl_s)
+        else:
+            effective_ttl_s = int(ttl_s)
         # Cache schema version. Bump this when adding new optional fields (additive changes only).
         # v2 adds status-context checks (GET /commits/<sha>/status) in addition to check-runs.
         # v3 added name-level dedupe (later reverted) and persisted `run_id`.
@@ -3804,7 +3909,7 @@ class GitHubAPIClient:
                 incomplete = bool(ent.incomplete)
                 
                 # Check TTL (or cache_only_mode overrides TTL)
-                if ts and ((now - ts) <= max(0, int(ttl_s)) or self.cache_only_mode) and not incomplete:
+                if ts and ((now - ts) <= max(0, int(effective_ttl_s)) or self.cache_only_mode) and not incomplete:
                     if ver >= MIN_CACHE_VER:
                         self._cache_hit("pr_checks")
                         # Apply required_checks overlay
@@ -3995,6 +4100,11 @@ class GitHubAPIClient:
             workflow_info_cache: Dict[str, tuple[str, str]] = {}  # run_id -> (workflow_name, event)
             for run_id in run_ids_to_fetch:
                 try:
+                    # Counter: track /actions/runs/{run_id} calls (category: actions_run).
+                    try:
+                        GITHUB_API_STATS.actions_run_prefetch_total += 1
+                    except Exception:
+                        pass
                     run_data = self.get(f"/repos/{owner}/{repo}/actions/runs/{run_id}", timeout=5) or {}
                     if isinstance(run_data, dict):
                         workflow_info_cache[run_id] = (
@@ -4531,10 +4641,14 @@ class GitHubAPIClient:
           this uses `gh` subprocess calls (separate from this client's REST budget).
         
         Caching:
-        - Tiered TTL based on PR state and commit age (matching pr_checks cache):
-          - Merged/closed: 30 days (immutable)
-          - Open PR, commit < 8 hours: 3 minutes
-          - Open PR, commit >= 8 hours: 2 hours
+        - Adaptive TTL based on PR age:
+          - age < 1h -> 2m
+          - age < 2h -> 4m
+          - age < 4h -> 30m
+          - age < 8h -> 60m
+          - age < 12h -> 80m
+          - age >= 12h -> 120m
+        - Merged/closed PRs: 60 days (immutable)
         - Uses both memory and disk cache for persistence across runs.
         - Failed fetches are cached briefly (<= 60s) to avoid retry storms.
 
@@ -4546,22 +4660,6 @@ class GitHubAPIClient:
             prn = int(pr_number)
         except (ValueError, TypeError):
             return set()
-
-        def _ttl_s_for_pr_state_and_commit_age(is_merged_or_closed: bool, commit_age_s: int) -> int:
-            """Tiered TTL for required-checks cache (matching pr_checks logic)."""
-            if is_merged_or_closed:
-                # Merged/closed PRs are immutable
-                return 30 * 24 * 3600  # 30 days
-            else:
-                # Open PR - determine by commit age
-                try:
-                    age = int(commit_age_s)
-                except (ValueError, TypeError):
-                    age = 0
-                if age < 8 * 3600:  # < 8 hours
-                    return 3 * 60  # 3 minutes
-                else:  # >= 8 hours
-                    return 2 * 3600  # 2 hours
 
         def _is_cache_entry_valid(ent: Dict[str, Any], *, now: int) -> bool:
             """Return True if a cache entry is valid under current tiered TTL policy."""
@@ -4592,10 +4690,13 @@ class GitHubAPIClient:
                 # Cache-only mode is handled by the caller.
                 return False
 
-            # For merged/closed PRs, commit age doesn't matter (use 7d TTL)
-            # For open PRs, use commit age (time since PR.updated_at)
-            commit_age_s = max(0, int(now) - int(pr_updated_at_epoch_i)) if pr_updated_at_epoch_i else 0
-            ttl_s = _ttl_s_for_pr_state_and_commit_age(is_merged_or_closed, commit_age_s)
+            # For merged/closed PRs, use long TTL (60 days)
+            # For open PRs, use adaptive TTL based on PR age (via shared _adaptive_ttl_s)
+            if is_merged_or_closed:
+                ttl_s = 60 * 24 * 3600  # 60 days (immutable)
+            else:
+                # Delegate to shared adaptive TTL logic
+                ttl_s = self._adaptive_ttl_s(timestamp_epoch=pr_updated_at_epoch_i, default_ttl_s=180)
 
             # Failed fetches should never be cached long-term.
             if ok is False:

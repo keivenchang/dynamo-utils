@@ -2,11 +2,18 @@
 
 Caching strategy:
   - Key: <owner>/<repo>:pulls:<state>:<base>
-  - Value: Dict with 'ts', 'pulls' (list of PR summary objects)
-  - Short TTL (PR list changes frequently)
+  - Value: Dict with 'ts', 'pulls' (list of PR summary objects), 'updated_at_epoch' (optional)
+  - Adaptive TTL based on most recent PR's updated_at:
+    - age < 1h -> 2m
+    - age < 2h -> 4m
+    - age < 4h -> 30m
+    - age < 8h -> 60m
+    - age < 12h -> 80m
+    - age >= 12h -> 120m
 """
 from __future__ import annotations
 
+import json
 import sys
 import time
 from pathlib import Path
@@ -18,6 +25,7 @@ if str(_module_dir) not in sys.path:
     sys.path.insert(0, str(_module_dir))
 
 from cache.cache_base import BaseDiskCache
+from cache_ttl_utils import adaptive_ttl_s
 
 
 class PullsListCache(BaseDiskCache):
@@ -35,11 +43,11 @@ class PullsListCache(BaseDiskCache):
         super().__init__(cache_file=cache_file, schema_version=self._SCHEMA_VERSION)
     
     def get_if_fresh(self, key: str, ttl_s: int) -> Optional[List[Dict[str, Any]]]:
-        """Get cached pulls list if fresh.
+        """Get cached pulls list if fresh (using adaptive TTL if updated_at is stored).
         
         Args:
             key: Cache key (e.g., "owner/repo:pulls:open:main")
-            ttl_s: TTL in seconds
+            ttl_s: Fallback TTL in seconds (used if updated_at is not available)
             
         Returns:
             List of PR objects, or None if not cached/stale
@@ -54,19 +62,27 @@ class PullsListCache(BaseDiskCache):
             ts = int(ent.get("ts", 0) or 0)
             now = int(time.time())
             
-            if ts and (now - ts) <= max(0, int(ttl_s)):
+            # Adaptive TTL: use stored updated_at_epoch if available
+            updated_at_epoch = ent.get("updated_at_epoch")
+            if updated_at_epoch is not None:
+                effective_ttl = adaptive_ttl_s(updated_at_epoch, default_ttl_s=ttl_s)
+            else:
+                effective_ttl = ttl_s
+            
+            if ts and (now - ts) <= max(0, int(effective_ttl)):
                 pulls = ent.get("pulls")
                 if isinstance(pulls, list):
                     return pulls
             
             return None
     
-    def put(self, key: str, pulls: List[Dict[str, Any]]) -> None:
+    def put(self, key: str, pulls: List[Dict[str, Any]], updated_at_epoch: Optional[int] = None) -> None:
         """Store pulls list.
         
         Args:
             key: Cache key
             pulls: List of PR summary objects
+            updated_at_epoch: Most recent PR's updated_at timestamp (for adaptive TTL)
         """
         now = int(time.time())
         with self._mu:
@@ -75,6 +91,8 @@ class PullsListCache(BaseDiskCache):
                 "ts": now,
                 "pulls": pulls,
             }
+            if updated_at_epoch is not None:
+                entry["updated_at_epoch"] = updated_at_epoch
             self._set_item(key, entry)  # Automatically tracks write
             self._persist()
 

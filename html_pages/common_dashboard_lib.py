@@ -3515,8 +3515,8 @@ def github_api_stats_rows(
 
     # TTL documentation (always show; independent of whether counters are non-zero in this run).
     rows.append(("github.cache.actions_job_details.ttl.completed", "30d", "Typical TTL used for completed job-details cache (dashboards pass 30d; only cached once completed)"))
-    rows.append(("github.cache.actions_job_details.ttl.in_progress", "uncached", "While a job is in_progress, job-details are not cached (so there is no TTL)"))
-    rows.append(("github.cache.actions_job_status.ttl.in_progress", "adaptive", "Adaptive TTL for non-completed jobs: <1h=1m, <2h=2m, <4h=4m, <8h=8m, >=8h=60m (until completed)"))
+    rows.append(("github.cache.actions_job_details.ttl.in_progress", "N/A (not cached)", "While a job is in_progress, job-details are not cached (polling frequency is adaptive via actions_job_status)"))
+    rows.append(("github.cache.actions_job_status.ttl.in_progress", "adaptive", "Adaptive TTL for non-completed jobs: <1h=2m, <2h=4m, <4h=30m, <8h=60m, <12h=80m, >=12h=120m (until completed)"))
 
     # In-progress job-details (uncached)
     #
@@ -3589,23 +3589,44 @@ def github_api_stats_rows(
         }
 
         cache_descriptions_disk = {
-            "actions_job_status": "GitHub Actions job status [actions_jobs.json] [key: owner/repo:jobstatus:job_id] [TTL: 1m or ∞ (once completed, immutable)]",
-            "actions_job_details": "GitHub Actions job details [actions_jobs.json] [key: owner/repo:job:job_id] [TTL: 30d]",
-            "pr_checks": "PR check runs [pr_checks_cache.json] [key: owner/repo#PR or owner/repo#PR:sha] [TTL: 3m (open PR, commit<8h) or 2h (open PR, commit≥8h) or 30d (merged/closed)]",
-            "pulls_list": "Pull request list responses [pulls_open_cache.json] [key: owner/repo:state] [TTL: 3m (open PR, commit<8h) or 2h (open PR, commit≥8h) or 30d (merged/closed)]",
-            "pr_branch": "PR branch information [pr_branch_cache.json] [key: owner/repo:branch] [TTL: 3m (open PR, commit<8h) or 2h (open PR, commit≥8h) or 30d (merged/closed)]",
-            "pr_info": "Full PR details with required checks and reviews [pr_info.json] [key: owner/repo#PR] [TTL: 3m (open PR, commit<8h) or 2h (open PR, commit≥8h) or 30d (merged/closed)]",
-            "search_issues": "GitHub search/issues API results [search_issues.json] [key: query_hash] [TTL: varies]",
-            "job_log": "Job log error summaries and snippets [job_logs_cache.json] [key: job_id] [TTL: ∞ (immutable, no TTL check)]",
-            "raw_log_text": f"Raw CI log text content index [index.json] [key: job_id] [TTL: {_format_ttl_duration(DEFAULT_RAW_LOG_TEXT_TTL_S)} (immutable once completed)]",
-            "required_checks": "Required PR check names [required_checks.json] [key: owner/repo:pr#] [TTL: 3m (open PR, commit<8h) or 2h (open PR, commit≥8h) or 30d (merged/closed)]",
-            "merge_dates": f"PR merge dates from GitHub API [github_pr_merge_dates.json] [key: owner/repo#PR] [TTL: {_format_ttl_duration(DEFAULT_CLOSED_PRS_TTL_S)} (immutable once merged)]",
-            "commit_history": "Commit history with metadata [commit_history.json] [key: varies] [TTL: varies]",
-            "commit_history_snippets": "Commit message snippets [commit_history_snippets.json] [key: commit_sha] [TTL: 365d (immutable)]",
-            "pytest_timings": "Pytest test duration timings [pytest-test-timings.json] [key: test_name] [TTL: varies]",
-            "gitlab_pipeline_jobs": "GitLab pipeline job details [gitlab_pipeline_jobs_details_v3.json] [key: project_id:pipeline_id] [TTL: varies]",
-            "gitlab_pipeline_status": "GitLab pipeline status [gitlab_pipeline_status.json] [key: project_id:pipeline_id] [TTL: varies]",
-            "gitlab_mr_pipelines": "GitLab MR pipeline associations [gitlab_mr_pipelines.json] [key: project_id:mr_iid] [TTL: varies]",
+            "actions_job_status": "GitHub Actions job status [actions_jobs.json] [key: owner/repo:jobstatus:job_id]",
+            "actions_job_details": "GitHub Actions job details [actions_jobs.json] [key: owner/repo:job:job_id]",
+            "pr_checks": "PR check runs [pr_checks_cache.json] [key: owner/repo#PR or owner/repo#PR:sha]",
+            "pulls_list": "Pull request list responses [pulls_open_cache.json] [key: owner/repo:state]",
+            "pr_branch": "PR branch information [pr_branch_cache.json] [key: owner/repo:branch]",
+            "pr_info": "Full PR details with required checks and reviews [pr_info.json] [key: owner/repo#PR]",
+            "search_issues": "GitHub search/issues API results [search_issues.json] [key: query_hash]",
+            "job_log": "Job log error summaries and snippets [job_logs_cache.json] [key: job_id]",
+            "raw_log_text": f"Raw CI log text content index [index.json] [key: job_id]",
+            "required_checks": "Required PR check names [required_checks.json] [key: owner/repo:pr#]",
+            "merge_dates": f"PR merge dates from GitHub API [github_pr_merge_dates.json] [key: owner/repo#PR]",
+            "commit_history": "Commit history with metadata [commit_history.json] [key: varies]",
+            "commit_history_snippets": "Commit message snippets [commit_history_snippets.json] [key: commit_sha]",
+            "pytest_timings": "Pytest test duration timings [pytest-test-timings.json] [key: test_name]",
+            "gitlab_pipeline_jobs": "GitLab pipeline job details [gitlab_pipeline_jobs_details_v3.json] [key: project_id:pipeline_id]",
+            "gitlab_pipeline_status": "GitLab pipeline status [gitlab_pipeline_status.json] [key: project_id:pipeline_id]",
+            "gitlab_mr_pipelines": "GitLab MR pipeline associations [gitlab_mr_pipelines.json] [key: project_id:mr_iid]",
+        }
+
+        # TTL documentation for each cache type (shown as separate rows after .disk/.mem/.hits/.misses)
+        cache_ttl_descriptions = {
+            "actions_job_status": "adaptive (in_progress: <1h=2m, <2h=4m, <4h=30m, <8h=60m, <12h=80m, >=12h=120m; completed: ∞)",
+            "actions_job_details": "30d (only cached once completed)",
+            "pr_checks": "adaptive (<1h=2m, <2h=4m, <4h=30m, <8h=60m, <12h=80m, >=12h=120m; closed/merged: 60d)",
+            "pulls_list": "adaptive (<1h=2m, <2h=4m, <4h=30m, <8h=60m, <12h=80m, >=12h=120m)",
+            "pr_branch": "adaptive (<1h=2m, <2h=4m, <4h=30m, <8h=60m, <12h=80m, >=12h=120m; closed/merged: 60d)",
+            "pr_info": "by updated_at timestamp (invalidated when PR changes)",
+            "search_issues": "varies",
+            "job_log": "∞ (immutable, no TTL check)",
+            "raw_log_text": f"{_format_ttl_duration(DEFAULT_RAW_LOG_TEXT_TTL_S)} (immutable once completed)",
+            "required_checks": "adaptive (<1h=2m, <2h=4m, <4h=30m, <8h=60m, <12h=80m, >=12h=120m; closed/merged: 60d)",
+            "merge_dates": f"{_format_ttl_duration(DEFAULT_CLOSED_PRS_TTL_S)} (immutable once merged)",
+            "commit_history": "varies",
+            "commit_history_snippets": "365d (immutable)",
+            "pytest_timings": "varies",
+            "gitlab_pipeline_jobs": "varies",
+            "gitlab_pipeline_status": "varies",
+            "gitlab_mr_pipelines": "varies",
         }
 
         # Build a unified dict of cache stats: {cache_name: {disk, mem, hits, misses}}
@@ -3636,11 +3657,11 @@ def github_api_stats_rows(
             cache_stats[cache_name]["hits"] = (cache_hits, "")
             cache_stats[cache_name]["misses"] = (cache_misses, "")
         
-        # Output cache stats grouped by cache name, with disk/mem/hits/misses together
+        # Output cache stats grouped by cache name, with disk/mem/hits/misses/ttl together
         for cache_name in sorted(cache_stats.keys()):
             stats = cache_stats[cache_name]
             
-            # Show in order: .disk (always), .mem (if >0), .hits (if exists), .misses (if exists)
+            # Show in order: .disk (always), .mem (if >0), .ttl (if available), .hits (if exists), .misses (if exists)
             if "disk" in stats:
                 count, desc = stats["disk"]
                 rows.append((f"github.cache.{cache_name}.disk", str(count), desc))
@@ -3649,6 +3670,10 @@ def github_api_stats_rows(
                 count, desc = stats["mem"]
                 if count > 0:  # Only show mem if count > 0
                     rows.append((f"github.cache.{cache_name}.mem", str(count), ""))
+            
+            # TTL documentation (separate row after disk/mem)
+            if cache_name in cache_ttl_descriptions:
+                rows.append((f"github.cache.{cache_name}.ttl", cache_ttl_descriptions[cache_name], "Cache TTL policy"))
             
             if "hits" in stats:
                 count, desc = stats["hits"]
@@ -3667,6 +3692,34 @@ def github_api_stats_rows(
             t = float(time_by_label_s.get(lbl, 0.0) or 0.0)
             rows.append((f"github.rest.by_category.{lbl}.calls", str(c), f"API calls for {lbl}"))
             rows.append((f"github.rest.by_category.{lbl}.time_secs", f"{t:.2f}s", f"Time spent in {lbl} calls"))
+            
+            # Attribution details for pulls_list (if instrumented)
+            if lbl == "pulls_list":
+                try:
+                    total = int(getattr(GITHUB_API_STATS, "pulls_list_network_page_calls_total", 0) or 0)
+                    by_bucket = dict(getattr(GITHUB_API_STATS, "pulls_list_network_page_calls_by_cache_age_bucket", {}) or {})
+                    by_state = dict(getattr(GITHUB_API_STATS, "pulls_list_network_page_calls_by_state", {}) or {})
+                    if total > 0:
+                        rows.append((f"github.rest.by_category.{lbl}.total_page_fetches", str(total), "Total /pulls page fetches (should match .calls above)"))
+                    if by_state:
+                        for st in sorted(by_state.keys()):
+                            rows.append((f"github.rest.by_category.{lbl}.by_state.{st}", str(by_state[st]), f"Page fetches for state={st}"))
+                    if by_bucket:
+                        for bucket in ["no_cache", "<1h", "<2h", "<3h", ">=3h"]:
+                            cnt = by_bucket.get(bucket, 0)
+                            if cnt > 0:
+                                rows.append((f"github.rest.by_category.{lbl}.by_cache_age.{bucket}", str(cnt), f"Page fetches where stale cache was {bucket} old"))
+                except Exception:
+                    pass
+            
+            # Attribution details for actions_run (if instrumented)
+            if lbl == "actions_run":
+                try:
+                    prefetch_total = int(getattr(GITHUB_API_STATS, "actions_run_prefetch_total", 0) or 0)
+                    if prefetch_total > 0:
+                        rows.append((f"github.rest.by_category.{lbl}.prefetch_workflow_metadata", str(prefetch_total), "Workflow metadata prefetch calls in _fetch_pr_checks_data() to batch-fetch (name,event) for all check-runs"))
+                except Exception:
+                    pass
 
     # REST errors by status (individual flat entries)
     by_status = (errs or {}).get("by_status") if isinstance(errs, dict) else {}
