@@ -174,20 +174,33 @@ if [ "$DRY_RUN" = true ]; then
 fi
 
 if [ "$SKIP_RSYNC" = false ]; then
-# Build exclude options from .backupignore file
+# Build exclude options from .rsyncrules file
 EXCLUDE_OPTS=""
-BACKUPIGNORE_FILE="$SOURCE_DIR/.backupignore"
+RSYNCRULES_FILE="$SOURCE_DIR/.rsyncrules"
 
-if [ -f "$BACKUPIGNORE_FILE" ]; then
-    echo "Reading exclusions from: $BACKUPIGNORE_FILE"
+if [ -f "$RSYNCRULES_FILE" ]; then
+    echo "Reading exclusions from: $RSYNCRULES_FILE"
     while IFS= read -r line || [ -n "$line" ]; do
         # Skip empty lines and comments
         if [[ -n "$line" && ! "$line" =~ ^[[:space:]]*# ]]; then
-            EXCLUDE_OPTS="$EXCLUDE_OPTS --exclude='$line'"
+            # Handle include patterns (lines starting with +)
+            if [[ "$line" =~ ^\+ ]]; then
+                # Remove the + prefix
+                pattern=$(echo "$line" | sed 's/^+ *//')
+                EXCLUDE_OPTS="$EXCLUDE_OPTS --include='$pattern'"
+            # Handle explicit exclude patterns (lines starting with -)
+            elif [[ "$line" =~ ^\- ]]; then
+                # Remove the - prefix
+                pattern=$(echo "$line" | sed 's/^- *//')
+                EXCLUDE_OPTS="$EXCLUDE_OPTS --exclude='$pattern'"
+            else
+                # Regular exclude pattern (no prefix)
+                EXCLUDE_OPTS="$EXCLUDE_OPTS --exclude='$line'"
+            fi
         fi
-    done < "$BACKUPIGNORE_FILE"
+    done < "$RSYNCRULES_FILE"
 else
-    echo "Warning: .backupignore file not found at $BACKUPIGNORE_FILE"
+    echo "Warning: .rsyncrules file not found at $RSYNCRULES_FILE"
     echo "Using default exclusions"
     # Fallback to default exclusions
     EXCLUDE_OPTS="--exclude='*.pyc' --exclude='__pycache__/' --exclude='.pytest_cache/' \
