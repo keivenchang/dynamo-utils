@@ -5,6 +5,17 @@
 
 set -e
 
+# Cleanup function for .working files
+cleanup_working_files() {
+  if [ -n "$BACKUP_HISTORY_ROOT" ] && [ -d "$BACKUP_HISTORY_ROOT" ]; then
+    echo "Cleaning up .working files..."
+    rm -f "$BACKUP_HISTORY_ROOT"/*.tgz.working 2>/dev/null || true
+  fi
+}
+
+# Set trap to cleanup on exit
+trap cleanup_working_files EXIT INT TERM
+
 # Default values
 DEFAULT_SOURCE_DIR="$HOME/nvidia"
 DEFAULT_DEST_DIR="/mnt/sda/keivenc/dynamo"
@@ -269,6 +280,10 @@ if [ "$SKIP_RSYNC" = true ] || [ $EXIT_CODE -eq 0 ]; then
     # Find all backup history directories
     BACKUP_HISTORY_ROOT="$DEST_PARENT/backup_history"
     if [ -d "$BACKUP_HISTORY_ROOT" ]; then
+      # Clean up any existing .working files from previous runs
+      echo "Cleaning up any existing .working files..."
+      rm -f "$BACKUP_HISTORY_ROOT"/*.tgz.working 2>/dev/null || true
+      
       # Get list of unique dates from directories (excluding today)
       DATES_TO_COMPRESS=$(find "$BACKUP_HISTORY_ROOT" -maxdepth 1 -type d -name '[0-9]*_[0-9]*' | \
         sed 's|.*/||' | \
