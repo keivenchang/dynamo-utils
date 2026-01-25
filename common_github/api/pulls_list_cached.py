@@ -39,13 +39,14 @@ Example API Response:
 
 Cached Fields:
   - Full PR list (number, title, state, user, head, base, updated_at, etc.)
-  - Typically paginated (per_page=100)
+  - Limited to first 5 pages (500 most recent PRs)
+  - Older PRs are fetched individually on-demand via get_pr_details fallback
 
 Cache:
   Internal BaseDiskCache instance (disk + memory)
 
 TTL:
-  Adaptive based on most recent PR's updated_at (<1h=1m, <2h=2m, <4h=4m, >=4h=8m)
+  Fixed 2 minutes (120 seconds)
 
 Cross-cache population:
   When fetching the pulls list, this module also populates pr_head_sha_cached
@@ -70,7 +71,7 @@ if TYPE_CHECKING:  # pragma: no cover
     from .. import GitHubAPIClient
 
 
-TTL_POLICY_DESCRIPTION = "adaptive (<1h=1m, <2h=2m, <4h=4m, >=4h=8m)"
+TTL_POLICY_DESCRIPTION = "fixed 2m (120s)"
 
 
 # =============================================================================
@@ -86,7 +87,7 @@ class _PullsListCache(BaseDiskCache):
         super().__init__(cache_file=cache_file, schema_version=self._SCHEMA_VERSION)
     
     def get_if_fresh(self, key: str, ttl_s: int) -> Optional[List[Dict[str, Any]]]:
-        """Get cached pulls list if fresh (using adaptive TTL if updated_at is stored)."""
+        """Get cached pulls list if fresh (fixed 2m TTL)."""
         with self._mu:
             self._load_once()
             ent = self._check_item(key)
@@ -97,12 +98,8 @@ class _PullsListCache(BaseDiskCache):
             ts = int(ent.get("ts", 0) or 0)
             now = int(time.time())
             
-            # Adaptive TTL: use stored updated_at_epoch if available
-            updated_at_epoch = ent.get("updated_at_epoch")
-            if updated_at_epoch is not None:
-                effective_ttl = pulls_list_adaptive_ttl_s(updated_at_epoch, default_ttl_s=ttl_s)
-            else:
-                effective_ttl = ttl_s
+            # Fixed TTL: 2 minutes (120 seconds)
+            effective_ttl = 120
             
             if ts and (now - ts) <= max(0, int(effective_ttl)):
                 pulls = ent.get("pulls")
@@ -250,7 +247,8 @@ class PullsListCached(CachedResourceBase[List[Dict[str, Any]]]):
 
         try:
             page = 1
-            while True:
+            max_pages = 5  # Limit to 5 pages (500 most recent PRs)
+            while page <= max_pages:
                 params = {"state": state, "per_page": 100, "page": page}
                 url = f"{self.api.base_url}{endpoint}"
 

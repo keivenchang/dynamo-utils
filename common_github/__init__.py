@@ -5042,6 +5042,8 @@ class GitHubAPIClient:
         for prn in unique_pr_numbers:
             pr_data = pr_num_to_data.get(prn)
             if isinstance(pr_data, dict):
+                # Cache hit - found in pulls_list
+                self._cache_hit("merge_dates.from_pulls_list")
                 merged_at = pr_data.get("merged_at")
                 if merged_at:
                     # Convert to Pacific time
@@ -5054,6 +5056,8 @@ class GitHubAPIClient:
                 else:
                     result[prn] = None  # Not merged
             else:
+                # Cache miss - not in pulls_list, need individual fetch
+                self._cache_miss("merge_dates")
                 missing.append(prn)
         
         # Fallback: fetch individual PRs not found in list
