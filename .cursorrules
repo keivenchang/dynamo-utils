@@ -156,14 +156,22 @@ DO NOT use these BS words in docs/comments:
 ## 2.3 UNIX Command Execution and Workflow
 
 ### 2.3.1 Command Chaining
-- Chain multiple commands in one go whenever possible using && or ;
-- Use parentheses for grouping, like this: (command1 && command2); (command3 || command4)
+**ALWAYS chain multiple independent commands into a single Shell call using && or ;**
+
+**CRITICAL RULE: If you're about to make 2+ separate Shell tool calls in sequence, STOP and chain them instead!**
+
+- Use parentheses for grouping: (command1 && command2); (command3 || command4)
+- Separate outputs with echo "=====" for readability
 - Examples:
   - (cd dir && command1 && echo "=====" && command2 && echo "=====" && ...)
-  - (grep keyword1 file && echo "=====" && grep keyword2 file && echo =====" && grep keyword3 file && ...)
+  - (grep keyword1 file && echo "=====" && grep keyword2 file && echo "=====" && grep keyword3 file && ...)
   - command1; must_run_command2; must_run_command3
   - (cd dir1 && cargo fmt); (cd dir2 && cargo fmt)
-- Reduces latency and improves efficiency
+  - (rg pattern1 file | wc -l && echo "=====") && (rg pattern2 file | wc -l && echo "=====") && rg pattern3 file
+- **Why this matters:**
+  - Reduces latency from multiple round-trips to one
+  - More efficient use of tool calls
+  - Easier to read consolidated output
 - Be careful with shell quoting in long one-liners (especially nested quotes). Prefer simpler, verifiable commands (or write a small script) over clever quoting.
 
 ### 2.3.2 Long-Running Programs
