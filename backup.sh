@@ -480,7 +480,8 @@ else
   if [ "$SKIP_RSYNC" = false ]; then
     echo "Backup failed with exit code $EXIT_CODE"
     echo "$(date '+%Y-%m-%d %H:%M:%S') - Backup failed with exit code $EXIT_CODE" >> "$LOG_FILE"
-    exit $EXIT_CODE
+    # Don't exit - allow compress/cleanup operations to continue
+    # exit $EXIT_CODE
   fi
 fi
 
