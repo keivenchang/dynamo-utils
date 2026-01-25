@@ -247,10 +247,17 @@ eval "$RSYNC_CMD" $EXCLUDE_OPTS "$SOURCE_DIR/" "$DEST_DIR/" 2>&1 | tee -a "$LOG_
 EXIT_CODE=${PIPESTATUS[0]}
 fi  # End of rsync section
 
-if [ "$SKIP_RSYNC" = true ] || [ $EXIT_CODE -eq 0 ]; then
+# rsync exit code 23 means "Partial transfer due to error" but backup is generally successful
+# We'll continue with compress/cleanup operations even with code 23
+if [ "$SKIP_RSYNC" = true ] || [ $EXIT_CODE -eq 0 ] || [ $EXIT_CODE -eq 23 ]; then
   if [ "$SKIP_RSYNC" = false ]; then
-    echo "Backup completed successfully!"
-    echo "$(date '+%Y-%m-%d %H:%M:%S') - Backup completed successfully" >> "$LOG_FILE"
+    if [ $EXIT_CODE -eq 23 ]; then
+      echo "Backup completed with warnings (some files/attrs were not transferred)"
+      echo "$(date '+%Y-%m-%d %H:%M:%S') - Backup completed with warnings (exit code 23)" >> "$LOG_FILE"
+    else
+      echo "Backup completed successfully!"
+      echo "$(date '+%Y-%m-%d %H:%M:%S') - Backup completed successfully" >> "$LOG_FILE"
+    fi
 
     # Check if any files were backed up to history
     BACKUP_HISTORY_COUNT=$(find "$BACKUP_HISTORY_DIR" -type f 2>/dev/null | wc -l)
