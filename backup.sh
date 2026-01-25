@@ -242,9 +242,12 @@ fi
 echo "+ $RSYNC_CMD $EXCLUDE_OPTS \"$SOURCE_DIR/\" \"$DEST_DIR/\""
 
 # Run rsync with exclusions and backup for changed/deleted files
+# Temporarily disable set -e to capture rsync exit code (rsync code 23 is acceptable)
+set +e
 eval "$RSYNC_CMD" $EXCLUDE_OPTS "$SOURCE_DIR/" "$DEST_DIR/" 2>&1 | tee -a "$LOG_FILE"
 
 EXIT_CODE=${PIPESTATUS[0]}
+set -e
 fi  # End of rsync section
 
 # rsync exit code 23 means "Partial transfer due to error" but backup is generally successful
