@@ -34,24 +34,22 @@ UNCOMPRESS=false
 REMOVE_AFTER_DAYS=""
 DRY_RUN=false
 DRYRUN=""  # Will be set to "echo" in dry-run mode
-BACKUP_ONLY=false  # Skip rsync, only do compress/uncompress/remove operations
+SKIP_RSYNC=false  # Skip rsync, only do compress/uncompress/remove operations
 
 show_usage() {
     cat << EOF
-Usage: $0 --input-path <source> --output-path <destination> [options]
+Usage: $0 [--backup] [options]
 
-Both --input-path and --output-path are required.
-
-This script performs incremental backups using rsync. Changed or deleted files
-are preserved in timestamped backup history directories before being updated.
+This script performs incremental backups using rsync and manages backup history.
+Changed or deleted files are preserved in timestamped backup history directories.
 
 Options:
-    --input-path <path>         Source directory to backup
-    --output-path <path>        Destination directory for backup
+    --backup                    Perform rsync backup (--input-path and --output-path required)
+    --input-path <path>         Source directory to backup (required with --backup)
+    --output-path <path>        Destination directory for backup (always required)
     --compress                  Compress yesterday and all prior days' backup history to .tgz
     --uncompress                Uncompress all .tgz archives back to directories
     --remove-after-days <N>     Remove backup history older than N days (default: no removal)
-    --backup                    Skip rsync, only perform compress/uncompress/remove operations
     --dry-run, --dryrun         Show what would be done without making changes
     -h, --help                  Show this help message
 
@@ -60,18 +58,27 @@ Backup History:
     Example: If backing up to /mnt/sda/keivenc/dynamo, history is stored in:
              /mnt/sda/keivenc/backup_history/20251217_172633/
 
-Example:
-    $0 --input-path $DEFAULT_SOURCE_DIR --output-path $DEFAULT_DEST_DIR
-    $0 --input-path ~/data --output-path /mnt/backup --compress --remove-after-days 30
-    $0 --input-path ~/data --output-path /mnt/backup --uncompress --dry-run
-    $0 --output-path /mnt/backup --backup --compress --dry-run
+Examples:
+    # Full backup with compression and retention
+    $0 --backup --input-path ~/data --output-path /mnt/backup --compress --remove-after-days 30
+    
+    # Compress and remove old backups without doing rsync
+    $0 --output-path /mnt/backup --compress --remove-after-days 30
+    
+    # Uncompress archives (dry-run)
+    $0 --output-path /mnt/backup --uncompress --dry-run
 EOF
     exit 1
 }
 
 # Parse arguments
+SKIP_RSYNC=true  # Default: skip rsync (operations only mode)
 while [[ $# -gt 0 ]]; do
     case $1 in
+        --backup)
+            SKIP_RSYNC=false  # Enable rsync backup
+            shift
+            ;;
         --input-path)
             SOURCE_DIR="$2"
             shift 2
@@ -86,10 +93,6 @@ while [[ $# -gt 0 ]]; do
             ;;
         --uncompress)
             UNCOMPRESS=true
-            shift
-            ;;
-        --backup)
-            BACKUP_ONLY=true
             shift
             ;;
         --remove-after-days)
@@ -110,8 +113,8 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# Validate that both parameters are provided (unless --backup mode)
-if [ "$BACKUP_ONLY" = false ]; then
+# Validate that both parameters are provided (unless skipping rsync)
+if [ "$SKIP_RSYNC" = false ]; then
     if [ -z "$SOURCE_DIR" ] || [ -z "$DEST_DIR" ]; then
         if [ -z "$SOURCE_DIR" ]; then
             echo "Error: --input-path is required"
@@ -123,7 +126,7 @@ if [ "$BACKUP_ONLY" = false ]; then
         show_usage
     fi
 else
-    # In backup-only mode, only output-path is required
+    # In operations-only mode, only output-path is required
     if [ -z "$DEST_DIR" ]; then
         echo "Error: --output-path is required"
         echo ""
@@ -145,8 +148,8 @@ if [ "$COMPRESS" = true ] && [ "$UNCOMPRESS" = true ]; then
     exit 1
 fi
 
-# Validate source path exists (skip in backup-only mode)
-if [ "$BACKUP_ONLY" = false ] && [ ! -d "$SOURCE_DIR" ]; then
+# Validate source path exists (skip in operations-only mode)
+if [ "$SKIP_RSYNC" = false ] && [ ! -d "$SOURCE_DIR" ]; then
     echo "Error: Source directory does not exist: $SOURCE_DIR"
     exit 1
 fi
@@ -155,9 +158,9 @@ fi
 DEST_PARENT="$(dirname "$DEST_DIR")"
 BACKUP_HISTORY_DIR="$DEST_PARENT/backup_history/$TIMESTAMP"
 
-if [ "$BACKUP_ONLY" = true ]; then
-    echo "Backup operations only mode (skipping rsync)"
-    echo "$(date '+%Y-%m-%d %H:%M:%S') - Backup operations only mode" >> "$LOG_FILE"
+if [ "$SKIP_RSYNC" = true ]; then
+    echo "Operations only mode (skipping rsync backup)"
+    echo "$(date '+%Y-%m-%d %H:%M:%S') - Operations only mode" >> "$LOG_FILE"
 else
     echo "Starting backup: $SOURCE_DIR -> $DEST_DIR"
     echo "$(date '+%Y-%m-%d %H:%M:%S') - Starting backup: $SOURCE_DIR -> $DEST_DIR" >> "$LOG_FILE"
@@ -170,7 +173,35 @@ if [ "$DRY_RUN" = true ]; then
     DRYRUN="echo +"
 fi
 
-if [ "$BACKUP_ONLY" = false ]; then
+if [ "$SKIP_RSYNC" = false ]; then
+# Build exclude options from .backupignore file
+EXCLUDE_OPTS=""
+BACKUPIGNORE_FILE="$SOURCE_DIR/.backupignore"
+
+if [ -f "$BACKUPIGNORE_FILE" ]; then
+    echo "Reading exclusions from: $BACKUPIGNORE_FILE"
+    while IFS= read -r line || [ -n "$line" ]; do
+        # Skip empty lines and comments
+        if [[ -n "$line" && ! "$line" =~ ^[[:space:]]*# ]]; then
+            EXCLUDE_OPTS="$EXCLUDE_OPTS --exclude='$line'"
+        fi
+    done < "$BACKUPIGNORE_FILE"
+else
+    echo "Warning: .backupignore file not found at $BACKUPIGNORE_FILE"
+    echo "Using default exclusions"
+    # Fallback to default exclusions
+    EXCLUDE_OPTS="--exclude='*.pyc' --exclude='__pycache__/' --exclude='.pytest_cache/' \
+--exclude='.mypy_cache/' --exclude='.ruff_cache/' --exclude='*.egg-info/' \
+--exclude='.venv/' --exclude='venv/' --exclude='node_modules/' \
+--exclude='target/' --exclude='build/' --exclude='dist/' \
+--exclude='*.o' --exclude='*.so' --exclude='*.dylib' --exclude='.DS_Store' \
+--exclude='.git/objects/' --exclude='.git/lfs/' --exclude='.git/FETCH_HEAD' \
+--exclude='.git/HEAD' --exclude='.git/index' --exclude='.git/logs/' \
+--exclude='*.log' --exclude='/tmp/' --exclude='*.tmp' \
+--exclude='*.swp' --exclude='*.swo' --exclude='*~' --exclude='*.bak' \
+--exclude='core' --exclude='core.*'"
+fi
+
 # Create destination directory if it doesn't exist
 $DRYRUN mkdir -p "$DEST_DIR"
 
@@ -184,63 +215,16 @@ if [ "$DRY_RUN" = true ]; then
 fi
 
 # Show the command that will be executed
-echo "+ $RSYNC_CMD \\"
-echo "  --exclude='*.pyc' --exclude='__pycache__/' --exclude='.pytest_cache/' \\"
-echo "  --exclude='.mypy_cache/' --exclude='.ruff_cache/' --exclude='*.egg-info/' \\"
-echo "  --exclude='.venv/' --exclude='venv/' --exclude='node_modules/' \\"
-echo "  --exclude='target/' --exclude='build/' --exclude='dist/' \\"
-echo "  --exclude='*.o' --exclude='*.so' --exclude='*.dylib' --exclude='.DS_Store' \\"
-echo "  --exclude='.git/objects/' --exclude='.git/lfs/' --exclude='.git/FETCH_HEAD' \\"
-echo "  --exclude='.git/HEAD' --exclude='.git/index' --exclude='.git/logs/' \\"
-echo "  --exclude='*.log' --exclude='/tmp/' --exclude='*.tmp' \\"
-echo "  --exclude='*.swp' --exclude='*.swo' --exclude='*~' --exclude='*.bak' \\"
-echo "  --exclude='core' --exclude='core.*' \\"
-echo "  --exclude='dynamo_latest/*.html' --exclude='dynamo_ci/*.html' --exclude='commits/*.html' \\"
-echo "  \"$SOURCE_DIR/\" \"$DEST_DIR/\""
+echo "+ $RSYNC_CMD $EXCLUDE_OPTS \"$SOURCE_DIR/\" \"$DEST_DIR/\""
 
 # Run rsync with exclusions and backup for changed/deleted files
-eval "$RSYNC_CMD" \
-  --exclude='*.pyc' \
-  --exclude='__pycache__/' \
-  --exclude='.pytest_cache/' \
-  --exclude='.mypy_cache/' \
-  --exclude='.ruff_cache/' \
-  --exclude='*.egg-info/' \
-  --exclude='.venv/' \
-  --exclude='venv/' \
-  --exclude='node_modules/' \
-  --exclude='target/' \
-  --exclude='build/' \
-  --exclude='dist/' \
-  --exclude='*.o' \
-  --exclude='*.so' \
-  --exclude='*.dylib' \
-  --exclude='.DS_Store' \
-  --exclude='.git/objects/' \
-  --exclude='.git/lfs/' \
-  --exclude='.git/FETCH_HEAD' \
-  --exclude='.git/HEAD' \
-  --exclude='.git/index' \
-  --exclude='.git/logs/' \
-  --exclude='*.log' \
-  --exclude='/tmp/' \
-  --exclude='*.tmp' \
-  --exclude='*.swp' \
-  --exclude='*.swo' \
-  --exclude='*~' \
-  --exclude='*.bak' \
-  --exclude='core' \
-  --exclude='core.*' \
-  --exclude='dynamo_latest/*.html' \
-  --exclude='dynamo_ci/*.html' \
-  --exclude='commits/*.html' \
-  "$SOURCE_DIR/" "$DEST_DIR/" 2>&1 | tee -a "$LOG_FILE"
+eval "$RSYNC_CMD" $EXCLUDE_OPTS "$SOURCE_DIR/" "$DEST_DIR/" 2>&1 | tee -a "$LOG_FILE"
 
 EXIT_CODE=${PIPESTATUS[0]}
-fi  # End of BACKUP_ONLY check
+fi  # End of rsync section
 
-if [ "$BACKUP_ONLY" = true ] || [ $EXIT_CODE -eq 0 ]; then
-  if [ "$BACKUP_ONLY" = false ]; then
+if [ "$SKIP_RSYNC" = true ] || [ $EXIT_CODE -eq 0 ]; then
+  if [ "$SKIP_RSYNC" = false ]; then
     echo "Backup completed successfully!"
     echo "$(date '+%Y-%m-%d %H:%M:%S') - Backup completed successfully" >> "$LOG_FILE"
 
@@ -458,7 +442,7 @@ if [ "$BACKUP_ONLY" = true ] || [ $EXIT_CODE -eq 0 ]; then
     fi
   fi
 else
-  if [ "$BACKUP_ONLY" = false ]; then
+  if [ "$SKIP_RSYNC" = false ]; then
     echo "Backup failed with exit code $EXIT_CODE"
     echo "$(date '+%Y-%m-%d %H:%M:%S') - Backup failed with exit code $EXIT_CODE" >> "$LOG_FILE"
     exit $EXIT_CODE
@@ -466,7 +450,7 @@ else
 fi
 
 # Show backup size
-if [ "$BACKUP_ONLY" = false ]; then
+if [ "$SKIP_RSYNC" = false ]; then
   echo "Backup statistics:"
   du -sh "$DEST_DIR" 2>/dev/null || echo "Could not calculate backup size"
 fi

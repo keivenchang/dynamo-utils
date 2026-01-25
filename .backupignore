@@ -1,0 +1,52 @@
+# Backup ignore patterns for backup.sh
+# One pattern per line, compatible with rsync --exclude
+
+# Python artifacts
+*.pyc
+__pycache__/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+.venv/
+venv/
+
+# Node.js
+node_modules/
+
+# Build artifacts
+target/
+build/
+dist/
+*.o
+*.so
+*.dylib
+
+# System files
+.DS_Store
+
+# Git internals (keep structure but not objects)
+.git/objects/
+.git/lfs/
+.git/FETCH_HEAD
+.git/HEAD
+.git/index
+.git/logs/
+
+# Logs and temporary files
+*.log
+/tmp/
+*.tmp
+*.swp
+*.swo
+*~
+*.bak
+core
+core.*
+
+# Generated HTML files
+dynamo_latest/*.html
+dynamo_ci/*.html
+commits/*.html
+users/*/index.html
+stats/index.html
