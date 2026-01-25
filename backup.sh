@@ -328,19 +328,20 @@ if [ "$SKIP_RSYNC" = true ] || [ $EXIT_CODE -eq 0 ] || [ $EXIT_CODE -eq 23 ]; th
             echo "  - $dirname"
           done
           set -x
-          : tar -czf "$BACKUP_HISTORY_ROOT/${backup_date}.tgz.working" -C "$BACKUP_HISTORY_ROOT" $DATE_DIRS
+          : tar -I pigz -cf "$BACKUP_HISTORY_ROOT/${backup_date}.tgz.working" -C "$BACKUP_HISTORY_ROOT" $DATE_DIRS
           : mv "$BACKUP_HISTORY_ROOT/${backup_date}.tgz.working" "$BACKUP_HISTORY_ROOT/${backup_date}.tgz"
           : rm -rf $DATE_DIRS
           { set +x; } 2>/dev/null
         else
           # Compress to .tgz.working first, then move to final name when complete
-          echo "Compressing $DIR_COUNT directories for date $backup_date:"
+          # Use pigz (parallel gzip) for faster compression
+          echo "Compressing $DIR_COUNT directories for date $backup_date (using pigz for parallel compression):"
           echo "$DATE_DIRS" | while read dirname; do
             echo "  - $dirname"
           done
           
           set -x
-          tar -czf "$BACKUP_HISTORY_ROOT/${backup_date}.tgz.working" -C "$BACKUP_HISTORY_ROOT" $DATE_DIRS
+          tar -I pigz -cf "$BACKUP_HISTORY_ROOT/${backup_date}.tgz.working" -C "$BACKUP_HISTORY_ROOT" $DATE_DIRS
           TAR_EXIT=$?
           { set +x; } 2>/dev/null
           
@@ -389,13 +390,13 @@ if [ "$SKIP_RSYNC" = true ] || [ $EXIT_CODE -eq 0 ] || [ $EXIT_CODE -eq 23 ]; th
           if [ "$DRY_RUN" = true ]; then
             echo "[DRY RUN] Would uncompress: $archive ($archive_size)"
             set -x
-            : tar -xzf "$archive" -C "$BACKUP_HISTORY_ROOT"
+            : tar -I pigz -xf "$archive" -C "$BACKUP_HISTORY_ROOT"
             : rm -f "$archive"
             { set +x; } 2>/dev/null
           else
-            echo "Uncompressing: $archive ($archive_size)"
+            echo "Uncompressing: $archive ($archive_size) (using pigz for parallel decompression)"
             set -x
-            tar -xzf "$archive" -C "$BACKUP_HISTORY_ROOT"
+            tar -I pigz -xf "$archive" -C "$BACKUP_HISTORY_ROOT"
             TAR_EXIT=$?
             { set +x; } 2>/dev/null
             

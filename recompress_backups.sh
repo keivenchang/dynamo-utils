@@ -134,8 +134,8 @@ for archive in "$BACKUP_HISTORY_DIR"/*.tgz; do
         echo "  [DRY RUN] Would extract, recompress with exclusions, and replace"
         set -x
         : mkdir -p "/tmp/recompress_$$"
-        : tar -xzf "$archive" -C "/tmp/recompress_$$"
-        : tar -czf "$archive.new" -C "/tmp/recompress_$$" $TAR_EXCLUDE_OPTS .
+        : tar -I pigz -xf "$archive" -C "/tmp/recompress_$$"
+        : tar -I pigz -cf "$archive.new" -C "/tmp/recompress_$$" $TAR_EXCLUDE_OPTS .
         : mv "$archive.new" "$archive"
         : rm -rf "/tmp/recompress_$$"
         { set +x; } 2>/dev/null
@@ -145,9 +145,9 @@ for archive in "$BACKUP_HISTORY_DIR"/*.tgz; do
         TEMP_DIR="/tmp/recompress_$$_${ARCHIVE_COUNT}"
         mkdir -p "$TEMP_DIR"
         
-        # Extract archive
+        # Extract archive (using pigz for parallel decompression)
         set -x
-        tar -xzf "$archive" -C "$TEMP_DIR"
+        tar -I pigz -xf "$archive" -C "$TEMP_DIR"
         EXTRACT_EXIT=$?
         { set +x; } 2>/dev/null
         
@@ -158,9 +158,9 @@ for archive in "$BACKUP_HISTORY_DIR"/*.tgz; do
             continue
         fi
         
-        # Recompress with exclusions
+        # Recompress with exclusions (using pigz for parallel compression)
         set -x
-        eval "tar -czf \"$archive.new\" -C \"$TEMP_DIR\" $TAR_EXCLUDE_OPTS ."
+        eval "tar -I pigz -cf \"$archive.new\" -C \"$TEMP_DIR\" $TAR_EXCLUDE_OPTS ."
         TAR_EXIT=$?
         { set +x; } 2>/dev/null
         
