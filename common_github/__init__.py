@@ -1405,6 +1405,9 @@ class GitHubAPIClient:
         # pr_comments now via api module
         from .api.pr_comments_cached import get_cache_sizes as get_pr_comments_cache_sizes
         pr_comments_mem, _pr_comments_disk_before = get_pr_comments_cache_sizes()
+        # pr_details now via api module
+        from .api.pr_details_cached import get_cache_sizes as get_pr_details_cache_sizes
+        pr_details_mem, _pr_details_disk_before = get_pr_details_cache_sizes()
         from .api.pr_info_cached import get_cache_sizes as get_pr_info_cache_sizes
         pr_info_mem, _pr_info_disk_before = get_pr_info_cache_sizes()
         # pr_reviews now via api module  
@@ -1432,6 +1435,8 @@ class GitHubAPIClient:
             "pr_checks_mem": pr_checks_mem,
             "pr_comments_disk": pr_comments_mem,
             "pr_comments_mem": pr_comments_mem,
+            "pull_request_disk": pr_details_mem,
+            "pull_request_mem": pr_details_mem,
             "pr_info_disk": pr_info_mem,
             "pr_info_mem": pr_info_mem,
             "pr_reviews_disk": pr_reviews_mem,
@@ -3594,15 +3599,14 @@ class GitHubAPIClient:
             return pr
 
         # Check cache (handles both memory + disk)
+        # Stats tracking now automatic via CachedResourceBase
         from .api import pr_info_cached
-        cached_entry = pr_info_cached.get_if_matches_updated_at(key, updated_at=upd)
+        cached_entry = pr_info_cached.get_if_matches_updated_at(self, key=key, updated_at=upd)
         if cached_entry is not None:
             pr = _hydrate_entry(cached_entry)
             if pr is not None:
-                self._cache_hit("pr_info")
                 return _maybe_backfill_and_persist(pr)
         
-        self._cache_miss("pr_info")
         return None
 
     def _save_pr_info_cache(
@@ -3620,7 +3624,7 @@ class GitHubAPIClient:
             return
         prd = self._pr_info_full_to_dict(pr)
         from .api import pr_info_cached
-        pr_info_cached.put(key, updated_at=upd, pr_dict=prd)
+        pr_info_cached.put(self, key=key, updated_at=upd, pr_dict=prd)
 
 
 
@@ -4219,13 +4223,14 @@ class GitHubAPIClient:
         except (ValueError, TypeError):
             return None
 
-    def get_pr_details(self, owner: str, repo: str, pr_number: int) -> Optional[dict]:
-        """Get full PR details including mergeable status.
+    def get_pr_details(self, owner: str, repo: str, pr_number: int, ttl_s: int = 300) -> Optional[dict]:
+        """Get full PR details including mergeable status (cached).
 
         Args:
             owner: Repository owner
             repo: Repository name
             pr_number: Pull request number
+            ttl_s: Cache TTL in seconds (default 5 minutes for open PRs, 360 days for merged)
 
         Returns:
             PR details as dict, or None if request failed
@@ -4244,11 +4249,8 @@ class GitHubAPIClient:
                 "updated_at": "2025-11-20T17:05:58Z"
             }
         """
-        endpoint = f"/repos/{owner}/{repo}/pulls/{pr_number}"
-        try:
-            return self.get(endpoint)
-        except AttributeError:  # .get() on non-dict
-            return None
+        from .api.pr_details_cached import get_pr_details_cached
+        return get_pr_details_cached(self, owner=owner, repo=repo, pr_number=pr_number, ttl_s=ttl_s)
 
 
     def count_unresolved_conversations(self, owner: str, repo: str, pr_number: int, ttl_s: int = 300) -> int:

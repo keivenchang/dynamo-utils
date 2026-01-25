@@ -30,16 +30,20 @@ Caching strategy:
   - Value: Dict with 'updated_at' (timestamp) and 'pr' (serialized PRInfo object)
   - Invalidation: By 'updated_at' timestamp (if PR unchanged, reuse cache)
 
+TTL Policy:
+  - Semantic versioning: cache is fresh if cached 'updated_at' matches current PR 'updated_at'
+  - No time-based TTL - relies on GitHub's PR update timestamp
+
 Architecture:
   This module follows the common_github/api/ pattern where each API resource
   has its own dedicated cache implementation (private BaseDiskCache subclass)
-  rather than sharing a global cache instance.
+  and exposes a CachedResourceBase subclass for unified statistics tracking.
 """
 from __future__ import annotations
 
 import sys
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple, TYPE_CHECKING
 
 # Ensure imports work from both html_pages/ and parent directory
 _module_dir = Path(__file__).resolve().parent
@@ -50,16 +54,25 @@ if str(_parent_dir.parent) not in sys.path:
     sys.path.insert(0, str(_parent_dir.parent))
 
 from cache.cache_base import BaseDiskCache
+from .base_cached import CachedResourceBase
 
+if TYPE_CHECKING:  # pragma: no cover
+    from .. import GitHubAPIClient
+
+
+TTL_POLICY_DESCRIPTION = "by updated_at timestamp (invalidated when PR changes)"
+
+
+# =============================================================================
+# Cache Implementation (private to this module)
+# =============================================================================
 
 class _PRInfoCache(BaseDiskCache):
     """Private cache for enriched PR information.
     
-    Stores full PRInfo objects keyed by (owner, repo, pr_number, updated_at).
+    Stores full PRInfo objects keyed by (owner, repo, pr_number).
     The updated_at serves as a natural cache invalidation key - if the PR
     hasn't been updated since we cached it, we can reuse the cached enrichment.
-    
-    Stats (hit/miss/write) are tracked automatically by BaseDiskCache.
     """
     
     _SCHEMA_VERSION = 1
@@ -80,22 +93,19 @@ class _PRInfoCache(BaseDiskCache):
         with self._mu:
             self._load_once()
             items = self._get_items()
-            ent = items.get(key)  # Don't use _check_item() - we'll track stats manually
+            ent = items.get(key)
             
             if not isinstance(ent, dict):
-                self.stats.miss += 1
                 return None
             
             cached_updated_at = str(ent.get("updated_at", "") or "").strip()
             if cached_updated_at == str(updated_at or "").strip():
                 pr_dict = ent.get("pr")
                 if isinstance(pr_dict, dict):
-                    self.stats.hit += 1
                     # IMPORTANT: callers expect the full entry dict so they can hydrate from ent["pr"].
                     return ent
             
             # Entry exists but updated_at doesn't match - this is a miss
-            self.stats.miss += 1
             return None
     
     def put(self, key: str, updated_at: str, pr_dict: Dict[str, Any]) -> None:
@@ -112,7 +122,7 @@ class _PRInfoCache(BaseDiskCache):
                 "updated_at": updated_at,
                 "pr": pr_dict,
             }
-            self._set_item(key, entry)  # Automatically tracks write
+            self._set_item(key, entry)
             self._persist()
 
 
@@ -130,21 +140,111 @@ def _get_cache_file() -> Path:
 _CACHE = _PRInfoCache(cache_file=_get_cache_file())
 
 
+# =============================================================================
+# Public API using CachedResourceBase
+# =============================================================================
+
+class PRInfoCached(CachedResourceBase[Optional[Dict[str, Any]]]):
+    """Cached resource for enriched PR info with automatic statistics tracking.
+    
+    This wraps the _PRInfoCache to provide consistent statistics tracking
+    through the CachedResourceBase framework.
+    """
+    
+    def __init__(self, api: "GitHubAPIClient", *, updated_at: str):
+        super().__init__(api)
+        self._updated_at = str(updated_at or "").strip()
+    
+    @property
+    def cache_name(self) -> str:
+        return "pr_info"
+    
+    def api_call_format(self) -> str:
+        return "Multiple APIs (PR details + reviews + checks)"
+    
+    def cache_key(self, **kwargs: Any) -> str:
+        owner = str(kwargs["owner"])
+        repo = str(kwargs["repo"])
+        pr_number = int(kwargs["pr_number"])
+        return f"{owner}/{repo}#pr:{pr_number}"
+    
+    def empty_value(self) -> Optional[Dict[str, Any]]:
+        return None
+    
+    def cache_read(self, *, key: str) -> Optional[Dict[str, Any]]:
+        """Read from cache only if updated_at matches."""
+        return _CACHE.get_if_matches_updated_at(key, self._updated_at)
+    
+    def value_from_cache_entry(self, *, entry: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """Extract the full entry (callers expect both 'updated_at' and 'pr' fields)."""
+        # Return the entire entry so callers can access entry["pr"] for hydration
+        return entry
+    
+    def is_cache_entry_fresh(self, *, entry: Dict[str, Any], now: int) -> bool:
+        """Check if cached updated_at matches expected updated_at."""
+        cached_updated_at = str(entry.get("updated_at", "") or "").strip()
+        return cached_updated_at == self._updated_at
+    
+    def cache_write(self, *, key: str, value: Optional[Dict[str, Any]], meta: Dict[str, Any]) -> None:
+        """Write to cache with updated_at timestamp."""
+        if value is None:
+            return
+        pr_dict = value.get("pr") if isinstance(value, dict) else value
+        if not isinstance(pr_dict, dict):
+            return
+        _CACHE.put(key, self._updated_at, pr_dict)
+    
+    def fetch(self, **kwargs: Any) -> Tuple[Optional[Dict[str, Any]], Dict[str, Any]]:
+        """Fetch is not implemented - pr_info enrichment happens in __init__.py."""
+        # This is never called because pr_info fetching/enrichment is complex
+        # and happens inline in __init__.py's get_pr_info methods.
+        # The cache is only used for lookup/storage.
+        return None, {}
+
+
 def get_cache_sizes() -> Tuple[int, int]:
     """Get memory and disk cache sizes for cache statistics.
     
     Returns:
-        Tuple of (memory_size_bytes, disk_size_bytes)
+        Tuple of (memory_count, disk_count_before_run)
     """
     return _CACHE.get_cache_sizes()
 
 
-# Public API for __init__.py to access the cache
-def get_if_matches_updated_at(key: str, updated_at: str) -> Optional[Dict[str, Any]]:
-    """Get cached PR info entry if updated_at matches."""
-    return _CACHE.get_if_matches_updated_at(key, updated_at)
+# Backward-compatible API for __init__.py (these delegate to CachedResourceBase now)
+def get_if_matches_updated_at(api: "GitHubAPIClient", *, key: str, updated_at: str) -> Optional[Dict[str, Any]]:
+    """Get cached PR info entry if updated_at matches.
+    
+    This function wraps CachedResourceBase.get() to maintain backward compatibility
+    with the existing __init__.py code while gaining automatic statistics tracking.
+    """
+    # Extract owner/repo/pr_number from key for CachedResourceBase.get()
+    # Key format: "owner/repo#pr:123"
+    try:
+        parts = key.split("#pr:")
+        if len(parts) != 2:
+            return None
+        owner_repo = parts[0]
+        pr_number = int(parts[1])
+        if "/" not in owner_repo:
+            return None
+        owner, repo = owner_repo.split("/", 1)
+    except (ValueError, IndexError):
+        return None
+    
+    # Use CachedResourceBase.get() for automatic stats tracking
+    cached = PRInfoCached(api, updated_at=updated_at)
+    # Direct cache read to avoid fetch (pr_info enrichment happens in __init__.py)
+    entry = cached.cache_read(key=key)
+    if entry is not None:
+        if cached.is_cache_entry_fresh(entry=entry, now=0):  # now unused for updated_at comparison
+            api._cache_hit(cached.cache_name)
+            return entry
+    api._cache_miss(cached.cache_name)
+    return None
 
 
-def put(key: str, updated_at: str, pr_dict: Dict[str, Any]) -> None:
-    """Store PR info."""
+def put(api: "GitHubAPIClient", *, key: str, updated_at: str, pr_dict: Dict[str, Any]) -> None:
+    """Store PR info with automatic statistics tracking."""
     _CACHE.put(key, updated_at, pr_dict)
+    api._cache_write("pr_info", entries=1)
