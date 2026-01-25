@@ -3,6 +3,34 @@
 This resource is intentionally implemented via `gh` because:
 - branch protection REST endpoints can 403 without admin perms
 - required-ness lives in GraphQL (merge-box semantics)
+
+Resource:
+  gh pr view {pr_number} --repo {owner}/{repo} --json statusCheckRollup
+
+Example API Response (from gh CLI):
+  {
+    "statusCheckRollup": [
+      {
+        "context": "build",
+        "state": "SUCCESS",
+        "isRequired": true
+      },
+      {
+        "context": "test",
+        "state": "PENDING",
+        "isRequired": true
+      },
+      {
+        "context": "lint",
+        "state": "SUCCESS",
+        "isRequired": false
+      }
+    ]
+  }
+
+Cached Fields:
+  - Set of required check context names (e.g., {"build", "test"})
+  - Extracted from statusCheckRollup where isRequired=true
 """
 
 from __future__ import annotations
@@ -13,10 +41,11 @@ import sys
 import time
 import traceback
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Dict, Optional, Set, Tuple, TYPE_CHECKING
 
+from cache.cache_base import BaseDiskCache
 from .. import GITHUB_API_STATS
-from ..cache_required_checks import REQUIRED_CHECKS_CACHE
 from .base_cached import CachedResourceBase
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -27,6 +56,103 @@ if TYPE_CHECKING:  # pragma: no cover
 TTL_POLICY_DESCRIPTION = (
     "adaptive (<1h=2m, <2h=4m, <4h=30m, <8h=60m, <12h=80m, >=12h=120m); closed/merged: 360d"
 )
+
+
+# =============================================================================
+# Cache Implementation (private to this module)
+# =============================================================================
+
+class _RequiredChecksCache(BaseDiskCache):
+    """Cache for required status checks from branch protection."""
+    
+    _SCHEMA_VERSION = 1
+    
+    def __init__(self, *, cache_file: Path):
+        super().__init__(cache_file=cache_file, schema_version=self._SCHEMA_VERSION)
+    
+    def get_if_valid(self, key: str, *, cache_only_mode: bool = False, check_ttl: bool = True) -> Optional[Dict[str, Any]]:
+        """Get cached required checks if valid."""
+        with self._mu:
+            self._load_once()
+            ent = self._check_item(key)
+            
+            if not isinstance(ent, dict):
+                return None
+            
+            # Extract value (stored as list on disk, return as set)
+            val = ent.get("val")
+            if isinstance(val, list):
+                val_set = set(val)
+            elif isinstance(val, set):
+                val_set = val
+            else:
+                return None
+            
+            # In cache_only_mode, always return cached value
+            if cache_only_mode or not check_ttl:
+                return {
+                    "val": val_set,
+                    "ok": ent.get("ok", True),
+                    "pr_state": ent.get("pr_state", "open"),
+                    "pr_updated_at_epoch": ent.get("pr_updated_at_epoch"),
+                }
+            
+            # Otherwise, check if entry is still fresh
+            ts = int(ent.get("ts", 0) or 0)
+            if ts:
+                return {
+                    "val": val_set,
+                    "ok": ent.get("ok", True),
+                    "pr_state": ent.get("pr_state", "open"),
+                    "pr_updated_at_epoch": ent.get("pr_updated_at_epoch"),
+                    "ts": ts,
+                }
+            
+            return None
+    
+    def put(
+        self,
+        key: str,
+        val: Set[str],
+        *,
+        ok: bool = True,
+        pr_state: str = "open",
+        pr_updated_at_epoch: Optional[int] = None,
+    ) -> None:
+        """Store required checks."""
+        now = int(time.time())
+        with self._mu:
+            self._load_once()
+            entry = {
+                "ts": now,
+                "val": list(val) if isinstance(val, set) else val,
+                "ok": ok,
+                "pr_state": pr_state,
+                "pr_updated_at_epoch": pr_updated_at_epoch,
+            }
+            self._set_item(key, entry)
+            self._persist()
+
+
+def _get_cache_file() -> Path:
+    """Get cache file path."""
+    try:
+        _module_dir = Path(__file__).resolve().parent.parent
+        if str(_module_dir) not in sys.path:
+            sys.path.insert(0, str(_module_dir))
+        import common
+        return common.dynamo_utils_cache_dir() / "required_checks.json"
+    except ImportError:
+        return Path.home() / ".cache" / "dynamo-utils" / "required_checks.json"
+
+
+# Module-level singleton cache instance (private)
+_CACHE = _RequiredChecksCache(cache_file=_get_cache_file())
+
+
+# =============================================================================
+# Public API
+# =============================================================================
 
 
 class RequiredChecksCached(CachedResourceBase[Set[str]]):
@@ -68,7 +194,7 @@ class RequiredChecksCached(CachedResourceBase[Set[str]]):
         return set()
 
     def cache_read(self, *, key: str) -> Optional[Dict[str, Any]]:
-        return REQUIRED_CHECKS_CACHE.get_if_valid(key, cache_only_mode=self.api.cache_only_mode, check_ttl=True)
+        return _CACHE.get_if_valid(key, cache_only_mode=self.api.cache_only_mode, check_ttl=True)
 
     def value_from_cache_entry(self, *, entry: Dict[str, Any]) -> Set[str]:
         val = entry.get("val", set())
@@ -112,7 +238,7 @@ class RequiredChecksCached(CachedResourceBase[Set[str]]):
         return (int(now) - int(ts)) <= int(ttl_s)
 
     def cache_write(self, *, key: str, value: Set[str], meta: Dict[str, Any]) -> None:
-        REQUIRED_CHECKS_CACHE.put(
+        _CACHE.put(
             key,
             set(value),
             ok=bool(meta.get("ok", True)),
@@ -345,4 +471,9 @@ query($owner:String!,$name:String!,$number:Int!,$prid:ID!,$after:String) {
 def get_required_checks_cached(api: "GitHubAPIClient", *, owner: str, repo: str, pr_number: int) -> Set[str]:
     """Back-compat wrapper."""
     return RequiredChecksCached(api).get(owner=owner, repo=repo, pr_number=pr_number)
+
+
+def get_cache_sizes() -> Tuple[int, int]:
+    """Get cache sizes for stats reporting (memory count, initial disk count)."""
+    return _CACHE.get_cache_sizes()
 

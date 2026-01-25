@@ -6,8 +6,33 @@ there is no matching OPEN PR found in the repo-wide pulls list.
 API:
   - GET /repos/{owner}/{repo}/pulls?head={owner}:{branch}&state=all&per_page=30
   - If branch is in "<fork_owner>/<branch>" form, also try head={fork_owner}:{branch}
+
+Example API Response:
+  [
+    {
+      "number": 1234,
+      "title": "Feature branch PR",
+      "state": "closed",
+      "head": {
+        "ref": "feature-branch",
+        "sha": "abc123..."
+      },
+      "base": {
+        "ref": "main"
+      },
+      "updated_at": "2026-01-24T08:00:00Z",
+      "merged": true,
+      "merged_at": "2026-01-24T08:00:00Z"
+    }
+  ]
+
+Cached Fields:
+  - Full PR list for the branch (typically empty or single closed/merged PR)
+  - Used to find PR number when only branch name is known
+
 Cache:
-  - PR_BRANCH_CACHE (disk + memory)
+  - Internal BaseDiskCache instance (disk + memory)
+
 TTL policy:
   - If cached list is empty -> no_pr_ttl_s
   - If cached list is non-empty -> min(closed_ttl_s, 360d) (matches existing behavior)
@@ -15,10 +40,12 @@ TTL policy:
 
 from __future__ import annotations
 
+import sys
 import time
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING
 
-from ..cache_pr_branch import PR_BRANCH_CACHE
+from cache.cache_base import BaseDiskCache
 from .base_cached import CachedResourceBase
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -28,6 +55,69 @@ if TYPE_CHECKING:  # pragma: no cover
 # Keep TTL documentation next to the actual TTL implementation (`is_cache_entry_fresh`).
 TTL_POLICY_DESCRIPTION = "empty: no_pr_ttl_s; non-empty: min(closed_ttl_s, 360d)"
 
+
+# =============================================================================
+# Cache Implementation (private to this module)
+# =============================================================================
+
+class _PRBranchCache(BaseDiskCache):
+    """Cache for PR branch lookups with TTL-based invalidation."""
+    
+    _SCHEMA_VERSION = 1
+    
+    def __init__(self, *, cache_file: Path):
+        super().__init__(cache_file=cache_file, schema_version=self._SCHEMA_VERSION)
+    
+    def get_entry_dict(
+        self,
+        *,
+        owner: str,
+        repo: str,
+        branch: str,
+    ) -> Optional[Dict[str, Any]]:
+        """Get raw cache entry dict without TTL filtering."""
+        cache_key = f"{owner}/{repo}:{branch}"
+        with self._mu:
+            self._load_once()
+            ent = self._check_item(cache_key)
+            return ent if isinstance(ent, dict) else None
+    
+    def put(
+        self,
+        *,
+        owner: str,
+        repo: str,
+        branch: str,
+        value: Dict[str, Any],
+    ) -> None:
+        """Store PR branch data."""
+        cache_key = f"{owner}/{repo}:{branch}"
+        
+        with self._mu:
+            self._load_once()
+            self._set_item(cache_key, value)
+            self._persist()
+
+
+def _get_cache_file() -> Path:
+    """Get cache file path."""
+    try:
+        _module_dir = Path(__file__).resolve().parent.parent
+        if str(_module_dir) not in sys.path:
+            sys.path.insert(0, str(_module_dir))
+        import common
+        return common.dynamo_utils_cache_dir() / "pr_branches.json"
+    except ImportError:
+        return Path.home() / ".cache" / "dynamo-utils" / "pr_branches.json"
+
+
+# Module-level singleton cache instance (private)
+_CACHE = _PRBranchCache(cache_file=_get_cache_file())
+
+
+# =============================================================================
+# Public API
+# =============================================================================
 
 class PRBranchCached(CachedResourceBase[List[Dict[str, Any]]]):
     def __init__(
@@ -81,7 +171,7 @@ class PRBranchCached(CachedResourceBase[List[Dict[str, Any]]]):
             owner, repo = owner_repo.split("/", 1)
         except ValueError:
             return None
-        return PR_BRANCH_CACHE.get_entry_dict(owner=owner, repo=repo, branch=branch)
+        return _CACHE.get_entry_dict(owner=owner, repo=repo, branch=branch)
 
     def value_from_cache_entry(self, *, entry: Dict[str, Any]) -> List[Dict[str, Any]]:
         prs = entry.get("prs")
@@ -112,7 +202,7 @@ class PRBranchCached(CachedResourceBase[List[Dict[str, Any]]]):
         except ValueError:
             return
         ts = int(meta.get("ts") or 0)
-        PR_BRANCH_CACHE.put(owner=owner, repo=repo, branch=branch, value={"ts": ts, "prs": value})
+        _CACHE.put(owner=owner, repo=repo, branch=branch, value={"ts": ts, "prs": value})
 
     def fetch(self, **kwargs: Any) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
         owner = str(kwargs["owner"])
@@ -177,3 +267,7 @@ def get_pr_branch_cached(
         refresh=bool(refresh),
     ).get(owner=owner, repo=repo, branch=branch)
 
+
+def get_cache_sizes() -> Tuple[int, int]:
+    """Get cache sizes for stats reporting (memory count, initial disk count)."""
+    return _CACHE.get_cache_sizes()

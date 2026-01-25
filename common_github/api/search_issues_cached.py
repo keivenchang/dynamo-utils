@@ -10,6 +10,10 @@ Caching strategy (preserves existing behavior/stats):
   - disabled flag (mem + disk): if GitHub returns 422 for this repo, disable for 6h
   - results cache (mem + disk): {ts, val: {pr_number: updated_at}}
   - inflight lock: dedupe concurrent identical requests across threads
+
+NOTE: This module uses in-memory dicts + custom disk loading instead of BaseDiskCache
+      due to complex logic (disabled flags, chunking, retry behavior). Could be refactored
+      to use BaseDiskCache in the future for consistency.
 """
 
 from __future__ import annotations

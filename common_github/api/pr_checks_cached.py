@@ -5,8 +5,86 @@ This is the heavy hitter for dashboards: it builds `GHPRCheckRow` entries from a
   - status contexts: GET /repos/{owner}/{repo}/commits/{sha}/status
   - (best-effort) workflow metadata: GET /repos/{owner}/{repo}/actions/runs/{run_id}
 
+Example API Response (check-runs):
+  {
+    "total_count": 3,
+    "check_runs": [
+      {
+        "id": 12345678,
+        "name": "build",
+        "status": "completed",
+        "conclusion": "success",
+        "started_at": "2026-01-24T10:00:00Z",
+        "completed_at": "2026-01-24T10:05:00Z",
+        "html_url": "https://github.com/owner/repo/actions/runs/98765/jobs/12345678",
+        "check_suite": {
+          "id": 87654321
+        }
+      }
+    ]
+  }
+
+Example API Response (status):
+  {
+    "state": "success",
+    "statuses": [
+      {
+        "id": 11111111,
+        "context": "ci/circleci",
+        "state": "success",
+        "description": "All tests passed",
+        "target_url": "https://circleci.com/gh/owner/repo/123",
+        "created_at": "2026-01-24T10:00:00Z",
+        "updated_at": "2026-01-24T10:05:00Z"
+      }
+    ]
+  }
+
+Cached Fields:
+  - GHPRCheckRow objects combining check-runs + statuses
+  - Fields: name, status, conclusion, started_at, completed_at, html_url, workflow_name
+
+Example API Response (check-runs):
+  {
+    "total_count": 3,
+    "check_runs": [
+      {
+        "id": 12345678,
+        "name": "build",
+        "status": "completed",
+        "conclusion": "success",
+        "started_at": "2026-01-24T10:00:00Z",
+        "completed_at": "2026-01-24T10:05:00Z",
+        "html_url": "https://github.com/owner/repo/actions/runs/98765/jobs/12345678",
+        "check_suite": {
+          "id": 87654321
+        }
+      }
+    ]
+  }
+
+Example API Response (status):
+  {
+    "state": "success",
+    "statuses": [
+      {
+        "id": 11111111,
+        "context": "ci/circleci",
+        "state": "success",
+        "description": "All tests passed",
+        "target_url": "https://circleci.com/gh/owner/repo/123",
+        "created_at": "2026-01-24T10:00:00Z",
+        "updated_at": "2026-01-24T10:05:00Z"
+      }
+    ]
+  }
+
+Cached Fields:
+  - GHPRCheckRow objects combining check-runs + statuses
+  - Fields: name, status, conclusion, started_at, completed_at, html_url, workflow_name
+
 Owns:
-  - caching (PR_CHECKS_CACHE) + TTL policy (adaptive based on PR updated_at age)
+  - caching (internal BaseDiskCache) + TTL policy (adaptive based on PR updated_at age)
   - ETag/304 handling
   - consistent cache stats attribution
 """
@@ -14,12 +92,15 @@ Owns:
 from __future__ import annotations
 
 import json
+import sys
+import time
 from dataclasses import replace
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple, TYPE_CHECKING
 
+from cache.cache_base import BaseDiskCache
 from .. import GITHUB_API_STATS
-from ..cache_pr_checks import PR_CHECKS_CACHE
 from ..pr_checks_types import (
     GHPRCheckRow,
     GHPRChecksCacheEntry,
@@ -30,6 +111,96 @@ from .base_cached import CachedResourceBase
 
 if TYPE_CHECKING:  # pragma: no cover
     from .. import GitHubAPIClient
+
+
+# =============================================================================
+# Cache Implementation (private to this module)
+# =============================================================================
+
+class _PRChecksCache(BaseDiskCache):
+    """Cache for PR check runs and statuses."""
+    
+    _SCHEMA_VERSION = 1
+    
+    def __init__(self, *, cache_file: Path):
+        super().__init__(cache_file=cache_file, schema_version=self._SCHEMA_VERSION)
+    
+    def _load_once(self) -> None:
+        """Load cache with migration from old format."""
+        if self._loaded:
+            return
+        self._loaded = True
+
+        if not self._cache_file.exists():
+            self._data = self._create_empty_cache()
+            self._initial_disk_count = 0
+            return
+
+        try:
+            data = json.loads(self._cache_file.read_text() or "{}")
+        except Exception:
+            data = {}
+
+        if not isinstance(data, dict):
+            data = {}
+
+        # Migration: Check for any top-level entries
+        items_dict = data.get("items")
+        if not isinstance(items_dict, dict):
+            items_dict = {}
+        
+        migrated_count = 0
+        for key, value in list(data.items()):
+            if key not in ["version", "items"]:
+                items_dict[key] = value
+                migrated_count += 1
+        
+        if migrated_count > 0:
+            data = {
+                "version": self._schema_version,
+                "items": items_dict
+            }
+            self._dirty = True
+        else:
+            data["items"] = items_dict
+            data["version"] = self._schema_version
+
+        self._initial_disk_count = len(data.get("items", {}))
+        self._data = data
+    
+    def get_entry_dict(self, key: str) -> Optional[Dict[str, Any]]:
+        """Get raw cache entry dict."""
+        with self._mu:
+            self._load_once()
+            return self._check_item(key)
+    
+    def put_entry_dict(self, key: str, entry_dict: Dict[str, Any]) -> None:
+        """Store entry dict."""
+        with self._mu:
+            self._load_once()
+            self._set_item(key, entry_dict)
+            self._persist()
+
+
+def _get_cache_file() -> Path:
+    """Get cache file path."""
+    try:
+        _module_dir = Path(__file__).resolve().parent.parent
+        if str(_module_dir) not in sys.path:
+            sys.path.insert(0, str(_module_dir))
+        import common
+        return common.dynamo_utils_cache_dir() / "pr_checks.json"
+    except ImportError:
+        return Path.home() / ".cache" / "dynamo-utils" / "pr_checks.json"
+
+
+# Module-level singleton cache instance (private)
+_CACHE = _PRChecksCache(cache_file=_get_cache_file())
+
+
+# =============================================================================
+# Public API
+# =============================================================================
 
 
 # Keep TTL documentation next to the actual TTL implementation (`api._adaptive_ttl_s` usage).
@@ -96,7 +267,7 @@ class PRChecksCached(CachedResourceBase[List[GHPRCheckRow]]):
     # The base class helpers aren't expressive enough for the ETag/304 fast-paths,
     # so we keep this resource self-contained and override get().
     def cache_read(self, *, key: str) -> Optional[Dict[str, Any]]:
-        return PR_CHECKS_CACHE.get_entry_dict(key)
+        return _CACHE.get_entry_dict(key)
 
     def value_from_cache_entry(self, *, entry: Dict[str, Any]) -> List[GHPRCheckRow]:
         # For this resource, we always deserialize strictly.
@@ -130,12 +301,12 @@ class PRChecksCached(CachedResourceBase[List[GHPRCheckRow]]):
         CACHE_VER = 7
         MIN_CACHE_VER = 2
 
-        cached_entry_dict = PR_CHECKS_CACHE.get_entry_dict(key)
+        cached_entry_dict = _CACHE.get_entry_dict(key)
         if cached_entry_dict is not None:
             try:
                 ent = GHPRChecksCacheEntry.from_disk_dict_strict(
                     d=cached_entry_dict,
-                    cache_file=PR_CHECKS_CACHE._cache_file,
+                    cache_file=_CACHE._cache_file,
                     entry_key=key,
                 )
                 ts = int(ent.ts)
@@ -155,7 +326,7 @@ class PRChecksCached(CachedResourceBase[List[GHPRCheckRow]]):
             try:
                 ent2 = GHPRChecksCacheEntry.from_disk_dict_strict(
                     d=cached_entry_dict,
-                    cache_file=PR_CHECKS_CACHE._cache_file,
+                    cache_file=_CACHE._cache_file,
                     entry_key=key,
                 )
                 stale_check_runs_etag = str(ent2.check_runs_etag or "")
@@ -196,7 +367,7 @@ class PRChecksCached(CachedResourceBase[List[GHPRCheckRow]]):
             if cached_entry_dict is not None:
                 ent3 = GHPRChecksCacheEntry.from_disk_dict_strict(
                     d=cached_entry_dict,
-                    cache_file=PR_CHECKS_CACHE._cache_file,
+                    cache_file=_CACHE._cache_file,
                     entry_key=key,
                 )
                 refreshed_entry = GHPRChecksCacheEntry(
@@ -207,7 +378,7 @@ class PRChecksCached(CachedResourceBase[List[GHPRCheckRow]]):
                     status_etag=ent3.status_etag,
                     incomplete=ent3.incomplete,
                 )
-                PR_CHECKS_CACHE.put_entry_dict(key, refreshed_entry.to_disk_dict())
+                _CACHE.put_entry_dict(key, refreshed_entry.to_disk_dict())
                 self.api._cache_write(cn, entries=1)
                 return _apply_required_overlay(ent3.rows, required=self._required_checks)
             return []
@@ -377,7 +548,7 @@ class PRChecksCached(CachedResourceBase[List[GHPRCheckRow]]):
             status_etag=str(new_status_etag or ""),
             incomplete=bool(incomplete),
         )
-        PR_CHECKS_CACHE.put_entry_dict(key, entry.to_disk_dict())
+        _CACHE.put_entry_dict(key, entry.to_disk_dict())
         self.api._cache_write(cn, entries=1)
         return rows
 
@@ -459,3 +630,39 @@ def get_pr_checks_rows_cached(
         skip_fetch=bool(skip_fetch),
     ).get(owner=owner, repo=repo, pr_number=int(pr_number), commit_sha=commit_sha, head_sha=head_sha)
 
+
+
+def get_cache_sizes() -> Tuple[int, int]:
+    """Get cache sizes for stats reporting (memory count, initial disk count)."""
+    return _CACHE.get_cache_sizes()
+
+
+def get_entry_dict(key: str) -> Optional[Dict[str, Any]]:
+    """Get entry dict from cache (for legacy __init__.py usage).
+    
+    Args:
+        key: Cache key
+        
+    Returns:
+        Entry dict or None if not found
+    """
+    return _CACHE.get_entry_dict(key)
+
+
+def get_cache_file() -> Path:
+    """Get cache file path (for legacy __init__.py usage).
+    
+    Returns:
+        Path to cache file
+    """
+    return _CACHE._cache_file
+
+
+def put_entry_dict(key: str, entry_dict: Dict[str, Any]) -> None:
+    """Store entry dict in cache (for legacy __init__.py usage).
+    
+    Args:
+        key: Cache key
+        entry_dict: Entry dictionary to store
+    """
+    _CACHE.put_entry_dict(key, entry_dict)

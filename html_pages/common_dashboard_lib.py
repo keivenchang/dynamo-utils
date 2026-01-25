@@ -107,7 +107,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple, TYPE_CHECKING
 from datetime import datetime, timezone
 
 from common_github import GitHubAPIClient, classify_ci_kind, GITHUB_CACHE_STATS, GITHUB_API_STATS, COMMIT_HISTORY_PERF_STATS
-from common_github.api.merge_dates_cached import TTL_POLICY_DESCRIPTION as MERGE_DATES_TTL_POLICY_DESCRIPTION
+# MERGE_DATES_TTL_POLICY removed - merge dates now extracted from pulls_list (see pr_head_sha_cached.py for details)
 from common_github.api.pr_branch_cached import TTL_POLICY_DESCRIPTION as PR_BRANCH_TTL_POLICY_DESCRIPTION
 from common_github.api.pr_checks_cached import TTL_POLICY_DESCRIPTION as PR_CHECKS_TTL_POLICY_DESCRIPTION
 from common_github.api.pr_comments_cached import TTL_POLICY_DESCRIPTION as PR_COMMENTS_TTL_POLICY_DESCRIPTION
@@ -3716,7 +3716,7 @@ def github_api_stats_rows(
             "job_log": "∞ (immutable, no TTL check)",
             "raw_log_text": f"{_format_ttl_duration(DEFAULT_RAW_LOG_TEXT_TTL_S)} (immutable once completed)",
             "required_checks": REQUIRED_CHECKS_TTL_POLICY_DESCRIPTION,
-            "merge_dates": MERGE_DATES_TTL_POLICY_DESCRIPTION,
+            "merge_dates": "extracted from pulls_list (merged_at field), immutable after merge",
             "commit_history": "varies",
             "commit_history_snippets": "365d (immutable)",
             "pytest_timings": "varies",

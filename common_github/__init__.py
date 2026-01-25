@@ -75,22 +75,22 @@ from common import (
 )
 
 # Cache modules - GitHub API caches now in common_github/
-from .cache_merge_dates import MERGE_DATES_CACHE
-from .cache_pulls_list import PULLS_LIST_CACHE
-from .cache_pr_branch import PR_BRANCH_CACHE
-from .cache_required_checks import REQUIRED_CHECKS_CACHE
-from .cache_pr_checks import PR_CHECKS_CACHE
-from .cache_pr_info import PR_INFO_CACHE, PR_HEAD_SHA_CACHE
+# MERGE_DATES_CACHE removed - use pr_dict.get("merged_at") from pulls_list or get_pr_details
+# PULLS_LIST_CACHE now private to api/pulls_list_cached.py
+# PR_BRANCH_CACHE now private to api/pr_branch_cached.py
+# REQUIRED_CHECKS_CACHE now private to api/required_checks_cached.py
+# PR_CHECKS_CACHE now private to api/pr_checks_cached.py
+# PR_INFO_CACHE now private to api/pr_info_cached.py
+# PR_HEAD_SHA_CACHE now private to api/pr_head_sha_cached.py
 from cache.cache_job_log import JOB_LOG_CACHE
 from cache.cache_duration import DURATION_CACHE
-from .cache_pr_comments import PR_COMMENTS_CACHE
-from .cache_pr_reviews import PR_REVIEWS_CACHE
-from .cache_actions_jobs import ACTIONS_JOBS_CACHE
+# PR_COMMENTS_CACHE now private to api/pr_comments_cached.py
+# PR_REVIEWS_CACHE now private to api/pr_reviews_cached.py
+# ACTIONS_JOBS_CACHE now private to api/actions_jobs_by_runid_cached.py
 
 # Cached-resource facades (kept at module scope when safe: no import cycles)
 from .api.pr_comments_cached import count_unresolved_conversations_cached
 from .api.pr_head_sha_cached import get_pr_head_sha_cached
-from .api.merge_dates_cached import get_cached_pr_merge_dates_cached
 from .pr_checks_types import (
     GHPRCheckRow,
     GHPRChecksCacheEntry,
@@ -1396,13 +1396,28 @@ class GitHubAPIClient:
         # For dashboard stats we want "what's on disk now" (post-run), so we report disk_count
         # using the current in-memory item count (which reflects what was persisted).
         job_log_mem, _job_log_disk_before = JOB_LOG_CACHE.get_cache_sizes()
-        pr_branch_mem, _pr_branch_disk_before = PR_BRANCH_CACHE.get_cache_sizes()
-        pr_checks_mem, _pr_checks_disk_before = PR_CHECKS_CACHE.get_cache_sizes()
-        pr_comments_mem, _pr_comments_disk_before = PR_COMMENTS_CACHE.get_cache_sizes()
-        pr_info_mem, _pr_info_disk_before = PR_INFO_CACHE.get_cache_sizes()
-        pr_reviews_mem, _pr_reviews_disk_before = PR_REVIEWS_CACHE.get_cache_sizes()
-        required_checks_mem, _required_checks_disk_before = REQUIRED_CHECKS_CACHE.get_cache_sizes()
-        actions_jobs_mem, _actions_jobs_disk_before = ACTIONS_JOBS_CACHE.get_cache_sizes()
+        # pr_branch now via api module
+        from .api.pr_branch_cached import get_cache_sizes as get_pr_branch_cache_sizes
+        pr_branch_mem, _pr_branch_disk_before = get_pr_branch_cache_sizes()
+        # pr_checks now via api module
+        from .api.pr_checks_cached import get_cache_sizes as get_pr_checks_cache_sizes
+        pr_checks_mem, _pr_checks_disk_before = get_pr_checks_cache_sizes()
+        # pr_comments now via api module
+        from .api.pr_comments_cached import get_cache_sizes as get_pr_comments_cache_sizes
+        pr_comments_mem, _pr_comments_disk_before = get_pr_comments_cache_sizes()
+        from .api.pr_info_cached import get_cache_sizes as get_pr_info_cache_sizes
+        pr_info_mem, _pr_info_disk_before = get_pr_info_cache_sizes()
+        # pr_reviews now via api module  
+        from .api.pr_reviews_cached import get_cache_sizes as get_pr_reviews_cache_sizes
+        pr_reviews_mem, _pr_reviews_disk_before = get_pr_reviews_cache_sizes()
+        # required_checks now via api module
+        from .api.required_checks_cached import get_cache_sizes as get_required_checks_cache_sizes
+        required_checks_mem, _required_checks_disk_before = get_required_checks_cache_sizes()
+        from .api.actions_jobs_by_runid_cached import get_cache_sizes as get_actions_jobs_cache_sizes
+        actions_jobs_mem, _actions_jobs_disk_before = get_actions_jobs_cache_sizes()
+        # pulls_list now via api module
+        from .api.pulls_list_cached import get_cache_sizes as get_pulls_list_cache_sizes
+        pulls_list_disk_mem, _pulls_list_disk_before = get_pulls_list_cache_sizes()
         
         cache_sizes = {
             "actions_job_details_mem": len(self._actions_job_details_mem_cache),
@@ -1422,6 +1437,7 @@ class GitHubAPIClient:
             "pr_reviews_disk": pr_reviews_mem,
             "pr_reviews_mem": pr_reviews_mem,
             "pulls_list_mem": len(self._pulls_list_mem_cache),
+            "pulls_list_disk": pulls_list_disk_mem,  # Use new BaseDiskCache count
             "raw_log_text_mem": len(self._raw_log_text_mem_cache),
             "required_checks_disk": required_checks_mem,
             "required_checks_mem": required_checks_mem,
@@ -1444,11 +1460,8 @@ class GitHubAPIClient:
             cache_sizes["actions_job_status_disk"] = 0
             cache_sizes["actions_job_details_disk"] = 0
 
-        try:
-            pulls_disk = self._load_pulls_list_disk_cache()
-            cache_sizes["pulls_list_disk"] = len(pulls_disk) if isinstance(pulls_disk, dict) else 0
-        except Exception:
-            cache_sizes["pulls_list_disk"] = 0
+        # pulls_list disk now reported from BaseDiskCache (see above)
+        # Old method _load_pulls_list_disk_cache() removed
 
         try:
             search_issues_disk = self._load_search_issues_disk_cache()
@@ -1799,8 +1812,8 @@ class GitHubAPIClient:
         
         TTL: Adaptive for non-completed jobs based on job age (2m/4m/30m/60m/80m then 120m), ∞ for completed jobs (immutable).
         """
-        from .api.actions_job_status_cached import get_actions_job_status_cached
-        return get_actions_job_status_cached(self, owner=owner, repo=repo, job_id=job_id, ttl_s=int(ttl_s))
+        from .api.actions_jobs_by_runid_cached import get_job_status_from_cache
+        return get_job_status_from_cache(self, owner=owner, repo=repo, job_id=job_id, ttl_s=int(ttl_s))
 
     def _adaptive_ttl_s(self, *, timestamp_epoch: int, default_ttl_s: int = 180) -> int:
         """Unified adaptive TTL for all time-based caches (jobs, PRs, etc.).
@@ -1956,7 +1969,8 @@ class GitHubAPIClient:
             pass
 
         # Check ACTIONS_JOBS_CACHE (unified with batch fetch)
-        cached = ACTIONS_JOBS_CACHE.get_if_fresh(key, ttl_s=ttl_s)
+        from .api import actions_jobs_by_runid_cached as actions_jobs_cached
+        cached = actions_jobs_cached.get_if_fresh(key, ttl_s=ttl_s)
         cached_present = cached is not None
         cached_job_status: str = ""
         cached_job_completed_at: bool = False
@@ -1996,7 +2010,8 @@ class GitHubAPIClient:
             return None
 
         # Get ETag from stale cache for conditional request
-        etag = ACTIONS_JOBS_CACHE.get_stale_etag(key)
+        from .api import actions_jobs_by_runid_cached as actions_jobs_cached
+        etag = actions_jobs_cached.get_stale_etag(key)
         # Record miss *after* gathering state; but before network fetch.
         self._cache_miss("actions_job_details")
         miss_reason = "no_fresh_cache"
@@ -2026,9 +2041,10 @@ class GitHubAPIClient:
         
         # Handle 304 Not Modified
         if resp.status_code == 304:
-            ACTIONS_JOBS_CACHE.refresh_timestamp(key)
+            from .api import actions_jobs_by_runid_cached as actions_jobs_cached
+            actions_jobs_cached.refresh_timestamp(key)
             # Reload from cache with infinite TTL to force return
-            cached = ACTIONS_JOBS_CACHE.get_if_fresh(key, ttl_s=999999999)
+            cached = actions_jobs_cached.get_if_fresh(key, ttl_s=999999999)
             if cached:
                 jobs_dict = cached.get("jobs") if isinstance(cached.get("jobs"), dict) else cached
                 job_data = jobs_dict.get(job_id_s) if isinstance(jobs_dict, dict) else None
@@ -2111,7 +2127,8 @@ class GitHubAPIClient:
 
         # Store in ACTIONS_JOBS_CACHE with ETag (unified cache with batch fetch)
         now = int(time.time())
-        ACTIONS_JOBS_CACHE.put(key, {job_id_s: val}, etag=new_etag)
+        from .api import actions_jobs_by_runid_cached as actions_jobs_cached
+        actions_jobs_cached.put(key, {job_id_s: val}, etag=new_etag)
         
         # Also populate memory cache
         self._actions_job_details_mem_cache[key] = {"ts": now, "val": val}
@@ -2170,7 +2187,8 @@ class GitHubAPIClient:
             cache_key = f"{owner}/{repo}:run_jobs:{run_id_s}"
 
             # Check cache first (using new ACTIONS_JOBS_CACHE)
-            cached = ACTIONS_JOBS_CACHE.get_if_fresh(cache_key, ttl_s=ttl_s)
+            from .api import actions_jobs_by_runid_cached as actions_jobs_cached
+            cached = actions_jobs_cached.get_if_fresh(cache_key, ttl_s=ttl_s)
             if cached is not None:
                 self._cache_hit("actions_jobs.disk")
                 cached_jobs = cached.get("jobs")
@@ -2182,9 +2200,10 @@ class GitHubAPIClient:
                         self._actions_job_details_mem_cache[job_key] = {"ts": int(time.time()), "val": job_details}
                         # Ensure individual job keys exist in disk cache too (idempotent)
                         # This handles cases where old cache entries don't have individual keys yet
-                        job_cached = ACTIONS_JOBS_CACHE.get_if_fresh(job_key, ttl_s=ttl_s)
+                        from .api import actions_jobs_by_runid_cached as actions_jobs_cached
+                        job_cached = actions_jobs_cached.get_if_fresh(job_key, ttl_s=ttl_s)
                         if job_cached is None:
-                            ACTIONS_JOBS_CACHE.put(job_key, {job_id: job_details}, etag=ACTIONS_JOBS_CACHE.get_stale_etag(cache_key))
+                            actions_jobs_cached.put(job_key, {job_id: job_details}, etag=actions_jobs_cached.get_stale_etag(cache_key))
                     continue
 
             # Cache-only mode: skip fetch if no cache hit
@@ -2193,7 +2212,8 @@ class GitHubAPIClient:
                 continue
 
             # Get ETag from stale cache (for conditional request)
-            etag = ACTIONS_JOBS_CACHE.get_stale_etag(cache_key)
+            from .api import actions_jobs_by_runid_cached as actions_jobs_cached
+            etag = actions_jobs_cached.get_stale_etag(cache_key)
 
             # Fetch jobs for this run with conditional request
             self._cache_miss("actions_jobs")
@@ -2205,9 +2225,10 @@ class GitHubAPIClient:
 
             # Handle 304 Not Modified - data hasn't changed, refresh timestamp
             if resp.status_code == 304:
-                ACTIONS_JOBS_CACHE.refresh_timestamp(cache_key)
+                from .api import actions_jobs_by_runid_cached as actions_jobs_cached
+                actions_jobs_cached.refresh_timestamp(cache_key)
                 # Load from cache (we know it exists because we got the ETag from it)
-                cached = ACTIONS_JOBS_CACHE.get_if_fresh(cache_key, ttl_s=999999999)  # Force load
+                cached = actions_jobs_cached.get_if_fresh(cache_key, ttl_s=999999999)  # Force load
                 if cached:
                     cached_jobs = cached.get("jobs")
                     if isinstance(cached_jobs, dict):
@@ -2217,7 +2238,8 @@ class GitHubAPIClient:
                             job_key = f"{owner}/{repo}:job:{job_id}"
                             self._actions_job_details_mem_cache[job_key] = {"ts": int(time.time()), "val": job_details}
                             # Refresh individual job key timestamps too (so they stay fresh)
-                            ACTIONS_JOBS_CACHE.refresh_timestamp(job_key)
+                            from .api import actions_jobs_by_runid_cached as actions_jobs_cached
+                            actions_jobs_cached.refresh_timestamp(job_key)
                 continue
 
             if resp.status_code < 200 or resp.status_code >= 300:
@@ -2280,7 +2302,8 @@ class GitHubAPIClient:
             new_etag = resp.headers.get("ETag") if hasattr(resp, "headers") else None
 
             # Store in cache with ETag (run-level key)
-            ACTIONS_JOBS_CACHE.put(cache_key, run_jobs, etag=new_etag)
+            from .api import actions_jobs_by_runid_cached as actions_jobs_cached
+            actions_jobs_cached.put(cache_key, run_jobs, etag=new_etag)
             
             # ALSO write individual job-level keys to disk cache (for individual lookups)
             # This ensures `get_actions_job_details_cached()` can hit the disk cache
@@ -2290,7 +2313,8 @@ class GitHubAPIClient:
                 # Populate memory cache
                 self._actions_job_details_mem_cache[job_key] = {"ts": now, "val": job_details}
                 # ALSO populate disk cache (with ETag so 304s work on individual lookups)
-                ACTIONS_JOBS_CACHE.put(job_key, {job_id: job_details}, etag=new_etag)
+                from .api import actions_jobs_by_runid_cached as actions_jobs_cached
+                actions_jobs_cached.put(job_key, {job_id: job_details}, etag=new_etag)
 
         return job_map
     
@@ -3570,7 +3594,8 @@ class GitHubAPIClient:
             return pr
 
         # Check cache (handles both memory + disk)
-        cached_entry = PR_INFO_CACHE.get_if_matches_updated_at(key, updated_at=upd)
+        from .api import pr_info_cached
+        cached_entry = pr_info_cached.get_if_matches_updated_at(key, updated_at=upd)
         if cached_entry is not None:
             pr = _hydrate_entry(cached_entry)
             if pr is not None:
@@ -3594,7 +3619,8 @@ class GitHubAPIClient:
         if not upd:
             return
         prd = self._pr_info_full_to_dict(pr)
-        PR_INFO_CACHE.put(key, updated_at=upd, pr_dict=prd)
+        from .api import pr_info_cached
+        pr_info_cached.put(key, updated_at=upd, pr_dict=prd)
 
 
 
@@ -3678,12 +3704,13 @@ class GitHubAPIClient:
         CACHE_VER = 7
         MIN_CACHE_VER = 2
 
-        cached_entry_dict = PR_CHECKS_CACHE.get_entry_dict(key)
+        from .api import pr_checks_cached
+        cached_entry_dict = pr_checks_cached.get_entry_dict(key)
         if cached_entry_dict is not None:
             try:
                 ent = GHPRChecksCacheEntry.from_disk_dict_strict(
                     d=cached_entry_dict,
-                    cache_file=PR_CHECKS_CACHE._cache_file,
+                    cache_file=pr_checks_cached.get_cache_file(),
                     entry_key=key,
                 )
                 ts = int(ent.ts)
@@ -3708,7 +3735,7 @@ class GitHubAPIClient:
             try:
                 ent = GHPRChecksCacheEntry.from_disk_dict_strict(
                     d=cached_entry_dict,
-                    cache_file=PR_CHECKS_CACHE._cache_file,
+                    cache_file=pr_checks_cached.get_cache_file(),
                     entry_key=key,
                 )
                 stale_check_runs_etag = str(ent.check_runs_etag or "")
@@ -3748,7 +3775,7 @@ class GitHubAPIClient:
                 if cached_entry_dict is not None:
                     ent = GHPRChecksCacheEntry.from_disk_dict_strict(
                         d=cached_entry_dict,
-                        cache_file=PR_CHECKS_CACHE._cache_file,
+                        cache_file=pr_checks_cached.get_cache_file(),
                         entry_key=key,
                     )
                     refreshed_entry = GHPRChecksCacheEntry(
@@ -3759,7 +3786,7 @@ class GitHubAPIClient:
                         status_etag=ent.status_etag,
                         incomplete=ent.incomplete,
                     )
-                    PR_CHECKS_CACHE.put_entry_dict(key, refreshed_entry.to_disk_dict())
+                    pr_checks_cached.put_entry_dict(key, refreshed_entry.to_disk_dict())
                     out2: List[GHPRCheckRow] = []
                     for r in ent.rows:
                         if r.is_required or (r.name in required_checks):
@@ -3973,7 +4000,7 @@ class GitHubAPIClient:
                 status_etag=new_status_etag,
                 incomplete=incomplete,
             )
-            PR_CHECKS_CACHE.put_entry_dict(key, entry.to_disk_dict())
+            pr_checks_cached.put_entry_dict(key, entry.to_disk_dict())
         except (ValueError, TypeError):
             pass
 
@@ -4957,18 +4984,21 @@ class GitHubAPIClient:
                                   owner: str = "ai-dynamo",
                                   repo: str = "dynamo",
                                   cache_file: str = '.github_pr_merge_dates_cache.json') -> Dict[int, Optional[str]]:
-        """Get merge dates for pull requests with caching.
+        """Get merge dates for pull requests (using pulls_list cache).
 
-        Merge dates are cached permanently since they don't change once a PR is merged.
+        NOTE: This method now uses the pulls_list cache instead of a separate merge_dates
+        cache. The PR API response includes "merged_at" which is extracted and formatted.
+
+        Merge dates are formatted in Pacific time for dashboard display.
 
         Args:
             pr_numbers: List of PR numbers
             owner: Repository owner (default: ai-dynamo)
             repo: Repository name (default: dynamo)
-            cache_file: Path to cache file (deprecated, kept for compatibility)
+            cache_file: Deprecated parameter (kept for compatibility, ignored)
 
         Returns:
-            Dictionary mapping PR number to merge date string (YYYY-MM-DD HH:MM:SS)
+            Dictionary mapping PR number to merge date string (YYYY-MM-DD HH:MM:SS Pacific time)
             Returns None for PRs that are not merged or not found
 
         Example:
@@ -4977,8 +5007,73 @@ class GitHubAPIClient:
             >>> merge_dates
             {4965: "2025-12-18 12:34:56", 5009: None}
         """
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
 
-        return get_cached_pr_merge_dates_cached(api=self, pr_numbers=pr_numbers, owner=owner, repo=repo)
+        result: Dict[int, Optional[str]] = {}
+        
+        # Deduplicate and filter PR numbers
+        unique_pr_numbers = []
+        seen = set()
+        for pr_num in pr_numbers:
+            try:
+                prn = int(pr_num)
+                if prn > 0 and prn not in seen:
+                    seen.add(prn)
+                    unique_pr_numbers.append(prn)
+            except (ValueError, TypeError):
+                continue
+        
+        if not unique_pr_numbers:
+            return result
+        
+        # Try to get from pulls_list first (batch operation)
+        all_prs = self.list_pull_requests(owner, repo, state="all", ttl_s=3600)
+        pr_num_to_data: Dict[int, dict] = {}
+        if isinstance(all_prs, list):
+            for pr_data in all_prs:
+                if isinstance(pr_data, dict):
+                    prn = pr_data.get("number")
+                    if prn:
+                        pr_num_to_data[int(prn)] = pr_data
+        
+        # Extract merge dates
+        missing: List[int] = []
+        for prn in unique_pr_numbers:
+            pr_data = pr_num_to_data.get(prn)
+            if isinstance(pr_data, dict):
+                merged_at = pr_data.get("merged_at")
+                if merged_at:
+                    # Convert to Pacific time
+                    try:
+                        dt_utc = datetime.fromisoformat(str(merged_at).replace("Z", "+00:00"))
+                        dt_pacific = dt_utc.astimezone(ZoneInfo("America/Los_Angeles"))
+                        result[prn] = dt_pacific.strftime("%Y-%m-%d %H:%M:%S")
+                    except Exception:
+                        result[prn] = None
+                else:
+                    result[prn] = None  # Not merged
+            else:
+                missing.append(prn)
+        
+        # Fallback: fetch individual PRs not found in list
+        for prn in missing:
+            pr_details = self.get_pr_details(owner, repo, prn)
+            if isinstance(pr_details, dict):
+                merged_at = pr_details.get("merged_at")
+                if merged_at:
+                    try:
+                        dt_utc = datetime.fromisoformat(str(merged_at).replace("Z", "+00:00"))
+                        dt_pacific = dt_utc.astimezone(ZoneInfo("America/Los_Angeles"))
+                        result[prn] = dt_pacific.strftime("%Y-%m-%d %H:%M:%S")
+                    except Exception:
+                        result[prn] = None
+                else:
+                    result[prn] = None
+            else:
+                result[prn] = None
+        
+        return result
 
     def _get_cached_pr_merge_dates_legacy(
         self,

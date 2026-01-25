@@ -3,20 +3,67 @@
 Resource:
   GET /repos/{owner}/{repo}/pulls?state={state}&per_page=100
 
-Cache:
-  PULLS_LIST_CACHE (disk + memory)
+Example API Response:
+  [
+    {
+      "number": 1234,
+      "title": "Add new feature",
+      "state": "open",
+      "user": {
+        "login": "contributor123"
+      },
+      "head": {
+        "ref": "feature-branch",
+        "sha": "abc123..."
+      },
+      "base": {
+        "ref": "main"
+      },
+      "created_at": "2026-01-20T10:00:00Z",
+      "updated_at": "2026-01-24T10:30:00Z",
+      "draft": false,
+      "labels": [
+        {"name": "enhancement"}
+      ]
+    },
+    {
+      "number": 1233,
+      "title": "Fix bug",
+      "state": "open",
+      "user": {
+        "login": "contributor456"
+      },
+      "updated_at": "2026-01-23T15:00:00Z"
+    }
+  ]
 
-TTL: Adaptive based on most recent PR's updated_at (<1h=1m, <2h=2m, <4h=4m, >=4h=8m)
+Cached Fields:
+  - Full PR list (number, title, state, user, head, base, updated_at, etc.)
+  - Typically paginated (per_page=100)
+
+Cache:
+  Internal BaseDiskCache instance (disk + memory)
+
+TTL:
+  Adaptive based on most recent PR's updated_at (<1h=1m, <2h=2m, <4h=4m, >=4h=8m)
+
+Cross-cache population:
+  When fetching the pulls list, this module also populates pr_head_sha_cached
+  for each PR to avoid redundant API calls when later checking individual PR
+  head SHAs.
 """
 
 from __future__ import annotations
 
+import sys
 import time
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING
 
+from cache.cache_base import BaseDiskCache
 from .. import GITHUB_API_STATS
-from ..cache_pulls_list import PULLS_LIST_CACHE
+from ..cache_ttl_utils import pulls_list_adaptive_ttl_s
 from .base_cached import CachedResourceBase
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -24,6 +71,80 @@ if TYPE_CHECKING:  # pragma: no cover
 
 
 TTL_POLICY_DESCRIPTION = "adaptive (<1h=1m, <2h=2m, <4h=4m, >=4h=8m)"
+
+
+# =============================================================================
+# Cache Implementation (private to this module)
+# =============================================================================
+
+class _PullsListCache(BaseDiskCache):
+    """Cache for GitHub pulls list API results."""
+    
+    _SCHEMA_VERSION = 1
+    
+    def __init__(self, *, cache_file: Path):
+        super().__init__(cache_file=cache_file, schema_version=self._SCHEMA_VERSION)
+    
+    def get_if_fresh(self, key: str, ttl_s: int) -> Optional[List[Dict[str, Any]]]:
+        """Get cached pulls list if fresh (using adaptive TTL if updated_at is stored)."""
+        with self._mu:
+            self._load_once()
+            ent = self._check_item(key)
+            
+            if not isinstance(ent, dict):
+                return None
+            
+            ts = int(ent.get("ts", 0) or 0)
+            now = int(time.time())
+            
+            # Adaptive TTL: use stored updated_at_epoch if available
+            updated_at_epoch = ent.get("updated_at_epoch")
+            if updated_at_epoch is not None:
+                effective_ttl = pulls_list_adaptive_ttl_s(updated_at_epoch, default_ttl_s=ttl_s)
+            else:
+                effective_ttl = ttl_s
+            
+            if ts and (now - ts) <= max(0, int(effective_ttl)):
+                pulls = ent.get("pulls")
+                if isinstance(pulls, list):
+                    return pulls
+            
+            return None
+    
+    def put(self, key: str, pulls: List[Dict[str, Any]], updated_at_epoch: Optional[int] = None) -> None:
+        """Store pulls list."""
+        now = int(time.time())
+        with self._mu:
+            self._load_once()
+            entry = {
+                "ts": now,
+                "pulls": pulls,
+            }
+            if updated_at_epoch is not None:
+                entry["updated_at_epoch"] = updated_at_epoch
+            self._set_item(key, entry)
+            self._persist()
+
+
+def _get_cache_file() -> Path:
+    """Get cache file path."""
+    try:
+        _module_dir = Path(__file__).resolve().parent.parent
+        if str(_module_dir) not in sys.path:
+            sys.path.insert(0, str(_module_dir))
+        import common
+        return common.dynamo_utils_cache_dir() / "pulls_list.json"
+    except ImportError:
+        return Path.home() / ".cache" / "dynamo-utils" / "pulls_list.json"
+
+
+# Module-level singleton cache instance (private)
+_CACHE = _PullsListCache(cache_file=_get_cache_file())
+
+
+# =============================================================================
+# Public API
+# =============================================================================
 
 
 class PullsListCached(CachedResourceBase[List[Dict[str, Any]]]):
@@ -63,7 +184,7 @@ class PullsListCached(CachedResourceBase[List[Dict[str, Any]]]):
         return []
 
     def cache_read(self, *, key: str) -> Optional[Dict[str, Any]]:
-        cached = PULLS_LIST_CACHE.get_if_fresh(key, ttl_s=int(self._ttl_s))
+        cached = _CACHE.get_if_fresh(key, ttl_s=int(self._ttl_s))
         if cached is not None:
             # Return a dict wrapper to match the base class interface
             return {"pulls": cached}
@@ -74,12 +195,17 @@ class PullsListCached(CachedResourceBase[List[Dict[str, Any]]]):
         return pulls if isinstance(pulls, list) else []
 
     def is_cache_entry_fresh(self, *, entry: Dict[str, Any], now: int) -> bool:
-        # PULLS_LIST_CACHE.get_if_fresh already applied TTL; treat returned entries as fresh.
+        # _CACHE.get_if_fresh already applied TTL; treat returned entries as fresh.
         return True
 
     def cache_write(self, *, key: str, value: List[Dict[str, Any]], meta: Dict[str, Any]) -> None:
         most_recent_updated_at = meta.get("updated_at_epoch")
-        PULLS_LIST_CACHE.put(key, value, updated_at_epoch=most_recent_updated_at)
+        _CACHE.put(key, value, updated_at_epoch=most_recent_updated_at)
+        
+        # OPTIMIZATION: Cross-populate pr_head_sha cache
+        # When we fetch the pulls list, populate pr_head_sha_cached for each PR
+        # to avoid redundant API calls when later checking individual PR head SHAs
+        _populate_pr_head_sha_from_pulls_list(key, value)
 
     def fetch(self, **kwargs: Any) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
         owner = str(kwargs["owner"])
@@ -93,9 +219,9 @@ class PullsListCached(CachedResourceBase[List[Dict[str, Any]]]):
         stale_ts = None
         try:
             # Best-effort: inspect existing on-disk entry without counting this as a cache hit/miss.
-            with PULLS_LIST_CACHE._mu:  # type: ignore[attr-defined]
-                PULLS_LIST_CACHE._load_once()  # type: ignore[attr-defined]
-                ent = (PULLS_LIST_CACHE._get_items() or {}).get(cache_key)  # type: ignore[attr-defined]
+            with _CACHE._mu:  # type: ignore[attr-defined]
+                _CACHE._load_once()  # type: ignore[attr-defined]
+                ent = (_CACHE._get_items() or {}).get(cache_key)  # type: ignore[attr-defined]
                 if isinstance(ent, dict):
                     ts_raw = ent.get("ts", None)
                     try:
@@ -184,6 +310,58 @@ class PullsListCached(CachedResourceBase[List[Dict[str, Any]]]):
         return items, {"updated_at_epoch": most_recent_updated_at}
 
 
+def _populate_pr_head_sha_from_pulls_list(list_key: str, pulls: List[Dict[str, Any]]) -> None:
+    """Cross-populate pr_head_sha_cached from pulls list data.
+    
+    This optimization avoids redundant API calls when checking individual PR head SHAs
+    after a pulls list fetch has already retrieved the data.
+    
+    Args:
+        list_key: The pulls list cache key (e.g., "owner/repo:pulls:open")
+        pulls: List of PR dicts from the pulls list API
+    """
+    try:
+        # Import here to avoid circular dependency
+        from . import pr_head_sha_cached
+        
+        # Extract owner/repo from list_key
+        # Format: "owner/repo:pulls:state"
+        parts = list_key.split(":")
+        if len(parts) < 2:
+            return
+        owner_repo = parts[0]  # "owner/repo"
+        
+        for pr_dict in pulls:
+            if not isinstance(pr_dict, dict):
+                continue
+            
+            # Extract required fields
+            pr_number = pr_dict.get("number")
+            if not pr_number:
+                continue
+            
+            head = pr_dict.get("head")
+            if not isinstance(head, dict):
+                continue
+            
+            head_sha = str(head.get("sha") or "").strip()
+            if not head_sha:
+                continue
+            
+            state = str(pr_dict.get("state") or "").strip().lower()
+            if not state:
+                state = "open"  # Default to open if missing
+            
+            # Populate pr_head_sha cache using its cache key format
+            # Format: "{owner}/{repo}:pr:{pr_number}:head_sha"
+            pr_head_sha_key = f"{owner_repo}:pr:{pr_number}:head_sha"
+            pr_head_sha_cached._CACHE.put(pr_head_sha_key, head_sha=head_sha, state=state)
+            
+    except Exception:
+        # Don't fail the main operation if cross-cache population fails
+        pass
+
+
 def list_pull_requests_cached(
     api: "GitHubAPIClient",
     *,
@@ -205,3 +383,9 @@ def list_pull_requests_cached(
         List of PR dicts (GitHub REST API /pulls response objects).
     """
     return PullsListCached(api, ttl_s=int(ttl_s)).get(owner=owner, repo=repo, state=state)
+
+
+def get_cache_sizes() -> Tuple[int, int]:
+    """Get cache sizes for stats reporting (memory count, initial disk count)."""
+    return _CACHE.get_cache_sizes()
+

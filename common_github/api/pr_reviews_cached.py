@@ -1,15 +1,51 @@
 """PR reviews cached API (REST).
 
-Resource: GET /repos/{owner}/{repo}/pulls/{pr_number}/reviews
-Cache: PR_REVIEWS_CACHE (disk + memory)
-TTL: caller-provided (default 5m in existing code path)
+Resource:
+  GET /repos/{owner}/{repo}/pulls/{pr_number}/reviews
+
+Example API Response:
+  [
+    {
+      "id": 987654321,
+      "user": {
+        "login": "reviewer123"
+      },
+      "body": "LGTM!",
+      "state": "APPROVED",
+      "submitted_at": "2026-01-24T10:15:30Z",
+      "commit_id": "abc123def456..."
+    },
+    {
+      "id": 987654322,
+      "user": {
+        "login": "another-reviewer"
+      },
+      "body": "Needs changes",
+      "state": "CHANGES_REQUESTED",
+      "submitted_at": "2026-01-24T09:00:00Z",
+      "commit_id": "abc123def456..."
+    }
+  ]
+
+Cached Fields:
+  - Full review list (id, user, body, state, submitted_at, commit_id)
+  - Review states: "APPROVED", "CHANGES_REQUESTED", "COMMENTED", "DISMISSED"
+
+Cache:
+  Internal BaseDiskCache instance (disk + memory)
+
+TTL:
+  caller-provided (default 5m in existing code path)
 """
 
 from __future__ import annotations
 
+import sys
+import time
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING
 
-from ..cache_pr_reviews import PR_REVIEWS_CACHE
+from cache.cache_base import BaseDiskCache
 from .base_cached import CachedResourceBase
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -18,6 +54,70 @@ if TYPE_CHECKING:  # pragma: no cover
 
 TTL_POLICY_DESCRIPTION = "ttl_s (default 5m)"
 
+
+# =============================================================================
+# Cache Implementation (private to this module)
+# =============================================================================
+
+class _PRReviewsCache(BaseDiskCache):
+    """Cache for PR reviews (GitHub /pulls/{pr}/reviews endpoint)."""
+    
+    _SCHEMA_VERSION = 1
+    
+    def __init__(self, *, cache_file: Path):
+        super().__init__(cache_file=cache_file, schema_version=self._SCHEMA_VERSION)
+    
+    def get_if_fresh(self, key: str, ttl_s: int) -> Optional[Dict[str, Any]]:
+        """Get cached PR reviews if fresh."""
+        with self._mu:
+            self._load_once()
+            ent = self._check_item(key)
+            
+            if not isinstance(ent, dict):
+                return None
+            
+            ts = int(ent.get("ts", 0) or 0)
+            now = int(time.time())
+            
+            if ts and (now - ts) <= max(0, int(ttl_s)):
+                return ent
+            
+            return None
+    
+    def put(self, key: str, reviews: List[Dict[str, Any]], etag: Optional[str] = None) -> None:
+        """Store PR reviews with optional ETag."""
+        now = int(time.time())
+        with self._mu:
+            self._load_once()
+            entry = {
+                "ts": now,
+                "reviews": reviews,
+            }
+            if etag:
+                entry["etag"] = etag.strip()
+            self._set_item(key, entry)
+            self._persist()
+
+
+def _get_cache_file() -> Path:
+    """Get cache file path."""
+    try:
+        _module_dir = Path(__file__).resolve().parent.parent
+        if str(_module_dir) not in sys.path:
+            sys.path.insert(0, str(_module_dir))
+        import common
+        return common.dynamo_utils_cache_dir() / "pr_reviews.json"
+    except ImportError:
+        return Path.home() / ".cache" / "dynamo-utils" / "pr_reviews.json"
+
+
+# Module-level singleton cache instance (private)
+_CACHE = _PRReviewsCache(cache_file=_get_cache_file())
+
+
+# =============================================================================
+# Public API
+# =============================================================================
 
 class PRReviewsCached(CachedResourceBase[List[Dict[str, Any]]]):
     def __init__(self, api: "GitHubAPIClient", *, ttl_s: int):
@@ -54,18 +154,18 @@ class PRReviewsCached(CachedResourceBase[List[Dict[str, Any]]]):
         return []
 
     def cache_read(self, *, key: str) -> Optional[Dict[str, Any]]:
-        return PR_REVIEWS_CACHE.get_if_fresh(key, ttl_s=int(self._ttl_s))
+        return _CACHE.get_if_fresh(key, ttl_s=int(self._ttl_s))
 
     def value_from_cache_entry(self, *, entry: Dict[str, Any]) -> List[Dict[str, Any]]:
         reviews = entry.get("reviews")
         return reviews if isinstance(reviews, list) else []
 
     def is_cache_entry_fresh(self, *, entry: Dict[str, Any], now: int) -> bool:
-        # PR_REVIEWS_CACHE.get_if_fresh already applied TTL; treat returned entries as fresh.
+        # _CACHE.get_if_fresh already applied TTL; treat returned entries as fresh.
         return True
 
     def cache_write(self, *, key: str, value: List[Dict[str, Any]], meta: Dict[str, Any]) -> None:
-        PR_REVIEWS_CACHE.put(key, reviews=value)
+        _CACHE.put(key, reviews=value)
 
     def fetch(self, **kwargs: Any) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
         owner = str(kwargs["owner"])
@@ -83,3 +183,7 @@ def get_pr_reviews_cached(
 ) -> List[Dict[str, Any]]:
     return PRReviewsCached(api, ttl_s=int(ttl_s)).get(owner=owner, repo=repo, pr_number=int(pr_number))
 
+
+def get_cache_sizes() -> Tuple[int, int]:
+    """Get cache sizes for stats reporting (memory count, initial disk count)."""
+    return _CACHE.get_cache_sizes()
