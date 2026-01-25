@@ -50,3 +50,8 @@ dynamo_ci/*.html
 commits/*.html
 users/*/index.html
 stats/index.html
+*debug*.html
+
+# Large directories to exclude
+dynamo_ci/
+commits/
