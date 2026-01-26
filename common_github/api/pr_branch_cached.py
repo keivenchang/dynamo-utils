@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 """PR branch cached API (REST).
 
 This resource resolves CLOSED/MERGED PRs for a given branch name, used when
@@ -55,6 +57,22 @@ if TYPE_CHECKING:  # pragma: no cover
 # Keep TTL documentation next to the actual TTL implementation (`is_cache_entry_fresh`).
 TTL_POLICY_DESCRIPTION = "empty: no_pr_ttl_s; non-empty: min(closed_ttl_s, 360d)"
 
+CACHE_NAME = "pr_branch"
+API_CALL_FORMAT = (
+    "REST GET /repos/{owner}/{repo}/pulls?head={owner}:{branch}&state=all&per_page=30 (closed/merged only)\n"
+    "Example response item (truncated):\n"
+    "  {\n"
+    "    \"number\": 4790,\n"
+    "    \"state\": \"closed\",\n"
+    "    \"merged_at\": \"2026-01-20T11:22:33Z\",\n"
+    "    \"updated_at\": \"2026-01-20T11:22:33Z\",\n"
+    "    \"head\": {\"ref\": \"user/feature\", \"sha\": \"21a03b3...\"},\n"
+    "    \"html_url\": \"https://github.com/OWNER/REPO/pull/4790\"\n"
+    "  }"
+)
+CACHE_KEY_FORMAT = "{owner}/{repo}:{branch}"
+CACHE_FILE_DEFAULT = "pr_branches.json"
+
 
 # =============================================================================
 # Cache Implementation (private to this module)
@@ -106,9 +124,9 @@ def _get_cache_file() -> Path:
         if str(_module_dir) not in sys.path:
             sys.path.insert(0, str(_module_dir))
         import common
-        return common.dynamo_utils_cache_dir() / "pr_branches.json"
+        return common.dynamo_utils_cache_dir() / CACHE_FILE_DEFAULT
     except ImportError:
-        return Path.home() / ".cache" / "dynamo-utils" / "pr_branches.json"
+        return Path.home() / ".cache" / "dynamo-utils" / CACHE_FILE_DEFAULT
 
 
 # Module-level singleton cache instance (private)
@@ -135,21 +153,10 @@ class PRBranchCached(CachedResourceBase[List[Dict[str, Any]]]):
 
     @property
     def cache_name(self) -> str:
-        return "pr_branch"
+        return CACHE_NAME
 
     def api_call_format(self) -> str:
-        return (
-            "REST GET /repos/{owner}/{repo}/pulls?head={owner}:{branch}&state=all&per_page=30 (closed/merged only)\n"
-            "Example response item (truncated):\n"
-            "  {\n"
-            "    \"number\": 4790,\n"
-            "    \"state\": \"closed\",\n"
-            "    \"merged_at\": \"2026-01-20T11:22:33Z\",\n"
-            "    \"updated_at\": \"2026-01-20T11:22:33Z\",\n"
-            "    \"head\": {\"ref\": \"user/feature\", \"sha\": \"21a03b3...\"},\n"
-            "    \"html_url\": \"https://github.com/OWNER/REPO/pull/4790\"\n"
-            "  }"
-        )
+        return API_CALL_FORMAT
 
     def inflight_lock_key(self, **kwargs: Any) -> Optional[str]:
         return f"{self.cache_name}:{self.cache_key(**kwargs)}"

@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 """Required-checks cached API.
 
 This resource is intentionally implemented via `gh` because:
@@ -56,6 +58,32 @@ if TYPE_CHECKING:  # pragma: no cover
 TTL_POLICY_DESCRIPTION = (
     "adaptive (<1h=2m, <2h=4m, <4h=30m, <8h=60m, <12h=80m, >=12h=120m); closed/merged: 360d"
 )
+
+CACHE_NAME = "required_checks"
+API_CALL_FORMAT = (
+    "gh api repos/{owner}/{repo}/pulls/{pr} --jq <expr> (core)\n"
+    "Example output (truncated):\n"
+    "  {\"node_id\":\"PR_kwDO...\",\"state\":\"OPEN\",\"merged_at\":null,\"updated_at\":\"2026-01-24T03:12:34Z\"}\n"
+    "\n"
+    "gh api graphql -f query=<omitted> ... (graphql; paginated)\n"
+    "Example output fields used (truncated):\n"
+    "  {\n"
+    "    \"data\": {\n"
+    "      \"repository\": {\n"
+    "        \"pullRequest\": {\n"
+    "          \"commits\": {\n"
+    "            \"nodes\": [\n"
+    "              {\"commit\": {\"statusCheckRollup\": {\"contexts\": {\"nodes\": [{\"__typename\":\"CheckRun\",\"name\":\"pre-commit\",\"isRequired\":true}]}}}}\n"
+    "            ]\n"
+    "          }\n"
+    "        }\n"
+    "      },\n"
+    "      \"rateLimit\": {\"cost\": 1, \"remaining\": 4999, \"resetAt\": \"2026-01-24T04:00:00Z\"}\n"
+    "    }\n"
+    "  }"
+)
+CACHE_KEY_FORMAT = "{cache_name}:{owner}/{repo}:pr{pr_number}"
+CACHE_FILE_DEFAULT = "required_checks.json"
 
 
 # =============================================================================
@@ -141,9 +169,9 @@ def _get_cache_file() -> Path:
         if str(_module_dir) not in sys.path:
             sys.path.insert(0, str(_module_dir))
         import common
-        return common.dynamo_utils_cache_dir() / "required_checks.json"
+        return common.dynamo_utils_cache_dir() / CACHE_FILE_DEFAULT
     except ImportError:
-        return Path.home() / ".cache" / "dynamo-utils" / "required_checks.json"
+        return Path.home() / ".cache" / "dynamo-utils" / CACHE_FILE_DEFAULT
 
 
 # Module-level singleton cache instance (private)
@@ -158,31 +186,10 @@ _CACHE = _RequiredChecksCache(cache_file=_get_cache_file())
 class RequiredChecksCached(CachedResourceBase[Set[str]]):
     @property
     def cache_name(self) -> str:
-        return "required_checks"
+        return CACHE_NAME
 
     def api_call_format(self) -> str:
-        return (
-            "gh api repos/{owner}/{repo}/pulls/{pr} --jq <expr> (core)\n"
-            "Example output (truncated):\n"
-            "  {\"node_id\":\"PR_kwDO...\",\"state\":\"OPEN\",\"merged_at\":null,\"updated_at\":\"2026-01-24T03:12:34Z\"}\n"
-            "\n"
-            "gh api graphql -f query=<omitted> ... (graphql; paginated)\n"
-            "Example output fields used (truncated):\n"
-            "  {\n"
-            "    \"data\": {\n"
-            "      \"repository\": {\n"
-            "        \"pullRequest\": {\n"
-            "          \"commits\": {\n"
-            "            \"nodes\": [\n"
-            "              {\"commit\": {\"statusCheckRollup\": {\"contexts\": {\"nodes\": [{\"__typename\":\"CheckRun\",\"name\":\"pre-commit\",\"isRequired\":true}]}}}}\n"
-            "            ]\n"
-            "          }\n"
-            "        }\n"
-            "      },\n"
-            "      \"rateLimit\": {\"cost\": 1, \"remaining\": 4999, \"resetAt\": \"2026-01-24T04:00:00Z\"}\n"
-            "    }\n"
-            "  }"
-        )
+        return API_CALL_FORMAT
 
     def cache_key(self, **kwargs: Any) -> str:
         owner = str(kwargs["owner"])

@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 """Pulls list cached API (REST).
 
 Resource:
@@ -73,6 +75,22 @@ if TYPE_CHECKING:  # pragma: no cover
 
 TTL_POLICY_DESCRIPTION = "fixed 2m (120s)"
 
+CACHE_NAME = "pulls_list"
+API_CALL_FORMAT = (
+    "REST GET /repos/{owner}/{repo}/pulls?state={state}&per_page=100 (paginated)\n"
+    "Example response item (truncated):\n"
+    "  {\n"
+    "    \"number\": 5530,\n"
+    "    \"title\": \"Add feature\",\n"
+    "    \"state\": \"open\",\n"
+    "    \"updated_at\": \"2026-01-24T03:12:34Z\",\n"
+    "    \"head\": {\"ref\": \"feature-branch\", \"sha\": \"abc123...\"},\n"
+    "    \"html_url\": \"https://github.com/OWNER/REPO/pull/5530\"\n"
+    "  }"
+)
+CACHE_KEY_FORMAT = "{owner}/{repo}:pulls_list:{state}"
+CACHE_FILE_DEFAULT = "pulls_list.json"
+
 
 # =============================================================================
 # Cache Implementation (private to this module)
@@ -130,9 +148,9 @@ def _get_cache_file() -> Path:
         if str(_module_dir) not in sys.path:
             sys.path.insert(0, str(_module_dir))
         import common
-        return common.dynamo_utils_cache_dir() / "pulls_list.json"
+        return common.dynamo_utils_cache_dir() / CACHE_FILE_DEFAULT
     except ImportError:
-        return Path.home() / ".cache" / "dynamo-utils" / "pulls_list.json"
+        return Path.home() / ".cache" / "dynamo-utils" / CACHE_FILE_DEFAULT
 
 
 # Module-level singleton cache instance (private)
@@ -151,21 +169,10 @@ class PullsListCached(CachedResourceBase[List[Dict[str, Any]]]):
 
     @property
     def cache_name(self) -> str:
-        return "pulls_list"
+        return CACHE_NAME
 
     def api_call_format(self) -> str:
-        return (
-            "REST GET /repos/{owner}/{repo}/pulls?state={state}&per_page=100 (paginated)\n"
-            "Example response item (truncated):\n"
-            "  {\n"
-            "    \"number\": 5530,\n"
-            "    \"title\": \"Add feature\",\n"
-            "    \"state\": \"open\",\n"
-            "    \"updated_at\": \"2026-01-24T03:12:34Z\",\n"
-            "    \"head\": {\"ref\": \"feature-branch\", \"sha\": \"abc123...\"},\n"
-            "    \"html_url\": \"https://github.com/OWNER/REPO/pull/5530\"\n"
-            "  }"
-        )
+        return API_CALL_FORMAT
 
     def inflight_lock_key(self, **kwargs: Any) -> Optional[str]:
         return f"{self.cache_name}:{self.cache_key(**kwargs)}"

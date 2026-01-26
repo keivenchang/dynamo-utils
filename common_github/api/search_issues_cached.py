@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 """search/issues cached API (REST).
 
 Used as an optimization to batch-probe PR `updated_at` for a set of PR numbers.
@@ -38,6 +40,19 @@ def _safe_int(x: Any, default: int = 0) -> int:
 # Keep TTL documentation next to the actual TTL implementation (see SearchIssuesCached.get()).
 TTL_POLICY_DESCRIPTION = "ttl_s (default 60s); disabled for 6h after HTTP 422"
 
+CACHE_NAME = "search_issues"
+API_CALL_FORMAT = (
+    "REST GET /search/issues?q=repo:{owner}/{repo} type:pr number:<n>...\n"
+    "Example response fields used (truncated):\n"
+    "  {\n"
+    "    \"items\": [\n"
+    "      {\"number\": 5530, \"updated_at\": \"2026-01-24T03:12:34Z\"}\n"
+    "    ]\n"
+    "  }"
+)
+CACHE_KEY_FORMAT = "{owner}/{repo}:search_issues:<nums_csv>"
+CACHE_FILE_DEFAULT = "search_issues.json"
+
 
 class SearchIssuesCached(CachedResourceBase[Dict[int, str]]):
     def __init__(self, api: "GitHubAPIClient", *, ttl_s: int, timeout: int):
@@ -47,18 +62,10 @@ class SearchIssuesCached(CachedResourceBase[Dict[int, str]]):
 
     @property
     def cache_name(self) -> str:
-        return "search_issues"
+        return CACHE_NAME
 
     def api_call_format(self) -> str:
-        return (
-            "REST GET /search/issues?q=repo:{owner}/{repo} type:pr number:<n>...\n"
-            "Example response fields used (truncated):\n"
-            "  {\n"
-            "    \"items\": [\n"
-            "      {\"number\": 5530, \"updated_at\": \"2026-01-24T03:12:34Z\"}\n"
-            "    ]\n"
-            "  }"
-        )
+        return API_CALL_FORMAT
 
     def cache_key(self, **kwargs: Any) -> str:
         owner = str(kwargs["owner"])

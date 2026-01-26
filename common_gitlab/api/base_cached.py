@@ -1,10 +1,9 @@
-"""Base class for cached API resources.
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+"""Base class for cached GitLab API resources.
 
-Goal: make each cached resource readable + debuggable by enforcing a small interface:
-- TTL policy
-- API call “display format”
-- shared cache access pattern
-- consistent cache + API statistics reporting
+Mirrors `common_github/api/base_cached.py` so GitLab cached resources can follow
+the same pattern over time (cache_name/api_call_format/TTL policy enforcement).
 """
 
 from __future__ import annotations
@@ -15,7 +14,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, Generic, Optional, Tuple, TypeVar, TYPE_CHECKING
 
 if TYPE_CHECKING:  # pragma: no cover
-    from .. import GitHubAPIClient
+    from .. import GitLabAPIClient
 
 T = TypeVar("T")
 
@@ -26,7 +25,7 @@ CACHE_ENTRY_TTL_S_KEY = "ttl_s"
 
 
 def make_cache_entry(*, value: Any, fetched_at: int, ttl_s: Optional[int] = None) -> Dict[str, Any]:
-    """Standard cache entry schema (optional helper).
+    """Standard on-disk cache entry schema for GitLab cached resources.
 
     Format:
       {"v": <value>, "meta": {"fetched_at": <epoch_seconds>, "ttl_s": <seconds?>}}
@@ -72,77 +71,68 @@ def cache_entry_ttl_s(entry: Dict[str, Any]) -> Optional[int]:
 
 @dataclass(frozen=True)
 class CacheLookupResult(Generic[T]):
-    """Normalized cache lookup result used by CachedResourceBase.get()."""
-
     entry: Optional[Dict[str, Any]]
-    # if entry is present but stale under the resource TTL policy
     is_fresh: bool
 
 
 class CachedResourceBase(ABC, Generic[T]):
-    """Base class for a cached resource backed by a disk cache object.
+    """Shared get() flow: cache lookup -> TTL check -> optional fetch -> cache write.
 
-    Subclasses define:
-    - cache key format
-    - how to read/write cache entries
-    - TTL policy (freshness check)
-    - the actual API fetch implementation
-    - how to record per-resource cache hit/miss/write stats
-    """
+This is intentionally minimal. GitLab cached resources can either use this or keep
+specialized batch-fetch logic (e.g., registry tag scans).
+"""
 
-    def __init__(self, api: "GitHubAPIClient"):
-        self.api: GitHubAPIClient = api
+    def __init__(self, api: "GitLabAPIClient"):
+        self.api = api
 
     @property
     @abstractmethod
     def cache_name(self) -> str:
-        """Short name used for stats keys (e.g. 'required_checks')."""
+        ...
 
     @abstractmethod
     def api_call_format(self) -> str:
-        """Human-readable description of the API call(s) this resource performs."""
+        ...
 
     @abstractmethod
     def cache_key(self, **kwargs: Any) -> str:
-        """Return a stable cache key for this resource."""
+        ...
 
     @abstractmethod
     def cache_read(self, *, key: str) -> Optional[Dict[str, Any]]:
-        """Read a raw cache entry dict or None if missing."""
+        ...
 
     @abstractmethod
     def cache_write(self, *, key: str, value: T, meta: Dict[str, Any]) -> None:
-        """Write to cache (meta includes ok/pr_state/etc as needed)."""
+        ...
 
     @abstractmethod
     def is_cache_entry_fresh(self, *, entry: Dict[str, Any], now: int) -> bool:
-        """TTL policy for the raw entry dict."""
+        ...
 
     @abstractmethod
     def value_from_cache_entry(self, *, entry: Dict[str, Any]) -> T:
-        """Convert cache entry dict into the returned value."""
+        ...
 
     @abstractmethod
     def fetch(self, **kwargs: Any) -> Tuple[T, Dict[str, Any]]:
-        """Fetch from network and return (value, meta_for_cache_write)."""
+        ...
 
     @abstractmethod
     def empty_value(self) -> T:
-        """Return an empty value for cache-only mode when no entry is usable."""
+        ...
 
     def inflight_lock_key(self, **kwargs: Any) -> Optional[str]:
-        """Optional inflight lock key to dedupe concurrent identical fetches."""
         return None
 
     def get(self, *, cache_only_mode: Optional[bool] = None, **kwargs: Any) -> T:
-        """Shared get() flow: cache lookup -> TTL check -> optional fetch -> cache write."""
-        cache_only = bool(self.api.cache_only_mode) if cache_only_mode is None else bool(cache_only_mode)
         key = self.cache_key(**kwargs)
         now_i = int(time.time())
+        cache_only = bool(self.api.cache_only_mode) if cache_only_mode is None else bool(cache_only_mode)
 
         entry = self.cache_read(key=key)
         if entry is not None:
-            if cache_only or self.is_cache_entry_fresh(entry=entry, now=now_i):
+            if self.is_cache_entry_fresh(entry=entry, now=now_i):
                 self.api._cache_hit(self.cache_name)
                 return self.value_from_cache_entry(entry=entry)
             self.api._cache_miss(f"{self.cache_name}.expired")
@@ -150,18 +140,22 @@ class CachedResourceBase(ABC, Generic[T]):
             self.api._cache_miss(f"{self.cache_name}.missing")
 
         if cache_only:
+            # Best-effort: treat "present but stale" as a hit for visibility (it's a cache read);
+            # treat missing entry as a miss.
+            if entry is not None:
+                self.api._cache_hit(self.cache_name)
+                return self.value_from_cache_entry(entry=entry)
             return self.empty_value()
 
         lock_key = self.inflight_lock_key(**kwargs)
         if lock_key:
-            lock = self.api._inflight_lock(lock_key)
-            with lock:
-                # Re-check cache (another thread may have populated it).
+            lk = self.api._inflight_lock(lock_key)
+            with lk:
+                # Re-check cache in case another worker populated it.
                 entry2 = self.cache_read(key=key)
-                if entry2 is not None:
-                    if self.is_cache_entry_fresh(entry=entry2, now=now_i):
-                        self.api._cache_hit(self.cache_name)
-                        return self.value_from_cache_entry(entry=entry2)
+                if entry2 is not None and self.is_cache_entry_fresh(entry=entry2, now=now_i):
+                    self.api._cache_hit(self.cache_name)
+                    return self.value_from_cache_entry(entry=entry2)
                 val, meta = self.fetch(**kwargs)
                 self.cache_write(key=key, value=val, meta=meta)
                 self.api._cache_write(self.cache_name, entries=1)

@@ -115,6 +115,18 @@ from cache.cache_base import BaseDiskCache
 from ..cache_ttl_utils import adaptive_ttl_s
 from .base_cached import CachedResourceBase
 
+TTL_POLICY_DESCRIPTION = "completed: 30d; incomplete: adaptive (<1h=2m, <2h=4m, <4h=30m, <8h=60m, <12h=80m, >=12h=120m)"
+
+CACHE_NAME = "actions_job_status"
+API_CALL_FORMAT = (
+    "REST GET /repos/{owner}/{repo}/actions/jobs/{job_id}\n"
+    "NOTE: This endpoint is ONLY used as a fallback when job data isn't\n"
+    "      already in cache from the batch run-level fetch.\n"
+    "      Primary method: GET /repos/{owner}/{repo}/actions/runs/{run_id}/jobs"
+)
+CACHE_KEY_FORMAT = "{owner}/{repo}:job:{job_id}"
+CACHE_FILE_DEFAULT = "actions_jobs.json"
+
 
 class _ActionsJobsCache(BaseDiskCache):
     """Private cache for Actions workflow run jobs.
@@ -243,9 +255,9 @@ def _get_cache_file() -> Path:
     """Get cache file path, handling imports from different contexts."""
     try:
         import common
-        return common.dynamo_utils_cache_dir() / "actions_jobs.json"
+        return common.dynamo_utils_cache_dir() / CACHE_FILE_DEFAULT
     except ImportError:
-        return Path.home() / ".cache" / "dynamo-utils" / "actions_jobs.json"
+        return Path.home() / ".cache" / "dynamo-utils" / CACHE_FILE_DEFAULT
 
 
 # Private module-level cache instance (singleton)
@@ -266,24 +278,10 @@ class ActionsJobStatusCached(CachedResourceBase[Optional[str]]):
     
     @property
     def cache_name(self) -> str:
-        return "actions_job_status"
+        return CACHE_NAME
     
     def api_call_format(self) -> str:
-        return (
-            "REST GET /repos/{owner}/{repo}/actions/jobs/{job_id}\n"
-            "NOTE: This endpoint is ONLY used as a fallback when job data isn't\n"
-            "      already in cache from the batch run-level fetch.\n"
-            "      Primary method: GET /repos/{owner}/{repo}/actions/runs/{run_id}/jobs\n"
-            "      (see get_actions_job_details_cached in __init__.py)\n"
-            "\n"
-            "Example response fields used:\n"
-            "  {\n"
-            "    \"status\": \"completed\",\n"
-            "    \"started_at\": \"2026-01-24T01:02:03Z\",\n"
-            "    \"id\": 12345678,\n"
-            "    \"run_id\": 98765432\n"
-            "  }"
-        )
+        return API_CALL_FORMAT
     
     def cache_key(self, **kwargs: Any) -> str:
         owner = str(kwargs["owner"])

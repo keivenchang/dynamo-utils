@@ -94,6 +94,7 @@ from __future__ import annotations
 
 import hashlib
 import html
+import json
 import logging
 import os
 import re
@@ -117,6 +118,10 @@ from common_github.api.pulls_list_cached import TTL_POLICY_DESCRIPTION as PULLS_
 from common_github.api.search_issues_cached import TTL_POLICY_DESCRIPTION as SEARCH_ISSUES_TTL_POLICY_DESCRIPTION
 from common_github.api.required_checks_cached import TTL_POLICY_DESCRIPTION as REQUIRED_CHECKS_TTL_POLICY_DESCRIPTION
 from common_github.api.pr_head_sha_cached import TTL_POLICY_DESCRIPTION as PR_HEAD_SHA_TTL_POLICY_DESCRIPTION
+from common_gitlab.api.mr_pipelines_cached import TTL_POLICY_DESCRIPTION as GITLAB_MR_PIPELINES_TTL_POLICY_DESCRIPTION
+from common_gitlab.api.pipeline_jobs_cached import TTL_POLICY_DESCRIPTION as GITLAB_PIPELINE_JOBS_TTL_POLICY_DESCRIPTION
+from common_gitlab.api.pipeline_status_cached import TTL_POLICY_DESCRIPTION as GITLAB_PIPELINE_STATUS_TTL_POLICY_DESCRIPTION
+from common_gitlab.api.registry_images_cached import TTL_POLICY_DESCRIPTION as GITLAB_REGISTRY_IMAGES_TTL_POLICY_DESCRIPTION
 from common_types import CIStatus
 from cache_pytest_timings import PYTEST_TIMINGS_CACHE
 from cache_snippet import SNIPPET_CACHE
@@ -3859,6 +3864,103 @@ def github_api_stats_rows(
     return rows
 
 
+def gitlab_api_stats_rows(
+    *,
+    gitlab_api: Optional[Any],
+    top_n: int = 15,
+) -> List[Tuple[str, Optional[str], str]]:
+    """Build GitLab API statistics rows using the same key conventions as GitHub.
+
+    Keys:
+      - gitlab.cache.all.(hits|misses|writes_ops|writes_entries)
+      - gitlab.cache.<cache>.(disk|mem|ttl|hits|misses)
+      - gitlab.rest.by_category.<label>.(calls|time_secs)
+    """
+    rows: List[Tuple[str, Optional[str], str]] = []
+    if gitlab_api is None:
+        return rows
+
+    # Cache stats (operation-level) from GitLabAPIClient.get_cache_stats()
+    try:
+        cache = gitlab_api.get_cache_stats() if hasattr(gitlab_api, "get_cache_stats") else {}
+    except Exception:
+        cache = {}
+    cache = cache if isinstance(cache, dict) else {}
+
+    rows.append(("gitlab.cache.all.hits", str(int(cache.get("hits_total") or 0)), "Total cache hits across all GitLab cache operations"))
+    rows.append(("gitlab.cache.all.misses", str(int(cache.get("misses_total") or 0)), "Total cache misses across all GitLab cache operations"))
+    rows.append(("gitlab.cache.all.writes_ops", str(int(cache.get("writes_ops_total") or 0)), "Number of GitLab cache write operations"))
+    rows.append(("gitlab.cache.all.writes_entries", str(int(cache.get("writes_entries_total") or 0)), "Number of GitLab cache entries written"))
+
+    hits_by = dict(cache.get("hits_by") or {}) if isinstance(cache, dict) else {}
+    misses_by = dict(cache.get("misses_by") or {}) if isinstance(cache, dict) else {}
+
+    def _disk_entry_count(path: Path) -> int:
+        try:
+            if not path.exists():
+                return 0
+            raw = json.loads(path.read_text() or "{}")
+            if not isinstance(raw, dict):
+                return 0
+            if "_metadata" in raw:
+                raw = {k: v for k, v in raw.items() if k != "_metadata"}
+            return int(len(raw))
+        except Exception:
+            return 0
+
+    # Known GitLab caches (disk-backed JSON)
+    try:
+        from common import resolve_cache_path  # local import (avoid cycles)
+    except Exception:
+        resolve_cache_path = None  # type: ignore[assignment]
+
+    caches: List[Tuple[str, str, str]] = [
+        ("registry_images", "gitlab_commit_sha.json", "GitLab registry tags by commit SHA [key: <40-sha>]"),
+        ("pipeline_status", "gitlab_pipeline_status.json", "GitLab pipeline status by commit SHA [key: <40-sha>]"),
+        ("pipeline_jobs", "gitlab_pipeline_jobs.json", "GitLab pipeline job counts by pipeline_id [key: pipeline_id]"),
+        ("pipeline_jobs_details", "gitlab_pipeline_jobs_details.json", "GitLab pipeline job details by pipeline_id [key: pipeline_id]"),
+        ("mr_pipelines", "gitlab_mr_pipelines.json", "GitLab MR -> latest pipeline [key: mr_iid]"),
+    ]
+    ttl_by_cache = {
+        "registry_images": str(GITLAB_REGISTRY_IMAGES_TTL_POLICY_DESCRIPTION),
+        "pipeline_status": str(GITLAB_PIPELINE_STATUS_TTL_POLICY_DESCRIPTION),
+        "pipeline_jobs": str(GITLAB_PIPELINE_JOBS_TTL_POLICY_DESCRIPTION),
+        "pipeline_jobs_details": str(GITLAB_PIPELINE_JOBS_TTL_POLICY_DESCRIPTION),
+        "mr_pipelines": str(GITLAB_MR_PIPELINES_TTL_POLICY_DESCRIPTION),
+    }
+
+    for cache_name, filename, desc in caches:
+        disk = 0
+        if resolve_cache_path is not None:
+            disk = _disk_entry_count(resolve_cache_path(filename))
+        rows.append((f"gitlab.cache.{cache_name}.disk", str(disk), f"{desc} [{filename}]"))
+        rows.append((f"gitlab.cache.{cache_name}.mem", "0", ""))
+        rows.append((f"gitlab.cache.{cache_name}.ttl", str(ttl_by_cache.get(cache_name, "varies")), "Cache TTL policy"))
+        h = int(sum(int(v or 0) for k, v in hits_by.items() if str(k) == cache_name or str(k).startswith(f"{cache_name}.")))
+        m = int(sum(int(v or 0) for k, v in misses_by.items() if str(k) == cache_name or str(k).startswith(f"{cache_name}.")))
+        rows.append((f"gitlab.cache.{cache_name}.hits", str(h), ""))
+        rows.append((f"gitlab.cache.{cache_name}.misses", str(m), ""))
+
+    # REST by category (label) from GitLabAPIClient.get_rest_call_stats()
+    try:
+        st = gitlab_api.get_rest_call_stats() if hasattr(gitlab_api, "get_rest_call_stats") else {}
+    except Exception:
+        st = {}
+    st = st if isinstance(st, dict) else {}
+    by_label = dict(st.get("by_label") or {}) if isinstance(st, dict) else {}
+    time_by_label_s = dict(st.get("time_by_label_s") or {}) if isinstance(st, dict) else {}
+    labels = sorted(set(list(by_label.keys()) + list(time_by_label_s.keys())))
+    if labels:
+        labels.sort(key=lambda k: (-int(by_label.get(k, 0) or 0), -float(time_by_label_s.get(k, 0.0) or 0.0), k))
+        for lbl in labels[: max(0, int(top_n))]:
+            c = int(by_label.get(lbl, 0) or 0)
+            t = float(time_by_label_s.get(lbl, 0.0) or 0.0)
+            rows.append((f"gitlab.rest.by_category.{lbl}.calls", str(c), f"API calls for {lbl}"))
+            rows.append((f"gitlab.rest.by_category.{lbl}.time_secs", f"{t:.2f}s", f"Time spent in {lbl} calls"))
+
+    return rows
+
+
 def build_page_stats(
     *,
     generation_time_secs: Optional[float] = None,
@@ -4011,52 +4113,9 @@ def build_page_stats(
         page_stats.append(("marker.composite.without.reports", "(N/A)", "Markers without reports"))
         page_stats.append(("marker.total_secs", "(N/A)", "Time processing build markers"))
 
-    # GitLab cache stats (commit-history-only, but show consistently)
-    has_gitlab_stats = (
-        perf_stats.gitlab_cache_registry_images_hit > 0 or
-        perf_stats.gitlab_cache_registry_images_miss > 0 or
-        perf_stats.gitlab_cache_pipeline_status_hit > 0 or
-        perf_stats.gitlab_cache_pipeline_status_miss > 0 or
-        perf_stats.gitlab_cache_pipeline_jobs_hit > 0 or
-        perf_stats.gitlab_cache_pipeline_jobs_miss > 0
-    )
-    if has_gitlab_stats:
-        page_stats.append(("gitlab.cache.registry_images.hits", str(perf_stats.gitlab_cache_registry_images_hit), ""))
-        page_stats.append(("gitlab.cache.registry_images.misses", str(perf_stats.gitlab_cache_registry_images_miss), ""))
-        page_stats.append(("gitlab.cache.pipeline_status.hits", str(perf_stats.gitlab_cache_pipeline_status_hit), ""))
-        page_stats.append(("gitlab.cache.pipeline_status.misses", str(perf_stats.gitlab_cache_pipeline_status_miss), ""))
-        page_stats.append(("gitlab.cache.pipeline_jobs.hits", str(perf_stats.gitlab_cache_pipeline_jobs_hit), ""))
-        page_stats.append(("gitlab.cache.pipeline_jobs.misses", str(perf_stats.gitlab_cache_pipeline_jobs_miss), ""))
-        page_stats.append(("gitlab.registry_images.total_secs", f"{perf_stats.gitlab_registry_images_total_secs:.2f}s", "Time fetching GitLab registry images (commit history only)"))
-        page_stats.append(("gitlab.pipeline_status.total_secs", f"{perf_stats.gitlab_pipeline_status_total_secs:.2f}s", "Time fetching GitLab pipeline status (commit history only)"))
-        page_stats.append(("gitlab.pipeline_jobs.total_secs", f"{perf_stats.gitlab_pipeline_jobs_total_secs:.2f}s", "Time fetching GitLab pipeline jobs (commit history only)"))
-    else:
-        page_stats.append(("gitlab.cache.registry_images.hits", "(N/A)", ""))
-        page_stats.append(("gitlab.cache.registry_images.misses", "(N/A)", ""))
-        page_stats.append(("gitlab.cache.pipeline_status.hits", "(N/A)", ""))
-        page_stats.append(("gitlab.cache.pipeline_status.misses", "(N/A)", ""))
-        page_stats.append(("gitlab.cache.pipeline_jobs.hits", "(N/A)", ""))
-        page_stats.append(("gitlab.cache.pipeline_jobs.misses", "(N/A)", ""))
-        page_stats.append(("gitlab.registry_images.total_secs", "(N/A)", "Time fetching GitLab registry images (commit history only)"))
-        page_stats.append(("gitlab.pipeline_status.total_secs", "(N/A)", "Time fetching GitLab pipeline status (commit history only)"))
-        page_stats.append(("gitlab.pipeline_jobs.total_secs", "(N/A)", "Time fetching GitLab pipeline jobs (commit history only)"))
-
-    # 6b. GitHub cache statistics (reads from global GITHUB_CACHE_STATS)
-    # Note: Individual cache stats (disk/mem/hits/misses) are now grouped together
-    # in build_github_cache_stats() and included via page_stats.extend(api_rows) above.
-    # No need to add merge_dates or required_checks hits/misses here separately.
-
-    # 7. GitLab API stats (commit history only)
+    # GitLab cache + REST statistics (GitHub-compatible key schema)
     if gitlab_client is not None:
-        if hasattr(gitlab_client, "get_rest_call_stats"):
-            st = gitlab_client.get_rest_call_stats() or {}
-            gl_total = int(st.get("total", 0) or 0)
-            gl_ok = int(st.get("success_total", 0) or 0)
-            gl_err = int(st.get("error_total", 0) or 0)
-            if gl_total > 0:
-                page_stats.append(("gitlab.rest.calls", str(gl_total), "Total GitLab REST API calls"))
-                page_stats.append(("gitlab.rest.success", str(gl_ok), "Successful GitLab API calls"))
-                page_stats.append(("gitlab.rest.errors", str(gl_err), "Failed GitLab API calls"))
+        page_stats.extend(gitlab_api_stats_rows(gitlab_api=gitlab_client))
 
     # Sort all stats alphabetically by key (but preserve section headers with None values)
     section_headers = [s for s in page_stats if s[1] is None]

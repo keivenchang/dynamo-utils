@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 """PR head SHA cached API (REST).
 
 Resource:
@@ -69,6 +71,18 @@ if TYPE_CHECKING:  # pragma: no cover
 
 TTL_POLICY_DESCRIPTION = "open: ttl_s (default 1d); closed/merged: ∞ (head SHA immutable)"
 
+CACHE_NAME = "pr_head_sha"
+API_CALL_FORMAT = (
+    "REST GET /repos/{owner}/{repo}/pulls/{pr_number} (extract head.sha)\n"
+    "Example response fields used:\n"
+    "  {\n"
+    "    \"state\": \"open\",\n"
+    "    \"head\": {\"sha\": \"21a03b3...\"}\n"
+    "  }"
+)
+CACHE_KEY_FORMAT = "{owner}/{repo}:pr:{pr_number}:head_sha"
+CACHE_FILE_DEFAULT = "pr_head_sha.json"
+
 
 # =============================================================================
 # Cache Implementation (private to this module)
@@ -135,11 +149,11 @@ def _get_cache_file() -> Path:
         import common
         cache_dir = common.dynamo_utils_cache_dir() / "pr-info"
         cache_dir.mkdir(parents=True, exist_ok=True)
-        return cache_dir / "pr_head_sha.json"
+        return cache_dir / CACHE_FILE_DEFAULT
     except ImportError:
         cache_dir = Path.home() / ".cache" / "dynamo-utils" / "pr-info"
         cache_dir.mkdir(parents=True, exist_ok=True)
-        return cache_dir / "pr_head_sha.json"
+        return cache_dir / CACHE_FILE_DEFAULT
 
 
 # Module-level singleton cache instance (private)
@@ -158,17 +172,10 @@ class PRHeadSHACached(CachedResourceBase[Optional[str]]):
 
     @property
     def cache_name(self) -> str:
-        return "pr_head_sha"
+        return CACHE_NAME
 
     def api_call_format(self) -> str:
-        return (
-            "REST GET /repos/{owner}/{repo}/pulls/{pr_number} (extract head.sha)\n"
-            "Example response fields used:\n"
-            "  {\n"
-            "    \"state\": \"open\",\n"
-            "    \"head\": {\"sha\": \"21a03b3...\"}\n"
-            "  }"
-        )
+        return API_CALL_FORMAT
 
     def inflight_lock_key(self, **kwargs: Any) -> Optional[str]:
         return f"{self.cache_name}:{self.cache_key(**kwargs)}"

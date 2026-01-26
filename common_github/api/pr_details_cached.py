@@ -59,6 +59,11 @@ if TYPE_CHECKING:  # pragma: no cover
 
 TTL_POLICY_DESCRIPTION = "merged/closed: 360d; open: 5m"
 
+CACHE_NAME = "pull_request"  # Match API label in logs
+API_CALL_FORMAT = "REST GET /repos/{owner}/{repo}/pulls/{pr_number}"
+CACHE_KEY_FORMAT = "{owner}/{repo}:pr:{pr_number}"
+CACHE_FILE_DEFAULT = "pr_details.json"
+
 
 # =============================================================================
 # Cache Implementation (private to this module)
@@ -119,9 +124,9 @@ def _get_cache_file() -> Path:
         if str(_module_dir) not in sys.path:
             sys.path.insert(0, str(_module_dir))
         import common
-        return common.dynamo_utils_cache_dir() / "pr_details.json"
+        return common.dynamo_utils_cache_dir() / CACHE_FILE_DEFAULT
     except ImportError:
-        return Path.home() / ".cache" / "dynamo-utils" / "pr_details.json"
+        return Path.home() / ".cache" / "dynamo-utils" / CACHE_FILE_DEFAULT
 
 
 # Module-level singleton cache instance (private)
@@ -139,10 +144,10 @@ class PRDetailsCached(CachedResourceBase[Optional[Dict[str, Any]]]):
 
     @property
     def cache_name(self) -> str:
-        return "pull_request"  # Match API label in logs
+        return CACHE_NAME
 
     def api_call_format(self) -> str:
-        return "REST GET /repos/{owner}/{repo}/pulls/{pr_number}"
+        return API_CALL_FORMAT
 
     def cache_key(self, **kwargs: Any) -> str:
         owner = str(kwargs["owner"])

@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 """PR review comments cached API (REST).
 
 Resource:
@@ -62,6 +64,21 @@ if TYPE_CHECKING:  # pragma: no cover
 
 TTL_POLICY_DESCRIPTION = "ttl_s (default 5m)"
 
+CACHE_NAME = "pr_comments"
+API_CALL_FORMAT = (
+    "REST GET /repos/{owner}/{repo}/pulls/{pr_number}/comments\n"
+    "Example response item (truncated):\n"
+    "  {\n"
+    "    \"id\": 123456789,\n"
+    "    \"in_reply_to_id\": null,\n"
+    "    \"user\": {\"login\": \"octocat\"},\n"
+    "    \"created_at\": \"2026-01-24T01:02:03Z\",\n"
+    "    \"html_url\": \"https://github.com/OWNER/REPO/pull/5530#discussion_r123\"\n"
+    "  }"
+)
+CACHE_KEY_FORMAT = "{owner}/{repo}#{pr_number}"
+CACHE_FILE_DEFAULT = "pr_comments.json"
+
 
 # =============================================================================
 # Cache Implementation (private to this module)
@@ -121,9 +138,9 @@ def _get_cache_file() -> Path:
         if str(_module_dir) not in sys.path:
             sys.path.insert(0, str(_module_dir))
         import common
-        return common.dynamo_utils_cache_dir() / "pr_comments.json"
+        return common.dynamo_utils_cache_dir() / CACHE_FILE_DEFAULT
     except ImportError:
-        return Path.home() / ".cache" / "dynamo-utils" / "pr_comments.json"
+        return Path.home() / ".cache" / "dynamo-utils" / CACHE_FILE_DEFAULT
 
 
 # Module-level singleton cache instance (private)
@@ -142,20 +159,10 @@ class PRCommentsCached(CachedResourceBase[List[Dict[str, Any]]]):
 
     @property
     def cache_name(self) -> str:
-        return "pr_comments"
+        return CACHE_NAME
 
     def api_call_format(self) -> str:
-        return (
-            "REST GET /repos/{owner}/{repo}/pulls/{pr_number}/comments\n"
-            "Example response item (truncated):\n"
-            "  {\n"
-            "    \"id\": 123456789,\n"
-            "    \"in_reply_to_id\": null,\n"
-            "    \"user\": {\"login\": \"octocat\"},\n"
-            "    \"created_at\": \"2026-01-24T01:02:03Z\",\n"
-            "    \"html_url\": \"https://github.com/OWNER/REPO/pull/5530#discussion_r123\"\n"
-            "  }"
-        )
+        return API_CALL_FORMAT
 
     def inflight_lock_key(self, **kwargs: Any) -> Optional[str]:
         return f"{self.cache_name}:{self.cache_key(**kwargs)}"

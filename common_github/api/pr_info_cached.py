@@ -62,6 +62,11 @@ if TYPE_CHECKING:  # pragma: no cover
 
 TTL_POLICY_DESCRIPTION = "by updated_at timestamp (invalidated when PR changes)"
 
+CACHE_NAME = "pr_info"
+API_CALL_FORMAT = "Multiple APIs (PR details + reviews + checks)"
+CACHE_KEY_FORMAT = "{owner}/{repo}#pr:{pr_number}"
+CACHE_FILE_DEFAULT = "pr_info.json"
+
 
 # =============================================================================
 # Cache Implementation (private to this module)
@@ -131,9 +136,9 @@ def _get_cache_file() -> Path:
     try:
         import common
         cache_dir = common.dynamo_utils_cache_dir() / "pr-info"
-        return cache_dir / "pr_info.json"
+        return cache_dir / CACHE_FILE_DEFAULT
     except ImportError:
-        return Path.home() / ".cache" / "dynamo-utils" / "pr-info" / "pr_info.json"
+        return Path.home() / ".cache" / "dynamo-utils" / "pr-info" / CACHE_FILE_DEFAULT
 
 
 # Private module-level cache instance (singleton)
@@ -157,10 +162,10 @@ class PRInfoCached(CachedResourceBase[Optional[Dict[str, Any]]]):
     
     @property
     def cache_name(self) -> str:
-        return "pr_info"
+        return CACHE_NAME
     
     def api_call_format(self) -> str:
-        return "Multiple APIs (PR details + reviews + checks)"
+        return API_CALL_FORMAT
     
     def cache_key(self, **kwargs: Any) -> str:
         owner = str(kwargs["owner"])
