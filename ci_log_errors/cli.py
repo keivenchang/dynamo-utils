@@ -25,12 +25,17 @@ def _cli(argv: Optional[Sequence[str]] = None) -> int:
     # Delegate to the implementation for the heavy lifting.
     parser = argparse.ArgumentParser(
         description="Extract and format a high-signal error snippet from a CI log file.",
+        epilog="Examples:\n"
+               "  %(prog)s 59975400792  # by job ID\n"
+               "  %(prog)s ~/.cache/dynamo-utils/raw-log-text/59975400792.log  # by file path\n"
+               "  %(prog)s 59975400792 --html  # HTML output",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument(
         "log_path",
         nargs="?",
         default="",
-        help="Path to a local raw log file (e.g., raw-log-text/<job_id>.log). Not required for --self-test-examples.",
+        help="Path to a local raw log file (e.g., raw-log-text/<job_id>.log) OR job ID number (e.g., 59975400792). Not required for --self-test-examples.",
     )
     parser.add_argument("--tail-bytes", type=int, default=512 * 1024, help="Read only the last N bytes (default: 524288)")
     parser.add_argument("--no-tail", action="store_true", help="Read the entire file (disables --tail-bytes).")
@@ -87,7 +92,18 @@ def _cli(argv: Optional[Sequence[str]] = None) -> int:
             )
         )
 
-    log_path = Path(args.log_path).expanduser()
+    # Handle both file paths and job IDs
+    log_input = args.log_path
+    log_path = Path(log_input).expanduser()
+    
+    # If the input looks like a job ID (numeric string), try to find it in the default log directory
+    if log_input.isdigit() and not log_path.exists():
+        default_log_dir = Path(args.logs_root).expanduser()
+        log_path = default_log_dir / f"{log_input}.log"
+        if not log_path.exists():
+            logger.error(f"ERROR: log file not found for job ID {log_input}: {log_path}")
+            return 2
+    
     if not log_path.exists():
         logger.error(f"ERROR: file not found: {log_path}")
         return 2
