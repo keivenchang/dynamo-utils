@@ -117,8 +117,8 @@ STATUS_FAILED = 'failed'
 STATUS_BUILDING = 'building'
 
 # Grafana Individual Job Details dashboard URL template
-# Example: https://grafana.nvidia.com/d/beyv28rcnhs74b/individual-job-details?orgId=283&var-branch=pull-request%2F5516&var-job=All&var-job_status=All&${__url_time_range}&var-repo=All&var-commit=All&var-workflow=All
-GRAFANA_PR_URL_TEMPLATE = "https://grafana.nvidia.com/d/beyv28rcnhs74b/individual-job-details?orgId=283&var-branch=pull-request%2F{pr_number}&var-job=All&var-job_status=All&${{__url_time_range}}&var-repo=All&var-commit=All&var-workflow=All"
+# Example: https://grafana.nvidia.com/d/beyv28rcnhs74b/individual-job-details?orgId=283&var-branch=pull-request%2F5516&var-job=All&var-job_status=All&${__url_time_range}&var-repo=All&var-commit=All&var-workflow=All&from=now-30d&to=now
+GRAFANA_PR_URL_TEMPLATE = "https://grafana.nvidia.com/d/beyv28rcnhs74b/individual-job-details?orgId=283&var-branch=pull-request%2F{pr_number}&var-job=All&var-job_status=All&var-repo=All&var-commit=All&var-workflow=All&from=now-30d&to=now"
 
 
 _normalize_check_name = normalize_check_name

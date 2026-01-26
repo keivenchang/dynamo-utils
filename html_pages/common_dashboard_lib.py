@@ -150,9 +150,9 @@ logger = logging.getLogger(__name__)
 # ======================================================================================
 
 # Grafana Test Details dashboard URL template (for individual pytest tests)
-# Example: https://grafana.nvidia.com/d/bf0set70vqygwb/test-details?orgId=283&var-branch=All&var-test_status=All&var-test=test_serve_deployment%5Baggregated%5D
+# Example: https://grafana.nvidia.com/d/bf0set70vqygwb/test-details?orgId=283&var-branch=All&var-test_status=All&var-test=test_serve_deployment%5Baggregated%5D&from=now-30d&to=now
 # Note: Multiple var-test parameters can be present, but only the last one is used for single-select variables
-GRAFANA_TEST_URL_TEMPLATE = "https://grafana.nvidia.com/d/bf0set70vqygwb/test-details?orgId=283&var-branch=All&var-test_status=All&var-test={test_name}"
+GRAFANA_TEST_URL_TEMPLATE = "https://grafana.nvidia.com/d/bf0set70vqygwb/test-details?orgId=283&var-branch=All&var-test_status=All&var-test={test_name}&from=now-30d&to=now"
 
 
 # ======================================================================================
