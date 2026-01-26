@@ -1,5 +1,6 @@
 .gitlab*.json
 index.html
+debug.html
 triton/
 notes/
 ping/
