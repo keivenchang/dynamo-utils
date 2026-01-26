@@ -193,7 +193,7 @@ DEFAULT_RAW_LOG_ERROR_SNIPPET_TAIL_BYTES: int = 512 * 1024
 #   - $DYNAMO_UTILS_CACHE_DIR       (explicit override), else
 #   - ~/.cache/dynamo-utils         (default)
 #
-# Do NOT write caches into a repo checkout (e.g. `dynamo_latest/.cache/...`), because:
+# Do NOT write caches into a repo checkout (e.g. `commits/.cache/...`), because:
 #   - it dirties the checkout (untracked files) and can break automation like `git checkout`
 #   - it scatters caches across multiple clones/paths
 #

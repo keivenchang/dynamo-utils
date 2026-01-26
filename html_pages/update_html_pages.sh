@@ -29,7 +29,7 @@
 #   --show-local-resources  Update the resource report ($DYNAMO_HOME/resource_report.html)
 #   --show-local-branches   Update the branches dashboard ($DYNAMO_HOME/index.html)
 #   --show-remote-branches  Update remote PR dashboards for selected GitHub users (IDENTICAL UI to local branches)
-#   --show-commit-history   Update the commit history dashboard ($DYNAMO_HOME/dynamo_latest/index.html)
+#   --show-commit-history   Update the commit history dashboard ($DYNAMO_HOME/commits/index.html)
 #   --debug-html                   Faster runs: outputs to debug.html instead of index.html, uses smaller commit window (25 commits), enables verification passes
 #   --github-token <token>  GitHub token to pass to all show_*.py scripts (preferred).
 #   --skip-gitlab-api     Skip fetching from GitLab API (commit-history only); use cached data only (faster).
@@ -78,7 +78,7 @@ Flags:
   --show-local-resources    Write: $DYNAMO_HOME/resource_report.html (or resource_report_debug.html in --debug-html)
   --show-local-branches     Write: $DYNAMO_HOME/index.html (or debug.html in --debug-html)
   --show-remote-branches    Write: $HOME/dynamo/speedoflight/dynamo/users/<user>/index.html (or debug.html in --debug-html)
-  --show-commit-history     Write: $DYNAMO_HOME/dynamo_latest/index.html (or debug.html in --debug-html)
+  --show-commit-history     Write: $DYNAMO_HOME/commits/index.html (or debug.html in --debug-html)
 
   --debug-html              Debug mode: outputs to debug.html, enables verification passes, smaller commit window (25 commits), shorter resource window
   --enable-success-build-test-logs  Opt-in: cache raw logs for successful *-build-test jobs to parse pytest slowest tests under "Run tests" (slower)
@@ -252,7 +252,7 @@ fi
 #
 # Timing reference (rough, from one interactive run on keivenc-linux, 2025-12-25):
 # - show_local_branches.py: ~15.6s (often the longest)
-# - git checkout+pull dynamo_latest: ~1.4s
+# - git checkout+pull commits: ~1.4s
 # - show_local_resources.py (1 day): ~0.6s
 # - mv operations + cleanup: ~0-2ms each
 # Notes:
@@ -272,7 +272,7 @@ LOG_FILE="$DAY_LOG_DIR/cron.log"
 
 # Per-component logs (append-only, rotated by day directory)
 BRANCHES_LOG="$DAY_LOG_DIR/show_local_branches.log"
-GIT_UPDATE_LOG="$DAY_LOG_DIR/dynamo_latest_git_update.log"
+GIT_UPDATE_LOG="$DAY_LOG_DIR/commits_git_update.log"
 COMMIT_HISTORY_LOG="$DAY_LOG_DIR/show_commit_history.log"
 RESOURCE_REPORT_LOG="$DAY_LOG_DIR/resource_report.log"
 REMOTE_PRS_LOG="$DAY_LOG_DIR/show_remote_branches.log"
@@ -447,7 +447,7 @@ run_show_remote_branches() {
             fi
             echo "[DRY-RUN]   User: $U"
             echo "[DRY-RUN]     Output: $OUT_FILE"
-            echo "[DRY-RUN]     Command: python3 $SCRIPT_DIR/show_remote_branches.py --github-user $U --base-dir $DYNAMO_HOME/dynamo_latest --output $OUT_FILE $TOKEN_FLAG $MAX_GH_FLAG $SUCCESS_BUILD_TEST_FLAG"
+            echo "[DRY-RUN]     Command: python3 $SCRIPT_DIR/show_remote_branches.py --github-user $U --base-dir $DYNAMO_HOME/commits --output $OUT_FILE $TOKEN_FLAG $MAX_GH_FLAG $SUCCESS_BUILD_TEST_FLAG"
         done
         return 0
     fi
@@ -471,12 +471,12 @@ run_show_remote_branches() {
         echo "$(date '+%Y-%m-%d %H:%M:%S') - Generating remote PRs dashboard (user=${U} output=$OUT_FILE)" >> "$LOG_FILE"
         log_line_ts "$REMOTE_PRS_LOG" "===== run_show_remote_branches start (user=${U} output=$OUT_FILE) ====="
 
-        # Use dynamo_latest as base-dir so we can locate the repo clone for workflow YAML inference.
+        # Use commits as base-dir so we can locate the repo clone for workflow YAML inference.
         # Div trees are now default (no flag needed)
         
         if run_cmd_to_log_ts "$REMOTE_PRS_LOG" python3 "$SCRIPT_DIR/show_remote_branches.py" \
             --github-user "${U}" \
-            --base-dir "$DYNAMO_HOME/dynamo_latest" \
+            --base-dir "$DYNAMO_HOME/commits" \
             --output "$OUT_FILE" \
                 $TOKEN_FLAG \
                 $MAX_GH_FLAG \
@@ -492,7 +492,7 @@ run_show_remote_branches() {
 }
 
 run_show_commit_history() {
-    DYNAMO_REPO="$DYNAMO_HOME/dynamo_latest"
+    DYNAMO_REPO="$DYNAMO_HOME/commits"
     COMMIT_HISTORY_BASENAME="${COMMIT_HISTORY_BASENAME:-index.html}"
     if [ "$FAST_DEBUG" = true ]; then
         COMMIT_HISTORY_BASENAME="debug.html"
@@ -550,7 +550,7 @@ run_show_commit_history() {
 
     # Checkout main and pull latest
     echo "$(date '+%Y-%m-%d %H:%M:%S') - Updating $DYNAMO_REPO to latest main" >> "$LOG_FILE"
-    log_line_ts "$GIT_UPDATE_LOG" "===== update dynamo_latest start ====="
+    log_line_ts "$GIT_UPDATE_LOG" "===== update commits start ====="
     if run_cmd_to_log_ts "$GIT_UPDATE_LOG" git checkout main && run_cmd_to_log_ts "$GIT_UPDATE_LOG" git pull origin main; then
         echo "$(date '+%Y-%m-%d %H:%M:%S') - Successfully updated to latest main" >> "$LOG_FILE"
     else
@@ -558,7 +558,7 @@ run_show_commit_history() {
         # Continue anyway - use whatever is currently checked out
     fi
 
-    # Note: --logs-dir defaults to ../dynamo_ci/logs for dynamo_latest repo
+    # Note: --logs-dir defaults to ../dynamo_ci/logs when it exists (see show_commit_history.py)
 
     echo "$(date '+%Y-%m-%d %H:%M:%S') - Generating commit history dashboard (max_commits=$MAX_COMMITS)" >> "$LOG_FILE"
     log_line_ts "$COMMIT_HISTORY_LOG" "===== run_show_commit_history start (max_commits=$MAX_COMMITS output=$COMMIT_HISTORY_HTML) ====="

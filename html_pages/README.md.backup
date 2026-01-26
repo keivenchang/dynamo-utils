@@ -190,15 +190,15 @@ Shows recent commits with expandable GitHub checks.
 ```bash
 # Full refresh
 python3 html_pages/show_commit_history.py \
-  --repo-path ~/dynamo/dynamo_latest \
+  --repo-path ~/dynamo/commits \
   --max-commits 100 \
-  --output ~/dynamo/dynamo_latest/index.html
+  --output ~/dynamo/commits/index.html
 
 # Cache-only (skip GitLab)
 python3 html_pages/show_commit_history.py \
-  --repo-path ~/dynamo/dynamo_latest \
-  --skip-gitlab-fetch \
-  --output ~/dynamo/dynamo_latest/index.html
+  --repo-path ~/dynamo/commits \
+  --skip-gitlab-api \
+  --output ~/dynamo/commits/index.html
 ```
 
 ---
@@ -274,7 +274,7 @@ See log for details: /home/keivenc/dynamo/logs/2026-01-23/show_local_branches.lo
 **Quick "did it actually update?" checks:**
 ```bash
 ls -lah ~/dynamo/index.html                     # local branches dashboard
-ls -lah ~/dynamo/dynamo_latest/index.html       # commit history dashboard
+ls -lah ~/dynamo/commits/index.html       # commit history dashboard
 ls -lah ~/dynamo/speedoflight/stats/index.html  # stats landing page
 ```
 

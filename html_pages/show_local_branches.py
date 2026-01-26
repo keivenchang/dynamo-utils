@@ -746,7 +746,7 @@ class LocalRepoScanner:
                 repo_node.add_child(branch_node)
 
         # If the current checkout didn't show up in the PR/local sections (common when on main),
-        # add a single line for it so repos like dynamo_latest/ and dynamo_ci/ are informative.
+        # add a single line for it so repos like commits/ and dynamo_ci/ are informative.
         has_current_line = _tree_has_current_branch(repo_node)
         if not has_current_line:
             current_label = current_branch or "HEAD"

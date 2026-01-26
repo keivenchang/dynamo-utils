@@ -676,7 +676,7 @@ gh run view <RUN_ID> --repo ai-dynamo/dynamo --json status,conclusion,url
 =============================================================================
 
 ## 6.1 Important Reminders
-- **NEVER delete `<workspace>/dynamo_latest/index.html`** (e.g. `~/dynamo/dynamo_latest/index.html`) - This is the production HTML page for commit history
+- **NEVER delete `<workspace>/commits/index.html`** (e.g. `~/dynamo/commits/index.html`) - This is the production HTML page for commit history
 - Never commit sensitive information (credentials, tokens, etc.)
 - Always test changes locally before pushing
 - Use meaningful commit messages

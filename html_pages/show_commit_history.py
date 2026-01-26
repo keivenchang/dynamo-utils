@@ -669,10 +669,14 @@ class CommitHistoryGenerator:
             if True:
                 # Set default logs_dir if not provided
                 if logs_dir is None:
-                    # For dynamo_latest, default to ../dynamo_ci/logs for build logs
+                    # Default to a sibling `../dynamo_ci/logs` when it exists.
+                    #
+                    # This covers common layouts, e.g.:
+                    # - repo root == <...>/commits  → <...>/dynamo_ci/logs
                     repo_abs_path = self.repo_path.resolve()
-                    if repo_abs_path.name == "dynamo_latest":
-                        logs_dir = repo_abs_path.parent / "dynamo_ci" / "logs"
+                    candidate_ci_logs = repo_abs_path.parent / "dynamo_ci" / "logs"
+                    if candidate_ci_logs.exists():
+                        logs_dir = candidate_ci_logs
                     else:
                         logs_dir = self.repo_path / "logs"
                 # Determine output path first
@@ -680,18 +684,18 @@ class CommitHistoryGenerator:
                     # Auto-detect output path.
                     #
                     # Policy: prefer writing to the web-served dashboard location:
-                    #   <repo_path>/../dynamo_latest/index.html
+                    #   <repo_path>/../commits/index.html
                     # This keeps manual runs consistent with update_html_pages.sh.
                     #
                     # If that directory doesn't exist, fall back to <repo_path>/logs/commit-history.html
                     # (or ./commit-history.html as a last resort).
                     repo_abs_path = self.repo_path.resolve()
                     nvidia_home = repo_abs_path.parent
-                    dynamo_latest_dir = nvidia_home / "dynamo_latest"
+                    commits_dir = repo_abs_path if repo_abs_path.name == "commits" else (nvidia_home / "commits")
                     logs_dir_temp = self.repo_path / "logs"
 
-                    if dynamo_latest_dir.exists():
-                        output_path = dynamo_latest_dir / "index.html"
+                    if commits_dir.exists():
+                        output_path = commits_dir / "index.html"
                     elif logs_dir_temp.exists():
                         output_path = logs_dir_temp / "commit-history.html"
                     else:
@@ -1156,7 +1160,6 @@ class CommitHistoryGenerator:
                         except ValueError:
                             log_paths[commit_sha].append((date_str, str(log_path)))
                     matching_logs_for_composite.extend(logs_for_this_commit)
-
             # If any commit in this composite_sha has logs, determine status
             if matching_logs_for_composite:
                 COMMIT_HISTORY_PERF_STATS.marker_composite_with_reports += 1

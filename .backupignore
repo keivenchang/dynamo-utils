@@ -45,7 +45,6 @@ core
 core.*
 
 # Generated HTML files
-dynamo_latest/*.html
 dynamo_ci/*.html
 commits/*.html
 users/*/index.html
