@@ -5030,7 +5030,8 @@ class GitHubAPIClient:
             return result
         
         # Try to get from pulls_list first (batch operation)
-        all_prs = self.list_pull_requests(owner, repo, state="all", ttl_s=3600)
+        # Use state="closed" since commits only represent merged/closed PRs, never open ones
+        all_prs = self.list_pull_requests(owner, repo, state="closed", ttl_s=3600)
         pr_num_to_data: Dict[int, dict] = {}
         if isinstance(all_prs, list):
             for pr_data in all_prs:
@@ -5121,9 +5122,9 @@ class GitHubAPIClient:
         # Fetch uncached PRs using list endpoint (much more efficient!)
         if prs_to_fetch:
             # OPTIMIZATION: Use list_pull_requests to get all PRs at once (1-3 API calls instead of N)
-            # This includes both open and closed/merged PRs
+            # Use state="closed" since commits only represent merged/closed PRs, never open ones
             try:
-                all_prs_data = self.list_pull_requests(owner, repo, state="all", ttl_s=3600)
+                all_prs_data = self.list_pull_requests(owner, repo, state="closed", ttl_s=3600)
 
                 # Build mapping: PR number -> PR data
                 pr_num_to_data = {}
