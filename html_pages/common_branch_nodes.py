@@ -381,22 +381,45 @@ def _format_branch_metadata_suffix(
     commit_time_pt: Optional[str],
     commit_datetime: Optional[datetime],
     created_at: Optional[datetime],
+    branch_name: Optional[str] = None,
 ) -> str:
-    """Format the metadata suffix for a branch (modified, created, age)."""
+    """Format the metadata suffix for a branch (modified, created, age, grafana button)."""
+    import urllib.parse
     parts = []
     if commit_time_pt:
-        parts.append(f'<span style="color: #656d76; font-size: 12px;">modified: {html_module.escape(commit_time_pt)}</span>')
+        parts.append(f'<span>modified: {html_module.escape(commit_time_pt)}</span>')
     if created_at:
         if created_at.tzinfo is None:
             created_at = created_at.replace(tzinfo=ZoneInfo("UTC"))
         created_pt = created_at.astimezone(ZoneInfo("America/Los_Angeles")).strftime("%Y-%m-%d %H:%M PT")
-        parts.append(f'<span style="color: #656d76; font-size: 12px;">created: {html_module.escape(created_pt)}</span>')
+        parts.append(f'<span>created: {html_module.escape(created_pt)}</span>')
     age_str = _format_age_compact(commit_datetime)
     if age_str:
-        parts.append(f'<span style="color: #656d76; font-size: 12px;">age: {html_module.escape(age_str)}</span>')
+        parts.append(f'<span>age: {html_module.escape(age_str)}</span>')
+    
+    # Add Grafana button for branch
+    if branch_name:
+        # Strip repo prefix (e.g., "ai-dynamo/keivenchang/fix-..." -> "keivenchang/fix-...")
+        branch_for_url = _strip_repo_prefix_for_clipboard(branch_name)
+        # URL-encode the branch name (e.g., "keivenchang/fix-..." -> "keivenchang%2Ffix-...")
+        encoded_branch = urllib.parse.quote(branch_for_url, safe='')
+        grafana_url = f"https://grafana.nvidia.com/d/beyv28rcnhs74b/individual-job-details?orgId=283&var-branch={encoded_branch}&var-job=All&var-job_status=All&var-repo=All&var-commit=All&var-workflow=All&from=now-30d&to=now"
+        grafana_button = (
+            f'<a href="{grafana_url}" '
+            f'target="_blank" '
+            f'style="display: inline-block; padding: 1px 6px; background: linear-gradient(180deg, #FF7A28 0%, #F05A28 100%); color: white; text-decoration: none; border-radius: 8px; font-weight: 600; font-size: 9px; border: 1px solid #D94A1F; box-shadow: 0 1px 2px rgba(240,90,40,0.3); line-height: 1.2; margin-left: 4px;" '
+            f'onmouseover="this.style.background=\'linear-gradient(180deg, #FF8A38 0%, #FF7A28 100%)\'; this.style.boxShadow=\'0 2px 4px rgba(240,90,40,0.4)\'; this.style.transform=\'translateY(-1px)\';" '
+            f'onmouseout="this.style.background=\'linear-gradient(180deg, #FF7A28 0%, #F05A28 100%)\'; this.style.boxShadow=\'0 1px 2px rgba(240,90,40,0.3)\'; this.style.transform=\'translateY(0)\';" '
+            f'onmousedown="this.style.boxShadow=\'0 1px 2px rgba(0,0,0,0.2) inset\'; this.style.transform=\'translateY(1px)\';" '
+            f'onmouseup="this.style.boxShadow=\'0 2px 4px rgba(240,90,40,0.4)\'; this.style.transform=\'translateY(-1px)\';" '
+            f'title="View branch {html_module.escape(branch_for_url)} in Grafana Individual Job Details dashboard">'
+            f'Grafana</a>'
+        )
+        parts.append(grafana_button)
+    
     if not parts:
         return ""
-    return "(" + ", ".join(parts) + ")"
+    return ", ".join(parts)
 
 
 def _format_commit_tooltip(commit_message: Optional[str]) -> str:
@@ -794,9 +817,11 @@ class BranchInfoNode(BranchNode):
             parts.append('<span class="branch-tag closed-branch">Closed</span>')
 
         # Branch name (fixed font; keep normal style regardless of merged/closed).
+        # Strip repo prefix for display (e.g., "ai-dynamo/keivenchang/..." -> "keivenchang/...")
+        display_name = _strip_repo_prefix_for_clipboard(self.label)
         cls_attr = ' class="current"' if self.is_current else ""
         parts.append(
-            f'<span{cls_attr} style="font-family: monospace; font-weight: 700;">{html_module.escape(self.label)}</span>'
+            f'<span{cls_attr} style="font-family: monospace; font-weight: 700;">{html_module.escape(display_name)}</span>'
         )
         
         # SHA link (if available)
@@ -827,6 +852,7 @@ class BranchInfoNode(BranchNode):
             commit_time_pt=self.commit_time_pt,
             commit_datetime=self.commit_datetime,
             created_at=self.created_at,
+            branch_name=self.label,
         )
         if metadata_suffix:
             kids.append(BranchMetadataNode(label=metadata_suffix).to_tree_vm())
