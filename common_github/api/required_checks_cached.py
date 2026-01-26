@@ -6,33 +6,69 @@ This resource is intentionally implemented via `gh` because:
 - branch protection REST endpoints can 403 without admin perms
 - required-ness lives in GraphQL (merge-box semantics)
 
-Resource:
-  gh pr view {pr_number} --repo {owner}/{repo} --json statusCheckRollup
+Resource (current implementation):
+  1) gh api repos/{owner}/{repo}/pulls/{pr_number} --jq <expr>
+     - used to fetch PR `node_id` + state + updated_at/merged_at (for TTL meta)
+  2) gh api graphql -f query=<omitted> ... (paginated)
+     - used to compute required-ness via `isRequired(pullRequestId: ...)`
 
-Example API Response (from gh CLI):
-  {
-    "statusCheckRollup": [
+Do NOT use:
+  - `gh pr view {pr_number} --repo {owner}/{repo} --json statusCheckRollup`
+    Empirically this can return an empty required set for `isRequired` even when the
+    equivalent GraphQL query (same as `_fetch_required_checks()` below) returns
+    required checks (e.g. PR 5635 in ai-dynamo/dynamo). Prefer GraphQL.
+
+Implementation note (how to migrate off `gh`, later; do NOT change behavior now):
+  TODO: Replace `gh` subprocess calls with direct REST+GraphQL HTTP (Python/requests),
+  keeping the same semantics and stats visibility.
+
+  This module can be implemented via direct GitHub GraphQL HTTP instead of the `gh` CLI.
+  The key requirement is the PR node id (`node_id`) because GraphQL uses
+  `isRequired(pullRequestId: $prid)` to compute required-ness per PR.
+
+  Outline (Python + requests):
+    1) REST: GET https://api.github.com/repos/{owner}/{repo}/pulls/{pr_number}
+       - Extract `node_id` as `$prid` (and optionally `updated_at` / `merged_at` for TTL meta).
+    2) GraphQL: POST https://api.github.com/graphql
+       - Body: {"query": <QUERY>, "variables": {"owner":..., "name":..., "number":..., "prid":..., "after":...}}
+       - Use the same query template as `_fetch_required_checks()` below; page with `after` until
+         `pageInfo.hasNextPage == false`.
+    3) Collect required check names where `isRequired == true`, using:
+       - CheckRun: `name`
+       - StatusContext: `context`
+
+Example API Response (truncated; key fields used by this module):
+  - REST (gh core) PR meta:
+      {"node_id":"PR_kwDO...","state":"OPEN","merged_at":null,"updated_at":"2026-01-24T03:12:34Z"}
+  - GraphQL required-ness (gh graphql):
       {
-        "context": "build",
-        "state": "SUCCESS",
-        "isRequired": true
-      },
-      {
-        "context": "test",
-        "state": "PENDING",
-        "isRequired": true
-      },
-      {
-        "context": "lint",
-        "state": "SUCCESS",
-        "isRequired": false
+        "data": {
+          "repository": {
+            "pullRequest": {
+              "commits": {
+                "nodes": [
+                  {
+                    "commit": {
+                      "statusCheckRollup": {
+                        "contexts": {
+                          "nodes": [
+                            {"__typename":"CheckRun","name":"pre-commit","isRequired":true},
+                            {"__typename":"StatusContext","context":"license/cla","isRequired":false}
+                          ]
+                        }
+                      }
+                    }
+                  }
+                ]
+              }
+            }
+          }
+        }
       }
-    ]
-  }
 
 Cached Fields:
-  - Set of required check context names (e.g., {"build", "test"})
-  - Extracted from statusCheckRollup where isRequired=true
+  - Set of required check names/contexts (e.g., {"pre-commit"})
+  - Extracted from GraphQL nodes where `isRequired == true`
 """
 
 from __future__ import annotations
