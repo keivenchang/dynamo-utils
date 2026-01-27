@@ -167,7 +167,21 @@ resolve_model() {
             echo "$TINYLLAMA_MODEL"
             ;;
         "qwen")
-            echo "$QWEN_MODEL"
+            # Use local HF cache to avoid rate limits
+            local qwen_cache_dir="$HOME/.cache/huggingface/hub/models--Qwen--Qwen3-0.6B"
+            if [ -d "$qwen_cache_dir/snapshots" ]; then
+                # Get the latest snapshot (most recent directory)
+                local latest_snapshot=$(ls -t "$qwen_cache_dir/snapshots" 2>/dev/null | head -1)
+                if [ -n "$latest_snapshot" ]; then
+                    echo "$qwen_cache_dir/snapshots/$latest_snapshot"
+                else
+                    # Fallback to HF model name if snapshot not found
+                    echo "$QWEN_MODEL"
+                fi
+            else
+                # Fallback to HF model name if cache dir doesn't exist
+                echo "$QWEN_MODEL"
+            fi
             ;;
         *)
             # Use custom model path as specified by user
@@ -335,6 +349,15 @@ OPTIONS:
     --enable-prefix-caching
                          Enable vLLM automatic prefix caching (prefix cache hits)
                          Default: disabled in this script (uses --no-enable-prefix-caching)
+    --enable-local-indexer
+                         Enable worker-local KV indexer for tracking worker's KV cache state.
+                         Useful for debugging and observability in disaggregated mode.
+                         Only applicable to vLLM framework.
+    --use-original-model-name
+                         Use the original HuggingFace model name instead of local cache path.
+                         Example: Use "Qwen/Qwen3-0.6B" instead of
+                         "~/.cache/huggingface/hub/models--Qwen--Qwen3-0.6B/snapshots/..."
+                         Useful when you want consistent model naming across systems.
     --lmcache             Enable LMCache KV cache offloading (vLLM only, enabled by default)
     --no-lmcache          Disable LMCache KV cache offloading (vLLM only)
                          Note: LMCache only supported on x86 architecture
@@ -366,6 +389,8 @@ DISAGG_MODE=false
 ENABLE_LMCACHE=true  # Enabled by default for vLLM (can be disabled with --no-lmcache)
 ENABLE_PREFIX_CACHING=false  # vLLM only; default disabled to reduce memory usage
 GPU_MEM_FRACTION_OVERRIDE=""  # Will override defaults if set
+ENABLE_LOCAL_INDEXER=false  # vLLM only; enable worker-local KV indexer
+USE_ORIGINAL_MODEL_NAME=false  # Use original model name instead of cached path
 QWEN_MODEL="Qwen/Qwen3-0.6B"
 TINYLLAMA_MODEL="TinyLlama/TinyLlama-1.1B-Chat-v1.0"
 # deepseek-ai/DeepSeek-R1-Distill-Llama-8B
@@ -408,6 +433,14 @@ while [[ $# -gt 0 ]]; do
             ENABLE_PREFIX_CACHING=true
             shift
             ;;
+        --enable-local-indexer)
+            ENABLE_LOCAL_INDEXER=true
+            shift
+            ;;
+        --use-original-model-name)
+            USE_ORIGINAL_MODEL_NAME=true
+            shift
+            ;;
         --dryrun|--dry-run)
             DRY_RUN=true
             shift
@@ -436,6 +469,26 @@ fi
 
 # Resolve model input to actual model path
 MODEL=$(resolve_model "$MODEL_INPUT")
+
+# If --use-original-model-name is set, use the original model name instead of cache path
+if [ "$USE_ORIGINAL_MODEL_NAME" = true ]; then
+    case "$MODEL_INPUT" in
+        ""|"qwen")
+            MODEL="$QWEN_MODEL"
+            ;;
+        "tinyllama")
+            MODEL="$TINYLLAMA_MODEL"
+            ;;
+        "deepseek")
+            MODEL="$DEEPSEEK_MODEL"
+            ;;
+        *)
+            # Already using original name for custom models
+            MODEL="$MODEL_INPUT"
+            ;;
+    esac
+    echo "Using original model name: $MODEL"
+fi
 
 # Framework detection will happen later, right before backend launch
 
@@ -670,6 +723,10 @@ if [ "$FRAMEWORK" = "vllm" ]; then
     if [ "$ENABLE_LMCACHE" = true ]; then
         FRAMEWORK_ARGS="$FRAMEWORK_ARGS --connector lmcache"
     fi
+    # Add local indexer if enabled
+    if [ "$ENABLE_LOCAL_INDEXER" = true ]; then
+        FRAMEWORK_ARGS="$FRAMEWORK_ARGS --enable-local-indexer true"
+    fi
 elif [ "$FRAMEWORK" = "sglang" ]; then
     FRAMEWORK_ARGS="--mem-fraction-static $GPU_MEMORY_UTIL_AGG --max-running-requests $BATCH_SIZE --enable-metrics"
 elif [ "$FRAMEWORK" = "trtllm" ]; then
@@ -847,6 +904,11 @@ if [ "$RUN_BACKEND" = true ]; then
             # Add LMCache support for prefill worker only (uses multi-connector with NIXL)
             if [ "$ENABLE_LMCACHE" = true ]; then
                 PREFILL_FLAG="$PREFILL_FLAG --connector lmcache nixl"
+            fi
+            
+            # Add local indexer if enabled (for both prefill and decode)
+            if [ "$ENABLE_LOCAL_INDEXER" = true ]; then
+                DISAGG_FRAMEWORK_ARGS="$DISAGG_FRAMEWORK_ARGS --enable-local-indexer true"
             fi
         elif [ "$FRAMEWORK" = "sglang" ]; then
             DISAGG_FRAMEWORK_ARGS="--mem-fraction-static $GPU_MEMORY_UTIL_DISAGG --page-size 16 --chunked-prefill-size 4096 --max-prefill-tokens 4096 --enable-memory-saver --delete-ckpt-after-loading --max-running-requests $BATCH_SIZE --enable-metrics --disaggregation-bootstrap-port 12345 --host 0.0.0.0 --disaggregation-transfer-backend nixl"
