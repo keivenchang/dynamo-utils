@@ -845,6 +845,8 @@ class BranchInfoNode(BranchNode):
         # - If anything is running/pending -> show RUNNING
         # - If all REQUIRED checks are already successful -> also show PASSED (can coexist with RUNNING)
         # - Else if all checks are successful and nothing is running -> show PASSED
+        #
+        # NOTE: do NOT use object identity for anything here; this must be stable across runs.
         ci_tags: list[str] = []
         if self.pr:
             try:
