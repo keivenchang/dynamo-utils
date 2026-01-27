@@ -109,6 +109,15 @@ import common
 import common_github
 
 
+def _hash10(s: str) -> str:
+    """Stable short hash for node identity in HTML trees.
+
+    IMPORTANT: Do NOT use Python's built-in hash() or id() for node keys because they are
+    process-dependent and will change across runs, breaking URL state restoration.
+    """
+    return hashlib.sha1(str(s or "").encode("utf-8")).hexdigest()[:10]
+
+
 def mock_build_ci_nodes(
     pr: PRInfo,
     repo_path: Path,
@@ -381,10 +390,8 @@ def _format_branch_metadata_suffix(
     commit_time_pt: Optional[str],
     commit_datetime: Optional[datetime],
     created_at: Optional[datetime],
-    branch_name: Optional[str] = None,
 ) -> str:
-    """Format the metadata suffix for a branch (modified, created, age, grafana button)."""
-    import urllib.parse
+    """Format the metadata suffix for a branch (modified, created, age)."""
     parts = []
     if commit_time_pt:
         parts.append(f'<span>modified: {html_module.escape(commit_time_pt)}</span>')
@@ -397,29 +404,38 @@ def _format_branch_metadata_suffix(
     if age_str:
         parts.append(f'<span>age: {html_module.escape(age_str)}</span>')
     
-    # Add Grafana button for branch
-    if branch_name:
-        # Strip repo prefix (e.g., "ai-dynamo/keivenchang/fix-..." -> "keivenchang/fix-...")
-        branch_for_url = _strip_repo_prefix_for_clipboard(branch_name)
-        # URL-encode the branch name (e.g., "keivenchang/fix-..." -> "keivenchang%2Ffix-...")
-        encoded_branch = urllib.parse.quote(branch_for_url, safe='')
-        grafana_url = f"https://grafana.nvidia.com/d/beyv28rcnhs74b/individual-job-details?orgId=283&var-branch={encoded_branch}&var-job=All&var-job_status=All&var-repo=All&var-commit=All&var-workflow=All&from=now-30d&to=now"
-        grafana_button = (
-            f'<a href="{grafana_url}" '
-            f'target="_blank" '
-            f'style="display: inline-block; padding: 1px 6px; background: linear-gradient(180deg, #FF7A28 0%, #F05A28 100%); color: white; text-decoration: none; border-radius: 8px; font-weight: 600; font-size: 9px; border: 1px solid #D94A1F; box-shadow: 0 1px 2px rgba(240,90,40,0.3); line-height: 1.2; margin-left: 4px;" '
-            f'onmouseover="this.style.background=\'linear-gradient(180deg, #FF8A38 0%, #FF7A28 100%)\'; this.style.boxShadow=\'0 2px 4px rgba(240,90,40,0.4)\'; this.style.transform=\'translateY(-1px)\';" '
-            f'onmouseout="this.style.background=\'linear-gradient(180deg, #FF7A28 0%, #F05A28 100%)\'; this.style.boxShadow=\'0 1px 2px rgba(240,90,40,0.3)\'; this.style.transform=\'translateY(0)\';" '
-            f'onmousedown="this.style.boxShadow=\'0 1px 2px rgba(0,0,0,0.2) inset\'; this.style.transform=\'translateY(1px)\';" '
-            f'onmouseup="this.style.boxShadow=\'0 2px 4px rgba(240,90,40,0.4)\'; this.style.transform=\'translateY(-1px)\';" '
-            f'title="View branch {html_module.escape(branch_for_url)} in Grafana Individual Job Details dashboard">'
-            f'Grafana</a>'
-        )
-        parts.append(grafana_button)
-    
     if not parts:
         return ""
     return ", ".join(parts)
+
+
+
+def _grafana_branch_button_html(*, branch_name: str) -> str:
+    """Return the Grafana 'Individual Job Details' link for a branch."""
+    import urllib.parse
+
+    bn = str(branch_name or "").strip()
+    if not bn:
+        return ""
+    branch_for_url = _strip_repo_prefix_for_clipboard(bn)
+    encoded_branch = urllib.parse.quote(branch_for_url, safe="")
+    grafana_url = (
+        "https://grafana.nvidia.com/d/beyv28rcnhs74b/individual-job-details"
+        f"?orgId=283&var-branch={encoded_branch}"
+        "&var-job=All&var-job_status=All&var-repo=All&var-commit=All&var-workflow=All"
+        "&from=now-30d&to=now"
+    )
+    return (
+        f'<a href="{grafana_url}" '
+        f'target="_blank" '
+        f'style="display: inline-block; padding: 1px 6px; background: linear-gradient(180deg, #FF7A28 0%, #F05A28 100%); color: white; text-decoration: none; border-radius: 8px; font-weight: 600; font-size: 9px; border: 1px solid #D94A1F; box-shadow: 0 1px 2px rgba(240,90,40,0.3); line-height: 1.2; margin-left: 6px;" '
+        f'onmouseover="this.style.background=\'linear-gradient(180deg, #FF8A38 0%, #FF7A28 100%)\'; this.style.boxShadow=\'0 2px 4px rgba(240,90,40,0.4)\'; this.style.transform=\'translateY(-1px)\';" '
+        f'onmouseout="this.style.background=\'linear-gradient(180deg, #FF7A28 0%, #F05A28 100%)\'; this.style.boxShadow=\'0 1px 2px rgba(240,90,40,0.3)\'; this.style.transform=\'translateY(0)\';" '
+        f'onmousedown="this.style.boxShadow=\'0 1px 2px rgba(0,0,0,0.2) inset\'; this.style.transform=\'translateY(1px)\';" '
+        f'onmouseup="this.style.boxShadow=\'0 2px 4px rgba(240,90,40,0.4)\'; this.style.transform=\'translateY(-1px)\';" '
+        f'title="View branch {html_module.escape(branch_for_url)} in Grafana Individual Job Details dashboard">'
+        f'Grafana</a>'
+    )
 
 
 def _format_commit_tooltip(commit_message: Optional[str]) -> str:
@@ -573,7 +589,8 @@ class BranchNode:
         """Convert this node and its children to a TreeNodeVM for rendering."""
         kids = [c.to_tree_vm() for c in (self.children or [])]
         return TreeNodeVM(
-            node_key=f"branch:{id(self)}",
+            # Stable key: avoid id(self) so URL state is stable across runs.
+            node_key=f"node:{_hash10(self.label)}:{self.label}",
             label_html=html_module.escape(self.label),
             children=kids,
             collapsible=True,
@@ -671,7 +688,9 @@ class CIJobNode(BranchNode):
                 kids.append(snippet_node)
         
         return TreeNodeVM(
-            node_key=f"ci:{self.job_id}:{id(self)}",
+            # Stable key: prefer PR context + job identity (not object id).
+            # NOTE: We keep the "CI:" prefix so URL-key generation can extract a repo token.
+            node_key=f"CI:{self.context_key}:{self.job_id}:{self.actions_job_id or self.run_id or _hash10(self.log_url or self.raw_log_href or self.display_name)}",
             label_html=label_html,
             children=kids,
             collapsible=True,
@@ -759,7 +778,7 @@ class RepoNode(BranchNode):
         kids = [c.to_tree_vm() for c in (self.children or [])]
         label_html = f'<span style="font-weight: 600;">{html_module.escape(self.label)}</span>'
         return TreeNodeVM(
-            node_key=f"repo:{id(self)}",
+            node_key=f"repo:{self.label}",
             label_html=label_html,
             children=kids,
             collapsible=False,
@@ -809,12 +828,70 @@ class BranchInfoNode(BranchNode):
         is_merged = bool(self.pr.is_merged) if self.pr else False
         is_closed_not_merged = bool(self.pr) and pr_state_lc and pr_state_lc != "open" and not is_merged
 
+        # Branch/CI state tags should sit BETWEEN the copy button and the branch name.
+        # This keeps the left edge stable and makes scan-reading easier.
+        #
         # Branch state tag (do NOT style/invert the branch name itself).
         if bool(self.merged_local) or bool(is_merged):
             parts.append('<span class="branch-tag merged-tag">Merged</span>')
         elif bool(is_closed_not_merged):
             # Closed tag should be reverse black/white; reuse existing CSS class.
             parts.append('<span class="branch-tag closed-branch">Closed</span>')
+
+        # CI status tags derived from check rows when available.
+        #
+        # Policy:
+        # - If any REQUIRED check failed -> show FAILED only
+        # - If anything is running/pending -> show RUNNING
+        # - If all REQUIRED checks are already successful -> also show PASSED (can coexist with RUNNING)
+        # - Else if all checks are successful and nothing is running -> show PASSED
+        ci_tags: list[str] = []
+        if self.pr:
+            try:
+                rows = list(self.pr.check_rows or [])
+                if rows:
+                    summary = summarize_pr_check_rows(rows)
+                    counts = summary.counts
+
+                    def _cnt(attr: str) -> int:
+                        try:
+                            return int(getattr(counts, attr) or 0)
+                        except Exception:
+                            return 0
+
+                    # Required rollup
+                    required_failed = _cnt("failure_required") > 0
+                    required_passed = (_cnt("success_required") > 0) and (_cnt("failure_required") == 0) and (_cnt("in_progress_required") == 0)
+
+                    # Running rollup (any running/pending anywhere in check rows)
+                    any_running = (_cnt("in_progress_required") + _cnt("in_progress_optional") + _cnt("pending")) > 0
+
+                    # All-done rollup (used to show PASSED when nothing is running)
+                    total = _cnt("total")
+                    done = _cnt("success_required") + _cnt("success_optional") + _cnt("failure_required") + _cnt("failure_optional") + _cnt("cancelled") + _cnt("other")
+                    all_done = (total > 0) and (done >= total)
+                    all_passed = all_done and (_cnt("failure_required") + _cnt("failure_optional")) == 0
+
+                    if required_failed:
+                        ci_tags = ['<span class="status-indicator status-failed">FAILED</span>']
+                    else:
+                        if any_running:
+                            ci_tags.append('<span class="status-indicator status-building">RUNNING</span>')
+                        if required_passed or (all_passed and not any_running):
+                            ci_tags.append('<span class="status-indicator status-success">PASSED</span>')
+                else:
+                    st = str(getattr(self.pr, "ci_status", "") or "").strip().lower()
+                    if st in {"failure", "failed", "error"}:
+                        ci_tags = ['<span class="status-indicator status-failed">FAILED</span>']
+                    elif st in {"in_progress", "in progress", "pending", "queued", "running", "building"}:
+                        ci_tags = ['<span class="status-indicator status-building">RUNNING</span>']
+                    elif st in {"success", "passed"}:
+                        ci_tags = ['<span class="status-indicator status-success">PASSED</span>']
+            except Exception:
+                ci_tags = []
+        for t in (ci_tags or []):
+            if t:
+                parts.append(t)
 
         # Branch name (fixed font; keep normal style regardless of merged/closed).
         # Strip repo prefix for display (e.g., "ai-dynamo/keivenchang/..." -> "keivenchang/...")
@@ -823,6 +900,11 @@ class BranchInfoNode(BranchNode):
         parts.append(
             f'<span{cls_attr} style="font-family: monospace; font-weight: 700;">{html_module.escape(display_name)}</span>'
         )
+
+        # Grafana link should appear directly after the branch name.
+        grafana_btn = _grafana_branch_button_html(branch_name=self.label)
+        if grafana_btn:
+            parts.append(grafana_btn)
         
         # SHA link (if available)
         if self.sha and self.commit_url:
@@ -852,7 +934,6 @@ class BranchInfoNode(BranchNode):
             commit_time_pt=self.commit_time_pt,
             commit_datetime=self.commit_datetime,
             created_at=self.created_at,
-            branch_name=self.label,
         )
         if metadata_suffix:
             kids.append(BranchMetadataNode(label=metadata_suffix).to_tree_vm())
@@ -873,7 +954,8 @@ class BranchInfoNode(BranchNode):
         default_expanded = not (is_merged_effective or is_closed_effective)
 
         return TreeNodeVM(
-            node_key=f"branch_info:{self.label}:{id(self)}",
+            # Stable key: branch name + (optional) SHA + (optional) PR number.
+            node_key=f"branch_info:{self.label}:{self.sha or ''}:{(self.pr.number if self.pr else '')}",
             label_html=label_html,
             children=kids,
             collapsible=True,  # Make branches collapsible like local branches
@@ -895,7 +977,7 @@ class PRNode(BranchNode):
             label_html = html_module.escape(self.label) if self.label else "(no PR)"
             kids = [c.to_tree_vm() for c in (self.children or [])]
             return TreeNodeVM(
-                node_key=f"pr:{id(self)}",
+                node_key=f"pr:none:{_hash10(self.label)}",
                 label_html=label_html,
                 children=kids,
                 collapsible=False,
@@ -966,7 +1048,7 @@ class PRURLNode(BranchNode):
             label_html = html_module.escape(self.label)
         
         return TreeNodeVM(
-            node_key=f"pr_url:{id(self)}",
+            node_key=f"pr_url:{(self.pr.number if self.pr else '')}:{_hash10(url or self.label)}",
             label_html=label_html,
             children=[],
             collapsible=False,
@@ -999,7 +1081,7 @@ class BranchCommitMessageNode(BranchNode):
         label_html = " ".join(parts) if parts else ""
         
         return TreeNodeVM(
-            node_key=f"commit_msg:{id(self)}",
+            node_key=f"commit_msg:{(self.pr.number if self.pr else '')}:{_hash10(msg)}",
             label_html=label_html,
             children=[],
             collapsible=False,
@@ -1018,7 +1100,7 @@ class BranchMetadataNode(BranchNode):
         """Convert to TreeNodeVM with muted metadata text."""
         # Label is already formatted with HTML (from _format_branch_metadata_suffix)
         return TreeNodeVM(
-            node_key=f"metadata:{id(self)}",
+            node_key=f"metadata:{_hash10(self.label)}",
             label_html=self.label,  # Already contains HTML
             children=[],
             collapsible=False,
@@ -1692,14 +1774,6 @@ class PRStatusWithJobsNode(BranchNode):
                         "</span>"
                     )
 
-                # Top-level pill should reflect REQUIRED checks only.
-                if counts["failure_required"] > 0:
-                    ci_label = '<span class="status-indicator status-failed">FAILED</span>'
-                elif counts["in_progress"] > 0 or counts["pending"] > 0:
-                    ci_label = '<span class="status-indicator status-building">RUNNING</span>'
-                else:
-                    ci_label = '<span class="status-indicator status-success">PASSED</span>'
-
                 checks_link = ""
                 if self.pr.head_sha:
                     checks_url = f"https://github.com/{DYNAMO_REPO_SLUG}/commit/{self.pr.head_sha}/checks"
@@ -1715,7 +1789,9 @@ class PRStatusWithJobsNode(BranchNode):
                         f"</a>"
                     )
 
-                status_parts.append(f"{ci_label}{checks_link} {ci_summary}")
+                # CI pill is rendered on the branch line (between copy icon and branch name).
+                # Keep this row as a "details" summary: link + compact CI breakdown.
+                status_parts.append(f"{checks_link} {ci_summary}".strip())
 
             if self.pr.review_decision == "APPROVED":
                 status_parts.append("Review: ✅ Approved")
@@ -1816,7 +1892,7 @@ class PRStatusWithJobsNode(BranchNode):
         """Show the PASSED/FAILED/RUNNING status line, collapsed for PASSED.
         
         Policy: collapse when PASSED (no required failures), expand when FAILED (has required failures).
-        We ignore RUNNING state and optional failures - if it displays "PASSED", it collapses.
+        Also expand when RUNNING/PENDING so active work is visible by default.
         """
         # Sort children alphabetically by display name.
         # Special nodes (RerunLinkNode, ConflictWarningNode, BlockedMessageNode) always stay at the end.
@@ -1919,7 +1995,46 @@ class PRStatusWithJobsNode(BranchNode):
             isinstance(child, CIJobNode) and child.status == "failure" and bool(child.is_required)
             for child in sorted_children
         )
-        auto_expand_checks = required_failed_from_api or required_failed_from_children
+        # Determine rollup status from check rows when available (more reliable than PR.ci_status).
+        rollup_status = str(getattr(pr, "ci_status", "") or "").strip().lower()
+        has_required_failure = bool(required_failed_from_api or required_failed_from_children)
+        try:
+            rows = list(pr.check_rows or [])
+            if rows:
+                summary = summarize_pr_check_rows(rows)
+                counts = summary.counts
+
+                def _cnt(name: str) -> int:
+                    try:
+                        if hasattr(counts, "get"):
+                            return int(counts.get(name, 0) or 0)
+                        return int(getattr(counts, name, 0) or 0)
+                    except Exception:
+                        return 0
+
+                failure_required = _cnt("failure_required")
+                in_prog = _cnt("in_progress_required") + _cnt("in_progress_optional") + _cnt("in_progress")
+                pending = _cnt("pending")
+                total = _cnt("total")
+
+                if failure_required > 0:
+                    rollup_status = CIStatus.FAILURE.value
+                elif in_prog > 0:
+                    rollup_status = CIStatus.IN_PROGRESS.value
+                elif pending > 0:
+                    rollup_status = CIStatus.PENDING.value
+                elif total > 0:
+                    rollup_status = CIStatus.SUCCESS.value
+
+                if failure_required > 0:
+                    has_required_failure = True
+        except Exception:
+            pass
+
+        auto_expand_checks = ci_should_expand_by_default(
+            rollup_status=rollup_status,
+            has_required_failure=bool(has_required_failure),
+        )
 
         # If we have required failures but no child nodes (cache-only run),
         # inject a placeholder so the triangle still renders.
