@@ -720,7 +720,14 @@ def is_required_check_name(check_name: str, required_names_normalized: set[str])
     name_norm = normalize_check_name(check_name)
     if not name_norm:
         return False
-    return name_norm in (required_names_normalized or set())
+    required = set(required_names_normalized or set())
+    if not required:
+        return False
+    if name_norm in required:
+        return True
+    # Substring match to handle workflow-prefixed contexts, e.g.
+    # "pr / backend-status-check (push)" vs "backend-status-check"
+    return any(r and (r in name_norm or name_norm in r) for r in required)
 
 
 def format_gh_check_run_duration(check_run: Dict[str, Any]) -> str:
@@ -1909,7 +1916,17 @@ class GitHubAPIClient:
         ttl_s: int = 600,
         timeout: int = 15,
     ) -> Optional[Dict[str, Any]]:
-        """Return Actions job details (including `steps`) with a persistent cache.
+        """Return Actions job details (including `steps`) with adaptive caching.
+
+        Caching strategy:
+        - Completed jobs: cached for ttl_s (typically 30 days)
+        - In-progress jobs: cached with adaptive TTL based on job age:
+          * <1h: 2 minutes
+          * <2h: 4 minutes  
+          * <4h: 30 minutes
+          * <8h: 60 minutes
+          * <12h: 80 minutes
+          * >=12h: 120 minutes
 
         Uses:
           GET /repos/{owner}/{repo}/actions/jobs/{job_id}
@@ -1950,7 +1967,7 @@ class GitHubAPIClient:
                 return False
             return True
 
-        # Memory cache
+        # Memory cache (accepts both completed and in-progress jobs)
         mem_ts: int = 0
         mem_has_entry: bool = False
         mem_val_status: str = ""
@@ -1961,15 +1978,34 @@ class GitHubAPIClient:
                 mem_has_entry = True
                 ts = int(ent.get("ts", 0) or 0)
                 mem_ts = ts
-                if ts and (now - ts) <= int(ttl_s):
-                    val = ent.get("val")
-                    if isinstance(val, dict):
-                        mem_val_status = str(val.get("status", "") or "")
-                        mem_val_completed_at = bool(str(val.get("completed_at", "") or "").strip())
-                    if _is_completed_job_details(val):
-                        if isinstance(val, dict):
-                            self._cache_hit("actions_job_details.mem")
-                            return val
+                val = ent.get("val")
+                if isinstance(val, dict):
+                    mem_val_status = str(val.get("status", "") or "")
+                    mem_val_completed_at = bool(str(val.get("completed_at", "") or "").strip())
+                    
+                    # Determine appropriate TTL for this cached entry
+                    is_completed = _is_completed_job_details(val)
+                    if is_completed:
+                        # Completed jobs: use provided ttl_s (usually 30 days)
+                        effective_ttl = int(ttl_s)
+                    else:
+                        # In-progress jobs: use adaptive TTL based on started_at
+                        started_at = str(val.get("started_at", "") or "").strip()
+                        if started_at:
+                            try:
+                                from datetime import datetime
+                                started_dt = datetime.fromisoformat(started_at.replace('Z', '+00:00'))
+                                started_epoch = int(started_dt.timestamp())
+                                effective_ttl = self._adaptive_ttl_s(timestamp_epoch=started_epoch, default_ttl_s=120)
+                            except Exception:
+                                effective_ttl = 120  # 2 minutes default
+                        else:
+                            effective_ttl = 120
+                    
+                    # Check if entry is still fresh
+                    if ts and (now - ts) <= effective_ttl:
+                        self._cache_hit("actions_job_details.mem")
+                        return val
         except (ValueError, TypeError):
             pass
 
@@ -1991,7 +2027,7 @@ class GitHubAPIClient:
             if isinstance(job_data, dict):
                 cached_job_status = str(job_data.get("status", "") or "")
                 cached_job_completed_at = bool(str(job_data.get("completed_at", "") or "").strip())
-            if _is_completed_job_details(job_data):
+                # Return both completed AND in-progress jobs if fresh
                 self._actions_job_details_mem_cache[key] = {"ts": now, "val": job_data}
                 self._cache_hit("actions_job_details.disk")
                 return job_data
@@ -2073,11 +2109,18 @@ class GitHubAPIClient:
             _dbg("bad_json", job_id=job_id_s, key=key)
             return None
 
-        # Never cache incomplete job details (see `_is_completed_job_details` above).
+        # Cache all job details (both completed and in-progress)
+        # Use adaptive TTL for in-progress, 30 days for completed
         try:
             api_status = str(data.get("status", "") or "").lower()
             api_completed_at = str(data.get("completed_at", "") or "").strip()
-            if api_status != "completed":
+            api_started_at = str(data.get("started_at", "") or "").strip()
+            
+            is_completed = api_status == "completed" and api_completed_at
+            is_in_progress = api_status in ("in_progress", "queued", "pending")
+            
+            # Track in-progress stats for debugging
+            if is_in_progress:
                 try:
                     GITHUB_API_STATS.actions_job_details_in_progress_uncached_total = int(
                         getattr(GITHUB_API_STATS, "actions_job_details_in_progress_uncached_total", 0) or 0
@@ -2087,11 +2130,22 @@ class GitHubAPIClient:
                         s.add(str(job_id_s))
                 except Exception:
                     pass
-                _dbg("api_not_completed", job_id=job_id_s, key=key, api_status=api_status or None)
-                return None
-            if not api_completed_at:
-                _dbg("api_missing_completed_at", job_id=job_id_s, key=key, api_status=api_status or None)
-                return None
+            
+            # Calculate appropriate TTL based on job status
+            if is_completed:
+                cache_ttl_s = 30 * 24 * 3600  # 30 days for completed jobs
+            elif is_in_progress and api_started_at:
+                # Adaptive TTL based on job age
+                try:
+                    from datetime import datetime
+                    started_dt = datetime.fromisoformat(api_started_at.replace('Z', '+00:00'))
+                    started_epoch = int(started_dt.timestamp())
+                    cache_ttl_s = self._adaptive_ttl_s(timestamp_epoch=started_epoch, default_ttl_s=120)
+                except Exception:
+                    cache_ttl_s = 120  # 2 minutes default for in-progress
+            else:
+                cache_ttl_s = 120  # 2 minutes for unknown states
+                
         except (json.JSONDecodeError, ValueError, TypeError):
             _dbg("api_parse_error", job_id=job_id_s, key=key)
             return None
@@ -3725,7 +3779,7 @@ class GitHubAPIClient:
                         self._cache_hit("pr_checks")
                         out2: List[GHPRCheckRow] = []
                         for r in ent.rows:
-                            if r.is_required or (r.name in required_checks):
+                            if r.is_required or (is_required_check_name(r.name, {normalize_check_name(x) for x in (required_checks or set())})):
                                 out2.append(r if r.is_required else replace(r, is_required=True))
                             else:
                                 out2.append(r)
@@ -3793,7 +3847,7 @@ class GitHubAPIClient:
                     pr_checks_cached.put_entry_dict(key, refreshed_entry.to_disk_dict())
                     out2: List[GHPRCheckRow] = []
                     for r in ent.rows:
-                        if r.is_required or (r.name in required_checks):
+                        if r.is_required or (is_required_check_name(r.name, {normalize_check_name(x) for x in (required_checks or set())})):
                             out2.append(r if r.is_required else replace(r, is_required=True))
                         else:
                             out2.append(r)
@@ -3907,7 +3961,7 @@ class GitHubAPIClient:
                 if isinstance(out_obj, dict):
                     description = str(out_obj.get("title", "") or "").strip()
 
-                is_req = bool(name and (name in required_checks))
+                is_req = bool(name and is_required_check_name(name, {normalize_check_name(x) for x in (required_checks or set())}))
                 key2 = (name, url)
                 if name and key2 in seen:
                     continue
@@ -3955,7 +4009,7 @@ class GitHubAPIClient:
                 if desc and ("skipped" in desc.lower() or "skip" in desc.lower()):
                     status_raw = "skipped"
 
-                is_req = bool(name and (name in required_checks))
+                is_req = bool(name and is_required_check_name(name, {normalize_check_name(x) for x in (required_checks or set())}))
                 key2 = (name, target)
                 if key2 in seen:
                     continue
@@ -4808,7 +4862,7 @@ class GitHubAPIClient:
                             rerun_run_id = check_run_id
 
                     # Check if this is a required check
-                    is_required = check_name in required_checks
+                    is_required = is_required_check_name(check_name, {normalize_check_name(x) for x in (required_checks or set())})
 
                     # Get error summary from job logs
                     error_summary = None
@@ -4878,7 +4932,7 @@ class GitHubAPIClient:
                     if not rerun_run_id and run_id:
                         rerun_run_id = run_id
 
-                is_required = check_name in (required_checks or set())
+                is_required = is_required_check_name(check_name, {normalize_check_name(x) for x in (required_checks or set())})
 
                 error_summary = None
                 if run_id and url:
@@ -4931,7 +4985,7 @@ class GitHubAPIClient:
                     if status in ('pending', 'queued', 'in_progress'):
                         name = check['name']
                         check_url = check['url']
-                        is_required = name in required_checks
+                        is_required = is_required_check_name(name, {normalize_check_name(x) for x in (required_checks or set())})
 
                         # Use the duration string we computed from timestamps (or fall back to "queued")
                         elapsed_time = check['duration'] if check['duration'] else 'queued'
@@ -4970,7 +5024,7 @@ class GitHubAPIClient:
                 if not name:
                     continue
                 url = str(cr.get("details_url") or cr.get("html_url") or "").strip()
-                is_required = name in (required_checks or set())
+                is_required = is_required_check_name(name, {normalize_check_name(x) for x in (required_checks or set())})
                 elapsed_time = format_gh_check_run_duration(cr) or status
                 running_checks.append(RunningCheck(name=name, check_url=url, is_required=is_required, elapsed_time=elapsed_time))
 
@@ -5283,7 +5337,14 @@ def is_required_check_name(check_name: str, required_names_normalized: set[str])
     name_norm = normalize_check_name(check_name)
     if not name_norm:
         return False
-    return name_norm in (required_names_normalized or set())
+    required = set(required_names_normalized or set())
+    if not required:
+        return False
+    if name_norm in required:
+        return True
+    # Substring match to handle workflow-prefixed contexts, e.g.
+    # "pr / backend-status-check (push)" vs "backend-status-check"
+    return any(r and (r in name_norm or name_norm in r) for r in required)
 
 
 def format_gh_check_run_duration(check_run: Dict[str, Any]) -> str:

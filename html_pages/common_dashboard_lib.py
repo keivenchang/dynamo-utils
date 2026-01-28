@@ -190,18 +190,18 @@ _yaml_parse_cache: Dict[Tuple[str, float], Tuple[Dict, Dict, Dict]] = {}
 # in the centralized pipeline (run_passes). No pre-sorting needed.
 
 
-def ci_should_expand_by_default(*, rollup_status: str, has_required_failure: bool) -> bool:
+def ci_should_expand_by_default(*, rollup_status: str, has_required_failure: bool, has_required_in_progress: bool = False) -> bool:
     """Shared UX rule: expand only when something truly needs attention.
 
     - expand for required failures (red X icon)
     - do NOT auto-expand long/step-heavy jobs by default (even if they have subsections)
-    - expand for in-progress/pending states so "BUILDING" remains visible
-    - do NOT auto-expand for optional failures, cancelled, unknown-only leaves, or all-green trees
+    - expand for REQUIRED in-progress/pending states so "BUILDING" remains visible
+    - do NOT auto-expand for optional-only failures/in-progress, cancelled, unknown-only leaves, or all-green trees
     """
     if bool(has_required_failure):
         return True
-    st = str(rollup_status or "").strip().lower()
-    if st in {CIStatus.IN_PROGRESS.value, CIStatus.PENDING.value, "building", "running"}:
+    # Only expand if REQUIRED jobs are in-progress (not just optional ones)
+    if bool(has_required_in_progress):
         return True
     return False
 
@@ -3610,25 +3610,25 @@ def github_api_stats_rows(
     rows.append(("github.cache.all.writes_entries", str(int(cache.get("writes_entries_total") or 0)), "Number of entries written to cache"))
 
     # TTL documentation (always show; independent of whether counters are non-zero in this run).
-    rows.append(("github.cache.actions_job_details.ttl.completed", "30d", "Typical TTL used for completed job-details cache (dashboards pass 30d; only cached once completed)"))
-    rows.append(("github.cache.actions_job_details.ttl.in_progress", "N/A (not cached)", "While a job is in_progress, job-details are not cached (polling frequency is adaptive via actions_job_status)"))
-    rows.append(("github.cache.actions_job_status.ttl.in_progress", "adaptive", "Adaptive TTL for non-completed jobs: <1h=2m, <2h=4m, <4h=30m, <8h=60m, <12h=80m, >=12h=120m (until completed)"))
+    rows.append(("github.cache.actions_job_details.ttl.completed", "30d", "Typical TTL used for completed job-details cache (dashboards pass 30d)"))
+    rows.append(("github.cache.actions_job_details.ttl.in_progress", "adaptive", "Adaptive TTL for in-progress jobs: <1h=2m, <2h=4m, <4h=30m, <8h=60m, <12h=80m, >=12h=120m"))
+    rows.append(("github.cache.actions_job_status.ttl.in_progress", "adaptive", "Adaptive TTL for non-completed jobs: <30m=1m, <2h=2m, <4h=10m, >=4h=15m (until completed)"))
 
-    # In-progress job-details (uncached)
+    # In-progress job-details (now cached with adaptive TTL)
     #
-    # Job details are intentionally NOT cached until a job is completed
-    # (steps and completed_at can be missing/incomplete while running).
+    # As of recent changes, in-progress job details ARE cached with adaptive TTL.
+    # This counter tracks how many in-progress fetches occurred (for monitoring).
     inprog = int(getattr(GITHUB_API_STATS, "actions_job_details_in_progress_uncached_total", 0) or 0)
     if inprog:
         rows.append((
-            "github.cache.actions_job_details.in_progress_uncached",
+            "github.cache.actions_job_details.in_progress_fetched",
             str(inprog),
-            "Actions job-details fetches that returned in_progress (not cacheable yet; no TTL; retried on subsequent runs)"
+            "Actions job-details fetches that returned in_progress (now cached with adaptive TTL)"
         ))
         try:
             job_ids = sorted(str(x) for x in (getattr(GITHUB_API_STATS, "actions_job_details_in_progress_uncached_job_ids", set()) or set()))
             if job_ids:
-                rows.append(("github.cache.actions_job_details.in_progress_uncached.sample_job_ids", ",".join(job_ids[:8]), "Sample job_ids (max 8)"))
+                rows.append(("github.cache.actions_job_details.in_progress_fetched.sample_job_ids", ",".join(job_ids[:8]), "Sample job_ids (max 8)"))
         except Exception:
             pass
 

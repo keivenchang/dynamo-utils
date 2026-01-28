@@ -385,6 +385,36 @@ def _format_age_compact(dt: Optional[datetime]) -> Optional[str]:
     return f"{seconds // 86400}d"
 
 
+
+def _format_age_with_style(dt: Optional[datetime]) -> Optional[str]:
+    """Format age with styling: bold if <8h, gray if >1d, lighter gray if >3d."""
+    if dt is None:
+        return None
+    now = datetime.now(tz=ZoneInfo("UTC"))
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=ZoneInfo("UTC"))
+    seconds = int((now - dt).total_seconds())
+    
+    # Get the age string
+    if seconds < 60:
+        age_str = f"{seconds}s"
+    elif seconds < 3600:
+        age_str = f"{seconds // 60}m"
+    elif seconds < 86400:
+        age_str = f"{seconds // 3600}h"
+    else:
+        age_str = f"{seconds // 86400}d"
+    
+    # Apply styling based on thresholds
+    if seconds < 28800:  # <8 hours
+        return f'<span style="font-weight: bold;">{age_str}</span>'
+    elif seconds > 259200:  # >3 days
+        return f'<span style="color: #d0d7de;">{age_str}</span>'
+    elif seconds > 86400:  # >1 day
+        return f'<span style="color: #8c959f;">{age_str}</span>'
+    else:
+        return age_str
+
 def _format_branch_metadata_suffix(
     *,
     commit_time_pt: Optional[str],
@@ -400,9 +430,9 @@ def _format_branch_metadata_suffix(
             created_at = created_at.replace(tzinfo=ZoneInfo("UTC"))
         created_pt = created_at.astimezone(ZoneInfo("America/Los_Angeles")).strftime("%Y-%m-%d %H:%M PT")
         parts.append(f'<span>created: {html_module.escape(created_pt)}</span>')
-    age_str = _format_age_compact(commit_datetime)
+    age_str = _format_age_with_style(commit_datetime)
     if age_str:
-        parts.append(f'<span>age: {html_module.escape(age_str)}</span>')
+        parts.append(f'<span>age: {age_str}</span>')
     
     if not parts:
         return ""
@@ -849,9 +879,50 @@ class BranchInfoNode(BranchNode):
         # NOTE: do NOT use object identity for anything here; this must be stable across runs.
         ci_tags: list[str] = []
         if self.pr:
+            # Prefer computing pills from the *rendered* CI children so the branch line
+            # cannot disagree with the expanded job tree.
+            pr_status_node = None
+            for _c in (self.children or []):
+                if isinstance(_c, PRStatusWithJobsNode):
+                    pr_status_node = _c
+                    break
+
+            if pr_status_node is not None:
+                try:
+                    pr_status_node.ensure_ci_children_built()
+                except Exception:
+                    pass
+
+            if pr_status_node is not None and (pr_status_node.children or []):
+                try:
+                    tree_sum = pr_status_node.compute_summary_from_children() or {}
+                    tree_counts = dict(tree_sum.get('counts', {}) or {})
+                    tree_names = dict(tree_sum.get('names', {}) or {})
+
+                    failure_required = int(tree_counts.get('failure_required', 0) or 0)
+                    success_required = int(tree_counts.get('success_required', 0) or 0)
+                    in_progress_total = int(tree_counts.get('in_progress', 0) or 0)
+                    in_progress_required = len(list(tree_names.get('in_progress_required', []) or []))
+
+                    required_failed = failure_required > 0
+                    required_passed = (success_required > 0) and (failure_required == 0) and (in_progress_required == 0)
+                    any_running = in_progress_total > 0
+
+                    if required_failed:
+                        ci_tags = ['<span class="status-indicator status-failed">FAILED</span>']
+                    else:
+                        if any_running:
+                            ci_tags.append('<span class="status-indicator status-building">RUNNING</span>')
+                        if required_passed:
+                            ci_tags.append('<span class="status-indicator status-success">PASSED</span>')
+                except Exception:
+                    # Fall back to check_rows-based computation below.
+                    pass
+
+            # Fallback: compute from PR check_rows when we don't have CI children.
             try:
                 rows = list(self.pr.check_rows or [])
-                if rows:
+                if False:  # Fallback disabled - tree-based computation always takes precedence
                     summary = summarize_pr_check_rows(rows)
                     counts = summary.counts
 
@@ -861,27 +932,103 @@ class BranchInfoNode(BranchNode):
                         except Exception:
                             return 0
 
-                    # Required rollup
-                    required_failed = _cnt("failure_required") > 0
-                    required_passed = (_cnt("success_required") > 0) and (_cnt("failure_required") == 0) and (_cnt("in_progress_required") == 0)
+                    def _status_bucket(status_raw: str) -> str:
+                        s = str(status_raw or "").strip().lower()
+                        if s in {"success", "passed", "pass"}:
+                            return "success"
+                        if s in {"failure", "failed", "error", "fail"}:
+                            return "failure"
+                        if s in {"in_progress", "in progress", "running", "queued"}:
+                            return "in_progress"
+                        if s in {"pending"}:
+                            return "pending"
+                        if s in {"cancelled", "canceled", "skipped", "skip", "neutral"}:
+                            return "cancelled"
+                        return "other"
 
-                    # Running rollup (any running/pending anywhere in check rows)
-                    any_running = (_cnt("in_progress_required") + _cnt("in_progress_optional") + _cnt("pending")) > 0
+                    # RUNNING = any check is actually in-progress.
+                    any_running = any(_status_bucket(getattr(r, "status_raw", "")) == "in_progress" for r in rows)
 
-                    # All-done rollup (used to show PASSED when nothing is running)
-                    total = _cnt("total")
-                    done = _cnt("success_required") + _cnt("success_optional") + _cnt("failure_required") + _cnt("failure_optional") + _cnt("cancelled") + _cnt("other")
-                    all_done = (total > 0) and (done >= total)
-                    all_passed = all_done and (_cnt("failure_required") + _cnt("failure_optional")) == 0
+                    # FAILED/PASSED are based ONLY on REQUIRED checks.
+                    #
+                    # Prefer using branch-protection required check *keys* (pr.required_checks) because
+                    # row.is_required can be unreliable when check contexts are workflow-prefixed.
+                    required_src = list(getattr(self.pr, "required_checks", []) or [])
+                    required_tokens = [
+                        (common_github.normalize_check_name(str(x or "")) or str(x or "").strip().lower())
+                        for x in required_src
+                        if str(x or "").strip()
+                    ]
+                    required_set = {t for t in required_tokens if t}
+
+                    if not required_set:
+                        # Fallback: if branch protection required checks are unavailable,
+                        # infer a small default required set from the visible check contexts.
+                        default_required = {
+                            "pre-commit",
+                            "dco",
+                            "copyright-checks",
+                        }
+                        inferred = set()
+                        for r in rows:
+                            name_raw = str(getattr(r, "name", "") or "")
+                            name_norm = common_github.normalize_check_name(name_raw) or name_raw.strip().lower()
+                            for tok in default_required:
+                                if _req_match(name_norm, tok):
+                                    inferred.add(tok)
+                        required_set = set(inferred)
+
+                    def _req_match(name_norm: str, tok: str) -> bool:
+                        if not tok or not name_norm:
+                            return False
+                        if name_norm == tok:
+                            return True
+                        # Match tok as a delimited segment inside name_norm.
+                        i = name_norm.find(tok)
+                        while i != -1:
+                            before = name_norm[i - 1] if i > 0 else " "
+                            after_i = i + len(tok)
+                            after = name_norm[after_i] if after_i < len(name_norm) else " "
+                            if (before in " /(") and (after in " /()"):
+                                return True
+                            i = name_norm.find(tok, i + 1)
+                        return False
+
+                    if required_set:
+                        tok_failed = set()
+                        tok_passed = set()
+                        for r in rows:
+                            name_raw = str(getattr(r, "name", "") or "")
+                            name_norm = common_github.normalize_check_name(name_raw) or name_raw.strip().lower()
+                            b = _status_bucket(getattr(r, "status_raw", ""))
+                            if not name_norm:
+                                continue
+                            for tok in required_set:
+                                if _req_match(name_norm, tok):
+                                    if b == "failure":
+                                        tok_failed.add(tok)
+                                    elif b == "success":
+                                        tok_passed.add(tok)
+                        required_failed = bool(tok_failed)
+                        required_passed = (tok_passed >= required_set) and not required_failed
+                    else:
+                        # Fallback: use row.is_required when required check keys aren't available.
+                        required_rows = [r for r in rows if bool(getattr(r, "is_required", False))]
+                        required_failed = any(_status_bucket(getattr(r, "status_raw", "")) == "failure" for r in required_rows)
+                        required_passed = bool(required_rows) and all(
+                            _status_bucket(getattr(r, "status_raw", "")) == "success" for r in required_rows
+                        )
 
                     if required_failed:
                         ci_tags = ['<span class="status-indicator status-failed">FAILED</span>']
                     else:
+                        # Show RUNNING if anything is running (independent of PASSED)
                         if any_running:
                             ci_tags.append('<span class="status-indicator status-building">RUNNING</span>')
-                        if required_passed or (all_passed and not any_running):
+                        # Show PASSED if all required checks passed (independent of RUNNING)
+                        if required_passed:
                             ci_tags.append('<span class="status-indicator status-success">PASSED</span>')
-                else:
+                elif False:  # Also disabled - part of fallback logic
                     st = str(getattr(self.pr, "ci_status", "") or "").strip().lower()
                     if st in {"failure", "failed", "error"}:
                         ci_tags = ['<span class="status-indicator status-failed">FAILED</span>']
@@ -949,7 +1096,10 @@ class BranchInfoNode(BranchNode):
         
         # 4) Other children (PR status, CI checks, etc.)
         for c in (self.children or []):
-            kids.append(c.to_tree_vm())
+            if 'pr_status_node' in locals() and (pr_status_node is not None) and (c is pr_status_node) and ('pr_status_vm' in locals()) and (pr_status_vm is not None):
+                kids.append(pr_status_vm)
+            else:
+                kids.append(c.to_tree_vm())
         
         is_merged_effective = bool(self.merged_local) or bool(is_merged)
         is_closed_effective = bool(is_closed_not_merged)
@@ -1621,6 +1771,51 @@ class PRStatusWithJobsNode(BranchNode):
         self.context_key = context_key
         self.enable_success_build_test_logs = bool(enable_success_build_test_logs)
 
+
+    def ensure_ci_children_built(self) -> None:
+        """Ensure self.children contains CIJobNodes.
+
+        This is a lightweight helper so the branch-line can compute pills from the
+        same CI nodes, without needing to run the full display pipeline.
+        """
+        pr = self.pr
+        if pr is None:
+            return
+        pr_number = int(pr.number or 0)
+        if pr_number <= 0:
+            return
+        if self.children:
+            return
+
+        gh = self.github_api
+        repo_root = (self.repo_root or Path.cwd()).resolve()
+        checks_ttl_s = int(
+            GitHubAPIClient.compute_checks_cache_ttl_s(
+                self.branch_commit_dt,
+                refresh=bool(self.refresh_checks),
+                pr_merged=bool(pr.is_merged),
+            )
+        )
+        skip_fetch = not bool(self.allow_fetch_checks)
+
+        if pr_number >= 100000000:
+            ci_nodes = mock_build_ci_nodes(pr, repo_root, page_root_dir=self.page_root_dir)
+        elif gh:
+            ci_nodes = build_ci_nodes_from_pr(
+                pr,
+                gh,
+                repo_root,
+                page_root_dir=self.page_root_dir,
+                checks_ttl_s=checks_ttl_s,
+                skip_fetch=skip_fetch,
+                validate_raw_logs=True,
+                enable_success_build_test_logs=bool(self.enable_success_build_test_logs),
+            )
+        else:
+            ci_nodes = []
+
+        self.children = list(ci_nodes)
+
     def _format_content(self) -> str:
         if not self.pr:
             return ""
@@ -1840,54 +2035,57 @@ class PRStatusWithJobsNode(BranchNode):
             "other": [],
         }
         
-        # Only count immediate children (top-level jobs), not recurse into steps
-        for child in (self.children or []):
-            if not isinstance(child, CIJobNode):
-                continue
-                
-            name = str(child.job_id or child.display_name or "").strip()
-            status = str(child.status or "unknown").strip().lower()
-            is_req = bool(child.is_required)
-            
-            if status == "success":
-                if is_req:
-                    counts["success_required"] += 1
-                    if name:
-                        names["success_required"].append(name)
-                else:
-                    counts["success_optional"] += 1
-                    if name:
-                        names["success_optional"].append(name)
-            elif status == "failure":
-                if is_req:
-                    counts["failure_required"] += 1
-                    if name:
-                        names["failure_required"].append(name)
-                else:
-                    counts["failure_optional"] += 1
-                    if name:
-                        names["failure_optional"].append(name)
-            elif status in ("in_progress", "running"):
-                counts["in_progress"] += 1
-                if is_req:
-                    if name:
-                        names["in_progress_required"].append(name)
-                else:
-                    if name:
-                        names["in_progress_optional"].append(name)
-            elif status == "pending":
-                counts["pending"] += 1
-                if name:
-                    names["pending"].append(name)
-            elif status in ("cancelled", "canceled"):
-                counts["cancelled"] += 1
-                if name:
-                    names["cancelled"].append(name)
-            else:
-                counts["other"] += 1
-                if name:
-                    names["other"].append(name)
-        
+        # Count CIJobNode entries anywhere in the displayed tree.
+        # Recurse into grouping nodes, but do NOT recurse into CIJobNode children (steps).
+        def _walk(nodes):
+            for child in (nodes or []):
+                if isinstance(child, CIJobNode):
+                    name = str(child.job_id or child.display_name or "").strip()
+                    status = str(child.status or "unknown").strip().lower()
+                    is_req = bool(child.is_required)
+                    if status == "success":
+                        if is_req:
+                            counts["success_required"] += 1
+                            if name:
+                                names["success_required"].append(name)
+                        else:
+                            counts["success_optional"] += 1
+                            if name:
+                                names["success_optional"].append(name)
+                    elif status == "failure":
+                        if is_req:
+                            counts["failure_required"] += 1
+                            if name:
+                                names["failure_required"].append(name)
+                        else:
+                            counts["failure_optional"] += 1
+                            if name:
+                                names["failure_optional"].append(name)
+                    elif status in ("in_progress", "running"):
+                        counts["in_progress"] += 1
+                        if is_req:
+                            if name:
+                                names["in_progress_required"].append(name)
+                        else:
+                            if name:
+                                names["in_progress_optional"].append(name)
+                    elif status == "pending":
+                        counts["pending"] += 1
+                        if name:
+                            names["pending"].append(name)
+                    elif status in ("cancelled", "canceled", "skipped", "neutral"):
+                        counts["cancelled"] += 1
+                        if name:
+                            names["cancelled"].append(name)
+                    else:
+                        counts["other"] += 1
+                        if name:
+                            names["other"].append(name)
+                    continue
+                if isinstance(child, BranchNode):
+                    _walk(getattr(child, "children", None))
+
+        _walk(self.children or [])
         return {"counts": counts, "names": names}
 
     def to_tree_vm(self) -> TreeNodeVM:
@@ -2036,6 +2234,7 @@ class PRStatusWithJobsNode(BranchNode):
         auto_expand_checks = ci_should_expand_by_default(
             rollup_status=rollup_status,
             has_required_failure=bool(has_required_failure),
+            has_required_in_progress=(_cnt("in_progress_required") > 0) if 'counts' in locals() else False,
         )
 
         # If we have required failures but no child nodes (cache-only run),
