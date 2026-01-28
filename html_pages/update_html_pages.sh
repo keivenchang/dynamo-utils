@@ -76,7 +76,7 @@ If no args are provided, ALL tasks run.
 
 Flags:
   --show-local-resources    Write: $DYNAMO_HOME/resource_report.html (or resource_report_debug.html in --debug-html)
-  --show-local-branches     Write: $HOME/dynamo/speedoflight/dynamo/users/<user>/local.html (or debug.html in --debug-html)
+  --show-local-branches     Write: $HOME/dynamo/speedoflight/dynamo/users/<user>/local.html (or local-debug.html in --debug-html)
   --show-remote-branches    Write: $HOME/dynamo/speedoflight/dynamo/users/<user>/index.html (or debug.html in --debug-html)
   --show-commit-history     Write: $DYNAMO_HOME/commits/index.html (or debug.html in --debug-html)
 
