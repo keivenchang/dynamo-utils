@@ -114,16 +114,17 @@ from common_github import (
     summarize_pr_check_rows,
 )
 
-def _detect_branch_merged_locally(*, repo_dir: Path, branch_sha: Optional[str]) -> bool:
-    """Best-effort local merge detection: branch tip is already contained in main/origin/main.
-
-    This helps mark branches as "merged" in the local dashboard even when GitHub PR metadata is
-    missing/stale or API calls are disabled.
+def _detect_branch_merged_locally(*, repo_dir: Path, branch_sha: Optional[str], pr: Optional[PRInfo] = None) -> bool:
+    """Best-effort local merge detection: check if branch changes are in main.
+    
+    GitHub merge commits create new SHAs, so we can't rely on ancestry alone.
+    Instead, check if a commit with the same PR number exists in main.
     """
     sha = str(branch_sha or "").strip()
     if not sha:
         return False
-    # Prefer origin/main when present, otherwise main.
+    
+    # Prefer origin/main when present, otherwise main
     has_origin_main = subprocess.run(
         ["git", "-C", str(repo_dir), "show-ref", "--verify", "--quiet", "refs/remotes/origin/main"],
         stdout=subprocess.DEVNULL,
@@ -131,15 +132,57 @@ def _detect_branch_merged_locally(*, repo_dir: Path, branch_sha: Optional[str]) 
         check=False,
     ).returncode == 0
     base_ref = "origin/main" if has_origin_main else "main"
-    return (
-        subprocess.run(
-            ["git", "-C", str(repo_dir), "merge-base", "--is-ancestor", sha, base_ref],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            check=False,
-        ).returncode
-        == 0
-    )
+    
+    # Method 1: Direct ancestry check (works for fast-forward merges)
+    if subprocess.run(
+        ["git", "-C", str(repo_dir), "merge-base", "--is-ancestor", sha, base_ref],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    ).returncode == 0:
+        return True
+    
+    # Method 2: Check if commit with same PR number exists in main (handles merge commits)
+    pr_num = None
+    
+    # First try to get PR number from PRInfo object (most reliable)
+    if pr and pr.number:
+        pr_num = str(pr.number)
+    else:
+        # Fallback: extract from local commit message
+        try:
+            result = subprocess.run(
+                ["git", "-C", str(repo_dir), "log", "-1", "--format=%s", sha],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                check=False,
+                text=True,
+            )
+            if result.returncode == 0:
+                commit_msg = result.stdout.strip()
+                # Extract PR number from commit message (e.g., "fix: something (#1234)")
+                pr_match = re.search(r'\(#(\d+)\)', commit_msg)
+                if pr_match:
+                    pr_num = pr_match.group(1)
+        except Exception:
+            pass
+    
+    # If we have a PR number, check if it exists in main
+    if pr_num:
+        try:
+            search_result = subprocess.run(
+                ["git", "-C", str(repo_dir), "log", "--oneline", base_ref, "--grep", f"(#{pr_num})"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                check=False,
+                text=True,
+            )
+            if search_result.returncode == 0 and search_result.stdout.strip():
+                return True
+        except Exception:
+            pass
+    
+    return False
 
 # Import shared node classes and refactored functions from common_branch_nodes
 from common_branch_nodes import (
@@ -635,7 +678,7 @@ class LocalRepoScanner:
                     label=branch_name,
                     sha=info['sha'],
                     is_current=info['is_current'],
-                    merged_local=_detect_branch_merged_locally(repo_dir=repo_dir, branch_sha=info.get("sha")),
+                    merged_local=_detect_branch_merged_locally(repo_dir=repo_dir, branch_sha=info.get("sha"), pr=pr),
                     commit_url=commit_url,
                     commit_time_pt=info.get('commit_time_pt'),
                     commit_datetime=info.get('commit_dt'),
@@ -878,7 +921,7 @@ Environment Variables:
     parser.add_argument(
         '--output',
         type=Path,
-        help='Output HTML file path (default: <repo-path>/index.html)'
+        help='Output HTML file path (default: speedoflight/dynamo/users/<user>/local.html)'
     )
     parser.add_argument(
         '--max-branches',
@@ -906,7 +949,7 @@ Environment Variables:
     args = parser.parse_args()
 
     base_dir = (args.repo_path or args.base_dir or Path.cwd()).resolve()
-    out_path = (Path(args.output).resolve() if args.output is not None else (base_dir / "index.html"))
+    out_path = (Path(args.output).resolve() if args.output is not None else (Path.home() / "dynamo/speedoflight/dynamo/users/keivenchang/local.html"))
     page_root_dir = out_path.parent.resolve()
 
     repo_root = Path(args.repo_root).resolve() if args.repo_root is not None else None
@@ -1028,7 +1071,7 @@ Environment Variables:
     # Final render + atomic write to destination (single visible update).
     out_path = args.output
     if out_path is None:
-        out_path = base_dir / "index.html"
+        out_path = Path.home() / "dynamo/speedoflight/dynamo/users/keivenchang/local.html"
     with phase_t.phase("render_final"):
         html_output2 = generate_html(
             root,

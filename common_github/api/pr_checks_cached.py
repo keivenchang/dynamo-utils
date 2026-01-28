@@ -102,6 +102,27 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple, TYPE_CHECKING
 
 from cache.cache_base import BaseDiskCache
+
+
+def _normalize_check_name(name: str) -> str:
+    return " ".join((name or "").strip().lower().split())
+
+
+def _is_required_check_name(check_name: str, required_names: set[str]) -> bool:
+    name_norm = _normalize_check_name(check_name)
+    if not name_norm:
+        return False
+
+    req = {_normalize_check_name(x) for x in (required_names or set()) if _normalize_check_name(x)}
+    if not req:
+        return False
+
+    if name_norm in req:
+        return True
+
+    # Substring match to handle workflow-prefixed contexts
+    return any(r and (r in name_norm or name_norm in r) for r in req)
+
 from .. import GITHUB_API_STATS
 from ..pr_checks_types import (
     GHPRCheckRow,
@@ -497,7 +518,7 @@ class PRChecksCached(CachedResourceBase[List[GHPRCheckRow]]):
                     run_id=run_id,
                     job_id=job_id,
                     description=description,
-                    is_required=bool(name in self._required_checks),
+                    is_required=_is_required_check_name(name, self._required_checks),
                     workflow_name=workflow_name,
                     event=event,
                 )
@@ -539,7 +560,7 @@ class PRChecksCached(CachedResourceBase[List[GHPRCheckRow]]):
                     run_id=run_id,
                     job_id=job_id,
                     description=desc,
-                    is_required=bool(name in self._required_checks),
+                    is_required=_is_required_check_name(name, self._required_checks),
                     workflow_name="",
                     event="",
                 )

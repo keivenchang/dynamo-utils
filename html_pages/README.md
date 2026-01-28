@@ -22,7 +22,7 @@ HTML dashboard generators and shared UI utilities for monitoring Dynamo CI/CD.
 - GitHub token: `~/.config/github-token` or `~/.config/gh/hosts.yml`
 
 **Outputs:**
-- Branches: `$DYNAMO_HOME/index.html`
+- Local branches: `$HOME/dynamo/speedoflight/dynamo/users/<user>/local.html`
 - Commit history: `$DYNAMO_REPO/index.html`  
 - Resource report: `$DYNAMO_HOME/resource_report.html`
 
@@ -92,7 +92,7 @@ See module docstring in `common_dashboard_lib.py` for complete node hierarchy an
 ```bash
 python3 html_pages/show_local_branches.py \
   --repo-path ~/dynamo \
-  --output ~/dynamo/index.html \
+  --output ~/dynamo/speedoflight/dynamo/users/keivenchang/local.html \
   --max-github-api-calls 100
 ```
 
@@ -301,7 +301,7 @@ Instead of fetching job details individually (500+ calls):
 Example output:
 ```bash
 $ ./html_pages/update_html_pages.sh --show-local-branches
-ERROR: Failed to update /home/keivenc/dynamo/index.html
+ERROR: Failed to update /home/keivenc/dynamo/speedoflight/dynamo/users/keivenchang/local.html
 See log for details: /home/keivenc/dynamo/logs/2026-01-23/show_local_branches.log
 ```
 
@@ -334,7 +334,7 @@ See log for details: /home/keivenc/dynamo/logs/2026-01-23/show_local_branches.lo
 
 **Quick "did it actually update?" checks:**
 ```bash
-ls -lah ~/dynamo/index.html                     # local branches dashboard
+ls -lah ~/dynamo/speedoflight/dynamo/users/keivenchang/local.html       # local branches dashboard
 ls -lah ~/dynamo/commits/index.html       # commit history dashboard
 ls -lah ~/dynamo/speedoflight/stats/index.html  # stats landing page
 ```

@@ -96,6 +96,7 @@ from __future__ import annotations
 
 import sys
 import time
+import threading
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple, TYPE_CHECKING
@@ -126,6 +127,35 @@ API_CALL_FORMAT = (
 )
 CACHE_KEY_FORMAT = "{owner}/{repo}:job:{job_id}"
 CACHE_FILE_DEFAULT = "actions_jobs.json"
+
+
+def _adaptive_ttl_actions_job_status_s(*, started_at_epoch: int, default_ttl_s: int = 60) -> int:
+    """Adaptive TTL for non-completed job-status.
+
+    Schedule:
+    - age < 30m -> 1m
+    - age < 2h  -> 2m
+    - age < 4h  -> 10m
+    - else      -> 15m
+    """
+    try:
+        ts = int(started_at_epoch or 0)
+    except (ValueError, TypeError):
+        ts = 0
+
+    if ts <= 0:
+        return int(default_ttl_s)
+
+    now = int(time.time())
+    age_s = max(0, int(now) - int(ts))
+    if age_s < 30 * 60:
+        return 60
+    if age_s < 2 * 3600:
+        return 120
+    if age_s < 4 * 3600:
+        return 10 * 60
+    return 15 * 60
+
 
 
 class _ActionsJobsCache(BaseDiskCache):
@@ -199,7 +229,7 @@ class _ActionsJobsCache(BaseDiskCache):
             now = int(time.time())
             
             if ts:
-                effective_ttl = adaptive_ttl_s(oldest_started_at, default_ttl_s=ttl_s)
+                effective_ttl = _adaptive_ttl_actions_job_status_s(started_at_epoch=oldest_started_at, default_ttl_s=ttl_s)
                 if (now - ts) <= int(effective_ttl):
                     return ent
             
@@ -275,7 +305,8 @@ class ActionsJobStatusCached(CachedResourceBase[Optional[str]]):
     def __init__(self, api: "GitHubAPIClient", *, ttl_s: int):
         super().__init__(api)
         self._ttl_s = int(ttl_s)
-    
+
+
     @property
     def cache_name(self) -> str:
         return CACHE_NAME
@@ -289,6 +320,11 @@ class ActionsJobStatusCached(CachedResourceBase[Optional[str]]):
         job_id = str(kwargs["job_id"])
         return f"{owner}/{repo}:job:{job_id}"
     
+
+    def inflight_lock_key(self, **kwargs: Any) -> Optional[str]:
+        # Deduplicate concurrent identical job-status fetches.
+        return self.cache_key(**kwargs)
+
     def empty_value(self) -> Optional[str]:
         return None
     

@@ -27,7 +27,7 @@
 #
 # Args (optional; can be combined):
 #   --show-local-resources  Update the resource report ($DYNAMO_HOME/resource_report.html)
-#   --show-local-branches   Update the branches dashboard ($DYNAMO_HOME/index.html)
+#   --show-local-branches   Update the branches dashboard (speedoflight/dynamo/users/<user>/local.html)
 #   --show-remote-branches  Update remote PR dashboards for selected GitHub users (IDENTICAL UI to local branches)
 #   --show-commit-history   Update the commit history dashboard ($DYNAMO_HOME/commits/index.html)
 #   --debug-html                   Faster runs: outputs to debug.html instead of index.html, uses smaller commit window (25 commits), enables verification passes
@@ -76,7 +76,7 @@ If no args are provided, ALL tasks run.
 
 Flags:
   --show-local-resources    Write: $DYNAMO_HOME/resource_report.html (or resource_report_debug.html in --debug-html)
-  --show-local-branches     Write: $DYNAMO_HOME/index.html (or debug.html in --debug-html)
+  --show-local-branches     Write: $HOME/dynamo/speedoflight/dynamo/users/<user>/local.html (or debug.html in --debug-html)
   --show-remote-branches    Write: $HOME/dynamo/speedoflight/dynamo/users/<user>/index.html (or debug.html in --debug-html)
   --show-commit-history     Write: $DYNAMO_HOME/commits/index.html (or debug.html in --debug-html)
 
@@ -121,6 +121,12 @@ GITHUB_TOKEN_ARG=""
 USER_NAME="${USER:-${LOGNAME:-}}"
 if [ -z "$USER_NAME" ]; then
     USER_NAME="$(id -un 2>/dev/null || echo unknown)"
+fi
+
+# GitHub username for output paths (from git config or default to keivenchang)
+GITHUB_USERNAME="keivenchang"
+if [ -z "$GITHUB_USERNAME" ]; then
+    GITHUB_USERNAME="keivenchang"
 fi
 
 while [ "$#" -gt 0 ]; do
@@ -185,11 +191,11 @@ else
 fi
 
 # Compute branches output path after parsing flags so `--debug-html` is honored.
-BRANCHES_BASENAME="${BRANCHES_BASENAME:-index.html}"
+BRANCHES_BASENAME="${BRANCHES_BASENAME:-local.html}"
 if [ "$FAST_DEBUG" = true ]; then
-    BRANCHES_BASENAME="debug.html"
+    BRANCHES_BASENAME="local-debug.html"
 fi
-BRANCHES_OUTPUT_FILE="$DYNAMO_HOME/$BRANCHES_BASENAME"
+BRANCHES_OUTPUT_FILE="$HOME/dynamo/speedoflight/dynamo/users/$GITHUB_USERNAME/$BRANCHES_BASENAME"
 
 # Prevent concurrent runs (cron can overlap if a run takes longer than its interval).
 # Use per-component locks in /tmp so different components can run in parallel.
@@ -371,6 +377,9 @@ dry_echo() {
 
 run_show_local_branches() {
     cd "$DYNAMO_HOME" || exit 1
+    
+    # Ensure output directory exists
+    mkdir -p "$(dirname "$BRANCHES_OUTPUT_FILE")"
     REFRESH_CLOSED_FLAG="${REFRESH_CLOSED_PRS:+--refresh-closed-prs}"
     MAX_GH_FLAG=""
     if [ -n "${MAX_GITHUB_API_CALLS:-}" ]; then

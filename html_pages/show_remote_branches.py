@@ -32,6 +32,7 @@ import argparse
 import logging
 import os
 import re
+import subprocess
 import sys
 import time
 from datetime import datetime
@@ -88,6 +89,34 @@ import html as html_module  # noqa: E402
 from common_dashboard_lib import github_api_stats_rows  # noqa: E402
 from common_branch_nodes import mock_get_open_pr_info_for_author  # noqa: E402
 from cache_snippet import SNIPPET_CACHE  # noqa: E402
+
+
+def _detect_branch_merged_to_main(*, repo_path: Path, branch_sha: Optional[str]) -> bool:
+    """Check if branch commit is merged into main via git history.
+    
+    This is more reliable than pr.is_merged from GitHub API, which can be stale or incorrect
+    for recently merged PRs or PRs merged via different mechanisms (cherry-pick, backport).
+    """
+    sha = str(branch_sha or "").strip()
+    if not sha:
+        return False
+    
+    # Check if origin/main exists, otherwise use main
+    has_origin_main = subprocess.run(
+        ["git", "-C", str(repo_path), "show-ref", "--verify", "--quiet", "refs/remotes/origin/main"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    ).returncode == 0
+    base_ref = "origin/main" if has_origin_main else "main"
+    
+    # Check if branch SHA is ancestor of main
+    return subprocess.run(
+        ["git", "-C", str(repo_path), "merge-base", "--is-ancestor", sha, base_ref],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    ).returncode == 0
 
 
 @dataclass
@@ -287,10 +316,14 @@ Environment Variables:
             commit_msg = str(pr.title or "").strip()
             commit_msg = re.sub(r'^#\d+\s+', '', commit_msg)
 
+            # Detect if branch is merged by checking git history (more reliable than pr.is_merged API field)
+            merged_local = _detect_branch_merged_to_main(repo_path=repo_root, branch_sha=pr.head_sha)
+
             branch_node = BranchInfoNode(
                 label=branch_name,
                 sha=sha7 or None,
                 is_current=False,
+                merged_local=merged_local,
                 commit_url=commit_url or None,
                 commit_time_pt=commit_time_pt,
                 commit_datetime=updated_dt,

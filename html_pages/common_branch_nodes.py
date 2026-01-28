@@ -447,7 +447,12 @@ def _grafana_branch_button_html(*, branch_name: str) -> str:
     bn = str(branch_name or "").strip()
     if not bn:
         return ""
+    
+    # Skip Grafana button for main/master branches
     branch_for_url = _strip_repo_prefix_for_clipboard(bn)
+    if branch_for_url.lower() in ("main", "master"):
+        return ""
+    
     encoded_branch = urllib.parse.quote(branch_for_url, safe="")
     grafana_url = (
         "https://grafana.nvidia.com/d/beyv28rcnhs74b/individual-job-details"
@@ -1050,7 +1055,12 @@ class BranchInfoNode(BranchNode):
             f'<span{cls_attr} style="font-family: monospace; font-weight: 700;">{html_module.escape(display_name)}</span>'
         )
 
-        # Grafana link should appear directly after the branch name.
+        # Merge target (→ base_branch) - show right after branch name
+        base_branch_html = _format_base_branch_inline(self.pr)
+        if base_branch_html:
+            parts.append(base_branch_html)
+        
+        # Grafana link after merge target
         grafana_btn = _grafana_branch_button_html(branch_name=self.label)
         if grafana_btn:
             parts.append(grafana_btn)
