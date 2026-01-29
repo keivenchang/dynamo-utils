@@ -3055,7 +3055,14 @@ def pytest_slowest_tests_from_raw_log(
     # Parsed pytest timings cache (disk-backed). Cache boundary is JSON-on-disk; in-memory uses dataclasses.
     from cache_pytest_timings import PYTEST_TIMINGS_CACHE  # local file import
 
-    cached = PYTEST_TIMINGS_CACHE.get_if_fresh(raw_log_path=Path(raw_log_path), step_name=step_name)
+    # Normalize step_name for caching: Build-and-test phases often show up as 'pytest (parallel)'
+    # but we want a stable cache key that still maps to our pytest parsing heuristics.
+    step_name_for_cache = str(step_name or "").strip()
+    step_name_lc = step_name_for_cache.lower()
+    if step_name_lc.startswith("pytest") and not step_name_lc.startswith("test:"):
+        step_name_for_cache = f"test: {step_name_for_cache}"
+
+    cached = PYTEST_TIMINGS_CACHE.get_if_fresh(raw_log_path=Path(raw_log_path), step_name=step_name_for_cache)
     if cached is not None:
         return list(cached)
     

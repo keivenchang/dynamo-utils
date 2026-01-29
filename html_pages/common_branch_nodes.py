@@ -450,7 +450,7 @@ def _grafana_branch_button_html(*, branch_name: str) -> str:
     
     # Skip Grafana button for main/master branches
     branch_for_url = _strip_repo_prefix_for_clipboard(bn)
-    if branch_for_url.lower() in ("main", "master"):
+    if branch_for_url.lower() in ("main", "master", "remote"):
         return ""
     
     encoded_branch = urllib.parse.quote(branch_for_url, safe="")
@@ -831,6 +831,7 @@ class BranchInfoNode(BranchNode):
         sha: Optional[str] = None,
         is_current: bool = False,
         merged_local: bool = False,
+        show_grafana: bool = True,
         commit_url: Optional[str] = None,
         commit_time_pt: Optional[str] = None,
         commit_datetime: Optional[datetime] = None,
@@ -843,6 +844,7 @@ class BranchInfoNode(BranchNode):
         self.sha = sha
         # Local-only merge detection (e.g., branch tip is already in main) for pages that don't have PR metadata.
         self.merged_local = bool(merged_local)
+        self.show_grafana = bool(show_grafana)
         self.commit_url = commit_url
         self.commit_time_pt = commit_time_pt
         self.commit_datetime = commit_datetime
@@ -1061,7 +1063,7 @@ class BranchInfoNode(BranchNode):
             parts.append(base_branch_html)
         
         # Grafana link after merge target
-        grafana_btn = _grafana_branch_button_html(branch_name=self.label)
+        grafana_btn = _grafana_branch_button_html(branch_name=self.label) if self.show_grafana else ""
         if grafana_btn:
             parts.append(grafana_btn)
         
@@ -1113,7 +1115,10 @@ class BranchInfoNode(BranchNode):
         
         is_merged_effective = bool(self.merged_local) or bool(is_merged)
         is_closed_effective = bool(is_closed_not_merged)
-        default_expanded = not (is_merged_effective or is_closed_effective)
+        # Collapse by default for merged/closed and special roots (main/remote).
+        display_name_lc = _strip_repo_prefix_for_clipboard(self.label).strip().lower()
+        is_special_root = display_name_lc in ("main", "master", "remote")
+        default_expanded = (not (is_merged_effective or is_closed_effective)) and (not is_special_root)
 
         return TreeNodeVM(
             # Stable key: branch name + (optional) SHA + (optional) PR number.

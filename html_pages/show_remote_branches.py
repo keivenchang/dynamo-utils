@@ -324,6 +324,7 @@ Environment Variables:
                 sha=sha7 or None,
                 is_current=False,
                 merged_local=merged_local,
+                show_grafana=False,
                 commit_url=commit_url or None,
                 commit_time_pt=commit_time_pt,
                 commit_datetime=updated_dt,
