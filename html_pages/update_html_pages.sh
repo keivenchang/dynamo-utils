@@ -443,6 +443,17 @@ run_show_remote_branches() {
     # Always enable: fetch/cache successful *-build-test raw logs so we can parse pytest test timings.
     SUCCESS_BUILD_TEST_FLAG="--enable-success-build-test-logs"
 
+    # Base dir for remote PRs generation: needs a local repo clone for workflow YAML inference.
+    # Default to $DYNAMO_HOME/dynamo_latest (requested). Fallback to $DYNAMO_HOME/commits if needed.
+    REMOTE_BASE_DIR="${REMOTE_PRS_BASE_DIR:-}"
+    if [ -z "${REMOTE_BASE_DIR:-}" ]; then
+        if [ -d "$DYNAMO_HOME/dynamo_latest" ]; then
+            REMOTE_BASE_DIR="$DYNAMO_HOME/dynamo_latest"
+        else
+            REMOTE_BASE_DIR="$DYNAMO_HOME/commits"
+        fi
+    fi
+
     if [ "$DRY_RUN" = true ]; then
         echo "[DRY-RUN] Would generate remote PRs dashboards for users: $USERS_LIST"
         for U in $USERS_LIST; do
@@ -456,7 +467,7 @@ run_show_remote_branches() {
             fi
             echo "[DRY-RUN]   User: $U"
             echo "[DRY-RUN]     Output: $OUT_FILE"
-            echo "[DRY-RUN]     Command: python3 $SCRIPT_DIR/show_remote_branches.py --github-user $U --base-dir $DYNAMO_HOME/commits --output $OUT_FILE $TOKEN_FLAG $MAX_GH_FLAG $SUCCESS_BUILD_TEST_FLAG"
+            echo "[DRY-RUN]     Command: python3 $SCRIPT_DIR/show_remote_branches.py --github-user $U --base-dir $REMOTE_BASE_DIR --output $OUT_FILE $TOKEN_FLAG $MAX_GH_FLAG $SUCCESS_BUILD_TEST_FLAG"
         done
         return 0
     fi
@@ -480,12 +491,12 @@ run_show_remote_branches() {
         echo "$(date '+%Y-%m-%d %H:%M:%S') - Generating remote PRs dashboard (user=${U} output=$OUT_FILE)" >> "$LOG_FILE"
         log_line_ts "$REMOTE_PRS_LOG" "===== run_show_remote_branches start (user=${U} output=$OUT_FILE) ====="
 
-        # Use commits as base-dir so we can locate the repo clone for workflow YAML inference.
+        # Use a local repo clone as base-dir so we can locate workflow YAML for inference.
         # Div trees are now default (no flag needed)
         
         if run_cmd_to_log_ts "$REMOTE_PRS_LOG" python3 "$SCRIPT_DIR/show_remote_branches.py" \
             --github-user "${U}" \
-            --base-dir "$DYNAMO_HOME/commits" \
+            --base-dir "$REMOTE_BASE_DIR" \
             --output "$OUT_FILE" \
                 $TOKEN_FLAG \
                 $MAX_GH_FLAG \

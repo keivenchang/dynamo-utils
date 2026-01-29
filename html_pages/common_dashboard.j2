@@ -587,7 +587,11 @@
             }
           }
           // Remove param if it matches default (keeps URLs short/clean).
-          if (_defaults.hasOwnProperty(key) && String(_defaults[key]) === String(val)) {
+          // Exception: tree/snippet state (`t.*` / `s.*`) should remain shareable/stable.
+          // Otherwise, browsers that fire `toggle` on load can cause the query string to disappear immediately.
+          var ks = String(key || '');
+          var isTreeOrSnippet = (ks.indexOf('t.') === 0 || ks.indexOf('s.') === 0);
+          if (!isTreeOrSnippet && _defaults.hasOwnProperty(key) && String(_defaults[key]) === String(val)) {
             params.delete(key);
           } else {
             params.set(key, String(val));
@@ -614,12 +618,8 @@
             
             if (params.has(urlKey)) {
               var wantOpen = _isTruthyParam(params.get(urlKey));
-              // Respect data-default-expanded="0" - never restore open state for collapsed-by-default items
-              if (defExpAttr === '0' && wantOpen) {
-                detailsEl.open = false;  // Force closed for merged/closed branches
-              } else {
-                detailsEl.open = wantOpen;
-              }
+              // URL state always overrides default
+              detailsEl.open = wantOpen;
             } else {
               // Use default expanded state
               detailsEl.open = defExp;

@@ -2307,18 +2307,19 @@ def render_tree_divs(root_nodes: List[TreeNodeVM]) -> str:
             sha7 = _sha7_from_key(full_key) or _sha7_from_key(nk)
             repo = _repo_token_from_key(full_key) or _repo_token_from_key(nk)
             
-            # Generate unique URL key using hash of full path
+            # Generate stable URL key using hash of node_key (not full path)
+            # This ensures URL params survive page reloads even when tree structure changes
             import hashlib
-            full_key_hash = hashlib.sha256(full_key.encode()).hexdigest()[:7]
+            node_key_hash = hashlib.sha256(nk.encode()).hexdigest()[:7]
             
             url_key_attr = ""
             if repo and sha7:
-                url_key_attr = f' data-url-key="t.{html.escape(repo)}.{html.escape(full_key_hash)}"'
+                url_key_attr = f' data-url-key="t.{html.escape(repo)}.{html.escape(node_key_hash)}"'
             elif sha7:
-                url_key_attr = f' data-url-key="t.{html.escape(full_key_hash)}"'
+                url_key_attr = f' data-url-key="t.{html.escape(node_key_hash)}"'
             else:
                 # Fallback: use just the hash
-                url_key_attr = f' data-url-key="t.{html.escape(full_key_hash)}"'
+                url_key_attr = f' data-url-key="t.{html.escape(node_key_hash)}"'
             
             parent_attr = f' data-parent-children-id="{html.escape(parent_children_id)}"' if parent_children_id else ''
             expanded = bool(node.default_expanded)
@@ -3167,6 +3168,16 @@ def pytest_slowest_tests_from_raw_log(
                         status_norm = status_by_test.get(test_id, CIStatus.SUCCESS.value)
                         test_times.append((full_name, dur_str, status_norm))
         
+        
+        # Add failed/error tests that didn't appear in slowest durations section
+        # This ensures failed tests are always shown, even without --durations flag
+        tests_already_shown = {t[0].split('] ', 1)[-1] for t in test_times if '] ' in t[0]}
+        for test_id, test_status in status_by_test.items():
+            # Only add if it's a failure/error and not already in the list
+            if test_status == CIStatus.FAILURE.value and test_id not in tests_already_shown:
+                # Add with unknown duration (will be shown as "?")
+                full_name = f"[call] {test_id}"
+                test_times.append((full_name, "?", test_status))
         # Persist parsed rows (best-effort).
         from cache_pytest_timings import PYTEST_TIMINGS_CACHE  # local file import
 
