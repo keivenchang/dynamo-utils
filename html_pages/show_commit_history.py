@@ -2382,6 +2382,9 @@ Environment Variables:
   DYNAMO_UTILS_CACHE_DIR
       Override default cache directory (~/.cache/dynamo-utils)
 
+  DYNAMO_UTILS_DISABLE_INTERNAL_RATE_LIMIT_CHECKS
+      Set to 1 to disable internal /rate_limit API calls (for quota experiments)
+
   MAX_GITHUB_API_CALLS
       Can be set when using update_html_pages.sh to override --max-github-api-calls default
 
