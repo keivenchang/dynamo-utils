@@ -513,14 +513,30 @@ def _format_pr_number_link(pr: Optional[PRInfo]) -> str:
 
 
 def _format_base_branch_inline(pr: Optional[PRInfo]) -> str:
-    """Format the base branch as an inline HTML snippet (→ base_branch)."""
+    """Format the base branch as an inline HTML snippet (→ base_branch).
+    
+    Uses blue button style for non-main branches to make them more prominent.
+    """
     if pr is None:
         return ""
     base_ref = str(pr.base_ref or "").strip()
     if not base_ref:
         return ""
-    # Return the → symbol and base branch name in a muted color
-    return f'<span style="color: #656d76;">→ {html_module.escape(base_ref)}</span>'
+    
+    # For non-main branches, use prominent blue button style (like commit history)
+    # For main branch, use subtle muted color
+    base_ref_lower = base_ref.lower()
+    if base_ref_lower not in ("main", "master"):
+        # Blue button style for non-main branches (more prominent)
+        return (
+            f'<span style="color: #656d76;">→</span> '
+            f'<span style="background: #ddf4ff; color: #0969da; padding: 2px 6px; '
+            f'border-radius: 6px; font-size: 11px; font-weight: 600; '
+            f'display: inline-block; margin-left: 4px;">{html_module.escape(base_ref)}</span>'
+        )
+    else:
+        # Muted style for main/master (subtle)
+        return f'<span style="color: #656d76;">→ {html_module.escape(base_ref)}</span>'
 
 
 def _strip_repo_prefix_for_clipboard(branch_name: str) -> str:
@@ -860,6 +876,10 @@ class BranchInfoNode(BranchNode):
         # Copy button
         clipboard_text = _strip_repo_prefix_for_clipboard(self.label)
         parts.append(_html_copy_button(clipboard_text=clipboard_text, title=f"Copy branch name: {clipboard_text}"))
+        
+        # Current branch indicator (✪) - show right after copy button, before state tags
+        if self.is_current:
+            parts.append('<span style="color: #0969da; font-size: 14px;" title="Current branch">✪</span>')
         
         pr_state_lc = (self.pr.state or "").lower() if self.pr else ""
         is_merged = bool(self.pr.is_merged) if self.pr else False
