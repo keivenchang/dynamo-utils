@@ -272,6 +272,23 @@ cleanup_python() {
         fi
     fi
 
+    # Clean up system-wide installations (sudo required)
+    # These can interfere with pytest which searches system packages before venv
+    for system_dir in /usr/local/lib/python*/dist-packages /usr/lib/python*/dist-packages; do
+        if [ -d "$system_dir" ]; then
+            # Remove dynamo packages (requires sudo)
+            if sudo test -d "$system_dir/dynamo" 2>/dev/null; then
+                cmd sudo rm -rf "$system_dir/dynamo"
+            fi
+            # Remove dist-info directories
+            for dist_info in "$system_dir"/ai_dynamo*-*.dist-info; do
+                if sudo test -d "$dist_info" 2>/dev/null; then
+                    cmd sudo rm -rf "$dist_info"
+                fi
+            done
+        fi
+    done
+
     # Clean up wheel files if in workspace
     if [ -n "${WHEEL_OUTPUT_DIR:-}" ] && [ -d "${WHEEL_OUTPUT_DIR:-}" ]; then
         for wheel_file in "$WHEEL_OUTPUT_DIR"/*.whl; do
