@@ -2,8 +2,34 @@ Cursor Rules for Dynamo Project
 https://github.com/keivenchang/dynamo-utils/blob/main/.cursorrules
 
 =============================================================================
+READ THIS FIRST (NON-NEGOTIABLE)
+=============================================================================
+
+If you do only one thing: re-read this section before making changes or running commands.
+
+- Pytest HF token (MUST):
+  - Before running any `pytest`, do:
+    - `export HF_TOKEN="$(cat ~/.cache/huggingface/token)" && pytest ...`
+  - Prefer: `pytest --basetemp=/tmp/pytest_temp tests/`
+
+- Cache deletion policy (MUST):
+  - NEVER delete caches unless explicitly requested and permission is granted.
+    - Examples: `__pycache__`, `.cache/`, `target/`, `node_modules/`, tmp dirs, etc.
+
+- Shell execution (MUST):
+  - Chain multi-step commands into ONE shell invocation using `&&` / `;` (reduce latency).
+  - For expensive/long-running commands: capture FULL output first (`2>&1` to a file or `tee`).
+    - Never pipe the live output of expensive commands into `grep`/`head`/`tail`.
+
+- Python rules (MUST):
+  - All imports at top of file. No `try/except` for imports. Never import inside functions.
+  - Fail fast: do not hide errors (no blanket `except Exception:` unless re-raising).
+  - No defensive `getattr()` for known typed attributes (use direct access).
+
+=============================================================================
 TABLE OF CONTENTS
 =============================================================================
+0. READ THIS FIRST (NON-NEGOTIABLE)
 1. AI PERSONALITY AND DOCUMENTATION GUIDELINES
   1.1 AI Personality
   1.2 Documentation Guidelines
@@ -472,10 +498,7 @@ long_call()
 
 ### 3.4.10 Dependency Management
 Validate dependency updates:
-```
-cargo-deny --version || cargo install --locked cargo-deny@0.16.4
-cargo-deny --no-default-features check --hide-inclusion-graph licenses bans --config deny.toml
-```
+- See `7.2.6 Cargo Deny (License Checks)` for the canonical commands.
 
 ### 3.4.11 Python Bindings and Wheel Creation
 After changes in lib/bindings/python/rust/*:
@@ -745,6 +768,7 @@ if handler:
 - Unit tests in tests/ directory
 - Use fixtures for common setup
 - Mock external services
+- Before running any `pytest`: see `READ THIS FIRST (NON-NEGOTIABLE)` for the required `HF_TOKEN` export pattern.
 - Always use: pytest --basetemp=/tmp/pytest_temp tests/
 
 ### 3.5.5 Dynamo-utils dashboards + log categorization
@@ -1063,10 +1087,7 @@ Run all the checks that CI runs before merging. These commands replicate the
 CI environment locally.
 
 Quick checklist before commit:
-1. cargo fmt (in all affected directories)
-2. cargo clippy --no-deps --all-targets -- -D warnings
-3. cargo test --locked --all-targets
-4. pre-commit run --all-files (if Python changes)
+- See `7.2.7 Quick Pre-Commit Checklist` (single canonical checklist).
 
 ### 7.2.1 Rust Format Check
 Check code formatting (must pass before commit):
@@ -1146,11 +1167,19 @@ cargo-deny --no-default-features check --hide-inclusion-graph licenses bans --co
 
 ### 7.2.7 Quick Pre-Commit Checklist
 Before committing Rust changes, run:
-1. cargo fmt
-2. cargo clippy --no-deps --all-targets -- -D warnings
-3. cargo test --locked --all-targets
-4. pre-commit run --all-files  (if Python changes)
-5. If scripts or HTML generators changed: `python3 -m py_compile <touched_py_files>` and run the relevant generator/update script to validate end-to-end output.
+- Prefer a single chained command (with separators) so it’s one copy/paste and one log stream.
+
+Rust-only (auto-fix formatting first):
+```bash
+cargo fmt && echo "=====" && cargo clippy --no-deps --all-targets -- -D warnings && echo "=====" && cargo test --locked --all-targets
+```
+
+Rust + Python changes:
+```bash
+cargo fmt && echo "=====" && cargo clippy --no-deps --all-targets -- -D warnings && echo "=====" && cargo test --locked --all-targets && echo "=====" && pre-commit run --all-files
+```
+
+If scripts or HTML generators changed: `python3 -m py_compile <touched_py_files>` and run the relevant generator/update script to validate end-to-end output.
 
 Expected result: All checks pass with no errors
 

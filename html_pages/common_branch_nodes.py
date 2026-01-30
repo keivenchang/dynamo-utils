@@ -696,6 +696,7 @@ class CIJobNode(BranchNode):
         self.error_snippet_categories = list(error_snippet_categories or [])
         self.short_job_name = str(short_job_name or "")
         self.yaml_dependencies = list(yaml_dependencies or [])
+        self.run_attempt = 0  # Set to 0 initially; will be populated during filtering
     
     def to_tree_vm(self) -> TreeNodeVM:
         """Convert this CI job node to a TreeNodeVM using check_line_html."""
@@ -724,6 +725,7 @@ class CIJobNode(BranchNode):
             short_job_name=self.short_job_name,
             yaml_dependencies=self.yaml_dependencies,
             is_pytest_node=is_pytest,
+            run_attempt=getattr(self, 'run_attempt', 0),  # Pass run_attempt for rerun badge
         )
         
         # Build children: existing children + snippet node (if present)
@@ -1470,6 +1472,86 @@ def _assume_completed_for_check_row(r: "GHPRCheckRow") -> bool:
     return s not in {"in_progress", "pending", "queued", "running", "unknown"}
 
 
+def _filter_latest_run_attempts(
+    rows: List[GHPRCheckRow],
+    github_api: Optional[GitHubAPIClient],
+    owner: str,
+    repo: str,
+) -> Tuple[List[GHPRCheckRow], Dict[str, int]]:
+    """Filter check rows to show only the latest run_attempt for each check.
+    
+    When a workflow run is rerun, GitHub creates new check-runs for the same workflow.
+    This function detects reruns via the run_attempt field and keeps only the latest.
+    
+    Strategy:
+    1. Group checks by (name, run_id)
+    2. For each group, fetch run_attempt from workflow run metadata
+    3. Keep only checks from the highest run_attempt
+    4. Return mapping of run_id -> run_attempt for UI display
+    
+    Args:
+        rows: List of check rows from GitHub API
+        github_api: GitHub API client (for fetching run metadata)
+        owner: Repository owner
+        repo: Repository name
+    
+    Returns:
+        Tuple of (filtered_rows, run_attempt_map)
+        - filtered_rows: Filtered list of check rows (only latest run_attempt per check)
+        - run_attempt_map: Dict mapping run_id -> run_attempt number
+    """
+    if not rows or not github_api:
+        return rows, {}
+    
+    from common_github.api.actions_run_metadata_cached import get_run_metadata_cached
+    
+    # Group checks by (name, run_id)
+    groups: Dict[Tuple[str, str], List[GHPRCheckRow]] = {}
+    checks_without_run_id: List[GHPRCheckRow] = []
+    run_attempt_map: Dict[str, int] = {}
+    
+    for row in rows:
+        name = str(row.name or "").strip()
+        run_id = str(row.run_id or "").strip()
+        
+        if not run_id or not run_id.isdigit():
+            # Not a GitHub Actions job (e.g., DCO, status checks) - keep as-is
+            checks_without_run_id.append(row)
+            continue
+        
+        key = (name, run_id)
+        if key not in groups:
+            groups[key] = []
+        groups[key].append(row)
+    
+    # Process each group
+    filtered_rows: List[GHPRCheckRow] = []
+    
+    for (name, run_id), group_rows in groups.items():
+        # Fetch run metadata to get run_attempt (should be cached from prefetch pass)
+        # Use skip_fetch=True to avoid additional API calls since prefetch already populated cache
+        metadata = get_run_metadata_cached(
+            api=github_api,
+            owner=owner,
+            repo=repo,
+            run_id=run_id,
+            ttl_s=30 * 24 * 3600,  # 30 days
+            skip_fetch=True,  # IMPORTANT: Use cached data only, no network fetch
+        )
+        
+        run_attempt = int(metadata.get("run_attempt", 1)) if metadata else 1
+        run_attempt_map[run_id] = run_attempt
+        
+        # For a given (name, run_id), there should typically be only one check row
+        # If there are multiple (shouldn't happen), just take the first one
+        filtered_rows.append(group_rows[0])
+    
+    # Add back checks without run_ids (non-Actions checks)
+    filtered_rows.extend(checks_without_run_id)
+    
+    return filtered_rows, run_attempt_map
+
+
 # ======================================================================
 # build_ci_nodes_from_pr (moved from show_local_branches.py)
 # ======================================================================
@@ -1572,6 +1654,10 @@ def build_ci_nodes_from_pr(
                 )
             )
             seen_norm.add(n0)
+
+    # Filter check rows to show only the latest run_attempt for each check (rerun detection).
+    # For checks with the same (name, run_id), keep only the one from the highest run_attempt.
+    rows, run_attempt_map = _filter_latest_run_attempts(rows, github_api, DYNAMO_OWNER, DYNAMO_REPO)
 
     # Note: Sorting is now handled by PASS 4 (sort_by_name_pass) in the centralized pipeline.
     # No need to pre-sort rows here.
@@ -1704,6 +1790,11 @@ def build_ci_nodes_from_pr(
         )
         # Store the core job name (without workflow prefix/event suffix) for matching in merge
         node.core_job_name = nm  # This is the original "name" from the check row
+        
+        # Attach run_attempt info for rerun badge display
+        rid = str(r.run_id or "").strip()
+        if rid and rid in run_attempt_map:
+            node.run_attempt = run_attempt_map[rid]
         
         # DEBUG: Verify it was set
         logger.debug(f"[build_ci_nodes_from_pr] Set core_job_name='{nm}' on node with job_id='{full_job_name[:50]}'")

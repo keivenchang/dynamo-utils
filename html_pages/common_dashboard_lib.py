@@ -874,6 +874,26 @@ def prefetch_actions_job_details_pass(
     except Exception as e:
         logger.warning(f"[prefetch_actions_job_details_pass] Batch fetch failed: {e}")
 
+    # Also prefetch run metadata (run_attempt, status, etc.) for rerun detection
+    logger.info(f"[prefetch_actions_job_details_pass] Batch fetching run metadata for {len(run_ids)} unique runs")
+    try:
+        from common_github.api.actions_run_metadata_cached import get_run_metadata_cached
+        metadata_count = 0
+        for run_id in run_ids:
+            metadata = get_run_metadata_cached(
+                api=github_api,
+                owner="ai-dynamo",
+                repo="dynamo",
+                run_id=run_id,
+                ttl_s=30 * 24 * 3600,  # 30 days for completed, 5m for in-progress
+                skip_fetch=False,
+            )
+            if metadata:
+                metadata_count += 1
+        logger.info(f"[prefetch_actions_job_details_pass] Prefetched {metadata_count} run metadata entries into cache")
+    except Exception as e:
+        logger.warning(f"[prefetch_actions_job_details_pass] Run metadata fetch failed: {e}")
+
     logger.info(f"[prefetch_actions_job_details_pass] Complete")
     return ci_nodes
 
@@ -4314,6 +4334,7 @@ def check_line_html(
     short_job_name: str = "",  # Short YAML job name (e.g., "build-test")
     yaml_dependencies: Optional[List[str]] = None,  # List of dependencies from YAML
     is_pytest_node: bool = False,  # True if this is a CIPytestNode (for Grafana links)
+    run_attempt: int = 0,  # Run attempt number (>1 means rerun)
 ) -> str:
     # Expected placeholder checks:
     # - Use a normal gray dot (same as queued/pending) instead of the special ◇ symbol
@@ -4396,6 +4417,10 @@ def check_line_html(
     # Add [may be REQUIRED] badge if this should be required but isn't marked as such
     if may_be_required and not is_required:
         req_html += ' <span style="color: #57606a; font-weight: 400;">[may be REQUIRED]</span>'
+    
+    # Add rerun badge if run_attempt > 1
+    if run_attempt and int(run_attempt) > 1:
+        req_html += f' <span style="background: #ddf4ff; color: #0969da; padding: 1px 5px; border-radius: 6px; font-size: 10px; font-weight: 600; display: inline-block; margin-left: 4px;" title="This check was rerun (attempt #{run_attempt})">🔄 attempt #{run_attempt}</span>'
 
     # Show display_name with double quotes if we have both and they're different
     name_html = ""

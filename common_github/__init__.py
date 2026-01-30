@@ -1425,6 +1425,9 @@ class GitHubAPIClient:
         required_checks_mem, _required_checks_disk_before = get_required_checks_cache_sizes()
         from .api.actions_jobs_by_runid_cached import get_cache_sizes as get_actions_jobs_cache_sizes
         actions_jobs_mem, _actions_jobs_disk_before = get_actions_jobs_cache_sizes()
+        # actions_run_metadata now via api module
+        from .api.actions_run_metadata_cached import get_cache_sizes as get_actions_run_metadata_cache_sizes
+        actions_run_metadata_mem, _actions_run_metadata_disk_before = get_actions_run_metadata_cache_sizes()
         # pulls_list now via api module
         from .api.pulls_list_cached import get_cache_sizes as get_pulls_list_cache_sizes
         pulls_list_disk_mem, _pulls_list_disk_before = get_pulls_list_cache_sizes()
@@ -1434,6 +1437,8 @@ class GitHubAPIClient:
             "actions_job_status_mem": len(self._actions_job_status_mem_cache),
             "actions_jobs_disk": actions_jobs_mem,
             "actions_jobs_mem": actions_jobs_mem,
+            "actions_run_metadata_disk": actions_run_metadata_mem,
+            "actions_run_metadata_mem": actions_run_metadata_mem,
             "job_log_disk": job_log_mem,
             "job_log_mem": job_log_mem,
             "pr_branch_disk": pr_branch_mem,
