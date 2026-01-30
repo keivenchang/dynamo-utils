@@ -26,7 +26,7 @@
 #   REMOTE_PRS_OUT_FILE - Full output filename override (rare; if set, used for every user).
 #
 # Args (optional; can be combined):
-#   --show-local-resources  Update the resource report ($DYNAMO_HOME/resource_report.html)
+#   --show-local-resources  Update the resource report (~/dynamo/speedoflight/stats/index.html)
 #   --show-local-branches   Update the branches dashboard (speedoflight/dynamo/users/<user>/local.html)
 #   --show-remote-branches  Update remote PR dashboards for selected GitHub users (IDENTICAL UI to local branches)
 #   --show-commit-history   Update the commit history dashboard ($DYNAMO_HOME/commits/index.html)
@@ -75,7 +75,7 @@ Usage: update_html_pages.sh [FLAGS]
 If no args are provided, ALL tasks run.
 
 Flags:
-  --show-local-resources    Write: $DYNAMO_HOME/resource_report.html (or resource_report_debug.html in --debug-html)
+  --show-local-resources    Write: $HOME/dynamo/speedoflight/stats/index.html (or debug.html in --debug-html)
   --show-local-branches     Write: $HOME/dynamo/speedoflight/dynamo/users/<user>/local.html (or local-debug.html in --debug-html)
   --show-remote-branches    Write: $HOME/dynamo/speedoflight/dynamo/users/<user>/index.html (or debug.html in --debug-html)
   --show-commit-history     Write: $DYNAMO_HOME/commits/index.html (or debug.html in --debug-html)
@@ -321,12 +321,14 @@ run_resource_report() {
     # - ~/.cache/dynamo-utils
     CACHE_ROOT="${DYNAMO_UTILS_CACHE_DIR:-$HOME/.cache/dynamo-utils}"
     RESOURCE_DB="${RESOURCE_DB:-$CACHE_ROOT/resource_monitor.sqlite}"
-    # Output to the top-level nvidia directory so nginx can serve it at /
+    # Output to speedoflight/stats/ to match other dashboards
     if [ -z "${RESOURCE_REPORT_HTML:-}" ]; then
+        STATS_DIR="$HOME/dynamo/speedoflight/stats"
+        mkdir -p "$STATS_DIR"
         if [ "$FAST_DEBUG" = true ]; then
-            RESOURCE_REPORT_HTML="$DYNAMO_HOME/resource_report_debug.html"
+            RESOURCE_REPORT_HTML="$STATS_DIR/debug.html"
         else
-            RESOURCE_REPORT_HTML="$DYNAMO_HOME/resource_report.html"
+            RESOURCE_REPORT_HTML="$STATS_DIR/index.html"
         fi
     fi
 

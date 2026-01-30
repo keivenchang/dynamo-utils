@@ -117,6 +117,125 @@ def _query_gh_rate_limit_timeseries(
     return series, latest
 
 
+def _query_disk_usage_timeseries(
+    con: sqlite3.Connection,
+    *,
+    start_ts: float,
+) -> Dict[str, Dict[str, Any]]:
+    """
+    Query disk usage time series for all monitored paths.
+
+    Returns:
+      {path: {"x": [...], "free_gb": [...], "used_gb": [...], "total_gb": [...], "percent_free": [...]}}
+    """
+    if not _table_exists(con, "disk_usage_samples"):
+        return {}
+    cur = con.cursor()
+    rows = cur.execute(
+        """
+        SELECT
+          s.ts_unix AS ts_unix,
+          d.path AS path,
+          d.total_bytes AS total_bytes,
+          d.used_bytes AS used_bytes,
+          d.free_bytes AS free_bytes,
+          d.percent_used AS percent_used
+        FROM disk_usage_samples d
+        JOIN samples s ON s.id = d.sample_id
+        WHERE s.ts_unix >= ?
+        ORDER BY s.ts_unix ASC
+        """,
+        (float(start_ts),),
+    ).fetchall()
+
+    series: Dict[str, Dict[str, Any]] = {}
+    for row in rows:
+        path = str(row["path"] or "")
+        if not path:
+            continue
+        
+        tsu = float(row["ts_unix"])
+        x = _ts_to_iso(tsu)
+        total_bytes = row["total_bytes"]
+        used_bytes = row["used_bytes"]
+        free_bytes = row["free_bytes"]
+        percent_used = row["percent_used"]
+        
+        # Convert to GB for readability
+        total_gb = total_bytes / (1024**3) if total_bytes else None
+        used_gb = used_bytes / (1024**3) if used_bytes else None
+        free_gb = free_bytes / (1024**3) if free_bytes else None
+        percent_free = 100.0 - percent_used if percent_used is not None else None
+
+        d = series.setdefault(path, {
+            "x": [],
+            "free_gb": [],
+            "used_gb": [],
+            "total_gb": [],
+            "percent_free": [],
+        })
+        d["x"].append(x)
+        d["free_gb"].append(free_gb)
+        d["used_gb"].append(used_gb)
+        d["total_gb"].append(total_gb)
+        d["percent_free"].append(percent_free)
+
+    return series
+
+
+def _query_disk_usage_latest(
+    con: sqlite3.Connection,
+) -> Dict[str, Dict[str, Any]]:
+    """
+    Query the latest disk usage for all monitored paths.
+
+    Returns:
+      {path: {"total_bytes": ..., "free_bytes": ..., "percent_free": ...}}
+    """
+    if not _table_exists(con, "disk_usage_samples"):
+        return {}
+    cur = con.cursor()
+    # Get the most recent sample for each path
+    rows = cur.execute(
+        """
+        SELECT
+          d.path AS path,
+          d.total_bytes AS total_bytes,
+          d.free_bytes AS free_bytes,
+          d.percent_used AS percent_used,
+          s.ts_unix AS ts_unix
+        FROM disk_usage_samples d
+        JOIN samples s ON s.id = d.sample_id
+        WHERE d.sample_id = (
+          SELECT d2.sample_id
+          FROM disk_usage_samples d2
+          JOIN samples s2 ON s2.id = d2.sample_id
+          WHERE d2.path = d.path
+          ORDER BY s2.ts_unix DESC
+          LIMIT 1
+        )
+        """,
+    ).fetchall()
+
+    latest: Dict[str, Dict[str, Any]] = {}
+    for row in rows:
+        path = str(row["path"] or "")
+        if not path:
+            continue
+        total = row["total_bytes"]
+        free = row["free_bytes"]
+        percent_used = row["percent_used"]
+        percent_free = 100.0 - percent_used if percent_used is not None else None
+
+        latest[path] = {
+            "total_bytes": int(total) if total is not None else None,
+            "free_bytes": int(free) if free is not None else None,
+            "percent_free": float(percent_free) if percent_free is not None else None,
+            "ts_unix": float(row["ts_unix"]),
+        }
+    return latest
+
+
 @dataclass(frozen=True)
 class SampleRow:
     sample_id: int
@@ -1552,8 +1671,16 @@ def _build_html(payload: Dict[str, Any]) -> str:
           <div id="gh_rate_limit_graph" class="plot"></div>
         </div>
       </div>
-      <!-- right side intentionally empty (for now) -->
-      <div></div>
+      <!-- Disk usage display -->
+      <div class="card chart">
+        <div class="hdr">
+          <div class="title">Disk Usage</div>
+          <div class="hint">Latest disk usage from <span class="mono">disk_usage_samples</span> table.</div>
+        </div>
+        <div class="body">
+          <div id="disk_usage_display" class="plot"></div>
+        </div>
+      </div>
     </div>
   </div>
 
@@ -3015,6 +3142,53 @@ def _build_html(payload: Dict[str, Any]) -> str:
     return Plotly.newPlot('gh_rate_limit_graph', traces, layout, config).then(() => installHoverDelay('gh_rate_limit_graph'));
   }}
 
+  function renderDiskUsage() {{
+    const diskData = PAYLOAD.disk_usage || {{}};
+    const container = document.getElementById('disk_usage_display');
+    if (!container) return;
+
+    const paths = Object.keys(diskData);
+    if (paths.length === 0) {{
+      const layout = commonLayout('No disk usage data');
+      const config = {{ displayModeBar: false, responsive: true }};
+      return Plotly.newPlot('disk_usage_display', [], layout, config);
+    }}
+
+    // Create traces for each partition - show free space as percentage
+    const traces = [];
+    for (const path of paths) {{
+      const d = diskData[path];
+      if (!d.x || d.x.length === 0) continue;
+      
+      traces.push({{
+        x: d.x,
+        y: d.percent_free,
+        name: `${{path}} (free)`,
+        mode: 'lines',
+        line: {{ width: 2 }},
+        hovertemplate: `${{path}}<br>Free: %{{y:.1f}}%<br>%{{x}}<extra></extra>`,
+      }});
+    }}
+
+    const layout = commonLayout('');
+    layout.yaxis = {{
+      title: 'Free Space (%)',
+      range: [0, 100],
+      gridcolor: 'rgba(255,255,255,0.09)',
+    }};
+    layout.legend = {{
+      orientation: 'h',
+      yanchor: 'top',
+      y: -0.15,
+      xanchor: 'center',
+      x: 0.5,
+    }};
+    layout.margin = {{ l: 60, r: 20, t: 20, b: 80 }};
+
+    const config = {{ displayModeBar: true, responsive: true }};
+    return Plotly.newPlot('disk_usage_display', traces, layout, config).then(() => installHoverDelay('disk_usage_display'));
+  }}
+
   buildSpikeTable(PAYLOAD.spikes || []);
   buildLeaderTable(PAYLOAD.cpu_leaderboard || []);
   buildDockerTable(PAYLOAD.docker_leaderboard || []);
@@ -3026,8 +3200,9 @@ def _build_html(payload: Dict[str, Any]) -> str:
   const pPing = renderPingGraph();
   const pNet = renderNetGraph();
   const pGh = renderGhRateLimitGraph();
-  Promise.allSettled([pSys, pGpu, pDocker, pPing, pNet, pGh]).then(() => {{
-    installTimeSync(['sys_graph', 'gpu_graph', 'docker_graph', 'ping_graph', 'net_graph', 'gh_rate_limit_graph']);
+  const pDisk = renderDiskUsage();
+  Promise.allSettled([pSys, pGpu, pDocker, pPing, pNet, pGh, pDisk]).then(() => {{
+    installTimeSync(['sys_graph', 'gpu_graph', 'docker_graph', 'ping_graph', 'net_graph', 'gh_rate_limit_graph', 'disk_usage_display']);
   }});
   </script>
 </body>
@@ -3140,6 +3315,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         gh_rate_limit, gh_rate_limit_latest = _query_gh_rate_limit_timeseries(
             con, start_ts=start_ts, resources=gh_resources
         )
+
+        # Disk usage (time series + latest snapshot for all auto-detected partitions)
+        disk_usage_timeseries = _query_disk_usage_timeseries(con, start_ts=start_ts)
+        disk_usage_latest = _query_disk_usage_latest(con)
 
         samples = _query_samples(con, start_ts=start_ts)
         avg_interval = 0.0
@@ -3283,6 +3462,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             "db_path": str(db_path),
             "gh_rate_limit": gh_rate_limit,
             "gh_rate_limit_latest": gh_rate_limit_latest,
+            "disk_usage": disk_usage_timeseries,
+            "disk_usage_latest": disk_usage_latest,
             "window": f"{datetime.fromtimestamp(start_ts)} → {datetime.fromtimestamp(end_ts)} (localtime) | last {days:g} days",
             "window_end": _ts_to_iso(end_ts),
             "sample_count": len(samples),

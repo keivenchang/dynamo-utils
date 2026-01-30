@@ -283,6 +283,97 @@ def _collect_github_rate_limit(
     return out_rows
 
 
+def _get_disk_partitions() -> List[str]:
+    """
+    Auto-detect all mounted physical disk partitions.
+    
+    Uses /sys/block to distinguish physical devices (PCI/SATA paths) from virtual devices.
+    Falls back to device name patterns if /sys/block is unavailable.
+    
+    Returns list of mount points to monitor.
+    """
+    import os
+    
+    # Build set of physical block devices by checking /sys/block symlinks
+    physical_devices = set()
+    sys_block = Path("/sys/block")
+    if sys_block.exists():
+        for device_link in sys_block.iterdir():
+            try:
+                # Read the symlink target to determine if physical or virtual
+                target = os.readlink(str(device_link))
+                # Physical devices have paths like ../devices/pci*/... or ../devices/ata*/...
+                # Virtual devices have paths like ../devices/virtual/block/...
+                if '/virtual/' not in target and '/loop' not in device_link.name:
+                    # This is a physical device (e.g., sda, nvme0n1)
+                    physical_devices.add(device_link.name)
+            except (OSError, IOError):
+                continue
+    
+    # Get all mounted partitions and filter for physical devices
+    mount_points: List[str] = []
+    try:
+        partitions = psutil.disk_partitions(all=False)
+        for partition in partitions:
+            device = partition.device
+            if not device.startswith('/dev/'):
+                continue
+            
+            # Extract base device name from partition device path
+            device_name = device.replace('/dev/', '')
+            if 'nvme' in device_name:
+                # nvme0n1p1 -> nvme0n1 (split on 'p' for partition)
+                base_device = device_name.split('p')[0] if 'p' in device_name else device_name
+            elif '/mapper/' in device or '/dm-' in device:
+                # Always include LVM/device-mapper devices (they map to physical storage)
+                mount_points.append(partition.mountpoint)
+                continue
+            else:
+                # sda1 -> sda, sdb2 -> sdb (strip trailing digits)
+                base_device = device_name.rstrip('0123456789')
+            
+            # Check if this partition belongs to a physical device
+            if base_device in physical_devices:
+                mount_points.append(partition.mountpoint)
+    except Exception:  # THIS IS A HORRIBLE ANTI-PATTERN, FIX IT
+        # Fallback to root if detection fails
+        mount_points = ["/"]
+    
+    return mount_points if mount_points else ["/"]
+
+
+def _collect_disk_usage(*, paths: Optional[Sequence[str]] = None) -> List[Dict[str, Any]]:
+    """
+    Best-effort disk usage sampling via shutil.disk_usage.
+    
+    If paths is None or empty, auto-detects all sda/nvme partitions.
+
+    Returns rows like:
+      {path, total_bytes, used_bytes, free_bytes, percent_used}
+    """
+    # Auto-detect partitions if not specified
+    if not paths:
+        paths = _get_disk_partitions()
+    
+    out_rows: List[Dict[str, Any]] = []
+    for path in paths:
+        try:
+            usage = shutil.disk_usage(path)
+            percent_used = (usage.used / usage.total * 100.0) if usage.total > 0 else 0.0
+            out_rows.append(
+                {
+                    "path": str(path),
+                    "total_bytes": int(usage.total),
+                    "used_bytes": int(usage.used),
+                    "free_bytes": int(usage.free),
+                    "percent_used": float(percent_used),
+                }
+            )
+        except Exception:  # THIS IS A HORRIBLE ANTI-PATTERN, FIX IT
+            continue
+    return out_rows
+
+
 def _parse_bytes(s: str) -> Optional[int]:
     """
     Parse Docker-ish byte strings like: '0B', '12.3kB', '4.1MB', '1.2GiB', '512KiB'.
@@ -704,6 +795,21 @@ class ResourceDB:
             """
         )
 
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS disk_usage_samples (
+              sample_id INTEGER NOT NULL,
+              path TEXT NOT NULL,
+              total_bytes INTEGER,
+              used_bytes INTEGER,
+              free_bytes INTEGER,
+              percent_used REAL,
+              PRIMARY KEY (sample_id, path),
+              FOREIGN KEY(sample_id) REFERENCES samples(id) ON DELETE CASCADE
+            );
+            """
+        )
+
         # Backwards-compatible migration for older DBs created before `image` existed.
         try:
             cols = [r[1] for r in cur.execute("PRAGMA table_info(docker_container_samples);").fetchall()]
@@ -729,6 +835,9 @@ class ResourceDB:
         )
         cur.execute(
             "CREATE INDEX IF NOT EXISTS idx_gh_rate_limit_resource ON gh_rate_limit_samples(resource);"
+        )
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_disk_usage_path ON disk_usage_samples(path);"
         )
         self.conn.commit()
 
@@ -938,6 +1047,27 @@ class ResourceDB:
                     int(r.get("remaining")) if r.get("remaining") is not None else None,
                     int(r.get("used")) if r.get("used") is not None else None,
                     int(r.get("reset_epoch")) if r.get("reset_epoch") is not None else None,
+                ),
+            )
+
+    def insert_disk_usage_samples(self, sample_id: int, rows: List[Dict[str, Any]]) -> None:
+        if not rows:
+            return
+        cur = self.conn.cursor()
+        for r in rows:
+            cur.execute(
+                """
+                INSERT OR REPLACE INTO disk_usage_samples(
+                  sample_id, path, total_bytes, used_bytes, free_bytes, percent_used
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    sample_id,
+                    str(r.get("path") or ""),
+                    int(r.get("total_bytes")) if r.get("total_bytes") is not None else None,
+                    int(r.get("used_bytes")) if r.get("used_bytes") is not None else None,
+                    int(r.get("free_bytes")) if r.get("free_bytes") is not None else None,
+                    float(r.get("percent_used")) if r.get("percent_used") is not None else None,
                 ),
             )
 
@@ -1169,6 +1299,9 @@ class Monitor:
         gh_rate_limit: bool,
         gh_rate_limit_interval_s: float,
         gh_rate_limit_resources: Sequence[str],
+        disk_usage: bool,
+        disk_usage_interval_s: float,
+        disk_usage_paths: Sequence[str],
         once: bool,
         duration_s: Optional[float],
     ):
@@ -1187,6 +1320,9 @@ class Monitor:
         self.gh_rate_limit = bool(gh_rate_limit)
         self.gh_rate_limit_interval_s = float(gh_rate_limit_interval_s)
         self.gh_rate_limit_resources = [str(s) for s in gh_rate_limit_resources]
+        self.disk_usage = bool(disk_usage)
+        self.disk_usage_interval_s = float(disk_usage_interval_s)
+        self.disk_usage_paths = [str(s) for s in disk_usage_paths]
         self.once = once
         self.duration_s = duration_s
         self._stop = False
@@ -1198,6 +1334,7 @@ class Monitor:
         self._prev_net_top_ts: float = 0.0
         self._prev_docker_stats_ts: float = 0.0
         self._prev_gh_rate_limit_ts: float = 0.0
+        self._prev_disk_usage_ts: float = 0.0
         self._prev_mem_ts: float = 0.0
 
     def request_stop(self) -> None:
@@ -1333,6 +1470,19 @@ class Monitor:
                     except Exception:  # THIS IS A HORRIBLE ANTI-PATTERN, FIX IT
                         gh_rl_rows = []
 
+            # Disk usage (optional; best-effort)
+            disk_usage_rows: List[Dict[str, Any]] = []
+            if self.disk_usage:
+                if (ts - float(self._prev_disk_usage_ts)) >= max(10.0, float(self.disk_usage_interval_s)):
+                    self._prev_disk_usage_ts = ts
+                    try:
+                        # Pass paths for monitoring; if empty, auto-detects sda/nvme partitions
+                        disk_usage_rows = _collect_disk_usage(
+                            paths=self.disk_usage_paths if self.disk_usage_paths else None
+                        )
+                    except Exception:  # THIS IS A HORRIBLE ANTI-PATTERN, FIX IT
+                        disk_usage_rows = []
+
             # Persist
             extra = {
                 "pid": os.getpid(),
@@ -1364,6 +1514,7 @@ class Monitor:
                 self.db.insert_net_process_samples(sample_id, net_top_rows)
                 self.db.insert_docker_container_samples(sample_id, docker_rows)
                 self.db.insert_gh_rate_limit_samples(sample_id, gh_rl_rows)
+                self.db.insert_disk_usage_samples(sample_id, disk_usage_rows)
                 self.db.conn.commit()
             except Exception as e:
                 self.db.conn.rollback()
@@ -1518,6 +1669,24 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         help="Comma-separated GitHub rate-limit resources to record",
     )
 
+    p.add_argument(
+        "--disk-usage",
+        action="store_true",
+        default=True,
+        help="Best-effort disk usage sampling via `shutil.disk_usage`; stored in disk_usage_samples (default: enabled)",
+    )
+    p.add_argument(
+        "--disk-usage-interval-seconds",
+        type=float,
+        default=900.0,
+        help="How often to sample disk usage when enabled (seconds, default: 900 = 15 minutes)",
+    )
+    p.add_argument(
+        "--disk-usage-paths",
+        default="",
+        help="Comma-separated disk paths to monitor (default: empty = auto-detect all sda*/nvme* partitions)",
+    )
+
     p.add_argument("--log-level", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR"])
     return p.parse_args(argv)
 
@@ -1569,6 +1738,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         gh_rate_limit_resources=[
             s.strip()
             for s in str(args.gh_rate_limit_resources or "").split(",")
+            if s.strip()
+        ],
+        disk_usage=bool(args.disk_usage),
+        disk_usage_interval_s=float(args.disk_usage_interval_seconds),
+        disk_usage_paths=[
+            s.strip()
+            for s in str(args.disk_usage_paths or "").split(",")
             if s.strip()
         ],
         once=bool(args.once),
