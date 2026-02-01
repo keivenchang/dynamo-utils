@@ -1707,6 +1707,7 @@ def build_ci_nodes_from_pr(
         raw_href = ""
         raw_size = 0
         snippet = ""
+        snippet_categories: List[str] = []
 
         # For failed GitHub Actions jobs, always materialize a local raw log so the tree shows `[raw log]`.
         # This is intentionally strict to avoid recurring regressions where errors have no raw logs.
@@ -1739,8 +1740,10 @@ def build_ci_nodes_from_pr(
                 # Use shared snippet cache (ALL dashboards now track snippet stats!)
                 snippet_body, _categories = SNIPPET_CACHE.get_or_compute(raw_log_path=base_dir / raw_href)
                 snippet = str(snippet_body or "")
+                snippet_categories = list(_categories or [])
             except OSError:
                 snippet = ""
+                snippet_categories = []
         elif st == "failure":
             # Only validate failures that correspond to GitHub Actions jobs (others like DCO have no raw log).
             if extract_actions_job_id_from_url(job_url):
@@ -1787,6 +1790,7 @@ def build_ci_nodes_from_pr(
             raw_log_href=raw_href,  # Pass pre-materialized raw log data
             raw_log_size_bytes=raw_size,
             error_snippet_text=snippet,
+            error_snippet_categories=snippet_categories,
         )
         # Store the core job name (without workflow prefix/event suffix) for matching in merge
         node.core_job_name = nm  # This is the original "name" from the check row
