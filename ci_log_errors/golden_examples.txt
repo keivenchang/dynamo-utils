@@ -66,6 +66,7 @@ VLLM/SGLang/TRTLLM backends:
 - 56701494636.log => backend-failure, trtllm-error
 - 57524186105.log => backend-failure, trtllm-error, sglang-error
 - 58471383691.log => vllm-error
+- 62096454660.log => network-port-conflict-error, pytest-error, python-error
 
 HuggingFace auth:
 - 58604176773.log => pytest-error, network-download-error, build-status-check-error, huggingface-auth-error
@@ -110,3 +111,4 @@ Notes:
 * 59652435193.log => +CI_FILTER_UNCOVERED, +Please add these paths to .github/filters.yaml, +RED:CI filter, +RED:CI_FILTER_UNCOVERED
 * 58465471934.log => +failures:, +recorder::tests::test_recorder_streams_events_to_file, +RED:failures:, +RED:    recorder::tests::test_recorder_streams_events_to_file
 * 59520885010.log => +FAILED tests/router/test_router_e2e_with_mockers.py::test_router_decisions_disagg, +# pytest --basetemp=/tmp/pytest-parallel --junitxml=pytest_parallel.xml -n 4, +# suggested, +-m \"pre_merge and parallel, +tests/router/test_router_e2e_with_mockers.py::test_router_decisions_disagg[with_bootstrap-decode_first], +'tests/router/test_router_e2e_with_mockers.py::test_router_decisions_disagg[with_bootstrap-decode_first]', !RED:__________ test_router_decisions_disagg[with_bootstrap-prefill_first] __________
+* 62096454660.log => +RuntimeError: Engine core initialization failed, +ERROR tests/kvbm_integration/test_kvbm.py::test_onboarding_determinism, +vllm/v1/engine, +RED:ERROR tests/kvbm_integration/test_kvbm.py::test_onboarding_determinism
