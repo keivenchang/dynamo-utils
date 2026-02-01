@@ -1763,8 +1763,8 @@ def expand_required_failure_descendants_pass(nodes: List[TreeNodeVM]) -> List[Tr
 
     out: List[TreeNodeVM] = []
     for n in (nodes or []):
-            n2, _ = walk(n)
-            out.append(n2)
+        n2, _ = walk(n)
+        out.append(n2)
     return out
 
 
@@ -3169,7 +3169,55 @@ def pytest_slowest_tests_from_raw_log(
         elif "e2e" in step_lower:
             target_test_type = "e2e"
 
-        # Look for the "slowest N durations" section
+        # Detect pytest command type (parallel vs serial) from step_name
+        # Examples: "pytest (parallel)", "pytest (serial)", "test: pytest (parallel)"
+        step_is_parallel = "parallel" in step_lower or "xdist" in step_lower or "-n" in step_lower
+        step_is_serial = "serial" in step_lower
+        
+        # CRITICAL FIX: GitHub Actions creates synthetic "pytest (parallel)" and "pytest (serial)" steps
+        # from job metadata, but the actual CI log may only contain ONE pytest execution.
+        # We need to check if the log actually contains a pytest run matching this step_name.
+        # If not, return empty (don't attribute tests from one pytest run to a different step).
+        
+        # Strategy: Scan the log for pytest command markers matching this step type.
+        # Only return tests if we find evidence that THIS step actually ran pytest.
+        log_has_matching_pytest = False
+        
+        # Scan for pytest command that matches this step's type
+        for line in lines[:25000]:  # Only scan first 25k lines (pytest command is usually early)
+            line_lower = line.lower()
+            # Check for pytest command execution
+            if 'pytest' in line_lower and ('bash -c' in line_lower or 'running' in line_lower or 'command:' in line_lower):
+                # If step wants parallel, look for parallel markers
+                if step_is_parallel:
+                    if (' -n ' in line and 'pytest' in line_lower) or 'pytest_parallel' in line or 'xdist' in line_lower:
+                        log_has_matching_pytest = True
+                        break
+                # If step wants serial, look for serial markers OR absence of parallel markers
+                elif step_is_serial:
+                    # Serial is indicated by pytest_serial, OR pytest without -n flag
+                    if 'pytest_serial' in line:
+                        log_has_matching_pytest = True
+                        break
+                    # Also check: pytest command without -n flag (but has pytest)
+                    if 'pytest' in line_lower and ' -n ' not in line and 'parallel' not in line_lower:
+                        log_has_matching_pytest = True
+                        break
+        
+        # If we didn't find a matching pytest command, return empty
+        if not log_has_matching_pytest:
+            logger.info(
+                f"[pytest_slowest_tests_from_raw_log] No matching pytest command found for step_name='{step_name}' "
+                f"(step_is_parallel={step_is_parallel}, step_is_serial={step_is_serial}). Returning empty."
+            )
+            return []
+        
+        logger.info(
+            f"[pytest_slowest_tests_from_raw_log] Found matching pytest command for step_name='{step_name}' "
+            f"(step_is_parallel={step_is_parallel}, step_is_serial={step_is_serial})"
+        )
+
+        # Look for the "slowest N durations" section(s)
         # Format: "============================= slowest 10 durations ============================="
         # Followed by lines like (with GitHub Actions timestamp prefix):
         # "2026-01-15T22:01:23.5641223Z 110.16s setup    tests/kvbm_integration/test_kvbm.py::test_offload_and_onboard[llm_server_kvbm0]"
@@ -3180,7 +3228,7 @@ def pytest_slowest_tests_from_raw_log(
         current_test_type = ""  # Track which test_type section we're in
         threshold = 0.0 if bool(include_all) else float(min_seconds or 0.0)
 
-        for line in lines:
+        for i, line in enumerate(lines):
             # Track which test_type section we're in by looking for pytest action markers
             # Example: "  test_type: unit" or "  test_type: e2e, gpu_1"
             # Match only "test_type:" at the start of a word (not "STR_TEST_TYPE:")
@@ -3261,6 +3309,7 @@ def pytest_slowest_tests_from_raw_log(
 
         PYTEST_TIMINGS_CACHE.put(raw_log_path=p, step_name=step_name, rows=test_times)
 
+        logger.info(f"[pytest_slowest_tests_from_raw_log] Returning {len(test_times)} tests for step_name='{step_name}'")
         return test_times
 
     except Exception as e:
