@@ -676,6 +676,7 @@ class CIJobNode(BranchNode):
         error_snippet_categories: Optional[List[str]] = None,  # Error categories (e.g., pytest-error, python-error)
         short_job_name: str = "",  # Short job name from YAML (e.g., "build-test")
         yaml_dependencies: Optional[List[str]] = None,  # List of job names this depends on (needs:)
+        timeout_marker: bool = False,  # True if this job timed out
     ):
         super().__init__(label="", children=children, expanded=expanded, status=status)
         self.job_id = str(job_id or "")
@@ -697,6 +698,7 @@ class CIJobNode(BranchNode):
         self.short_job_name = str(short_job_name or "")
         self.yaml_dependencies = list(yaml_dependencies or [])
         self.run_attempt = 0  # Set to 0 initially; will be populated during filtering
+        self.timeout_marker = bool(timeout_marker)
     
     def to_tree_vm(self) -> TreeNodeVM:
         """Convert this CI job node to a TreeNodeVM using check_line_html."""
@@ -726,6 +728,7 @@ class CIJobNode(BranchNode):
             yaml_dependencies=self.yaml_dependencies,
             is_pytest_node=is_pytest,
             run_attempt=getattr(self, 'run_attempt', 0),  # Pass run_attempt for rerun badge
+            timeout_marker=getattr(self, 'timeout_marker', False),  # Pass timeout marker flag
         )
         
         # Build children: existing children + snippet node (if present)
@@ -1692,7 +1695,12 @@ def build_ci_nodes_from_pr(
         elif raw in {"queued", "pending"}:
             st = "pending"
         elif raw in {"cancelled", "canceled"}:
-            st = "cancelled"
+            # Check if this is a timeout-cancelled (should show as both cancelled + timeout indicator)
+            if r.has_timeout_annotation:
+                st = "cancelled-timeout"  # Special status for timeout
+                any_failed = True  # Timeouts count as failures
+            else:
+                st = "cancelled"
         else:
             st = str(r.status_norm or "unknown")
 
@@ -1777,8 +1785,9 @@ def build_ci_nodes_from_pr(
 
         node = CIJobNode(
             job_id=full_job_name,  # Use full verbatim name as job_id for display
-            display_name=nm,  # Use the original check name as display_name (e.g., "Build and Test - dynamo")
+            display_name=nm,  # Use the original check name as display_name
             status=str(st or "unknown"),
+            timeout_marker=st == "cancelled-timeout",  # Flag for timeout marker
             duration=str(r.duration or ""),
             log_url=job_url,
             actions_job_id=str(r.job_id or ""),

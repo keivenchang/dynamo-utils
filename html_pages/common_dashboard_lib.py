@@ -3505,6 +3505,15 @@ def status_icon_html(
             # Synthetic cancelled: grey dot (normal size, 12px)
             return _circle_dot_fill_svg(color=COLOR_GREY, width=12, height=12)
         return _circle_x_fill_svg(color=COLOR_GREY, width=icon_px_i, height=icon_px_i)
+    # Timeout-cancelled: show as red X (failure) but with timeout indicator in label
+    if s == "cancelled-timeout":
+        if bool(is_required):
+            return _circle_x_fill_svg(color=COLOR_RED, width=icon_px_i, height=icon_px_i)
+        return (
+            f'<span style="color: {COLOR_RED}; display: inline-flex; vertical-align: text-bottom;">'
+            f'{_octicon_svg(path_d="M3.72 3.72a.75.75 0 011.06 0L8 6.94l3.22-3.22a.75.75 0 111.06 1.06L9.06 8l3.22 3.22a.75.75 0 11-1.06 1.06L8 9.06l-3.22 3.22a.75.75 0 11-1.06-1.06L6.94 8 3.72 4.78a.75.75 0 010-1.06z", name="octicon-x", width=icon_px_i, height=icon_px_i)}'
+            "</span>"
+        )
     return _dot_svg(color=COLOR_GREY, width=icon_px_i, height=icon_px_i)
 
 
@@ -4431,6 +4440,7 @@ def check_line_html(
     yaml_dependencies: Optional[List[str]] = None,  # List of dependencies from YAML
     is_pytest_node: bool = False,  # True if this is a CIPytestNode (for Grafana links)
     run_attempt: int = 0,  # Run attempt number (>1 means rerun)
+    timeout_marker: bool = False,  # True if job timed out
 ) -> str:
     # Expected placeholder checks:
     # - Use a normal gray dot (same as queued/pending) instead of the special ◇ symbol
@@ -4517,6 +4527,10 @@ def check_line_html(
     # Add rerun badge if run_attempt > 1
     if run_attempt and int(run_attempt) > 1:
         req_html += f' <span style="background: #ddf4ff; color: #0969da; padding: 1px 5px; border-radius: 6px; font-size: 10px; font-weight: 600; display: inline-block; margin-left: 4px;" title="This check was rerun (attempt #{run_attempt})">🔄 attempt #{run_attempt}</span>'
+    
+    # Add TIMEOUT marker for timeout-cancelled jobs
+    if timeout_marker:
+        req_html += ' <span style="background: #ff4444; color: white; padding: 1px 5px; border-radius: 4px; font-size: 10px; font-weight: 600; display: inline-block; margin-left: 4px;" title="Job exceeded maximum execution time">TIMEOUT</span>'
 
     # Show display_name with double quotes if we have both and they're different
     name_html = ""

@@ -56,6 +56,7 @@ class GHPRCheckRow:
     is_required: bool = False
     workflow_name: str = ""
     event: str = ""
+    has_timeout_annotation: bool = False  # True if check-run has "exceeded the maximum execution time" annotation
 
     @property
     def status_norm(self) -> str:
@@ -66,12 +67,15 @@ class GHPRCheckRow:
             return CIStatus.SUCCESS.value
         if s in {"fail", "failure", "timed_out", "action_required"}:
             return CIStatus.FAILURE.value
+        # CRITICAL: Treat timeout-cancelled as FAILURE (not cancelled)
+        if s in {"cancelled", "canceled"}:
+            if self.has_timeout_annotation:
+                return CIStatus.FAILURE.value  # Timeout = failure
+            return CIStatus.CANCELLED.value  # User cancellation
         if s in {"in_progress", "running"}:
             return CIStatus.IN_PROGRESS.value
         if s in {"pending", "queued"}:
             return CIStatus.PENDING.value
-        if s in {"cancelled", "canceled"}:
-            return CIStatus.CANCELLED.value
         return CIStatus.UNKNOWN.value
 
 
@@ -86,6 +90,7 @@ _GHPR_CHECK_ROW_DISK_KEYS: set[str] = {
     "is_required",
     "workflow_name",
     "event",
+    "has_timeout_annotation",
 }
 
 
@@ -101,6 +106,7 @@ def _ghpr_check_row_to_disk_dict(row: GHPRCheckRow) -> Dict[str, Any]:
         "is_required": bool(row.is_required),
         "workflow_name": row.workflow_name,
         "event": row.event,
+        "has_timeout_annotation": bool(row.has_timeout_annotation),
     }
 
 
@@ -124,6 +130,7 @@ def _ghpr_check_row_from_disk_dict_strict(*, d: Any, cache_file: Path, entry_key
         is_required=bool(d.get("is_required", False)),
         workflow_name=str(d.get("workflow_name", "") or ""),
         event=str(d.get("event", "") or ""),
+        has_timeout_annotation=bool(d.get("has_timeout_annotation", False)),
     )
 
 
