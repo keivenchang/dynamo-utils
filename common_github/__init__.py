@@ -1837,13 +1837,13 @@ class GitHubAPIClient:
 
         Delegates to shared cache_ttl_utils.adaptive_ttl_s() for consistent behavior.
 
-        Schedule:
+        Schedule (updated 2026-02 to reduce staleness for old PRs/commits):
           - age < 1h   -> 2m (120s)
           - age < 2h   -> 4m (240s)
-          - age < 4h   -> 30m (1800s)
-          - age < 8h   -> 60m (3600s)
-          - age < 12h  -> 80m (4800s)
-          - age >= 12h -> 120m (7200s)
+          - age < 4h   -> 10m (600s)
+          - age < 8h   -> 15m (900s)
+          - age < 12h  -> 20m (1200s)
+          - age >= 12h -> 30m (1800s)
 
         Args:
             timestamp_epoch: Entity's timestamp (job started_at, PR updated_at, etc.) in epoch seconds

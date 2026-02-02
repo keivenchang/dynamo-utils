@@ -232,7 +232,7 @@ _CACHE = _PRChecksCache(cache_file=_get_cache_file())
 
 # Keep TTL documentation next to the actual TTL implementation (`api._adaptive_ttl_s` usage).
 TTL_POLICY_DESCRIPTION = (
-    "adaptive (<1h=2m, <2h=4m, <4h=30m, <8h=60m, <12h=80m, >=12h=120m) when pr_updated_at_epoch is provided; "
+    "adaptive (<1h=2m, <2h=4m, <4h=10m, <8h=15m, <12h=20m, >=12h=30m) when pr_updated_at_epoch is provided; "
     "otherwise ttl_s (default 5m)"
 )
 

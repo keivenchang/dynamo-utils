@@ -10,13 +10,13 @@ from typing import Union
 def adaptive_ttl_s(timestamp_epoch: Union[int, None], default_ttl_s: int = 180) -> int:
     """Unified adaptive TTL for all time-based caches.
 
-    Schedule:
+    Schedule (updated 2026-02 to reduce staleness for old PRs/commits):
       - age < 1h   -> 2m (120s)
       - age < 2h   -> 4m (240s)
-      - age < 4h   -> 30m (1800s)
-      - age < 8h   -> 60m (3600s)
-      - age < 12h  -> 80m (4800s)
-      - age >= 12h -> 120m (7200s)
+      - age < 4h   -> 10m (600s)   [reduced from 30m]
+      - age < 8h   -> 15m (900s)   [reduced from 60m]
+      - age < 12h  -> 20m (1200s)  [reduced from 80m]
+      - age >= 12h -> 30m (1800s)  [reduced from 120m to detect new CI faster]
 
     Args:
         timestamp_epoch: Entity's timestamp (job started_at, PR updated_at, etc.) in epoch seconds
@@ -33,17 +33,17 @@ def adaptive_ttl_s(timestamp_epoch: Union[int, None], default_ttl_s: int = 180) 
     if ts <= 0 or ts > now:
         return int(default_ttl_s)
     age = int(now) - ts
-    if age < 3600:
-        return 120
-    if age < 7200:
-        return 240
-    if age < 14400:
-        return 1800
-    if age < 28800:
-        return 3600
-    if age < 43200:
-        return 4800
-    return 7200
+    if age < 3600:        # < 1h
+        return 120        # 2m
+    if age < 7200:        # < 2h
+        return 240        # 4m
+    if age < 14400:       # < 4h
+        return 600        # 10m (reduced from 30m)
+    if age < 28800:       # < 8h
+        return 900        # 15m (reduced from 60m)
+    if age < 43200:       # < 12h
+        return 1200       # 20m (reduced from 80m)
+    return 1800           # 30m (reduced from 120m)
 
 
 def pulls_list_adaptive_ttl_s(timestamp_epoch: Union[int, None], default_ttl_s: int = 180) -> int:
