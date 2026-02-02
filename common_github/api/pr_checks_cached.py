@@ -332,6 +332,7 @@ class PRChecksCached(CachedResourceBase[List[GHPRCheckRow]]):
         MIN_CACHE_VER = 2
 
         cached_entry_dict = _CACHE.get_entry_dict(key)
+        has_etag = False
         if cached_entry_dict is not None:
             try:
                 ent = GHPRChecksCacheEntry.from_disk_dict_strict(
@@ -342,7 +343,13 @@ class PRChecksCached(CachedResourceBase[List[GHPRCheckRow]]):
                 ts = int(ent.ts)
                 ver = int(ent.ver)
                 incomplete = bool(ent.incomplete)
-                if ts and ((now - ts) <= max(0, int(effective_ttl_s)) or self.api.cache_only_mode) and not incomplete:
+                has_etag = bool(ent.check_runs_etag or ent.status_etag)
+                
+                # CRITICAL: If we have ETags, ALWAYS query GitHub with them (even if within TTL).
+                # - If data changed: GitHub returns 200 + new data → immediately reflects new CI runs
+                # - If unchanged: GitHub returns 304 → cheap, just refreshes timestamp
+                # Only skip GitHub query if: (1) no ETag available, AND (2) within TTL
+                if ts and ((now - ts) <= max(0, int(effective_ttl_s)) or self.api.cache_only_mode) and not incomplete and not has_etag:
                     if ver >= MIN_CACHE_VER:
                         self.api._cache_hit(cn)
                         return _apply_required_overlay(ent.rows, required=self._required_checks)
