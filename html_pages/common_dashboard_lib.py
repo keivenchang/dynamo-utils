@@ -3651,8 +3651,14 @@ def github_api_stats_rows(
 
     rows.append(("## GitHub API", None, ""))
 
-    # REST summary (individual flat entries)
-    rows.append(("github.rest.calls", str(int(rest.get("total") or 0)), "Total GitHub REST API calls made"))
+    # REST summary - reorganized to highlight ETag optimization
+    rest_total = int(rest.get("total") or 0)
+    rest_304 = int(GITHUB_API_STATS.etag_304_total or 0)
+    rest_billable = max(0, rest_total - rest_304)
+    
+    rows.append(("github.rest.calls", str(rest_total), f"Total GitHub REST API calls made ({rest_total} total = {rest_304} free + {rest_billable} billable)"))
+    rows.append(("github.rest.etag_304_total", str(rest_304), "🆓 FREE: 304 Not Modified responses (ETag hits - don't count against rate limit!)"))
+    rows.append(("github.rest.billable_estimate", str(rest_billable), f"💰 BILLABLE: Calls counting against rate limit (total - 304 free)"))
     rows.append(("github.rest.ok", str(int(rest.get("success_total") or 0)), "Successful API calls"))
     rows.append(("github.rest.errors", str(int(rest.get("error_total") or 0)), "Failed API calls"))
     rows.append(("github.rest.time_total_secs", f"{float(rest.get('time_total_s') or 0.0):.2f}s", "Total time spent in API calls (SUM of all parallel threads - see note below)"))
@@ -3671,24 +3677,19 @@ def github_api_stats_rows(
     rows.append(("github.gh.graphql.cost_total", str(gh_gql_cost), "Sum of GraphQL rateLimit.cost across `gh api graphql` calls"))
 
     # Helpful combined estimate for core consumption (excludes rate_limit polling).
-    rest_total = int(rest.get("total") or 0)
-    rest_304 = int(GITHUB_API_STATS.etag_304_total or 0)
-    rest_billable = max(0, rest_total - rest_304)
-    rows.append(("github.core.billable_calls_estimate", str(rest_billable + gh_core_billable), "Estimated total billable core calls (python REST + gh REST; excludes 304s)"))
+    rows.append(("github.core.billable_calls_estimate", str(rest_billable + gh_core_billable), "💰 TOTAL BILLABLE: Estimated total billable core calls (python REST + gh REST; excludes 304s)"))
 
-    # ETag stats (conditional requests - 304s don't count against rate limit!)
-    etag_304_total = int(GITHUB_API_STATS.etag_304_total or 0)
-    rows.append(("github.rest.etag_304_total", str(etag_304_total), "304 Not Modified responses (FREE - don't count against rate limit!)"))
-    if etag_304_total > 0:
+    # ETag stats breakdown by endpoint (show which endpoints benefit from caching)
+    if rest_304 > 0:
         # Show top ETag 304 by endpoint
         etag_304_by_label = dict(GITHUB_API_STATS.etag_304_by_label or {})
         if etag_304_by_label:
             sorted_labels = sorted(etag_304_by_label.items(), key=lambda kv: (-kv[1], kv[0]))
             for lbl, cnt in sorted_labels[:5]:  # Top 5
-                rows.append((f"github.rest.etag_304.{lbl}", str(int(cnt)), f"304 responses for {lbl} (cached, free)"))
+                rows.append((f"github.rest.etag_304.{lbl}", str(int(cnt)), f"🆓 304 responses for {lbl} (cached, free)"))
             if len(sorted_labels) > 5:
                 remaining = sum(cnt for lbl, cnt in sorted_labels[5:])
-                rows.append(("github.rest.etag_304.other", str(remaining), "304 responses for other endpoints"))
+                rows.append(("github.rest.etag_304.other", str(remaining), "🆓 304 responses for other endpoints"))
 
     # Budget & mode (individual flat entries)
     if mode:
