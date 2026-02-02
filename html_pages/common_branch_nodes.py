@@ -1073,10 +1073,12 @@ class BranchInfoNode(BranchNode):
 
         # Branch name (fixed font; keep normal style regardless of merged/closed).
         # Strip repo prefix for display (e.g., "ai-dynamo/keivenchang/..." -> "keivenchang/...")
+        # Only bold branches with ✪ (current branches), others use normal weight
         display_name = _strip_repo_prefix_for_clipboard(self.label)
         cls_attr = ' class="current"' if self.is_current else ""
+        font_weight = "700" if self.is_current else "400"
         parts.append(
-            f'<span{cls_attr} style="font-family: monospace; font-weight: 700;">{html_module.escape(display_name)}</span>'
+            f'<span{cls_attr} style="font-family: monospace; font-weight: {font_weight};">{html_module.escape(display_name)}</span>'
         )
 
         # Merge target (→ base_branch) - show right after branch name
