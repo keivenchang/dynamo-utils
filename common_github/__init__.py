@@ -245,16 +245,31 @@ class _GitHubAPIStats:
         self._api_call_log = []  # List[Dict[str, Any]]
         self._api_call_log_mu = threading.Lock()
 
-    def log_actual_api_call(self, *, kind: str, text: str) -> None:
-        """Append an ordered, human-readable API call record."""
+    def log_actual_api_call(self, *, kind: str, text: str) -> int:
+        """Append an ordered, human-readable API call record.
+        
+        Returns the sequence number for this entry (can be used to update it later).
+        """
         k = str(kind or "").strip() or "unknown"
         t = str(text or "").strip()
         if not t:
-            return
+            return 0
         with self._api_call_log_mu:
             self._api_call_log_seq = int(self._api_call_log_seq) + 1
             seq = int(self._api_call_log_seq)
             self._api_call_log.append({"seq": seq, "kind": k, "text": t})
+            return seq
+
+    def update_api_call_log_entry(self, *, seq: int, text_suffix: str) -> None:
+        """Append text to an existing API call log entry by sequence number."""
+        suffix = str(text_suffix or "").strip()
+        if not suffix or not seq:
+            return
+        with self._api_call_log_mu:
+            for ent in self._api_call_log:
+                if isinstance(ent, dict) and int(ent.get("seq", 0) or 0) == int(seq):
+                    ent["text"] = f"{ent.get('text', '')} {suffix}"
+                    break
 
     def get_actual_api_call_log(self) -> List[Dict[str, Any]]:
         """Return a copy of ordered API call records."""
@@ -1570,7 +1585,7 @@ class GitHubAPIClient:
             if q:
                 sep = "&" if ("?" in url_full) else "?"
                 url_full = f"{url_full}{sep}{q}"
-        GITHUB_API_STATS.log_actual_api_call(kind="rest", text=f"REST GET {url_full}  # {label}")
+        call_seq = GITHUB_API_STATS.log_actual_api_call(kind="rest", text=f"REST GET {url_full}  # {label}")
         if self._debug_rest:
             # Explicit per-request debug output (stdout/stderr capture-friendly).
             print(f"[API_CALL#{GITHUB_API_STATS.rest_calls_total}] {label} {url}", file=sys.stderr, flush=True)
@@ -1599,6 +1614,8 @@ class GitHubAPIClient:
                 GITHUB_API_STATS.etag_304_by_label[label] = int(GITHUB_API_STATS.etag_304_by_label.get(label, 0) or 0) + 1
                 GITHUB_API_STATS.rest_success_total += 1
                 GITHUB_API_STATS.rest_success_by_label[label] = int(GITHUB_API_STATS.rest_success_by_label.get(label, 0) or 0) + 1
+                # Update the API call log to indicate this was an ETag hit (free)
+                GITHUB_API_STATS.update_api_call_log_entry(seq=call_seq, text_suffix="→ 🆓 304 (ETag)")
             elif code and code < 400:
                 GITHUB_API_STATS.rest_success_total += 1
                 GITHUB_API_STATS.rest_success_by_label[label] = int(GITHUB_API_STATS.rest_success_by_label.get(label, 0) or 0) + 1
