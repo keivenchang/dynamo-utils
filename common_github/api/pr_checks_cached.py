@@ -286,6 +286,85 @@ class PRChecksCached(CachedResourceBase[List[GHPRCheckRow]]):
     def inflight_lock_key(self, **kwargs: Any) -> Optional[str]:
         return f"{self.cache_name}:{self.cache_key(**kwargs)}"
 
+    def _check_for_timeout_annotation(self, owner: str, repo: str, check_run_id: str) -> bool:
+        """Check if a cancelled check-run has timeout annotation.
+        
+        Returns True if the check-run was cancelled due to timeout (has annotation 
+        with "exceeded the maximum execution time"), False otherwise.
+        
+        This temporarily bypasses cache_only_mode and API budget to ensure reliable
+        timeout detection, then restores the original settings.
+        """
+        annots_url = f"{self.api.base_url}/repos/{owner}/{repo}/check-runs/{check_run_id}/annotations"
+        try:
+            # Temporarily bypass cache_only_mode AND budget for annotations (critical for timeout detection)
+            old_cache_only = self.api.cache_only_mode
+            old_budget_max = self.api._rest_budget_max
+            old_budget_exhausted = self.api._rest_budget_exhausted
+            self.api.cache_only_mode = False
+            self.api._rest_budget_max = None  # Disable budget for this one call
+            self.api._rest_budget_exhausted = False
+            try:
+                annots_resp = self.api._rest_get(annots_url, timeout=5)
+                if annots_resp is not None:
+                    annots_data = annots_resp.json() if annots_resp else []
+                    if isinstance(annots_data, list):
+                        # Check if any annotation mentions timeout
+                        return any(
+                            isinstance(annot, dict) and 
+                            "maximum execution time" in str(annot.get("message", "") or "").lower()
+                            for annot in annots_data
+                        )
+            finally:
+                self.api.cache_only_mode = old_cache_only
+                self.api._rest_budget_max = old_budget_max
+                self.api._rest_budget_exhausted = old_budget_exhausted
+        except Exception:
+            # Best-effort: if annotation fetch fails, treat as regular cancellation
+            pass
+        return False
+
+    def _handle_304_response(
+        self, 
+        cached_entry_dict: Optional[Dict[str, Any]], 
+        key: str,
+        stale_check_runs_etag: str,
+        cn: str,
+        min_cache_ver: int,
+    ) -> Optional[List[GHPRCheckRow]]:
+        """Handle 304 Not Modified response.
+        
+        Returns cached rows if version is current, None if should fetch fresh data.
+        """
+        if cached_entry_dict is None:
+            # No cached entry and got 304: shouldn't happen
+            return []
+        
+        ent = GHPRChecksCacheEntry.from_disk_dict_strict(
+            d=cached_entry_dict,
+            cache_file=_CACHE._cache_file,
+            entry_key=key,
+        )
+        
+        # If cached version is too old, ignore 304 and signal to fetch fresh
+        # This handles schema/logic changes that require re-processing the same GitHub data
+        if ent.ver < min_cache_ver:
+            return None
+        
+        # Version is current: refresh timestamp and return cached rows
+        now = int(time.time())
+        refreshed_entry = GHPRChecksCacheEntry(
+            ts=int(now),
+            ver=int(ent.ver),
+            rows=ent.rows,
+            check_runs_etag=stale_check_runs_etag,
+            status_etag=ent.status_etag,
+            incomplete=ent.incomplete,
+        )
+        _CACHE.put_entry_dict(key, refreshed_entry.to_disk_dict())
+        self.api._cache_write(cn, entries=1)
+        return _apply_required_overlay(ent.rows, required=self._required_checks)
+
     def cache_key(self, **kwargs: Any) -> str:
         owner = str(kwargs["owner"])
         repo = str(kwargs["repo"])
@@ -407,29 +486,10 @@ class PRChecksCached(CachedResourceBase[List[GHPRCheckRow]]):
 
         # 304: return cached rows with refreshed timestamp.
         if check_runs_resp is not None and int(getattr(check_runs_resp, "status_code", 0) or 0) == 304:
-            if cached_entry_dict is not None:
-                ent3 = GHPRChecksCacheEntry.from_disk_dict_strict(
-                    d=cached_entry_dict,
-                    cache_file=_CACHE._cache_file,
-                    entry_key=key,
-                )
-                # CRITICAL: If cached version is too old (< MIN_CACHE_VER), ignore 304 and fetch fresh.
-                # This handles schema/logic changes that require re-processing the same GitHub data.
-                if ent3.ver >= MIN_CACHE_VER:
-                    refreshed_entry = GHPRChecksCacheEntry(
-                        ts=int(now),
-                        ver=int(ent3.ver),
-                        rows=ent3.rows,
-                        check_runs_etag=stale_check_runs_etag,
-                        status_etag=ent3.status_etag,
-                        incomplete=ent3.incomplete,
-                    )
-                    _CACHE.put_entry_dict(key, refreshed_entry.to_disk_dict())
-                    self.api._cache_write(cn, entries=1)
-                    return _apply_required_overlay(ent3.rows, required=self._required_checks)
-                # Version too old: fall through to fetch fresh (ignore 304)
-            else:
-                return []  # No cached entry and got 304: shouldn't happen, return empty
+            result = self._handle_304_response(cached_entry_dict, key, stale_check_runs_etag, cn, MIN_CACHE_VER)
+            if result is not None:
+                return result
+            # result is None means version too old: fall through to fetch fresh
 
         data = check_runs_resp.json() if check_runs_resp is not None else {}
         check_runs = data.get("check_runs") if isinstance(data, dict) else None
@@ -531,36 +591,7 @@ class PRChecksCached(CachedResourceBase[List[GHPRCheckRow]]):
             has_timeout_annotation = False
             check_run_id = str(cr.get("id", "") or "").strip()
             if conclusion in ("cancelled", "canceled") and check_run_id and check_run_id.isdigit():
-                # Fetch annotations for this cancelled check-run to distinguish timeout from user cancellation
-                annots_url = f"{self.api.base_url}/repos/{owner}/{repo}/check-runs/{check_run_id}/annotations"
-                try:
-                    # Temporarily bypass cache_only_mode AND budget for annotations (critical for timeout detection)
-                    old_cache_only = self.api.cache_only_mode
-                    old_budget_max = self.api._rest_budget_max
-                    old_budget_exhausted = self.api._rest_budget_exhausted
-                    self.api.cache_only_mode = False
-                    self.api._rest_budget_max = None  # Disable budget for this one call
-                    self.api._rest_budget_exhausted = False
-                    try:
-                        annots_resp = self.api._rest_get(annots_url, timeout=5)
-                        if annots_resp is not None:
-                            annots_data = annots_resp.json() if annots_resp else []
-                            if isinstance(annots_data, list):
-                                for annot in annots_data:
-                                    if not isinstance(annot, dict):
-                                        continue
-                                    msg = str(annot.get("message", "") or "").lower()
-                                    # Check for timeout indicator
-                                    if "exceeded the maximum execution time" in msg or "maximum execution time" in msg:
-                                        has_timeout_annotation = True
-                                        break
-                    finally:
-                        self.api.cache_only_mode = old_cache_only
-                        self.api._rest_budget_max = old_budget_max
-                        self.api._rest_budget_exhausted = old_budget_exhausted
-                except Exception:
-                    # Best-effort: if annotation fetch fails, treat as regular cancellation
-                    pass
+                has_timeout_annotation = self._check_for_timeout_annotation(owner, repo, check_run_id)
 
             rows.append(
                 GHPRCheckRow(
