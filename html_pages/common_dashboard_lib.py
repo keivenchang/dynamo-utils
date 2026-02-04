@@ -4528,10 +4528,6 @@ def check_line_html(
     # Add rerun badge if run_attempt > 1
     if run_attempt and int(run_attempt) > 1:
         req_html += f' <span style="background: #ddf4ff; color: #0969da; padding: 1px 5px; border-radius: 6px; font-size: 10px; font-weight: 600; display: inline-block; margin-left: 4px;" title="This check was rerun (attempt #{run_attempt})">🔄 attempt #{run_attempt}</span>'
-    
-    # Add TIMEOUT marker for timeout-cancelled jobs
-    if timeout_marker:
-        req_html += ' <span style="background: #ff4444; color: white; padding: 1px 5px; border-radius: 4px; font-size: 10px; font-weight: 600; display: inline-block; margin-left: 4px;" title="Job exceeded maximum execution time">TIMEOUT</span>'
 
     # Show display_name with double quotes if we have both and they're different
     name_html = ""
@@ -4620,8 +4616,13 @@ def check_line_html(
             )
             links += grafana_button
 
-    # Format: [REQUIRED] short-name "long-name" (duration) [log] ...
-    return f"{icon} {req_html}{id_html}{name_html}{dur_html}{links}"
+    # Add TIMEOUT marker for timeout-cancelled jobs (at the end for proper sorting)
+    timeout_html = ""
+    if timeout_marker:
+        timeout_html = ' <span style="background: #ff4444; color: white; padding: 1px 5px; border-radius: 4px; font-size: 10px; font-weight: 600; display: inline-block; margin-left: 4px;" title="Job exceeded maximum execution time">TIMEOUT</span>'
+
+    # Format: [REQUIRED] short-name "long-name" (duration) [log] ... [TIMEOUT]
+    return f"{icon} {req_html}{id_html}{name_html}{dur_html}{links}{timeout_html}"
 
 
 def build_and_test_dynamo_phase_tuples(
