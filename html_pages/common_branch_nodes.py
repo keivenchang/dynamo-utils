@@ -673,10 +673,9 @@ class CIJobNode(BranchNode):
         raw_log_href: str = "",  # Pre-materialized raw log href (relative path)
         raw_log_size_bytes: int = 0,  # Pre-materialized raw log size
         error_snippet_text: str = "",  # Pre-extracted error snippet
-        error_snippet_categories: Optional[List[str]] = None,  # Error categories (e.g., pytest-error, python-error)
+        error_snippet_categories: Optional[List[str]] = None,  # Error categories (e.g., pytest-error, python-error, exceed-action-timeout)
         short_job_name: str = "",  # Short job name from YAML (e.g., "build-test")
         yaml_dependencies: Optional[List[str]] = None,  # List of job names this depends on (needs:)
-        timeout_marker: bool = False,  # True if this job timed out
     ):
         super().__init__(label="", children=children, expanded=expanded, status=status)
         self.job_id = str(job_id or "")
@@ -698,7 +697,6 @@ class CIJobNode(BranchNode):
         self.short_job_name = str(short_job_name or "")
         self.yaml_dependencies = list(yaml_dependencies or [])
         self.run_attempt = 0  # Set to 0 initially; will be populated during filtering
-        self.timeout_marker = bool(timeout_marker)
     
     def to_tree_vm(self) -> TreeNodeVM:
         """Convert this CI job node to a TreeNodeVM using check_line_html."""
@@ -728,7 +726,6 @@ class CIJobNode(BranchNode):
             yaml_dependencies=self.yaml_dependencies,
             is_pytest_node=is_pytest,
             run_attempt=getattr(self, 'run_attempt', 0),  # Pass run_attempt for rerun badge
-            timeout_marker=getattr(self, 'timeout_marker', False),  # Pass timeout marker flag
         )
         
         # Build children: existing children + snippet node (if present)
@@ -1721,7 +1718,8 @@ def build_ci_nodes_from_pr(
 
         # For failed GitHub Actions jobs, always materialize a local raw log so the tree shows `[raw log]`.
         # This is intentionally strict to avoid recurring regressions where errors have no raw logs.
-        if st == "failure" and (not skip_fetch):
+        # Also download logs for timeout-cancelled jobs so we can analyze what timed out.
+        if (st == "failure" or st == "cancelled-timeout") and (not skip_fetch):
             try:
                 if extract_actions_job_id_from_url(job_url):
                     raw_href = (
@@ -1783,11 +1781,15 @@ def build_ci_nodes_from_pr(
         elif workflow_name:
             full_job_name = f"{workflow_name} / {nm}"
 
+        # Add timeout marker to error categories if this is a timeout-cancelled job
+        job_error_categories = list(snippet_categories or [])
+        if st == "cancelled-timeout":
+            job_error_categories.insert(0, "exceed-action-timeout")
+        
         node = CIJobNode(
             job_id=full_job_name,  # Use full verbatim name as job_id for display
             display_name=nm,  # Use the original check name as display_name
             status=str(st or "unknown"),
-            timeout_marker=st == "cancelled-timeout",  # Flag for timeout marker
             duration=str(r.duration or ""),
             log_url=job_url,
             actions_job_id=str(r.job_id or ""),
@@ -1801,7 +1803,7 @@ def build_ci_nodes_from_pr(
             raw_log_href=raw_href,  # Pass pre-materialized raw log data
             raw_log_size_bytes=raw_size,
             error_snippet_text=snippet,
-            error_snippet_categories=snippet_categories,
+            error_snippet_categories=job_error_categories if job_error_categories else None,
         )
         # Store the core job name (without workflow prefix/event suffix) for matching in merge
         node.core_job_name = nm  # This is the original "name" from the check row

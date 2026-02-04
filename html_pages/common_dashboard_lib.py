@@ -345,6 +345,21 @@ def ci_status_icon_context() -> Dict[str, str]:
 # Both dashboards should use the exact same symbol so their trees look identical.
 EXPECTED_CHECK_PLACEHOLDER_SYMBOL = "◇"
 
+# Known error markers that should be extracted from test names and rendered as pills.
+# Pytest parameters (like [tcp], [cuda12.9, amd64]) are NOT in this list and stay in test names.
+KNOWN_ERROR_MARKERS = frozenset({
+    "pytest-timeout",       # Individual test timeout (detected from +++ Timeout +++ markers)
+    "exceed-action-timeout", # Job-level GitHub Actions timeout
+    "backend-failure",      # Generic backend error
+    "trtllm-error",         # TensorRT-LLM specific error
+    "vllm-error",           # vLLM specific error
+    "sglang-error",         # SGLang specific error
+    "cuda-error",           # CUDA runtime error
+    "oom-error",            # Out of memory error
+    "import-error",         # Python import error
+    "timeout",              # Generic timeout (not job-level)
+})
+
 # Back-compat: older callsites import this for the optional pass count styling in the compact CI summary.
 # (The current compact rendering no longer uses a "+N" format, but keep the constant to avoid crashes.)
 PASS_PLUS_STYLE = "font-size: 10px; font-weight: 600; opacity: 0.9;"
@@ -703,6 +718,7 @@ def run_all_passes(
         ("event_file", "_fast", "Jobs that tend to run fast", True),
         ("label", "_fast", "Jobs that tend to run fast", True),
         ("lychee", "_fast", "Jobs that tend to run fast", True),
+        ("Pre Merge / ", "Pre Merge", "Pre Merge CI", True),
         ("trigger-ci", "_fast", "Jobs that tend to run fast", True),
         ("Validate PR title", "_fast", "Jobs that tend to run fast", True),
     ]
@@ -1023,14 +1039,36 @@ def add_job_steps_and_tests_pass(ci_nodes: List, repo_root: Path) -> List:
             if step_name_s.startswith("  └─ "):
                 # This is a pytest test - add as child of the current "Run tests" step
                 if current_test_parent:
-                    test_name = step_name_s[len("  └─ "):]  # Remove prefix
+                    test_name_full = step_name_s[len("  └─ "):]  # Remove prefix
+                    
+                    # Extract ONLY known error markers from test name (not pytest parameters)
+                    # Pytest parameters like [tcp], [cuda12.9, amd64] should remain in the test name
+                    import re
+                    
+                    error_categories = []
+                    test_name_clean = test_name_full
+                    
+                    # Extract only known error markers (from right to left)
+                    while True:
+                        match = re.search(r'\s*\[([\w-]+)\]\s*$', test_name_clean)
+                        if not match:
+                            break
+                        marker = match.group(1)
+                        if marker in KNOWN_ERROR_MARKERS:
+                            error_categories.insert(0, marker)  # Insert at front to maintain order
+                            test_name_clean = test_name_clean[:match.start()]
+                        else:
+                            # Not a known error marker (likely pytest parameter), stop extraction
+                            break
+                    
                     test_node = CIPytestNode(
-                        job_id=test_name,
+                        job_id=test_name_clean.strip(),  # Test name with pytest parameters, without error markers
                         display_name="",
                         status=step_status,
                         duration=step_dur,
                         log_url="",
                         children=[],
+                        error_snippet_categories=error_categories if error_categories else None,
                     )
                     current_test_parent.children.append(test_node)
             else:
@@ -3043,16 +3081,26 @@ def ci_subsection_tuples_for_job(
         for step_name, step_dur, step_status in (steps or []):
             result.append((step_name, step_dur, step_status))
 
-            # If this is a "Run tests" step, parse pytest slowest tests from raw log
+            # If this is a "Run tests" step, parse pytest tests from raw log
             if is_python_test_step(step_name) and raw_log_path:
                 t0 = time.monotonic()
-                pytest_tests = pytest_slowest_tests_from_raw_log(
+                
+                # Try pytest_results_from_raw_log first (PASSED/FAILED/SKIPPED lines - more comprehensive)
+                pytest_tests = pytest_results_from_raw_log(
                     raw_log_path=raw_log_path,
-                    # Tests: list *all* per-test timings in order (do not filter).
-                    min_seconds=0.0,
-                    include_all=True,
-                    step_name=step_name,
+                    min_seconds=0.0,  # Include all tests
                 )
+                
+                # If no results from PASSED/FAILED lines, fall back to --durations output
+                if not pytest_tests:
+                    pytest_tests = pytest_slowest_tests_from_raw_log(
+                        raw_log_path=raw_log_path,
+                        # Tests: list *all* per-test timings in order (do not filter).
+                        min_seconds=0.0,
+                        include_all=True,
+                        step_name=step_name,
+                    )
+                
                 t_pytest_total += time.monotonic() - t0
                 # Add pytest tests as indented/prefixed entries
                 for test_name, test_dur, test_status in pytest_tests:
@@ -3314,6 +3362,142 @@ def pytest_slowest_tests_from_raw_log(
 
     except Exception as e:
         logger.debug(f"Failed to parse pytest slowest durations from {raw_log_path}: {e}")
+        return []
+
+
+def pytest_results_from_raw_log(
+    *,
+    raw_log_path: Optional[Path],
+    min_seconds: float = 0.0,
+) -> List[Tuple[str, str, str]]:
+    """Parse pytest individual test results (PASSED/FAILED/SKIPPED) from raw log.
+    
+    This parses lines like:
+        2026-02-03T17:46:32.8254182Z tests/test_foo.py::test_bar PASSED [  5%]
+        2026-02-03T17:49:14.7655058Z tests/router/test_e2e.py::test_basic[tcp] FAILED [ 61%]
+        
+    Also detects pytest-timeout markers:
+        2026-02-03T17:52:47.0974817Z tests/router/test_e2e.py::test_basic[tcp] +++++++++++++++++++++++++++++++++++ Timeout ++++++++++++++++++++++++++++++++++++
+        ... stack traces ...
+        2026-02-03T17:52:51.1096979Z FAILED                                                                   [ 61%]
+    
+    Args:
+        raw_log_path: Path to the raw log file
+        min_seconds: Minimum duration to include (calculated from timestamp diff). Default: 0.0 (include all)
+    
+    Returns:
+        List of (test_name, duration_str, status_norm) tuples, in order of execution.
+        Test names with timeout will have " [pytest-timeout]" appended.
+        
+    Example output:
+        [
+            ("tests/test_foo.py::test_bar", "0.5s", "success"),
+            ("tests/router/test_e2e.py::test_basic[tcp] [pytest-timeout]", "2m 39s", "failure"),
+            ...
+        ]
+    """
+    if not raw_log_path:
+        return []
+    
+    try:
+        p = Path(raw_log_path)
+        if not p.exists() or not p.is_file():
+            return []
+        
+        import re
+        from datetime import datetime
+        
+        results = []
+        prev_timestamp = None
+        timeout_tests = set()  # Track which tests timed out
+        
+        # First pass: detect timeout markers
+        # Pattern: tests/test_foo.py::test_bar +++++++++++++++++++++++++++++++++++ Timeout ++++++++++++++++++++++++++++++++++++
+        timeout_pattern = re.compile(
+            r'^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d+Z\s+(\S+)\s+\+{20,}\s+Timeout\s+\+{20,}'
+        )
+        
+        with open(p, 'r', encoding='utf-8', errors='replace') as f:
+            for line in f:
+                m = timeout_pattern.match(line)
+                if m:
+                    timeout_tests.add(m.group(1))
+        
+        # Second pass: parse test results
+        # Pattern: 2026-02-03T17:46:32.8254182Z tests/test_foo.py::test_bar PASSED [  5%]
+        pattern = re.compile(
+            r'^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d+Z)\s+(\S+)\s+(PASSED|FAILED|SKIPPED|ERROR)\s+\[\s*\d+%\]'
+        )
+        
+        with open(p, 'r', encoding='utf-8', errors='replace') as f:
+            for line in f:
+                m = pattern.match(line)
+                if not m:
+                    continue
+                
+                timestamp_str, test_name, status_raw = m.groups()
+                
+                # Parse timestamp
+                try:
+                    timestamp = datetime.fromisoformat(timestamp_str.replace('Z', '+00:00'))
+                except (ValueError, AttributeError):
+                    timestamp = None
+                
+                # Calculate duration from previous test
+                duration_s = 0.0
+                if prev_timestamp and timestamp:
+                    duration_s = (timestamp - prev_timestamp).total_seconds()
+                
+                # Normalize status
+                status_norm = {
+                    'PASSED': 'success',
+                    'FAILED': 'failure',
+                    'SKIPPED': 'skipped',
+                    'ERROR': 'failure',
+                }.get(status_raw, 'unknown')
+                
+                # Format duration
+                if duration_s < 1.0:
+                    dur_str = f"{duration_s:.2f}s"
+                elif duration_s < 60:
+                    dur_str = f"{duration_s:.1f}s"
+                elif duration_s < 3600:
+                    mins = int(duration_s // 60)
+                    secs = int(duration_s % 60)
+                    dur_str = f"{mins}m {secs}s"
+                else:
+                    hours = int(duration_s // 3600)
+                    mins = int((duration_s % 3600) // 60)
+                    dur_str = f"{hours}h {mins}m"
+                
+                # Apply duration filter
+                if duration_s >= min_seconds:
+                    results.append((test_name, dur_str, status_norm))
+                
+                prev_timestamp = timestamp
+        
+        # Now add timeout tests that were detected but didn't have PASSED/FAILED/SKIPPED lines
+        # (these appear as a test name followed by Timeout marker, then FAILED with no test name)
+        for timeout_test in timeout_tests:
+            # Check if this test is already in results
+            if not any(timeout_test in r[0] for r in results):
+                # Add it as a failed test with timeout marker
+                results.append((f"{timeout_test} [pytest-timeout]", "unknown", "failure"))
+        
+        # Add timeout markers to tests that are in results and timed out
+        results_with_markers = []
+        for test_name, dur_str, status_norm in results:
+            # Check if this test timed out and doesn't already have the marker
+            if any(timeout_test in test_name for timeout_test in timeout_tests) and "[pytest-timeout]" not in test_name:
+                test_name_with_marker = f"{test_name} [pytest-timeout]"
+                results_with_markers.append((test_name_with_marker, dur_str, status_norm))
+            else:
+                results_with_markers.append((test_name, dur_str, status_norm))
+        
+        return results_with_markers
+    
+    except Exception as e:
+        logger.debug(f"Failed to parse pytest results from {raw_log_path}: {e}")
         return []
 
 
@@ -4286,6 +4470,11 @@ def _tag_pill_html(*, text: str, monospace: bool = False, kind: str = "category"
         border = "#d0d7de"
         bg = "#f6f8fa"
         fg = "#57606a"
+    elif t == "exceed-action-timeout":
+        # Special styling for timeout marker: redder than other error categories
+        border = "#ff9999"
+        bg = "#ffcccc"
+        fg = "#cc0000"
     else:
         # Error categories: lightly red-tinted pill (avoid yellow/orange).
         border = "#ffb8b8"
@@ -4441,7 +4630,6 @@ def check_line_html(
     yaml_dependencies: Optional[List[str]] = None,  # List of dependencies from YAML
     is_pytest_node: bool = False,  # True if this is a CIPytestNode (for Grafana links)
     run_attempt: int = 0,  # Run attempt number (>1 means rerun)
-    timeout_marker: bool = False,  # True if job timed out
 ) -> str:
     # Expected placeholder checks:
     # - Use a normal gray dot (same as queued/pending) instead of the special ◇ symbol
@@ -4588,6 +4776,11 @@ def check_line_html(
         cmd = _snippet_first_command(snippet_text)
         if cmd:
             links += _tag_pill_html(text=cmd, monospace=True, kind="command", snippet_key=snippet_key)
+    
+    # Also show category pills even when no snippet (e.g., for pytest-timeout markers)
+    elif error_snippet_categories:
+        for c in error_snippet_categories[:3]:
+            links += _tag_pill_html(text=c, monospace=False, kind="category", snippet_key="")
 
     # Detect pytest tests and add Grafana button
     # Only add the button if this is explicitly a CIPytestNode
@@ -4616,13 +4809,8 @@ def check_line_html(
             )
             links += grafana_button
 
-    # Add TIMEOUT marker for timeout-cancelled jobs (at the end for proper sorting)
-    timeout_html = ""
-    if timeout_marker:
-        timeout_html = ' <span style="background: #ff4444; color: white; padding: 1px 5px; border-radius: 4px; font-size: 10px; font-weight: 600; display: inline-block; margin-left: 4px;" title="Job exceeded maximum execution time">TIMEOUT</span>'
-
-    # Format: [REQUIRED] short-name "long-name" (duration) [log] ... [TIMEOUT]
-    return f"{icon} {req_html}{id_html}{name_html}{dur_html}{links}{timeout_html}"
+    # Format: [REQUIRED] short-name "long-name" (duration) [log] ...
+    return f"{icon} {req_html}{id_html}{name_html}{dur_html}{links}"
 
 
 def build_and_test_dynamo_phase_tuples(
@@ -4648,253 +4836,3 @@ def build_and_test_dynamo_phase_tuples(
             phases3 = build_and_test_dynamo_phases_from_actions_job(job) or []
 
     return [(str(n), str(d), str(s)) for (n, d, s) in (phases3 or [])]
-
-
-def _test_pytest_slowest_regex():
-    """Self-test for the pytest slowest durations regex pattern.
-    
-    Tests the regex used in pytest_slowest_tests_from_raw_log() to ensure it:
-    - Matches valid pytest test lines from --durations output
-    - Rejects error messages and non-test lines that contain keywords like "call", "setup", etc.
-    
-    Run from dynamo-utils.dev directory:
-        cd /path/to/dynamo-utils.dev
-        PYTHONPATH=.:html_pages python3 html_pages/common_dashboard_lib.py
-    """
-    import re
-    
-    # The regex pattern from pytest_slowest_tests_from_raw_log()
-    pattern = r'^(?:\d{4}-\d{2}-\d{2}T[\d:.]+Z\s+)?(\d+\.?\d*)s\s+(setup|call|teardown)\s+(tests/.+)$'
-    
-    # VALID lines (should match) - from actual pytest --durations=10 output
-    valid_lines = [
-        # With GitHub Actions timestamp
-        "2026-01-31T20:03:47.4743233Z 160.53s call     tests/serve/test_vllm.py::test_serve_deployment[multimodal_agg_qwen2vl_2b_epd]",
-        "2026-01-31T20:03:47.4743778Z 128.98s call     tests/serve/test_vllm.py::test_serve_deployment[multimodal_agg_qwen]",
-        "2026-01-31T20:03:47.4744340Z 94.34s setup    tests/kvbm_integration/test_kvbm.py::test_offload_and_onboard[llm_server_kvbm0]",
-        "2026-01-31T20:03:47.4744890Z 93.86s call     tests/serve/test_vllm.py::test_serve_deployment[agg-request-plane-tcp]",
-        "2026-01-31T20:03:47.4746440Z 76.43s call     tests/router/test_router_e2e_with_vllm.py::test_vllm_indexers_sync[jetstream]",
-        "2026-01-31T20:03:47.4748247Z 48.67s setup    tests/kvbm_integration/test_kvbm.py::test_gpu_cache_eviction[llm_server_kvbm0]",
-        # Without timestamp
-        "160.53s call     tests/serve/test_vllm.py::test_serve_deployment[aggregated]",
-        "94.34s setup    tests/kvbm_integration/test_kvbm.py::test_offload_and_onboard[llm_server_kvbm0]",
-        "48.67s teardown tests/cleanup/test_cleanup.py::test_cleanup_resources",
-    ]
-    
-    # INVALID lines (should NOT match) - from actual CI error logs
-    invalid_lines = [
-        # Pytest progress indicators
-        "[call] [ 62%] (?)",
-        "[setup] [ 15%]",
-        # Pytest error headers
-        "[call] at setup of test_onboarding_determinism[llm_server_kvbm0] ________",
-        "ERROR at setup of test_serve_deployment[agg] ________",
-        # ManagedProcess error messages containing "call"
-        "2026-01-31T20:03:47.4718825Z ERROR    ManagedProcess:managed_process.py:354 Main server process died with exit code 1 while waiting for port 8000",
-        "[call] ManagedProcess:managed_process.py:354 Main server process died with exit code 1 while waiting for port 8000",
-        "[call] ManagedProcess:managed_process.py:339 === Last 20 lines from /tmp/dynamo_tests/test_onboarding_determinism[llm_server_kvbm0]_vllm/vllm.log.txt ===",
-        # VLLM error messages
-        "[call] ManagedProcess:managed_process.py:345 [VLLM] [0;36m(APIServer pid=1306)[0;0m     self.engine_core = EngineCoreClient.make_async_mp_client(",
-        "2026-01-31T20:03:47.4713894Z ERROR    ManagedProcess:managed_process.py:345 [VLLM] [0;36m(APIServer pid=1306)[0;0m   File \"/opt/dynamo/venv/lib/python3.12/site-packages/vllm/v1/engine/async_llm.py\", line 205, in from_vllm_config",
-        # INFO log messages
-        "2026-01-31T20:03:47.4708208Z INFO     ManagedProcess:managed_process.py:219 Running command: vllm serve --block-size 16 --port 8000",
-        # Pytest summary lines (not from slowest durations section)
-        "FAILED tests/serve/test_vllm.py::test_serve_deployment[agg] - AssertionError: ...",
-        "ERROR  tests/kvbm_integration/test_kvbm.py::test_onboarding_determinism - RuntimeError: ...",
-        # Lines with "call" but not pytest test format
-        "[call] Some other text with call in it",
-        "This line has setup in it but not a test",
-    ]
-    
-    print("Testing pytest slowest durations regex pattern")
-    print("=" * 80)
-    print(f"Pattern: {pattern}")
-    print()
-    
-    # Test valid lines (should match)
-    print("VALID LINES (should match):")
-    all_valid_pass = True
-    for i, line in enumerate(valid_lines, 1):
-        m = re.match(pattern, line)
-        status = "✓ PASS" if m else "✗ FAIL"
-        if not m:
-            all_valid_pass = False
-        print(f"  {status} [{i}] {line[:100]}")
-        if m:
-            print(f"         -> duration={m.group(1)}s, phase={m.group(2)}, test={m.group(3)[:60]}...")
-    
-    print()
-    
-    # Test invalid lines (should NOT match)
-    print("INVALID LINES (should NOT match):")
-    all_invalid_pass = True
-    for i, line in enumerate(invalid_lines, 1):
-        m = re.match(pattern, line)
-        status = "✓ PASS (rejected)" if not m else "✗ FAIL (matched!)"
-        if m:
-            all_invalid_pass = False
-        print(f"  {status} [{i}] {line[:100]}")
-        if m:
-            print(f"         -> ERROR: Matched as duration={m.group(1)}s, phase={m.group(2)}, test={m.group(3)[:60]}...")
-    
-    print()
-    print("=" * 80)
-    
-    if all_valid_pass and all_invalid_pass:
-        print("✓ ALL TESTS PASSED")
-        return True
-    else:
-        print("✗ SOME TESTS FAILED")
-        if not all_valid_pass:
-            print("  - Some valid lines were rejected (false negatives)")
-        if not all_invalid_pass:
-            print("  - Some invalid lines were matched (false positives)")
-        return False
-
-
-if __name__ == "__main__":
-    # When run as a script, execute the self-test
-    # Usage from dynamo-utils.dev directory:
-    #   PYTHONPATH=.:html_pages python3 html_pages/common_dashboard_lib.py
-    print("Running self-tests for pytest regex patterns...")
-    print()
-    
-    import sys
-    
-    # Test 1: Slowest durations regex
-    print("=" * 80)
-    print("TEST 1: Pytest slowest durations regex (--durations output)")
-    print("=" * 80)
-    print(f"Pattern: {PYTEST_SLOWEST_DURATIONS_REGEX.pattern}")
-    print()
-    
-    # VALID lines (should match) - from actual pytest --durations=10 output
-    valid_lines = [
-        "2026-01-31T20:03:47.4743233Z 160.53s call     tests/serve/test_vllm.py::test_serve_deployment[multimodal_agg_qwen2vl_2b_epd]",
-        "2026-01-31T20:03:47.4743778Z 128.98s call     tests/serve/test_vllm.py::test_serve_deployment[multimodal_agg_qwen]",
-        "2026-01-31T20:03:47.4744340Z 94.34s setup    tests/kvbm_integration/test_kvbm.py::test_offload_and_onboard[llm_server_kvbm0]",
-        "160.53s call     tests/serve/test_vllm.py::test_serve_deployment[aggregated]",
-        "94.34s setup    tests/kvbm_integration/test_kvbm.py::test_offload_and_onboard[llm_server_kvbm0]",
-        "48.67s teardown tests/cleanup/test_cleanup.py::test_cleanup_resources",
-    ]
-    
-    # INVALID lines (should NOT match) - from actual CI error logs
-    invalid_lines = [
-        "[call] [ 62%] (?)",
-        "[call] at setup of test_onboarding_determinism[llm_server_kvbm0] ________",
-        "2026-01-31T20:03:47.4718825Z ERROR    ManagedProcess:managed_process.py:354 Main server process died with exit code 1",
-        "[call] ManagedProcess:managed_process.py:354 Main server process died with exit code 1 while waiting for port 8000",
-        "[call] ManagedProcess:managed_process.py:345 [VLLM] [0;36m(APIServer pid=1306)[0;0m     self.engine_core = ...",
-        "FAILED tests/serve/test_vllm.py::test_serve_deployment[agg] - AssertionError: ...",
-    ]
-    
-    print("VALID LINES (should match):")
-    all_valid_pass = True
-    for i, line in enumerate(valid_lines, 1):
-        m = PYTEST_SLOWEST_DURATIONS_REGEX.match(line)
-        status = "✓ PASS" if m else "✗ FAIL"
-        if not m:
-            all_valid_pass = False
-        print(f"  {status} [{i}] {line[:90]}")
-        if m:
-            print(f"         -> duration={m.group(1)}s, phase={m.group(2)}, test={m.group(3)[:50]}...")
-    
-    print()
-    
-    print("INVALID LINES (should NOT match):")
-    all_invalid_pass = True
-    for i, line in enumerate(invalid_lines, 1):
-        m = PYTEST_SLOWEST_DURATIONS_REGEX.match(line)
-        status = "✓ PASS (rejected)" if not m else "✗ FAIL (matched!)"
-        if m:
-            all_invalid_pass = False
-        print(f"  {status} [{i}] {line[:90]}")
-        if m:
-            print(f"         -> ERROR: Matched as duration={m.group(1)}s, phase={m.group(2)}, test={m.group(3)[:50]}...")
-    
-    print()
-    print("=" * 80)
-    
-    if all_valid_pass and all_invalid_pass:
-        print("✓ TEST 1 PASSED (slowest durations regex)")
-    else:
-        print("✗ TEST 1 FAILED (slowest durations regex)")
-        if not all_valid_pass:
-            print("  - Some valid lines were rejected (false negatives)")
-        if not all_invalid_pass:
-            print("  - Some invalid lines were matched (false positives)")
-    
-    print()
-    print()
-    
-    # Test 2: Summary regex (for FAILED/ERROR lines)
-    print("=" * 80)
-    print("TEST 2: Pytest summary lines regex (FAILED/ERROR/PASSED lines)")
-    print("=" * 80)
-    print(f"Pattern: {PYTEST_SUMMARY_REGEX.pattern}")
-    print()
-    
-    # VALID summary lines (should match)
-    valid_summary = [
-        "2026-01-31T20:03:47.4749199Z ERROR tests/kvbm_integration/test_kvbm.py::test_onboarding_determinism[llm_server_kvbm0]",
-        "FAILED tests/serve/test_vllm.py::test_serve_deployment[agg] - AssertionError: ...",
-        "2025-11-29T21:55:17.1891443Z FAILED tests/foo.py::test_bar - AssertionError: ...",
-        "PASSED tests/router/test_basic.py::test_something",
-    ]
-    
-    # INVALID summary lines (should NOT match - error messages that contain status words)
-    invalid_summary = [
-        "[call] at setup of test_onboarding_determinism[llm_server_kvbm0] ________",
-        "ERROR at setup of test_serve_deployment[agg] ________",
-        "2026-01-31T20:03:47.4718825Z ERROR    ManagedProcess:managed_process.py:354 Main server process died",
-        "[call] ManagedProcess:managed_process.py:345 [VLLM] ERROR something",
-        "This line has ERROR in it but not a test",
-        "[ 62%] PASSED but not a real test line",
-    ]
-    
-    print("VALID SUMMARY LINES (should match):")
-    all_summary_valid_pass = True
-    for i, line in enumerate(valid_summary, 1):
-        m = PYTEST_SUMMARY_REGEX.match(line)
-        status = "✓ PASS" if m else "✗ FAIL"
-        if not m:
-            all_summary_valid_pass = False
-        print(f"  {status} [{i}] {line[:90]}")
-        if m:
-            print(f"         -> status={m.group(1)}, test={m.group(2)[:60]}...")
-    
-    print()
-    
-    print("INVALID SUMMARY LINES (should NOT match):")
-    all_summary_invalid_pass = True
-    for i, line in enumerate(invalid_summary, 1):
-        m = PYTEST_SUMMARY_REGEX.match(line)
-        status = "✓ PASS (rejected)" if not m else "✗ FAIL (matched!)"
-        if m:
-            all_summary_invalid_pass = False
-        print(f"  {status} [{i}] {line[:90]}")
-        if m:
-            print(f"         -> ERROR: Matched as status={m.group(1)}, test={m.group(2)[:60]}...")
-    
-    print()
-    print("=" * 80)
-    
-    if all_summary_valid_pass and all_summary_invalid_pass:
-        print("✓ TEST 2 PASSED (summary regex)")
-    else:
-        print("✗ TEST 2 FAILED (summary regex)")
-        if not all_summary_valid_pass:
-            print("  - Some valid lines were rejected (false negatives)")
-        if not all_summary_invalid_pass:
-            print("  - Some invalid lines were matched (false positives)")
-    
-    # Overall result
-    print()
-    print("=" * 80)
-    overall_pass = all_valid_pass and all_invalid_pass and all_summary_valid_pass and all_summary_invalid_pass
-    if overall_pass:
-        print("✓✓✓ ALL REGEX TESTS PASSED ✓✓✓")
-        sys.exit(0)
-    else:
-        print("✗✗✗ SOME REGEX TESTS FAILED ✗✗✗")
-        sys.exit(1)
