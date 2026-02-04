@@ -26,6 +26,7 @@ Docker:
 - 58745798050.log => network-download-error, docker-build-error
 - 58818079816.log => github-lfs-error, docker-build-error, !git-fetch, !pytest-error
 - 58861639352.log => docker-image-error
+- 62377203598.log => docker-upload-error
 
 Infra / system:
 - 57877945100.log => cuda-error
@@ -115,3 +116,4 @@ Notes:
 * 58465471934.log => +failures:, +recorder::tests::test_recorder_streams_events_to_file, +RED:failures:, +RED:    recorder::tests::test_recorder_streams_events_to_file
 * 59520885010.log => +FAILED tests/router/test_router_e2e_with_mockers.py::test_router_decisions_disagg, +# pytest --basetemp=/tmp/pytest-parallel --junitxml=pytest_parallel.xml -n 4, +# suggested, +-m \"pre_merge and parallel, +tests/router/test_router_e2e_with_mockers.py::test_router_decisions_disagg[with_bootstrap-decode_first], +'tests/router/test_router_e2e_with_mockers.py::test_router_decisions_disagg[with_bootstrap-decode_first]', !RED:__________ test_router_decisions_disagg[with_bootstrap-prefill_first] __________
 * 62096454660.log => +RuntimeError: Engine core initialization failed, +ERROR tests/kvbm_integration/test_kvbm.py::test_onboarding_determinism, +vllm/v1/engine, +RED:ERROR tests/kvbm_integration/test_kvbm.py::test_onboarding_determinism
+* 62377203598.log => +unknown: failed to copy: unexpected status from PUT request, +416 Requested Range Not Satisfiable, +##[error]Process completed with exit code 1, +RED:failed to copy: unexpected status from PUT request, +RED:##[error]Process completed with exit code 1

@@ -76,6 +76,10 @@ CAT_CUDA_ERROR_RE: Pattern[str] = re.compile(
 
 CAT_DOCKER_BUILD_ERROR_RE: Pattern[str] = re.compile(r"\berror:\s*failed\s+to\s+build\b|\bfailed\s+to\s+solve\b")
 CAT_DOCKER_CLI_ERROR_RE: Pattern[str] = re.compile(r"\bdocker:\s+.*\berror\b", re.IGNORECASE)
+CAT_DOCKER_UPLOAD_ERROR_RE: Pattern[str] = re.compile(
+    r"failed\s+to\s+copy:\s+unexpected\s+status\s+from\s+PUT\s+request|416\s+Requested\s+Range\s+Not\s+Satisfiable",
+    re.IGNORECASE
+)
 
 CAT_DOCKER_DAEMON_CONNECTION_ERROR_RE: Pattern[str] = re.compile(r"cannot\s+connect\s+to\s+the\s+docker\s+daemon", re.IGNORECASE)
 CAT_DOCKER_DAEMON_ERROR_RESPONSE_RE: Pattern[str] = re.compile(
@@ -232,6 +236,7 @@ CAT_RULES: List[Tuple[str, Pattern[str]]] = [
     ("pytest-error", CAT_PYTEST_ERROR_RE),
     ("network-download-error", re.compile(CAT_DOWNLOAD_ERROR_RE.pattern, re.IGNORECASE)),
     ("docker-build-error", re.compile(CAT_DOCKER_BUILD_ERROR_RE.pattern, re.IGNORECASE)),
+    ("docker-upload-error", CAT_DOCKER_UPLOAD_ERROR_RE),
     ("build-status-check-error", CAT_BUILD_STATUS_CHECK_ERROR_RE),
     ("ci-filter-coverage-error", CAT_CI_FILTER_UNCOVERED_RE),
     ("invalid-task-type", CAT_INVALID_TASK_TYPE_RE),
@@ -286,6 +291,8 @@ SNIPPET_ANCHOR_LINE_RE: Pattern[str] = re.compile(
     r"|(?-i:(?<![./])\b[A-Z][A-Za-z0-9]{2,}(?:Error|Exception)(?::|\b$))"
     r"|\b(?:broken\s+links?|broken\s+link|dead\s+links?)\b"
     r"|\b(?:network\s+error|connection\s+failed)\b"
+    # Docker upload/push failures
+    r"|\bfailed\s+to\s+copy:\s+unexpected\s+status\b"
     # Multi-line backend result blocks (JSON-ish) often show:
     #   "trtllm": { ... "result": "failure", ... }
     # Anchor on the high-signal failure field so the snippet includes the surrounding block.
@@ -470,6 +477,10 @@ RED_DOCKER_NO_SUCH_CONTAINER_RE: Pattern[str] = re.compile(
     r"\berror response from daemon:\s*no\s+such\s+container\b",
     re.IGNORECASE,
 )
+RED_DOCKER_UPLOAD_ERROR_LINE_RE: Pattern[str] = re.compile(
+    r"failed\s+to\s+copy:\s+unexpected\s+status\s+from\s+PUT\s+request|##\[error\]Process completed with exit code",
+    re.IGNORECASE,
+)
 RED_NETWORK_ERROR_LINE_RE: Pattern[str] = re.compile(
     r"\bnetwork\s+error:\s*connection\s+failed\b|\bconnection\s+failed\.\s*check\s+network\s+connectivity\b",
     re.IGNORECASE,
@@ -504,6 +515,7 @@ RED_FULL_LINE_RES: List[Pattern[str]] = [
     # Network / docker infra errors
     RED_DOCKER_DAEMON_ERROR_LINE_RE,
     RED_DOCKER_NO_SUCH_CONTAINER_RE,
+    RED_DOCKER_UPLOAD_ERROR_LINE_RE,
     RED_NETWORK_ERROR_LINE_RE,
     # Etcd failures (lease/connection)
     RED_ETCD_ERROR_LINE_RE,

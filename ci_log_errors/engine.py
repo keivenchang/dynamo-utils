@@ -43,6 +43,7 @@ from .regexes import (
     CAT_DOCKER_DAEMON_CONNECTION_ERROR_RE,
     CAT_DOCKER_DAEMON_ERROR_RESPONSE_RE,
     CAT_DOCKER_INFRA_ERROR_RE,
+    CAT_DOCKER_UPLOAD_ERROR_RE,
     CAT_DOWNLOAD_ERROR_RE,
     CAT_ETCD_ERROR_RE,
     CAT_EXIT_CODE_127_RE,
@@ -1251,6 +1252,10 @@ def categorize_error_log_lines(lines: Sequence[str]) -> List[str]:
         # Build failures (Docker/buildkit/etc.)
         if CAT_DOCKER_BUILD_ERROR_RE.search(t):
             add("docker-build-error")
+        
+        # Docker upload/push failures (registry PUT errors)
+        if CAT_DOCKER_UPLOAD_ERROR_RE.search(t):
+            add("docker-upload-error")
 
         # Build-status-check failures (CI gate that checks upstream build job status)
         if CAT_BUILD_STATUS_CHECK_ERROR_RE.search(text):
