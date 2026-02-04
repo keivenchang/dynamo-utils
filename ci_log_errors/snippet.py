@@ -234,6 +234,7 @@ def extract_error_snippet_from_text(
         last_generic: Optional[int] = None
         last_pytest_failed: Optional[int] = None
         last_docker_daemon_err: Optional[int] = None
+        last_docker_upload_err: Optional[int] = None
         last_cuda_err: Optional[int] = None
         last_failed_to_build: Optional[int] = None
         last_network_err: Optional[int] = None
@@ -303,6 +304,9 @@ def extract_error_snippet_from_text(
                 last_pytest_exec_cmd = i
             if DOCKER_DAEMON_ERROR_LINE_RE.search(s_norm):
                 last_docker_daemon_err = i
+            # Docker upload/push failures (registry PUT errors)
+            if RED_DOCKER_UPLOAD_ERROR_LINE_RE.search(s_norm):
+                last_docker_upload_err = i
             # Capture actual execution commands for snippet context (user wants these shown).
             if re.search(r"\bdocker\s+(?:run|build)\b", s_norm, flags=re.IGNORECASE):
                 last_docker_exec_cmd = i
@@ -400,6 +404,7 @@ def extract_error_snippet_from_text(
             last_failed_to_build,
             last_backend_result_failure,
             last_docker_daemon_err,
+            last_docker_upload_err,  # Docker upload/push failures (high priority, often at end of log)
             last_generic,
         ):
             if idx is not None:
