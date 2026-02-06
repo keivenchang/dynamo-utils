@@ -1032,7 +1032,7 @@ def add_job_steps_and_tests_pass(ci_nodes: List, repo_root: Path) -> List:
         t0 = time.monotonic()
         # Pytest tests (with └─ prefix) should be children of the "Run tests" step
         current_test_parent: Optional[CIJobNode] = None
-        for (step_name, step_dur, step_status) in step_tuples:
+        for (step_name, step_dur, step_status, _step_dict) in step_tuples:
             step_name_s = str(step_name or "")
             
             # Check if this is a pytest test (has └─ prefix)
@@ -1072,17 +1072,12 @@ def add_job_steps_and_tests_pass(ci_nodes: List, repo_root: Path) -> List:
                     )
                     current_test_parent.children.append(test_node)
             else:
-                # This is a regular step
-                # For "Build and Test - dynamo", classify the step type
-                if job_name == "Build and Test - dynamo":
-                    kind = classify_ci_kind(str(step_name))
-                    step_id = f"{kind}: {step_name}" if kind and kind != "check" else str(step_name)
-                else:
-                    step_id = str(step_name)
+                # This is a regular step - use the original step name from API
+                step_id = str(step_name)
 
                 step_node = CIStepNode(
                     job_id=step_id,
-                    display_name=str(step_name),  # Store original name (without augmentation) for verifier
+                    display_name=str(step_name),
                     status=step_status,
                     duration=step_dur,
                     log_url="",
@@ -2689,15 +2684,18 @@ def _status_norm_from_actions_step(status: str, conclusion: str) -> str:
     return CIStatus.UNKNOWN.value
 
 
-def build_and_test_dynamo_phases_from_actions_job(job: Dict[str, object]) -> List[Tuple[str, str, str]]:
+def build_and_test_dynamo_phases_from_actions_job(job: Dict[str, object]) -> List[Tuple[str, str, str, Optional[Dict[str, object]]]]:
     """Extract phase rows from the Actions job `steps` array.
 
-    Returns (phase_name, duration_str, status_norm).
+    Returns (phase_name, duration_str, status_norm, step_dict).
+    The step_dict contains started_at/completed_at for timestamp-based log filtering.
     """
     steps = job.get("steps") if isinstance(job, dict) else None
     if not isinstance(steps, list) or not steps:
+        logger.warning("[build_and_test_dynamo_phases_from_actions_job] No steps found in job")
         return []
 
+    logger.info(f"[build_and_test_dynamo_phases_from_actions_job] Processing {len(steps)} steps from job")
     def _dur(st: Dict[str, object]) -> str:
         a = _parse_iso_utc(str(st.get("started_at", "") or ""))
         b = _parse_iso_utc(str(st.get("completed_at", "") or ""))
@@ -2705,56 +2703,50 @@ def build_and_test_dynamo_phases_from_actions_job(job: Dict[str, object]) -> Lis
             return ""
         return _format_duration_short((b - a).total_seconds())
 
-    out: List[Tuple[str, str, str]] = []
+    out: List[Tuple[str, str, str, Optional[Dict[str, object]]]] = []
 
-    # We match the canonical step names used in the workflow, but keep it fuzzy.
+    # Return ALL API step names directly - no filtering, no transformation
     for st in steps:
         if not isinstance(st, dict):
             continue
         nm = str(st.get("name", "") or "")
-        nm_lc = nm.lower()
         status_norm = _status_norm_from_actions_step(
             status=str(st.get("status", "") or ""),
             conclusion=str(st.get("conclusion", "") or ""),
         )
         dur = _dur(st)
-
-        if "build image" in nm_lc:
-            out.append(("Build Image", dur, status_norm))
-        elif "rust" in nm_lc and "check" in nm_lc:
-            out.append(("Rust checks", dur, status_norm))
-        elif "pytest" in nm_lc and ("parallel" in nm_lc or "xdist" in nm_lc):
-            out.append(("pytest (parallel)", dur, status_norm))
-        elif nm_lc.startswith("run pytest") or (("pytest" in nm_lc) and ("parallel" not in nm_lc) and ("xdist" not in nm_lc)):
-            # If the workflow has an explicit non-parallel pytest step, call it serial.
-            out.append(("pytest (serial)", dur, status_norm))
+        out.append((nm, dur, status_norm, st))
+        logger.debug(f"[build_and_test_dynamo_phases_from_actions_job] Added step '{nm}' with step_dict: started_at={st.get('started_at')}, completed_at={st.get('completed_at')}")
 
     # De-dup while keeping order (some jobs echo repeated step names via composites).
     seen = set()
-    uniq: List[Tuple[str, str, str]] = []
+    uniq: List[Tuple[str, str, str, Optional[Dict[str, object]]]] = []
     for ph in out:
         k = ph[0]
         if k in seen:
             continue
         seen.add(k)
         uniq.append(ph)
+    logger.info(f"[build_and_test_dynamo_phases_from_actions_job] Returning {len(uniq)} unique phases")
     return uniq
 
 
 def actions_job_steps_over_threshold_from_actions_job(
     job: Dict[str, object], *, min_seconds: float = 30.0
-) -> List[Tuple[str, str, str]]:
-    """Return (step_name, duration_str, status_norm) for steps we want to display.
+) -> List[Tuple[str, str, str, Optional[Dict[str, object]]]]:
+    """Return (step_name, duration_str, status_norm, step_dict) for steps we want to display.
 
     Policy:
     - show steps with duration >= min_seconds
     - always show failing steps (even if < min_seconds or duration is missing)
+    
+    Returns 4-tuples with step_dict for timestamp-based filtering.
     """
     steps = job.get("steps") if isinstance(job, dict) else None
     if not isinstance(steps, list) or not steps:
         return []
 
-    out: List[Tuple[str, str, str]] = []
+    out: List[Tuple[str, str, str, Optional[Dict[str, object]]]] = []
     for st in steps:
         if not isinstance(st, dict):
             continue
@@ -2783,16 +2775,16 @@ def actions_job_steps_over_threshold_from_actions_job(
                 continue
 
         dur_s = _format_duration_short(float(dt_s)) if dt_s is not None else ""
-        out.append((nm, dur_s, status_norm))
+        out.append((nm, dur_s, status_norm, st))  # Include st (step_dict) for timestamps
 
     # De-dup while keeping order (some composite actions can repeat step names).
     seen = set()
-    uniq: List[Tuple[str, str, str]] = []
-    for (nm, dur, st) in out:
+    uniq: List[Tuple[str, str, str, Optional[Dict[str, object]]]] = []
+    for (nm, dur, st, step_dict) in out:
         if nm in seen:
             continue
         seen.add(nm)
-        uniq.append((nm, dur, st))
+        uniq.append((nm, dur, st, step_dict))
     return uniq
 
 
@@ -2802,8 +2794,10 @@ def actions_job_step_tuples(
     job_url: str,
     min_seconds: float = 10.0,
     ttl_s: int = 30 * 24 * 3600,
-) -> List[Tuple[str, str, str]]:
-    """Fetch job details (cached) and return long-running steps (duration >= min_seconds)."""
+) -> List[Tuple[str, str, str, Optional[Dict[str, object]]]]:
+    """Fetch job details (cached) and return long-running steps (duration >= min_seconds).
+    
+    Returns 4-tuples: (step_name, duration_str, status_norm, step_dict) for timestamp-based filtering."""
     import time  # For timing analysis
     t_start = time.monotonic()
     
@@ -2917,9 +2911,11 @@ def is_python_test_step(step_name: str) -> bool:
     step_lower = str(step_name or "").lower()
     if not step_lower:
         return False
+    
+    # Be specific: only pytest steps, not "Rust checks (integration tests)" etc.
     return (
-        ("run" in step_lower and "test" in step_lower)
-        or "pytest" in step_lower
+        "pytest" in step_lower
+        or ("run" in step_lower and "test" in step_lower and "rust" not in step_lower)
         or step_lower.startswith("test")
     )
 
@@ -2989,6 +2985,14 @@ def ci_subsection_tuples_for_job(
 
     # Special case: "Build and Test - dynamo" has custom phase extraction
     if nm == "Build and Test - dynamo":
+        # Fetch job details once for timestamp-based filtering
+        job_dict = None
+        jid = extract_actions_job_id_from_url(str(job_url or ""))
+        if github_api and jid:
+            job_dict = github_api.get_actions_job_details_cached(
+                owner="ai-dynamo", repo="dynamo", job_id=jid, ttl_s=30 * 24 * 3600
+            ) or {}
+        
         t0 = time.monotonic()
         phases = build_and_test_dynamo_phase_tuples(
             github_api=github_api,
@@ -3024,31 +3028,46 @@ def ci_subsection_tuples_for_job(
                 return True
             return False
 
-        extra_steps = [(n, d, st) for (n, d, st) in (steps or []) if not _covered_by_phase(n)]
+        extra_steps = [(n, d, st, step_dict) for (n, d, st, step_dict) in (steps or []) if not _covered_by_phase(n)]
 
-        out = [(p[0], p[1], p[2]) for p in (phases or [])]
-        out.extend([(s[0], s[1], s[2]) for s in extra_steps])
+        out = [(p[0], p[1], p[2], p[3] if len(p) > 3 else None) for p in (phases or [])]  # Keep step dict
+        logger.info(f"[ci_subsection_tuples_for_job] Extracted {len(out)} phases for job '{nm}'")
+        for i, (step_name, _, _, step_dict) in enumerate(out[:5]):  # Log first 5
+            has_timestamps = False
+            if step_dict and isinstance(step_dict, dict):
+                has_timestamps = bool(step_dict.get('started_at') and step_dict.get('completed_at'))
+            logger.info(f"[ci_subsection_tuples_for_job]   Phase {i}: '{step_name}', has_step_dict={bool(step_dict)}, has_timestamps={has_timestamps}")
+        out.extend(extra_steps)  # extra_steps now include step_dict (4-tuples)
 
-        # Apply pytest test extraction to "Run tests" steps and "test: pytest" phases (same as other build-test jobs)
+        # Apply pytest test extraction to "Run tests" steps and "test: pytest" phases
         result = []
         t_pytest_total = 0.0
-        for step_name, step_dur, step_status in out:
-            result.append((step_name, step_dur, step_status))
+        for step_name, step_dur, step_status, step_dict in out:
+            result.append((step_name, step_dur, step_status, step_dict))  # Include step_dict for timestamps
 
             # If this is a "Run tests" step or a "test: pytest" phase, parse pytest slowest tests from raw log
             if is_python_test_step(step_name) and raw_log_path:
                 t0 = time.monotonic()
+                logger.info(f"[ci_subsection_tuples_for_job] About to call pytest_slowest_tests_from_raw_log for '{step_name}'")
+                logger.info(f"[ci_subsection_tuples_for_job]   step_dict type: {type(step_dict).__name__ if step_dict else 'None'}")
+                if step_dict and isinstance(step_dict, dict):
+                    logger.info(f"[ci_subsection_tuples_for_job]   step_dict has started_at: {bool(step_dict.get('started_at'))}, completed_at: {bool(step_dict.get('completed_at'))}")
+                    logger.info(f"[ci_subsection_tuples_for_job]   Timestamps: {step_dict.get('started_at')} -> {step_dict.get('completed_at')}")
+                else:
+                    logger.warning(f"[ci_subsection_tuples_for_job] WARNING: step_dict is None or not a dict for pytest step '{step_name}'!")
+                    
                 pytest_tests = pytest_slowest_tests_from_raw_log(
                     raw_log_path=raw_log_path,
                     # Tests: list *all* per-test timings in order (do not filter).
                     min_seconds=0.0,
                     include_all=True,
                     step_name=step_name,
+                    step_dict=step_dict,  # Pass step dict for timestamp filtering
                 )
                 t_pytest_total += time.monotonic() - t0
-                # Add pytest tests as indented entries
+                # Add pytest tests as indented entries (4-tuples with None step_dict for tests)
                 for test_name, test_dur, test_status in pytest_tests:
-                    result.append((f"  └─ {test_name}", test_dur, test_status))
+                    result.append((f"  └─ {test_name}", test_dur, test_status, None))
 
         t_total = time.monotonic() - t_start
         if t_total > 0.1:  # Log only if >100ms
@@ -3078,8 +3097,8 @@ def ci_subsection_tuples_for_job(
         # For each step, check if it's "Run tests" - if so, add pytest tests as additional entries
         result = []
         t_pytest_total = 0.0
-        for step_name, step_dur, step_status in (steps or []):
-            result.append((step_name, step_dur, step_status))
+        for step_name, step_dur, step_status, step_dict in (steps or []):
+            result.append((step_name, step_dur, step_status, step_dict))
 
             # If this is a "Run tests" step, parse pytest tests from raw log
             if is_python_test_step(step_name) and raw_log_path:
@@ -3089,6 +3108,8 @@ def ci_subsection_tuples_for_job(
                 pytest_tests = pytest_results_from_raw_log(
                     raw_log_path=raw_log_path,
                     min_seconds=0.0,  # Include all tests
+                    step_name=step_name,  # Pass step name to verify parallel/serial matches
+                    step_dict=step_dict,  # Pass step dict for timestamp filtering
                 )
                 
                 # If no results from PASSED/FAILED lines, fall back to --durations output
@@ -3099,13 +3120,14 @@ def ci_subsection_tuples_for_job(
                         min_seconds=0.0,
                         include_all=True,
                         step_name=step_name,
+                        step_dict=step_dict,  # Pass step dict for timestamp filtering
                     )
                 
                 t_pytest_total += time.monotonic() - t0
-                # Add pytest tests as indented/prefixed entries
+                # Add pytest tests as indented/prefixed entries (4-tuples with None step_dict for tests)
                 for test_name, test_dur, test_status in pytest_tests:
                     # Prefix with indentation to show hierarchy
-                    result.append((f"  └─ {test_name}", test_dur, test_status))
+                    result.append((f"  └─ {test_name}", test_dur, test_status, None))
 
         t_total = time.monotonic() - t_start
         if t_total > 0.1:  # Log only if >100ms
@@ -3128,6 +3150,7 @@ def pytest_slowest_tests_from_raw_log(
     min_seconds: float = 10.0,
     include_all: bool = False,
     step_name: str = "",
+    step_dict: Optional[Dict[str, object]] = None,
 ) -> List[Tuple[str, str, str]]:
     """Parse pytest per-test durations from cached raw log file.
     
@@ -3176,6 +3199,36 @@ def pytest_slowest_tests_from_raw_log(
             log_text = f.read()
         
         lines = log_text.split('\n')
+        
+        logger.info(f"[pytest_slowest_tests_from_raw_log] Called for '{step_name}', step_dict={type(step_dict).__name__}, is_dict={isinstance(step_dict, dict) if step_dict else False}")
+        
+        # Filter lines by timestamp if step_dict has started_at/completed_at
+        if step_dict and isinstance(step_dict, dict):
+            logger.info(f"[pytest_slowest_tests_from_raw_log] step_dict provided for '{step_name}': {bool(step_dict)}, keys={list(step_dict.keys())}")
+            started_at_str = str(step_dict.get("started_at", "") or "")
+            completed_at_str = str(step_dict.get("completed_at", "") or "")
+            logger.info(f"[pytest_slowest_tests_from_raw_log] Timestamps: started={started_at_str}, completed={completed_at_str}")
+            if started_at_str and completed_at_str:
+                started_at = _parse_iso_utc(started_at_str)
+                completed_at = _parse_iso_utc(completed_at_str)
+                if started_at and completed_at:
+                    filtered_lines = []
+                    for line in lines:
+                        # Extract timestamp from GitHub Actions log line
+                        # Format: 2026-02-06T00:51:17.3815132Z ...
+                        if len(line) > 28 and line[27] == 'Z':
+                            line_ts_str = line[:28]
+                            line_ts = _parse_iso_utc(line_ts_str)
+                            if line_ts and started_at <= line_ts <= completed_at:
+                                filtered_lines.append(line)
+                        else:
+                            # No timestamp, include it (safer)
+                            filtered_lines.append(line)
+                    lines = filtered_lines
+                    logger.info(
+                        f"[pytest_slowest_tests_from_raw_log] Filtered to {len(lines)} lines "
+                        f"between {started_at_str} and {completed_at_str} for step '{step_name}'"
+                    )
 
         # Build a map from test-id -> status using pytest summary lines.
         # Example lines:
@@ -3217,54 +3270,9 @@ def pytest_slowest_tests_from_raw_log(
         elif "e2e" in step_lower:
             target_test_type = "e2e"
 
-        # Detect pytest command type (parallel vs serial) from step_name
-        # Examples: "pytest (parallel)", "pytest (serial)", "test: pytest (parallel)"
-        step_is_parallel = "parallel" in step_lower or "xdist" in step_lower or "-n" in step_lower
-        step_is_serial = "serial" in step_lower
+        # Simply parse all slowest durations from the log
+        # The step structure in the UI makes it clear which step each test belongs to
         
-        # CRITICAL FIX: GitHub Actions creates synthetic "pytest (parallel)" and "pytest (serial)" steps
-        # from job metadata, but the actual CI log may only contain ONE pytest execution.
-        # We need to check if the log actually contains a pytest run matching this step_name.
-        # If not, return empty (don't attribute tests from one pytest run to a different step).
-        
-        # Strategy: Scan the log for pytest command markers matching this step type.
-        # Only return tests if we find evidence that THIS step actually ran pytest.
-        log_has_matching_pytest = False
-        
-        # Scan for pytest command that matches this step's type
-        for line in lines[:25000]:  # Only scan first 25k lines (pytest command is usually early)
-            line_lower = line.lower()
-            # Check for pytest command execution
-            if 'pytest' in line_lower and ('bash -c' in line_lower or 'running' in line_lower or 'command:' in line_lower):
-                # If step wants parallel, look for parallel markers
-                if step_is_parallel:
-                    if (' -n ' in line and 'pytest' in line_lower) or 'pytest_parallel' in line or 'xdist' in line_lower:
-                        log_has_matching_pytest = True
-                        break
-                # If step wants serial, look for serial markers OR absence of parallel markers
-                elif step_is_serial:
-                    # Serial is indicated by pytest_serial, OR pytest without -n flag
-                    if 'pytest_serial' in line:
-                        log_has_matching_pytest = True
-                        break
-                    # Also check: pytest command without -n flag (but has pytest)
-                    if 'pytest' in line_lower and ' -n ' not in line and 'parallel' not in line_lower:
-                        log_has_matching_pytest = True
-                        break
-        
-        # If we didn't find a matching pytest command, return empty
-        if not log_has_matching_pytest:
-            logger.info(
-                f"[pytest_slowest_tests_from_raw_log] No matching pytest command found for step_name='{step_name}' "
-                f"(step_is_parallel={step_is_parallel}, step_is_serial={step_is_serial}). Returning empty."
-            )
-            return []
-        
-        logger.info(
-            f"[pytest_slowest_tests_from_raw_log] Found matching pytest command for step_name='{step_name}' "
-            f"(step_is_parallel={step_is_parallel}, step_is_serial={step_is_serial})"
-        )
-
         # Look for the "slowest N durations" section(s)
         # Format: "============================= slowest 10 durations ============================="
         # Followed by lines like (with GitHub Actions timestamp prefix):
@@ -3369,6 +3377,8 @@ def pytest_results_from_raw_log(
     *,
     raw_log_path: Optional[Path],
     min_seconds: float = 0.0,
+    step_name: str = "",
+    step_dict: Optional[Dict[str, object]] = None,
 ) -> List[Tuple[str, str, str]]:
     """Parse pytest individual test results (PASSED/FAILED/SKIPPED) from raw log.
     
@@ -3381,9 +3391,17 @@ def pytest_results_from_raw_log(
         ... stack traces ...
         2026-02-03T17:52:51.1096979Z FAILED                                                                   [ 61%]
     
+    CRITICAL: Uses timestamp-based filtering when job object is provided.
+    For synthetic steps like "pytest (parallel)" or "pytest (serial)", this function will:
+    1. Find the real step in the job API that matches the synthetic name
+    2. Use that step's started_at/completed_at timestamps to filter log lines
+    3. Only parse tests within that time window
+    
     Args:
         raw_log_path: Path to the raw log file
         min_seconds: Minimum duration to include (calculated from timestamp diff). Default: 0.0 (include all)
+        step_name: Name of the step (used to find matching step in job API for timestamp filtering)
+        job: Optional job dict from GitHub API (contains steps with timestamps)
     
     Returns:
         List of (test_name, duration_str, status_norm) tuples, in order of execution.
@@ -3407,6 +3425,36 @@ def pytest_results_from_raw_log(
         import re
         from datetime import datetime
         
+        # Read entire log file
+        with open(p, 'r', encoding='utf-8', errors='replace') as f:
+            lines = f.readlines()
+        
+        # Filter lines by timestamp if step_dict has started_at/completed_at
+        if step_dict and isinstance(step_dict, dict):
+            started_at_str = str(step_dict.get("started_at", "") or "")
+            completed_at_str = str(step_dict.get("completed_at", "") or "")
+            if started_at_str and completed_at_str:
+                started_at = _parse_iso_utc(started_at_str)
+                completed_at = _parse_iso_utc(completed_at_str)
+                if started_at and completed_at:
+                    filtered_lines = []
+                    for line in lines:
+                        # Extract timestamp from GitHub Actions log line
+                        # Format: 2026-02-06T00:51:17.3815132Z ...
+                        if len(line) > 28 and line[27] == 'Z':
+                            line_ts_str = line[:28]
+                            line_ts = _parse_iso_utc(line_ts_str)
+                            if line_ts and started_at <= line_ts <= completed_at:
+                                filtered_lines.append(line)
+                        else:
+                            # No timestamp, include it (safer)
+                            filtered_lines.append(line)
+                    lines = filtered_lines
+                    logger.info(
+                        f"[pytest_results_from_raw_log] Filtered to {len(lines)} lines "
+                        f"between {started_at_str} and {completed_at_str} for step '{step_name}'"
+                    )
+        
         results = []
         prev_timestamp = None
         timeout_tests = set()  # Track which tests timed out
@@ -3417,11 +3465,10 @@ def pytest_results_from_raw_log(
             r'^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d+Z\s+(\S+)\s+\+{20,}\s+Timeout\s+\+{20,}'
         )
         
-        with open(p, 'r', encoding='utf-8', errors='replace') as f:
-            for line in f:
-                m = timeout_pattern.match(line)
-                if m:
-                    timeout_tests.add(m.group(1))
+        for line in lines:
+            m = timeout_pattern.match(line)
+            if m:
+                timeout_tests.add(m.group(1))
         
         # Second pass: parse test results
         # Pattern: 2026-02-03T17:46:32.8254182Z tests/test_foo.py::test_bar PASSED [  5%]
@@ -3429,25 +3476,24 @@ def pytest_results_from_raw_log(
             r'^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d+Z)\s+(\S+)\s+(PASSED|FAILED|SKIPPED|ERROR)\s+\[\s*\d+%\]'
         )
         
-        with open(p, 'r', encoding='utf-8', errors='replace') as f:
-            for line in f:
-                m = pattern.match(line)
-                if not m:
-                    continue
-                
-                timestamp_str, test_name, status_raw = m.groups()
-                
-                # Parse timestamp
-                try:
-                    timestamp = datetime.fromisoformat(timestamp_str.replace('Z', '+00:00'))
-                except (ValueError, AttributeError):
-                    timestamp = None
-                
-                # Calculate duration from previous test
-                duration_s = 0.0
-                if prev_timestamp and timestamp:
-                    duration_s = (timestamp - prev_timestamp).total_seconds()
-                
+        for line in lines:
+            m = pattern.match(line)
+            if not m:
+                continue
+            
+            timestamp_str, test_name, status_raw = m.groups()
+            
+            # Parse timestamp
+            try:
+                timestamp = datetime.fromisoformat(timestamp_str.replace('Z', '+00:00'))
+            except (ValueError, AttributeError):
+                timestamp = None
+            
+            # Calculate duration from previous test
+            duration_s = 0.0
+            if prev_timestamp and timestamp:
+                duration_s = (timestamp - prev_timestamp).total_seconds()
+            
                 # Normalize status
                 status_norm = {
                     'PASSED': 'success',
@@ -4819,13 +4865,18 @@ def build_and_test_dynamo_phase_tuples(
     job_url: str,
     raw_log_path: Optional[Path] = None,
     is_required: bool = False,
-) -> List[Tuple[str, str, str]]:
+) -> List[Tuple[str, str, str, Optional[Dict[str, object]]]]:
     """Return phase tuples for the Build-and-Test phase breakdown (best-effort).
 
     Shared helper used by both dashboards to keep logic identical.
+    
+    Returns:
+        List of 4-tuples: (phase_name, duration_str, status_norm, step_dict)
+        The step_dict contains started_at/completed_at for timestamp-based log filtering.
     """
-    phases3: List[Tuple[str, str, str]] = []
+    phases3: List[Tuple[str, str, str, Optional[Dict[str, object]]]] = []
     jid = extract_actions_job_id_from_url(str(job_url or ""))
+    logger.info(f"[build_and_test_dynamo_phase_tuples] Called with job_url={job_url}, extracted job_id={jid}")
     if github_api and jid:
         # Use 30-day TTL to match prefetch_actions_job_details_pass (prevents cache misses).
         # Job details are immutable once completed (verified by get_actions_job_details_cached),
@@ -4834,5 +4885,11 @@ def build_and_test_dynamo_phase_tuples(
         job = github_api.get_actions_job_details_cached(owner="ai-dynamo", repo="dynamo", job_id=jid, ttl_s=30 * 24 * 3600) or {}
         if isinstance(job, dict):
             phases3 = build_and_test_dynamo_phases_from_actions_job(job) or []
+            logger.info(f"[build_and_test_dynamo_phase_tuples] Got {len(phases3)} phases from build_and_test_dynamo_phases_from_actions_job")
+        else:
+            logger.warning(f"[build_and_test_dynamo_phase_tuples] Job data is not a dict: {type(job)}")
+    else:
+        logger.warning(f"[build_and_test_dynamo_phase_tuples] No github_api or no job_id (jid={jid})")
 
-    return [(str(n), str(d), str(s)) for (n, d, s) in (phases3 or [])]
+    logger.info(f"[build_and_test_dynamo_phase_tuples] Returning {len(phases3)} phases")
+    return phases3  # Return 4-tuples: (name, dur, status, step_dict)
