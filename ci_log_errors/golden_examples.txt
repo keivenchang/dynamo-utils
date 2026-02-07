@@ -43,6 +43,7 @@ Infra / system:
 - 57877945085.log => exit-127-cmd-not-found
 - 57521050554.log => exit-139-sigsegv, !huggingface-auth-error
 - 58412373114.log => oom
+- 62702682140.log => disk-space-error
 
 Network / timeouts:
 - 57930774858.log => network-error
@@ -71,6 +72,7 @@ VLLM/SGLang/TRTLLM backends:
   # NOTE: The root cause "Exception: Zmq error: Address already in use" appears at line 6577
   # in the raw log, but the snippet currently shows only the final RuntimeError at the end.
   # TODO: Improve snippet extraction to capture root cause exceptions, not just final symptoms.
+- 62815133304.log => pytest-error  # trtllm test_deployment[aggregated-2] AssertionError: Could not parse metric
 
 HuggingFace auth:
 - 58604176773.log => pytest-error, network-download-error, build-status-check-error, huggingface-auth-error
@@ -117,3 +119,4 @@ Notes:
 * 59520885010.log => +FAILED tests/router/test_router_e2e_with_mockers.py::test_router_decisions_disagg, +# pytest --basetemp=/tmp/pytest-parallel --junitxml=pytest_parallel.xml -n 4, +# suggested, +-m \"pre_merge and parallel, +tests/router/test_router_e2e_with_mockers.py::test_router_decisions_disagg[with_bootstrap-decode_first], +'tests/router/test_router_e2e_with_mockers.py::test_router_decisions_disagg[with_bootstrap-decode_first]', !RED:__________ test_router_decisions_disagg[with_bootstrap-prefill_first] __________
 * 62096454660.log => +RuntimeError: Engine core initialization failed, +ERROR tests/kvbm_integration/test_kvbm.py::test_onboarding_determinism, +vllm/v1/engine, +RED:ERROR tests/kvbm_integration/test_kvbm.py::test_onboarding_determinism
 * 62377203598.log => +unknown: failed to copy: unexpected status from PUT request, +416 Requested Range Not Satisfiable, +##[error]Process completed with exit code 1, +RED:failed to copy: unexpected status from PUT request, +RED:##[error]Process completed with exit code 1
+* 62815133304.log => +FAILED tests/serve/test_trtllm.py::test_deployment[aggregated-2], +E   AssertionError: Could not parse value for metric, +E   tests.utils.engine_process.EngineResponseError: Could not parse value for metric, +________________________ test_deployment[aggregated-2] _________________________, +docker run, +bash -c, !2026-

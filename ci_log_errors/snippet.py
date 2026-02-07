@@ -489,6 +489,40 @@ def extract_error_snippet_from_text(
                 )
             )
 
+            # Include pytest failure detail lines ("E   <ExceptionType>: <message>").
+            # These appear between the underscore title and the next section boundary
+            # (captured stderr/log, another test title, short test summary).
+            # They contain the actual assertion/error messages the user needs to see.
+            _pytest_e_line_re = re.compile(r"^\s*E\s{2,}")
+            _pytest_section_boundary_re = re.compile(
+                r"^-{4,}\s+Captured\s+(?:stderr|log|stdout)\s+"
+                r"|^={4,}\s+short test summary"
+                r"|^={4,}\s+\d+\s+(?:failed|passed|error)",
+                re.IGNORECASE,
+            )
+            try:
+                # Find the LAST underscore title position in the window (matches the failing test).
+                title_pos = None
+                for wi, ln in enumerate(window):
+                    s = _strip_ts_and_ansi(ln)
+                    if s and SNIPPET_PYTEST_UNDERSCORE_TITLE_RE.search(s):
+                        title_pos = wi
+                if title_pos is not None:
+                    e_lines_added = 0
+                    for wi in range(title_pos + 1, len(window)):
+                        s = _strip_ts_and_ansi(window[wi])
+                        if _pytest_section_boundary_re.search(s):
+                            break
+                        if _pytest_e_line_re.search(s):
+                            if s and s.strip() and s not in snippet_lines:
+                                snippet_lines.append(s)
+                                e_lines_added += 1
+                            # Cap to avoid overwhelming the snippet with huge exception chains.
+                            if e_lines_added >= 10:
+                                break
+            except Exception:  # THIS IS A HORRIBLE ANTI-PATTERN, FIX IT
+                pass
+
         # Ensure we include the last docker daemon error line if present (high-signal and easy to miss).
         if last_docker_daemon_err is not None:
             docker_line = all_lines[last_docker_daemon_err]

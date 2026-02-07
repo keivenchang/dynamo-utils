@@ -7,10 +7,23 @@ READ THIS FIRST (NON-NEGOTIABLE)
 
 If you do only one thing: re-read this section before making changes or running commands.
 
+- Git commit policy (MUST):
+  - NEVER suggest committing changes until the user explicitly asks
+  - DO NOT proactively offer to commit, create commits, or ask "should I commit this?"
+  - Wait for explicit user request like "commit this" or "create a commit"
+  - This applies even after completing tasks - just report what was done, don't offer to commit
+
+- Hugging Face usage (MUST):
+  - DO NOT use Hugging Face libraries or APIs in new code unless explicitly requested
+  - Avoid dependencies on transformers, datasets, accelerate, tokenizers, etc.
+  - If existing code uses Hugging Face, do not add new Hugging Face dependencies
+  - Prefer alternative solutions that don't require Hugging Face integration
+
 - Pytest HF token (MUST):
   - Before running any `pytest`, do:
-    - `export HF_TOKEN="$(cat ~/.cache/huggingface/token)" && pytest ...`
+    - `export HF_HUB_OFFLINE=1 HF_TOKEN="$(cat ~/.cache/huggingface/token)" && pytest ...`
   - Prefer: `pytest --basetemp=/tmp/pytest_temp tests/`
+  - Note: Only needed for existing tests that require HF authentication
 
 - Cache deletion policy (MUST):
   - NEVER delete caches unless explicitly requested and permission is granted.

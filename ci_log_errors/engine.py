@@ -1366,6 +1366,10 @@ def categorize_error_log_lines(lines: Sequence[str]) -> List[str]:
         # OOM / kill
         if re.search(r"\bout\s+of\s+memory\b|\boom\b|killed\s+process", t):
             add("oom")
+        
+        # Disk space exhausted
+        if re.search(r"no\s+space\s+left\s+on\s+device|disk.*full|ENOSPC", t, re.IGNORECASE):
+            add("disk-space-error")
     except Exception:  # THIS IS A HORRIBLE ANTI-PATTERN, FIX IT
         return cats
 
