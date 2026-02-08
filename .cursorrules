@@ -55,6 +55,7 @@ TABLE OF CONTENTS
     2.3.1 Command Chaining
     2.3.2 Long-Running Programs
     2.3.3 Piping and Filtering
+    2.3.4 Waiting for Output (await_output.sh)
   2.4 Cron
     2.4.1 Environment and Variables
     2.4.2 Locks and Logging
