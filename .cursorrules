@@ -259,6 +259,48 @@ When reviewing saved logs, filter out unimportant cargo test output (on the save
 - "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out"
 - "tower_http::trace::on_failure:"
 
+### 2.3.4 Waiting for Output (await_output.sh)
+
+**NEVER use `sleep N && command && grep 'DONE'` — it always waits the full sleep duration.**
+
+Use `_/await_output.sh` instead. It runs the command, streams output, and exits immediately
+when a sentinel string appears (or on timeout). All output is logged to a file regardless.
+
+**Usage:**
+```bash
+_/await_output.sh -t TIMEOUT -s "SENTINEL" [-s "SENTINEL2" ...] [-l LOGFILE] [-q] -- COMMAND [ARGS...]
+```
+
+- `-t, --timeout SECONDS` — maximum wait time (**required**, no default)
+- `-s, --sentinel STRING` — string to watch for (repeatable; exits on first match)
+- `-l, --log FILE` — log file path (default: `/tmp/await_output.log`)
+- `-q, --quiet` — suppress terminal output (log only)
+
+**Exit codes:** 0 = sentinel found, 1 = usage error, 2 = timeout, 3 = command exited without sentinel
+
+**Examples:**
+
+Single command:
+```bash
+_/await_output.sh -t 90 -s "model loaded" -- python serve.py
+```
+
+Series of commands (wrap in `bash -c`):
+```bash
+_/await_output.sh -t 120 -s "BUILD COMPLETE" -- bash -c 'cargo build && cargo test && echo "BUILD COMPLETE"'
+```
+
+Multiple sentinels (first match wins):
+```bash
+_/await_output.sh -t 60 -s "listening on" -s "READY" -s "model loaded" -- ./start_server.sh
+```
+
+**Why this matters:**
+- `sleep 60 && grep DONE` always waits 60s even if DONE appears at 3s
+- `await_output.sh` exits at 3s, saving 57s per invocation
+- Output is always captured to a log file for later inspection
+- Timeout ensures the script never hangs forever
+
 ## 2.4 Cron
 
 ### 2.4.1 Environment and Variables
