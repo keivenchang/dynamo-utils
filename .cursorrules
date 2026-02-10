@@ -22,7 +22,8 @@ If you do only one thing: re-read this section before making changes or running 
 - Pytest HF token (MUST):
   - Before running any `pytest`, do:
     - `export HF_HUB_OFFLINE=1 HF_TOKEN="$(cat ~/.cache/huggingface/token)" && pytest ...`
-  - Prefer: `pytest --basetemp=/tmp/pytest_temp --duration=0 tests/`
+  - Prefer: `pytest -xvv --basetemp=/tmp/pytest_temp --duration=0 tests/`
+  - Always pass `-xvv` to stop at first failure and get verbose output for fast analysis
   - Always pass `--duration=0` to show timing of all tests (helps detect slow/flaky tests)
   - Note: Only needed for existing tests that require HF authentication
 
@@ -843,7 +844,8 @@ if handler:
 - Use fixtures for common setup
 - Mock external services
 - Before running any `pytest`: see `READ THIS FIRST (NON-NEGOTIABLE)` for the required `HF_TOKEN` export pattern.
-- Always use: pytest --basetemp=/tmp/pytest_temp --duration=0 tests/
+- Always use: pytest -xvv --basetemp=/tmp/pytest_temp --duration=0 tests/
+- Always pass `-xvv` to stop at first failure and get verbose output for fast analysis
 - Always pass `--duration=0` to show timing of all tests (helps detect slow/flaky tests)
 
 ### 3.5.5 Dynamo-utils dashboards + log categorization
