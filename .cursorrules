@@ -22,7 +22,8 @@ If you do only one thing: re-read this section before making changes or running 
 - Pytest HF token (MUST):
   - Before running any `pytest`, do:
     - `export HF_HUB_OFFLINE=1 HF_TOKEN="$(cat ~/.cache/huggingface/token)" && pytest ...`
-  - Prefer: `pytest --basetemp=/tmp/pytest_temp tests/`
+  - Prefer: `pytest --basetemp=/tmp/pytest_temp --duration=0 tests/`
+  - Always pass `--duration=0` to show timing of all tests (helps detect slow/flaky tests)
   - Note: Only needed for existing tests that require HF authentication
 
 - Cache deletion policy (MUST):
@@ -268,15 +269,19 @@ when a sentinel string appears (or on timeout). All output is logged to a file r
 
 **Usage:**
 ```bash
-_/await_output.sh -t TIMEOUT -s "SENTINEL" [-s "SENTINEL2" ...] [-l LOGFILE] [-q] -- COMMAND [ARGS...]
+_/await_output.sh -t TIMEOUT [-s "SENTINEL" ...] [-p PID] [-l LOGFILE] [-q] -- COMMAND [ARGS...]
 ```
 
 - `-t, --timeout SECONDS` — maximum wait time (**required**, no default)
 - `-s, --sentinel STRING` — string to watch for (repeatable; exits on first match)
+- `-p, --pid PID` — exit when this PID exits (e.g. a background build process)
 - `-l, --log FILE` — log file path (default: `/tmp/await_output.log`)
 - `-q, --quiet` — suppress terminal output (log only)
+- `--self-test` — run built-in test suite (15 cases)
 
-**Exit codes:** 0 = sentinel found, 1 = usage error, 2 = timeout, 3 = command exited without sentinel
+At least one of `--sentinel` or `--pid` is required.
+
+**Exit codes:** 0 = sentinel found (or PID exited when no sentinels), 1 = usage error, 2 = timeout, 3 = command exited without sentinel, 4 = watched PID exited but sentinel not found
 
 **Examples:**
 
@@ -295,9 +300,22 @@ Multiple sentinels (first match wins):
 _/await_output.sh -t 60 -s "listening on" -s "READY" -s "model loaded" -- ./start_server.sh
 ```
 
+Watch a background build PID (exit when build finishes):
+```bash
+./container/build.sh --framework none --target dev > /tmp/build.log 2>&1 &
+BUILD_PID=$!
+_/await_output.sh -t 1200 -p $BUILD_PID -- tail -f /tmp/build.log
+```
+
+Combine PID + sentinel (exit on whichever comes first):
+```bash
+_/await_output.sh -t 600 -s "ERROR" -p $BUILD_PID -- tail -f /tmp/build.log
+```
+
 **Why this matters:**
 - `sleep 60 && grep DONE` always waits 60s even if DONE appears at 3s
 - `await_output.sh` exits at 3s, saving 57s per invocation
+- `--pid` avoids `tail -f` hanging forever after a background process finishes
 - Output is always captured to a log file for later inspection
 - Timeout ensures the script never hangs forever
 
@@ -825,7 +843,8 @@ if handler:
 - Use fixtures for common setup
 - Mock external services
 - Before running any `pytest`: see `READ THIS FIRST (NON-NEGOTIABLE)` for the required `HF_TOKEN` export pattern.
-- Always use: pytest --basetemp=/tmp/pytest_temp tests/
+- Always use: pytest --basetemp=/tmp/pytest_temp --duration=0 tests/
+- Always pass `--duration=0` to show timing of all tests (helps detect slow/flaky tests)
 
 ### 3.5.5 Dynamo-utils dashboards + log categorization
 
