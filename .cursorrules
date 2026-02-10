@@ -19,10 +19,13 @@ If you do only one thing: re-read this section before making changes or running 
   - If existing code uses Hugging Face, do not add new Hugging Face dependencies
   - Prefer alternative solutions that don't require Hugging Face integration
 
-- Pytest HF token (MUST):
+- Pytest (MUST):
+  - **CRITICAL: Multiple pytest installations exist.** The system `pytest` at `/usr/local/bin/pytest`
+    is OUTSIDE the venv and cannot see venv-installed packages (like `dynamo`).
+    ALWAYS use `python3 -m pytest` to ensure the venv's pytest runs with the correct `sys.path`.
   - Before running any `pytest`, do:
-    - `export HF_HUB_OFFLINE=1 HF_TOKEN="$(cat ~/.cache/huggingface/token)" && pytest ...`
-  - Prefer: `pytest -xvv --basetemp=/tmp/pytest_temp --duration=0 tests/`
+    - `export HF_HUB_OFFLINE=1 HF_TOKEN="$(cat ~/.cache/huggingface/token)" && python3 -m pytest ...`
+  - Prefer: `python3 -m pytest -xvv --basetemp=/tmp/pytest_temp --duration=0 tests/`
   - Always pass `-xvv` to stop at first failure and get verbose output for fast analysis
   - Always pass `--duration=0` to show timing of all tests (helps detect slow/flaky tests)
   - Note: Only needed for existing tests that require HF authentication
@@ -840,11 +843,12 @@ if handler:
 
 ### 3.5.4 Testing
 - Framework: pytest
+- **CRITICAL:** Always use `python3 -m pytest` (not bare `pytest`) to ensure the venv's pytest runs with correct `sys.path`
 - Unit tests in tests/ directory
 - Use fixtures for common setup
 - Mock external services
 - Before running any `pytest`: see `READ THIS FIRST (NON-NEGOTIABLE)` for the required `HF_TOKEN` export pattern.
-- Always use: pytest -xvv --basetemp=/tmp/pytest_temp --duration=0 tests/
+- Always use: python3 -m pytest -xvv --basetemp=/tmp/pytest_temp --duration=0 tests/
 - Always pass `-xvv` to stop at first failure and get verbose output for fast analysis
 - Always pass `--duration=0` to show timing of all tests (helps detect slow/flaky tests)
 
