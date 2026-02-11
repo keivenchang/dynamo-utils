@@ -235,6 +235,44 @@ class FrameworkTargetData:
 # build.sh is now executed directly instead of parsing --dry-run output
 
 
+# Framework name mapping: build_images.py uses "none" but render.py uses "dynamo"
+RENDER_FRAMEWORK_MAP = {
+    "none": "dynamo",
+    "vllm": "vllm",
+    "sglang": "sglang",
+    "trtllm": "trtllm",
+}
+
+# Build methods
+BUILD_METHOD_BUILD_SH = "build_sh"
+BUILD_METHOD_RENDER_PY = "render_py"
+
+
+def detect_build_method(repo_path: Path) -> str:
+    """
+    Detect which build method is available at the checked-out SHA.
+
+    Priority: render.py > build.sh (render.py is the newer approach).
+
+    Returns:
+        BUILD_METHOD_RENDER_PY or BUILD_METHOD_BUILD_SH
+
+    Raises:
+        RuntimeError: If neither render.py nor build.sh exists
+    """
+    render_py = repo_path / "container" / "render.py"
+    build_sh = repo_path / "container" / "build.sh"
+
+    if render_py.exists():
+        return BUILD_METHOD_RENDER_PY
+    if build_sh.exists():
+        return BUILD_METHOD_BUILD_SH
+
+    raise RuntimeError(
+        f"Neither container/render.py nor container/build.sh found at {repo_path}. "
+        "Cannot determine how to build Docker images at this SHA."
+    )
+
 
 def extract_version_from_build_sh(framework: str, repo_path: Path) -> str:
     """
@@ -291,53 +329,213 @@ def extract_version_from_build_sh(framework: str, repo_path: Path) -> str:
         raise RuntimeError(f"Failed to extract version from build.sh: {e}")
 
 
+def _generate_error_html_and_exit(
+    frameworks: List[str],
+    sha: str,
+    repo_path: Path,
+    error_message: str,
+    log_dir: Path,
+    log_date: str,
+    html_out_file: Optional[Path] = None,
+    email: Optional[str] = None,
+    hostname: str = DEFAULT_HOSTNAME,
+    html_path: str = DEFAULT_HTML_PATH,
+) -> int:
+    """
+    Generate an error HTML report when a fatal error occurs before task execution
+    (e.g., build.sh doesn't exist at the checked-out SHA).
+
+    Creates a task graph with a placeholder version, marks all tasks as FAILED
+    with the error message, generates the HTML report, and returns exit code 1.
+
+    Args:
+        frameworks: List of framework names that were requested
+        sha: Git commit SHA (9 chars)
+        repo_path: Path to the repository
+        error_message: Human-readable error description
+        log_dir: Directory for log files
+        log_date: Date string (YYYY-MM-DD)
+        html_out_file: Optional secondary HTML output path (e.g., repo/build.html)
+        email: Optional email address to send report to
+        hostname: Hostname for absolute URLs
+        html_path: Base path for absolute URLs
+
+    Returns:
+        1 (always -- caller should return this)
+    """
+    global _frameworks_data_cache, _html_out_file
+
+    logger = logging.getLogger("main")
+    logger.error(f"Fatal error: {error_message}")
+
+    _html_out_file = html_out_file
+
+    # Create task graphs with a placeholder version so we have tasks to mark as FAILED
+    all_tasks: Dict[str, BaseTask] = {}
+    for framework in frameworks:
+        framework_tasks = create_task_graph(framework, sha, repo_path, version="error")
+        all_tasks.update(framework_tasks)
+
+    # Set log file paths and mark every task as FAILED
+    for task_id, task in all_tasks.items():
+        task.set_log_file_path(log_dir, log_date, sha)
+        task.mark_status_as(TaskStatus.FAILED, error_message)
+
+        # Write a log file for each task so log links in the HTML report work
+        try:
+            with open(task.log_file, 'w') as log_fh:
+                log_fh.write(f"Task: {task_id}\n")
+                log_fh.write(f"Description: {task.description}\n")
+                log_fh.write(f"Error: {error_message}\n")
+                log_fh.write("=" * 80 + "\n")
+        except (OSError, IOError) as e:
+            logger.warning(f"Failed to write error log for {task_id}: {e}")
+
+    # Initialize frameworks data cache -- pass version="error" so temp task graphs
+    # for non-active frameworks don't re-invoke build.sh (which is missing).
+    _frameworks_data_cache = initialize_frameworks_data_cache(
+        all_tasks=all_tasks,
+        log_dir=log_dir,
+        date_str=log_date,
+        sha=sha,
+        repo_path=repo_path,
+        use_absolute_urls=email is not None,
+        version="error",
+    )
+
+    # Update cache with FAILED status for all tasks
+    for task in all_tasks.values():
+        update_frameworks_data_cache(task, use_absolute_urls=email is not None)
+
+    # Generate HTML report
+    try:
+        html_content = generate_html_report(
+            all_tasks=all_tasks,
+            repo_path=repo_path,
+            sha=sha,
+            log_dir=log_dir,
+            date_str=log_date,
+            use_absolute_urls=False,
+        )
+        html_file = log_dir / f"{log_date}.{sha}.report.html"
+        _write_html_report_files(html_content, html_file)
+        update_report_status_marker(html_file, all_tasks)
+        logger.info(f"Error HTML report written: {html_file}")
+        if _html_out_file:
+            logger.info(f"Error HTML report also written: {_html_out_file}")
+    except (OSError, IOError, ValueError, RuntimeError, KeyError) as e:
+        logger.error(f"Failed to generate error HTML report: {e}")
+
+    # Send email if requested
+    # send_email_notification handles its own errors internally and returns a bool,
+    # so only generate_html_report needs guarding here.
+    if email:
+        try:
+            html_content_email = generate_html_report(
+                all_tasks=all_tasks,
+                repo_path=repo_path,
+                sha=sha,
+                log_dir=log_dir,
+                date_str=log_date,
+                use_absolute_urls=True,
+                hostname=hostname,
+                html_path=html_path,
+            )
+        except (OSError, IOError, ValueError, RuntimeError, KeyError) as e:
+            logger.error(f"Failed to generate email HTML content: {e}")
+            return 1
+
+        failed_task_names = [t.task_id for t in all_tasks.values()]
+        send_email_notification(
+            email=email,
+            html_content=html_content_email,
+            sha=sha[:7],
+            failed_tasks=failed_task_names,
+        )
+
+    return 1
+
+
 # Factory function to create task instances for a specific framework
-def create_task_graph(framework: str, sha: str, repo_path: Path, version: Optional[str] = None) -> Dict[str, 'BaseTask']:
+def create_task_graph(
+    framework: str,
+    sha: str,
+    repo_path: Path,
+    version: Optional[str] = None,
+    build_method: str = BUILD_METHOD_BUILD_SH,
+) -> Dict[str, 'BaseTask']:
     """
     Create task instances for a specific framework.
 
     Args:
-        framework: Framework name (vllm, sglang, trtllm)
+        framework: Framework name (none, vllm, sglang, trtllm)
         sha: Git commit SHA (short form, 9 chars)
         repo_path: Path to the Dynamo repository
-        version: Version string from build.sh (e.g., "v0.1.0.dev.f1552864b").
-                 If None, will be extracted from build.sh output.
+        version: Version string for image tags. For build_sh method this comes from
+                 build.sh --dry-run (e.g., "v0.1.0.dev.f1552864b"). For render_py
+                 method this is typically the SHA itself. If None, will be extracted
+                 from build.sh output (only works with build_sh method).
+        build_method: BUILD_METHOD_BUILD_SH or BUILD_METHOD_RENDER_PY
 
     Returns:
         Dictionary mapping task IDs to task instances
 
-    Image Dependency Chain:
-        build.sh is executed directly for each target. Dependencies are enforced
-        through the task graph parent relationships.
+    Image Dependency Chain (build_sh):
+        build.sh is executed directly for each target.
+        1. Runtime: build.sh --target runtime → dynamo:{version}-{framework}-runtime
+        2. Dev: build.sh --target dev → dynamo:{version}-{framework}-dev
+        3. Local-dev: build.sh --target local-dev → dynamo:{version}-{framework}-local-dev
 
-        1. Runtime image: build.sh --target runtime
-           → Produces: dynamo:{version}-{framework}-runtime
-
-        2. Dev image: build.sh --target dev (waits for runtime)
-           → Produces: dynamo:{version}-{framework}-dev
-
-        3. Local-dev image: build.sh --target local-dev (waits for dev)
-           → Uses --build-arg DEV_BASE to reference dev image
-           → Produces: dynamo:{version}-{framework}-local-dev
-
-        Note: We use --no-tag-latest to prevent automatic 'latest' tag creation.
+    Image Dependency Chain (render_py):
+        render.py generates a Dockerfile, then docker build produces the image.
+        1. Runtime: render.py + docker build → dynamo:{sha}-{framework}-runtime
+        2. Dev: render.py + docker build → dynamo:{sha}-{framework}-dev
+        3. Local-dev: render.py + docker build → dynamo:{sha}-{framework}-local-dev
     """
     # Task ID format: framework-target-type (all lowercase)
     # Example: vllm-runtime-build, vllm-dev-compilation, vllm-runtime-sanity
 
-    # Extract version from build.sh if not provided
+    # Determine version if not provided
     if version is None:
-        version = extract_version_from_build_sh(framework, repo_path)
+        if build_method == BUILD_METHOD_RENDER_PY:
+            # render.py method: use SHA as version (tag: dynamo:<sha>-<fw>-<target>)
+            version = sha
+        else:
+            version = extract_version_from_build_sh(framework, repo_path)
 
     tasks: Dict[str, BaseTask] = {}
     sanity_no_framework_flag = " --no-framework-check" if framework == "none" else ""
+    home_dir = str(Path.home())
+
+    # render.py uses "dynamo" instead of "none"
+    render_fw = RENDER_FRAMEWORK_MAP.get(framework, framework)
+
+    def _build_cmd(target: str, image_tag: str) -> str:
+        """Generate the build command for a given target and image tag."""
+        if build_method == BUILD_METHOD_RENDER_PY:
+            # Two-step:
+            #   1. render.py generates Dockerfile, prints "INFO: Generated Dockerfile written to <path>"
+            #   2. Parse that output to get the actual path, then docker build with it
+            render_cmd = f"python3 {repo_path}/container/render.py --framework {render_fw} --target {target}"
+            extra_args = ""
+            if target == "local-dev":
+                extra_args = " --build-arg USER_UID=$(id -u) --build-arg USER_GID=$(id -g)"
+            # Chain: run render.py, parse its output for the Dockerfile path, then docker build
+            return (
+                f"RENDER_OUTPUT=$({render_cmd}) && "
+                f"RENDERED_DF=$(echo \"$RENDER_OUTPUT\" | grep -oP '(?<=written to ).*') && "
+                f"echo \"$RENDER_OUTPUT\" && "
+                f"docker build --progress=plain -t {image_tag}{extra_args} -f \"$RENDERED_DF\" {repo_path}"
+            )
+        # build_sh method
+        return f"{repo_path}/container/build.sh --no-tag-latest --framework {framework} --target {target}"
 
     # Level 0: Runtime image build (builds directly from CUDA base image)
     runtime_image_tag = f"dynamo:{version}-{framework}-runtime"
     tasks[f"{framework}-runtime-build"] = BuildTask(
         task_id=f"{framework}-runtime-build",
         description=f"Build {framework.upper()} runtime image",
-        command=f"{repo_path}/container/build.sh --no-tag-latest --framework {framework} --target runtime",
+        command=_build_cmd("runtime", runtime_image_tag),
         output_image=runtime_image_tag,
         timeout=1200.0,  # 20 minutes for builds
     )
@@ -346,7 +544,7 @@ def create_task_graph(framework: str, sha: str, repo_path: Path, version: Option
     tasks[f"{framework}-runtime-sanity"] = CommandTask(
         task_id=f"{framework}-runtime-sanity",
         description=f"Run sanity_check.py in {framework.upper()} runtime container",
-        command=f"{repo_path}/container/run.sh --image {runtime_image_tag} -- bash -c 'id && python3 /workspace/deploy/sanity_check.py --runtime-check{sanity_no_framework_flag}'",
+        command=f"{repo_path}/container/run.sh --image {runtime_image_tag} --hf-home {home_dir}/.cache/huggingface -- bash -c 'id && python3 /workspace/deploy/sanity_check.py --runtime-check{sanity_no_framework_flag}'",
         input_image=runtime_image_tag,
         parents=[f"{framework}-runtime-build"],
         timeout=45.0,  # 45 seconds for sanity checks
@@ -358,7 +556,7 @@ def create_task_graph(framework: str, sha: str, repo_path: Path, version: Option
     tasks[f"{framework}-dev-build"] = BuildTask(
         task_id=f"{framework}-dev-build",
         description=f"Build {framework.upper()} dev image",
-        command=f"{repo_path}/container/build.sh --no-tag-latest --framework {framework} --target dev",
+        command=_build_cmd("dev", dev_image_tag),
         input_image=runtime_image_tag,
         output_image=dev_image_tag,
         parents=[f"{framework}-runtime-build"],
@@ -372,7 +570,6 @@ def create_task_graph(framework: str, sha: str, repo_path: Path, version: Option
     # - CARGO_BUILD_JOBS=$(nproc): Parallel compilation
     # - CARGO_PROFILE_DEV_CODEGEN_UNITS=256: More parallel code generation
     cargo_cmd = "CARGO_INCREMENTAL=1 CARGO_PROFILE_DEV_OPT_LEVEL=0 CARGO_BUILD_JOBS=$(nproc) CARGO_PROFILE_DEV_CODEGEN_UNITS=256 cargo build --profile dev --features dynamo-llm/block-manager && cd /workspace/lib/bindings/python && CARGO_INCREMENTAL=1 CARGO_PROFILE_DEV_OPT_LEVEL=0 CARGO_BUILD_JOBS=$(nproc) CARGO_PROFILE_DEV_CODEGEN_UNITS=256 maturin develop --uv && uv pip install -e ."
-    home_dir = str(Path.home())
     # For 'none' framework, run compilation AFTER sanity (sanity runs first, even if it fails)
     # For other frameworks, run compilation after build (before sanity)
     dev_compilation_parent = f"{framework}-dev-sanity" if framework == "none" else f"{framework}-dev-build"
@@ -404,7 +601,7 @@ def create_task_graph(framework: str, sha: str, repo_path: Path, version: Option
     tasks[f"{framework}-dev-sanity"] = CommandTask(
         task_id=f"{framework}-dev-sanity",
         description=f"Run sanity_check.py in {framework.upper()} dev container",
-        command=f"{repo_path}/container/run.sh --image {dev_image_tag} --mount-workspace -v {home_dir}/.cargo:/root/.cargo -- bash -c 'id && python3 /workspace/deploy/sanity_check.py{sanity_no_framework_flag}'",
+        command=f"{repo_path}/container/run.sh --image {dev_image_tag} --mount-workspace --hf-home {home_dir}/.cache/huggingface -v {home_dir}/.cargo:/root/.cargo -- bash -c 'id && python3 /workspace/deploy/sanity_check.py{sanity_no_framework_flag}'",
         input_image=dev_image_tag,
         parents=[dev_sanity_parent],
         timeout=45.0,  # 45 seconds for sanity checks
@@ -415,7 +612,11 @@ def create_task_graph(framework: str, sha: str, repo_path: Path, version: Option
     tasks[f"{framework}-dev-upload"] = CommandTask(
         task_id=f"{framework}-dev-upload",
         description=f"Upload {framework.upper()} dev image to GitLab registry",
-        command=f"echo 'Placeholder: Would upload {dev_image_tag} to {gitlab_dev_image_tag}'",
+        command=(
+            f"docker tag {dev_image_tag} {gitlab_dev_image_tag} && "
+            f"docker push {gitlab_dev_image_tag} && "
+            f"docker rmi {gitlab_dev_image_tag}"
+        ),
         input_image=dev_image_tag,
         output_image=gitlab_dev_image_tag,
         parents=[f"{framework}-dev-sanity"],
@@ -427,7 +628,7 @@ def create_task_graph(framework: str, sha: str, repo_path: Path, version: Option
     tasks[f"{framework}-local-dev-build"] = BuildTask(
         task_id=f"{framework}-local-dev-build",
         description=f"Build {framework.upper()} local-dev image",
-        command=f"{repo_path}/container/build.sh --no-tag-latest --framework {framework} --target local-dev",
+        command=_build_cmd("local-dev", local_dev_image_tag),
         input_image=dev_image_tag,
         output_image=local_dev_image_tag,
         parents=[f"{framework}-dev-build"],
@@ -459,7 +660,7 @@ def create_task_graph(framework: str, sha: str, repo_path: Path, version: Option
     tasks[f"{framework}-local-dev-sanity"] = CommandTask(
         task_id=f"{framework}-local-dev-sanity",
         description=f"Run sanity_check.py in {framework.upper()} local-dev container",
-        command=f"{repo_path}/container/run.sh --image {local_dev_image_tag} --mount-workspace -v {home_dir}/.cargo:/home/dynamo/.cargo -- bash -c 'id && (sudo id || true) && python3 /workspace/deploy/sanity_check.py{sanity_no_framework_flag}'",
+        command=f"{repo_path}/container/run.sh --image {local_dev_image_tag} --mount-workspace --hf-home {home_dir}/.cache/huggingface -v {home_dir}/.cargo:/home/dynamo/.cargo -- bash -c 'id && (sudo id || true) && python3 /workspace/deploy/sanity_check.py{sanity_no_framework_flag}'",
         input_image=local_dev_image_tag,
         parents=[local_dev_sanity_parent],
         timeout=45.0,  # 45 seconds for sanity checks
@@ -2167,6 +2368,8 @@ def initialize_frameworks_data_cache(
     sha: str,
     repo_path: Path,
     use_absolute_urls: bool = False,
+    version: Optional[str] = None,
+    build_method: str = BUILD_METHOD_BUILD_SH,
 ) -> Dict[str, Dict[str, Any]]:
     """
     Initialize the frameworks data cache once with image info and previous logs.
@@ -2193,8 +2396,10 @@ def initialize_frameworks_data_cache(
         # For frameworks not in all_tasks, create temporary task graph to get image info
         temp_tasks = None
         if framework not in frameworks_in_all_tasks:
-            # Create a temporary task graph just to extract image names
-            temp_tasks = create_task_graph(framework, sha, repo_path)
+            # Create a temporary task graph just to extract image names.
+            # Pass version and build_method through so callers in error paths
+            # don't re-invoke build.sh (which may not exist at this SHA).
+            temp_tasks = create_task_graph(framework, sha, repo_path, version=version, build_method=build_method)
 
         for target in targets:
             # Initialize target structure
@@ -2950,18 +3155,54 @@ def main() -> int:
         log_dir = repo_path / "logs" / log_date
         log_dir.mkdir(parents=True, exist_ok=True)
 
+        # Detect build method (render.py vs build.sh)
+        try:
+            build_method = detect_build_method(repo_path)
+        except RuntimeError as e:
+            html_out = args.html_out if args.html_out is not None else (repo_path / "build.html")
+            return _generate_error_html_and_exit(
+                frameworks=frameworks,
+                sha=sha,
+                repo_path=repo_path,
+                error_message=str(e),
+                log_dir=log_dir,
+                log_date=log_date,
+                html_out_file=html_out,
+            )
+        logger.info(f"Build method: {build_method}")
+
         # Create task graphs (also determines image names and versioning)
         all_tasks: Dict[str, BaseTask] = {}
+        version_extraction_failed = False
+        version_error_message = ""
         for framework in frameworks:
-            logger.info(f"Extracting version from build.sh for {framework.upper()}...")
-            try:
-                version = extract_version_from_build_sh(framework, repo_path)
-                logger.info(f"  Version: {version}")
-            except Exception as e:
-                logger.error(f"Failed to extract version for {framework}: {e}")
-                return 1
-            framework_tasks = create_task_graph(framework, sha, repo_path, version=version)
+            if build_method == BUILD_METHOD_RENDER_PY:
+                # render.py method: use SHA as version (tag format: dynamo:<sha>-<fw>-<target>)
+                version = sha
+                logger.info(f"  Using SHA as version for {framework.upper()}: {version}")
+            else:
+                logger.info(f"Extracting version from build.sh for {framework.upper()}...")
+                try:
+                    version = extract_version_from_build_sh(framework, repo_path)
+                    logger.info(f"  Version: {version}")
+                except RuntimeError as e:
+                    version_error_message = str(e)
+                    version_extraction_failed = True
+                    break
+            framework_tasks = create_task_graph(framework, sha, repo_path, version=version, build_method=build_method)
             all_tasks.update(framework_tasks)
+
+        if version_extraction_failed:
+            html_out = args.html_out if args.html_out is not None else (repo_path / "build.html")
+            return _generate_error_html_and_exit(
+                frameworks=frameworks,
+                sha=sha,
+                repo_path=repo_path,
+                error_message=version_error_message,
+                log_dir=log_dir,
+                log_date=log_date,
+                html_out_file=html_out,
+            )
 
         # Set log_file paths for all tasks (needed for HTML generation)
         for task_id, task in all_tasks.items():
@@ -2975,6 +3216,7 @@ def main() -> int:
             sha=sha,
             repo_path=repo_path,
             use_absolute_urls=False,
+            build_method=build_method,
         )
 
         # Generate and write HTML report
@@ -3178,19 +3420,69 @@ def main() -> int:
         # We'll populate this after creating task graphs, so skip cleanup for now
         # Cleanup will happen per-task before execution
 
-    # Create task graph for each framework
-    # Extract version once per framework to avoid repeated build.sh calls
-    all_tasks = {}
-    for framework in frameworks:
-        logger.info(f"Extracting version from build.sh for {framework.upper()}...")
-        try:
-            version = extract_version_from_build_sh(framework, repo_path)
-            logger.info(f"  Version: {version}")
-        except Exception as e:
-            logger.error(f"Failed to extract version for {framework}: {e}")
+    # Detect build method (render.py vs build.sh)
+    try:
+        build_method = detect_build_method(repo_path)
+    except RuntimeError as e:
+        if not args.dry_run:
+            return _generate_error_html_and_exit(
+                frameworks=frameworks,
+                sha=sha,
+                repo_path=repo_path,
+                error_message=str(e),
+                log_dir=log_dir,
+                log_date=log_date,
+                html_out_file=_html_out_file,
+                email=args.email,
+                hostname=args.hostname,
+                html_path=args.html_path,
+            )
+        else:
+            logger.error(f"Build method detection failed: {e}")
             return 1
-        framework_tasks = create_task_graph(framework, sha, repo_path, version=version)
+    logger.info(f"Build method: {build_method}")
+
+    # Create task graph for each framework
+    # For build_sh: extract version once per framework to avoid repeated build.sh calls
+    # For render_py: use SHA as version (tag format: dynamo:<sha>-<fw>-<target>)
+    all_tasks = {}
+    version_extraction_failed = False
+    version_error_message = ""
+    for framework in frameworks:
+        if build_method == BUILD_METHOD_RENDER_PY:
+            version = sha
+            logger.info(f"  Using SHA as version for {framework.upper()}: {version}")
+        else:
+            logger.info(f"Extracting version from build.sh for {framework.upper()}...")
+            try:
+                version = extract_version_from_build_sh(framework, repo_path)
+                logger.info(f"  Version: {version}")
+            except RuntimeError as e:
+                # Version extraction failed (build.sh missing or broken at this SHA).
+                # Generate an error HTML report instead of silently exiting.
+                version_error_message = str(e)
+                version_extraction_failed = True
+                break
+        framework_tasks = create_task_graph(framework, sha, repo_path, version=version, build_method=build_method)
         all_tasks.update(framework_tasks)
+
+    if version_extraction_failed:
+        if not args.dry_run:
+            return _generate_error_html_and_exit(
+                frameworks=frameworks,
+                sha=sha,
+                repo_path=repo_path,
+                error_message=version_error_message,
+                log_dir=log_dir,
+                log_date=log_date,
+                html_out_file=_html_out_file,
+                email=args.email,
+                hostname=args.hostname,
+                html_path=args.html_path,
+            )
+        else:
+            logger.error(f"Version extraction failed: {version_error_message}")
+            return 1
 
     # Set log_file paths for all tasks (needed for HTML generation to find existing logs)
     if not args.dry_run:
@@ -3205,6 +3497,7 @@ def main() -> int:
             sha=sha,
             repo_path=repo_path,
             use_absolute_urls=args.email is not None,
+            build_method=build_method,
         )
         logger.info("Frameworks data cache initialized")
         # Note: HTML report will be generated when first task starts running
