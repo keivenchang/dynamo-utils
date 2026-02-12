@@ -105,6 +105,7 @@ safe_kill "python.*dynamo\.frontend" "dynamo frontend"
 # Kill vllm processes
 safe_kill "python.*dynamo\.vllm" "dynamo vllm"
 safe_kill "VLLM::EngineCore" "VLLM EngineCore"
+safe_kill "VLLM::Worker" "VLLM Worker"
 safe_kill "vllm\.entrypoints" "vllm entrypoints"
 
 # Kill sglang processes

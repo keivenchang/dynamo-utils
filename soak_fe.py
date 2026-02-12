@@ -39,7 +39,7 @@ class LoadTestConfig:
     def __init__(self):
         self.duration_sec = 60
         self.workers = 1
-        self.requests_per_worker = 1
+        self.requests_per_worker = 0  # 0 = unlimited (run until duration expires)
         self.port = 8000
         self.model = None  # Available models: "Qwen/Qwen3-0.6B", "deepseek-ai/DeepSeek-R1-Distill-Llama-8B", etc.
         self.max_tokens = 300
@@ -290,7 +290,8 @@ class LoadTestWorker:
         )
 
         request_id = 1
-        while request_id <= self.config.requests_per_worker and not self.cancelled:
+        unlimited = self.config.requests_per_worker == 0
+        while (unlimited or request_id <= self.config.requests_per_worker) and not self.cancelled:
             try:
                 if self.config.streaming:
                     (
@@ -702,10 +703,13 @@ class LoadTester:
             print(f"Model: {self.config.model or 'Auto-detect first available model'}")
             print(f"Max duration: {self.config.duration_sec} seconds")
             print(f"Workers: {self.config.workers}")
-            print(f"Requests per worker: {self.config.requests_per_worker}")
-            print(
-                f"Total requests: {self.config.workers * self.config.requests_per_worker}"
-            )
+            if self.config.requests_per_worker == 0:
+                print("Requests per worker: unlimited (run until duration expires)")
+            else:
+                print(f"Requests per worker: {self.config.requests_per_worker}")
+                print(
+                    f"Total requests: {self.config.workers * self.config.requests_per_worker}"
+                )
             print(f"Streaming: {self.config.streaming}")
             print()
             print(f"Results will be stored in: {self.config.log_file}")
@@ -829,19 +833,20 @@ class LoadTester:
                         last_report = int(current_time)
 
                     # Check if all workers completed or all requests finished
-                    total_expected_requests = (
-                        self.config.workers * self.config.requests_per_worker
-                    )
                     if all(task.done() for task in self.tasks):
                         print("All workers completed before time limit.")
                         break
-                    elif self.stats.total_requests >= total_expected_requests:
-                        print(
-                            f"All {total_expected_requests} requests completed before time limit."
+                    elif self.config.requests_per_worker > 0:
+                        total_expected_requests = (
+                            self.config.workers * self.config.requests_per_worker
                         )
-                        # Signal workers to stop
-                        self.running = False
-                        break
+                        if self.stats.total_requests >= total_expected_requests:
+                            print(
+                                f"All {total_expected_requests} requests completed before time limit."
+                            )
+                            # Signal workers to stop
+                            self.running = False
+                            break
 
                     await asyncio.sleep(0.1)
 
@@ -849,6 +854,10 @@ class LoadTester:
                     print("Interrupted by user.")
                 elif time.time() - start_time >= self.config.duration_sec:
                     print("Time limit reached. Stopping workers...")
+                    self.running = False
+                    for worker in workers:
+                        worker.cancel()
+                    self.model_fetcher.cancel()
                 else:
                     print("All requests completed successfully.")
 
@@ -1063,8 +1072,8 @@ Examples:
     parser.add_argument(
         "--requests_per_worker",
         type=int,
-        default=1,
-        help="Requests per worker (default: 1)",
+        default=0,
+        help="Requests per worker (default: 0 = unlimited, run until duration expires)",
     )
     parser.add_argument(
         "--port", type=int, default=8000, help="Backend port (default: 8000)"

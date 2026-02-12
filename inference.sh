@@ -930,13 +930,18 @@ if [ "$RUN_BACKEND" = true ]; then
         # Convert to percentage for display (use awk instead of bc for portability)
         GPU_MEM_PERCENT=$(awk "BEGIN {printf \"%.0f%%\", $GPU_MEMORY_UTIL_DISAGG * 100}")
 
+        # Assign different NIXL side-channel ports so prefill and decode workers
+        # don't collide when running on the same machine (vLLM default is 5600).
+        NIXL_PORT_PREFILL=5600
+        NIXL_PORT_DECODE=5601
+
         # Launch prefill worker FIRST so it can register before decode worker tries to connect
         dry_run_echo "Launching prefill worker on port $PREFILL_PORT ($GPU_MEM_PERCENT GPU memory)..."
         if [ "$DRY_RUN" = false ]; then
-            ( set -x; DYN_LOG=info DYN_SYSTEM_PORT=$PREFILL_PORT python3 -m dynamo.$FRAMEWORK --model "$MODEL" $DISAGG_FRAMEWORK_ARGS $PREFILL_FLAG ) 2>&1 | sed 's/^/[PREFILL] /' &
+            ( set -x; VLLM_NIXL_SIDE_CHANNEL_PORT=$NIXL_PORT_PREFILL DYN_LOG=info DYN_SYSTEM_PORT=$PREFILL_PORT python3 -m dynamo.$FRAMEWORK --model "$MODEL" $DISAGG_FRAMEWORK_ARGS $PREFILL_FLAG ) 2>&1 | sed 's/^/[PREFILL] /' &
             PREFILL_PID=$!
         else
-            ( set -x; : DYN_LOG=info DYN_SYSTEM_PORT=$PREFILL_PORT python3 -m dynamo.$FRAMEWORK --model "$MODEL" $DISAGG_FRAMEWORK_ARGS $PREFILL_FLAG ) 2>&1 | sed 's/^+ : /+ /'
+            ( set -x; : VLLM_NIXL_SIDE_CHANNEL_PORT=$NIXL_PORT_PREFILL DYN_LOG=info DYN_SYSTEM_PORT=$PREFILL_PORT python3 -m dynamo.$FRAMEWORK --model "$MODEL" $DISAGG_FRAMEWORK_ARGS $PREFILL_FLAG ) 2>&1 | sed 's/^+ : /+ /'
             dry_run_echo "PREFILL_PID=\$!"
         fi
 
@@ -971,10 +976,10 @@ if [ "$RUN_BACKEND" = true ]; then
         # Launch decode worker SECOND (after prefill worker is ready)
         dry_run_echo "Launching decode worker on port $DECODE_PORT ($GPU_MEM_PERCENT GPU memory)..."
         if [ "$DRY_RUN" = false ]; then
-            ( set -x; DYN_LOG=info DYN_SYSTEM_PORT=$DECODE_PORT python3 -m dynamo.$FRAMEWORK --model "$MODEL" $DISAGG_FRAMEWORK_ARGS $DECODE_FLAG ) 2>&1 | sed 's/^/[DECODE] /' &
+            ( set -x; VLLM_NIXL_SIDE_CHANNEL_PORT=$NIXL_PORT_DECODE DYN_LOG=info DYN_SYSTEM_PORT=$DECODE_PORT python3 -m dynamo.$FRAMEWORK --model "$MODEL" $DISAGG_FRAMEWORK_ARGS $DECODE_FLAG ) 2>&1 | sed 's/^/[DECODE] /' &
             BACKEND_PID=$!
         else
-            ( set -x; : DYN_LOG=info DYN_SYSTEM_PORT=$DECODE_PORT python3 -m dynamo.$FRAMEWORK --model "$MODEL" $DISAGG_FRAMEWORK_ARGS $DECODE_FLAG ) 2>&1 | sed 's/^+ : /+ /'
+            ( set -x; : VLLM_NIXL_SIDE_CHANNEL_PORT=$NIXL_PORT_DECODE DYN_LOG=info DYN_SYSTEM_PORT=$DECODE_PORT python3 -m dynamo.$FRAMEWORK --model "$MODEL" $DISAGG_FRAMEWORK_ARGS $DECODE_FLAG ) 2>&1 | sed 's/^+ : /+ /'
             dry_run_echo "BACKEND_PID=\$!"
         fi
     else
