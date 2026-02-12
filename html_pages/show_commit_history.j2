@@ -967,6 +967,8 @@ window.__dashboardOnReadyQueue.push(function() {
 {%- set commit_link = "https://github.com/ai-dynamo/dynamo/commit/" ~ sha_full -%}
 {%- set gitlab_commit_link = "https://gitlab-master.nvidia.com/dl/ai-dynamo/dynamo/-/commit/" ~ sha_full -%}
 {%- set has_docker_images = sha_short in docker_images and docker_images[sha_short] -%}
+{%- set has_dev_images = sha_short in dev_registry_images and dev_registry_images[sha_short] -%}
+{%- set dev_imgs = dev_registry_images.get(sha_short, []) -%}
 {%- set has_gitlab = sha_full in gitlab_images and gitlab_images[sha_full] -%}
 {%- set gitlab_imgs = gitlab_images.get(sha_full, []) -%}
 {%- set composite_bg_color = commit.composite_bg_color -%}
@@ -999,7 +1001,7 @@ window.__dashboardOnReadyQueue.push(function() {
 {%- set status = status_info.get('status', 'unknown') -%}
 {%- set inherited = status_info.get('inherited', False) -%}
 {# Image SHA dropdown should only contain Image-SHA/local-image related info. GitLab registry info belongs to GitLab dropdown. #}
-{%- set has_composite_toggle = has_docker_images -%}
+{%- set has_composite_toggle = has_docker_images or has_dev_images -%}
 {# Expand/collapse triangle MUST be the first element in the cell (greyed out if nothing to expand). #}
 {%- if has_composite_toggle -%}
 <a href="#"
@@ -1413,8 +1415,8 @@ Framework: {{ img.framework }}">{{ display_tag }}</td>
 </tr>
 {%- endif -%}
 
-{# Docker images row (Image SHA dropdown) if any LOCAL docker images exist for this SHA #}
-{% if has_docker_images %}
+{# Docker images row (Image SHA dropdown) if any LOCAL docker images or dev registry images exist #}
+{% if has_docker_images or has_dev_images %}
 {%- set images = docker_images.get(sha_short, []) -%}
 
 <tr class="docker-images-row" id="docker-row-{{ sha_short }}" style="display: none;">
@@ -1426,7 +1428,35 @@ Framework: {{ img.framework }}">{{ display_tag }}</td>
           style="padding: 0 6px; height: 18px; line-height: 16px; font-size: 14px; border: 1px solid #d0d7de; border-radius: 999px; background: #ffffff; color: #57606a; cursor: pointer;"
           title="Close Docker images"><svg aria-hidden="true" viewBox="0 0 16 16" version="1.1" width="12" height="12" data-view-component="true" class="octicon octicon-x" fill="currentColor"><path fill-rule="evenodd" d="M3.72 3.72a.75.75 0 011.06 0L8 6.94l3.22-3.22a.75.75 0 111.06 1.06L9.06 8l3.22 3.22a.75.75 0 11-1.06 1.06L8 9.06l-3.22 3.22a.75.75 0 11-1.06-1.06L6.94 8 3.72 4.78a.75.75 0 010-1.06z"></path></svg></button>
 </div>
-<!-- Docker Images Section -->
+{# GitLab Dev Registry Images Section (dev/dynamo sub-repo) #}
+{% if dev_imgs %}
+<div style="margin-bottom: 12px; padding: 8px; background-color: white; border: 1px solid #d0d7de; border-radius: 4px;">
+<div style="font-weight: 600; margin-bottom: 4px; font-size: 13px;">GitLab Dev Registry Images: <a href="https://gitlab-master.nvidia.com/dl/ai-dynamo/dynamo/container_registry/165910?orderBy=PUBLISHED_AT&amp;sort=desc&amp;search[]={{ sha_short }}" target="_blank" style="color: #fc6d26; text-decoration: none; font-weight: 600; font-size: 12px;" title="View dev images for {{ sha_short }} in GitLab Container Registry">View Registry</a></div>
+<table style="width: 100%; border: none; background-color: white; border-collapse: collapse;">
+<thead>
+<tr>
+<th style="width: 40%; padding: 3px 6px; border: none;">Image Name:Tag</th>
+<th style="width: 15%; padding: 3px 6px; border: none;">pull dev</th>
+<th style="width: 10%; padding: 3px 6px; border: none;">Framework</th>
+<th style="width: 8%; padding: 3px 6px; border: none;">Size</th>
+<th style="width: 27%; padding: 3px 6px; border: none;">Created (PDT)</th>
+</tr>
+</thead>
+<tbody>
+{% for img in dev_imgs | sort(attribute='tag') %}
+<tr>
+<td style="font-family: monospace; font-size: 11px; padding: 2px 6px; border: none; max-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="{{ img.location }}">{{ img.image_name }}</td>
+<td style="font-size: 11px; padding: 2px 6px; border: none; white-space: nowrap;"><button data-clipboard-text="docker pull {{ img.location }}" onclick="copyFromClipboardAttr(this)" style="padding: 4px 6px; font-size: 11px; background-color: transparent; color: #57606a; border: 1px solid #d0d7de; border-radius: 6px; cursor: pointer; display: inline-flex; align-items: center; vertical-align: middle;" title="Click to copy docker pull command for dev image" onmouseover="this.style.backgroundColor='#f3f4f6'; this.style.borderColor='#8c959f';" onmouseout="this.style.backgroundColor='transparent'; this.style.borderColor='#d0d7de';"><svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" style="display: inline-block;">{% include "copy_icon_paths.svg" %}</svg></button><span style="margin-left: 6px;">copy command</span></td>
+<td style="font-size: 11px; padding: 2px 6px; border: none;">{{ img.framework }}</td>
+<td style="font-size: 11px; padding: 2px 6px; border: none;">{{ img.size_display }}</td>
+<td style="font-size: 11px; padding: 2px 6px; border: none;">{{ img.created_display }}</td>
+</tr>
+{% endfor %}
+</tbody>
+</table>
+</div>
+{% endif %}
+<!-- Local Docker Images Section -->
 {% if images %}
 <div style="margin-bottom: 12px; padding: 8px; background-color: white; border: 1px solid #d0d7de; border-radius: 4px;">
 <div style="font-weight: 600; margin-bottom: 4px; font-size: 13px;">Local Docker Images:</div>

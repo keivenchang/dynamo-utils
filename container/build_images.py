@@ -66,6 +66,15 @@ from common import (
     MARKER_FAILED,
     MARKER_KILLED,
 )
+from common_build_report import (
+    BuildReport,
+    CommitInfo,
+    FrameworkResult,
+    RegistryImage,
+    TargetResult,
+    TaskResult,
+    SCHEMA_VERSION,
+)
 
 
 # ==============================================================================
@@ -122,6 +131,39 @@ def _write_html_report_files(html_content: str, primary_html_file: Path) -> None
             # Best-effort: don't fail the build if the secondary write fails.
             logger = logging.getLogger("html")
             logger.warning(f"Failed to write secondary HTML file {_html_out_file}: {e}")
+
+
+def _write_report_and_json(
+    html_content: str,
+    all_tasks: Dict[str, 'BaseTask'],
+    repo_path: Path,
+    sha: str,
+    log_dir: Path,
+    date_str: str,
+) -> None:
+    """Write HTML report, update status marker, and save JSON build report.
+
+    Consolidates the three steps (HTML write, marker update, JSON write) that
+    must happen together whenever the report is refreshed.  JSON generation
+    failures are logged but never fail the build.
+    """
+    html_file = log_dir / f"{date_str}.{sha}.report.html"
+    _write_html_report_files(html_content, html_file)
+    update_report_status_marker(html_file, all_tasks)
+
+    # Best-effort JSON alongside the HTML
+    try:
+        report = generate_build_report(
+            all_tasks=all_tasks,
+            repo_path=repo_path,
+            sha=sha,
+            log_dir=log_dir,
+            date_str=date_str,
+        )
+        json_file = log_dir / f"{date_str}.{sha}.json"
+        report.to_file(json_file)
+    except Exception as exc:
+        logging.getLogger("html").warning(f"Failed to write JSON build report: {exc}")
 
 
 def check_sha_changed(repo_path: Path, task_id: str) -> Optional[str]:
@@ -417,9 +459,7 @@ def _generate_error_html_and_exit(
             date_str=log_date,
             use_absolute_urls=False,
         )
-        html_file = log_dir / f"{log_date}.{sha}.report.html"
-        _write_html_report_files(html_content, html_file)
-        update_report_status_marker(html_file, all_tasks)
+        _write_report_and_json(html_content, all_tasks, repo_path, sha, log_dir, log_date)
         logger.info(f"Error HTML report written: {html_file}")
         if _html_out_file:
             logger.info(f"Error HTML report also written: {_html_out_file}")
@@ -1742,9 +1782,7 @@ def execute_task_sequential(
                     date_str=log_date,
                     use_absolute_urls=False,
                 )
-                html_file = log_dir / f"{log_date}.{sha}.report.html"
-                _write_html_report_files(html_content, html_file)
-                update_report_status_marker(html_file, all_tasks)
+                _write_report_and_json(html_content, all_tasks, repo_path, sha, log_dir, log_date)
             except Exception as e:
                 logger.warning(f"Failed to generate HTML report after image-not-found failure: {e}")
 
@@ -1816,9 +1854,7 @@ def execute_task_sequential(
                 date_str=log_date,
                 use_absolute_urls=False,
             )
-            html_file = log_dir / f"{log_date}.{sha}.report.html"
-            _write_html_report_files(html_content, html_file)
-            update_report_status_marker(html_file, all_tasks)
+            _write_report_and_json(html_content, all_tasks, repo_path, sha, log_dir, log_date)
         except Exception as e:
             logger.warning(f"Failed to generate HTML report before task execution: {e}")
 
@@ -1861,9 +1897,7 @@ def execute_task_sequential(
                 date_str=log_date,
                 use_absolute_urls=False,
             )
-            html_file = log_dir / f"{log_date}.{sha}.report.html"
-            _write_html_report_files(html_content, html_file)
-            update_report_status_marker(html_file, all_tasks)
+            _write_report_and_json(html_content, all_tasks, repo_path, sha, log_dir, log_date)
         except Exception as e:
             logger.warning(f"Failed to generate incremental HTML report: {e}")
 
@@ -1945,9 +1979,7 @@ def execute_task_parallel(
                         date_str=log_date,
                         use_absolute_urls=False,
                     )
-                    html_file = log_dir / f"{log_date}.{sha}.report.html"
-                    _write_html_report_files(html_content, html_file)
-                    update_report_status_marker(html_file, all_tasks)
+                    _write_report_and_json(html_content, all_tasks, repo_path, sha, log_dir, log_date)
                 except Exception as e:
                     # Silently continue on error to avoid spam
                     pass
@@ -2012,9 +2044,7 @@ def execute_task_parallel(
                     date_str=log_date,
                     use_absolute_urls=False,
                 )
-                html_file = log_dir / f"{log_date}.{sha}.report.html"
-                _write_html_report_files(html_content, html_file)
-                update_report_status_marker(html_file, all_tasks)
+                _write_report_and_json(html_content, all_tasks, repo_path, sha, log_dir, log_date)
                 logger.info(f"  Generated final HTML report: {html_file}")
             except Exception as e:
                 logger.error(f"  Failed to generate final HTML report: {e}")
@@ -2125,9 +2155,7 @@ def execute_task_parallel(
                         date_str=log_date,
                         use_absolute_urls=False,
                     )
-                    html_file = log_dir / f"{log_date}.{sha}.report.html"
-                    _write_html_report_files(html_content, html_file)
-                    update_report_status_marker(html_file, all_tasks)
+                    _write_report_and_json(html_content, all_tasks, repo_path, sha, log_dir, log_date)
                 except Exception as e:
                     with lock:
                         logger.warning(f"Failed to generate HTML report after image-not-found failure: {e}")
@@ -2193,9 +2221,7 @@ def execute_task_parallel(
                     date_str=log_date,
                     use_absolute_urls=False,
                 )
-                html_file = log_dir / f"{log_date}.{sha}.report.html"
-                _write_html_report_files(html_content, html_file)
-                update_report_status_marker(html_file, all_tasks)
+                _write_report_and_json(html_content, all_tasks, repo_path, sha, log_dir, log_date)
             except Exception as e:
                 with lock:
                     logger.warning(f"Failed to generate HTML report before task execution: {e}")
@@ -2252,9 +2278,7 @@ def execute_task_parallel(
                     date_str=log_date,
                     use_absolute_urls=False,
                 )
-                html_file = log_dir / f"{log_date}.{sha}.report.html"
-                _write_html_report_files(html_content, html_file)
-                update_report_status_marker(html_file, all_tasks)
+                _write_report_and_json(html_content, all_tasks, repo_path, sha, log_dir, log_date)
             except Exception as e:
                 with lock:
                     logger.warning(f"Failed to generate incremental HTML report: {e}")
@@ -2874,6 +2898,240 @@ def generate_html_report(
     )
 
     return html
+
+
+def _parse_size_to_bytes(size_str: Optional[str]) -> Optional[int]:
+    """Parse human-readable size like '21.2 GB' to bytes."""
+    if not size_str:
+        return None
+    # Try to get size_bytes directly from DockerUtils (more accurate)
+    # but this function handles the string form stored in FrameworkTargetData.image_size
+    size_str = size_str.strip()
+    multipliers = {"B": 1, "KB": 1024, "MB": 1024**2, "GB": 1024**3, "TB": 1024**4}
+    for unit, mult in sorted(multipliers.items(), key=lambda x: -len(x[0])):
+        if size_str.upper().endswith(unit):
+            num_part = size_str[: -len(unit)].strip()
+            try:
+                return int(float(num_part) * mult)
+            except ValueError:
+                return None
+    return None
+
+
+def _parse_duration_str(time_str: Optional[str]) -> Optional[float]:
+    """Parse duration string like '120.5s' or 'elapsed 30.2s' to float seconds."""
+    if not time_str:
+        return None
+    # Strip 'elapsed ' prefix
+    s = time_str.strip()
+    if s.startswith("elapsed "):
+        s = s[len("elapsed "):]
+    # Strip trailing 's'
+    if s.endswith("s"):
+        s = s[:-1]
+    try:
+        return float(s)
+    except ValueError:
+        return None
+
+
+def _normalize_status(status: Optional[str]) -> str:
+    """Normalize task status strings to the BuildReport convention."""
+    if not status:
+        return "SKIP"
+    s = status.strip().upper()
+    # Map build_images.py status values to BuildReport convention
+    mapping = {
+        "PASSED": "PASS",
+        "PASS": "PASS",
+        "FAILED": "FAIL",
+        "FAIL": "FAIL",
+        "SKIPPED": "SKIP",
+        "SKIP": "SKIP",
+        "KILLED": "KILLED",
+        "RUNNING": "RUNNING",
+        "QUEUED": "QUEUED",
+        "UPLOADED": "PASS",
+    }
+    return mapping.get(s, s)
+
+
+def generate_build_report(
+    all_tasks: Dict[str, 'BaseTask'],
+    repo_path: Path,
+    sha: str,
+    log_dir: Path,
+    date_str: str,
+) -> BuildReport:
+    """Generate a BuildReport from the current build state.
+
+    Converts _frameworks_data_cache, commit info, and task statistics into
+    the typed BuildReport structure for JSON serialization.
+
+    Args:
+        all_tasks: Dictionary of all tasks that were executed
+        repo_path: Path to the repository
+        sha: Git commit SHA (9 chars)
+        log_dir: Directory containing log files
+        date_str: Date string (YYYY-MM-DD)
+
+    Returns:
+        BuildReport ready for serialization
+    """
+    # Task statistics (same logic as generate_html_report)
+    total_tasks = len(all_tasks)
+    succeeded = sum(1 for task_id, t in all_tasks.items()
+                   if t.status == TaskStatus.PASSED
+                   and not (task_id.startswith('none-') and ('compilation' in task_id or 'sanity' in task_id)))
+    failed = sum(1 for task_id, t in all_tasks.items()
+                if t.status == TaskStatus.FAILED
+                and not (task_id.startswith('none-') and ('compilation' in task_id or 'sanity' in task_id)))
+    skipped = sum(1 for t in all_tasks.values() if t.status == TaskStatus.SKIPPED)
+    killed = sum(1 for t in all_tasks.values() if t.status == TaskStatus.KILLED)
+
+    # Determine overall status
+    if failed > 0:
+        overall_status = "FAIL"
+    elif killed > 0:
+        overall_status = "KILLED"
+    elif sum(1 for t in all_tasks.values() if t.status in (TaskStatus.RUNNING, TaskStatus.QUEUED)) > 0:
+        overall_status = "RUNNING"
+    else:
+        overall_status = "PASS"
+
+    # Commit info
+    commit_info_dict: Dict[str, Any] = {}
+    if git:
+        try:
+            repo = git.Repo(repo_path)
+            commit_obj = repo.commit(sha)
+            commit_info_dict = {
+                'sha_short': sha[:9],
+                'sha_full': str(commit_obj.hexsha),
+                'author': f"{commit_obj.author.name} <{commit_obj.author.email}>",
+                'date': commit_obj.committed_datetime.isoformat(),
+                'message': commit_obj.message.strip(),
+            }
+            first_line = str(commit_obj.message).split('\n')[0]
+            pr_match = re.search(r'\(#(\d+)\)', first_line)
+            if pr_match:
+                commit_info_dict['pr_number'] = int(pr_match.group(1))
+            try:
+                stats = commit_obj.stats
+                commit_info_dict['insertions'] = int(stats.total.get('insertions', 0))
+                commit_info_dict['deletions'] = int(stats.total.get('deletions', 0))
+            except Exception:
+                pass
+        except Exception:
+            commit_info_dict = {'sha_short': sha[:9], 'sha_full': sha}
+    else:
+        commit_info_dict = {'sha_short': sha[:9], 'sha_full': sha}
+
+    commit = CommitInfo(
+        sha_short=commit_info_dict.get('sha_short', sha[:9]),
+        sha_full=commit_info_dict.get('sha_full', sha),
+        author=commit_info_dict.get('author'),
+        date=commit_info_dict.get('date'),
+        message=commit_info_dict.get('message'),
+        pr_number=commit_info_dict.get('pr_number'),
+        insertions=commit_info_dict.get('insertions'),
+        deletions=commit_info_dict.get('deletions'),
+    )
+
+    # Build frameworks data from _frameworks_data_cache
+    global _frameworks_data_cache
+    if _frameworks_data_cache is None:
+        _frameworks_data_cache = initialize_frameworks_data_cache(
+            all_tasks, log_dir, date_str, sha, repo_path, False
+        )
+    frameworks_data = _frameworks_data_cache
+
+    framework_results: List[FrameworkResult] = []
+    for framework in FRAMEWORKS:
+        fw_data = frameworks_data.get(framework, {})
+        targets: List[TargetResult] = []
+        registry_images: List[RegistryImage] = []
+
+        for target_name in ['runtime', 'dev', 'local-dev']:
+            target_data: FrameworkTargetData = fw_data.get(target_name, FrameworkTargetData())
+
+            def _to_task_result(td: Optional[TaskData]) -> Optional[TaskResult]:
+                if td is None:
+                    return None
+                return TaskResult(
+                    status=_normalize_status(td.status),
+                    duration_s=_parse_duration_str(td.time),
+                    log_file=td.log_file,
+                    prev_status=_normalize_status(td.prev_status) if td.prev_status else None,
+                )
+
+            targets.append(TargetResult(
+                target=target_name,
+                build=_to_task_result(target_data.build),
+                compilation=_to_task_result(target_data.compilation),
+                sanity=_to_task_result(target_data.sanity),
+                image_name=target_data.output_image,
+                image_size_bytes=_parse_size_to_bytes(target_data.image_size),
+                input_image=target_data.input_image,
+            ))
+
+        # Registry images from dev-upload target
+        upload_data: FrameworkTargetData = fw_data.get('dev-upload', FrameworkTargetData())
+        if upload_data.output_image:
+            # output_image is the full gitlab registry URL
+            gitlab_location = upload_data.output_image
+            # Derive image_name (repo:tag) from location: last segment after "/"
+            image_name = gitlab_location.rsplit("/", 1)[-1] if "/" in gitlab_location else gitlab_location
+            # Derive tag from image_name: part after ":"
+            tag = image_name.split(":", 1)[-1] if ":" in image_name else image_name
+
+            push_status = "SKIP"
+            pushed_at = None
+            if upload_data.build:
+                push_status = _normalize_status(upload_data.build.status)
+                # If the upload task completed, use its end_time as pushed_at
+                upload_task_id = f"{framework}-dev-upload"
+                upload_task = all_tasks.get(upload_task_id)
+                if upload_task and upload_task.end_time and upload_task.status == TaskStatus.PASSED:
+                    pushed_at = datetime.fromtimestamp(upload_task.end_time).isoformat()
+
+            # Get dev image size (from the dev target, not the upload target)
+            dev_data: FrameworkTargetData = fw_data.get('dev', FrameworkTargetData())
+            dev_size_bytes = _parse_size_to_bytes(dev_data.image_size)
+
+            registry_images.append(RegistryImage(
+                location=gitlab_location,
+                image_name=image_name,
+                tag=tag,
+                framework=framework,
+                target="dev",
+                push_status=push_status,
+                size_bytes=dev_size_bytes,
+                pushed_at=pushed_at,
+            ))
+
+        framework_results.append(FrameworkResult(
+            framework=framework,
+            targets=targets,
+            registry_images=registry_images,
+        ))
+
+    now = datetime.now()
+    return BuildReport(
+        schema_version=SCHEMA_VERSION,
+        sha_short=sha[:9],
+        sha_full=commit_info_dict.get('sha_full', sha),
+        build_date=date_str,
+        report_generated=now.isoformat(),
+        overall_status=overall_status,
+        total_tasks=total_tasks,
+        succeeded=succeeded,
+        failed=failed,
+        skipped=skipped,
+        killed=killed,
+        commit=commit,
+        frameworks=framework_results,
+    )
 
 
 def send_email_notification(
@@ -3594,9 +3852,7 @@ def main() -> int:
                     date_str=log_date,
                     use_absolute_urls=False,
                 )
-                html_file = log_dir / f"{log_date}.{sha}.report.html"
-                _write_html_report_files(html_content, html_file)
-                update_report_status_marker(html_file, all_tasks)
+                _write_report_and_json(html_content, all_tasks, repo_path, sha, log_dir, log_date)
                 logger.info(f"  Generated final HTML report: {html_file}")
             except Exception as e:
                 logger.error(f"  Failed to generate final HTML report: {e}")
@@ -3721,17 +3977,12 @@ def main() -> int:
                 use_absolute_urls=False,
             )
 
-            # Always save HTML file
-            html_file = log_dir / f"{log_date}.{sha}.report.html"
-            _write_html_report_files(html_content_file, html_file)
-
-            # Create status marker file for the report
-            update_report_status_marker(html_file, all_tasks)
-
-            logger.info(f"  HTML Report: {html_file}")
+            # Save HTML report, status marker, and JSON build report together
+            _write_report_and_json(html_content_file, all_tasks, repo_path, sha, log_dir, log_date)
+            logger.info(f"  HTML + JSON Report saved to: {log_dir}")
         except Exception as e:
-            logger.error(f"Failed to generate HTML report: {e}")
-            # Continue to try sending email even if HTML report generation failed
+            logger.error(f"Failed to generate reports: {e}")
+            # Continue to try sending email even if report generation failed
 
         # Send email notification (separate try-except to avoid hiding email errors)
         if args.email:
