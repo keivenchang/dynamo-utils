@@ -606,6 +606,8 @@ grep -n "needs:" .github/workflows/<workflow>.yml
 
 ## 4.8 Dynamo-utils dashboards (operational runbook)
 
+**When the user says "run update_html_pages" (or similar) without specifying tasks:** run with `--show-commit-history` only (not all tasks). Example: `./update_html_pages.sh --show-commit-history --run-ignore-lock`.
+
 For operational procedures including:
 - Running `update_html_pages.sh`
 - Output verification and troubleshooting

@@ -118,6 +118,10 @@ STATUS_BUILDING = 'building'
 # Example: https://grafana.nvidia.com/d/beyv28rcnhs74b/individual-job-details?orgId=283&var-branch=pull-request%2F5516&var-job=All&var-job_status=All&${__url_time_range}&var-repo=All&var-commit=All&var-workflow=All&from=now-30d&to=now
 GRAFANA_PR_URL_TEMPLATE = "https://grafana.nvidia.com/d/beyv28rcnhs74b/individual-job-details?orgId=283&var-branch=pull-request%2F{pr_number}&var-job=All&var-job_status=All&var-repo=All&var-commit=All&var-workflow=All&from=now-30d&to=now"
 
+# URL to container/build-local-dev.py (curl and pipe to python3 to create local-dev image).
+# Derived from this script's repo (dynamo-utils or dynamo-utils.dev) so the copy command matches where the dashboard runs from.
+BUILD_LOCAL_DEV_SCRIPT_URL = f"http://speedoflight.nvidia.com/dynamo/{_UTILS_DIR.name}/container/build-local-dev.py"
+
 
 _normalize_check_name = normalize_check_name
 _is_required_check_name = is_required_check_name
@@ -1309,6 +1313,7 @@ class CommitHistoryGenerator:
                             created_display = dt.strftime('%Y-%m-%d %H:%M')
                         except (ValueError, TypeError):
                             created_display = report.report_generated[:16]
+                    local_dev_cmd = f"curl -sL {BUILD_LOCAL_DEV_SCRIPT_URL} | python3 - {img.image_name} --build"
                     formatted.append({
                         "tag": img.tag,
                         "framework": img.framework,
@@ -1316,6 +1321,7 @@ class CommitHistoryGenerator:
                         "location": img.location,
                         "size_display": size_display,
                         "created_display": created_display,
+                        "local_dev_cmd": local_dev_cmd,
                     })
                 dev_registry_images[sha_short_key] = formatted
             except Exception as e:
