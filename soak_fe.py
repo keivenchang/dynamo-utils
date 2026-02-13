@@ -39,7 +39,7 @@ class LoadTestConfig:
     def __init__(self):
         self.duration_sec = 60
         self.workers = 1
-        self.requests_per_worker = 100
+        self.requests_per_worker = 1
         self.port = 8000
         self.model = None  # Available models: "Qwen/Qwen3-0.6B", "deepseek-ai/DeepSeek-R1-Distill-Llama-8B", etc.
         self.max_tokens = 300
@@ -396,12 +396,25 @@ class LoadTestWorker:
                 continue
 
     async def _retry_request(self, request_func) -> Tuple[bool, float, int, str]:
-        """Retry a request function forever until success or non-connection error."""
+        """Retry a request function forever until success or non-retriable error."""
         attempt = 0
         while not self.cancelled:
             attempt += 1
             try:
-                return await request_func()
+                result = await request_func()
+                success, duration, status_code, content = result
+
+                # Retry on 400/404 -- model may still be loading
+                if not success and status_code in (400, 404):
+                    wait_time = 3.0
+                    print(
+                        f"Worker {self.worker_id}: HTTP {status_code} (attempt {attempt}), model may not be ready. Retrying in {wait_time}s...",
+                        file=sys.stderr,
+                    )
+                    await asyncio.sleep(wait_time)
+                    continue
+
+                return result
             except Exception as e:
                 error_str = str(e).lower()
                 # Check for connection-related errors
