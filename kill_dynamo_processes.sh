@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Kill all dynamo/vllm/sglang processes
-# Usage: ./kill_dynamo_processes.sh [--force] [--all]
+# Usage: ./kill_dynamo_processes.sh [--force] [--all] [--ports PORT1,PORT2,...]
 
 set -euo pipefail
 
@@ -15,13 +15,26 @@ NC='\033[0m' # No Color
 # Check for flags
 FORCE_MODE=false
 KILL_ALL=false
+KILL_PORTS=()
 
-for arg in "$@"; do
-    if [[ "$arg" == "--force" ]]; then
-        FORCE_MODE=true
-    elif [[ "$arg" == "--all" ]]; then
-        KILL_ALL=true
-    fi
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --force)
+            FORCE_MODE=true
+            shift
+            ;;
+        --all)
+            KILL_ALL=true
+            shift
+            ;;
+        --ports)
+            IFS=',' read -ra KILL_PORTS <<< "$2"
+            shift 2
+            ;;
+        *)
+            shift
+            ;;
+    esac
 done
 
 echo -e "${YELLOW}🔄 Starting cleanup of dynamo/vllm/sglang processes...${NC}"
@@ -98,6 +111,62 @@ safe_kill() {
         echo
     fi
 }
+
+# Function to get PIDs listening on a port
+get_port_pids() {
+    local port=$1
+    if command -v ss >/dev/null 2>&1; then
+        ss -ltnp 2>/dev/null | grep ":$port " | sed -n 's/.*pid=\([0-9]*\).*/\1/p' | sort -u
+    elif command -v lsof >/dev/null 2>&1; then
+        lsof -ti:$port 2>/dev/null || true
+    elif command -v fuser >/dev/null 2>&1; then
+        fuser $port/tcp 2>/dev/null | tr -d ' ' || true
+    fi
+}
+
+# Function to kill processes on a specific port with retry
+safe_kill_port() {
+    local port="$1"
+    local max_retries=5
+    local retry=0
+
+    while [ $retry -lt $max_retries ]; do
+        local pids=$(get_port_pids "$port")
+        if [ -z "$pids" ]; then
+            if [ $retry -gt 0 ]; then
+                echo -e "${GREEN}✓ Port $port freed after $retry attempt(s)${NC}"
+            fi
+            return 0
+        fi
+
+        echo -e "${RED}Killing processes on port $port: $pids (attempt $((retry + 1))/$max_retries)${NC}"
+        echo "$pids" | while read pid; do
+            if [ -n "$pid" ]; then
+                ps -p "$pid" -o pid,cmd --no-headers 2>/dev/null || true
+            fi
+        done
+        echo "$pids" | xargs kill -9 2>/dev/null || true
+        sleep 2
+        retry=$((retry + 1))
+    done
+
+    # Final check
+    local remaining=$(get_port_pids "$port")
+    if [ -n "$remaining" ]; then
+        echo -e "${YELLOW}⚠ Port $port still has processes after cleanup: $remaining${NC}"
+    else
+        echo -e "${GREEN}✓ Port $port freed after $retry attempt(s)${NC}"
+    fi
+}
+
+# Kill processes on specified ports (if --ports was provided)
+if [ ${#KILL_PORTS[@]} -gt 0 ]; then
+    echo -e "${YELLOW}Killing processes on ports: ${KILL_PORTS[*]}${NC}"
+    for port in "${KILL_PORTS[@]}"; do
+        safe_kill_port "$port"
+    done
+    echo
+fi
 
 # Kill dynamo frontend processes
 safe_kill "python.*dynamo\.frontend" "dynamo frontend"

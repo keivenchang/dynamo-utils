@@ -2,6 +2,8 @@
 
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 BACKENDS=examples/backends
 # Use existing environment variables if set, otherwise use defaults
 : ${DYN_FRONTEND_PORT:=8000}
@@ -513,36 +515,12 @@ if [ "$DRY_RUN" = true ]; then
     echo
 fi
 
-# Function to clean up dynamo processes
-# Parameters: cleanup_frontend (true/false), cleanup_backend (true/false)
+# Function to clean up dynamo processes using the dedicated kill script
 cleanup_dynamo_processes() {
-    local cleanup_frontend="${1:-true}"
-    local cleanup_backend="${2:-true}"
-
     if [ "$DRY_RUN" = false ]; then
-        if [ "$cleanup_backend" = true ]; then
-            (ps -ef --forest|grep multiprocess|awk '{print $2}'|xargs -r kill) 2>/dev/null || true
-            (ps -ef|grep "python3.*\/tmp"|awk '{print $2}'|xargs -r kill) 2>/dev/null || true
-            (ps -ef|grep "VLLM::EngineCore"|awk '{print $2}'|xargs -r kill) 2>/dev/null || true
-            (ps -ef|grep "python -m dynamo.sglang.main"|awk '{print $2}'|xargs -r kill) 2>/dev/null || true
-            pkill -f "python3 -m dynamo.vllm" 2>/dev/null || true
-            pkill -f "python3 -m dynamo.sglang" 2>/dev/null || true
-            pkill -f "python3 -m dynamo.trtllm" 2>/dev/null || true
-        fi
-        if [ "$cleanup_frontend" = true ]; then
-            (ps -ef|grep "python -m dynamo.frontend"|grep -v grep|awk '{print $2}'|xargs -r kill) 2>/dev/null || true
-            pkill -f "python -m dynamo.frontend" 2>/dev/null || true
-        fi
+        "$SCRIPT_DIR/kill_dynamo_processes.sh" --force 2>/dev/null || true
     else
-        if [ "$cleanup_backend" = true ]; then
-            dry_run_echo "Would kill multiprocess processes: \$(ps -ef --forest|grep multiprocess|awk '{print \$2}')"
-            dry_run_echo "Would kill python3 temp processes: \$(ps -ef|grep \"python3.*\/tmp\"|awk '{print \$2}')"
-            dry_run_echo "Would kill VLLM processes: \$(ps -ef|grep \"VLLM::EngineCore\"|awk '{print \$2}')"
-            dry_run_echo "Would kill sglang processes: \$(ps -ef|grep \"python -m dynamo.sglang.main\"|awk '{print \$2}')"
-        fi
-        if [ "$cleanup_frontend" = true ]; then
-            dry_run_echo "Would kill frontend processes: \$(ps -ef|grep \"python -m dynamo.frontend\"|grep -v grep|awk '{print \$2}')"
-        fi
+        dry_run_echo "Would run: kill_dynamo_processes.sh --force"
     fi
 }
 
@@ -551,8 +529,8 @@ if [ ! -e /.dockerenv ]; then
     exit 1
 fi
 
-# Clean up any existing processes before starting - only kill what we're about to launch
-cleanup_dynamo_processes "$RUN_FRONTEND" "$RUN_BACKEND"
+# Clean up any existing dynamo processes before starting
+cleanup_dynamo_processes
 if [ -d "~/dynamo" ]; then
     WORKSPACE_DIR="~/dynamo"
 elif [ -d "/workspace" ]; then
@@ -570,10 +548,6 @@ cd $WORKSPACE_DIR
 #time CARGO_INCREMENTAL=1 cargo build --workspace --bin dynamo-run
 #    --bin http --bin llmctl
 # time uv pip install -e .
-
-if [ "$DRY_RUN" = false ]; then
-    pkill -f "python3.*--endpoint" || true
-fi
 
 # Detect and validate framework if backend will be started - do this early
 if [ "$RUN_BACKEND" = true ]; then
@@ -622,11 +596,8 @@ cleanup_on_exit() {
     [ -n "$BACKEND_PID" ] && kill -9 $BACKEND_PID 2>/dev/null || true
     [ -n "$PREFILL_PID" ] && kill -9 $PREFILL_PID 2>/dev/null || true
 
-    # Force kill any remaining dynamo processes
-    pkill -9 -f "python.*dynamo\.(frontend|trtllm|vllm|sglang)" 2>/dev/null || true
-
-    # Reuse the cleanup function to be thorough
-    cleanup_dynamo_processes
+    # Thorough cleanup via dedicated kill script
+    "$SCRIPT_DIR/kill_dynamo_processes.sh" --force 2>/dev/null || true
 
     echo "Cleanup complete."
 }
@@ -801,44 +772,6 @@ check_all_ports() {
     fi
 }
 
-# Function to get PIDs using a port
-get_port_pids() {
-    local port=$1
-    # Try different methods to find PIDs
-    if command -v ss >/dev/null 2>&1; then
-        ss -ltnp 2>/dev/null | grep ":$port " | sed -n 's/.*pid=\([0-9]*\).*/\1/p' | sort -u
-    elif command -v lsof >/dev/null 2>&1; then
-        lsof -ti:$port 2>/dev/null || true
-    elif command -v fuser >/dev/null 2>&1; then
-        fuser $port/tcp 2>/dev/null | tr -d ' ' || true
-    fi
-}
-
-# Function to kill processes on specific ports with retry
-kill_port_processes() {
-    local ports=("$@")
-    for port in "${ports[@]}"; do
-        local max_retries=5
-        local retry=0
-        while [ $retry -lt $max_retries ]; do
-            local pids=$(get_port_pids $port)
-            if [ -z "$pids" ]; then
-                break
-            fi
-            echo "Killing processes on port $port: $pids (attempt $((retry + 1))/$max_retries)"
-            echo "$pids" | xargs kill -9 2>/dev/null || true
-            sleep 2
-            retry=$((retry + 1))
-        done
-
-        # Final check
-        local remaining=$(get_port_pids $port)
-        if [ -n "$remaining" ]; then
-            echo "Warning: Port $port still has processes after cleanup: $remaining"
-        fi
-    done
-}
-
 # Start background processes based on component selection
 FRONTEND_PID=""
 BACKEND_PID=""
@@ -852,10 +785,10 @@ if [ "$DRY_RUN" = false ]; then
         DECODE_PORT=$((DYN_BACKEND_PORT + 1))
     fi
 
-    # Kill processes on required ports
+    # Kill processes on required ports via dedicated kill script
     ports_to_kill=()
     if [ "$RUN_FRONTEND" = true ]; then
-        ports_to_kill+=(8000)
+        ports_to_kill+=($DYN_FRONTEND_PORT)
     fi
     if [ "$RUN_BACKEND" = true ]; then
         if [ "$DISAGG_MODE" = true ]; then
@@ -866,8 +799,8 @@ if [ "$DRY_RUN" = false ]; then
     fi
 
     if [ ${#ports_to_kill[@]} -gt 0 ]; then
-        echo "Cleaning up processes on ports: ${ports_to_kill[*]}"
-        kill_port_processes "${ports_to_kill[@]}"
+        port_list=$(IFS=,; echo "${ports_to_kill[*]}")
+        "$SCRIPT_DIR/kill_dynamo_processes.sh" --force --ports "$port_list"
     fi
 
     # Now check if ports are available
