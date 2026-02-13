@@ -450,6 +450,7 @@ def _generate_error_html_and_exit(
         update_frameworks_data_cache(task, use_absolute_urls=email is not None)
 
     # Generate HTML report
+    html_file = log_dir / f"{log_date}.{sha}.report.html"
     try:
         html_content = generate_html_report(
             all_tasks=all_tasks,
@@ -1472,6 +1473,11 @@ def parse_args() -> argparse.Namespace:
         help="Skip all compilation tasks",
     )
     parser.add_argument(
+        "--upload",
+        action="store_true",
+        help="Push dev images to GitLab registry (gitlab-master.nvidia.com). If not set, dev-upload tasks are skipped and reported as such.",
+    )
+    parser.add_argument(
         "--max-workers",
         type=int,
         default=None,
@@ -1642,6 +1648,7 @@ def execute_task_sequential(
     dry_run: bool = False,
     skip_action_if_already_passed: bool = False,
     no_compile: bool = False,
+    enable_dev_upload: bool = False,
 ) -> bool:
     """
     Execute a single task and its dependencies recursively (sequential mode).
@@ -1658,6 +1665,7 @@ def execute_task_sequential(
         dry_run: If True, only print commands without executing
         skip_action_if_already_passed: If True, skip any task if .PASSED marker exists or if build image exists
         no_compile: If True, skip all compilation tasks
+        enable_dev_upload: If True, run dev-upload tasks; otherwise skip them and report as skipped
 
     Returns:
         True if task succeeded, False if failed
@@ -1675,7 +1683,7 @@ def execute_task_sequential(
         if not execute_task_sequential(
             all_tasks, executed_tasks, failed_tasks, parent_id,
             repo_path, sha, log_dir, log_date, dry_run, skip_action_if_already_passed,
-            no_compile
+            no_compile, enable_dev_upload
         ):
             # Parent failed
             if not task.run_even_if_deps_fail:
@@ -1701,7 +1709,25 @@ def execute_task_sequential(
                 execute_task_sequential(
                     all_tasks, executed_tasks, failed_tasks, child_id,
                     repo_path, sha, log_dir, log_date, dry_run, skip_action_if_already_passed,
-                    no_compile
+                    no_compile, enable_dev_upload
+                )
+
+        return True
+
+    # Check if we should skip dev-upload (--upload not set)
+    if not enable_dev_upload and task_id.endswith("-dev-upload"):
+        logger.info(f"⊘ Skipping {task_id}: upload disabled (use --upload to push to GitLab)")
+        task.mark_status_as(TaskStatus.SKIPPED, "Upload disabled (use --upload to enable)")
+        if log_dir and log_date:
+            update_frameworks_data_cache(task, use_absolute_urls=False)
+
+        # Process children
+        for child_id in task.children:
+            if child_id not in executed_tasks:
+                execute_task_sequential(
+                    all_tasks, executed_tasks, failed_tasks, child_id,
+                    repo_path, sha, log_dir, log_date, dry_run, skip_action_if_already_passed,
+                    no_compile, enable_dev_upload
                 )
 
         return True
@@ -1734,7 +1760,7 @@ def execute_task_sequential(
                 execute_task_sequential(
                     all_tasks, executed_tasks, failed_tasks, child_id,
                     repo_path, sha, log_dir, log_date, dry_run, skip_action_if_already_passed,
-                    no_compile
+                    no_compile, enable_dev_upload
                 )
 
         return True
@@ -1819,7 +1845,7 @@ def execute_task_sequential(
                     execute_task_sequential(
                         all_tasks, executed_tasks, failed_tasks, child_id,
                         repo_path, sha, log_dir, log_date, dry_run, skip_action_if_already_passed,
-                        no_compile
+                        no_compile, enable_dev_upload
                     )
 
             return True
@@ -1908,7 +1934,7 @@ def execute_task_sequential(
                 execute_task_sequential(
                     all_tasks, executed_tasks, failed_tasks, child_id,
                     repo_path, sha, log_dir, log_date, dry_run, skip_action_if_already_passed,
-                    no_compile
+                    no_compile, enable_dev_upload
                 )
 
     return task.status == TaskStatus.PASSED
@@ -1924,6 +1950,7 @@ def execute_task_parallel(
     dry_run: bool = False,
     skip_if_passed: bool = False,
     no_compile: bool = False,
+    enable_dev_upload: bool = False,
     max_workers: int = 4,
 ) -> Tuple[Set[str], Set[str]]:
     """
@@ -1942,6 +1969,7 @@ def execute_task_parallel(
         dry_run: If True, only print commands without executing
         skip_if_passed: If True, skip any task if .PASSED marker exists or if build image exists
         no_compile: If True, skip all compilation tasks
+        enable_dev_upload: If True, run dev-upload tasks; otherwise skip them and report as skipped
         max_workers: Maximum number of parallel threads
 
     Returns:
@@ -2045,6 +2073,7 @@ def execute_task_parallel(
                     use_absolute_urls=False,
                 )
                 _write_report_and_json(html_content, all_tasks, repo_path, sha, log_dir, log_date)
+                html_file = log_dir / f"{log_date}.{sha}.report.html"
                 logger.info(f"  Generated final HTML report: {html_file}")
             except Exception as e:
                 logger.error(f"  Failed to generate final HTML report: {e}")
@@ -2086,6 +2115,17 @@ def execute_task_parallel(
             with lock:
                 logger.info(f"⊘ Skipping {task_id}: --no-compile flag set")
             task.mark_status_as(TaskStatus.SKIPPED, "--no-compile flag set")
+            with lock:
+                executed_tasks.add(task_id)
+            return True
+
+        # Check if we should skip dev-upload (--upload not set)
+        if not enable_dev_upload and task_id.endswith("-dev-upload"):
+            with lock:
+                logger.info(f"⊘ Skipping {task_id}: upload disabled (use --upload to push to GitLab)")
+            task.mark_status_as(TaskStatus.SKIPPED, "Upload disabled (use --upload to enable)")
+            if log_dir and log_date:
+                update_frameworks_data_cache(task, use_absolute_urls=False)
             with lock:
                 executed_tasks.add(task_id)
             return True
@@ -2562,10 +2602,7 @@ def update_frameworks_data_cache(task: 'BaseTask', use_absolute_urls: bool = Fal
     if _frameworks_data_cache is None:
         raise RuntimeError("Frameworks data cache not initialized! This should never happen.")
 
-    # Only update if task actually executed (not SKIPPED)
-    if task.status == TaskStatus.SKIPPED:
-        return
-
+    # Update cache for all statuses (including SKIPPED) so the HTML report shows correct state
     # Parse task_id to extract framework and target
     parts = task.task_id.split('-', 1)
     if len(parts) < 2:
@@ -3853,6 +3890,7 @@ def main() -> int:
                     use_absolute_urls=False,
                 )
                 _write_report_and_json(html_content, all_tasks, repo_path, sha, log_dir, log_date)
+                html_file = log_dir / f"{log_date}.{sha}.report.html"
                 logger.info(f"  Generated final HTML report: {html_file}")
             except Exception as e:
                 logger.error(f"  Failed to generate final HTML report: {e}")
@@ -3879,6 +3917,7 @@ def main() -> int:
             dry_run=args.dry_run,
             skip_if_passed=args.skip_action_if_already_passed,
             no_compile=args.no_compile,
+            enable_dev_upload=args.upload,
             max_workers=max_workers,
         )
     else:
@@ -3898,6 +3937,7 @@ def main() -> int:
                 dry_run=args.dry_run,
                 skip_action_if_already_passed=args.skip_action_if_already_passed,
                 no_compile=args.no_compile,
+                enable_dev_upload=args.upload,
             )
 
     # Calculate total execution time

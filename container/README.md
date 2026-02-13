@@ -41,7 +41,17 @@ python3 container/build_images.py --repo-path ~/dynamo/dynamo_ci --skip-action-i
 
 # Full build
 python3 container/build_images.py --repo-path ~/dynamo/dynamo_ci --parallel --force-run
+
+# With dev image upload to GitLab (optional)
+python3 container/build_images.py --repo-path ~/dynamo/dynamo_ci --parallel --skip --run-ignore-lock --upload
 ```
+
+### Dev upload and cron
+
+- **Dev upload** pushes the dev image to `gitlab-master.nvidia.com:5005/dl/ai-dynamo/dynamo/dev/`. It is **off by default**.
+- To enable upload, pass **`--upload`**. Without it, dev-upload tasks are skipped and the HTML report shows "Skipped" for them.
+- **Cron**: If your cron job should push dev images to GitLab, add `--upload` to the command. Example:
+  - `0 2 * * * ... container/build_images.py --repo-path /path/to/repo --parallel --skip --run-ignore-lock --upload`
 
 ### Features
 

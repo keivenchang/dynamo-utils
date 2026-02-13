@@ -196,7 +196,7 @@ h2 { margin: 0; font-size: 1.2em; font-weight: bold; }
 {%- elif build_task.status == 'queued' %}
 <span style="color: #95a5a6;">⏳ to be uploaded</span>{%- if build_task.time %} <span class="chart-timing">(prev: {{ build_task.time }})</span>{%- endif %}
 {%- elif build_task.status == 'skipped' %}
-{%- if build_task.prev_status %}<span class="chart-timing">prev: <span class="success">UPLOADED</span>{%- if build_task.time %} ({{ build_task.time }}){%- endif %}</span>{%- endif %}
+<span style="color: #95a5a6;">⏭️ Skipped</span>{%- if build_task.prev_status %} <span class="chart-timing">(prev: <span class="success">UPLOADED</span>{%- if build_task.time %} {{ build_task.time }}{%- endif %})</span>{%- endif %}
 {%- else %}
 <span class="failure">❌ FAIL</span> <span class="chart-timing">({{ build_task.time if build_task.time else 'n/a' }})</span>
 {%- endif %}
