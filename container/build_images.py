@@ -650,13 +650,14 @@ def create_task_graph(
 
     # Level 5: Dev upload (runs after dev sanity check succeeds, in parallel with local-dev build)
     gitlab_dev_image_tag = f"gitlab-master.nvidia.com:5005/dl/ai-dynamo/dynamo/dev/{dev_image_tag}"
+    # Use "docker rmi ... || true" so a second run or already-removed tag does not fail the task
     tasks[f"{framework}-dev-upload"] = CommandTask(
         task_id=f"{framework}-dev-upload",
         description=f"Upload {framework.upper()} dev image to GitLab registry",
         command=(
             f"docker tag {dev_image_tag} {gitlab_dev_image_tag} && "
             f"docker push {gitlab_dev_image_tag} && "
-            f"docker rmi {gitlab_dev_image_tag}"
+            f"( docker rmi {gitlab_dev_image_tag} || true )"
         ),
         input_image=dev_image_tag,
         output_image=gitlab_dev_image_tag,

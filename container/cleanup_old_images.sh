@@ -92,10 +92,14 @@ while [[ $# -gt 0 ]]; do
 done
 
 # Function to get images for a specific variant, sorted by creation time (newest first)
+# Matches both old format (v0.9.0.dev.COMMIT-VARIANT-TARGET) and
+# new format (COMMIT-VARIANT-TARGET), e.g. dynamo:98df1a2c5-vllm-dev
+# Excludes latest-* tags (those are always kept).
 get_variant_images() {
     local variant=$1
     docker images --format "{{.Repository}}:{{.Tag}} {{.ID}} {{.CreatedAt}}" \
-        | grep -E "^(dynamo|<none>):.*v.*\.dev.*-${variant}($| |-local-dev)" \
+        | grep -E "^dynamo:.*-${variant}-(dev|local-dev|runtime) " \
+        | grep -v ":latest-" \
         | sort -k3,4 -r
 }
 
@@ -309,9 +313,10 @@ main() {
     # First, delete all <none> images
     delete_none_images
     
-    # Process each variant
+    # Process each variant (including base "none" images)
+    process_variant "none" "Base (none)"
     process_variant "vllm" "VLLM"
-    process_variant "sglang" "SGLang" 
+    process_variant "sglang" "SGLang"
     process_variant "trtllm" "TensorRT-LLM"
     
     # Delete the identified images
