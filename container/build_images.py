@@ -1115,6 +1115,23 @@ class BaseTask(ABC):
         except (subprocess.TimeoutExpired, subprocess.CalledProcessError, OSError):
             return False
 
+    def image_exists(self) -> bool:
+        """Check if output Docker image already exists locally."""
+        if not self.output_image:
+            return False
+
+        try:
+            result = subprocess.run(
+                ["docker", "inspect", self.output_image],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True
+            )
+            return result.returncode == 0
+        except (subprocess.CalledProcessError, OSError) as e:
+            self.logger.warning(f"Error checking image existence: {e}")
+            return False
+
     def format_log_header(self, repo_path: Path) -> str:
         """
         Format the log file header for this task.
@@ -1251,24 +1268,6 @@ class BuildTask(BaseTask):
         command = self.get_command(repo_path)
         exit_code = self._run_command(command, repo_path)
         return exit_code == 0
-
-    def image_exists(self) -> bool:
-        """Check if Docker image already exists"""
-        if not self.output_image:
-            return False
-
-        try:
-            # Use docker inspect to check if image exists
-            result = subprocess.run(
-                ["docker", "inspect", self.output_image],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True
-            )
-            return result.returncode == 0
-        except (subprocess.CalledProcessError, OSError) as e:
-            self.logger.warning(f"Error checking image existence: {e}")
-            return False
 
     def get_image_size(self) -> Optional[str]:
         """Get the size of the Docker image in human-readable format"""
@@ -1553,14 +1552,16 @@ def parse_args() -> argparse.Namespace:
         help="Skip all compilation tasks",
     )
     parser.add_argument(
-        "--upload",
+        "--no-upload",
         action="store_true",
-        help="Push dev images to GitLab registry (gitlab-master.nvidia.com). If not set, dev-upload tasks are skipped and reported as such.",
+        default=False,
+        help="Skip pushing dev images to GitLab registry (upload is enabled by default).",
     )
     parser.add_argument(
-        "--compress",
+        "--no-compress",
         action="store_true",
-        help="Compress dev images by removing /workspace, .git dirs, /tmp and squashing layers. Overwrites the original dev image tag.",
+        default=False,
+        help="Skip compressing dev images (compress is enabled by default).",
     )
     parser.add_argument(
         "--max-workers",
@@ -1915,8 +1916,8 @@ def execute_task_sequential(
         return False
 
     # Check if we should skip any task if it has already passed.
-    # IMPORTANT: For BuildTask, a stale .PASSED marker is NOT sufficient to skip.
-    # The output image must exist (users may have pruned local images).
+    # IMPORTANT: A stale .PASSED marker is NOT sufficient to skip if the task produces
+    # a Docker image. The output image must still exist locally (users may have pruned).
     if skip_action_if_already_passed:
         if isinstance(task, BuildTask):
             if task.image_exists():
@@ -1931,8 +1932,18 @@ def execute_task_sequential(
                 skip_task = False
                 reason = ""
         else:
-            skip_task = task.passed_previously()
-            reason = "Already passed previously" if skip_task else ""
+            has_output = bool(task.output_image)
+            output_ok = task.image_exists() if has_output else True
+            if task.passed_previously() and output_ok:
+                skip_task = True
+                reason = "Already passed previously"
+            elif task.passed_previously() and not output_ok:
+                skip_task = False
+                reason = ""
+                logger.info(f"Found .PASSED marker for {task_id} but output image is missing; re-running")
+            else:
+                skip_task = False
+                reason = ""
 
         if skip_task:
             logger.info(f"⊘ Skipping {task_id}: {reason}")
@@ -2313,8 +2324,8 @@ def execute_task_parallel(
             return False
 
         # Check if we should skip any task if it has already passed.
-        # IMPORTANT: For BuildTask, a stale .PASSED marker is NOT sufficient to skip.
-        # The output image must exist (users may have pruned local images).
+        # IMPORTANT: A stale .PASSED marker is NOT sufficient to skip if the task produces
+        # a Docker image. The output image must still exist locally (users may have pruned).
         if skip_if_passed:
             if isinstance(task, BuildTask):
                 if task.image_exists():
@@ -2330,8 +2341,19 @@ def execute_task_parallel(
                     skip_task = False
                     reason = ""
             else:
-                skip_task = task.passed_previously()
-                reason = "Already passed previously" if skip_task else ""
+                has_output = bool(task.output_image)
+                output_ok = task.image_exists() if has_output else True
+                if task.passed_previously() and output_ok:
+                    skip_task = True
+                    reason = "Already passed previously"
+                elif task.passed_previously() and not output_ok:
+                    skip_task = False
+                    reason = ""
+                    with lock:
+                        logger.info(f"Found .PASSED marker for {task_id} but output image is missing; re-running")
+                else:
+                    skip_task = False
+                    reason = ""
 
             if skip_task:
                 with lock:
@@ -4077,8 +4099,8 @@ def main() -> int:
             dry_run=args.dry_run,
             skip_if_passed=args.skip_action_if_already_passed,
             no_compile=args.no_compile,
-            enable_dev_upload=args.upload,
-            enable_dev_compress=args.compress,
+            enable_dev_upload=not args.no_upload,
+            enable_dev_compress=not args.no_compress,
             max_workers=max_workers,
         )
     else:
@@ -4098,8 +4120,8 @@ def main() -> int:
                 dry_run=args.dry_run,
                 skip_action_if_already_passed=args.skip_action_if_already_passed,
                 no_compile=args.no_compile,
-                enable_dev_upload=args.upload,
-                enable_dev_compress=args.compress,
+                enable_dev_upload=not args.no_upload,
+                enable_dev_compress=not args.no_compress,
             )
 
     # Calculate total execution time
