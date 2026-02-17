@@ -1007,26 +1007,33 @@ class DockerUtils(BaseUtils):
 
     def _parse_dynamo_image(self, image_name: str) -> Optional[DynamoImageInfo]:
         """Parse dynamo image name to extract framework and version info."""
-        # Pattern for dynamo images: (dynamo|dynamo-base):v{version}-{framework}-{target}
-        # Examples:
-        #   dynamo:v0.1.0.dev.ea07d51fc-sglang-local-dev
-        #   dynamo-base:v0.1.0.dev.ea07d51fc-vllm-dev
+        # Two tag formats:
+        #   Old: dynamo:v0.1.0.dev.ea07d51fc-sglang-local-dev  (starts with v)
+        #   New: dynamo:d56439ec2-sglang-local-dev              (commit SHA only)
         #
         # NOTE: version strings may contain hyphens (e.g., "v0.0.0-test-rc7.dev.<sha>"),
         # so we must anchor the framework by matching known framework names rather than
         # splitting on the first '-' after 'v'.
-        fw_alt = "|".join(re.escape(f) for f in FRAMEWORKS)
-        pattern = rf'^(?:dynamo|dynamo-base):v(.+)-({fw_alt})(?:-(.+))?$'
-        match = re.match(pattern, image_name)
+        all_frameworks = list(FRAMEWORKS) + ["none"]
+        fw_alt = "|".join(re.escape(f) for f in all_frameworks)
+
+        # Try old format first (tag starts with v)
+        pattern_old = rf'^(?:dynamo|dynamo-base):v(.+)-({fw_alt})(?:-(.+))?$'
+        match = re.match(pattern_old, image_name)
+
+        if not match:
+            # Try new format: COMMIT_SHA-FRAMEWORK-TARGET (no v prefix)
+            pattern_new = rf'^(?:dynamo|dynamo-base):([a-f0-9]+)-({fw_alt})(?:-(.+))?$'
+            match = re.match(pattern_new, image_name)
 
         if not match:
             return None
 
         version_part, framework, target = match.groups()
 
-        # Validate framework
+        # Validate framework (FRAMEWORKS + "none" for base images)
         normalized_framework = normalize_framework(framework)
-        if normalized_framework not in FRAMEWORKS:
+        if normalized_framework not in FRAMEWORKS and normalized_framework != "none":
             return None
 
         return DynamoImageInfo(

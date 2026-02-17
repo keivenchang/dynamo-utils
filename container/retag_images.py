@@ -41,11 +41,12 @@ class DockerImageRetagger(BaseUtils):
         # Get dynamo local-dev images only
         all_images = self.docker_utils.list_dynamo_images(target="local-dev", sha=sha)
         
-        # Group by framework
-        retaggable = {framework: [] for framework in FRAMEWORKS}
+        # Group by framework (include "none" for base images)
+        retaggable = {framework: [] for framework in list(FRAMEWORKS) + ["none"]}
         for image in all_images:
             if image.dynamo_info and image.dynamo_info.framework:
-                retaggable[image.dynamo_info.framework].append(image)
+                if image.dynamo_info.framework in retaggable:
+                    retaggable[image.dynamo_info.framework].append(image)
                 
         return retaggable
     

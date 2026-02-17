@@ -593,13 +593,15 @@ def create_task_graph(
     )
 
     # Level 1: Dev image build (waits for runtime to complete)
+    # Builds as -dev-orig; compress step will later produce the final -dev image.
     dev_image_tag = f"dynamo:{version}-{framework}-dev"
+    dev_orig_image_tag = f"{dev_image_tag}-orig"
     tasks[f"{framework}-dev-build"] = BuildTask(
         task_id=f"{framework}-dev-build",
         description=f"Build {framework.upper()} dev image",
-        command=_build_cmd("dev", dev_image_tag),
+        command=_build_cmd("dev", dev_orig_image_tag),
         input_image=runtime_image_tag,
-        output_image=dev_image_tag,
+        output_image=dev_orig_image_tag,
         parents=[f"{framework}-runtime-build"],
         timeout=1200.0,  # 20 minutes for builds
     )
@@ -611,16 +613,13 @@ def create_task_graph(
     # - CARGO_BUILD_JOBS=$(nproc): Parallel compilation
     # - CARGO_PROFILE_DEV_CODEGEN_UNITS=256: More parallel code generation
     cargo_cmd = "CARGO_INCREMENTAL=1 CARGO_PROFILE_DEV_OPT_LEVEL=0 CARGO_BUILD_JOBS=$(nproc) CARGO_PROFILE_DEV_CODEGEN_UNITS=256 cargo build --profile dev --features dynamo-llm/block-manager && cd /workspace/lib/bindings/python && CARGO_INCREMENTAL=1 CARGO_PROFILE_DEV_OPT_LEVEL=0 CARGO_BUILD_JOBS=$(nproc) CARGO_PROFILE_DEV_CODEGEN_UNITS=256 maturin develop --uv && uv pip install -e ."
-    # For 'none' framework, run compilation AFTER sanity (sanity runs first, even if it fails)
-    # For other frameworks, run compilation after build (before sanity)
-    dev_compilation_parent = f"{framework}-dev-sanity" if framework == "none" else f"{framework}-dev-build"
+    # Compilation runs after dev-build (before sanity), same for all frameworks
     tasks[f"{framework}-dev-compilation"] = CommandTask(
         task_id=f"{framework}-dev-compilation",
         description=f"Run workspace compilation in {framework.upper()} dev container",
-        command=f"{repo_path}/container/run.sh --image {dev_image_tag} --mount-workspace -v {home_dir}/.cargo:/root/.cargo -v {repo_path}/target/.{framework}:/workspace/target -- bash -c '{cargo_cmd}'",
-        input_image=dev_image_tag,
-        parents=[dev_compilation_parent],
-        run_even_if_deps_fail=framework == "none",  # For none framework, run even if sanity fails
+        command=f"{repo_path}/container/run.sh --image {dev_orig_image_tag} --mount-workspace -v {home_dir}/.cargo:/root/.cargo -v {repo_path}/target/.{framework}:/workspace/target -- bash -c '{cargo_cmd}'",
+        input_image=dev_orig_image_tag,
+        parents=[f"{framework}-dev-build"],
         timeout=600.0,  # 10 minutes for compilation
     )
 
@@ -635,20 +634,17 @@ def create_task_graph(
         timeout=60.0,
     )
 
-    # Level 4: Dev sanity check (runs in parallel with chown)
-    # For 'none' framework, run sanity BEFORE compilation (since compilation will fail)
-    # For other frameworks, run sanity AFTER compilation
-    dev_sanity_parent = f"{framework}-dev-build" if framework == "none" else f"{framework}-dev-compilation"
+    # Level 4: Dev sanity check (runs after compilation, same for all frameworks)
     tasks[f"{framework}-dev-sanity"] = CommandTask(
         task_id=f"{framework}-dev-sanity",
         description=f"Run sanity_check.py in {framework.upper()} dev container",
-        command=f"{repo_path}/container/run.sh --image {dev_image_tag} --mount-workspace --hf-home {home_dir}/.cache/huggingface -v {home_dir}/.cargo:/root/.cargo -- bash -c 'id && python3 /workspace/deploy/sanity_check.py{sanity_no_framework_flag}'",
-        input_image=dev_image_tag,
-        parents=[dev_sanity_parent],
+        command=f"{repo_path}/container/run.sh --image {dev_orig_image_tag} --mount-workspace --hf-home {home_dir}/.cache/huggingface -v {home_dir}/.cargo:/root/.cargo -- bash -c 'id && python3 /workspace/deploy/sanity_check.py{sanity_no_framework_flag}'",
+        input_image=dev_orig_image_tag,
+        parents=[f"{framework}-dev-compilation"],
         timeout=45.0,  # 45 seconds for sanity checks
     )
 
-    # Level 5: Dev upload (runs after dev sanity check succeeds, in parallel with local-dev build)
+    # Level 8: Dev upload (runs after compress-sanity, in parallel with local-dev build)
     gitlab_dev_image_tag = f"gitlab-master.nvidia.com:5005/dl/ai-dynamo/dynamo/dev/{dev_image_tag}"
     # Use "docker rmi ... || true" so a second run or already-removed tag does not fail the task
     tasks[f"{framework}-dev-upload"] = CommandTask(
@@ -661,11 +657,96 @@ def create_task_graph(
         ),
         input_image=dev_image_tag,
         output_image=gitlab_dev_image_tag,
-        parents=[f"{framework}-dev-sanity"],
+        parents=[f"{framework}-dev-compress-sanity"],
         timeout=600.0,  # 10 minutes for upload
     )
 
-    # Level 3: Local-dev image build
+    # Level 6: Dev compress (squash dev-orig image to produce dev)
+    # Takes the -orig image (built by dev-build), removes /workspace, .git dirs,
+    # /tmp, __pycache__, squashes all layers into a single layer via
+    # docker export/import, and outputs the final -dev tag.
+    # Deletes the -orig image when done.
+    #
+    # docker export/import loses all image metadata (ENV, ENTRYPOINT, WORKDIR, USER,
+    # CMD), so we reconstruct it: inspect the original, emit --change flags, then
+    # pass them to docker import.
+    compress_script_path = f"/tmp/_compress_{framework}.sh"
+    compress_script_content = f"""#!/usr/bin/env bash
+set -e
+
+echo "Compressing {dev_orig_image_tag} -> {dev_image_tag}"
+
+# 1. Extract metadata and write a helper import script.
+#    We pipe docker export into this script so stdin flows to docker import.
+docker inspect --format '{{{{json .Config}}}}' {dev_orig_image_tag} | \\
+  python3 -c '
+import sys, json, shlex
+c = json.load(sys.stdin)
+parts = []
+for e in (c.get("Env") or []):
+    # Use ENV key="value" form: quotes protect both spaces in values
+    # (e.g. CUDA_ARCH_LIST) and empty values (e.g. TRTOSS_VERSION=).
+    k, _, v = e.partition("=")
+    parts.extend(["--change", shlex.quote("ENV " + k + "=" + chr(34) + v.replace(chr(34), chr(92)+chr(34)) + chr(34))])
+ep = c.get("Entrypoint")
+if ep:
+    parts.extend(["--change", shlex.quote("ENTRYPOINT " + json.dumps(ep))])
+cmd = c.get("Cmd")
+if cmd:
+    parts.extend(["--change", shlex.quote("CMD " + json.dumps(cmd))])
+wd = c.get("WorkingDir")
+if wd:
+    parts.extend(["--change", shlex.quote("WORKDIR " + wd)])
+u = c.get("User")
+if u:
+    parts.extend(["--change", shlex.quote("USER " + u)])
+with open("/tmp/_compress_import_{framework}.sh", "w") as f:
+    f.write("#!/usr/bin/env bash\\n")
+    f.write("docker import " + " ".join(parts) + " - \\"$1\\"\\n")
+'
+chmod +x /tmp/_compress_import_{framework}.sh
+
+# 2. Create container from -orig that removes bloat, run it to completion
+CONTAINER_ID=$(docker create --entrypoint /bin/bash {dev_orig_image_tag} \\
+  -c 'rm -rf /workspace /tmp/* && find / -name .git -type d -exec rm -rf {{}} + 2>/dev/null; find / -name __pycache__ -type d -exec rm -rf {{}} + 2>/dev/null; true')
+docker start -a "$CONTAINER_ID"
+
+# 3. Flatten and import as the final dev tag
+docker export "$CONTAINER_ID" | bash /tmp/_compress_import_{framework}.sh {dev_image_tag}
+docker rm -f "$CONTAINER_ID"
+rm -f /tmp/_compress_import_{framework}.sh
+
+# 4. Delete the -orig image (force: other stopped containers from run.sh may reference it)
+docker rmi -f {dev_orig_image_tag}
+
+echo "Compress complete: {dev_image_tag}"
+docker images {dev_image_tag} --format 'Size: {{{{.Size}}}}'
+"""
+    # Write script to temp file so shell=True can execute it correctly
+    Path(compress_script_path).write_text(compress_script_content)
+    Path(compress_script_path).chmod(0o755)
+
+    tasks[f"{framework}-dev-compress"] = CommandTask(
+        task_id=f"{framework}-dev-compress",
+        description=f"Compress {framework.upper()} dev image (remove bloat + squash layers)",
+        command=f"bash {compress_script_path}",
+        input_image=dev_orig_image_tag,
+        output_image=dev_image_tag,
+        parents=[f"{framework}-dev-sanity"],
+        timeout=300.0,  # 5 minutes for export/import
+    )
+
+    # Level 7: Sanity check on the compressed dev image (verify it still works after squash)
+    tasks[f"{framework}-dev-compress-sanity"] = CommandTask(
+        task_id=f"{framework}-dev-compress-sanity",
+        description=f"Run sanity_check.py on compressed {framework.upper()} dev image",
+        command=f"{repo_path}/container/run.sh --image {dev_image_tag} --mount-workspace --hf-home {home_dir}/.cache/huggingface -v {home_dir}/.cargo:/root/.cargo -- bash -c 'id && python3 /workspace/deploy/sanity_check.py{sanity_no_framework_flag}'",
+        input_image=dev_image_tag,
+        parents=[f"{framework}-dev-compress"],
+        timeout=45.0,  # 45 seconds for sanity checks
+    )
+
+    # Level 8: Local-dev image build (runs after compress-sanity, in parallel with dev-upload)
     local_dev_image_tag = f"dynamo:{version}-{framework}-local-dev"
     tasks[f"{framework}-local-dev-build"] = BuildTask(
         task_id=f"{framework}-local-dev-build",
@@ -673,38 +754,27 @@ def create_task_graph(
         command=_build_cmd("local-dev", local_dev_image_tag),
         input_image=dev_image_tag,
         output_image=local_dev_image_tag,
-        parents=[f"{framework}-dev-build"],
+        parents=[f"{framework}-dev-compress-sanity"],
         timeout=1200.0,  # 20 minutes for builds
     )
 
-    # Level 5: Local-dev compilation
-    # For 'none' framework, run compilation AFTER sanity (sanity runs first, even if it fails)
-    # For other frameworks, run compilation after build (before sanity)
-    local_dev_compilation_parents = (
-        [f"{framework}-local-dev-sanity", f"{framework}-dev-chown"]
-        if framework == "none"
-        else [f"{framework}-local-dev-build", f"{framework}-dev-chown"]
-    )
+    # Level 9: Local-dev compilation (runs after local-dev-build + dev-chown, same for all frameworks)
     tasks[f"{framework}-local-dev-compilation"] = CommandTask(
         task_id=f"{framework}-local-dev-compilation",
         description=f"Run workspace compilation in {framework.upper()} local-dev container",
         command=f"{repo_path}/container/run.sh --image {local_dev_image_tag} --mount-workspace -v {home_dir}/.cargo:/home/dynamo/.cargo -v {repo_path}/target/.{framework}:/workspace/target -- bash -c '{cargo_cmd}'",
         input_image=local_dev_image_tag,
-        parents=local_dev_compilation_parents,
-        run_even_if_deps_fail=framework == "none",  # For none framework, run even if sanity fails
+        parents=[f"{framework}-local-dev-build", f"{framework}-dev-chown"],
         timeout=600.0,  # 10 minutes for compilation
     )
 
-    # Level 6: Local-dev sanity check
-    # For 'none' framework, run sanity BEFORE compilation (since compilation will fail)
-    # For other frameworks, run sanity AFTER compilation
-    local_dev_sanity_parent = f"{framework}-local-dev-build" if framework == "none" else f"{framework}-local-dev-compilation"
+    # Level 10: Local-dev sanity check (runs after compilation, same for all frameworks)
     tasks[f"{framework}-local-dev-sanity"] = CommandTask(
         task_id=f"{framework}-local-dev-sanity",
         description=f"Run sanity_check.py in {framework.upper()} local-dev container",
         command=f"{repo_path}/container/run.sh --image {local_dev_image_tag} --mount-workspace --hf-home {home_dir}/.cache/huggingface -v {home_dir}/.cargo:/home/dynamo/.cargo -- bash -c 'id && (sudo id || true) && python3 /workspace/deploy/sanity_check.py{sanity_no_framework_flag}'",
         input_image=local_dev_image_tag,
-        parents=[local_dev_sanity_parent],
+        parents=[f"{framework}-local-dev-compilation"],
         timeout=45.0,  # 45 seconds for sanity checks
     )
 
@@ -1479,6 +1549,11 @@ def parse_args() -> argparse.Namespace:
         help="Push dev images to GitLab registry (gitlab-master.nvidia.com). If not set, dev-upload tasks are skipped and reported as such.",
     )
     parser.add_argument(
+        "--compress",
+        action="store_true",
+        help="Compress dev images by removing /workspace, .git dirs, /tmp and squashing layers. Overwrites the original dev image tag.",
+    )
+    parser.add_argument(
         "--max-workers",
         type=int,
         default=None,
@@ -1650,6 +1725,7 @@ def execute_task_sequential(
     skip_action_if_already_passed: bool = False,
     no_compile: bool = False,
     enable_dev_upload: bool = False,
+    enable_dev_compress: bool = False,
 ) -> bool:
     """
     Execute a single task and its dependencies recursively (sequential mode).
@@ -1684,7 +1760,7 @@ def execute_task_sequential(
         if not execute_task_sequential(
             all_tasks, executed_tasks, failed_tasks, parent_id,
             repo_path, sha, log_dir, log_date, dry_run, skip_action_if_already_passed,
-            no_compile, enable_dev_upload
+            no_compile, enable_dev_upload, enable_dev_compress
         ):
             # Parent failed
             if not task.run_even_if_deps_fail:
@@ -1710,9 +1786,23 @@ def execute_task_sequential(
                 execute_task_sequential(
                     all_tasks, executed_tasks, failed_tasks, child_id,
                     repo_path, sha, log_dir, log_date, dry_run, skip_action_if_already_passed,
-                    no_compile, enable_dev_upload
+                    no_compile, enable_dev_upload, enable_dev_compress
                 )
 
+        return True
+
+    # Check if we should skip dev-compress or dev-compress-sanity (--compress not set)
+    if not enable_dev_compress and (task_id.endswith("-dev-compress") or task_id.endswith("-dev-compress-sanity")):
+        logger.info(f"⊘ Skipping {task_id}: compress disabled (use --compress to squash dev images)")
+        task.mark_status_as(TaskStatus.SKIPPED, "Compress disabled (use --compress to enable)")
+        executed_tasks.add(task_id)
+        for child_id in task.children:
+            if child_id not in executed_tasks:
+                execute_task_sequential(
+                    all_tasks, executed_tasks, failed_tasks, child_id,
+                    repo_path, sha, log_dir, log_date, dry_run, skip_action_if_already_passed,
+                    no_compile, enable_dev_upload, enable_dev_compress
+                )
         return True
 
     # Check if we should skip dev-upload (--upload not set)
@@ -1728,7 +1818,7 @@ def execute_task_sequential(
                 execute_task_sequential(
                     all_tasks, executed_tasks, failed_tasks, child_id,
                     repo_path, sha, log_dir, log_date, dry_run, skip_action_if_already_passed,
-                    no_compile, enable_dev_upload
+                    no_compile, enable_dev_upload, enable_dev_compress
                 )
 
         return True
@@ -1761,7 +1851,7 @@ def execute_task_sequential(
                 execute_task_sequential(
                     all_tasks, executed_tasks, failed_tasks, child_id,
                     repo_path, sha, log_dir, log_date, dry_run, skip_action_if_already_passed,
-                    no_compile, enable_dev_upload
+                    no_compile, enable_dev_upload, enable_dev_compress
                 )
 
         return True
@@ -1935,7 +2025,7 @@ def execute_task_sequential(
                 execute_task_sequential(
                     all_tasks, executed_tasks, failed_tasks, child_id,
                     repo_path, sha, log_dir, log_date, dry_run, skip_action_if_already_passed,
-                    no_compile, enable_dev_upload
+                    no_compile, enable_dev_upload, enable_dev_compress
                 )
 
     return task.status == TaskStatus.PASSED
@@ -1952,6 +2042,7 @@ def execute_task_parallel(
     skip_if_passed: bool = False,
     no_compile: bool = False,
     enable_dev_upload: bool = False,
+    enable_dev_compress: bool = False,
     max_workers: int = 4,
 ) -> Tuple[Set[str], Set[str]]:
     """
@@ -2085,13 +2176,13 @@ def execute_task_parallel(
     signal.signal(signal.SIGINT, signal_handler)
 
     def can_execute(task_id: str) -> bool:
-        """Check if all dependencies are satisfied"""
+        """Check if all dependencies have finished (passed, failed, or skipped)"""
         task = all_tasks[task_id]
         for parent_id in task.parents:
             if parent_id not in executed_tasks:
                 return False
-            if parent_id in failed_tasks and not task.run_even_if_deps_fail:
-                return False
+            # Don't block here on failed parents -- let execute_single_task
+            # handle the skip/fail propagation so tasks don't get stuck in pending.
         return True
 
     def execute_single_task(task_id: str) -> bool:
@@ -2116,6 +2207,15 @@ def execute_task_parallel(
             with lock:
                 logger.info(f"⊘ Skipping {task_id}: --no-compile flag set")
             task.mark_status_as(TaskStatus.SKIPPED, "--no-compile flag set")
+            with lock:
+                executed_tasks.add(task_id)
+            return True
+
+        # Check if we should skip dev-compress or dev-compress-sanity (--compress not set)
+        if not enable_dev_compress and (task_id.endswith("-dev-compress") or task_id.endswith("-dev-compress-sanity")):
+            with lock:
+                logger.info(f"⊘ Skipping {task_id}: compress disabled (use --compress to squash dev images)")
+            task.mark_status_as(TaskStatus.SKIPPED, "Compress disabled (use --compress to enable)")
             with lock:
                 executed_tasks.add(task_id)
             return True
@@ -2441,11 +2541,10 @@ def initialize_frameworks_data_cache(
     This is called once at the start, before any tasks run.
     Searches for previous logs in current date and up to 7 days back.
     """
-
     hostname = DEFAULT_HOSTNAME
     html_path = DEFAULT_HTML_PATH
     frameworks_data: Dict[str, Dict[str, Any]] = {}
-    targets = ['runtime', 'dev', 'dev-upload', 'local-dev']
+    targets = ['runtime', 'dev', 'dev-compress', 'dev-upload', 'local-dev']
 
     # Determine which frameworks are actually being run (present in all_tasks)
     frameworks_in_all_tasks = set()
@@ -2469,6 +2568,44 @@ def initialize_frameworks_data_cache(
         for target in targets:
             # Initialize target structure
             frameworks_data[framework][target] = FrameworkTargetData()
+
+            # Special handling for dev-compress: it's a CommandTask pair (compress + compress-sanity)
+            if target == 'dev-compress':
+                compress_task_id = f"{framework}-dev-compress"
+                compress_sanity_task_id = f"{framework}-dev-compress-sanity"
+                compress_task = all_tasks.get(compress_task_id) or (temp_tasks.get(compress_task_id) if temp_tasks else None)
+                compress_sanity_task = all_tasks.get(compress_sanity_task_id) or (temp_tasks.get(compress_sanity_task_id) if temp_tasks else None)
+
+                if compress_task:
+                    frameworks_data[framework][target].input_image = compress_task.input_image
+                    frameworks_data[framework][target].output_image = compress_task.output_image
+                    if compress_task.output_image:
+                        image_size = get_docker_image_size(compress_task.output_image)
+                        if image_size:
+                            frameworks_data[framework][target].image_size = image_size
+
+                # Map compress task to 'build' column, compress-sanity to 'sanity' column
+                for task_id_suffix, col in [(compress_task_id, 'build'), (compress_sanity_task_id, 'sanity')]:
+                    prev_log = find_previous_log_file(repo_path, date_str, sha, task_id_suffix)
+                    if prev_log:
+                        log_file, found_log_dir = prev_log
+                        log_results = parse_log_file_results(log_file)
+                        if log_results:
+                            log_link = (
+                                f"../{found_log_dir.name}/{log_file.name}" if found_log_dir.name != date_str
+                                else log_file.name
+                            )
+                            td = TaskData(
+                                status='skipped',
+                                time=f"{log_results.duration:.1f}s" if log_results.duration else None,
+                                log_file=log_link if not use_absolute_urls else f"http://{hostname}{html_path}/{found_log_dir.name}/{log_file.name}",
+                                prev_status=log_results.status.value,
+                            )
+                            if col == 'build':
+                                frameworks_data[framework][target].build = td
+                            else:
+                                frameworks_data[framework][target].sanity = td
+                continue  # Skip normal BuildTask handling for dev-compress
 
             # Special handling for dev-upload: it's a CommandTask, not a BuildTask
             if target == 'dev-upload':
@@ -2650,7 +2787,20 @@ def update_frameworks_data_cache(task: 'BaseTask', use_absolute_urls: bool = Fal
         _frameworks_data_cache[framework][target].input_image = task.input_image
         _frameworks_data_cache[framework][target].output_image = task.output_image
     elif isinstance(task, CommandTask):
-        if 'compilation' in rest:
+        if rest == 'dev-compress':
+            # Compress task maps to 'build' column of 'dev-compress' target
+            _frameworks_data_cache[framework]['dev-compress'].build = create_task_data_from_task(task)
+            if task.input_image:
+                _frameworks_data_cache[framework]['dev-compress'].input_image = task.input_image
+            if task.output_image:
+                _frameworks_data_cache[framework]['dev-compress'].output_image = task.output_image
+                image_size = get_docker_image_size(task.output_image)
+                if image_size:
+                    _frameworks_data_cache[framework]['dev-compress'].image_size = image_size
+        elif rest == 'dev-compress-sanity':
+            # Compress-sanity maps to 'sanity' column of 'dev-compress' target
+            _frameworks_data_cache[framework]['dev-compress'].sanity = create_task_data_from_task(task)
+        elif 'compilation' in rest:
             target = rest.replace('-compilation', '')
             _frameworks_data_cache[framework][target].compilation = create_task_data_from_task(task)
         elif 'sanity' in rest:
@@ -3919,6 +4069,7 @@ def main() -> int:
             skip_if_passed=args.skip_action_if_already_passed,
             no_compile=args.no_compile,
             enable_dev_upload=args.upload,
+            enable_dev_compress=args.compress,
             max_workers=max_workers,
         )
     else:
@@ -3939,6 +4090,7 @@ def main() -> int:
                 skip_action_if_already_passed=args.skip_action_if_already_passed,
                 no_compile=args.no_compile,
                 enable_dev_upload=args.upload,
+                enable_dev_compress=args.compress,
             )
 
     # Calculate total execution time

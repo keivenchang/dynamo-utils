@@ -29,7 +29,9 @@ body { font-family: Arial, sans-serif; margin: 10px; line-height: 1.3; }
 .chart-target { font-weight: bold; background-color: #f1f3f4; }
 .chart-status { text-align: center; }
 .chart-timing { text-align: right; font-family: monospace; font-size: 0.9em; }
+.chart-cell-span-2 { grid-column: span 2; }
 .chart-cell-span-3 { grid-column: span 3; }
+.chart-cell-span-4 { grid-column: span 4; }
 .success { color: #28a745; font-weight: bold; }
 .failure { color: #dc3545; font-weight: bold; }
 .git-info { background-color: #e9ecef; padding: 4px 6px; border-radius: 2px; font-family: monospace; font-size: 0.9em; }
@@ -167,7 +169,7 @@ h2 { margin: 0; font-size: 1.2em; font-weight: bold; }
 <div class="chart-cell chart-header">Sanity Check</div>
 <div class="chart-cell chart-header">Image Size</div>
 </div>
-{%- for target_name in ['base', 'runtime', 'dev', 'dev-upload', 'local-dev'] %}
+{%- for target_name in ['base', 'runtime', 'dev', 'dev-compress', 'dev-upload', 'local-dev'] %}
 {%- if target_name in targets %}
 {%- set target_data = targets[target_name] %}
 {%- set build_task = target_data.build %}
@@ -175,7 +177,7 @@ h2 { margin: 0; font-size: 1.2em; font-weight: bold; }
 {%- set sanity_task = target_data.sanity %}
 
 <div class="chart-row">
-<div class="chart-cell chart-target">{{ target_name }}</div>
+<div class="chart-cell chart-target">{{ 'dev-orig' if target_name == 'dev' else target_name }}</div>
 <div class="chart-cell" style="font-family: monospace; font-size: 0.85em;">
 {%- if target_data.input_image %}{{ target_data.input_image }}{%- else %}-{%- endif %}
 </div>
@@ -184,8 +186,51 @@ h2 { margin: 0; font-size: 1.2em; font-weight: bold; }
 <button onclick="navigator.clipboard.writeText('{{ target_data.output_image }}').then(function(){alert('Copied to clipboard!');})" style="border: none; background: none; cursor: pointer; padding: 0 4px; font-size: 0.9em;" title="Copy to clipboard">📋</button>{{ target_data.output_image }}
 {%- elif target_data.output_image %}{{ target_data.output_image }}{%- else %}-{%- endif %}
 </div>
-{%- if target_name == 'dev-upload' %}
-<div class="chart-cell chart-status chart-cell-span-3" style="text-align: center;">
+{%- if target_name == 'dev-compress' %}
+{# dev-compress row: Compress spans build+compilation columns, then sanity column, then image size #}
+<div class="chart-cell chart-status chart-cell-span-2" style="text-align: center;">
+{%- if build_task %}
+{%- if build_task.status == 'passed' %}
+<span class="success">✅ COMPRESSED</span>{%- if build_task.time %} <span class="chart-timing">({{ build_task.time }})</span>{%- endif %}
+{%- elif build_task.status == 'running' %}
+<span style="color: #3498db;">🔄 COMPRESSING</span>{%- if build_task.time %} <span class="chart-timing">(elapsed <span class="elapsed-seconds">{{ build_task.time.replace('elapsed ', '').replace('s', '') }}</span>s)</span>{%- endif %}
+{%- elif build_task.status == 'killed' %}
+<span style="color: #ff9800; font-weight: bold;">⚠️ KILLED</span>{%- if build_task.time %} <span class="chart-timing">({{ build_task.time }})</span>{%- endif %}
+{%- elif build_task.status == 'queued' %}
+<span style="color: #95a5a6;">⏳ to be compressed</span>{%- if build_task.time %} <span class="chart-timing">(prev: {{ build_task.time }})</span>{%- endif %}
+{%- elif build_task.status == 'skipped' %}
+<span style="color: #95a5a6;">⏭️ Skipped</span>{%- if build_task.prev_status %} <span class="chart-timing">(prev: <span class="success">COMPRESSED</span>{%- if build_task.time %} {{ build_task.time }}{%- endif %})</span>{%- endif %}
+{%- else %}
+<span class="failure">❌ FAIL</span> <span class="chart-timing">({{ build_task.time if build_task.time else 'n/a' }})</span>
+{%- endif %}
+{%- if build_task.log_file %} <a href="{{ build_task.log_file }}" class="log-link" target="_blank" rel="noopener noreferrer">[log]</a>{%- endif %}
+{%- else %}-{%- endif %}
+</div>
+{# sanity column for compress-sanity #}
+<div class="chart-cell chart-status">
+{%- if sanity_task %}
+{%- if sanity_task.status == 'passed' %}
+<span class="success">✅ PASS</span>{%- if sanity_task.time %} <span class="chart-timing">({{ sanity_task.time }})</span>{%- endif %}
+{%- elif sanity_task.status == 'running' %}
+<span style="color: #3498db;">🔄 RUNNING</span>{%- if sanity_task.time %} <span class="chart-timing">(elapsed <span class="elapsed-seconds">{{ sanity_task.time.replace('elapsed ', '').replace('s', '') }}</span>s)</span>{%- endif %}
+{%- elif sanity_task.status == 'killed' %}
+<span style="color: #ff9800; font-weight: bold;">⚠️ KILLED</span>{%- if sanity_task.time %} <span class="chart-timing">({{ sanity_task.time }})</span>{%- endif %}
+{%- elif sanity_task.status == 'queued' %}
+<span style="color: #95a5a6;">⏳ to be run</span>{%- if sanity_task.time %} <span class="chart-timing">(prev: {{ sanity_task.time }})</span>{%- endif %}
+{%- elif sanity_task.status == 'skipped' %}
+<span style="color: #95a5a6;">⏭️ Skipped</span>{%- if sanity_task.prev_status %} <span class="chart-timing">(prev: <span class="success">PASS</span>{%- if sanity_task.time %} {{ sanity_task.time }}{%- endif %})</span>{%- endif %}
+{%- else %}
+<span class="failure">❌ FAIL</span> <span class="chart-timing">({{ sanity_task.time if sanity_task.time else 'n/a' }})</span>
+{%- endif %}
+{%- if sanity_task.log_file %} <a href="{{ sanity_task.log_file }}" class="log-link" target="_blank" rel="noopener noreferrer">[log]</a>{%- endif %}
+{%- else %}-{%- endif %}
+</div>
+{# image size for compressed image #}
+<div class="chart-cell" style="text-align: center;">
+{%- if target_data.image_size %}{{ target_data.image_size }}{%- else %}-{%- endif %}
+</div>
+{%- elif target_name == 'dev-upload' %}
+<div class="chart-cell chart-status chart-cell-span-4" style="text-align: center;">
 {%- if build_task %}
 {%- if build_task.status == 'passed' %}
 <span class="success">✅ UPLOADED</span>{%- if build_task.time %} <span class="chart-timing">({{ build_task.time }})</span>{%- endif %}
@@ -258,8 +303,8 @@ h2 { margin: 0; font-size: 1.2em; font-weight: bold; }
 {%- if sanity_task.log_file %} <a href="{{ sanity_task.log_file }}" class="log-link" target="_blank" rel="noopener noreferrer">[log]</a>{%- endif %}
 {%- else %}-{%- endif %}
 </div>
-{%- endif %}
 <div class="chart-cell chart-timing">{{ target_data.image_size if target_data.image_size else '-' }}</div>
+{%- endif %}
 </div>
 {%- endif %}
 {%- endfor %}
