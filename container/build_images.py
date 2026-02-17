@@ -529,9 +529,9 @@ def create_task_graph(
 
     Image Dependency Chain (render_py):
         render.py generates a Dockerfile, then docker build produces the image.
-        1. Runtime: render.py + docker build → dynamo:{sha}-{framework}-runtime
-        2. Dev: render.py + docker build → dynamo:{sha}-{framework}-dev
-        3. Local-dev: render.py + docker build → dynamo:{sha}-{framework}-local-dev
+        1. Runtime: render.py + docker build → dynamo:{sha}-{framework}-cuda{cuda_version}-runtime
+        2. Dev: render.py + docker build → dynamo:{sha}-{framework}-cuda{cuda_version}-dev
+        3. Local-dev: render.py + docker build → dynamo:{sha}-{framework}-cuda{cuda_version}-local-dev
     """
     # Task ID format: framework-target-type (all lowercase)
     # Example: vllm-runtime-build, vllm-dev-compilation, vllm-runtime-sanity
@@ -539,7 +539,7 @@ def create_task_graph(
     # Determine version if not provided
     if version is None:
         if build_method == BUILD_METHOD_RENDER_PY:
-            # render.py method: use SHA as version (tag: dynamo:<sha>-<fw>-<target>)
+            # render.py method: use SHA as version (tag: dynamo:<sha>-<fw>-cuda<ver>-<target>)
             version = sha
         else:
             version = extract_version_from_build_sh(framework, repo_path)
@@ -550,6 +550,12 @@ def create_task_graph(
 
     # render.py uses "dynamo" instead of "none"
     render_fw = RENDER_FRAMEWORK_MAP.get(framework, framework)
+    # trtllm requires CUDA 13.1; other frameworks default to 12.9.
+    # The supported CUDA versions per framework are defined in context.yaml
+    # (each framework section lists cudaX.Y keys with base/runtime image tags).
+    # --cuda-version is required on and after Dmitry Tokarev's render.py changes
+    # (9e8971812 "fix: Fix pre-merge (#6341)", 2026-02-17).
+    render_cuda_version = "13.1" if framework == "trtllm" else "12.9"
 
     def _build_cmd(target: str, image_tag: str) -> str:
         """Generate the build command for a given target and image tag."""
@@ -557,7 +563,7 @@ def create_task_graph(
             # Two-step:
             #   1. render.py generates Dockerfile, prints "INFO: Generated Dockerfile written to <path>"
             #   2. Parse that output to get the actual path, then docker build with it
-            render_cmd = f"python3 {repo_path}/container/render.py --framework {render_fw} --target {target}"
+            render_cmd = f"python3 {repo_path}/container/render.py --framework {render_fw} --target {target} --cuda-version {render_cuda_version}"
             extra_args = ""
             if target == "local-dev":
                 extra_args = " --build-arg USER_UID=$(id -u) --build-arg USER_GID=$(id -g)"
@@ -571,8 +577,11 @@ def create_task_graph(
         # build_sh method
         return f"{repo_path}/container/build.sh --no-tag-latest --framework {framework} --target {target}"
 
+    # Embed CUDA version in image tags so the tag encodes framework, CUDA, and target
+    cuda_tag = f"cuda{render_cuda_version}"
+
     # Level 0: Runtime image build (builds directly from CUDA base image)
-    runtime_image_tag = f"dynamo:{version}-{framework}-runtime"
+    runtime_image_tag = f"dynamo:{version}-{framework}-{cuda_tag}-runtime"
     tasks[f"{framework}-runtime-build"] = BuildTask(
         task_id=f"{framework}-runtime-build",
         description=f"Build {framework.upper()} runtime image",
@@ -594,7 +603,7 @@ def create_task_graph(
 
     # Level 1: Dev image build (waits for runtime to complete)
     # Builds as -dev-orig; compress step will later produce the final -dev image.
-    dev_image_tag = f"dynamo:{version}-{framework}-dev"
+    dev_image_tag = f"dynamo:{version}-{framework}-{cuda_tag}-dev"
     dev_orig_image_tag = f"{dev_image_tag}-orig"
     tasks[f"{framework}-dev-build"] = BuildTask(
         task_id=f"{framework}-dev-build",
@@ -747,7 +756,7 @@ docker images {dev_image_tag} --format 'Size: {{{{.Size}}}}'
     )
 
     # Level 8: Local-dev image build (runs after compress-sanity, in parallel with dev-upload)
-    local_dev_image_tag = f"dynamo:{version}-{framework}-local-dev"
+    local_dev_image_tag = f"dynamo:{version}-{framework}-{cuda_tag}-local-dev"
     tasks[f"{framework}-local-dev-build"] = BuildTask(
         task_id=f"{framework}-local-dev-build",
         description=f"Build {framework.upper()} local-dev image",
@@ -3623,7 +3632,7 @@ def main() -> int:
         version_error_message = ""
         for framework in frameworks:
             if build_method == BUILD_METHOD_RENDER_PY:
-                # render.py method: use SHA as version (tag format: dynamo:<sha>-<fw>-<target>)
+                # render.py method: use SHA as version (tag format: dynamo:<sha>-<fw>-cuda<ver>-<target>)
                 version = sha
                 logger.info(f"  Using SHA as version for {framework.upper()}: {version}")
             else:
@@ -3890,7 +3899,7 @@ def main() -> int:
 
     # Create task graph for each framework
     # For build_sh: extract version once per framework to avoid repeated build.sh calls
-    # For render_py: use SHA as version (tag format: dynamo:<sha>-<fw>-<target>)
+    # For render_py: use SHA as version (tag format: dynamo:<sha>-<fw>-cuda<ver>-<target>)
     all_tasks = {}
     version_extraction_failed = False
     version_error_message = ""
