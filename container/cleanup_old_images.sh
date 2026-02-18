@@ -10,6 +10,7 @@ set -e
 DRY_RUN=false
 FORCE=false
 RETAIN_COUNT=2
+KEEP_LOCAL_DEV_ONLY=false
 
 # Function to show usage
 usage() {
@@ -29,14 +30,16 @@ OPTIONS:
     --dry-run, --dryrun    Show what would be deleted without actually deleting
     --force                Use docker rmi -f to force removal of images
     --retain N             Number of recent images to retain per variant (default: $RETAIN_COUNT)
+    --keep-local-dev-only  Remove all runtime and dev images, keeping only local-dev
     -h, --help             Show this help message
 
 EXAMPLES:
-    $0 --dry-run                     # Show what would be deleted
-    $0 --dryrun                      # Same as --dry-run
-    $0 --force                       # Force delete images with docker rmi -f
-    $0 --dry-run --retain 3         # Retain top 3 images per variant
-    $0 --force --retain 1           # Force delete, retain only 1 recent image per variant
+    $0 --dry-run                         # Show what would be deleted
+    $0 --dryrun                          # Same as --dry-run
+    $0 --force                           # Force delete images with docker rmi -f
+    $0 --dry-run --retain 3             # Retain top 3 images per variant
+    $0 --force --retain 1               # Force delete, retain only 1 recent image per variant
+    $0 --force --keep-local-dev-only    # Remove all runtime and dev images
 
 EOF
 }
@@ -64,6 +67,10 @@ while [[ $# -gt 0 ]]; do
         --retain=*)
             # Still support the old format for backwards compatibility
             RETAIN_COUNT="${1#*=}"
+            shift
+            ;;
+        --keep-local-dev-only)
+            KEEP_LOCAL_DEV_ONLY=true
             shift
             ;;
         -h|--help)
@@ -262,6 +269,88 @@ delete_images() {
     echo "Batch deletion completed"
 }
 
+# Function to remove all runtime and dev images (keeping only local-dev)
+remove_dev_runtime_images() {
+    echo "Removing all runtime and dev images (keeping only local-dev)..."
+
+    # Find dynamo images with -dev or -runtime suffix but NOT -local-dev
+    local targets=()
+    while IFS= read -r line; do
+        [ -z "$line" ] && continue
+        local repo_tag=$(echo "$line" | awk '{print $1}')
+        # Skip local-dev images
+        case "$repo_tag" in *-local-dev) continue ;; esac
+        # Match dev or runtime targets
+        case "$repo_tag" in *-dev|*-runtime) targets+=("$repo_tag") ;; esac
+    done < <(docker images --format "{{.Repository}}:{{.Tag}} {{.ID}}" | grep "^dynamo:")
+
+    if [ ${#targets[@]} -eq 0 ]; then
+        echo "No runtime/dev images found to remove."
+        echo
+        return
+    fi
+
+    echo "Found ${#targets[@]} runtime/dev images to remove:"
+    for t in "${targets[@]}"; do
+        echo "  D $t"
+    done
+
+    if [ "$DRY_RUN" = true ]; then
+        echo "DRY RUN: Would delete ${#targets[@]} images"
+        echo
+        return
+    fi
+
+    local deleted=0
+    local failed=0
+    for t in "${targets[@]}"; do
+        if [ "$FORCE" = true ]; then
+            if docker rmi -f "$t" 2>/dev/null; then
+                deleted=$((deleted + 1))
+            else
+                echo "  FAILED: $t"
+                failed=$((failed + 1))
+            fi
+        else
+            if docker rmi "$t" 2>/dev/null; then
+                deleted=$((deleted + 1))
+            else
+                echo "  FAILED: $t (use --force?)"
+                failed=$((failed + 1))
+            fi
+        fi
+    done
+    echo "Deleted $deleted, failed $failed"
+    echo
+}
+
+# Function to prune orphan image layers (unreferenced after image deletions)
+prune_orphan_images() {
+    echo "Pruning orphan (unused) image layers..."
+
+    local orphan_size=$(docker system df 2>/dev/null | grep "Images" | awk '{print $(NF-1)}')
+    if [ -z "$orphan_size" ] || [ "$orphan_size" = "0B" ]; then
+        echo "No orphan layers to prune."
+        echo
+        return
+    fi
+
+    echo "Reclaimable image space: $orphan_size"
+
+    if [ "$DRY_RUN" = true ]; then
+        echo "DRY RUN: Would run: docker image prune -f"
+        echo
+        return
+    fi
+
+    if docker image prune -f 2>/dev/null; then
+        echo "Orphan image layers pruned"
+    else
+        echo "WARNING: Some orphan layers may have failed to prune"
+    fi
+    echo
+}
+
 # Function to prune Docker build cache
 prune_build_cache() {
     echo "Pruning Docker build cache..."
@@ -316,6 +405,14 @@ main() {
     
     # Delete the identified images
     delete_images
+
+    # Remove runtime and dev images if --keep-local-dev-only was specified
+    if [ "$KEEP_LOCAL_DEV_ONLY" = true ]; then
+        remove_dev_runtime_images
+    fi
+
+    # Prune orphan image layers (unreferenced after deletions above)
+    prune_orphan_images
     
     # Prune Docker build cache (often the largest consumer of disk space)
     prune_build_cache
