@@ -195,11 +195,8 @@ class DockerCleaner:
 class ImageSHAResolver:
     """Resolves commit SHAs from image SHAs in git history.
 
-    Uses git plumbing (ls-tree + cat-file) to compute image SHAs without
-    checking out commits, so the working tree is never modified.
+    Thin wrapper around DynamoRepositoryUtils.get_last_n_docker_image_shas().
     """
-
-    MAX_LOOKBACK = 100
 
     def __init__(self, repo_path: Path):
         self.repo_path = repo_path
@@ -209,64 +206,21 @@ class ImageSHAResolver:
         """
         Get the last N unique image SHAs from git history.
 
-        Only examines commits that actually changed container/ (via git log --
-        container/), and stops as soon as N unique image SHAs are found.
-        Uses git plumbing to read file contents -- never modifies the working tree.
-
         Returns:
             List of tuples [(commit_sha, image_sha), ...] in chronological
             order (oldest first, newest last).
         """
         logger.info(f"{Colors.CYAN}Analyzing git history to find last {n} unique image SHAs...{Colors.RESET}")
 
-        # Get commits that touched container/, newest first (these are the
-        # only points where the image SHA can change).
-        result = subprocess.run(
-            ["git", "-C", str(self.repo_path), "log",
-             "--format=%H", f"-{self.MAX_LOOKBACK}", "--", "container/"],
-            capture_output=True, text=True, check=True,
-        )
-        container_commits = [h.strip() for h in result.stdout.strip().split('\n') if h.strip()]
+        results = self.repo_utils.get_last_n_docker_image_shas(n)
 
-        if not container_commits:
-            logger.warning(f"{Colors.YELLOW}No commits found that touched container/{Colors.RESET}")
-            return []
-
-        # Walk newest-to-oldest, compute image SHA at each transition point,
-        # and collect until we have n unique SHAs.
-        results: List[tuple[str, str]] = []
-        prev_image_sha: Optional[str] = None
-
-        for full_sha in container_commits:
-            commit_sha = full_sha[:9]
-            image_sha = self.repo_utils.generate_docker_image_sha_for_commit(full_sha)
-
-            if image_sha in ("ERROR", "NO_CONTAINER_DIR", "NO_FILES"):
-                logger.debug(f"  Skipping commit {commit_sha}: {image_sha}")
-                continue
-
-            if image_sha != prev_image_sha:
-                # Transition: the previous commit_sha was the last one with
-                # the old image SHA. Record *this* commit as introducing a new one.
-                if prev_image_sha is not None and prev_image_sha not in {s for _, s in results}:
-                    results.append((prev_commit_sha, prev_image_sha[:7]))
-                    logger.info(f"  Found: commit {prev_commit_sha} -> image SHA {prev_image_sha[:7]}")
-                    if len(results) >= n:
-                        break
-                prev_image_sha = image_sha
-
-            prev_commit_sha = commit_sha
-
-        # Don't forget the last group (oldest commit we examined)
-        if len(results) < n and prev_image_sha is not None and prev_image_sha not in {s for _, s in results}:
-            results.append((prev_commit_sha, prev_image_sha[:7]))
-            logger.info(f"  Found: commit {prev_commit_sha} -> image SHA {prev_image_sha[:7]}")
+        for commit_sha, image_sha in results:
+            logger.info(f"  Found: commit {commit_sha} -> image SHA {image_sha}")
 
         if len(results) < n:
             logger.warning(f"{Colors.YELLOW}Only found {len(results)} unique image SHAs (requested {n}){Colors.RESET}")
 
-        # Reverse to chronological order (oldest first, newest last)
-        return list(reversed(results))
+        return results
 
 
 class ImageRebuilder:

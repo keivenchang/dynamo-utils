@@ -969,6 +969,59 @@ class DynamoRepositoryUtils(BaseUtils):
         sha_full = hasher.hexdigest()
         return sha_full if full_hash else sha_full[:12]
 
+    MAX_DOCKER_IMAGE_SHA_LOOKBACK = 100
+
+    def get_last_n_docker_image_shas(self, n: int) -> List[Tuple[str, str]]:
+        """
+        Get the last N unique Docker image SHAs from git history.
+
+        Only examines commits that actually changed container/ (via git log),
+        and stops as soon as N unique image SHAs are found.
+        Uses git plumbing -- never modifies the working tree.
+
+        Args:
+            n: Number of unique Docker image SHAs to find.
+
+        Returns:
+            List of tuples [(commit_sha_9char, image_sha_7char), ...] in
+            chronological order (oldest first, newest last).
+        """
+        result = subprocess.run(
+            ["git", "-C", str(self.repo_path), "log",
+             "--format=%H", f"-{self.MAX_DOCKER_IMAGE_SHA_LOOKBACK}", "--", "container/"],
+            capture_output=True, text=True, check=True,
+        )
+        container_commits = [h.strip() for h in result.stdout.strip().split('\n') if h.strip()]
+
+        if not container_commits:
+            return []
+
+        results: List[Tuple[str, str]] = []
+        prev_image_sha: Optional[str] = None
+        prev_commit_sha: Optional[str] = None
+
+        for full_sha in container_commits:
+            commit_sha = full_sha[:9]
+            image_sha = self.generate_docker_image_sha_for_commit(full_sha)
+
+            if image_sha in ("ERROR", "NO_CONTAINER_DIR", "NO_FILES"):
+                self.logger.debug(f"Skipping commit {commit_sha}: {image_sha}")
+                continue
+
+            if image_sha != prev_image_sha:
+                if prev_image_sha is not None and prev_image_sha not in {s for _, s in results}:
+                    results.append((prev_commit_sha, prev_image_sha[:7]))
+                    if len(results) >= n:
+                        break
+                prev_image_sha = image_sha
+
+            prev_commit_sha = commit_sha
+
+        if len(results) < n and prev_image_sha is not None and prev_image_sha not in {s for _, s in results}:
+            results.append((prev_commit_sha, prev_image_sha[:7]))
+
+        return list(reversed(results))
+
     def get_stored_docker_image_sha(self) -> str:
         """
         Get stored Docker image SHA from file.

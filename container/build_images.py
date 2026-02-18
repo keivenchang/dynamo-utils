@@ -3639,6 +3639,23 @@ def main() -> int:
                 sha = repo.head.commit.hexsha[:9]
             else:
                 sha = repo.head.commit.hexsha[:9]
+
+                # Auto-resolve to the commit that introduced the current Docker image SHA
+                dynamo_repo_utils_resolve = DynamoRepositoryUtils(repo_path)
+                sha_pairs = dynamo_repo_utils_resolve.get_last_n_docker_image_shas(1)
+                if not sha_pairs:
+                    logger.info("No Docker image SHA changes found in last "
+                                f"{DynamoRepositoryUtils.MAX_DOCKER_IMAGE_SHA_LOOKBACK} commits - nothing to build")
+                    return 0
+
+                resolved_sha, docker_img_sha = sha_pairs[-1]
+                if resolved_sha != sha:
+                    logger.info(f"Auto-resolved build commit: {sha} -> {resolved_sha} "
+                                f"(Docker image SHA {docker_img_sha})")
+                    repo.git.checkout(resolved_sha)
+                    sha = resolved_sha
+                else:
+                    logger.info(f"HEAD {sha} is the commit that introduced Docker image SHA {docker_img_sha}")
         except Exception as e:
             logger.error(f"Failed to get/checkout commit SHA: {e}")
             return 1
@@ -3861,6 +3878,24 @@ def main() -> int:
         else:
             full_sha = git_utils.get_current_commit()
             sha = full_sha[:9]  # Use 9 chars to match build.sh format
+
+            # Auto-resolve: find the commit that introduced the current Docker
+            # image SHA (the most recent commit that changed container/).
+            dynamo_repo_utils_resolve = DynamoRepositoryUtils(repo_path)
+            sha_pairs = dynamo_repo_utils_resolve.get_last_n_docker_image_shas(1)
+            if not sha_pairs:
+                logger.info("No Docker image SHA changes found in last "
+                            f"{DynamoRepositoryUtils.MAX_DOCKER_IMAGE_SHA_LOOKBACK} commits - nothing to build")
+                return 0
+
+            resolved_sha, docker_img_sha = sha_pairs[-1]  # newest
+            if resolved_sha != sha:
+                logger.info(f"Auto-resolved build commit: {sha} -> {resolved_sha} "
+                            f"(Docker image SHA {docker_img_sha})")
+                repo.git.checkout(resolved_sha)
+                sha = resolved_sha
+            else:
+                logger.info(f"HEAD {sha} is the commit that introduced Docker image SHA {docker_img_sha}")
     except Exception as e:
         logger.error(f"Failed to get/checkout commit SHA: {e}")
         return 1

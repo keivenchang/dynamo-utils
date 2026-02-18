@@ -169,7 +169,7 @@ h2 { margin: 0; font-size: 1.2em; font-weight: bold; }
 <div class="chart-cell chart-header">Sanity Check</div>
 <div class="chart-cell chart-header">Image Size</div>
 </div>
-{%- for target_name in ['base', 'runtime', 'dev', 'dev-compress', 'dev-upload', 'local-dev'] %}
+{%- for target_name in ['runtime', 'dev', 'dev-compress', 'dev-upload', 'local-dev'] %}
 {%- if target_name in targets %}
 {%- set target_data = targets[target_name] %}
 {%- set build_task = target_data.build %}
@@ -283,7 +283,7 @@ h2 { margin: 0; font-size: 1.2em; font-weight: bold; }
 <span class="failure">❌ FAIL</span> <span class="chart-timing">({{ compilation_task.time if compilation_task.time else 'n/a' }})</span>
 {%- endif %}
 {%- if compilation_task.log_file %} <a href="{{ compilation_task.log_file }}" class="log-link" target="_blank" rel="noopener noreferrer">[log]</a>{%- endif %}
-{%- else %}-{%- endif %}
+{%- else %}{%- if target_name == 'runtime' %}N/A{%- else %}-{%- endif %}{%- endif %}
 </div>
 <div class="chart-cell chart-status">
 {%- if sanity_task %}
