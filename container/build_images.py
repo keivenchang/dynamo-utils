@@ -3640,15 +3640,9 @@ def main() -> int:
             else:
                 sha = repo.head.commit.hexsha[:9]
 
-                # Auto-resolve to the commit that introduced the current Docker image SHA
+                # Resolve to the commit that first introduced this Docker image SHA
                 dynamo_repo_utils_resolve = DynamoRepositoryUtils(repo_path)
-                sha_pairs = dynamo_repo_utils_resolve.get_last_n_docker_image_shas(1)
-                if not sha_pairs:
-                    logger.info("No Docker image SHA changes found in last "
-                                f"{DynamoRepositoryUtils.MAX_DOCKER_IMAGE_SHA_LOOKBACK} commits - nothing to build")
-                    return 0
-
-                resolved_sha, docker_img_sha = sha_pairs[-1]
+                resolved_sha, docker_img_sha = dynamo_repo_utils_resolve.find_docker_image_sha_origin(sha)
                 if resolved_sha != sha:
                     logger.info(f"Auto-resolved build commit: {sha} -> {resolved_sha} "
                                 f"(Docker image SHA {docker_img_sha})")
@@ -3870,26 +3864,18 @@ def main() -> int:
 
                 logger.info(f"Checking out SHA: {args.repo_sha}")
                 repo.git.checkout(args.repo_sha)
-                logger.info(f"✅ Checked out {args.repo_sha}")
-                # Get the full SHA after checkout
+                logger.info(f"Checked out {args.repo_sha}")
                 sha = repo.head.commit.hexsha[:9]
             else:
                 logger.info(f"Already at SHA: {args.repo_sha}")
                 sha = args.repo_sha[:9]
         else:
             full_sha = git_utils.get_current_commit()
-            sha = full_sha[:9]  # Use 9 chars to match build.sh format
+            sha = full_sha[:9]
 
-            # Auto-resolve: find the commit that introduced the current Docker
-            # image SHA (the most recent commit that changed container/).
+            # Resolve to the commit that first introduced this Docker image SHA
             dynamo_repo_utils_resolve = DynamoRepositoryUtils(repo_path)
-            sha_pairs = dynamo_repo_utils_resolve.get_last_n_docker_image_shas(1)
-            if not sha_pairs:
-                logger.info("No Docker image SHA changes found in last "
-                            f"{DynamoRepositoryUtils.MAX_DOCKER_IMAGE_SHA_LOOKBACK} commits - nothing to build")
-                return 0
-
-            resolved_sha, docker_img_sha = sha_pairs[-1]  # newest
+            resolved_sha, docker_img_sha = dynamo_repo_utils_resolve.find_docker_image_sha_origin(sha)
             if resolved_sha != sha:
                 logger.info(f"Auto-resolved build commit: {sha} -> {resolved_sha} "
                             f"(Docker image SHA {docker_img_sha})")

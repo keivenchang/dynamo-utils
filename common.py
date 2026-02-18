@@ -965,6 +965,43 @@ class DynamoRepositoryUtils(BaseUtils):
 
         return list(reversed(results))
 
+    def find_docker_image_sha_origin(self, commit_sha: str) -> Tuple[str, str]:
+        """
+        Find the commit that first introduced the Docker image SHA at the given commit.
+
+        Walks backward from commit_sha through container/ history until the
+        image SHA changes. The oldest commit still matching is the origin.
+
+        Args:
+            commit_sha: Git commit SHA (short or full), or "HEAD".
+
+        Returns:
+            Tuple of (introducing_commit_sha_9char, image_sha_7char).
+
+        Raises:
+            ValueError: If the Docker image SHA cannot be computed for commit_sha.
+        """
+        target_sha = self.generate_docker_image_sha_for_commit(commit_sha, full_hash=True)
+        if target_sha in ("ERROR", "NO_CONTAINER_DIR", "NO_FILES"):
+            raise ValueError(f"Cannot compute Docker image SHA for {commit_sha}: {target_sha}")
+
+        result = subprocess.run(
+            ["git", "-C", str(self.repo_path), "log",
+             commit_sha, "--format=%H", f"-{self.MAX_DOCKER_IMAGE_SHA_LOOKBACK}", "--", "container/"],
+            capture_output=True, text=True, check=True,
+        )
+        container_commits = [h.strip() for h in result.stdout.strip().split('\n') if h.strip()]
+
+        origin = container_commits[0] if container_commits else commit_sha
+        for full_sha in container_commits:
+            img_sha = self.generate_docker_image_sha_for_commit(full_sha, full_hash=True)
+            if img_sha == target_sha:
+                origin = full_sha
+            else:
+                break
+
+        return (origin[:9], target_sha[:7])
+
     DOCKER_IMAGE_SHA_FILE = ".last_docker_image_sha"
     DOCKER_IMAGE_SHA_FILE_COMPAT = ".last_build_composite_sha"  # TODO: remove after 2026-02-25
 
