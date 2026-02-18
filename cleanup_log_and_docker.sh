@@ -96,19 +96,14 @@ cleanup_docker() {
 
   local cleanup_images="$SCRIPT_DIR/container/cleanup_old_images.sh"
   if [ -x "$cleanup_images" ]; then
+    local args=(--force --retain "$RETAIN_IMAGES" --keep-local-dev-only)
     if [ "$DRY_RUN" = true ]; then
-      echo "+ $cleanup_images --dry-run --retain $RETAIN_IMAGES"
-    else
-      "$cleanup_images" --retain "$RETAIN_IMAGES"
+      args+=(--dry-run)
     fi
+    echo "+ $cleanup_images ${args[*]}"
+    "$cleanup_images" "${args[@]}"
   else
     echo "WARNING: $cleanup_images not found/executable; skipping cleanup_old_images.sh"
-  fi
-
-  if [ "$DRY_RUN" = true ]; then
-    echo "+ docker builder prune -a --force"
-  else
-    docker builder prune -a --force || true
   fi
 }
 
