@@ -3314,9 +3314,14 @@ def generate_build_report(
                 if upload_task and upload_task.end_time and upload_task.status == TaskStatus.PASSED:
                     pushed_at = datetime.fromtimestamp(upload_task.end_time).isoformat()
 
-            # Get dev image size (from the dev target, not the upload target)
-            dev_data: FrameworkTargetData = fw_data.get('dev', FrameworkTargetData())
-            dev_size_bytes = _parse_size_to_bytes(dev_data.image_size)
+            # Get dev image size: prefer compressed size (what was actually uploaded)
+            # over the original dev-build size (which is the uncompressed dev-orig image)
+            compress_data: FrameworkTargetData = fw_data.get('dev-compress', FrameworkTargetData())
+            if compress_data.image_size:
+                dev_size_bytes = _parse_size_to_bytes(compress_data.image_size)
+            else:
+                dev_data: FrameworkTargetData = fw_data.get('dev', FrameworkTargetData())
+                dev_size_bytes = _parse_size_to_bytes(dev_data.image_size)
 
             registry_images.append(RegistryImage(
                 location=gitlab_location,
