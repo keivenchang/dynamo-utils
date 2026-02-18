@@ -53,7 +53,7 @@ td.col-message {
     border-radius: 3px;
     display: inline-block;
 }
-/* Commit SHA background colors - alternates based on Image SHA */
+/* Image SHA column background colors - alternates by Image SHA group */
 .sha-color-0 { background-color: #fff9c4; } /* Light yellow */
 .sha-color-1 { background-color: #f3e5f5; } /* Light purple */
 .sha-color-2 { background-color: #c8e6c9; } /* Light green */
@@ -303,7 +303,7 @@ a.image-sha-badge:hover {
  * Policy: keep the header cell visible so the checkbox remains available to re-enable the column.
  * When collapsed, hide the cell's contents and shrink the column width.
  */
-#commits-table.hide-col-composite td.col-composite,
+#commits-table.hide-col-image_sha td.col-image_sha,
 #commits-table.hide-col-github td.col-github,
 #commits-table.hide-col-gitlab td.col-gitlab,
 #commits-table.hide-col-grafana td.col-grafana,
@@ -319,7 +319,7 @@ a.image-sha-badge:hover {
     padding-right: 6px;
 }
 
-#commits-table.hide-col-composite td.col-composite .col-body,
+#commits-table.hide-col-image_sha td.col-image_sha .col-body,
 #commits-table.hide-col-github td.col-github .col-body,
 #commits-table.hide-col-gitlab td.col-gitlab .col-body,
 #commits-table.hide-col-grafana td.col-grafana .col-body,
@@ -330,7 +330,7 @@ a.image-sha-badge:hover {
     display: none;
 }
 
-#commits-table.hide-col-composite th.col-composite .col-title-text,
+#commits-table.hide-col-image_sha th.col-image_sha .col-title-text,
 #commits-table.hide-col-github th.col-github .col-title-text,
 #commits-table.hide-col-gitlab th.col-gitlab .col-title-text,
 #commits-table.hide-col-grafana th.col-grafana .col-title-text,
@@ -341,7 +341,7 @@ a.image-sha-badge:hover {
     display: none;
 }
 
-#commits-table.hide-col-composite th.col-composite,
+#commits-table.hide-col-image_sha th.col-image_sha,
 #commits-table.hide-col-github th.col-github,
 #commits-table.hide-col-gitlab th.col-gitlab,
 #commits-table.hide-col-grafana th.col-grafana,
@@ -911,8 +911,8 @@ window.__dashboardOnReadyQueue.push(function() {
 </div>
 
 <div class="container">
-{# Default UX: collapse Image SHA + GitLab Status + Grafana columns on first load (users can re-enable via checkbox / URL state / localStorage). #}
-<table id="commits-table" class="hide-col-composite hide-col-gitlab hide-col-grafana hide-col-email">
+{# Default UX: collapse GitLab Status + Grafana columns on first load (users can re-enable via checkbox / URL state / localStorage). #}
+<table id="commits-table" class="hide-col-gitlab hide-col-grafana hide-col-email">
 <thead>
 <tr>
 <th style="width: 30px;"></th>
@@ -920,7 +920,7 @@ window.__dashboardOnReadyQueue.push(function() {
 {# Column header layout policy: checkbox, icon, description (in that order). #}
 {# NOTE: `data-url-state="1"` opts into URL syncing (common_dashboard.j2 DashboardUrlState). #}
 {# We keep desired defaults in `data-url-default` so the JS can override browser form restoration. #}
-<th class="col-composite"><label class="col-toggle"><input class="commit-col-toggle" type="checkbox" data-col="composite" data-url-state="1" data-url-default="0" data-url-key="col.composite" onchange="toggleCommitColumn(this)"><span class="col-icon" title="Image SHA"></span><span class="col-title-text">Image SHA</span></label></th>
+<th class="col-image_sha"><label class="col-toggle"><input class="commit-col-toggle" type="checkbox" checked data-col="image_sha" data-url-state="1" data-url-default="1" data-url-key="col.image_sha" onchange="toggleCommitColumn(this)"><span class="col-icon" title="Image SHA">🐳</span><span class="col-title-text">Image SHA</span></label></th>
 <th class="col-github"><label class="col-toggle"><input class="commit-col-toggle" type="checkbox" checked data-col="github" data-url-state="1" data-url-default="1" data-url-key="col.github" onchange="toggleCommitColumn(this)"><span class="col-icon" title="GitHub Status"><svg height="14" width="14" viewBox="0 0 16 16" fill="currentColor" style="display: inline-block; vertical-align: middle;"><path fill-rule="evenodd" clip-rule="evenodd" d="M8 0C3.58 0 0 3.58 0 8C0 11.54 2.29 14.53 5.47 15.59C5.87 15.66 6.02 15.42 6.02 15.21C6.02 15.02 6.01 14.39 6.01 13.72C4 14.09 3.48 13.23 3.32 12.78C3.23 12.55 2.84 11.84 2.5 11.65C2.22 11.5 1.82 11.13 2.49 11.12C3.12 11.11 3.57 11.7 3.72 11.94C4.44 13.15 5.59 12.81 6.05 12.6C6.12 12.08 6.33 11.73 6.56 11.53C4.78 11.33 2.92 10.64 2.92 7.58C2.92 6.71 3.23 5.99 3.74 5.43C3.66 5.23 3.38 4.41 3.82 3.31C3.82 3.31 4.49 3.1 6.02 4.13C6.66 3.95 7.34 3.86 8.02 3.86C8.7 3.86 9.38 3.95 10.02 4.13C11.55 3.09 12.22 3.31 12.22 3.31C12.66 4.41 12.38 5.23 12.3 5.43C12.81 5.99 13.12 6.7 13.12 7.58C13.12 10.65 11.25 11.33 9.47 11.53C9.76 11.78 10.01 12.26 10.01 13.01C10.01 14.08 10 14.94 10 15.21C10 15.42 10.15 15.67 10.55 15.59C13.71 14.53 16 11.53 16 8C16 3.58 12.42 0 8 0Z"></path></svg></span><span class="col-title-text">GitHub Status</span></label></th>
 <th class="col-gitlab"><label class="col-toggle"><input class="commit-col-toggle" type="checkbox" data-col="gitlab" data-url-state="1" data-url-default="0" data-url-key="col.gitlab" onchange="toggleCommitColumn(this)"><span class="col-icon" title="GitLab Status">🦊</span><span class="col-title-text">GitLab Status</span></label></th>
 <th class="col-grafana"><label class="col-toggle"><input class="commit-col-toggle" type="checkbox" data-col="grafana" data-url-state="1" data-url-default="0" data-url-key="col.grafana" onchange="toggleCommitColumn(this)"><span class="col-icon" title="Grafana">📊</span><span class="col-title-text">Grafana</span></label></th>
@@ -993,9 +993,9 @@ window.__dashboardOnReadyQueue.push(function() {
    title="Show commit message and file changes">▶</a>
 </td>
 <td class="sha">
-<a href="{{ commit_link }}" target="_blank" class="{{ sha_color_class }}">{{ sha_short }}</a>
+<a href="{{ commit_link }}" target="_blank">{{ sha_short }}</a>
 </td>
-<td class="sha col-composite"><span class="col-body">
+<td class="sha col-image_sha {{ sha_color_class }}"><span class="col-body">
 {%- set log_paths_list = log_paths.get(sha_short, []) -%}
 {%- set status_info = build_status.get(sha_short, {}) -%}
 {%- set status = status_info.get('status', 'unknown') -%}
