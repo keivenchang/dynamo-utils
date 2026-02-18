@@ -984,7 +984,7 @@ window.__dashboardOnReadyQueue.push(function() {
 {%- set changed_files = commit.changed_files -%}
 
 <tr>
-<td style="padding: 4px 4px 4px 8px;">
+<td style="padding: 4px 0 4px 8px;">
 <a href="#"
    id="commit-info-toggle-{{ sha_short }}"
    class="triangle-toggle"
@@ -992,7 +992,7 @@ window.__dashboardOnReadyQueue.push(function() {
    style="margin-right: 0;"
    title="Show commit message and file changes">▶</a>
 </td>
-<td class="sha">
+<td class="sha" style="padding-left: 0;">
 <a href="{{ commit_link }}" target="_blank">{{ sha_short }}</a>
 </td>
 <td class="sha col-image_sha {{ sha_color_class }}"><span class="col-body">
