@@ -3818,12 +3818,13 @@ def main() -> int:
                 logger.info("Doing hard reset to clean repository state...")
                 git_utils_temp.repo.git.reset('--hard', 'HEAD')
 
-                # Clean untracked files (except .last_build_composite_sha which we want to keep)
+                # Clean untracked files (except Docker image SHA tracking files)
+                sha_keep = {DynamoRepositoryUtils.DOCKER_IMAGE_SHA_FILE, DynamoRepositoryUtils.DOCKER_IMAGE_SHA_FILE_COMPAT}
                 untracked = git_utils_temp.repo.untracked_files
                 if untracked:
                     logger.info(f"Removing {len(untracked)} untracked file(s)...")
                     for file in untracked:
-                        if file != '.last_build_composite_sha':
+                        if file not in sha_keep:
                             file_path = repo_path / file
                             try:
                                 if file_path.is_file():
@@ -3929,7 +3930,7 @@ def main() -> int:
         logger.info("DynamoDockerBuilder V2 - Starting")
 
         # Check if rebuild is needed based on Docker image SHA
-        # Only check in non-dry-run mode to avoid writing .last_build_composite_sha
+        # Only check in non-dry-run mode to avoid writing .last_docker_image_sha
         dynamo_repo_utils = DynamoRepositoryUtils(repo_path)
         if not dynamo_repo_utils.check_if_rebuild_needed(force_run=bool(args.run_ignore_lock)):
             logger.info("✅ No rebuild needed - exiting")

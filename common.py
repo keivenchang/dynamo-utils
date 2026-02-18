@@ -14,7 +14,7 @@ import shlex
 import shutil
 import subprocess
 import sys
-import tempfile
+
 import threading
 import time
 import urllib.parse
@@ -823,11 +823,11 @@ class DynamoRepositoryUtils(BaseUtils):
 
     def generate_docker_image_sha(self, full_hash: bool = False) -> str:
         """
-        Generate Docker image SHA from container/ directory files.
+        Generate Docker image SHA for the current HEAD commit.
 
-        This creates a SHA256 hash of all relevant files in the container directory,
-        excluding documentation, temporary files, etc. This hash can be used to
-        determine if a rebuild is needed.
+        Delegates to generate_docker_image_sha_for_commit("HEAD") so the result
+        is deterministic (only committed files are hashed, untracked/gitignored
+        artifacts like rendered Dockerfiles are excluded).
 
         Args:
             full_hash: If True, return full 64-char SHA. If False, return first 12 chars.
@@ -838,81 +838,24 @@ class DynamoRepositoryUtils(BaseUtils):
             - "NO_FILES": no relevant files found
             - "ERROR": error during calculation
         """
-
-        container_dir = self.repo_path / "container"
-        if not container_dir.exists():
-            self.logger.warning(f"Container directory not found: {container_dir}")
-            return "NO_CONTAINER_DIR"
-
-        # Excluded patterns (matching V1)
-        excluded_extensions = {'.md', '.rst', '.log', '.bak', '.tmp', '.swp', '.swo', '.orig', '.rej'}
-        excluded_filenames = {'README', 'CHANGELOG', 'LICENSE', 'NOTICE', 'AUTHORS', 'CONTRIBUTORS'}
-        excluded_specific = {'launch_message.txt'}
-
-        # Collect files to hash
-        files_to_hash = []
-        for file_path in sorted(container_dir.rglob('*')):
-            if not file_path.is_file():
-                continue
-            # Skip hidden files
-            if any(part.startswith('.') for part in file_path.relative_to(container_dir).parts):
-                continue
-            # Skip excluded extensions
-            if file_path.suffix.lower() in excluded_extensions:
-                continue
-            # Skip excluded names
-            if file_path.stem.upper() in excluded_filenames:
-                continue
-            # Skip specific files
-            if file_path.name.lower() in excluded_specific:
-                continue
-            files_to_hash.append(file_path.relative_to(self.repo_path))
-
-        if not files_to_hash:
-            self.logger.warning("No files found to hash in container directory")
-            return "NO_FILES"
-
-        self.logger.debug(f"Hashing {len(files_to_hash)} files from container directory")
-
-        # Calculate Docker image SHA (hash of container/ contents)
-        try:
-            with tempfile.NamedTemporaryFile(mode='w+b', delete=False) as temp_file:
-                temp_path = Path(temp_file.name)
-                try:
-                    for file_rel_path in files_to_hash:
-                        full_path = self.repo_path / file_rel_path
-                        if full_path.exists():
-                            temp_file.write(str(file_rel_path).encode('utf-8'))
-                            temp_file.write(b'\n')
-                            with open(full_path, 'rb') as f:
-                                temp_file.write(f.read())
-                            temp_file.write(b'\n')
-
-                    temp_file.flush()
-                    with open(temp_path, 'rb') as f:
-                        sha_full = hashlib.sha256(f.read()).hexdigest()
-                        result = sha_full if full_hash else sha_full[:12]
-                        self.logger.debug(f"Docker image SHA: {result}")
-                        return result
-                finally:
-                    temp_path.unlink(missing_ok=True)
-        except Exception as e:
-            self.logger.error(f"Error calculating Docker image SHA: {e}")
-            return "ERROR"
+        return self.generate_docker_image_sha_for_commit("HEAD", full_hash=full_hash)
 
     def generate_docker_image_sha_for_commit(self, commit_sha: str, full_hash: bool = False) -> str:
         """
         Generate Docker image SHA for a specific commit using git plumbing (no checkout required).
 
-        Produces byte-identical output to generate_docker_image_sha() for the same tree state.
-        Uses git ls-tree + git cat-file instead of reading from the working tree.
+        Hashes only committed (tracked) files under container/, so the result is
+        deterministic regardless of untracked/gitignored artifacts on disk.
 
         Args:
-            commit_sha: Git commit SHA (short or full)
+            commit_sha: Git commit SHA (short or full), or "HEAD".
             full_hash: If True, return full 64-char SHA. If False, return first 12 chars.
 
         Returns:
-            SHA256 hash string, or error code (same as generate_docker_image_sha).
+            SHA256 hash string, or error code:
+            - "NO_CONTAINER_DIR": no container/ tree at that commit
+            - "NO_FILES": no relevant files after filtering
+            - "ERROR": git command failed
         """
         excluded_extensions = {'.md', '.rst', '.log', '.bak', '.tmp', '.swp', '.swo', '.orig', '.rej'}
         excluded_filenames = {'README', 'CHANGELOG', 'LICENSE', 'NOTICE', 'AUTHORS', 'CONTRIBUTORS'}
@@ -954,7 +897,7 @@ class DynamoRepositoryUtils(BaseUtils):
         if not entries:
             return "NO_FILES"
 
-        # entries are already sorted by git ls-tree (lexicographic, matching sorted(rglob))
+        # git ls-tree output is already sorted lexicographically
         hasher = hashlib.sha256()
         for file_rel_path, blob_hash in entries:
             content = subprocess.run(
@@ -1022,6 +965,9 @@ class DynamoRepositoryUtils(BaseUtils):
 
         return list(reversed(results))
 
+    DOCKER_IMAGE_SHA_FILE = ".last_docker_image_sha"
+    DOCKER_IMAGE_SHA_FILE_COMPAT = ".last_build_composite_sha"  # TODO: remove after 2026-02-25
+
     def get_stored_docker_image_sha(self) -> str:
         """
         Get stored Docker image SHA from file.
@@ -1029,10 +975,15 @@ class DynamoRepositoryUtils(BaseUtils):
         Returns:
             Stored SHA string, or empty string if not found
         """
-        sha_file = self.repo_path / ".last_build_composite_sha"
+        sha_file = self.repo_path / self.DOCKER_IMAGE_SHA_FILE
+        compat_file = self.repo_path / self.DOCKER_IMAGE_SHA_FILE_COMPAT
         if sha_file.exists():
             stored = sha_file.read_text().strip()
             self.logger.debug(f"Found stored Docker image SHA: {stored[:12]}")
+            return stored
+        if compat_file.exists() and not compat_file.is_symlink():
+            stored = compat_file.read_text().strip()
+            self.logger.debug(f"Found stored Docker image SHA (compat): {stored[:12]}")
             return stored
         self.logger.debug("No stored Docker image SHA found")
         return ""
@@ -1044,8 +995,12 @@ class DynamoRepositoryUtils(BaseUtils):
         Args:
             sha: Docker image SHA to store
         """
-        sha_file = self.repo_path / ".last_build_composite_sha"
+        sha_file = self.repo_path / self.DOCKER_IMAGE_SHA_FILE
+        compat_file = self.repo_path / self.DOCKER_IMAGE_SHA_FILE_COMPAT
         sha_file.write_text(sha)
+        if compat_file.exists() or compat_file.is_symlink():
+            compat_file.unlink()
+        compat_file.symlink_to(self.DOCKER_IMAGE_SHA_FILE)
         self.logger.info(f"Stored Docker image SHA: {sha[:12]}")
 
     def check_if_rebuild_needed(self, force_run: bool = False) -> bool:
@@ -1062,7 +1017,7 @@ class DynamoRepositoryUtils(BaseUtils):
             True if rebuild is needed, False otherwise
         """
         self.logger.info("\nChecking if rebuild is needed based on file changes...")
-        self.logger.info(f"Docker image SHA file: {self.repo_path}/.last_build_composite_sha")
+        self.logger.info(f"Docker image SHA file: {self.repo_path}/{self.DOCKER_IMAGE_SHA_FILE}")
 
         current_sha = self.generate_docker_image_sha(full_hash=True)
         if current_sha in ("NO_CONTAINER_DIR", "NO_FILES", "ERROR"):

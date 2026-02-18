@@ -546,11 +546,10 @@ class CommitHistoryGenerator:
                         COMMIT_HISTORY_PERF_STATS.composite_sha_cache_miss += 1
                         t_sha = time.monotonic()
                         try:
-                            repo.git.checkout(commit.hexsha)
-                            composite_sha = repo_utils.generate_docker_image_sha()
+                            composite_sha = repo_utils.generate_docker_image_sha_for_commit(commit.hexsha)
                         except Exception as e:
                             composite_sha = "ERROR"
-                            self.logger.error(f"Failed to calculate composite SHA for {sha_short}: {e}")
+                            self.logger.error(f"Failed to calculate Docker image SHA for {sha_short}: {e}")
                             COMMIT_HISTORY_PERF_STATS.composite_sha_errors += 1
                         COMMIT_HISTORY_PERF_STATS.composite_sha_compute_secs += max(0.0, time.monotonic() - t_sha)
 
@@ -613,9 +612,7 @@ class CommitHistoryGenerator:
                         cache_updated = False  # Reset flag after save
 
             finally:
-                # Restore original ref (best-effort)
-                if repo is not None and original_ref is not None:
-                    repo.git.checkout(original_ref)
+                pass  # No checkout restore needed -- git plumbing never modifies HEAD
 
             # Optional: export pipeline -> PR mapping as CSV for this commit window.
             if export_pipeline_pr_csv:
@@ -754,12 +751,6 @@ class CommitHistoryGenerator:
             return 0
         except KeyboardInterrupt:
             self.logger.warning("Operation interrupted by user")
-            # Try to restore HEAD
-            try:
-                if repo is not None and original_ref is not None:
-                    repo.git.checkout(original_ref)
-            except:
-                pass
             return 1
         except Exception as e:
             self.logger.error(f"Failed to get commit history: {e}", exc_info=True)
