@@ -720,7 +720,7 @@ class GitUtils(BaseUtils):
 
 
 class DynamoRepositoryUtils(BaseUtils):
-    """Utilities for Dynamo repository operations including Image SHA (hash of container/ contents; formerly shown as CDS) calculation."""
+    """Utilities for Dynamo repository operations including Docker image SHA calculation."""
 
     def __init__(self, repo_path: Any, dry_run: bool = False, verbose: bool = False):
         """
@@ -821,9 +821,9 @@ class DynamoRepositoryUtils(BaseUtils):
 
         return fork_map
 
-    def generate_composite_sha(self, full_hash: bool = False) -> str:
+    def generate_docker_image_sha(self, full_hash: bool = False) -> str:
         """
-        Generate Image SHA (hash of container/ directory files; formerly shown as CDS).
+        Generate Docker image SHA from container/ directory files.
 
         This creates a SHA256 hash of all relevant files in the container directory,
         excluding documentation, temporary files, etc. This hash can be used to
@@ -874,7 +874,7 @@ class DynamoRepositoryUtils(BaseUtils):
 
         self.logger.debug(f"Hashing {len(files_to_hash)} files from container directory")
 
-        # Calculate Image SHA (hash of container/ contents; formerly shown as CDS)
+        # Calculate Docker image SHA (hash of container/ contents)
         try:
             with tempfile.NamedTemporaryFile(mode='w+b', delete=False) as temp_file:
                 temp_path = Path(temp_file.name)
@@ -892,17 +892,86 @@ class DynamoRepositoryUtils(BaseUtils):
                     with open(temp_path, 'rb') as f:
                         sha_full = hashlib.sha256(f.read()).hexdigest()
                         result = sha_full if full_hash else sha_full[:12]
-                        self.logger.debug(f"Image SHA: {result}")
+                        self.logger.debug(f"Docker image SHA: {result}")
                         return result
                 finally:
                     temp_path.unlink(missing_ok=True)
         except Exception as e:
-            self.logger.error(f"Error calculating Image SHA (hash of container/ contents): {e}")
+            self.logger.error(f"Error calculating Docker image SHA: {e}")
             return "ERROR"
 
-    def get_stored_composite_sha(self) -> str:
+    def generate_docker_image_sha_for_commit(self, commit_sha: str, full_hash: bool = False) -> str:
         """
-        Get stored Image SHA (hash of container/ contents; formerly shown as CDS) from file.
+        Generate Docker image SHA for a specific commit using git plumbing (no checkout required).
+
+        Produces byte-identical output to generate_docker_image_sha() for the same tree state.
+        Uses git ls-tree + git cat-file instead of reading from the working tree.
+
+        Args:
+            commit_sha: Git commit SHA (short or full)
+            full_hash: If True, return full 64-char SHA. If False, return first 12 chars.
+
+        Returns:
+            SHA256 hash string, or error code (same as generate_docker_image_sha).
+        """
+        excluded_extensions = {'.md', '.rst', '.log', '.bak', '.tmp', '.swp', '.swo', '.orig', '.rej'}
+        excluded_filenames = {'README', 'CHANGELOG', 'LICENSE', 'NOTICE', 'AUTHORS', 'CONTRIBUTORS'}
+        excluded_specific = {'launch_message.txt'}
+
+        try:
+            result = subprocess.run(
+                ["git", "-C", str(self.repo_path), "ls-tree", "-r", commit_sha, "--", "container/"],
+                capture_output=True, text=True, check=True,
+            )
+        except subprocess.CalledProcessError as e:
+            self.logger.error(f"git ls-tree failed for {commit_sha}: {e.stderr.strip()}")
+            return "ERROR"
+
+        if not result.stdout.strip():
+            return "NO_CONTAINER_DIR"
+
+        # Parse ls-tree output: "<mode> <type> <blob_hash>\t<path>"
+        entries = []
+        for line in result.stdout.strip().split('\n'):
+            meta, path = line.split('\t', 1)
+            _mode, _type, blob_hash = meta.split()
+            if _type != "blob":
+                continue
+
+            rel_path = Path(path)
+            parts_under_container = rel_path.relative_to("container").parts
+            if any(part.startswith('.') for part in parts_under_container):
+                continue
+            if rel_path.suffix.lower() in excluded_extensions:
+                continue
+            if rel_path.stem.upper() in excluded_filenames:
+                continue
+            if rel_path.name.lower() in excluded_specific:
+                continue
+
+            entries.append((str(rel_path), blob_hash))
+
+        if not entries:
+            return "NO_FILES"
+
+        # entries are already sorted by git ls-tree (lexicographic, matching sorted(rglob))
+        hasher = hashlib.sha256()
+        for file_rel_path, blob_hash in entries:
+            content = subprocess.run(
+                ["git", "-C", str(self.repo_path), "cat-file", "-p", blob_hash],
+                capture_output=True, check=True,
+            ).stdout
+            hasher.update(file_rel_path.encode('utf-8'))
+            hasher.update(b'\n')
+            hasher.update(content)
+            hasher.update(b'\n')
+
+        sha_full = hasher.hexdigest()
+        return sha_full if full_hash else sha_full[:12]
+
+    def get_stored_docker_image_sha(self) -> str:
+        """
+        Get stored Docker image SHA from file.
 
         Returns:
             Stored SHA string, or empty string if not found
@@ -910,27 +979,27 @@ class DynamoRepositoryUtils(BaseUtils):
         sha_file = self.repo_path / ".last_build_composite_sha"
         if sha_file.exists():
             stored = sha_file.read_text().strip()
-            self.logger.debug(f"Found stored Image SHA: {stored[:12]}")
+            self.logger.debug(f"Found stored Docker image SHA: {stored[:12]}")
             return stored
-        self.logger.debug("No stored Image SHA found")
+        self.logger.debug("No stored Docker image SHA found")
         return ""
 
-    def store_composite_sha(self, sha: str) -> None:
+    def store_docker_image_sha(self, sha: str) -> None:
         """
-        Store current Image SHA (hash of container/ contents; formerly shown as CDS) to file.
+        Store current Docker image SHA to file.
 
         Args:
-            sha: Image SHA (hash of container/ contents) to store
+            sha: Docker image SHA to store
         """
         sha_file = self.repo_path / ".last_build_composite_sha"
         sha_file.write_text(sha)
-        self.logger.info(f"Stored Image SHA: {sha[:12]}")
+        self.logger.info(f"Stored Docker image SHA: {sha[:12]}")
 
     def check_if_rebuild_needed(self, force_run: bool = False) -> bool:
         """
-        Check if rebuild is needed based on Image SHA comparison.
+        Check if rebuild is needed based on Docker image SHA comparison.
 
-        Compares current Image SHA with stored SHA to determine if
+        Compares current Docker image SHA with stored SHA to determine if
         container files have changed since last build.
 
         Args:
@@ -940,36 +1009,34 @@ class DynamoRepositoryUtils(BaseUtils):
             True if rebuild is needed, False otherwise
         """
         self.logger.info("\nChecking if rebuild is needed based on file changes...")
-        self.logger.info(f"Image SHA file: {self.repo_path}/.last_build_composite_sha")
+        self.logger.info(f"Docker image SHA file: {self.repo_path}/.last_build_composite_sha")
 
-        # Generate current Image SHA (full hash, not truncated)
-        current_sha = self.generate_composite_sha(full_hash=True)
+        current_sha = self.generate_docker_image_sha(full_hash=True)
         if current_sha in ("NO_CONTAINER_DIR", "NO_FILES", "ERROR"):
-            self.logger.warning(f"Failed to generate Image SHA: {current_sha}")
+            self.logger.warning(f"Failed to generate Docker image SHA: {current_sha}")
             return True  # Assume rebuild needed
 
-        # Get stored Image SHA
-        stored_sha = self.get_stored_composite_sha()
+        stored_sha = self.get_stored_docker_image_sha()
 
         if stored_sha:
             if current_sha == stored_sha:
                 if force_run:
-                    self.logger.info(f"Image SHA unchanged ({current_sha[:12]}) but --run-ignore-lock specified - proceeding")
+                    self.logger.info(f"Docker image SHA unchanged ({current_sha[:12]}) but --run-ignore-lock specified - proceeding")
                     return True
                 else:
-                    self.logger.info(f"Image SHA unchanged ({current_sha[:12]}) - skipping rebuild")
+                    self.logger.info(f"Docker image SHA unchanged ({current_sha[:12]}) - skipping rebuild")
                     self.logger.info("Use --run-ignore-lock to force rebuild")
                     return False  # No rebuild needed
             else:
-                self.logger.info("Image SHA changed:")
+                self.logger.info("Docker image SHA changed:")
                 self.logger.info(f"  Previous: {stored_sha[:12]}")
                 self.logger.info(f"  Current:  {current_sha[:12]}")
                 self.logger.info("Rebuild needed")
-                self.store_composite_sha(current_sha)
+                self.store_docker_image_sha(current_sha)
                 return True
         else:
-            self.logger.info("No previous Image SHA found - rebuild needed")
-            self.store_composite_sha(current_sha)
+            self.logger.info("No previous Docker image SHA found - rebuild needed")
+            self.store_docker_image_sha(current_sha)
             return True
 
 

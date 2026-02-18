@@ -193,92 +193,79 @@ class DockerCleaner:
 
 
 class ImageSHAResolver:
-    """Resolves commit SHAs from image SHAs in git history."""
+    """Resolves commit SHAs from image SHAs in git history.
+
+    Uses git plumbing (ls-tree + cat-file) to compute image SHAs without
+    checking out commits, so the working tree is never modified.
+    """
+
+    MAX_LOOKBACK = 100
 
     def __init__(self, repo_path: Path):
         self.repo_path = repo_path
         self.repo_utils = DynamoRepositoryUtils(str(repo_path))
 
-        if git is None:
-            raise RuntimeError("GitPython is required. Install with: pip install gitpython")
-
-        try:
-            self.repo = git.Repo(repo_path)
-        except git.InvalidGitRepositoryError:
-            raise RuntimeError(f"Not a git repository: {repo_path}")
-
     def get_last_n_image_shas(self, n: int) -> List[tuple[str, str]]:
         """
         Get the last N unique image SHAs from git history.
-        
-        Walks backward through commit history and records the LAST commit
-        (chronologically oldest) with each unique image SHA before it changes.
+
+        Only examines commits that actually changed container/ (via git log --
+        container/), and stops as soon as N unique image SHAs are found.
+        Uses git plumbing to read file contents -- never modifies the working tree.
 
         Returns:
-            List of tuples: [(commit_sha, image_sha), ...]
+            List of tuples [(commit_sha, image_sha), ...] in chronological
+            order (oldest first, newest last).
         """
         logger.info(f"{Colors.CYAN}Analyzing git history to find last {n} unique image SHAs...{Colors.RESET}")
 
-        # First pass: collect all commits with their image SHAs
-        all_commits = []
-        
-        # Save current HEAD
-        original_head = self.repo.head.commit.hexsha
+        # Get commits that touched container/, newest first (these are the
+        # only points where the image SHA can change).
+        result = subprocess.run(
+            ["git", "-C", str(self.repo_path), "log",
+             "--format=%H", f"-{self.MAX_LOOKBACK}", "--", "container/"],
+            capture_output=True, text=True, check=True,
+        )
+        container_commits = [h.strip() for h in result.stdout.strip().split('\n') if h.strip()]
 
-        # Iterate through commits on main branch
-        try:
-            # Use main branch, not HEAD (which could be detached)
-            ref = 'origin/main' if 'origin/main' in [str(r) for r in self.repo.refs] else 'main'
-            for commit in self.repo.iter_commits(ref, max_count=500):
-                commit_sha = commit.hexsha[:9]
+        if not container_commits:
+            logger.warning(f"{Colors.YELLOW}No commits found that touched container/{Colors.RESET}")
+            return []
 
-                # Calculate image SHA for this commit by checking out the commit
-                try:
-                    # Checkout quietly
-                    self.repo.git.checkout(commit.hexsha, force=True, quiet=True)
-                    
-                    # Compute image SHA
-                    image_sha = self.repo_utils.generate_composite_sha()
+        # Walk newest-to-oldest, compute image SHA at each transition point,
+        # and collect until we have n unique SHAs.
+        results: List[tuple[str, str]] = []
+        prev_image_sha: Optional[str] = None
 
-                    if image_sha:
-                        all_commits.append((commit_sha, image_sha))
-                        
-                except Exception as e:
-                    logger.debug(f"  Skipping commit {commit_sha}: {e}")
-                    continue
+        for full_sha in container_commits:
+            commit_sha = full_sha[:9]
+            image_sha = self.repo_utils.generate_docker_image_sha_for_commit(full_sha)
 
-        finally:
-            # Return to original HEAD
-            try:
-                self.repo.git.checkout(original_head, force=True, quiet=True)
-                logger.debug(f"Returned to original HEAD: {original_head[:9]}")
-            except Exception as e:
-                logger.warning(f"{Colors.YELLOW}Failed to return to original HEAD: {e}{Colors.RESET}")
-        
-        # Second pass: find the last commit (chronologically oldest) with each unique image SHA
-        results = []
-        seen_image_shas = set()
-        
-        for i, (commit_sha, image_sha) in enumerate(all_commits):
-            # Check if next commit has different image SHA (or if this is the last commit)
-            is_last_with_this_sha = (
-                i == len(all_commits) - 1 or  # Last commit overall
-                all_commits[i + 1][1] != image_sha  # Next commit has different SHA
-            )
-            
-            if is_last_with_this_sha and image_sha not in seen_image_shas:
-                seen_image_shas.add(image_sha)
-                results.append((commit_sha, image_sha[:7]))
-                logger.info(f"  Found: commit {commit_sha} → image SHA {image_sha[:7]}")
-                
-                if len(results) >= n:
-                    break
+            if image_sha in ("ERROR", "NO_CONTAINER_DIR", "NO_FILES"):
+                logger.debug(f"  Skipping commit {commit_sha}: {image_sha}")
+                continue
+
+            if image_sha != prev_image_sha:
+                # Transition: the previous commit_sha was the last one with
+                # the old image SHA. Record *this* commit as introducing a new one.
+                if prev_image_sha is not None and prev_image_sha not in {s for _, s in results}:
+                    results.append((prev_commit_sha, prev_image_sha[:7]))
+                    logger.info(f"  Found: commit {prev_commit_sha} -> image SHA {prev_image_sha[:7]}")
+                    if len(results) >= n:
+                        break
+                prev_image_sha = image_sha
+
+            prev_commit_sha = commit_sha
+
+        # Don't forget the last group (oldest commit we examined)
+        if len(results) < n and prev_image_sha is not None and prev_image_sha not in {s for _, s in results}:
+            results.append((prev_commit_sha, prev_image_sha[:7]))
+            logger.info(f"  Found: commit {prev_commit_sha} -> image SHA {prev_image_sha[:7]}")
 
         if len(results) < n:
             logger.warning(f"{Colors.YELLOW}Only found {len(results)} unique image SHAs (requested {n}){Colors.RESET}")
 
-        # Reverse to get chronological order (oldest first, newest last)
-        # Since we walked commits newest→oldest, results are in reverse chronological order
+        # Reverse to chronological order (oldest first, newest last)
         return list(reversed(results))
 
 

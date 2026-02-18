@@ -3893,7 +3893,7 @@ def main() -> int:
     else:
         logger.info("DynamoDockerBuilder V2 - Starting")
 
-        # Check if rebuild is needed based on Image SHA (hash of container/ contents; formerly shown as CDS)
+        # Check if rebuild is needed based on Docker image SHA
         # Only check in non-dry-run mode to avoid writing .last_build_composite_sha
         dynamo_repo_utils = DynamoRepositoryUtils(repo_path)
         if not dynamo_repo_utils.check_if_rebuild_needed(force_run=bool(args.run_ignore_lock)):

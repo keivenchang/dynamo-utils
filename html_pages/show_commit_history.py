@@ -547,7 +547,7 @@ class CommitHistoryGenerator:
                         t_sha = time.monotonic()
                         try:
                             repo.git.checkout(commit.hexsha)
-                            composite_sha = repo_utils.generate_composite_sha()
+                            composite_sha = repo_utils.generate_docker_image_sha()
                         except Exception as e:
                             composite_sha = "ERROR"
                             self.logger.error(f"Failed to calculate composite SHA for {sha_short}: {e}")
