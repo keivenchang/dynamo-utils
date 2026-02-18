@@ -679,7 +679,8 @@ def create_task_graph(
     # docker export/import loses all image metadata (ENV, ENTRYPOINT, WORKDIR, USER,
     # CMD), so we reconstruct it: inspect the original, emit --change flags, then
     # pass them to docker import.
-    compress_script_path = f"/tmp/_compress_{framework}.sh"
+    compress_script_path = f"/tmp/_compress_{framework}_{version}.sh"
+    compress_import_script_path = f"/tmp/_compress_import_{framework}_{version}.sh"
     compress_script_content = f"""#!/usr/bin/env bash
 set -e
 
@@ -709,11 +710,11 @@ if wd:
 u = c.get("User")
 if u:
     parts.extend(["--change", shlex.quote("USER " + u)])
-with open("/tmp/_compress_import_{framework}.sh", "w") as f:
+with open("{compress_import_script_path}", "w") as f:
     f.write("#!/usr/bin/env bash\\n")
     f.write("docker import " + " ".join(parts) + " - \\"$1\\"\\n")
 '
-chmod +x /tmp/_compress_import_{framework}.sh
+chmod +x {compress_import_script_path}
 
 # 2. Create container from -orig that removes bloat, run it to completion
 CONTAINER_ID=$(docker create --entrypoint /bin/bash {dev_orig_image_tag} \\
@@ -721,9 +722,9 @@ CONTAINER_ID=$(docker create --entrypoint /bin/bash {dev_orig_image_tag} \\
 docker start -a "$CONTAINER_ID"
 
 # 3. Flatten and import as the final dev tag
-docker export "$CONTAINER_ID" | bash /tmp/_compress_import_{framework}.sh {dev_image_tag}
+docker export "$CONTAINER_ID" | bash {compress_import_script_path} {dev_image_tag}
 docker rm -f "$CONTAINER_ID"
-rm -f /tmp/_compress_import_{framework}.sh
+rm -f {compress_import_script_path}
 
 # 4. Delete the -orig image (force: other stopped containers from run.sh may reference it)
 docker rmi -f {dev_orig_image_tag}
@@ -1512,7 +1513,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--target",
-        default="base,runtime,dev,local-dev",
+        default="runtime,dev,local-dev",
         help="Comma-separated list of build targets (default: all)",
     )
 
@@ -1803,8 +1804,16 @@ def execute_task_sequential(
 
     # Check if we should skip dev-compress or dev-compress-sanity (--compress not set)
     if not enable_dev_compress and (task_id.endswith("-dev-compress") or task_id.endswith("-dev-compress-sanity")):
-        logger.info(f"⊘ Skipping {task_id}: compress disabled (use --compress to squash dev images)")
-        task.mark_status_as(TaskStatus.SKIPPED, "Compress disabled (use --compress to enable)")
+        logger.info(f"⊘ Skipping {task_id}: compress disabled (--no-compress)")
+        # When skipping dev-compress, retag -dev-orig to -dev so downstream tasks have the expected image
+        if task_id.endswith("-dev-compress") and task.input_image and task.output_image:
+            orig_tag = task.input_image
+            dev_tag = task.output_image
+            logger.info(f"  Retagging {orig_tag} -> {dev_tag} (compress skipped)")
+            rc = subprocess.call(["docker", "tag", orig_tag, dev_tag])
+            if rc != 0:
+                logger.warning(f"  Failed to retag {orig_tag} -> {dev_tag} (exit code {rc})")
+        task.mark_status_as(TaskStatus.SKIPPED, "Compress disabled (use default to enable)")
         executed_tasks.add(task_id)
         for child_id in task.children:
             if child_id not in executed_tasks:
@@ -2234,8 +2243,18 @@ def execute_task_parallel(
         # Check if we should skip dev-compress or dev-compress-sanity (--compress not set)
         if not enable_dev_compress and (task_id.endswith("-dev-compress") or task_id.endswith("-dev-compress-sanity")):
             with lock:
-                logger.info(f"⊘ Skipping {task_id}: compress disabled (use --compress to squash dev images)")
-            task.mark_status_as(TaskStatus.SKIPPED, "Compress disabled (use --compress to enable)")
+                logger.info(f"⊘ Skipping {task_id}: compress disabled (--no-compress)")
+            # When skipping dev-compress, retag -dev-orig to -dev so downstream tasks have the expected image
+            if task_id.endswith("-dev-compress") and task.input_image and task.output_image:
+                orig_tag = task.input_image
+                dev_tag = task.output_image
+                with lock:
+                    logger.info(f"  Retagging {orig_tag} -> {dev_tag} (compress skipped)")
+                rc = subprocess.call(["docker", "tag", orig_tag, dev_tag])
+                if rc != 0:
+                    with lock:
+                        logger.warning(f"  Failed to retag {orig_tag} -> {dev_tag} (exit code {rc})")
+            task.mark_status_as(TaskStatus.SKIPPED, "Compress disabled (use default to enable)")
             with lock:
                 executed_tasks.add(task_id)
             return True
