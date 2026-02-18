@@ -6,24 +6,10 @@
 
 set -e
 
-# Color codes for output
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-NC='\033[0m' # No Color
-
 # Default values
 DRY_RUN=false
 FORCE=false
 RETAIN_COUNT=2
-
-# Function to print colored output
-print_color() {
-    local color=$1
-    local message=$2
-    echo -e "${color}${message}${NC}"
-}
 
 # Function to show usage
 usage() {
@@ -37,6 +23,7 @@ This script will:
 - Keep all *-local-dev tags for latest variants
 - Keep the top $RETAIN_COUNT most recent images for each variant type
 - Remove older images to free up disk space
+- Prune Docker build cache
 
 OPTIONS:
     --dry-run, --dryrun    Show what would be deleted without actually deleting
@@ -92,13 +79,14 @@ while [[ $# -gt 0 ]]; do
 done
 
 # Function to get images for a specific variant, sorted by creation time (newest first)
-# Matches both old format (v0.9.0.dev.COMMIT-VARIANT-TARGET) and
-# new format (COMMIT-VARIANT-TARGET), e.g. dynamo:98df1a2c5-vllm-dev
+# Matches any tag containing -VARIANT-...-TARGET where TARGET is dev/local-dev/runtime
+# and there may be optional attributes (e.g. cuda12.9) between the variant and target.
+# Examples: dynamo:98df1a2c5-vllm-dev, dynamo:ef2583a9d-sglang-cuda12.9-local-dev
 # Excludes latest-* tags (those are always kept).
 get_variant_images() {
     local variant=$1
     docker images --format "{{.Repository}}:{{.Tag}} {{.ID}} {{.CreatedAt}}" \
-        | grep -E "^dynamo:.*-${variant}-(dev|local-dev|runtime) " \
+        | grep -E "^dynamo:.*-${variant}(-[^- ]+)*-(dev|local-dev|runtime) " \
         | grep -v ":latest-" \
         | sort -k3,4 -r
 }
@@ -108,13 +96,13 @@ process_variant() {
     local variant=$1
     local variant_name=$2
     
-    print_color $BLUE "Processing $variant_name images..."
+    echo "Processing $variant_name images..."
     
     # Get all images for this variant
     local images=$(get_variant_images "$variant")
     
     if [ -z "$images" ]; then
-        print_color $YELLOW "No $variant_name images found."
+        echo "No $variant_name images found."
         return
     fi
     
@@ -171,21 +159,21 @@ process_variant() {
 
 # Function to delete dangling <none> images
 delete_none_images() {
-    print_color $BLUE "Cleaning up <none> (dangling) images..."
+    echo "Cleaning up <none> (dangling) images..."
     
     local dangling_images=$(docker images --filter "dangling=true" -q --no-trunc)
     
     if [ -z "$dangling_images" ]; then
-        print_color $GREEN "No <none> images found."
+        echo "No <none> images found."
         echo
         return
     fi
     
     local count=$(echo "$dangling_images" | wc -l)
-    print_color $YELLOW "Found $count <none> images"
+    echo "Found $count <none> images"
     
     if [ "$DRY_RUN" = true ]; then
-        print_color $YELLOW "DRY RUN: Would batch delete $count <none> images:"
+        echo "DRY RUN: Would batch delete $count <none> images:"
         echo "$dangling_images" | while read -r image_id; do
             echo "  $image_id"
         done
@@ -193,26 +181,19 @@ delete_none_images() {
         return
     fi
     
-    # Batch delete all dangling images at once
-    print_color $BLUE "Batch deleting $count <none> images..."
+    echo "Batch deleting $count <none> images..."
     
     if [ "$FORCE" = true ]; then
-        set -x
         if echo "$dangling_images" | xargs docker rmi -f 2>/dev/null; then
-            { set +x; } 2>/dev/null
-            print_color $GREEN "✓ Successfully batch deleted $count <none> images"
+            echo "Successfully batch deleted $count <none> images"
         else
-            { set +x; } 2>/dev/null
-            print_color $YELLOW "⚠ Some <none> images may have failed to delete (likely in use)"
+            echo "WARNING: Some <none> images may have failed to delete (likely in use)"
         fi
     else
-        set -x
         if echo "$dangling_images" | xargs docker rmi 2>/dev/null; then
-            { set +x; } 2>/dev/null
-            print_color $GREEN "✓ Successfully batch deleted $count <none> images"
+            echo "Successfully batch deleted $count <none> images"
         else
-            { set +x; } 2>/dev/null
-            print_color $YELLOW "⚠ Some <none> images may have failed to delete (likely in use)"
+            echo "WARNING: Some <none> images may have failed to delete (likely in use)"
         fi
     fi
     echo
@@ -223,15 +204,15 @@ delete_images() {
     local temp_file="/tmp/images_to_delete_$$"
     
     if [ ! -f "$temp_file" ] || [ ! -s "$temp_file" ]; then
-        print_color $GREEN "No images to delete!"
+        echo "No images to delete!"
         return
     fi
     
     local image_count=$(wc -l < "$temp_file")
     
     if [ "$DRY_RUN" = true ]; then
-        print_color $YELLOW "DRY RUN: Would batch delete $image_count images"
-        print_color $YELLOW "Image IDs that would be batch deleted:"
+        echo "DRY RUN: Would batch delete $image_count images"
+        echo "Image IDs that would be batch deleted:"
         cat "$temp_file" | while read -r image_id; do
             echo "  $image_id"
         done
@@ -239,51 +220,38 @@ delete_images() {
         return
     fi
     
-    print_color $YELLOW "Batch deleting $image_count Docker images..."
-    
-    # Batch delete all images at once
-    print_color $BLUE "Executing batch deletion..."
+    echo "Batch deleting $image_count Docker images..."
     
     if [ "$FORCE" = true ]; then
-        set -x
         if cat "$temp_file" | xargs docker rmi -f 2>/dev/null; then
-            { set +x; } 2>/dev/null
-            print_color $GREEN "✓ Successfully batch deleted $image_count images"
+            echo "Successfully batch deleted $image_count images"
         else
-            { set +x; } 2>/dev/null
-            print_color $YELLOW "⚠ Some images may have failed to delete (likely in use by containers)"
-            print_color $BLUE "Attempting individual deletion for failed images..."
+            echo "WARNING: Some images may have failed to delete (likely in use by containers)"
+            echo "Attempting individual deletion for failed images..."
             
-            # Fallback: try individual deletion for any remaining images
             while read -r image_id; do
-                # Check if image still exists
                 if docker image inspect "$image_id" >/dev/null 2>&1; then
                     if docker rmi -f "$image_id" 2>/dev/null; then
-                        print_color $GREEN "✓ Individually deleted: $image_id"
+                        echo "  Deleted: $image_id"
                     else
-                        print_color $RED "✗ Failed to delete: $image_id (may be in use)"
+                        echo "  FAILED: $image_id (may be in use)"
                     fi
                 fi
             done < "$temp_file"
         fi
     else
-        set -x
         if cat "$temp_file" | xargs docker rmi 2>/dev/null; then
-            { set +x; } 2>/dev/null
-            print_color $GREEN "✓ Successfully batch deleted $image_count images"
+            echo "Successfully batch deleted $image_count images"
         else
-            { set +x; } 2>/dev/null
-            print_color $YELLOW "⚠ Some images may have failed to delete (likely in use by containers)"
-            print_color $BLUE "Attempting individual deletion for failed images..."
+            echo "WARNING: Some images may have failed to delete (likely in use by containers)"
+            echo "Attempting individual deletion for failed images..."
             
-            # Fallback: try individual deletion for any remaining images
             while read -r image_id; do
-                # Check if image still exists
                 if docker image inspect "$image_id" >/dev/null 2>&1; then
                     if docker rmi "$image_id" 2>/dev/null; then
-                        print_color $GREEN "✓ Individually deleted: $image_id"
+                        echo "  Deleted: $image_id"
                     else
-                        print_color $RED "✗ Failed to delete: $image_id (may be in use)"
+                        echo "  FAILED: $image_id (may be in use)"
                     fi
                 fi
             done < "$temp_file"
@@ -291,20 +259,47 @@ delete_images() {
     fi
     
     rm -f "$temp_file"
-    print_color $GREEN "Batch deletion completed"
+    echo "Batch deletion completed"
+}
+
+# Function to prune Docker build cache
+prune_build_cache() {
+    echo "Pruning Docker build cache..."
+
+    local cache_size=$(docker system df --format '{{.Type}}\t{{.Size}}' 2>/dev/null | grep "Build Cache" | awk '{print $NF}')
+    if [ -z "$cache_size" ] || [ "$cache_size" = "0B" ]; then
+        echo "No build cache to prune."
+        echo
+        return
+    fi
+
+    echo "Build cache size: $cache_size"
+
+    if [ "$DRY_RUN" = true ]; then
+        echo "DRY RUN: Would run: docker builder prune -af"
+        echo
+        return
+    fi
+
+    if docker builder prune -af 2>/dev/null; then
+        echo "Build cache pruned"
+    else
+        echo "WARNING: Some build cache entries may have failed to prune"
+    fi
+    echo
 }
 
 # Main execution
 main() {
-    print_color $BLUE "=== Docker Image Cleanup Script ==="
+    echo "=== Docker Image Cleanup Script ==="
     echo
     
     if [ "$DRY_RUN" = true ]; then
-        print_color $YELLOW "DRY RUN MODE - No images will be deleted"
+        echo "DRY RUN MODE - No images will be deleted"
         echo
     fi
     
-    print_color $BLUE "Configuration: Retaining top $RETAIN_COUNT images per variant"
+    echo "Configuration: Retaining top $RETAIN_COUNT images per variant"
     echo
     
     # Clean up any existing temp file
@@ -322,7 +317,10 @@ main() {
     # Delete the identified images
     delete_images
     
-    print_color $BLUE "=== Cleanup Complete ==="
+    # Prune Docker build cache (often the largest consumer of disk space)
+    prune_build_cache
+    
+    echo "=== Cleanup Complete ==="
 }
 
 # Run main function

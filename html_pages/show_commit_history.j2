@@ -1432,26 +1432,26 @@ Framework: {{ img.framework }}">{{ display_tag }}</td>
 {% if dev_imgs %}
 <div style="margin-bottom: 12px; padding: 8px; background-color: white; border: 1px solid #d0d7de; border-radius: 4px;">
 <div style="font-weight: 600; margin-bottom: 4px; font-size: 13px;">GitLab Dev Registry Images: <a href="https://gitlab-master.nvidia.com/dl/ai-dynamo/dynamo/container_registry/165910?orderBy=PUBLISHED_AT&amp;sort=desc&amp;search[]={{ sha_short }}" target="_blank" style="color: #fc6d26; text-decoration: none; font-weight: 600; font-size: 12px;" title="View dev images for {{ sha_short }} in GitLab Container Registry">View Registry</a></div>
-<table style="width: 100%; border: none; background-color: white; border-collapse: collapse;">
+<table style="border: none; background-color: white; border-collapse: collapse;">
 <thead>
 <tr>
-<th style="width: 35%; padding: 3px 6px; border: none;">Image Name:Tag</th>
-<th style="width: 12%; padding: 3px 6px; border: none;">pull dev</th>
-<th style="width: 18%; padding: 3px 6px; border: none;">create local-dev</th>
-<th style="width: 10%; padding: 3px 6px; border: none;">Framework</th>
-<th style="width: 8%; padding: 3px 6px; border: none;">Size</th>
-<th style="width: 27%; padding: 3px 6px; border: none;">Created (PDT)</th>
+<th style="padding: 2px 4px; border: none; font-size: 11px;">Image Name:Tag</th>
+<th style="padding: 2px 4px; border: none; font-size: 11px;">pull dev</th>
+<th style="padding: 2px 4px; border: none; font-size: 11px;">create local-dev</th>
+<th style="padding: 2px 4px; border: none; font-size: 11px;">Framework</th>
+<th style="padding: 2px 4px; border: none; font-size: 11px;">Size</th>
+<th style="padding: 2px 4px; border: none; font-size: 11px;">Created (PDT)</th>
 </tr>
 </thead>
 <tbody>
 {% for img in dev_imgs | sort(attribute='tag') %}
 <tr>
-<td style="font-family: monospace; font-size: 11px; padding: 2px 6px; border: none; max-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="{{ img.location }}">{{ img.image_name }}</td>
-<td style="font-size: 11px; padding: 2px 6px; border: none; white-space: nowrap;"><button data-clipboard-text="docker pull {{ img.location }}" onclick="copyFromClipboardAttr(this)" style="padding: 4px 6px; font-size: 11px; background-color: transparent; color: #57606a; border: 1px solid #d0d7de; border-radius: 6px; cursor: pointer; display: inline-flex; align-items: center; vertical-align: middle;" title="Click to copy docker pull command for dev image" onmouseover="this.style.backgroundColor='#f3f4f6'; this.style.borderColor='#8c959f';" onmouseout="this.style.backgroundColor='transparent'; this.style.borderColor='#d0d7de';"><svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" style="display: inline-block;">{% include "copy_icon_paths.svg" %}</svg></button><span style="margin-left: 6px;">copy command</span></td>
-<td style="font-size: 11px; padding: 2px 6px; border: none; white-space: nowrap;"><button data-clipboard-text="{{ img.local_dev_cmd }}" onclick="copyFromClipboardAttr(this)" style="padding: 4px 6px; font-size: 11px; background-color: transparent; color: #57606a; border: 1px solid #d0d7de; border-radius: 6px; cursor: pointer; display: inline-flex; align-items: center; vertical-align: middle;" title="Click to copy: curl script and run with this image to create local-dev" onmouseover="this.style.backgroundColor='#f3f4f6'; this.style.borderColor='#8c959f';" onmouseout="this.style.backgroundColor='transparent'; this.style.borderColor='#d0d7de';"><svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" style="display: inline-block;">{% include "copy_icon_paths.svg" %}</svg></button><span style="margin-left: 6px;">copy command</span></td>
-<td style="font-size: 11px; padding: 2px 6px; border: none;">{{ img.framework }}</td>
-<td style="font-size: 11px; padding: 2px 6px; border: none;">{{ img.size_display }}</td>
-<td style="font-size: 11px; padding: 2px 6px; border: none;">{{ img.created_display }}</td>
+<td style="font-family: monospace; font-size: 11px; padding: 1px 4px; border: none; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="{{ img.location }}">{{ img.image_name }}</td>
+<td style="font-size: 11px; padding: 1px 4px; border: none; white-space: nowrap;"><button data-clipboard-text="docker pull {{ img.location }}" onclick="copyFromClipboardAttr(this)" style="padding: 1px 3px; font-size: 11px; background-color: transparent; color: #57606a; border: 1px solid #d0d7de; border-radius: 4px; cursor: pointer; display: inline-flex; align-items: center; vertical-align: middle; line-height: 1;" title="Click to copy docker pull command for dev image" onmouseover="this.style.backgroundColor='#f3f4f6'; this.style.borderColor='#8c959f';" onmouseout="this.style.backgroundColor='transparent'; this.style.borderColor='#d0d7de';"><svg width="10" height="10" viewBox="0 0 16 16" fill="currentColor" style="display: inline-block;">{% include "copy_icon_paths.svg" %}</svg></button><span style="margin-left: 3px;">copy command</span></td>
+<td style="font-size: 11px; padding: 1px 4px; border: none; white-space: nowrap;"><button data-clipboard-text="{{ img.local_dev_cmd }}" onclick="copyFromClipboardAttr(this)" style="padding: 1px 3px; font-size: 11px; background-color: transparent; color: #57606a; border: 1px solid #d0d7de; border-radius: 4px; cursor: pointer; display: inline-flex; align-items: center; vertical-align: middle; line-height: 1;" title="Click to copy: curl script and run with this image to create local-dev" onmouseover="this.style.backgroundColor='#f3f4f6'; this.style.borderColor='#8c959f';" onmouseout="this.style.backgroundColor='transparent'; this.style.borderColor='#d0d7de';"><svg width="10" height="10" viewBox="0 0 16 16" fill="currentColor" style="display: inline-block;">{% include "copy_icon_paths.svg" %}</svg></button><span style="margin-left: 3px;">copy command</span></td>
+<td style="font-size: 11px; padding: 1px 4px; border: none;">{{ img.framework }}</td>
+<td style="font-size: 11px; padding: 1px 4px; border: none;">{{ img.size_display }}</td>
+<td style="font-size: 11px; padding: 1px 4px; border: none;">{{ img.created_display }}</td>
 </tr>
 {% endfor %}
 </tbody>

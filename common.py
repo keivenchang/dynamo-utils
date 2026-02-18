@@ -1006,41 +1006,82 @@ class DockerUtils(BaseUtils):
         return f"{size_float:.1f} PB"
 
     def _parse_dynamo_image(self, image_name: str) -> Optional[DynamoImageInfo]:
-        """Parse dynamo image name to extract framework and version info."""
-        # Two tag formats:
-        #   Old: dynamo:v0.1.0.dev.ea07d51fc-sglang-local-dev  (starts with v)
-        #   New: dynamo:d56439ec2-sglang-local-dev              (commit SHA only)
-        #
-        # NOTE: version strings may contain hyphens (e.g., "v0.0.0-test-rc7.dev.<sha>"),
-        # so we must anchor the framework by matching known framework names rather than
-        # splitting on the first '-' after 'v'.
-        all_frameworks = list(FRAMEWORKS) + ["none"]
-        fw_alt = "|".join(re.escape(f) for f in all_frameworks)
+        """Parse dynamo image name to extract framework, version, and target.
 
-        # Try old format first (tag starts with v)
-        pattern_old = rf'^(?:dynamo|dynamo-base):v(.+)-({fw_alt})(?:-(.+))?$'
-        match = re.match(pattern_old, image_name)
+        Walks the hyphen-separated segments of the tag to find a known framework
+        and a known target. Everything before the framework is the version/SHA,
+        everything after is optional attributes + target. There is only one
+        framework and one target per SHA.
 
-        if not match:
-            # Try new format: COMMIT_SHA-FRAMEWORK-TARGET (no v prefix)
-            pattern_new = rf'^(?:dynamo|dynamo-base):([a-f0-9]+)-({fw_alt})(?:-(.+))?$'
-            match = re.match(pattern_new, image_name)
+        Supported formats (non-exhaustive):
+          dynamo:v0.1.0.dev.ea07d51fc-sglang-local-dev
+          dynamo:d56439ec2-sglang-local-dev
+          dynamo:d56439ec2-sglang-cuda12.9-local-dev
+          dynamo:d56439ec2-trtllm-cuda13.1-dev-orig
+        """
+        all_frameworks = set(FRAMEWORKS) | {"none"}
+        known_targets = {"local-dev", "dev-orig", "runtime", "dev"}
 
-        if not match:
+        # Strip repo prefix: "dynamo:tag" or "dynamo-base:tag" -> "tag"
+        # TODO: remove dynamo-base support after Q3 2026
+        if image_name.startswith("dynamo-base:"):
+            tag = image_name[len("dynamo-base:"):]
+        elif image_name.startswith("dynamo:"):
+            tag = image_name[len("dynamo:"):]
+        else:
             return None
 
-        version_part, framework, target = match.groups()
-
-        # Validate framework (FRAMEWORKS + "none" for base images)
-        normalized_framework = normalize_framework(framework)
-        if normalized_framework not in FRAMEWORKS and normalized_framework != "none":
+        # Split tag into segments: e.g. "ea02149e4-sglang-cuda12.9-local-dev"
+        # -> ["ea02149e4", "sglang", "cuda12.9", "local", "dev"]
+        parts = tag.split("-")
+        if len(parts) < 2:
             return None
+
+        # Find frameworks: scan all segments for known names
+        fw_matches = [(i, parts[i].lower()) for i, part in enumerate(parts) if part.lower() in all_frameworks]
+        if not fw_matches:
+            return None
+        if len(fw_matches) > 1:
+            self.logger.error(
+                f"Multiple frameworks in tag '{image_name}': "
+                f"{', '.join(f'{name!r} at segment {idx}' for idx, name in fw_matches)}"
+            )
+            return None
+        fw_idx, framework = fw_matches[0]
+        if fw_idx == 0:
+            return None
+
+        version_part = "-".join(parts[:fw_idx])
+
+        # Find target: try joining trailing segments (longest match first)
+        # e.g. parts = [..., "local", "dev"] -> try "local-dev" then "dev"
+        remaining = parts[fw_idx + 1:]
+        target_matches = []
+        for length in range(len(remaining), 0, -1):
+            candidate = "-".join(remaining[-length:])
+            if candidate in known_targets:
+                target_matches.append(candidate)
+        if len(target_matches) > 1:
+            # Multiple lengths matched (e.g. "dev" and "local-dev"); longest wins,
+            # but if two non-overlapping targets matched that's a real collision.
+            unique = set(target_matches)
+            # "local-dev" contains "dev", so if both matched it's not a collision
+            # (longest-first already picked the right one). But if genuinely
+            # different targets appear, error out.
+            longest = max(unique, key=len)
+            non_substrings = {t for t in unique if t not in longest}
+            if non_substrings:
+                self.logger.error(
+                    f"Multiple targets in tag '{image_name}': {sorted(unique)}"
+                )
+                return None
+        target = target_matches[0] if target_matches else ""
 
         return DynamoImageInfo(
             version=version_part,
-            framework=normalized_framework,
-            target=target or "",
-            latest_tag=None  # Will be computed later if needed
+            framework=framework,
+            target=target,
+            latest_tag=None,
         )
 
     def get_image_info(self, image_name: str) -> Optional[DockerImageInfo]:

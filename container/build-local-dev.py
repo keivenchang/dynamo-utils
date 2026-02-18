@@ -31,8 +31,8 @@ TEMPLATE_REL_PATH = "container/templates/local_dev.Dockerfile"
 
 REGISTRY = "gitlab-master.nvidia.com:5005/dl/ai-dynamo/dynamo/dev"
 
-# dynamo:<sha>-{none,vllm,sglang,trtllm}-dev
-IMAGE_PATTERN = re.compile(r"^dynamo:([a-f0-9]+)-(none|vllm|sglang|trtllm)-dev$")
+# dynamo:<sha>-<framework>[-optional-segments]-dev
+IMAGE_PATTERN = re.compile(r"^dynamo:[a-f0-9]+-(none|vllm|sglang|trtllm)(-[a-zA-Z0-9.]+)*-dev$")
 
 # Pre-rendered fallback: used when local_dev.Dockerfile is not found on disk.
 # {base_image} is replaced at render time.
@@ -215,11 +215,12 @@ def ensure_image_local(image: str) -> None:
 
 
 def validate_image(image: str) -> re.Match[str]:
-    """Validate the image name matches dynamo:<sha>-{none,vllm,sglang,trtllm}-dev."""
+    """Validate the image name matches dynamo:<sha>-<framework>[...]-dev."""
     m = IMAGE_PATTERN.match(image)
     if not m:
         print(
-            f"ERROR: Image must match dynamo:<sha>-{{none,vllm,sglang,trtllm}}-dev\n"
+            f"ERROR: Image must match dynamo:<sha>-<framework>[...]-dev\n"
+            f"       where framework is one of: none, vllm, sglang, trtllm\n"
             f"       Got: {image}",
             file=sys.stderr,
         )
@@ -239,7 +240,7 @@ def main() -> None:
     )
     parser.add_argument(
         "image",
-        help="Dev base image, must be dynamo:<sha>-{none,vllm,sglang,trtllm}-dev",
+        help="Dev base image, e.g. dynamo:<sha>-vllm-dev or dynamo:<sha>-vllm-cuda12.9-dev",
     )
     parser.add_argument(
         "--output", "-o",

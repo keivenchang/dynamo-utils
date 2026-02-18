@@ -376,9 +376,9 @@ Examples:
     # Mutually exclusive: either specify number of image SHAs or specific commit SHAs
     sha_group = parser.add_mutually_exclusive_group(required=True)
     sha_group.add_argument(
-        "--num-image-sha-to-build",
+        "--num-image-sha-to-build", "--num",
         type=int,
-        help="Number of last image SHAs to build (determines commit SHAs automatically)"
+        help="Number of last image SHAs to build (determines commit SHAs automatically). 0 = cleanup only, no builds."
     )
     sha_group.add_argument(
         "--commit-sha",
@@ -454,7 +454,11 @@ def main():
             return 1
 
     # Determine which commit SHAs to build
-    if args.num_image_sha_to_build:
+    if args.num_image_sha_to_build is not None:
+        if args.num_image_sha_to_build == 0:
+            logger.info(f"{Colors.GREEN}--num-image-sha-to-build 0: cleanup only, no builds{Colors.RESET}")
+            return 0
+
         try:
             resolver = ImageSHAResolver(repo_path)
             sha_pairs = resolver.get_last_n_image_shas(args.num_image_sha_to_build)
