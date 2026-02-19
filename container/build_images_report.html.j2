@@ -24,11 +24,12 @@ body { font-family: Arial, sans-serif; margin: 10px; line-height: 1.3; }
 .framework-header { background-color: #007bff; color: white; padding: 8px 12px; border-radius: 4px 4px 0 0; font-weight: bold; display: grid; grid-column: 1 / -1; }
 .results-chart { display: grid; grid-template-columns: auto 1fr 1fr auto auto auto auto; width: 100%; border-collapse: collapse; margin: 0; }
 .chart-row { display: contents; }
-.chart-cell { padding: 6px 12px; border: 1px solid #dee2e6; vertical-align: middle; }
-.chart-header { background-color: #f8f9fa; font-weight: bold; text-align: center; }
+.chart-cell { padding: 6px 12px; border: 1px solid #dee2e6; font-size: 13px; display: flex; align-items: center; flex-wrap: wrap; }
+.chart-header { background-color: #f8f9fa; font-weight: bold; justify-content: center; }
 .chart-target { font-weight: bold; background-color: #f1f3f4; }
-.chart-status { text-align: center; }
-.chart-timing { text-align: right; font-family: monospace; font-size: 0.9em; }
+.chart-status { justify-content: center; }
+.chart-timing { justify-content: flex-end; font-family: monospace; }
+.chart-size { justify-content: flex-end; font-family: monospace; white-space: nowrap; }
 .chart-cell-span-2 { grid-column: span 2; }
 .chart-cell-span-3 { grid-column: span 3; }
 .chart-cell-span-4 { grid-column: span 4; }
@@ -37,7 +38,9 @@ body { font-family: Arial, sans-serif; margin: 10px; line-height: 1.3; }
 .git-info { background-color: #e9ecef; padding: 4px 6px; border-radius: 2px; font-family: monospace; font-size: 0.9em; }
 a { color: #007bff; text-decoration: none; }
 a:hover { text-decoration: underline; }
-a.log-link { font-size: 0.85em; margin-left: 4px; }
+a.log-link { margin-left: 4px; }
+.spinner { display: inline-block; width: 12px; height: 12px; border: 2px solid #b0d4f1; border-top-color: #3498db; border-radius: 50%; animation: spin 0.8s linear infinite; vertical-align: middle; margin-right: 4px; }
+@keyframes spin { to { transform: rotate(360deg); } }
 p { margin: 1px 0; }
 h2 { margin: 0; font-size: 1.2em; font-weight: bold; }
 
@@ -178,12 +181,12 @@ h2 { margin: 0; font-size: 1.2em; font-weight: bold; }
 
 <div class="chart-row">
 <div class="chart-cell chart-target">{{ 'dev-orig' if target_name == 'dev' else target_name }}</div>
-<div class="chart-cell" style="font-family: monospace; font-size: 0.85em;">
+<div class="chart-cell" style="font-family: monospace;">
 {%- if target_data.input_image %}{{ target_data.input_image }}{%- else %}-{%- endif %}
 </div>
-<div class="chart-cell" style="font-family: monospace; font-size: 0.85em;">
+<div class="chart-cell" style="font-family: monospace;">
 {%- if target_name == 'dev-upload' and target_data.output_image %}
-<button onclick="navigator.clipboard.writeText('{{ target_data.output_image }}').then(function(){alert('Copied to clipboard!');})" style="border: none; background: none; cursor: pointer; padding: 0 4px; font-size: 0.9em;" title="Copy to clipboard">📋</button>{{ target_data.output_image }}
+<button data-clipboard-text="docker pull {{ target_data.output_image }}" onclick="copyFromClipboardAttr(this)" style="padding: 2px 4px; background-color: transparent; color: #57606a; border: 1px solid #d0d7de; border-radius: 4px; cursor: pointer; display: inline-flex; align-items: center; vertical-align: middle;" title="Copy docker pull command" onmouseover="this.style.backgroundColor='#f3f4f6'; this.style.borderColor='#8c959f';" onmouseout="this.style.backgroundColor='transparent'; this.style.borderColor='#d0d7de';"><svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor" style="display: inline-block;"><path d="M0 6.75C0 5.784.784 5 1.75 5h1.5a.75.75 0 0 1 0 1.5h-1.5a.25.25 0 0 0-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 0 0 .25-.25v-1.5a.75.75 0 0 1 1.5 0v1.5A1.75 1.75 0 0 1 9.25 16h-7.5A1.75 1.75 0 0 1 0 14.25Z"></path><path d="M5 1.75C5 .784 5.784 0 6.75 0h7.5C15.216 0 16 .784 16 1.75v7.5A1.75 1.75 0 0 1 14.25 11h-7.5A1.75 1.75 0 0 1 5 9.25Zm1.75-.25a.25.25 0 0 0-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 0 0 .25-.25v-7.5a.25.25 0 0 0-.25-.25Z"></path></svg></button> {{ target_data.output_image }}
 {%- elif target_data.output_image %}{{ target_data.output_image }}{%- else %}-{%- endif %}
 </div>
 {%- if target_name == 'dev-compress' %}
@@ -193,13 +196,13 @@ h2 { margin: 0; font-size: 1.2em; font-weight: bold; }
 {%- if build_task.status == 'passed' %}
 <span class="success">✅ COMPRESSED</span>{%- if build_task.time %} <span class="chart-timing">({{ build_task.time }})</span>{%- endif %}
 {%- elif build_task.status == 'running' %}
-<span style="color: #3498db;">🔄 COMPRESSING</span>{%- if build_task.time %} <span class="chart-timing">(elapsed <span class="elapsed-seconds">{{ build_task.time.replace('elapsed ', '').replace('s', '') }}</span>s)</span>{%- endif %}
+<span style="color: #3498db;"><span class="spinner"></span>COMPRESSING</span>{%- if build_task.time %} <span class="chart-timing">(elapsed <span class="elapsed-seconds">{{ build_task.time.replace('elapsed ', '').replace('s', '') }}</span>s)</span>{%- endif %}
 {%- elif build_task.status == 'killed' %}
 <span style="color: #ff9800; font-weight: bold;">⚠️ KILLED</span>{%- if build_task.time %} <span class="chart-timing">({{ build_task.time }})</span>{%- endif %}
 {%- elif build_task.status == 'queued' %}
 <span style="color: #95a5a6;">⏳ to be compressed</span>{%- if build_task.time %} <span class="chart-timing">(prev: {{ build_task.time }})</span>{%- endif %}
 {%- elif build_task.status == 'skipped' %}
-<span style="color: #95a5a6;">⏭️ Skipped</span>{%- if build_task.prev_status %} <span class="chart-timing">(prev: <span class="success">COMPRESSED</span>{%- if build_task.time %} {{ build_task.time }}{%- endif %})</span>{%- endif %}
+<span style="color: #95a5a6;">Skipped</span>{%- if build_task.prev_status %} <span class="chart-timing">(prev: <span class="success">COMPRESSED</span>{%- if build_task.time %} {{ build_task.time }}{%- endif %})</span>{%- endif %}
 {%- else %}
 <span class="failure">❌ FAIL</span> <span class="chart-timing">({{ build_task.time if build_task.time else 'n/a' }})</span>
 {%- endif %}
@@ -212,13 +215,13 @@ h2 { margin: 0; font-size: 1.2em; font-weight: bold; }
 {%- if sanity_task.status == 'passed' %}
 <span class="success">✅ PASS</span>{%- if sanity_task.time %} <span class="chart-timing">({{ sanity_task.time }})</span>{%- endif %}
 {%- elif sanity_task.status == 'running' %}
-<span style="color: #3498db;">🔄 RUNNING</span>{%- if sanity_task.time %} <span class="chart-timing">(elapsed <span class="elapsed-seconds">{{ sanity_task.time.replace('elapsed ', '').replace('s', '') }}</span>s)</span>{%- endif %}
+<span style="color: #3498db;"><span class="spinner"></span>RUNNING</span>{%- if sanity_task.time %} <span class="chart-timing">(elapsed <span class="elapsed-seconds">{{ sanity_task.time.replace('elapsed ', '').replace('s', '') }}</span>s)</span>{%- endif %}
 {%- elif sanity_task.status == 'killed' %}
 <span style="color: #ff9800; font-weight: bold;">⚠️ KILLED</span>{%- if sanity_task.time %} <span class="chart-timing">({{ sanity_task.time }})</span>{%- endif %}
 {%- elif sanity_task.status == 'queued' %}
 <span style="color: #95a5a6;">⏳ to be run</span>{%- if sanity_task.time %} <span class="chart-timing">(prev: {{ sanity_task.time }})</span>{%- endif %}
 {%- elif sanity_task.status == 'skipped' %}
-<span style="color: #95a5a6;">⏭️ Skipped</span>{%- if sanity_task.prev_status %} <span class="chart-timing">(prev: <span class="success">PASS</span>{%- if sanity_task.time %} {{ sanity_task.time }}{%- endif %})</span>{%- endif %}
+<span style="color: #95a5a6;">Skipped</span>{%- if sanity_task.prev_status %} <span class="chart-timing">(prev: <span class="success">PASS</span>{%- if sanity_task.time %} {{ sanity_task.time }}{%- endif %})</span>{%- endif %}
 {%- else %}
 <span class="failure">❌ FAIL</span> <span class="chart-timing">({{ sanity_task.time if sanity_task.time else 'n/a' }})</span>
 {%- endif %}
@@ -226,35 +229,44 @@ h2 { margin: 0; font-size: 1.2em; font-weight: bold; }
 {%- else %}-{%- endif %}
 </div>
 {# image size for compressed image #}
-<div class="chart-cell" style="text-align: center;">
+<div class="chart-cell chart-size">
 {%- if target_data.image_size %}{{ target_data.image_size }}{%- else %}-{%- endif %}
 </div>
 {%- elif target_name == 'dev-upload' %}
-<div class="chart-cell chart-status chart-cell-span-4" style="text-align: center;">
+<div class="chart-cell chart-status chart-cell-span-3" style="text-align: center;">
 {%- if build_task %}
 {%- if build_task.status == 'passed' %}
 <span class="success">✅ UPLOADED</span>{%- if build_task.time %} <span class="chart-timing">({{ build_task.time }})</span>{%- endif %}
 {%- elif build_task.status == 'running' %}
-<span style="color: #3498db;">🔄 UPLOADING</span>{%- if build_task.time %} <span class="chart-timing">(elapsed <span class="elapsed-seconds">{{ build_task.time.replace('elapsed ', '').replace('s', '') }}</span>s)</span>{%- endif %}
+<span style="color: #3498db;"><span class="spinner"></span>UPLOADING</span>{%- if build_task.time %} <span class="chart-timing">(elapsed <span class="elapsed-seconds">{{ build_task.time.replace('elapsed ', '').replace('s', '') }}</span>s)</span>{%- endif %}
 {%- elif build_task.status == 'killed' %}
 <span style="color: #ff9800; font-weight: bold;">⚠️ KILLED</span>{%- if build_task.time %} <span class="chart-timing">({{ build_task.time }})</span>{%- endif %}
 {%- elif build_task.status == 'queued' %}
 <span style="color: #95a5a6;">⏳ to be uploaded</span>{%- if build_task.time %} <span class="chart-timing">(prev: {{ build_task.time }})</span>{%- endif %}
 {%- elif build_task.status == 'skipped' %}
-<span style="color: #95a5a6;">⏭️ Skipped</span>{%- if build_task.prev_status %} <span class="chart-timing">(prev: <span class="success">UPLOADED</span>{%- if build_task.time %} {{ build_task.time }}{%- endif %})</span>{%- endif %}
+<span style="color: #95a5a6;">Skipped</span>{%- if build_task.prev_status %} <span class="chart-timing">(prev: <span class="success">UPLOADED</span>{%- if build_task.time %} {{ build_task.time }}{%- endif %})</span>{%- endif %}
 {%- else %}
 <span class="failure">❌ FAIL</span> <span class="chart-timing">({{ build_task.time if build_task.time else 'n/a' }})</span>
 {%- endif %}
 {%- if build_task.log_file %} <a href="{{ build_task.log_file }}" class="log-link" target="_blank" rel="noopener noreferrer">[log]</a>{%- endif %}
 {%- else %}-{%- endif %}
 </div>
+<div class="chart-cell chart-size">
+{%- set compress_data = targets.get('dev-compress', {}) %}
+{%- if compress_data and compress_data.image_size %}{{ compress_data.image_size }}{%- elif targets.get('dev', {}).image_size %}{{ targets['dev'].image_size }}{%- else %}-{%- endif %}
+</div>
+{%- else %}
+{%- if target_name == 'runtime' %}
+{# Runtime has no compilation -- build spans both columns #}
+<div class="chart-cell chart-status chart-cell-span-2">
 {%- else %}
 <div class="chart-cell chart-status">
+{%- endif %}
 {%- if build_task %}
 {%- if build_task.status == 'passed' %}
 <span class="success">✅ PASS</span>{%- if build_task.time %} <span class="chart-timing">({{ build_task.time }})</span>{%- endif %}
 {%- elif build_task.status == 'running' %}
-<span style="color: #3498db;">🔄 RUNNING</span>{%- if build_task.time %} <span class="chart-timing">(elapsed <span class="elapsed-seconds">{{ build_task.time.replace('elapsed ', '').replace('s', '') }}</span>s)</span>{%- endif %}
+<span style="color: #3498db;"><span class="spinner"></span>RUNNING</span>{%- if build_task.time %} <span class="chart-timing">(elapsed <span class="elapsed-seconds">{{ build_task.time.replace('elapsed ', '').replace('s', '') }}</span>s)</span>{%- endif %}
 {%- elif build_task.status == 'killed' %}
 <span style="color: #ff9800; font-weight: bold;">⚠️ KILLED</span>{%- if build_task.time %} <span class="chart-timing">({{ build_task.time }})</span>{%- endif %}
 {%- elif build_task.status == 'queued' %}
@@ -267,12 +279,13 @@ h2 { margin: 0; font-size: 1.2em; font-weight: bold; }
 {%- if build_task.log_file %} <a href="{{ build_task.log_file }}" class="log-link" target="_blank" rel="noopener noreferrer">[log]</a>{%- endif %}
 {%- else %}-{%- endif %}
 </div>
+{%- if target_name != 'runtime' %}
 <div class="chart-cell chart-status">
 {%- if compilation_task %}
 {%- if compilation_task.status == 'passed' %}
 <span class="success">✅ PASS</span>{%- if compilation_task.time %} <span class="chart-timing">({{ compilation_task.time }})</span>{%- endif %}
 {%- elif compilation_task.status == 'running' %}
-<span style="color: #3498db;">🔄 RUNNING</span>{%- if compilation_task.time %} <span class="chart-timing">(elapsed <span class="elapsed-seconds">{{ compilation_task.time.replace('elapsed ', '').replace('s', '') }}</span>s)</span>{%- endif %}
+<span style="color: #3498db;"><span class="spinner"></span>RUNNING</span>{%- if compilation_task.time %} <span class="chart-timing">(elapsed <span class="elapsed-seconds">{{ compilation_task.time.replace('elapsed ', '').replace('s', '') }}</span>s)</span>{%- endif %}
 {%- elif compilation_task.status == 'killed' %}
 <span style="color: #ff9800; font-weight: bold;">⚠️ KILLED</span>{%- if compilation_task.time %} <span class="chart-timing">({{ compilation_task.time }})</span>{%- endif %}
 {%- elif compilation_task.status == 'queued' %}
@@ -283,14 +296,15 @@ h2 { margin: 0; font-size: 1.2em; font-weight: bold; }
 <span class="failure">❌ FAIL</span> <span class="chart-timing">({{ compilation_task.time if compilation_task.time else 'n/a' }})</span>
 {%- endif %}
 {%- if compilation_task.log_file %} <a href="{{ compilation_task.log_file }}" class="log-link" target="_blank" rel="noopener noreferrer">[log]</a>{%- endif %}
-{%- else %}{%- if target_name == 'runtime' %}N/A{%- else %}-{%- endif %}{%- endif %}
+{%- else %}-{%- endif %}
 </div>
+{%- endif %}
 <div class="chart-cell chart-status">
 {%- if sanity_task %}
 {%- if sanity_task.status == 'passed' %}
 <span class="success">✅ PASS</span>{%- if sanity_task.time %} <span class="chart-timing">({{ sanity_task.time }})</span>{%- endif %}
 {%- elif sanity_task.status == 'running' %}
-<span style="color: #3498db;">🔄 RUNNING</span>{%- if sanity_task.time %} <span class="chart-timing">(elapsed <span class="elapsed-seconds">{{ sanity_task.time.replace('elapsed ', '').replace('s', '') }}</span>s)</span>{%- endif %}
+<span style="color: #3498db;"><span class="spinner"></span>RUNNING</span>{%- if sanity_task.time %} <span class="chart-timing">(elapsed <span class="elapsed-seconds">{{ sanity_task.time.replace('elapsed ', '').replace('s', '') }}</span>s)</span>{%- endif %}
 {%- elif sanity_task.status == 'killed' %}
 <span style="color: #ff9800; font-weight: bold;">⚠️ KILLED</span>{%- if sanity_task.time %} <span class="chart-timing">({{ sanity_task.time }})</span>{%- endif %}
 {%- elif sanity_task.status == 'queued' %}
@@ -303,7 +317,7 @@ h2 { margin: 0; font-size: 1.2em; font-weight: bold; }
 {%- if sanity_task.log_file %} <a href="{{ sanity_task.log_file }}" class="log-link" target="_blank" rel="noopener noreferrer">[log]</a>{%- endif %}
 {%- else %}-{%- endif %}
 </div>
-<div class="chart-cell chart-timing">{{ target_data.image_size if target_data.image_size else '-' }}</div>
+<div class="chart-cell chart-size">{{ target_data.image_size if target_data.image_size else '-' }}</div>
 {%- endif %}
 </div>
 {%- endif %}
@@ -311,6 +325,38 @@ h2 { margin: 0; font-size: 1.2em; font-weight: bold; }
 </div></div>
 {%- endfor %}
 <script>
+var copyIconSvg = '<svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor" style="display:inline-block;"><path d="M0 6.75C0 5.784.784 5 1.75 5h1.5a.75.75 0 0 1 0 1.5h-1.5a.25.25 0 0 0-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 0 0 .25-.25v-1.5a.75.75 0 0 1 1.5 0v1.5A1.75 1.75 0 0 1 9.25 16h-7.5A1.75 1.75 0 0 1 0 14.25Z"></path><path d="M5 1.75C5 .784 5.784 0 6.75 0h7.5C15.216 0 16 .784 16 1.75v7.5A1.75 1.75 0 0 1 14.25 11h-7.5A1.75 1.75 0 0 1 5 9.25Zm1.75-.25a.25.25 0 0 0-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 0 0 .25-.25v-7.5a.25.25 0 0 0-.25-.25Z"></path></svg>';
+
+function copyToClipboard(text, button) {
+    if (!text) return;
+    var textArea = document.createElement('textarea');
+    textArea.value = text;
+    textArea.style.position = 'fixed';
+    textArea.style.left = '-999999px';
+    textArea.style.top = '-999999px';
+    document.body.appendChild(textArea);
+    textArea.focus();
+    textArea.select();
+    try {
+        document.execCommand('copy');
+        document.body.removeChild(textArea);
+        if (button) {
+            var originalHTML = button.innerHTML;
+            button.innerHTML = copyIconSvg + '<span style="margin-left:4px; color:#28a745;">Copied!</span>';
+            setTimeout(function() { button.innerHTML = originalHTML; }, 2000);
+        }
+    } catch (err) {
+        document.body.removeChild(textArea);
+    }
+}
+
+function copyFromClipboardAttr(button) {
+    if (!button) return;
+    var text = button.getAttribute('data-clipboard-text');
+    if (!text) return;
+    copyToClipboard(text, button);
+}
+
 // Update elapsed time for all RUNNING tasks on a randomized cadence (0.25–0.5s).
 // IMPORTANT: since cadence is not fixed, we increment by real elapsed wall time so it
 // stays accurate even under timer throttling / sleep-wake.

@@ -674,7 +674,7 @@ def create_task_graph(
     # Takes the -orig image (built by dev-build), removes /workspace, .git dirs,
     # /tmp, __pycache__, squashes all layers into a single layer via
     # docker export/import, and outputs the final -dev tag.
-    # Deletes the -orig image when done.
+    # The -orig image is deleted later by dev-orig-cleanup after all tasks pass.
     #
     # docker export/import loses all image metadata (ENV, ENTRYPOINT, WORKDIR, USER,
     # CMD), so we reconstruct it: inspect the original, emit --change flags, then
@@ -725,9 +725,6 @@ docker start -a "$CONTAINER_ID"
 docker export "$CONTAINER_ID" | bash {compress_import_script_path} {dev_image_tag}
 docker rm -f "$CONTAINER_ID"
 rm -f {compress_import_script_path}
-
-# 4. Delete the -orig image (force: other stopped containers from run.sh may reference it)
-docker rmi -f {dev_orig_image_tag}
 
 echo "Compress complete: {dev_image_tag}"
 docker images {dev_image_tag} --format 'Size: {{{{.Size}}}}'
@@ -786,6 +783,16 @@ docker images {dev_image_tag} --format 'Size: {{{{.Size}}}}'
         input_image=local_dev_image_tag,
         parents=[f"{framework}-local-dev-compilation"],
         timeout=45.0,  # 45 seconds for sanity checks
+    )
+
+    # Level 11: Delete the -orig dev image after all framework tasks pass
+    tasks[f"{framework}-dev-orig-cleanup"] = CommandTask(
+        task_id=f"{framework}-dev-orig-cleanup",
+        description=f"Delete {framework.upper()} dev-orig image (all tasks passed)",
+        command=f"docker rmi -f {dev_orig_image_tag} && echo 'Deleted {dev_orig_image_tag}'",
+        input_image=dev_orig_image_tag,
+        parents=[f"{framework}-local-dev-sanity"],
+        timeout=30.0,
     )
 
     return tasks
@@ -3476,7 +3483,7 @@ def print_dependency_tree(frameworks: List[str], sha: str, repo_path: Path, verb
 
     for framework in frameworks:
         # Create task graph for this framework
-        tasks = create_task_graph(framework, sha, repo_path)
+        tasks = create_task_graph(framework, sha, repo_path, build_method=BUILD_METHOD_RENDER_PY)
 
         # Create pipeline and add tasks
         pipeline = BuildPipeline()
