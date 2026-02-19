@@ -1304,7 +1304,12 @@ class CommitHistoryGenerator:
                             created_display = dt.strftime('%Y-%m-%d %H:%M')
                         except (ValueError, TypeError):
                             created_display = report.report_generated[:16]
-                    local_dev_cmd = f"curl -sL {BUILD_LOCAL_DEV_SCRIPT_URL} | python3 - {img.image_name} --build"
+                    local_dev_cmd = (
+                        f"docker pull {img.location}"
+                        f" && docker tag {img.location} {img.image_name}"
+                        f" && docker rmi {img.location}"
+                        f" && curl -sL {BUILD_LOCAL_DEV_SCRIPT_URL} | python3 - {img.image_name} --build"
+                    )
                     formatted.append({
                         "tag": img.tag,
                         "framework": img.framework,

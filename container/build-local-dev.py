@@ -274,7 +274,7 @@ def main() -> None:
         base = f"container/run.sh --image {tag} -it --mount-workspace --hf-home ~/.cache/huggingface"
         with_sanity = f"{base} -- bash -c 'python /workspace/deploy/sanity_check.py && exec bash'"
         shell_only = f"{base} -- bash"
-        print(f"\nSuggested run commands:")
+        print(f"\nYou can now use the image. Here are some commands you can try:")
         print(f"  (with sanity check)  {with_sanity}")
         print(f"  (shell only)         {shell_only}")
 
@@ -299,7 +299,7 @@ def main() -> None:
             if rc != 0:
                 print(f"ERROR: docker build exited with code {rc}", file=sys.stderr)
                 sys.exit(rc)
-            print(f"\nBuilt image: {out_tag}")
+            print(f"\nSuccessfully built image: {out_tag}")
             suggest_run_command(out_tag)
 
 
