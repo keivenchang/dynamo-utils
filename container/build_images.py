@@ -1904,50 +1904,9 @@ def execute_task_sequential(
         raise ValueError("log_dir and log_date must be set for actual execution")
     task.set_log_file_path(log_dir, log_date, sha)
 
-    # Check if input image exists (required for tasks that depend on previous builds)
-    if not task.check_input_image_exists():
-        # Check if SHA changed (common cause of missing images)
-        sha_warning = check_sha_changed(repo_path, task_id)
-        if sha_warning:
-            logger.warning(sha_warning)
-
-        logger.error(f"✗ Skipping {task_id}: Input image missing ({task.input_image})")
-        task.mark_status_as(TaskStatus.FAILED, f"Input image not found: {task.input_image}")  # Also creates .FAILED marker
-        executed_tasks.add(task_id)
-        failed_tasks.add(task_id)
-
-        # Write to log file
-        with open(task.log_file, 'w') as log_fh:
-            log_fh.write(f"Task: {task_id}\n")
-            log_fh.write(f"Description: {task.description}\n")
-            log_fh.write(f"Error: Input image not found: {task.input_image}\n")
-            if sha_warning:
-                log_fh.write("\n")
-                log_fh.write(sha_warning)
-                log_fh.write("\n")
-            log_fh.write("=" * 80 + "\n")
-
-        # CRITICAL FIX: Update frameworks cache and regenerate HTML report even on failure
-        # This ensures the HTML report shows the failure instead of blank cells
-        update_frameworks_data_cache(task, use_absolute_urls=False)
-
-        if log_dir and log_date:
-            try:
-                html_content = generate_html_report(
-                    all_tasks=all_tasks,
-                    repo_path=repo_path,
-                    sha=sha,
-                    log_dir=log_dir,
-                    date_str=log_date,
-                    use_absolute_urls=False,
-                )
-                _write_report_and_json(html_content, all_tasks, repo_path, sha, log_dir, log_date)
-            except Exception as e:
-                logger.warning(f"Failed to generate HTML report after image-not-found failure: {e}")
-
-        return False
-
     # Check if we should skip any task if it has already passed.
+    # This must run BEFORE the input image check: if the task already passed,
+    # we don't need the input image (it may have been cleaned up).
     # IMPORTANT: A stale .PASSED marker is NOT sufficient to skip if the task produces
     # a Docker image. The output image must still exist locally (users may have pruned).
     if skip_action_if_already_passed:
@@ -1992,6 +1951,45 @@ def execute_task_sequential(
                     )
 
             return True
+
+    # Check if input image exists (required for tasks that depend on previous builds)
+    if not task.check_input_image_exists():
+        sha_warning = check_sha_changed(repo_path, task_id)
+        if sha_warning:
+            logger.warning(sha_warning)
+
+        logger.error(f"✗ Skipping {task_id}: Input image missing ({task.input_image})")
+        task.mark_status_as(TaskStatus.FAILED, f"Input image not found: {task.input_image}")
+        executed_tasks.add(task_id)
+        failed_tasks.add(task_id)
+
+        with open(task.log_file, 'w') as log_fh:
+            log_fh.write(f"Task: {task_id}\n")
+            log_fh.write(f"Description: {task.description}\n")
+            log_fh.write(f"Error: Input image not found: {task.input_image}\n")
+            if sha_warning:
+                log_fh.write("\n")
+                log_fh.write(sha_warning)
+                log_fh.write("\n")
+            log_fh.write("=" * 80 + "\n")
+
+        update_frameworks_data_cache(task, use_absolute_urls=False)
+
+        if log_dir and log_date:
+            try:
+                html_content = generate_html_report(
+                    all_tasks=all_tasks,
+                    repo_path=repo_path,
+                    sha=sha,
+                    log_dir=log_dir,
+                    date_str=log_date,
+                    use_absolute_urls=False,
+                )
+                _write_report_and_json(html_content, all_tasks, repo_path, sha, log_dir, log_date)
+            except Exception as e:
+                logger.warning(f"Failed to generate HTML report after image-not-found failure: {e}")
+
+        return False
 
     # Execute this task
     logger.info(f"Executing: {task_id} ({task.description})")
@@ -2317,55 +2315,9 @@ def execute_task_parallel(
             raise ValueError("log_dir and log_date must be set for actual execution")
         task.set_log_file_path(log_dir, log_date, sha)
 
-        # Check if input image exists (required for tasks that depend on previous builds)
-        if not task.check_input_image_exists():
-            # Check if SHA changed (common cause of missing images)
-            sha_warning = check_sha_changed(repo_path, task_id)
-            if sha_warning:
-                with lock:
-                    logger.warning(sha_warning)
-
-            with lock:
-                logger.error(f"✗ Skipping {task_id}: Input image missing ({task.input_image})")
-            task.mark_status_as(TaskStatus.FAILED, f"Input image not found: {task.input_image}")  # Also creates .FAILED marker
-
-            # Write to log file
-            with open(task.log_file, 'w') as log_fh:
-                log_fh.write(f"Task: {task_id}\n")
-                log_fh.write(f"Description: {task.description}\n")
-                log_fh.write(f"Error: Input image not found: {task.input_image}\n")
-                if sha_warning:
-                    log_fh.write("\n")
-                    log_fh.write(sha_warning)
-                    log_fh.write("\n")
-                log_fh.write("=" * 80 + "\n")
-
-            with lock:
-                executed_tasks.add(task_id)
-                failed_tasks.add(task_id)
-
-            # CRITICAL FIX: Update frameworks cache and regenerate HTML report even on failure
-            # This ensures the HTML report shows the failure instead of blank cells
-            update_frameworks_data_cache(task, use_absolute_urls=False)
-
-            if log_dir and log_date:
-                try:
-                    html_content = generate_html_report(
-                        all_tasks=all_tasks,
-                        repo_path=repo_path,
-                        sha=sha,
-                        log_dir=log_dir,
-                        date_str=log_date,
-                        use_absolute_urls=False,
-                    )
-                    _write_report_and_json(html_content, all_tasks, repo_path, sha, log_dir, log_date)
-                except Exception as e:
-                    with lock:
-                        logger.warning(f"Failed to generate HTML report after image-not-found failure: {e}")
-
-            return False
-
         # Check if we should skip any task if it has already passed.
+        # This must run BEFORE the input image check: if the task already passed,
+        # we don't need the input image (it may have been cleaned up).
         # IMPORTANT: A stale .PASSED marker is NOT sufficient to skip if the task produces
         # a Docker image. The output image must still exist locally (users may have pruned).
         if skip_if_passed:
@@ -2404,6 +2356,50 @@ def execute_task_parallel(
                 with lock:
                     executed_tasks.add(task_id)
                 return True
+
+        # Check if input image exists (required for tasks that depend on previous builds)
+        if not task.check_input_image_exists():
+            sha_warning = check_sha_changed(repo_path, task_id)
+            if sha_warning:
+                with lock:
+                    logger.warning(sha_warning)
+
+            with lock:
+                logger.error(f"✗ Skipping {task_id}: Input image missing ({task.input_image})")
+            task.mark_status_as(TaskStatus.FAILED, f"Input image not found: {task.input_image}")
+
+            with open(task.log_file, 'w') as log_fh:
+                log_fh.write(f"Task: {task_id}\n")
+                log_fh.write(f"Description: {task.description}\n")
+                log_fh.write(f"Error: Input image not found: {task.input_image}\n")
+                if sha_warning:
+                    log_fh.write("\n")
+                    log_fh.write(sha_warning)
+                    log_fh.write("\n")
+                log_fh.write("=" * 80 + "\n")
+
+            with lock:
+                executed_tasks.add(task_id)
+                failed_tasks.add(task_id)
+
+            update_frameworks_data_cache(task, use_absolute_urls=False)
+
+            if log_dir and log_date:
+                try:
+                    html_content = generate_html_report(
+                        all_tasks=all_tasks,
+                        repo_path=repo_path,
+                        sha=sha,
+                        log_dir=log_dir,
+                        date_str=log_date,
+                        use_absolute_urls=False,
+                    )
+                    _write_report_and_json(html_content, all_tasks, repo_path, sha, log_dir, log_date)
+                except Exception as e:
+                    with lock:
+                        logger.warning(f"Failed to generate HTML report after image-not-found failure: {e}")
+
+            return False
 
         with lock:
             logger.info(f"Executing: {task_id} ({task.description})")
