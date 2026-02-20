@@ -17,6 +17,7 @@ Architecture:
 import argparse
 import atexit
 import glob
+import hashlib
 import logging
 import os
 import re
@@ -1124,21 +1125,35 @@ class BaseTask(ABC):
             return False
 
     def image_exists(self) -> bool:
-        """Check if output Docker image already exists locally."""
+        """Check if output Docker image already exists locally.
+
+        For dev-build tasks (output ends with -dev-orig), also returns True
+        if the final compressed image (-dev) already exists, since rebuilding
+        dev-orig would be pointless when the downstream product is present.
+        """
         if not self.output_image:
             return False
 
-        try:
-            result = subprocess.run(
-                ["docker", "inspect", self.output_image],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True
-            )
-            return result.returncode == 0
-        except (subprocess.CalledProcessError, OSError) as e:
-            self.logger.warning(f"Error checking image existence: {e}")
-            return False
+        def _docker_image_exists(tag: str) -> bool:
+            try:
+                result = subprocess.run(
+                    ["docker", "inspect", tag],
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                )
+                return result.returncode == 0
+            except (subprocess.CalledProcessError, OSError):
+                return False
+
+        if _docker_image_exists(self.output_image):
+            return True
+
+        if self.output_image.endswith("-dev-orig"):
+            final_dev = self.output_image.replace("-dev-orig", "-dev")
+            if _docker_image_exists(final_dev):
+                self.logger.info(f"  Final image {final_dev} exists (skipping {self.output_image} rebuild)")
+                return True
+
+        return False
 
     def format_log_header(self, repo_path: Path) -> str:
         """
@@ -1485,8 +1500,9 @@ def parse_args() -> argparse.Namespace:
         help="Path to the Dynamo repository",
     )
     parser.add_argument(
-        "--repo-sha",
+        "--repo-sha", "--sha",
         type=str,
+        dest="repo_sha",
         help="Git commit SHA to build (default: current HEAD)",
     )
     parser.add_argument(
@@ -1809,7 +1825,7 @@ def execute_task_sequential(
 
         return True
 
-    # Check if we should skip dev-compress or dev-compress-sanity (--compress not set)
+    # Check if we should skip dev-compress or dev-compress-sanity (--no-compress)
     if not enable_dev_compress and (task_id.endswith("-dev-compress") or task_id.endswith("-dev-compress-sanity")):
         logger.info(f"⊘ Skipping {task_id}: compress disabled (--no-compress)")
         # When skipping dev-compress, retag -dev-orig to -dev so downstream tasks have the expected image
@@ -1831,10 +1847,10 @@ def execute_task_sequential(
                 )
         return True
 
-    # Check if we should skip dev-upload (--upload not set)
+    # Check if we should skip dev-upload (--no-upload)
     if not enable_dev_upload and task_id.endswith("-dev-upload"):
-        logger.info(f"⊘ Skipping {task_id}: upload disabled (use --upload to push to GitLab)")
-        task.mark_status_as(TaskStatus.SKIPPED, "Upload disabled (use --upload to enable)")
+        logger.info(f"⊘ Skipping {task_id}: upload disabled (--no-upload)")
+        task.mark_status_as(TaskStatus.SKIPPED, "Upload disabled (pass default to enable)")
         if log_dir and log_date:
             update_frameworks_data_cache(task, use_absolute_urls=False)
 
@@ -2247,7 +2263,7 @@ def execute_task_parallel(
                 executed_tasks.add(task_id)
             return True
 
-        # Check if we should skip dev-compress or dev-compress-sanity (--compress not set)
+        # Check if we should skip dev-compress or dev-compress-sanity (--no-compress)
         if not enable_dev_compress and (task_id.endswith("-dev-compress") or task_id.endswith("-dev-compress-sanity")):
             with lock:
                 logger.info(f"⊘ Skipping {task_id}: compress disabled (--no-compress)")
@@ -2266,11 +2282,11 @@ def execute_task_parallel(
                 executed_tasks.add(task_id)
             return True
 
-        # Check if we should skip dev-upload (--upload not set)
+        # Check if we should skip dev-upload (--no-upload)
         if not enable_dev_upload and task_id.endswith("-dev-upload"):
             with lock:
-                logger.info(f"⊘ Skipping {task_id}: upload disabled (use --upload to push to GitLab)")
-            task.mark_status_as(TaskStatus.SKIPPED, "Upload disabled (use --upload to enable)")
+                logger.info(f"⊘ Skipping {task_id}: upload disabled (--no-upload)")
+            task.mark_status_as(TaskStatus.SKIPPED, "Upload disabled (pass default to enable)")
             if log_dir and log_date:
                 update_frameworks_data_cache(task, use_absolute_urls=False)
             with lock:
@@ -3755,8 +3771,9 @@ def main() -> int:
         logger.info(f"HTML report written: {html_out}")
         return 0
 
-    # Check for lock file to prevent concurrent runs (unless --run-ignore-lock is set)
-    lock_file = repo_path / ".build_images.lock"
+    # Lock file lives outside the repo so git operations (reset, pull, checkout) can't destroy it.
+    _lock_hash = hashlib.md5(str(repo_path.resolve()).encode()).hexdigest()[:8]
+    lock_file = Path(f"/tmp/build_images.{_lock_hash}.lock")
     if lock_file.exists() and not args.run_ignore_lock:
         try:
             with open(lock_file, 'r') as f:
@@ -3779,6 +3796,7 @@ def main() -> int:
             lock_file.unlink()
 
     # Create lock file with current PID and timestamp
+    logger.info(f"Acquiring lock: {lock_file}")
     try:
         with open(lock_file, 'w') as f:
             f.write(f"{os.getpid()}\n{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
@@ -3786,13 +3804,18 @@ def main() -> int:
         logger.error(f"Failed to create lock file: {e}")
         return 1
 
-    # Ensure lock file is removed on exit
+    # Ensure lock file is removed on exit (only if we own it)
+    _our_pid = os.getpid()
+
     def cleanup_lock():
-        if lock_file.exists():
-            try:
-                lock_file.unlink()
-            except:
-                pass
+        try:
+            if lock_file.exists():
+                with open(lock_file, 'r') as f:
+                    stored_pid = int(f.readline().strip())
+                if stored_pid == _our_pid:
+                    lock_file.unlink()
+        except (ValueError, IOError, OSError):
+            pass
     atexit.register(cleanup_lock)
 
     # Pull latest code if requested
