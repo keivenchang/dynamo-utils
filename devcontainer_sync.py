@@ -25,6 +25,7 @@ USAGE:
 """
 
 import argparse
+import getpass
 import hashlib
 import os
 import re
@@ -59,8 +60,8 @@ class DevContainerSync:
         # Frameworks to generate
         self.frameworks = ["vllm", "sglang", "trtllm"]
         
-        # Get username for customization
-        self.username = os.environ.get("USER", "user")
+        # Get username for customization (USER may not be set in cron / Cursor server context)
+        self.username = os.environ.get("USER") or getpass.getuser()
         
         # Hash tracking
         self.temp_sha_file = Path("/tmp/.sync_devcontainer.sha")

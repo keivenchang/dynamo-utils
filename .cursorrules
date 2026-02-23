@@ -432,6 +432,37 @@ Key rules (learned from debugging slow builds + permission issues):
   - For **dev/local-dev** images: `sanity_check.py --thorough`
 - Monitor build times when adding permission operations; treat them as performance-sensitive code.
 
+#### 2.5.2.4 Docker 29.x + Dev Containers Compatibility
+
+Docker 29.x changed `docker events --format {{json .}}` output: the event type field
+is `"Action"` instead of the legacy `"status"`. The devcontainers CLI v0.75.0 (bundled
+with Dev Containers extension v1.0.26) checks only `i.status || i.Status`, so it silently
+discards the start event and hangs forever after "Container started".
+
+- **Affected:** Docker 29.0.0+ with Dev Containers extension v1.0.26 (CLI v0.75.0)
+- **Fixed in:** Dev Containers extension v1.0.32+
+- **If stuck on v1.0.26:** Downgrade Docker to 28.x, or create a `docker` wrapper
+  earlier in the Cursor server's PATH that intercepts `docker events` and renames
+  `"Action"` to `"status"` in the JSON output. Note: the Cursor server PATH differs
+  from your shell PATH (`~/.local/bin` is typically NOT included). Check it with:
+  `cat /proc/$(pgrep -f cursor-server | head -1)/environ | tr '\0' '\n' | grep ^PATH=`
+
+Example wrapper (place in a PATH dir before `/usr/bin/`, e.g. `/usr/local/bin/docker`):
+```bash
+#!/bin/bash
+if [[ "$1" == "events" ]]; then
+    /usr/bin/docker "$@" | while IFS= read -r line; do
+        if [[ "$line" == *'"Action":'* ]]; then
+            echo "$line" | sed 's/"Action":/"status":/'
+        else
+            echo "$line"
+        fi
+    done
+    exit ${PIPESTATUS[0]}
+fi
+exec /usr/bin/docker "$@"
+```
+
 =============================================================================
 3. UNIVERSAL CODE STYLE
 =============================================================================
