@@ -22,11 +22,11 @@
 #   REMOTE_GITHUB_USERS - Space-separated GitHub usernames to render.
 #                         Back-compat: REMOTE_GITHUB_USER
 #   REMOTE_PRS_OUT_DIR  - Output directory root for each user.
-#                         Default: $HOME/dynamo/speedoflight/dynamo/users/<user>/
+#                         Default: $DYNAMO_HOME/speedoflight/dynamo/users/<user>/
 #   REMOTE_PRS_OUT_FILE - Full output filename override (rare; if set, used for every user).
 #
 # Args (optional; can be combined):
-#   --show-local-resources  Update the resource report (~/dynamo/speedoflight/stats/index.html)
+#   --show-local-resources  Update the resource report ($DYNAMO_HOME/speedoflight/stats/index.html)
 #   --show-local-branches   Update the branches dashboard (speedoflight/dynamo/users/<user>/local.html)
 #   --show-remote-branches  Update remote PR dashboards for selected GitHub users (IDENTICAL UI to local branches)
 #   --show-commit-history   Update the commit history dashboard ($DYNAMO_HOME/commits/index.html)
@@ -75,9 +75,9 @@ Usage: update_html_pages.sh [FLAGS]
 If no args are provided, ALL tasks run.
 
 Flags:
-  --show-local-resources    Write: $HOME/dynamo/speedoflight/stats/index.html (or debug.html in --debug-html)
-  --show-local-branches     Write: $HOME/dynamo/speedoflight/dynamo/users/<user>/local.html (or local-debug.html in --debug-html)
-  --show-remote-branches    Write: $HOME/dynamo/speedoflight/dynamo/users/<user>/index.html (or debug.html in --debug-html)
+  --show-local-resources    Write: $DYNAMO_HOME/speedoflight/stats/index.html (or debug.html in --debug-html)
+  --show-local-branches     Write: $DYNAMO_HOME/speedoflight/dynamo/users/<user>/local.html (or local-debug.html in --debug-html)
+  --show-remote-branches    Write: $DYNAMO_HOME/speedoflight/dynamo/users/<user>/index.html (or debug.html in --debug-html)
   --show-commit-history     Write: $DYNAMO_HOME/commits/index.html (or debug.html in --debug-html)
 
   --debug-html              Debug mode: outputs to debug.html, enables verification passes, smaller commit window (25 commits), shorter resource window
@@ -195,7 +195,7 @@ BRANCHES_BASENAME="${BRANCHES_BASENAME:-local.html}"
 if [ "$FAST_DEBUG" = true ]; then
     BRANCHES_BASENAME="local-debug.html"
 fi
-BRANCHES_OUTPUT_FILE="$HOME/dynamo/speedoflight/dynamo/users/$GITHUB_USERNAME/$BRANCHES_BASENAME"
+BRANCHES_OUTPUT_FILE="$DYNAMO_HOME/speedoflight/dynamo/users/$GITHUB_USERNAME/$BRANCHES_BASENAME"
 
 # Prevent concurrent runs (cron can overlap if a run takes longer than its interval).
 # Use per-component locks in /tmp so different components can run in parallel.
@@ -323,7 +323,7 @@ run_resource_report() {
     RESOURCE_DB="${RESOURCE_DB:-$CACHE_ROOT/resource_monitor.sqlite}"
     # Output to speedoflight/stats/ to match other dashboards
     if [ -z "${RESOURCE_REPORT_HTML:-}" ]; then
-        STATS_DIR="$HOME/dynamo/speedoflight/stats"
+        STATS_DIR="$DYNAMO_HOME/speedoflight/stats"
         mkdir -p "$STATS_DIR"
         if [ "$FAST_DEBUG" = true ]; then
             RESOURCE_REPORT_HTML="$STATS_DIR/debug.html"
@@ -426,7 +426,7 @@ run_show_remote_branches() {
     #   REMOTE_GITHUB_USER=keivenchang
     #
     # Default output root:
-    #   ~/dynamo/speedoflight/dynamo/users/<user>/index.html
+    #   $DYNAMO_HOME/speedoflight/dynamo/users/<user>/index.html
 
     USERS_LIST="${REMOTE_GITHUB_USERS:-${REMOTE_GITHUB_USER:-}}"
     if [ -z "${USERS_LIST:-}" ]; then
@@ -462,7 +462,7 @@ run_show_remote_branches() {
             if [ -z "${U:-}" ]; then
                 continue
             fi
-            OUT_DIR="${REMOTE_PRS_OUT_DIR:-$HOME/dynamo/speedoflight/dynamo/users/${U}}"
+            OUT_DIR="${REMOTE_PRS_OUT_DIR:-$DYNAMO_HOME/speedoflight/dynamo/users/${U}}"
             OUT_FILE="${REMOTE_PRS_OUT_FILE:-$OUT_DIR/index.html}"
             if [ "$FAST_DEBUG" = true ]; then
                 OUT_FILE="${REMOTE_PRS_OUT_FILE:-$OUT_DIR/debug.html}"
@@ -479,7 +479,7 @@ run_show_remote_branches() {
         if [ -z "${U:-}" ]; then
             continue
         fi
-        OUT_DIR="${REMOTE_PRS_OUT_DIR:-$HOME/dynamo/speedoflight/dynamo/users/${U}}"
+        OUT_DIR="${REMOTE_PRS_OUT_DIR:-$DYNAMO_HOME/speedoflight/dynamo/users/${U}}"
         OUT_FILE="${REMOTE_PRS_OUT_FILE:-$OUT_DIR/index.html}"
         if [ "$FAST_DEBUG" = true ]; then
             OUT_FILE="${REMOTE_PRS_OUT_FILE:-$OUT_DIR/debug.html}"
@@ -487,8 +487,8 @@ run_show_remote_branches() {
         mkdir -p "$(dirname "$OUT_FILE")"
         
         # Copy shared tree-view.css and debug-tree.html to speedoflight
-        cp -f "$SCRIPT_DIR/tree-view.css" "$HOME/dynamo/speedoflight/dynamo/tree-view.css" 2>/dev/null || true
-        cp -f "$SCRIPT_DIR/debug-tree.html" "$HOME/dynamo/speedoflight/dynamo/users/${U}/debug-tree.html" 2>/dev/null || true
+        cp -f "$SCRIPT_DIR/tree-view.css" "$DYNAMO_HOME/speedoflight/dynamo/tree-view.css" 2>/dev/null || true
+        cp -f "$SCRIPT_DIR/debug-tree.html" "$DYNAMO_HOME/speedoflight/dynamo/users/${U}/debug-tree.html" 2>/dev/null || true
 
         echo "$(date '+%Y-%m-%d %H:%M:%S') - Generating remote PRs dashboard (user=${U} output=$OUT_FILE)" >> "$LOG_FILE"
         log_line_ts "$REMOTE_PRS_LOG" "===== run_show_remote_branches start (user=${U} output=$OUT_FILE) ====="

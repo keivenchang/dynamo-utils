@@ -85,15 +85,15 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# Function to get images for a specific variant, sorted by creation time (newest first)
-# Matches any tag containing -VARIANT-...-TARGET where TARGET is dev/local-dev/runtime
-# and there may be optional attributes (e.g. cuda12.9) between the variant and target.
-# Examples: dynamo:98df1a2c5-vllm-dev, dynamo:ef2583a9d-sglang-cuda12.9-local-dev
+# Function to get images for a specific framework variant, sorted by creation time (newest first)
+# Generic pattern: dynamo:<sha>-<framework>-<anything>
+# Examples: dynamo:98df1a2c5-vllm-dev, dynamo:ef2583a9d-sglang-cuda12.9-local-dev,
+#           dynamo:d38954c75-none-cuda12.9-dev-orig
 # Excludes latest-* tags (those are always kept).
 get_variant_images() {
     local variant=$1
     docker images --format "{{.Repository}}:{{.Tag}} {{.ID}} {{.CreatedAt}}" \
-        | grep -E "^dynamo:.*-${variant}(-[^- ]+)*-(dev|local-dev|runtime) " \
+        | grep -E "^dynamo:[^ ]+-${variant}-" \
         | grep -v ":latest-" \
         | sort -k3,4 -r
 }
@@ -269,28 +269,27 @@ delete_images() {
     echo "Batch deletion completed"
 }
 
-# Function to remove all runtime and dev images (keeping only local-dev)
-remove_dev_runtime_images() {
-    echo "Removing all runtime and dev images (keeping only local-dev)..."
+# Function to remove all non-local-dev dynamo images
+remove_non_local_dev_images() {
+    echo "Removing all non-local-dev dynamo images..."
 
-    # Find dynamo images with -dev or -runtime suffix but NOT -local-dev
     local targets=()
     while IFS= read -r line; do
         [ -z "$line" ] && continue
         local repo_tag=$(echo "$line" | awk '{print $1}')
-        # Skip local-dev images
+        # Keep local-dev and latest-* images
         case "$repo_tag" in *-local-dev) continue ;; esac
-        # Match dev or runtime targets
-        case "$repo_tag" in *-dev|*-runtime) targets+=("$repo_tag") ;; esac
+        case "$repo_tag" in dynamo:latest-*) continue ;; esac
+        targets+=("$repo_tag")
     done < <(docker images --format "{{.Repository}}:{{.Tag}} {{.ID}}" | grep "^dynamo:")
 
     if [ ${#targets[@]} -eq 0 ]; then
-        echo "No runtime/dev images found to remove."
+        echo "No non-local-dev images found to remove."
         echo
         return
     fi
 
-    echo "Found ${#targets[@]} runtime/dev images to remove:"
+    echo "Found ${#targets[@]} non-local-dev images to remove:"
     for t in "${targets[@]}"; do
         echo "  D $t"
     done
@@ -406,9 +405,9 @@ main() {
     # Delete the identified images
     delete_images
 
-    # Remove runtime and dev images if --keep-local-dev-only was specified
+    # Remove all non-local-dev images if --keep-local-dev-only was specified
     if [ "$KEEP_LOCAL_DEV_ONLY" = true ]; then
-        remove_dev_runtime_images
+        remove_non_local_dev_images
     fi
 
     # Prune orphan image layers (unreferenced after deletions above)
