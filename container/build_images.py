@@ -36,6 +36,8 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
+import yaml
+
 # Add parent directory to path to import common.py
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
@@ -91,45 +93,48 @@ DEFAULT_HTML_PATH = "/nvidia/dynamo_ci/logs"
 # Global frameworks data cache for HTML reporting (initialized once, updated as tasks run)
 _frameworks_data_cache: Optional[Dict[str, Dict[str, Any]]] = None
 _html_out_file: Optional[Path] = None
+# Set in main() so HTML report can show "Disabled (--no-compress)" / "Disabled (--no-upload)" / "Disabled (--no-build)" when applicable
+_report_no_compress: bool = False
+_report_no_upload: bool = False
+_report_no_build: bool = False
 
 # Global initial SHA tracking for detecting mid-build commits
 _initial_sha: Optional[str] = None
 
 
-def _rewrite_html_links_for_repo_root(html_content: str) -> str:
+def _rewrite_html_links_for_repo_root(html_content: str, sha: str = "", date_str: str = "") -> str:
     """
-    The HTML report is primarily generated for a file living in logs/<date>/, where
-    log links can be simple basenames like "YYYY-MM-DD.<sha>.<task>.log".
+    The HTML report lives in logs/{date}/{sha}/, so log links are simple basenames
+    like "{task}.log".  Cross-date links use "../../{date}/{sha}/{task}.log".
 
     When we also write the same report to repo root (e.g. <repo>/build.html),
-    those basenames must become "logs/<date>/YYYY-MM-DD.<sha>.<task>.log" so they
-    resolve correctly when served from the repo root URL.
+    those must be rewritten so they resolve correctly from the repo root URL.
     """
-    # Previous-log links are stored as "../<date>/<file>" (relative to logs/<date>/).
-    # From repo root, those should be "logs/<date>/<file>".
-    html_content = html_content.replace('href="../', 'href="logs/')
+    # Cross-date links: "../../{date}/{sha}/{task}.log" -> "logs/{date}/{sha}/{task}.log"
+    html_content = html_content.replace('href="../../', 'href="logs/')
 
-    # Current-log links are often stored as just the log filename.
-    # Convert: href="YYYY-MM-DD....log" -> href="logs/YYYY-MM-DD/YYYY-MM-DD....log"
-    return re.sub(
-        r'href="(?P<fname>(?P<d>\d{4}-\d{2}-\d{2})\.[^"]+?\.log)"',
-        r'href="logs/\g<d>/\g<fname>"',
-        html_content,
-    )
+    # Current-date links: bare "{task}.log" -> "logs/{date}/{sha}/{task}.log"
+    if date_str and sha:
+        prefix = f"logs/{date_str}/{sha}/"
+        html_content = re.sub(
+            r'href="([^/"]+?\.log)"',
+            rf'href="{prefix}\1"',
+            html_content,
+        )
+    return html_content
 
 
-def _write_html_report_files(html_content: str, primary_html_file: Path) -> None:
+def _write_html_report_files(html_content: str, primary_html_file: Path, sha: str = "", date_str: str = "") -> None:
     """
-    Write the HTML report to the primary location (logs/...report.html) and also to
-    an optional secondary location (e.g., <repo>/build.html) if configured.
+    Write the HTML report to the primary location (logs/{date}/{sha}/report.html)
+    and also to an optional secondary location (e.g., <repo>/build.html) if configured.
     """
     primary_html_file.write_text(html_content)
     if _html_out_file is not None:
         try:
             _html_out_file.parent.mkdir(parents=True, exist_ok=True)
-            _html_out_file.write_text(_rewrite_html_links_for_repo_root(html_content))
+            _html_out_file.write_text(_rewrite_html_links_for_repo_root(html_content, sha=sha, date_str=date_str))
         except (OSError, IOError) as e:
-            # Best-effort: don't fail the build if the secondary write fails.
             logger = logging.getLogger("html")
             logger.warning(f"Failed to write secondary HTML file {_html_out_file}: {e}")
 
@@ -147,9 +152,13 @@ def _write_report_and_json(
     Consolidates the three steps (HTML write, marker update, JSON write) that
     must happen together whenever the report is refreshed.  JSON generation
     failures are logged but never fail the build.
+
+    Files are written to: logs/{date_str}/{sha}/report.html and report.json
     """
-    html_file = log_dir / f"{date_str}.{sha}.report.html"
-    _write_html_report_files(html_content, html_file)
+    sha_dir = log_dir / sha
+    sha_dir.mkdir(parents=True, exist_ok=True)
+    html_file = sha_dir / "report.html"
+    _write_html_report_files(html_content, html_file, sha=sha, date_str=date_str)
     update_report_status_marker(html_file, all_tasks)
 
     # Best-effort JSON alongside the HTML
@@ -161,7 +170,7 @@ def _write_report_and_json(
             log_dir=log_dir,
             date_str=date_str,
         )
-        json_file = log_dir / f"{date_str}.{sha}.json"
+        json_file = sha_dir / "report.json"
         report.to_file(json_file)
     except Exception as exc:
         logging.getLogger("html").warning(f"Failed to write JSON build report: {exc}")
@@ -451,7 +460,7 @@ def _generate_error_html_and_exit(
         update_frameworks_data_cache(task, use_absolute_urls=email is not None)
 
     # Generate HTML report
-    html_file = log_dir / f"{log_date}.{sha}.report.html"
+    html_file = log_dir / sha / "report.html"
     try:
         html_content = generate_html_report(
             all_tasks=all_tasks,
@@ -496,6 +505,143 @@ def _generate_error_html_and_exit(
         )
 
     return 1
+
+
+# Keys in context.yaml that define CUDA versions (e.g. cuda12.9, cuda13.0, cuda13.1)
+_CUDA_KEY_PATTERN = re.compile(r"^cuda(\d+\.\d+)$")
+
+
+def get_latest_cuda_version(repo_path: Path, framework: str) -> str:
+    """
+    Parse container/context.yaml and return the latest CUDA version for the given framework.
+    Returns the highest cudaX.Y key present (e.g. "13.0" for vllm/sglang/none, "13.1" for trtllm).
+    Fallback: "13.1" for trtllm, "12.9" for others if context is missing or has no cuda keys.
+    """
+    context_path = repo_path / "container" / "context.yaml"
+    if not context_path.exists():
+        return "13.1" if framework == "trtllm" else "12.9"
+    try:
+        with open(context_path) as f:
+            context = yaml.safe_load(f)
+    except (OSError, yaml.YAMLError):
+        return "13.1" if framework == "trtllm" else "12.9"
+    if not context:
+        return "13.1" if framework == "trtllm" else "12.9"
+    section = "dynamo" if framework == "none" else framework
+    fw_ctx = context.get(section)
+    if not fw_ctx:
+        return "13.1" if framework == "trtllm" else "12.9"
+    versions = []
+    for key in fw_ctx:
+        m = _CUDA_KEY_PATTERN.match(key)
+        if m:
+            versions.append(m.group(1))
+    if not versions:
+        return "13.1" if framework == "trtllm" else "12.9"
+    # Sort by (major, minor) and take latest
+    def version_key(v: str) -> tuple:
+        parts = v.split(".")
+        return (int(parts[0]), int(parts[1]) if len(parts) > 1 else 0)
+    return max(versions, key=version_key)
+
+
+def get_runtime_base_image(repo_path: Path, framework: str) -> Optional[str]:
+    """
+    Parse container/context.yaml and return the base image for the runtime target
+    (the first FROM ... AS runtime). Used to show "Input Image" in the report for runtime.
+    """
+    context_path = repo_path / "container" / "context.yaml"
+    if not context_path.exists():
+        return None
+    try:
+        with open(context_path) as f:
+            context = yaml.safe_load(f)
+    except (OSError, yaml.YAMLError):
+        return None
+    if not context:
+        return None
+    # Use latest CUDA version from context (same as create_task_graph)
+    cuda_version = get_latest_cuda_version(repo_path, framework)
+    cuda_key = f"cuda{cuda_version}"
+    if framework == "none":
+        # dynamo_runtime.Dockerfile uses FROM dynamo_base AS runtime; dynamo_base is FROM BASE_IMAGE:BASE_IMAGE_TAG
+        dyn = context.get("dynamo") or {}
+        cuda_ctx = dyn.get(cuda_key) or dyn.get("cuda12.9") or {}
+        base = dyn.get("base_image")
+        tag = cuda_ctx.get("base_image_tag")
+        if base and tag:
+            return f"{base}:{tag}"
+        return None
+    fw_ctx = context.get(framework)
+    if not fw_ctx:
+        return None
+    cuda_ctx = fw_ctx.get(cuda_key) or fw_ctx.get("cuda12.9") or {}
+    img = fw_ctx.get("runtime_image")
+    tag = cuda_ctx.get("runtime_image_tag")
+    if img and tag:
+        return f"{img}:{tag}"
+    return None
+
+
+def detect_latest_image_sha(repo_path: Path, framework: str) -> Optional[str]:
+    """
+    Auto-detect the latest local Docker image SHA for a framework.
+    Looks for images matching dynamo:*-{framework}-cuda*-local-dev or dynamo:*-{framework}-cuda*-dev
+    and returns the SHA portion (version prefix in the tag).
+    """
+    import subprocess as _sp
+    result = _sp.run(
+        ["docker", "images", "--format", "{{.Repository}}:{{.Tag}}", "--filter", "reference=dynamo"],
+        capture_output=True, text=True, timeout=10,
+    )
+    if result.returncode != 0:
+        return None
+
+    cuda_version = get_latest_cuda_version(repo_path, framework)
+    cuda_tag = f"cuda{cuda_version}"
+
+    # Prefer local-dev, then dev, then runtime
+    for target in ("local-dev", "dev", "runtime"):
+        pattern = f"-{framework}-{cuda_tag}-{target}"
+        for line in result.stdout.strip().splitlines():
+            if pattern in line:
+                # Tag format: dynamo:{sha}-{framework}-cuda{ver}-{target}
+                tag = line.split(":", 1)[1] if ":" in line else line
+                sha_part = tag.split(f"-{framework}-")[0]
+                if sha_part:
+                    return sha_part
+    return None
+
+
+def _docker_image_exists(tag: str) -> bool:
+    """Return True if the given Docker image tag exists locally."""
+    try:
+        result = subprocess.run(
+            ["docker", "inspect", tag],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=10,
+        )
+        return result.returncode == 0
+    except (subprocess.TimeoutExpired, subprocess.CalledProcessError, OSError):
+        return False
+
+
+def _check_reuse_images_exist(repo_path: Path, tag_version: str, frameworks: List[str]) -> bool:
+    """
+    Check if all images required for reuse mode exist locally.
+    Required per framework: runtime, dev, local-dev (same tag_version as would be built).
+    """
+    for framework in frameworks:
+        cuda_version = get_latest_cuda_version(repo_path, framework)
+        cuda_tag = f"cuda{cuda_version}"
+        for target in ("runtime", "dev", "local-dev"):
+            tag = f"dynamo:{tag_version}-{framework}-{cuda_tag}-{target}"
+            if not _docker_image_exists(tag):
+                logging.getLogger(__name__).info(f"Reuse skipped: image missing: {tag}")
+                return False
+    return True
 
 
 # Factory function to create task instances for a specific framework
@@ -551,12 +697,8 @@ def create_task_graph(
 
     # render.py uses "dynamo" instead of "none"
     render_fw = RENDER_FRAMEWORK_MAP.get(framework, framework)
-    # trtllm requires CUDA 13.1; other frameworks default to 12.9.
-    # The supported CUDA versions per framework are defined in context.yaml
-    # (each framework section lists cudaX.Y keys with base/runtime image tags).
-    # --cuda-version is required on and after Dmitry Tokarev's render.py changes
-    # (9e8971812 "fix: Fix pre-merge (#6341)", 2026-02-17).
-    render_cuda_version = "13.1" if framework == "trtllm" else "12.9"
+    # CUDA version from context.yaml (latest cudaX.Y per framework)
+    render_cuda_version = get_latest_cuda_version(repo_path, framework)
 
     def _build_cmd(target: str, image_tag: str) -> str:
         """Generate the build command for a given target and image tag."""
@@ -581,13 +723,16 @@ def create_task_graph(
     # Embed CUDA version in image tags so the tag encodes framework, CUDA, and target
     cuda_tag = f"cuda{render_cuda_version}"
 
-    # Level 0: Runtime image build (builds directly from CUDA base image)
+    # Level 0: Runtime image build (builds directly from CUDA base image).
+    # Set input_image for report display only; check_input_image_exists() skips runtime-build (docker build pulls base).
+    runtime_base_image = get_runtime_base_image(repo_path, framework)
     runtime_image_tag = f"dynamo:{version}-{framework}-{cuda_tag}-runtime"
     tasks[f"{framework}-runtime-build"] = BuildTask(
         task_id=f"{framework}-runtime-build",
         description=f"Build {framework.upper()} runtime image",
         command=_build_cmd("runtime", runtime_image_tag),
         output_image=runtime_image_tag,
+        input_image=runtime_base_image,
         timeout=1200.0,  # 20 minutes for builds
     )
 
@@ -799,6 +944,100 @@ docker images {dev_image_tag} --format 'Size: {{{{.Size}}}}'
     return tasks
 
 
+def create_task_graph_reuse(
+    framework: str,
+    sha: str,
+    repo_path: Path,
+    version: str,
+    build_method: str = BUILD_METHOD_RENDER_PY,
+) -> Dict[str, "BaseTask"]:
+    """
+    Create only compilation and sanity-check tasks for reuse mode.
+    Uses existing images (dev, local-dev, runtime) — no build tasks.
+    Used when --reuse-if-image-exists and all required images are present.
+    """
+    tasks: Dict[str, BaseTask] = {}
+    sanity_no_framework_flag = " --no-framework-check" if framework == "none" else ""
+    home_dir = str(Path.home())
+    render_cuda_version = get_latest_cuda_version(repo_path, framework)
+    cuda_tag = f"cuda{render_cuda_version}"
+
+    runtime_image_tag = f"dynamo:{version}-{framework}-{cuda_tag}-runtime"
+    dev_image_tag = f"dynamo:{version}-{framework}-{cuda_tag}-dev"
+    local_dev_image_tag = f"dynamo:{version}-{framework}-{cuda_tag}-local-dev"
+
+    cargo_cmd = "CARGO_INCREMENTAL=1 CARGO_PROFILE_DEV_OPT_LEVEL=0 CARGO_BUILD_JOBS=$(nproc) CARGO_PROFILE_DEV_CODEGEN_UNITS=256 cargo build --profile dev --features dynamo-llm/block-manager && cd /workspace/lib/bindings/python && CARGO_INCREMENTAL=1 CARGO_PROFILE_DEV_OPT_LEVEL=0 CARGO_BUILD_JOBS=$(nproc) CARGO_PROFILE_DEV_CODEGEN_UNITS=256 maturin develop --uv && uv pip install -e ."
+
+    # Runtime sanity (reuse existing runtime image)
+    tasks[f"{framework}-runtime-sanity"] = CommandTask(
+        task_id=f"{framework}-runtime-sanity",
+        description=f"Run sanity_check.py in {framework.upper()} runtime container (reuse)",
+        command=f"{repo_path}/container/run.sh --image {runtime_image_tag} --hf-home {home_dir}/.cache/huggingface -- bash -c 'id && python3 /workspace/deploy/sanity_check.py --runtime-check{sanity_no_framework_flag}'",
+        input_image=runtime_image_tag,
+        parents=[],
+        timeout=45.0,
+        ignore_exit_code=True,
+    )
+
+    # Dev compilation (reuse existing dev image; use dev not dev-orig)
+    tasks[f"{framework}-dev-compilation"] = CommandTask(
+        task_id=f"{framework}-dev-compilation",
+        description=f"Run workspace compilation in {framework.upper()} dev container (reuse)",
+        command=f"{repo_path}/container/run.sh --image {dev_image_tag} --mount-workspace -v {home_dir}/.cargo:/root/.cargo -v {repo_path}/target/.{framework}:/workspace/target -- bash -c '{cargo_cmd}'",
+        input_image=dev_image_tag,
+        parents=[],
+        timeout=600.0,
+    )
+
+    tasks[f"{framework}-dev-chown"] = CommandTask(
+        task_id=f"{framework}-dev-chown",
+        description=f"Fix file ownership after {framework.upper()} dev compilation",
+        command=f"sudo chown -R $(id -u):$(id -g) {repo_path}/target/.{framework} {repo_path}/lib/bindings/python {home_dir}/.cargo || true",
+        parents=[f"{framework}-dev-compilation"],
+        run_even_if_deps_fail=True,
+        timeout=60.0,
+    )
+
+    tasks[f"{framework}-dev-sanity"] = CommandTask(
+        task_id=f"{framework}-dev-sanity",
+        description=f"Run sanity_check.py in {framework.upper()} dev container (reuse)",
+        command=f"{repo_path}/container/run.sh --image {dev_image_tag} --mount-workspace --hf-home {home_dir}/.cache/huggingface -v {home_dir}/.cargo:/root/.cargo -- bash -c 'id && python3 /workspace/deploy/sanity_check.py{sanity_no_framework_flag}'",
+        input_image=dev_image_tag,
+        parents=[f"{framework}-dev-compilation"],
+        timeout=45.0,
+    )
+
+    tasks[f"{framework}-dev-compress-sanity"] = CommandTask(
+        task_id=f"{framework}-dev-compress-sanity",
+        description=f"Run sanity_check.py on compressed {framework.upper()} dev image (reuse)",
+        command=f"{repo_path}/container/run.sh --image {dev_image_tag} --mount-workspace --hf-home {home_dir}/.cache/huggingface -v {home_dir}/.cargo:/root/.cargo -- bash -c 'id && python3 /workspace/deploy/sanity_check.py{sanity_no_framework_flag}'",
+        input_image=dev_image_tag,
+        parents=[f"{framework}-dev-compilation"],
+        timeout=45.0,
+    )
+
+    # Local-dev compilation and sanity (reuse existing local-dev image)
+    tasks[f"{framework}-local-dev-compilation"] = CommandTask(
+        task_id=f"{framework}-local-dev-compilation",
+        description=f"Run workspace compilation in {framework.upper()} local-dev container (reuse)",
+        command=f"{repo_path}/container/run.sh --image {local_dev_image_tag} --mount-workspace -v {home_dir}/.cargo:/home/dynamo/.cargo -v {repo_path}/target/.{framework}:/workspace/target -- bash -c '{cargo_cmd}'",
+        input_image=local_dev_image_tag,
+        parents=[],
+        timeout=600.0,
+    )
+
+    tasks[f"{framework}-local-dev-sanity"] = CommandTask(
+        task_id=f"{framework}-local-dev-sanity",
+        description=f"Run sanity_check.py in {framework.upper()} local-dev container (reuse)",
+        command=f"{repo_path}/container/run.sh --image {local_dev_image_tag} --mount-workspace --hf-home {home_dir}/.cache/huggingface -v {home_dir}/.cargo:/home/dynamo/.cargo -- bash -c 'id && (sudo id || true) && python3 /workspace/deploy/sanity_check.py{sanity_no_framework_flag}'",
+        input_image=local_dev_image_tag,
+        parents=[f"{framework}-local-dev-compilation"],
+        timeout=45.0,
+    )
+
+    return tasks
+
+
 # ==============================================================================
 # BASE TASK CLASS
 # ==============================================================================
@@ -852,36 +1091,40 @@ class BaseTask(ABC):
         """Get the current status of the task"""
         return self._status
 
-    def set_log_file_path(self, log_dir: Path, log_date: str, sha: str) -> Path:
+    def set_log_file_path(self, log_dir: Path, log_date: str, file_sha: str) -> Path:
         """
         Set and return the log file path for this task.
 
+        Log files live under: logs/{date}/{file_sha}/{task_id}.log
+
         Args:
-            log_dir: Directory where logs are stored
-            log_date: Date string (YYYY-MM-DD)
-            sha: Git commit SHA
+            log_dir: Date-level directory (e.g. logs/2026-02-20)
+            log_date: Date string (YYYY-MM-DD) -- unused, kept for API compat
+            file_sha: File SHA string (e.g. "a798e08c8.IMAGE.e2fc6d")
 
         Returns:
             The log file path
         """
-        self.log_file = log_dir / f"{log_date}.{sha}.{self.task_id}.log"
+        sha_dir = log_dir / file_sha
+        sha_dir.mkdir(parents=True, exist_ok=True)
+        self.log_file = sha_dir / f"{self.task_id}.log"
         return self.log_file
 
     @staticmethod
-    def get_log_file_path(log_dir: Path, log_date: str, sha: str, task_id: str) -> Path:
+    def get_log_file_path(log_dir: Path, log_date: str, file_sha: str, task_id: str) -> Path:
         """
         Get the log file path for a task ID without a task instance.
 
         Args:
-            log_dir: Directory where logs are stored
-            log_date: Date string (YYYY-MM-DD)
-            sha: Git commit SHA
+            log_dir: Date-level directory (e.g. logs/2026-02-20)
+            log_date: Date string (YYYY-MM-DD) -- unused, kept for API compat
+            file_sha: File SHA string (e.g. "a798e08c8.IMAGE.e2fc6d")
             task_id: Task identifier
 
         Returns:
             The log file path
         """
-        return log_dir / f"{log_date}.{sha}.{task_id}.log"
+        return log_dir / file_sha / f"{task_id}.log"
 
     @abstractmethod
     def prepare(self, repo_path: Path, sha: str) -> None:
@@ -1111,6 +1354,9 @@ class BaseTask(ABC):
         """
         if not self.input_image:
             return True  # No input image required
+        # Runtime-build uses the Dockerfile base image; docker build will pull it. Do not require it locally.
+        if getattr(self, 'task_id', '') and str(self.task_id).endswith('-runtime-build'):
+            return True
 
         try:
             result = subprocess.run(
@@ -1557,6 +1803,16 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Run-ignore-lock: force run even if Image SHA (hash of container/ contents; formerly shown as CDS) hasn't changed (bypasses lock check)",
     )
+    parser.add_argument(
+        "--reuse-if-image-exists",
+        action="store_true",
+        dest="reuse_if_image_exists",
+        help=(
+            "Go to latest commit, compute image SHA; if all runtime/dev/local-dev images for that image SHA exist locally, "
+            "only run compilation and sanity checks (reuse existing images with /workspace mounted). "
+            "Otherwise run the full build. Uses HEAD (ignores --repo-sha)."
+        ),
+    )
 
     # Build options
     parser.add_argument(
@@ -1586,6 +1842,22 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         default=False,
         help="Skip compressing dev images (compress is enabled by default).",
+    )
+    parser.add_argument(
+        "--no-build",
+        action="store_true",
+        default=False,
+        help="Skip all build tasks; run only compilation and sanity checks against existing images.",
+    )
+    parser.add_argument(
+        "--image-sha",
+        type=str,
+        default=None,
+        help=(
+            "Image SHA (git commit prefix) to use for existing Docker image tags "
+            "with --no-build. E.g. --image-sha a798e08c8 uses dynamo:a798e08c8-vllm-cuda12.9-dev. "
+            "If omitted with --no-build, auto-detects from the latest local Docker images."
+        ),
     )
     parser.add_argument(
         "--max-workers",
@@ -1899,7 +2171,7 @@ def execute_task_sequential(
         return True
 
     # ACTUAL EXECUTION
-    # Setup log file: YYYY-MM-DD.{sha}.{task-id}.log
+    # Setup log file: YYYY-MM-DD.{file_sha}.{task-id}.log
     if log_dir is None or log_date is None:
         raise ValueError("log_dir and log_date must be set for actual execution")
     task.set_log_file_path(log_dir, log_date, sha)
@@ -2215,8 +2487,7 @@ def execute_task_parallel(
                     use_absolute_urls=False,
                 )
                 _write_report_and_json(html_content, all_tasks, repo_path, sha, log_dir, log_date)
-                html_file = log_dir / f"{log_date}.{sha}.report.html"
-                logger.info(f"  Generated final HTML report: {html_file}")
+                logger.info(f"  Generated final HTML report: {log_dir / sha / 'report.html'}")
             except Exception as e:
                 logger.error(f"  Failed to generate final HTML report: {e}")
 
@@ -2661,13 +2932,13 @@ def initialize_frameworks_data_cache(
                         log_results = parse_log_file_results(log_file)
                         if log_results:
                             log_link = (
-                                f"../{found_log_dir.name}/{log_file.name}" if found_log_dir.name != date_str
+                                f"../../{found_log_dir.name}/{log_file.parent.name}/{log_file.name}" if found_log_dir.name != date_str
                                 else log_file.name
                             )
                             td = TaskData(
                                 status='skipped',
                                 time=f"{log_results.duration:.1f}s" if log_results.duration else None,
-                                log_file=log_link if not use_absolute_urls else f"http://{hostname}{html_path}/{found_log_dir.name}/{log_file.name}",
+                                log_file=log_link if not use_absolute_urls else f"http://{hostname}{html_path}/{found_log_dir.name}/{log_file.parent.name}/{log_file.name}",
                                 prev_status=log_results.status.value,
                             )
                             if col == 'build':
@@ -2699,16 +2970,15 @@ def initialize_frameworks_data_cache(
                     log_file, found_log_dir = prev_log_result
                     log_results = parse_log_file_results(log_file)
                     if log_results:
-                        # If log is from a different date, use relative path
                         if found_log_dir.name != date_str:
-                            log_link = f"../{found_log_dir.name}/{log_file.name}"
+                            log_link = f"../../{found_log_dir.name}/{log_file.parent.name}/{log_file.name}"
                         else:
                             log_link = log_file.name
 
                         frameworks_data[framework][target].build = TaskData(
                             status='skipped',
                             time=f"{log_results.duration:.1f}s" if log_results.duration else None,
-                            log_file=log_link if not use_absolute_urls else f"http://{hostname}{html_path}/{found_log_dir.name}/{log_file.name}",
+                            log_file=log_link if not use_absolute_urls else f"http://{hostname}{html_path}/{found_log_dir.name}/{log_file.parent.name}/{log_file.name}",
                             prev_status=log_results.status.value,
                         )
                 continue  # Skip the normal BuildTask handling for dev-upload
@@ -2727,7 +2997,11 @@ def initialize_frameworks_data_cache(
                 build_task = None
 
             if build_task:
-                frameworks_data[framework][target].input_image = build_task.input_image
+                # For runtime target, show base image (FROM ... AS runtime) in report only; task has no input_image check
+                if target == "runtime":
+                    frameworks_data[framework][target].input_image = get_runtime_base_image(repo_path, framework) or build_task.input_image
+                else:
+                    frameworks_data[framework][target].input_image = build_task.input_image
                 frameworks_data[framework][target].output_image = build_task.output_image
 
                 # Try to get image size if image exists
@@ -2744,17 +3018,16 @@ def initialize_frameworks_data_cache(
                     log_file, found_log_dir = prev_log_result
                     log_results = parse_log_file_results(log_file)
                     if log_results:
-                        # If log is from a different date, use relative path
                         if found_log_dir.name != date_str:
-                            log_link = f"../{found_log_dir.name}/{log_file.name}"
+                            log_link = f"../../{found_log_dir.name}/{log_file.parent.name}/{log_file.name}"
                         else:
                             log_link = log_file.name
 
                         frameworks_data[framework][target].build = TaskData(
                             status='skipped',
                             time=f"{log_results.duration:.1f}s" if log_results.duration else None,
-                            log_file=log_link if not use_absolute_urls else f"http://{hostname}{html_path}/{found_log_dir.name}/{log_file.name}",
-                            prev_status=log_results.status.value,  # Use .value (lowercase) not .name (uppercase)
+                            log_file=log_link if not use_absolute_urls else f"http://{hostname}{html_path}/{found_log_dir.name}/{log_file.parent.name}/{log_file.name}",
+                            prev_status=log_results.status.value,
                         )
 
             # Load previous compilation log (if exists) - search current and previous dates
@@ -2764,17 +3037,16 @@ def initialize_frameworks_data_cache(
                     log_file_comp, found_log_dir = prev_log_result
                     log_results = parse_log_file_results(log_file_comp)
                     if log_results:
-                        # If log is from a different date, use relative path
                         if found_log_dir.name != date_str:
-                            log_link = f"../{found_log_dir.name}/{log_file_comp.name}"
+                            log_link = f"../../{found_log_dir.name}/{log_file_comp.parent.name}/{log_file_comp.name}"
                         else:
                             log_link = log_file_comp.name
 
                         frameworks_data[framework][target].compilation = TaskData(
                             status='skipped',
                             time=f"{log_results.duration:.1f}s" if log_results.duration else None,
-                            log_file=log_link if not use_absolute_urls else f"http://{hostname}{html_path}/{found_log_dir.name}/{log_file_comp.name}",
-                            prev_status=log_results.status.value,  # Use .value (lowercase) not .name (uppercase)
+                            log_file=log_link if not use_absolute_urls else f"http://{hostname}{html_path}/{found_log_dir.name}/{log_file_comp.parent.name}/{log_file_comp.name}",
+                            prev_status=log_results.status.value,
                         )
 
             # Load previous sanity log (if exists) - search current and previous dates
@@ -2784,17 +3056,16 @@ def initialize_frameworks_data_cache(
                     log_file_sanity, found_log_dir = prev_log_result
                     log_results = parse_log_file_results(log_file_sanity)
                     if log_results:
-                        # If log is from a different date, use relative path
                         if found_log_dir.name != date_str:
-                            log_link = f"../{found_log_dir.name}/{log_file_sanity.name}"
+                            log_link = f"../../{found_log_dir.name}/{log_file_sanity.parent.name}/{log_file_sanity.name}"
                         else:
                             log_link = log_file_sanity.name
 
                         frameworks_data[framework][target].sanity = TaskData(
                             status='skipped',
                             time=f"{log_results.duration:.1f}s" if log_results.duration else None,
-                            log_file=log_link if not use_absolute_urls else f"http://{hostname}{html_path}/{found_log_dir.name}/{log_file_sanity.name}",
-                            prev_status=log_results.status.value,  # Use .value (lowercase) not .name (uppercase)
+                            log_file=log_link if not use_absolute_urls else f"http://{hostname}{html_path}/{found_log_dir.name}/{log_file_sanity.parent.name}/{log_file_sanity.name}",
+                            prev_status=log_results.status.value,
                         )
 
     return frameworks_data
@@ -2834,9 +3105,11 @@ def update_frameworks_data_cache(task: 'BaseTask', use_absolute_urls: bool = Fal
         log_url = None
         if t.log_file:
             if use_absolute_urls:
-                rel_path = t.log_file.relative_to(t.log_file.parent.parent)
+                # logs/{date}/{sha}/{task}.log -> {date}/{sha}/{task}.log
+                rel_path = t.log_file.relative_to(t.log_file.parent.parent.parent)
                 log_url = f"http://{DEFAULT_HOSTNAME}{DEFAULT_HTML_PATH}/{rel_path}"
             else:
+                # report.html is in the same sha dir, so just the filename
                 log_url = t.log_file.name
 
         return TaskData(
@@ -3006,14 +3279,16 @@ def generate_html_report(
         header_color = "#28a745"  # Green
 
     # Get git information
+    # Extract repo SHA from file_sha (strip ".IMAGE.xxx" suffix if present)
+    repo_sha = sha.split('.IMAGE.')[0] if '.IMAGE.' in sha else sha
     commit_info: Dict[str, Any] = {}
     if git:
         try:
             repo = git.Repo(repo_path)
-            commit = repo.commit(sha)
+            commit = repo.commit(repo_sha)
             commit_info = {
-                'sha_short': sha[:7],
-                'sha_full': sha,
+                'sha_short': repo_sha[:7],
+                'sha_full': repo_sha,
                 'author': f"{commit.author.name} <{commit.author.email}>",
                 'date': commit.committed_datetime.strftime('%Y-%m-%d %H:%M:%S %Z'),
                 'message': commit.message.strip(),
@@ -3038,9 +3313,9 @@ def generate_html_report(
 
         except Exception as e:
             logging.getLogger("html").warning(f"Could not get git info: {e}")
-            commit_info = {'sha_short': sha[:7], 'sha_full': sha}
+            commit_info = {'sha_short': repo_sha[:7], 'sha_full': repo_sha}
     else:
-        commit_info = {'sha_short': sha[:7], 'sha_full': sha}
+        commit_info = {'sha_short': repo_sha[:7], 'sha_full': repo_sha}
 
     # Use the global frameworks data cache (already initialized and updated by tasks)
     global _frameworks_data_cache
@@ -3152,6 +3427,9 @@ def generate_html_report(
         report_generated=now.strftime('%Y-%m-%d %H:%M:%S'),
         commit=commit_info,
         frameworks=frameworks_dict,
+        no_compress=_report_no_compress,
+        no_upload=_report_no_upload,
+        no_build=_report_no_build,
     )
 
     return html
@@ -3256,14 +3534,15 @@ def generate_build_report(
     else:
         overall_status = "PASS"
 
-    # Commit info
+    # Commit info (extract repo SHA from file_sha for git lookups)
+    repo_sha = sha.split('.IMAGE.')[0] if '.IMAGE.' in sha else sha
     commit_info_dict: Dict[str, Any] = {}
     if git:
         try:
             repo = git.Repo(repo_path)
-            commit_obj = repo.commit(sha)
+            commit_obj = repo.commit(repo_sha)
             commit_info_dict = {
-                'sha_short': sha[:9],
+                'sha_short': repo_sha[:9],
                 'sha_full': str(commit_obj.hexsha),
                 'author': f"{commit_obj.author.name} <{commit_obj.author.email}>",
                 'date': commit_obj.committed_datetime.isoformat(),
@@ -3280,13 +3559,13 @@ def generate_build_report(
             except Exception:
                 pass
         except Exception:
-            commit_info_dict = {'sha_short': sha[:9], 'sha_full': sha}
+            commit_info_dict = {'sha_short': repo_sha[:9], 'sha_full': repo_sha}
     else:
-        commit_info_dict = {'sha_short': sha[:9], 'sha_full': sha}
+        commit_info_dict = {'sha_short': repo_sha[:9], 'sha_full': repo_sha}
 
     commit = CommitInfo(
-        sha_short=commit_info_dict.get('sha_short', sha[:9]),
-        sha_full=commit_info_dict.get('sha_full', sha),
+        sha_short=commit_info_dict.get('sha_short', repo_sha[:9]),
+        sha_full=commit_info_dict.get('sha_full', repo_sha),
         author=commit_info_dict.get('author'),
         date=commit_info_dict.get('date'),
         message=commit_info_dict.get('message'),
@@ -3381,8 +3660,8 @@ def generate_build_report(
     now = datetime.now()
     return BuildReport(
         schema_version=SCHEMA_VERSION,
-        sha_short=sha[:9],
-        sha_full=commit_info_dict.get('sha_full', sha),
+        sha_short=repo_sha[:9],
+        sha_full=commit_info_dict.get('sha_full', repo_sha),
         build_date=date_str,
         report_generated=now.isoformat(),
         overall_status=overall_status,
@@ -3735,16 +4014,26 @@ def main() -> int:
                 html_out_file=html_out,
             )
 
+        # Compute file_sha (includes IMAGE.<docker_hash> segment)
+        dru_html = DynamoRepositoryUtils(repo_path)
+        docker_img_sha_html = dru_html.generate_docker_image_sha_for_commit(sha)
+        if docker_img_sha_html not in ("ERROR", "NO_CONTAINER_DIR", "NO_FILES"):
+            file_sha = f"{sha}.IMAGE.{docker_img_sha_html[:6]}"
+        else:
+            file_sha = sha
+            logger.warning(f"Could not compute Docker image SHA; using plain SHA for filenames")
+        logger.info(f"File SHA: {file_sha}")
+
         # Set log_file paths for all tasks (needed for HTML generation)
         for task_id, task in all_tasks.items():
-            task.set_log_file_path(log_dir, log_date, sha)
+            task.set_log_file_path(log_dir, log_date, file_sha)
 
         # Initialize frameworks data cache once (loads previous logs and image info)
         _frameworks_data_cache = initialize_frameworks_data_cache(
             all_tasks=all_tasks,
             log_dir=log_dir,
             date_str=log_date,
-            sha=sha,
+            sha=file_sha,
             repo_path=repo_path,
             use_absolute_urls=False,
             build_method=build_method,
@@ -3754,7 +4043,7 @@ def main() -> int:
         html_content = generate_html_report(
             all_tasks=all_tasks,
             repo_path=repo_path,
-            sha=sha,
+            sha=file_sha,
             log_dir=log_dir,
             date_str=log_date,
             use_absolute_urls=False,
@@ -3762,8 +4051,7 @@ def main() -> int:
 
         html_out = args.html_out if args.html_out is not None else (repo_path / "build.html")
         html_out.parent.mkdir(parents=True, exist_ok=True)
-        # html_out is typically written to repo root; rewrite links so log URLs resolve.
-        html_out.write_text(_rewrite_html_links_for_repo_root(html_content))
+        html_out.write_text(_rewrite_html_links_for_repo_root(html_content, sha=file_sha, date_str=log_date))
         logger.info(f"HTML report written: {html_out}")
         return 0
 
@@ -3839,7 +4127,7 @@ def main() -> int:
                 git_utils_temp.repo.git.reset('--hard', 'HEAD')
 
                 # Clean untracked files (except Docker image SHA tracking files)
-                sha_keep = {DynamoRepositoryUtils.DOCKER_IMAGE_SHA_FILE, DynamoRepositoryUtils.DOCKER_IMAGE_SHA_FILE_COMPAT}
+                sha_keep = {DynamoRepositoryUtils.DOCKER_IMAGE_SHA_FILE, DynamoRepositoryUtils.DOCKER_IMAGE_SHA_FILE_COMPAT, DynamoRepositoryUtils.COMPILATION_SHA_FILE}
                 untracked = git_utils_temp.repo.untracked_files
                 if untracked:
                     logger.info(f"Removing {len(untracked)} untracked file(s)...")
@@ -3871,10 +4159,13 @@ def main() -> int:
         git_utils = GitUtils(repo_path)
         repo = git.Repo(repo_path)
 
-        if args.repo_sha:
+        # --reuse-if-image-exists: always use HEAD and resolve to image-SHA origin (ignore --repo-sha)
+        effective_repo_sha = None if getattr(args, "reuse_if_image_exists", False) else args.repo_sha
+
+        if effective_repo_sha:
             # Check if we need to checkout the specified SHA
             current_sha = repo.head.commit.hexsha[:9]
-            target_sha = args.repo_sha[:9]
+            target_sha = effective_repo_sha[:9]
 
             if current_sha != target_sha:
                 # Reset all *.lock files before checkout (they can be regenerated)
@@ -3888,13 +4179,13 @@ def main() -> int:
                         except Exception as e:
                             logger.warning(f"  Could not reset {lock_file.relative_to(repo_path)}: {e}")
 
-                logger.info(f"Checking out SHA: {args.repo_sha}")
-                repo.git.checkout(args.repo_sha)
-                logger.info(f"Checked out {args.repo_sha}")
+                logger.info(f"Checking out SHA: {effective_repo_sha}")
+                repo.git.checkout(effective_repo_sha)
+                logger.info(f"Checked out {effective_repo_sha}")
                 sha = repo.head.commit.hexsha[:9]
             else:
-                logger.info(f"Already at SHA: {args.repo_sha}")
-                sha = args.repo_sha[:9]
+                logger.info(f"Already at SHA: {effective_repo_sha}")
+                sha = effective_repo_sha[:9]
         else:
             full_sha = git_utils.get_current_commit()
             sha = full_sha[:9]
@@ -3935,14 +4226,61 @@ def main() -> int:
     if args.show_tree:
         print_dependency_tree(frameworks, sha, repo_path, verbose=args.verbose)
 
+    # Handle --no-build + --image-sha: determine which image tags to use
+    # image_version overrides the version in Docker tags (dynamo:<version>-fw-cuda-target)
+    # but sha stays as the repo commit SHA for logs, reports, and filenames.
+    no_build = getattr(args, 'no_build', False)
+    image_sha = getattr(args, 'image_sha', None)
+    image_version = None  # None = use default (sha for render_py, build.sh output otherwise)
+    if image_sha:
+        image_version = image_sha
+        logger.info(f"Using --image-sha override for image tags: {image_version}")
+    elif no_build:
+        detected = detect_latest_image_sha(repo_path, frameworks[0])
+        if detected:
+            image_version = detected
+            logger.info(f"Auto-detected image SHA from local Docker images: {image_version}")
+        else:
+            logger.error(f"--no-build requires existing images but none found for {frameworks[0]}. "
+                         "Use --image-sha to specify explicitly.")
+            return 1
+
+    # file_sha: used in log/report filenames.
+    # Format: "<repo_sha>.IMAGE.<docker_image_sha>" where docker_image_sha is a 6-char
+    # content hash of container/ files. This distinguishes builds from the same commit
+    # that may have different Docker configurations (e.g. --no-build with a different image).
+    dru_file_sha = DynamoRepositoryUtils(repo_path)
+    _img_sha_source = image_version if (image_version and image_version != sha) else sha
+    docker_img_sha = dru_file_sha.generate_docker_image_sha_for_commit(_img_sha_source)
+    if docker_img_sha not in ("ERROR", "NO_CONTAINER_DIR", "NO_FILES"):
+        file_sha = f"{sha}.IMAGE.{docker_img_sha[:6]}"
+        tag_version_for_render = f"{sha}.IMAGE.{docker_img_sha[:6]}"
+    else:
+        file_sha = sha
+        tag_version_for_render = sha
+        logger.warning(f"Could not compute Docker image SHA (got {docker_img_sha}); using plain SHA for filenames")
+    logger.info(f"File SHA: {file_sha}")
+
+    # --reuse-if-image-exists: if all required images exist, only run compile + sanity (no builds)
+    reuse_mode = False
+    if getattr(args, "reuse_if_image_exists", False):
+        if _check_reuse_images_exist(repo_path, tag_version_for_render, frameworks):
+            reuse_mode = True
+            logger.info("Reuse mode: all images present — running compilation and sanity only (no builds)")
+
     # Execution mode header
     if args.dry_run:
         logger.info("DRY-RUN MODE: Showing commands that would be executed")
+    elif no_build:
+        logger.info("DynamoDockerBuilder V2 - Starting (--no-build: compilation + sanity only)")
+    elif reuse_mode:
+        logger.info("DynamoDockerBuilder V2 - Starting (reuse mode: compilation + sanity only)")
     else:
         logger.info("DynamoDockerBuilder V2 - Starting")
 
         # Check if rebuild is needed based on Docker image SHA
         # Only check in non-dry-run mode to avoid writing .last_docker_image_sha
+        # Skip this check in --no-build and reuse mode (no builds to skip)
         dynamo_repo_utils = DynamoRepositoryUtils(repo_path)
         if not dynamo_repo_utils.check_if_rebuild_needed(force_run=bool(args.run_ignore_lock)):
             logger.info("✅ No rebuild needed - exiting")
@@ -3993,14 +4331,20 @@ def main() -> int:
 
     # Create task graph for each framework
     # For build_sh: extract version once per framework to avoid repeated build.sh calls
-    # For render_py: use SHA as version (tag format: dynamo:<sha>-<fw>-cuda<ver>-<target>)
+    # For render_py: use SHA.IMAGE_SHA as version so tags include IMAGE sha (e.g. dynamo:6d3e0137c.c62194-none-cuda13.0-runtime)
     all_tasks = {}
     version_extraction_failed = False
     version_error_message = ""
     for framework in frameworks:
-        if build_method == BUILD_METHOD_RENDER_PY:
-            version = sha
-            logger.info(f"  Using SHA as version for {framework.upper()}: {version}")
+        if reuse_mode:
+            version = tag_version_for_render
+            logger.info(f"  Reuse mode: {framework.upper()} version {version}")
+        elif image_version:
+            version = image_version
+            logger.info(f"  Using image version for {framework.upper()}: {version} (repo SHA: {sha})")
+        elif build_method == BUILD_METHOD_RENDER_PY:
+            version = tag_version_for_render
+            logger.info(f"  Using version for {framework.upper()}: {version} (git SHA + IMAGE sha)")
         else:
             logger.info(f"Extracting version from build.sh for {framework.upper()}...")
             try:
@@ -4012,7 +4356,11 @@ def main() -> int:
                 version_error_message = str(e)
                 version_extraction_failed = True
                 break
-        framework_tasks = create_task_graph(framework, sha, repo_path, version=version, build_method=build_method)
+        framework_tasks = (
+            create_task_graph_reuse(framework, sha, repo_path, version=tag_version_for_render, build_method=build_method)
+            if reuse_mode
+            else create_task_graph(framework, sha, repo_path, version=version, build_method=build_method)
+        )
         all_tasks.update(framework_tasks)
 
     if version_extraction_failed:
@@ -4036,14 +4384,14 @@ def main() -> int:
     # Set log_file paths for all tasks (needed for HTML generation to find existing logs)
     if not args.dry_run:
         for task_id, task in all_tasks.items():
-            task.set_log_file_path(log_dir, log_date, sha)
+            task.set_log_file_path(log_dir, log_date, file_sha)
 
         # Initialize frameworks data cache once (this loads previous logs and image info)
         _frameworks_data_cache = initialize_frameworks_data_cache(
             all_tasks=all_tasks,
             log_dir=log_dir,
             date_str=log_date,
-            sha=sha,
+            sha=file_sha,
             repo_path=repo_path,
             use_absolute_urls=args.email is not None,
             build_method=build_method,
@@ -4076,6 +4424,29 @@ def main() -> int:
 
         all_tasks = sanity_tasks
         logger.info(f"Filtered to {len([t for t in all_tasks.values() if 'sanity' in t.task_id])} sanity check tasks")
+
+    # Filter tasks based on --no-build (skip builds, run compilation + sanity against existing images)
+    if getattr(args, 'no_build', False):
+        logger.info("No-build mode: skipping builds, running compilation and sanity only")
+
+        build_task_ids = set()
+        for task_id, task in all_tasks.items():
+            if isinstance(task, BuildTask):
+                build_task_ids.add(task_id)
+            # Also skip compress, upload, and cleanup tasks (they depend on building)
+            elif any(x in task_id for x in ('compress', 'upload', 'orig-cleanup')):
+                build_task_ids.add(task_id)
+
+        for task_id in build_task_ids:
+            all_tasks[task_id].mark_status_as(TaskStatus.SKIPPED, "Skipped (--no-build)")
+
+        # Remove build dependencies from compilation/sanity/chown tasks
+        for task_id, task in all_tasks.items():
+            if task_id not in build_task_ids:
+                task.parents = [p for p in task.parents if p not in build_task_ids]
+
+        runnable = [tid for tid, t in all_tasks.items() if tid not in build_task_ids]
+        logger.info(f"Will run {len(runnable)} tasks (compilation + sanity + chown)")
 
     # Execute tasks in dependency order
     mode = "parallel" if args.parallel else "sequential"
@@ -4143,9 +4514,8 @@ def main() -> int:
                     date_str=log_date,
                     use_absolute_urls=False,
                 )
-                _write_report_and_json(html_content, all_tasks, repo_path, sha, log_dir, log_date)
-                html_file = log_dir / f"{log_date}.{sha}.report.html"
-                logger.info(f"  Generated final HTML report: {html_file}")
+                _write_report_and_json(html_content, all_tasks, repo_path, file_sha, log_dir, log_date)
+                logger.info(f"  Generated final HTML report: {log_dir / file_sha / 'report.html'}")
             except Exception as e:
                 logger.error(f"  Failed to generate final HTML report: {e}")
 
@@ -4153,6 +4523,12 @@ def main() -> int:
 
     signal.signal(signal.SIGTERM, basic_signal_handler)
     signal.signal(signal.SIGINT, basic_signal_handler)
+
+    # Set report flags so HTML can show "Disabled (--no-compress)" / "Disabled (--no-upload)" when applicable
+    global _report_no_compress, _report_no_upload, _report_no_build
+    _report_no_compress = getattr(args, 'no_compress', False)
+    _report_no_upload = getattr(args, 'no_upload', False)
+    _report_no_build = getattr(args, 'no_build', False)
 
     # Execute based on mode
     if args.parallel:
@@ -4165,7 +4541,7 @@ def main() -> int:
             all_tasks=all_tasks,
             root_tasks=root_tasks,
             repo_path=repo_path,
-            sha=sha,
+            sha=file_sha,
             log_dir=log_dir if not args.dry_run else None,
             log_date=log_date if not args.dry_run else None,
             dry_run=args.dry_run,
@@ -4186,7 +4562,7 @@ def main() -> int:
                 failed_tasks=failed_tasks,
                 task_id=root_id,
                 repo_path=repo_path,
-                sha=sha,
+                sha=file_sha,
                 log_dir=log_dir if not args.dry_run else None,
                 log_date=log_date if not args.dry_run else None,
                 dry_run=args.dry_run,
@@ -4235,6 +4611,13 @@ def main() -> int:
         ]
         exit_status = 0 if len(critical_failures) == 0 else 1
 
+        # Store compilation SHA on success (tracks HEAD at last successful compilation)
+        if exit_status == 0:
+            compilation_tasks = [tid for tid in all_tasks if 'compilation' in tid and all_tasks[tid].status == TaskStatus.PASSED]
+            if compilation_tasks:
+                dynamo_repo_utils = DynamoRepositoryUtils(repo_path)
+                dynamo_repo_utils.store_compilation_sha(sha)
+
         logger.info(f"\nExecution Summary:")
         logger.info(f"  ✓ Success: {success_count}")
         logger.info(f"  ✗ Failed: {failed_count}")
@@ -4274,7 +4657,7 @@ def main() -> int:
             )
 
             # Save HTML report, status marker, and JSON build report together
-            _write_report_and_json(html_content_file, all_tasks, repo_path, sha, log_dir, log_date)
+            _write_report_and_json(html_content_file, all_tasks, repo_path, file_sha, log_dir, log_date)
             logger.info(f"  HTML + JSON Report saved to: {log_dir}")
         except Exception as e:
             logger.error(f"Failed to generate reports: {e}")

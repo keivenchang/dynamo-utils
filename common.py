@@ -1004,6 +1004,7 @@ class DynamoRepositoryUtils(BaseUtils):
 
     DOCKER_IMAGE_SHA_FILE = ".last_docker_image_sha"
     DOCKER_IMAGE_SHA_FILE_COMPAT = ".last_build_composite_sha"  # TODO: remove after 2026-02-25
+    COMPILATION_SHA_FILE = ".last_compilation_sha"
 
     def get_stored_docker_image_sha(self) -> str:
         """
@@ -1039,6 +1040,22 @@ class DynamoRepositoryUtils(BaseUtils):
             compat_file.unlink()
         compat_file.symlink_to(self.DOCKER_IMAGE_SHA_FILE)
         self.logger.info(f"Stored Docker image SHA: {sha[:12]}")
+
+    def get_stored_compilation_sha(self) -> str:
+        """Get stored compilation SHA from file (HEAD commit at last successful compilation)."""
+        sha_file = self.repo_path / self.COMPILATION_SHA_FILE
+        if sha_file.exists():
+            stored = sha_file.read_text().strip()
+            self.logger.debug(f"Found stored compilation SHA: {stored}")
+            return stored
+        self.logger.debug("No stored compilation SHA found")
+        return ""
+
+    def store_compilation_sha(self, sha: str) -> None:
+        """Store HEAD commit SHA after successful compilation."""
+        sha_file = self.repo_path / self.COMPILATION_SHA_FILE
+        sha_file.write_text(sha)
+        self.logger.info(f"Stored compilation SHA: {sha}")
 
     def check_if_rebuild_needed(self, force_run: bool = False) -> bool:
         """

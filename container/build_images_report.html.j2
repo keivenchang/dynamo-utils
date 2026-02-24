@@ -192,7 +192,9 @@ h2 { margin: 0; font-size: 1.2em; font-weight: bold; }
 {%- if target_name == 'dev-compress' %}
 {# dev-compress row: Compress spans build+compilation columns, then sanity column, then image size #}
 <div class="chart-cell chart-status chart-cell-span-2" style="text-align: center;">
-{%- if build_task %}
+{%- if no_build %}<span style="color: #95a5a6;">Disabled (--no-build)</span>
+{%- elif no_compress %}<span style="color: #95a5a6;">Disabled (--no-compress)</span>
+{%- elif build_task %}
 {%- if build_task.status == 'passed' %}
 <span class="success">✅ COMPRESSED</span>{%- if build_task.time %} <span class="chart-timing">({{ build_task.time }})</span>{%- endif %}
 {%- elif build_task.status == 'running' %}
@@ -209,7 +211,6 @@ h2 { margin: 0; font-size: 1.2em; font-weight: bold; }
 {%- if build_task.log_file %} <a href="{{ build_task.log_file }}" class="log-link" target="_blank" rel="noopener noreferrer">[log]</a>{%- endif %}
 {%- else %}-{%- endif %}
 </div>
-{# sanity column for compress-sanity #}
 <div class="chart-cell chart-status">
 {%- if sanity_task %}
 {%- if sanity_task.status == 'passed' %}
@@ -234,7 +235,8 @@ h2 { margin: 0; font-size: 1.2em; font-weight: bold; }
 </div>
 {%- elif target_name == 'dev-upload' %}
 <div class="chart-cell chart-status chart-cell-span-3" style="text-align: center;">
-{%- if build_task %}
+{%- if no_upload %}<span style="color: #95a5a6;">Disabled (--no-upload)</span>
+{%- elif build_task %}
 {%- if build_task.status == 'passed' %}
 <span class="success">✅ UPLOADED</span>{%- if build_task.time %} <span class="chart-timing">({{ build_task.time }})</span>{%- endif %}
 {%- elif build_task.status == 'running' %}
@@ -262,7 +264,8 @@ h2 { margin: 0; font-size: 1.2em; font-weight: bold; }
 {%- else %}
 <div class="chart-cell chart-status">
 {%- endif %}
-{%- if build_task %}
+{%- if no_build and build_task and build_task.status == 'skipped' %}<span style="color: #95a5a6;">Disabled (--no-build)</span>
+{%- elif build_task %}
 {%- if build_task.status == 'passed' %}
 <span class="success">✅ PASS</span>{%- if build_task.time %} <span class="chart-timing">({{ build_task.time }})</span>{%- endif %}
 {%- elif build_task.status == 'running' %}

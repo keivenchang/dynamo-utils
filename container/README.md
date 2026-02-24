@@ -30,7 +30,19 @@ container/
 
 **Overview**: Automated Docker build and test pipeline for multiple inference frameworks.
 
-### Usage
+**Usage summary**
+
+| Goal | Command |
+|------|---------|
+| Dry run | `--repo-path <path> --dry-run -v` |
+| Build at image-SHA origin (HEAD) | `--repo-path <path> --parallel --skip --run-ignore-lock -v` |
+| Build specific commit | `--repo-path <path> --repo-sha <commit> --parallel --skip --run-ignore-lock -v` |
+| Reuse if images exist | `--repo-path <path> --reuse-if-image-exists --parallel --skip -v` |
+| Sanity only | `--repo-path <path> --sanity-check-only --framework sglang --force-run` |
+
+Common flags: `--repo-path` (required), `--repo-sha` / `--sha`, `--parallel`, `--skip`, `--run-ignore-lock`, `--no-upload`, `--no-compress`, `-v`, `--dry-run`.
+
+### Usage (examples)
 
 ```bash
 # Quick test (single framework)
@@ -44,6 +56,52 @@ python3 container/build_images.py --repo-path ~/dynamo/dynamo_ci --parallel --fo
 
 # Without upload and compress (both are on by default)
 python3 container/build_images.py --repo-path ~/dynamo/dynamo_ci --parallel --skip --run-ignore-lock --no-upload --no-compress
+```
+
+### Commit SHA and image SHA
+
+- **Image SHA** is a content hash of the `container/` directory. It identifies when the Dockerfile/context changed. Image tags include it (e.g. `dynamo:6d3e0137c.IMAGE.c62194-none-cuda13.0-runtime`).
+- **Commit SHA** is the git commit used for the build (logs, report paths, and the first part of the image tag).
+
+**Default (no `--repo-sha`) – build at image-SHA origin**
+
+If you omit `--repo-sha` / `--sha`, the script:
+
+1. Uses the **latest commit** (current HEAD).
+2. Computes the **image SHA** for that commit (hash of `container/`).
+3. **Traverses back** in history to find the commit that **first introduced** that image SHA (`find_docker_image_sha_origin`).
+4. If that commit differs from HEAD, **checks out** that commit.
+5. **Builds** that commit (so the image tag is that commit SHA + image SHA).
+
+Use this when you want to build the canonical commit for the current container state (e.g. from `dynamo_ci` HEAD) without specifying a commit yourself.
+
+**Explicit commit (`--repo-sha` / `--sha`)**
+
+If you pass `--repo-sha <commit>` (e.g. `--repo-sha 6d3e0137c`), the script checks out that exact commit and builds it. No traverse-back step: you get that commit’s tree and its image SHA in the tag.
+
+```bash
+# Build at image-SHA origin (default: use HEAD, resolve to introducing commit, then build)
+python3 container/build_images.py --repo-path ~/dynamo/dynamo_ci --parallel --skip --run-ignore-lock -v
+
+# Build a specific commit as-is (no traverse-back)
+python3 container/build_images.py --repo-path ~/dynamo/dynamo_ci --repo-sha 6d3e0137c --parallel --skip --run-ignore-lock -v
+```
+
+### Reuse existing images (`--reuse-if-image-exists`)
+
+When you pass **`--reuse-if-image-exists`**, the script:
+
+1. Goes to the **latest commit** (HEAD; `--repo-sha` is ignored).
+2. Computes the **image SHA** and resolves to the commit that introduced it (same as default).
+3. Checks if **all** required images for that image SHA exist locally (runtime, dev, local-dev for each framework).
+4. **If they exist**: only runs **compilation and sanity checks** with `/workspace` mounted, reusing those images (no build steps).
+5. **If any image is missing**: runs the **full build** (runtime, dev, local-dev) as usual.
+
+Use this for a fast compile/sanity pass when container/ has not changed and you already have the images (e.g. after a previous full build or when syncing from another machine).
+
+```bash
+# Reuse if images exist; otherwise full build (uses HEAD, ignores --repo-sha)
+python3 container/build_images.py --repo-path ~/dynamo/dynamo_ci --reuse-if-image-exists --parallel --skip -v
 ```
 
 ### Dev upload and compress
