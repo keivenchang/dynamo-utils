@@ -360,6 +360,9 @@ OPTIONS:
                          Example: Use "Qwen/Qwen3-0.6B" instead of
                          "~/.cache/huggingface/hub/models--Qwen--Qwen3-0.6B/snapshots/..."
                          Useful when you want consistent model naming across systems.
+    --router-mode MODE    Frontend router mode (e.g. "kv" for KV-aware routing).
+                         Disagg mode defaults to "kv"; aggregated mode defaults to none.
+                         Use "--router-mode kv" in aggregated mode to test router metrics.
     --lmcache             Enable LMCache KV cache offloading (vLLM only, enabled by default)
     --no-lmcache          Disable LMCache KV cache offloading (vLLM only)
                          Note: LMCache only supported on x86 architecture
@@ -393,6 +396,7 @@ ENABLE_PREFIX_CACHING=false  # vLLM only; default disabled to reduce memory usag
 GPU_MEM_FRACTION_OVERRIDE=""  # Will override defaults if set
 ENABLE_LOCAL_INDEXER=false  # vLLM only; enable worker-local KV indexer
 USE_ORIGINAL_MODEL_NAME=false  # Use original model name instead of cached path
+ROUTER_MODE=""  # Frontend router mode (e.g. "kv"); empty = framework default
 QWEN_MODEL="Qwen/Qwen3-0.6B"
 TINYLLAMA_MODEL="TinyLlama/TinyLlama-1.1B-Chat-v1.0"
 # deepseek-ai/DeepSeek-R1-Distill-Llama-8B
@@ -442,6 +446,10 @@ while [[ $# -gt 0 ]]; do
         --use-original-model-name)
             USE_ORIGINAL_MODEL_NAME=true
             shift
+            ;;
+        --router-mode)
+            ROUTER_MODE="$2"
+            shift 2
             ;;
         --dryrun|--dry-run)
             DRY_RUN=true
@@ -681,6 +689,9 @@ if [ -n "$GPU_MEM_FRACTION_OVERRIDE" ]; then
     echo "Using GPU memory fraction: $GPU_MEM_FRACTION_OVERRIDE"
 fi
 
+# Use file-based discovery to avoid requiring etcd/NATS for local dev
+DISCOVERY_ARGS="--discovery-backend file"
+
 # Set framework-specific arguments
 BATCH_SIZE=2
 if [ "$FRAMEWORK" = "vllm" ]; then
@@ -871,10 +882,10 @@ if [ "$RUN_BACKEND" = true ]; then
         # Launch prefill worker FIRST so it can register before decode worker tries to connect
         dry_run_echo "Launching prefill worker on port $PREFILL_PORT ($GPU_MEM_PERCENT GPU memory)..."
         if [ "$DRY_RUN" = false ]; then
-            ( set -x; VLLM_NIXL_SIDE_CHANNEL_PORT=$NIXL_PORT_PREFILL DYN_LOG=info DYN_SYSTEM_PORT=$PREFILL_PORT python3 -m dynamo.$FRAMEWORK --model "$MODEL" $DISAGG_FRAMEWORK_ARGS $PREFILL_FLAG ) 2>&1 | sed 's/^/[PREFILL] /' &
+            ( set -x; VLLM_NIXL_SIDE_CHANNEL_PORT=$NIXL_PORT_PREFILL DYN_LOG=info DYN_SYSTEM_PORT=$PREFILL_PORT python3 -m dynamo.$FRAMEWORK --model "$MODEL" $DISAGG_FRAMEWORK_ARGS $PREFILL_FLAG $DISCOVERY_ARGS ) 2>&1 | sed 's/^/[PREFILL] /' &
             PREFILL_PID=$!
         else
-            ( set -x; : VLLM_NIXL_SIDE_CHANNEL_PORT=$NIXL_PORT_PREFILL DYN_LOG=info DYN_SYSTEM_PORT=$PREFILL_PORT python3 -m dynamo.$FRAMEWORK --model "$MODEL" $DISAGG_FRAMEWORK_ARGS $PREFILL_FLAG ) 2>&1 | sed 's/^+ : /+ /'
+            ( set -x; : VLLM_NIXL_SIDE_CHANNEL_PORT=$NIXL_PORT_PREFILL DYN_LOG=info DYN_SYSTEM_PORT=$PREFILL_PORT python3 -m dynamo.$FRAMEWORK --model "$MODEL" $DISAGG_FRAMEWORK_ARGS $PREFILL_FLAG $DISCOVERY_ARGS ) 2>&1 | sed 's/^+ : /+ /'
             dry_run_echo "PREFILL_PID=\$!"
         fi
 
@@ -909,31 +920,35 @@ if [ "$RUN_BACKEND" = true ]; then
         # Launch decode worker SECOND (after prefill worker is ready)
         dry_run_echo "Launching decode worker on port $DECODE_PORT ($GPU_MEM_PERCENT GPU memory)..."
         if [ "$DRY_RUN" = false ]; then
-            ( set -x; VLLM_NIXL_SIDE_CHANNEL_PORT=$NIXL_PORT_DECODE DYN_LOG=info DYN_SYSTEM_PORT=$DECODE_PORT python3 -m dynamo.$FRAMEWORK --model "$MODEL" $DISAGG_FRAMEWORK_ARGS $DECODE_FLAG ) 2>&1 | sed 's/^/[DECODE] /' &
+            ( set -x; VLLM_NIXL_SIDE_CHANNEL_PORT=$NIXL_PORT_DECODE DYN_LOG=info DYN_SYSTEM_PORT=$DECODE_PORT python3 -m dynamo.$FRAMEWORK --model "$MODEL" $DISAGG_FRAMEWORK_ARGS $DECODE_FLAG $DISCOVERY_ARGS ) 2>&1 | sed 's/^/[DECODE] /' &
             BACKEND_PID=$!
         else
-            ( set -x; : VLLM_NIXL_SIDE_CHANNEL_PORT=$NIXL_PORT_DECODE DYN_LOG=info DYN_SYSTEM_PORT=$DECODE_PORT python3 -m dynamo.$FRAMEWORK --model "$MODEL" $DISAGG_FRAMEWORK_ARGS $DECODE_FLAG ) 2>&1 | sed 's/^+ : /+ /'
+            ( set -x; : VLLM_NIXL_SIDE_CHANNEL_PORT=$NIXL_PORT_DECODE DYN_LOG=info DYN_SYSTEM_PORT=$DECODE_PORT python3 -m dynamo.$FRAMEWORK --model "$MODEL" $DISAGG_FRAMEWORK_ARGS $DECODE_FLAG $DISCOVERY_ARGS ) 2>&1 | sed 's/^+ : /+ /'
             dry_run_echo "BACKEND_PID=\$!"
         fi
     else
         # Aggregated mode: Launch single worker
         if [ "$DRY_RUN" = false ]; then
-            ( set -x; DYN_LOG=info DYN_SYSTEM_PORT=$DYN_BACKEND_PORT python -m dynamo.$FRAMEWORK --model "$MODEL" $FRAMEWORK_ARGS ) &
+            ( set -x; DYN_LOG=info DYN_SYSTEM_PORT=$DYN_BACKEND_PORT python -m dynamo.$FRAMEWORK --model "$MODEL" $FRAMEWORK_ARGS $DISCOVERY_ARGS ) &
             BACKEND_PID=$!
         else
-            ( set -x; : DYN_LOG=info DYN_SYSTEM_PORT=$DYN_BACKEND_PORT python -m dynamo.$FRAMEWORK --model "$MODEL" $FRAMEWORK_ARGS ) 2>&1 | sed 's/^+ : /+ /'
+            ( set -x; : DYN_LOG=info DYN_SYSTEM_PORT=$DYN_BACKEND_PORT python -m dynamo.$FRAMEWORK --model "$MODEL" $FRAMEWORK_ARGS $DISCOVERY_ARGS ) 2>&1 | sed 's/^+ : /+ /'
             dry_run_echo "BACKEND_PID=\$!"
         fi
     fi
 fi
 
+# Build frontend router-mode argument
+FRONTEND_ROUTER_ARGS=""
+if [ -n "$ROUTER_MODE" ]; then
+    FRONTEND_ROUTER_ARGS="--router-mode $ROUTER_MODE"
+elif [ "$DISAGG_MODE" = true ]; then
+    FRONTEND_ROUTER_ARGS="--router-mode kv"
+fi
+
 # Start frontend AFTER backend (so backend is ready when frontend starts accepting requests)
 if [ "$RUN_FRONTEND" = true ]; then
-    if [ "$DISAGG_MODE" = true ]; then
-        cmd env -u DYN_SYSTEM_PORT python -m dynamo.frontend --http-port $DYN_FRONTEND_PORT --router-mode kv &
-    else
-        cmd env -u DYN_SYSTEM_PORT python -m dynamo.frontend --http-port $DYN_FRONTEND_PORT &
-    fi
+    cmd env -u DYN_SYSTEM_PORT python -m dynamo.frontend --http-port $DYN_FRONTEND_PORT $FRONTEND_ROUTER_ARGS $DISCOVERY_ARGS &
     if [ "$DRY_RUN" = false ]; then
         FRONTEND_PID=$!
     else

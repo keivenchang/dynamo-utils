@@ -34,10 +34,24 @@ If you do only one thing: re-read this section before making changes or running 
   - NEVER delete caches unless explicitly requested and permission is granted.
     - Examples: `__pycache__`, `.cache/`, `target/`, `node_modules/`, tmp dirs, etc.
 
+- Production dynamo-utils (MUST):
+  - NEVER read, write, or modify files under `~/dynamo/dynamo-utils/` (production).
+  - ALL development work happens in `~/dynamo/dynamo-utils.dev/`.
+  - The only operation allowed on production is `git pull` when explicitly requested.
+  - If you catch yourself about to touch `dynamo-utils/`, STOP. Use `dynamo-utils.dev/` instead.
+
 - Shell execution (MUST):
   - Chain multi-step commands into ONE shell invocation using `&&` / `;` (reduce latency).
   - For expensive/long-running commands: capture FULL output first (`2>&1` to a file or `tee`).
     - Never pipe the live output of expensive commands into `grep`/`head`/`tail`.
+  - Use `\cp` and `\mv` (backslash-escaped) instead of bare `cp` and `mv`.
+    The host shell aliases `cp` to `cp -i` and `mv` to `mv -i`, which prompt for
+    confirmation and hang in non-interactive shells. Always: `\cp -f`, `\mv -f`.
+
+- Rust formatting (MUST):
+  - Run `cargo fmt` IMMEDIATELY after editing any `.rs` file. Do NOT wait until commit time.
+  - This is non-negotiable: edit → fmt → continue. Every time. No exceptions.
+  - If you edited Rust files and did NOT run `cargo fmt`, STOP and run it NOW before doing anything else.
 
 - Python rules (MUST):
   - All imports at top of file. No `try/except` for imports. Never import inside functions.
@@ -514,7 +528,7 @@ Dashboards / CI log work (recent learnings):
 - Always use --locked: cargo test --locked, cargo build --locked, cargo install --locked
 - Development build: cargo build --locked --features dynamo-llm/block-manager --workspace
 - Clean builds: cargo clean
-- Before commit: cargo fmt (run on all affected directories)
+- **IMMEDIATELY after editing any .rs file: `cargo fmt`** (do NOT defer to commit time)
 - See section 7.2 (Pre-Merge CI Checks) for comprehensive build/test/lint commands
 
 ### 3.4.4 Type Inference for Examples
@@ -1295,3 +1309,14 @@ If scripts or HTML generators changed: `python3 -m py_compile <touched_py_files>
 
 Expected result: All checks pass with no errors
 
+=============================================================================
+NEVER VIOLATE (repeated from top -- re-read before every action)
+=============================================================================
+
+- NEVER touch ~/dynamo/dynamo-utils/ (production). ALL work in ~/dynamo/dynamo-utils.dev/.
+- NEVER use bare `cp` or `mv`. Always `\cp -f` and `\mv -f` (host aliases cp/mv to -i, which hangs).
+- NEVER suggest committing unless the user explicitly asks.
+- NEVER delete caches without explicit permission.
+- NEVER hide errors (no `except Exception: pass`). Fail fast.
+- NEVER use `getattr()` on known typed attributes. Access directly.
+- NEVER import inside functions or use try/except for imports.
