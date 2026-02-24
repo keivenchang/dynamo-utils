@@ -60,8 +60,7 @@
     "workspaceFolder": "/workspace",
     "workspaceMount": "source=${localWorkspaceFolder},target=/workspace,type=bind,consistency=cached",
     "userEnvProbe": "interactiveShell",
-    "postCreateCommand": "/bin/bash /workspace/.devcontainer/post-create.sh", // Runs cargo build and pip installs packages
-    "postStartCommand": "/bin/bash /workspace/_/post-start.sh",
+    "postCreateCommand": "/bin/bash /workspace/.devcontainer/post-create.sh && /bin/bash /workspace/_/post-start.sh",
     "containerEnv": {
         "CARGO_PROFILE_DEV_OPT_LEVEL": "0",
         "CARGO_BUILD_JOBS": "32",
@@ -81,7 +80,9 @@
         "source=${localEnv:HOME}/.rustup,target=/home/dynamo/.rustup,type=bind",
         "source=${localEnv:HOME}/.bash_aliases,target=/home/dynamo/.bash_aliases,type=bind",
         "source=${localEnv:HOME}/.gitconfig,target=/home/dynamo/.gitconfig,type=bind",
-        "source=${localEnv:HOME}/.gnupg,target=/home/dynamo/.gnupg-host,type=bind,readonly",
+        "source=${localEnv:HOME}/.gnupg/private-keys-v1.d,target=/home/dynamo/.gnupg/private-keys-v1.d,type=bind,readonly",
+        "source=${localEnv:HOME}/.gnupg/pubring.kbx,target=/home/dynamo/.gnupg/pubring.kbx,type=bind,readonly",
+        "source=${localEnv:HOME}/.gnupg/trustdb.gpg,target=/home/dynamo/.gnupg/trustdb.gpg,type=bind,readonly",
         "source=${localEnv:HOME}/.ssh,target=/home/dynamo/.ssh,type=bind,readonly",
         "source=${localEnv:HOME}/dynamo/dynamo-utils,target=/workspace/_,type=bind",
         "source=${localEnv:HOME}/dynamo/dynamo-utils/pyrightconfig.json,target=/workspace/pyrightconfig.json,type=bind",
