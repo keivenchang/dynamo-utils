@@ -19,7 +19,7 @@ container/
 - **`build_images.py`**: automated Docker build/test pipeline (multi-framework).
 - **`build_all_targets_and_verify.sh`**: build runtime/dev/local-dev targets and run verification (run from a Dynamo repo root).
 - **`retag_images.py`**: retag images (useful for promoting images across tags).
-- **`cleanup_old_images.sh`**: prune old images/build cache.
+- **`cleanup_old_images.sh`**: prune old images/build cache. Use `--keep-dev-and-local-dev-only` to remove only runtime images (keeps BOTH dev and local-dev; used by `cleanup_log_and_docker.sh`).
 - **`dangerously_wipe_local_docker.sh`**: **DANGEROUS** kill all running containers and delete **all local Docker images** (requires `--wipe-out-all-docker-images`).
 - **`restart_gpu_containers.sh`**: watchdog-style monitor/restart for GPU containers.
 - **`build_images_report.html.j2`**: HTML template used by `build_images.py`.
@@ -37,7 +37,7 @@ container/
 | Dry run | `--repo-path <path> --dry-run -v` |
 | Build at image-SHA origin (HEAD) | `--repo-path <path> --parallel --skip --run-ignore-lock -v` |
 | Build specific commit | `--repo-path <path> --repo-sha <commit> --parallel --skip --run-ignore-lock -v` |
-| Reuse if images exist | `--repo-path <path> --reuse-if-image-exists --parallel --skip -v` |
+| Reuse dev if image exists | `--repo-path <path> --reuse-dev-if-image-exists --parallel --skip -v` |
 | Sanity only | `--repo-path <path> --sanity-check-only --framework sglang --run-ignore-lock` |
 
 Common flags: `--repo-path` (required), `--repo-sha` / `--sha`, `--parallel`, `--skip`, `--run-ignore-lock`, `--no-upload`, `--no-compress`, `-v`, `--dry-run`.
@@ -87,21 +87,20 @@ python3 container/build_images.py --repo-path ~/dynamo/dynamo_ci --parallel --sk
 python3 container/build_images.py --repo-path ~/dynamo/dynamo_ci --repo-sha 6d3e0137c --parallel --skip --run-ignore-lock -v
 ```
 
-### Reuse existing images (`--reuse-if-image-exists`)
+### Reuse dev images (`--reuse-dev-if-image-exists`)
 
-When you pass **`--reuse-if-image-exists`**, the script:
+When you pass **`--reuse-dev-if-image-exists`**, the script:
 
-1. Goes to the **latest commit** (HEAD; `--repo-sha` is ignored).
-2. Computes the **image SHA** and resolves to the commit that introduced it (same as default).
-3. Checks if **all** required images for that image SHA exist locally (runtime, dev, local-dev for each framework).
-4. **If they exist**: only runs **compilation and sanity checks** with `/workspace` mounted, reusing those images (no build steps).
-5. **If any image is missing**: runs the **full build** (runtime, dev, local-dev) as usual.
+1. Computes the **image SHA** for the target commit (HEAD or `--repo-sha`).
+2. Checks if the **local-dev** image for that image SHA exists locally (per framework).
+3. **If it exists**: only runs **local-dev compilation and sanity check** (no build steps).
+4. **If the image is missing**: runs the **full build** as usual.
 
-Use this for a fast compile/sanity pass when container/ has not changed and you already have the images (e.g. after a previous full build or when syncing from another machine).
+Use this for a fast compile/sanity pass when container/ has not changed and you already have the local-dev image (e.g. after a previous full build).
 
 ```bash
-# Reuse if images exist; otherwise full build (uses HEAD, ignores --repo-sha)
-python3 container/build_images.py --repo-path ~/dynamo/dynamo_ci --reuse-if-image-exists --parallel --skip -v
+# Reuse local-dev if image exists; otherwise full build
+python3 container/build_images.py --repo-path ~/dynamo/dynamo_ci --repo-sha fd839b8d5 --reuse-dev-if-image-exists --parallel --skip -v
 ```
 
 ### Dev upload and compress

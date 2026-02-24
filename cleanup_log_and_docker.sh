@@ -6,7 +6,7 @@
 #
 # What it does (by default):
 # - Docker cleanup:
-#   - Runs dynamo-utils/container/cleanup_old_images.sh --retain <N>
+#   - Runs dynamo-utils/container/cleanup_old_images.sh --retain <N> --keep-dev-and-local-dev-only
 #   - Runs: docker builder prune -a --force
 # - Log cleanup:
 #   - Deletes $DYNAMO_HOME/logs/YYYY-MM-DD/ directories older than <keep-days> (default: 30)
@@ -96,7 +96,7 @@ cleanup_docker() {
 
   local cleanup_images="$SCRIPT_DIR/container/cleanup_old_images.sh"
   if [ -x "$cleanup_images" ]; then
-    local args=(--force --retain "$RETAIN_IMAGES" --keep-local-dev-only)
+    local args=(--force --retain "$RETAIN_IMAGES" --keep-dev-and-local-dev-only)
     if [ "$DRY_RUN" = true ]; then
       args+=(--dry-run)
     fi

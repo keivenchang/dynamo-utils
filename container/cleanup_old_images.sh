@@ -10,7 +10,7 @@ set -e
 DRY_RUN=false
 FORCE=false
 RETAIN_COUNT=2
-KEEP_LOCAL_DEV_ONLY=false
+KEEP_DEV_AND_LOCAL_DEV_ONLY=false
 
 # Function to show usage
 usage() {
@@ -21,8 +21,7 @@ Docker Image Cleanup Script for dynamo vllm/sglang/trtllm variants
 
 This script will:
 - Keep all :latest-* tags (latest-vllm, latest-sglang, latest-trtllm, etc.)
-- Keep all *-local-dev tags for latest variants
-- Keep the top $RETAIN_COUNT most recent images for each variant type
+- Keep the top $RETAIN_COUNT most recent images per variant type (runtime, dev, local-dev)
 - Remove older images to free up disk space
 - Prune Docker build cache
 
@@ -30,7 +29,7 @@ OPTIONS:
     --dry-run, --dryrun    Show what would be deleted without actually deleting
     --force                Use docker rmi -f to force removal of images
     --retain N             Number of recent images to retain per variant (default: $RETAIN_COUNT)
-    --keep-local-dev-only  Remove all runtime and dev images, keeping only local-dev
+    --keep-dev-and-local-dev-only  Remove only runtime images; keeps BOTH dev and local-dev (both or nothing)
     -h, --help             Show this help message
 
 EXAMPLES:
@@ -39,7 +38,7 @@ EXAMPLES:
     $0 --force                           # Force delete images with docker rmi -f
     $0 --dry-run --retain 3             # Retain top 3 images per variant
     $0 --force --retain 1               # Force delete, retain only 1 recent image per variant
-    $0 --force --keep-local-dev-only    # Remove all runtime and dev images
+    $0 --force --keep-dev-and-local-dev-only   # Remove runtime only; keep BOTH dev and local-dev
 
 EOF
 }
@@ -69,8 +68,8 @@ while [[ $# -gt 0 ]]; do
             RETAIN_COUNT="${1#*=}"
             shift
             ;;
-        --keep-local-dev-only)
-            KEEP_LOCAL_DEV_ONLY=true
+        --keep-dev-and-local-dev-only)
+            KEEP_DEV_AND_LOCAL_DEV_ONLY=true
             shift
             ;;
         -h|--help)
@@ -86,9 +85,9 @@ while [[ $# -gt 0 ]]; do
 done
 
 # Function to get images for a specific framework variant, sorted by creation time (newest first)
-# Generic pattern: dynamo:<sha>-<framework>-<anything>
-# Examples: dynamo:98df1a2c5-vllm-dev, dynamo:ef2583a9d-sglang-cuda12.9-local-dev,
-#           dynamo:d38954c75-none-cuda12.9-dev-orig
+# Generic pattern: dynamo:<IMAGE_SHA>.<sha>-<framework>-<anything>
+# Examples: dynamo:A1B2C3.98df1a2c5-vllm-dev, dynamo:D4E5F6.ef2583a9d-sglang-cuda12.9-local-dev,
+#           dynamo:A1B2C3.d38954c75-none-cuda12.9-dev-orig
 # Excludes latest-* tags (those are always kept).
 get_variant_images() {
     local variant=$1
@@ -269,27 +268,42 @@ delete_images() {
     echo "Batch deletion completed"
 }
 
-# Function to remove all non-local-dev dynamo images
-remove_non_local_dev_images() {
-    echo "Removing all non-local-dev dynamo images..."
+# Function to remove only runtime dynamo images (keep BOTH dev and local-dev; both or nothing)
+remove_runtime_images() {
+    echo "Removing runtime-only dynamo images (keeping BOTH dev and local-dev)..."
 
     local targets=()
     while IFS= read -r line; do
         [ -z "$line" ] && continue
         local repo_tag=$(echo "$line" | awk '{print $1}')
-        # Keep local-dev and latest-* images
-        case "$repo_tag" in *-local-dev) continue ;; esac
+        # Keep latest-*; keep BOTH *-dev and *-local-dev; remove only *-runtime* (no -dev in tag)
         case "$repo_tag" in dynamo:latest-*) continue ;; esac
+        case "$repo_tag" in *-local-dev) continue ;; esac
+        case "$repo_tag" in *-dev) continue ;; esac
+        case "$repo_tag" in *-runtime*) ;; *) continue ;; esac
         targets+=("$repo_tag")
     done < <(docker images --format "{{.Repository}}:{{.Tag}} {{.ID}}" | grep "^dynamo:")
 
+    # Sanity: must not remove any dev or local-dev (both or nothing)
+    local bad=
+    for t in "${targets[@]}"; do
+        case "$t" in *-local-dev|*-dev) bad=1; break ;; esac
+    done
+    if [ -n "$bad" ]; then
+        echo "ERROR: Would remove a dev/local-dev image; aborting (keep both or nothing)." >&2
+        return 1
+    fi
+
     if [ ${#targets[@]} -eq 0 ]; then
-        echo "No non-local-dev images found to remove."
+        echo "No runtime images found to remove. All dev and local-dev images are kept."
         echo
         return
     fi
 
-    echo "Found ${#targets[@]} non-local-dev images to remove:"
+    if [ "$DRY_RUN" = true ]; then
+        echo "DRY RUN: Would keep all *-dev and *-local-dev; would remove ${#targets[@]} runtime image(s)."
+    fi
+    echo "Found ${#targets[@]} runtime images to remove (all dev and local-dev kept):"
     for t in "${targets[@]}"; do
         echo "  D $t"
     done
@@ -405,9 +419,9 @@ main() {
     # Delete the identified images
     delete_images
 
-    # Remove all non-local-dev images if --keep-local-dev-only was specified
-    if [ "$KEEP_LOCAL_DEV_ONLY" = true ]; then
-        remove_non_local_dev_images
+    # Remove only runtime images if --keep-dev-and-local-dev-only was specified
+    if [ "$KEEP_DEV_AND_LOCAL_DEV_ONLY" = true ]; then
+        remove_runtime_images
     fi
 
     # Prune orphan image layers (unreferenced after deletions above)
