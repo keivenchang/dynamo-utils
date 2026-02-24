@@ -38,7 +38,7 @@ container/
 | Build at image-SHA origin (HEAD) | `--repo-path <path> --parallel --skip --run-ignore-lock -v` |
 | Build specific commit | `--repo-path <path> --repo-sha <commit> --parallel --skip --run-ignore-lock -v` |
 | Reuse if images exist | `--repo-path <path> --reuse-if-image-exists --parallel --skip -v` |
-| Sanity only | `--repo-path <path> --sanity-check-only --framework sglang --force-run` |
+| Sanity only | `--repo-path <path> --sanity-check-only --framework sglang --run-ignore-lock` |
 
 Common flags: `--repo-path` (required), `--repo-sha` / `--sha`, `--parallel`, `--skip`, `--run-ignore-lock`, `--no-upload`, `--no-compress`, `-v`, `--dry-run`.
 
@@ -46,13 +46,13 @@ Common flags: `--repo-path` (required), `--repo-sha` / `--sha`, `--parallel`, `-
 
 ```bash
 # Quick test (single framework)
-python3 container/build_images.py --repo-path ~/dynamo/dynamo_ci --sanity-check-only --framework sglang --force-run
+python3 container/build_images.py --repo-path ~/dynamo/dynamo_ci --sanity-check-only --framework sglang --run-ignore-lock
 
 # Parallel build with skip
-python3 container/build_images.py --repo-path ~/dynamo/dynamo_ci --skip-action-if-already-passed --parallel --force-run
+python3 container/build_images.py --repo-path ~/dynamo/dynamo_ci --skip-action-if-already-passed --parallel --run-ignore-lock
 
 # Full build
-python3 container/build_images.py --repo-path ~/dynamo/dynamo_ci --parallel --force-run
+python3 container/build_images.py --repo-path ~/dynamo/dynamo_ci --parallel --run-ignore-lock
 
 # Without upload and compress (both are on by default)
 python3 container/build_images.py --repo-path ~/dynamo/dynamo_ci --parallel --skip --run-ignore-lock --no-upload --no-compress
@@ -60,7 +60,7 @@ python3 container/build_images.py --repo-path ~/dynamo/dynamo_ci --parallel --sk
 
 ### Commit SHA and image SHA
 
-- **Image SHA** is a content hash of the `container/` directory. It identifies when the Dockerfile/context changed. Image tags include it (e.g. `dynamo:6d3e0137c.IMAGE.c62194-none-cuda13.0-runtime`).
+- **Image SHA** is a 6-char uppercase SHA256 of `git ls-tree -r <commit> -- container/`. Any change in `container/` produces a new hash. Image tags include it (e.g. `dynamo:C62194.6d3e0137c-none-cuda13.0-runtime`).
 - **Commit SHA** is the git commit used for the build (logs, report paths, and the first part of the image tag).
 
 **Default (no `--repo-sha`) – build at image-SHA origin**
@@ -123,12 +123,91 @@ python3 container/build_images.py --repo-path ~/dynamo/dynamo_ci --reuse-if-imag
 - **HTML report generation**:
   - Automatic report generation with clickable links
   - Two versions: file paths vs absolute URLs (for email)
-  - Log file paths: `~/dynamo/dynamo_ci/logs/YYYY-MM-DD/`
-  - Report: `YYYY-MM-DD.{sha_short}.report.html`
+  - Log file paths: `~/dynamo/dynamo_ci/logs/YYYY-MM-DD/{image_sha}.{commit_sha}/`
+  - Report: `{image_sha}.{commit_sha}/report.html`
 - **Email notifications**:
   - SMTP server: `smtp.nvidia.com:25`
   - Subject format: `{SUCC|FAIL}: DynamoDockerBuilder - {sha_short} [{failed_tasks}]`
   - HTML email body with clickable links
   - Not sent in dry-run mode
+
+---
+
+## Renaming Images in GitLab Container Registry
+
+**Web UI Location**: https://gitlab-master.nvidia.com/dl/ai-dynamo/dynamo/container_registry/165910
+
+Or navigate via project:
+1. Go to https://gitlab-master.nvidia.com/dl/ai-dynamo/dynamo
+2. Click **Packages & Registries** → **Container Registry** in left sidebar
+3. Click on **dev/dynamo** repository
+
+### Bulk Rename with crane
+
+Use [crane](https://github.com/google/go-containerregistry/blob/main/cmd/crane/doc/crane.md) to copy tags directly in the registry without pulling images:
+
+```bash
+# Install crane
+cd /tmp
+curl -sL "https://github.com/google/go-containerregistry/releases/latest/download/go-containerregistry_Linux_x86_64.tar.gz" | tar -xz crane
+chmod +x crane
+
+# Copy old tag to new tag (no docker pull needed!)
+./crane copy \
+  gitlab-master.nvidia.com:5005/dl/ai-dynamo/dynamo/dev/dynamo:OLD_TAG \
+  gitlab-master.nvidia.com:5005/dl/ai-dynamo/dynamo/dev/dynamo:NEW_TAG
+
+# List all tags
+./crane ls gitlab-master.nvidia.com:5005/dl/ai-dynamo/dynamo/dev/dynamo
+
+# Delete old tag using GitLab API (crane delete doesn't work - see note below)
+PROJECT_ID="169905"  # dl/ai-dynamo/dynamo
+REGISTRY_ID="165910"  # dev/dynamo
+TOKEN="your-gitlab-token"  # Must have 'api' permission
+TAG="OLD_TAG"
+
+curl --request DELETE \
+  --header "PRIVATE-TOKEN: $TOKEN" \
+  "https://gitlab-master.nvidia.com/api/v4/projects/${PROJECT_ID}/registry/repositories/${REGISTRY_ID}/tags/${TAG}"
+```
+
+**IMPORTANT: Why not use `crane delete`?**
+- `crane delete` requires Docker Registry API delete permission
+- GitLab tokens with `write_registry` allow **push** but not **delete** via Docker Registry API
+- Must use **GitLab REST API** instead (requires `api` permission on token)
+- Example: Token with `api` + `write_registry` works for GitLab API delete, but not crane delete
+
+**Token location**:
+- Stored in `~/.docker/config.json` (set via `docker login gitlab-master.nvidia.com:5005`)
+- Extract token from Docker config:
+  ```bash
+  python3 -c "
+  import json, base64
+  from pathlib import Path
+  config = json.load(open(Path.home() / '.docker' / 'config.json'))
+  auth = config['auths']['gitlab-master.nvidia.com:5005']['auth']
+  username, token = base64.b64decode(auth).decode().split(':', 1)
+  print(f'Username: {username}')
+  print(f'Token: {token}')
+  "
+  ```
+```
+
+**Image naming convention**:
+- **Current format**: `AABB11.commit_sha-variant-cuda-type`
+- **Example**: `1FA782.9a15730a7-none-cuda12.9-dev`
+- **`AABB11`**: uppercase 6-char SHA256 of `git ls-tree -r <commit> -- container/` (identifies container content)
+- **`commit_sha`**: lowercase 9-char git commit SHA (identifies code version)
+
+**Calculate image SHA for a commit**:
+```bash
+cd ~/dynamo
+python3 -c "
+import sys; sys.path.insert(0, 'dynamo-utils.dev')
+from common import DynamoRepositoryUtils
+repo = DynamoRepositoryUtils('/home/keivenc/dynamo/dynamo4')
+print(repo.generate_docker_image_sha_for_commit('COMMIT_SHA', full_hash=False))
+"
+```
 
 

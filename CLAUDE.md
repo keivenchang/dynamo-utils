@@ -358,17 +358,17 @@ pytest --cache-dir=/tmp/pytest_cache --basetemp=/tmp/pytest_test ...
 
 **Quick Test (Single Framework)**:
 ```bash
-python3 container/build_images.py --sanity-check-only --framework sglang --force-run
+python3 container/build_images.py --sanity-check-only --framework sglang --run-ignore-lock
 ```
 
 **Parallel Build with Skip**:
 ```bash
-python3 container/build_images.py --skip-build-if-image-exists --parallel --force-run
+python3 container/build_images.py --reuse-if-image-exists --parallel --run-ignore-lock
 ```
 
 **Full Build**:
 ```bash
-python3 container/build_images.py --parallel --force-run
+python3 container/build_images.py --parallel --run-ignore-lock
 ```
 
 ## 4.3 Go Operator Linting
