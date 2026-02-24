@@ -7,11 +7,11 @@ This module defines the schema for build report JSON files written alongside
 the HTML report by build_images.py and consumed by show_commit_history.py.
 
 File naming convention:
-    YYYY-MM-DD.<sha9>.json   (alongside YYYY-MM-DD.<sha9>.report.html)
+    logs/{date}/{image_and_commit_sha}/report.json
 
 Usage (producer -- build_images.py):
     report = BuildReport(...)
-    report.to_file(log_dir / f"{date_str}.{sha}.json")
+    report.to_file(log_dir / image_and_commit_sha / "report.json")
 
 Usage (consumer -- show_commit_history.py):
     report = BuildReport.from_file(json_path)
@@ -50,7 +50,7 @@ class TargetResult:
     build: Optional[TaskResult] = None
     compilation: Optional[TaskResult] = None
     sanity: Optional[TaskResult] = None
-    image_name: Optional[str] = None  # e.g. "dynamo:v0.8.0.dev.c8ad4aa67-vllm-dev"
+    image_name: Optional[str] = None  # e.g. "dynamo:A1B2C3.c8ad4aa67-vllm-dev"
     image_size_bytes: Optional[int] = None  # from local docker
     input_image: Optional[str] = None  # base image used
 
@@ -60,8 +60,8 @@ class RegistryImage:
     """A container image pushed to a remote registry."""
 
     location: str  # full pull URL
-    image_name: str  # repo:tag portion, e.g. "dynamo:c8ad4aa67-vllm-dev"
-    tag: str  # just the tag, e.g. "c8ad4aa67-vllm-dev"
+    image_name: str  # repo:tag portion, e.g. "dynamo:A1B2C3.c8ad4aa67-vllm-dev"
+    tag: str  # just the tag, e.g. "A1B2C3.c8ad4aa67-vllm-dev"
     framework: str  # "none", "vllm", "sglang", "trtllm"
     target: str  # "dev" (currently only dev images are uploaded)
     push_status: str  # "PASS", "FAIL", "SKIP", "KILLED", "RUNNING", "QUEUED"
@@ -82,8 +82,8 @@ class FrameworkResult:
 class CommitInfo:
     """Git commit metadata."""
 
-    sha_short: str  # 9-char short SHA
-    sha_full: str  # 40-char full SHA
+    commit_sha_9: str  # 9-char commit SHA (e.g. "a798e08c8")
+    commit_sha_40: str  # 40-char commit SHA (full hexsha)
     author: Optional[str] = None  # "Name <email>"
     date: Optional[str] = None  # ISO 8601 or human-readable
     message: Optional[str] = None  # full commit message
@@ -97,12 +97,12 @@ class BuildReport:
     """Top-level build report structure.
 
     Serialized as JSON alongside the HTML report file:
-        logs/2026-02-11/2026-02-11.c8ad4aa67.json
+        logs/2026-02-11/A1B2C3.c8ad4aa67/report.json
     """
 
     schema_version: int
-    sha_short: str  # 9-char
-    sha_full: str  # 40-char
+    commit_sha_9: str  # 9-char commit SHA (e.g. "a798e08c8")
+    commit_sha_40: str  # 40-char commit SHA (full hexsha)
     build_date: str  # "YYYY-MM-DD"
     report_generated: str  # ISO 8601 when the report was generated
     overall_status: str  # "PASS", "FAIL", "PARTIAL", "KILLED", "RUNNING"
@@ -142,8 +142,8 @@ class BuildReport:
         """Reconstruct a BuildReport from a plain dict."""
         commit_d = d.get("commit") or {}
         commit = CommitInfo(
-            sha_short=commit_d.get("sha_short", ""),
-            sha_full=commit_d.get("sha_full", ""),
+            commit_sha_9=commit_d.get("commit_sha_9", ""),
+            commit_sha_40=commit_d.get("commit_sha_40", ""),
             author=commit_d.get("author"),
             date=commit_d.get("date"),
             message=commit_d.get("message"),
@@ -191,8 +191,8 @@ class BuildReport:
 
         return cls(
             schema_version=d.get("schema_version", SCHEMA_VERSION),
-            sha_short=d.get("sha_short", ""),
-            sha_full=d.get("sha_full", ""),
+            commit_sha_9=d.get("commit_sha_9", ""),
+            commit_sha_40=d.get("commit_sha_40", ""),
             build_date=d.get("build_date", ""),
             report_generated=d.get("report_generated", ""),
             overall_status=d.get("overall_status", ""),

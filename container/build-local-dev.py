@@ -5,18 +5,20 @@
 """
 Render a standalone local-dev Dockerfile from the Jinja2 template.
 
-Takes a dev image name (e.g. dynamo:bbe82f182-vllm-dev) and produces a plain
-Dockerfile in /tmp/ that can be built directly with `docker build`.
+Takes a dev image name (e.g. dynamo:A1B2C3.bbe82f182-vllm-dev) and produces
+a plain Dockerfile in /tmp/ that can be built directly with `docker build`.
+
+Image names use the format <IMAGE_SHA_UPPER>.<commit_sha> (content hash of container/).
 
 If the image is not available locally, pulls it from the GitLab registry
 (gitlab-master.nvidia.com:5005/dl/ai-dynamo/dynamo/dev/), retags it to the
 short name, and removes the long registry name.
 
 Usage:
-    ./render_local_dev.py dynamo:bbe82f182-vllm-dev
-    ./render_local_dev.py dynamo:bbe82f182-none-dev --output /tmp/my.Dockerfile
-    ./render_local_dev.py dynamo:bbe82f182-vllm-dev --build
-    ./render_local_dev.py dynamo:bbe82f182-vllm-dev --build --dry-run
+    ./render_local_dev.py dynamo:A1B2C3.bbe82f182-vllm-dev
+    ./render_local_dev.py dynamo:A1B2C3.bbe82f182-none-dev --output /tmp/my.Dockerfile
+    ./render_local_dev.py dynamo:A1B2C3.bbe82f182-vllm-dev --build
+    ./render_local_dev.py dynamo:A1B2C3.bbe82f182-vllm-dev --build --dry-run
 """
 
 import argparse
@@ -31,8 +33,9 @@ TEMPLATE_REL_PATH = "container/templates/local_dev.Dockerfile"
 
 REGISTRY = "gitlab-master.nvidia.com:5005/dl/ai-dynamo/dynamo/dev"
 
-# dynamo:<sha>-<framework>[-optional-segments]-dev
-IMAGE_PATTERN = re.compile(r"^dynamo:[a-f0-9]+-(none|vllm|sglang|trtllm)(-[a-zA-Z0-9.]+)*-dev$")
+# dynamo:<IMAGE_SHA_UPPER>.<commit_sha>-<framework>[-optional-segments]-dev
+# Also accepts legacy format: dynamo:<sha>.IMAGE.<6hex>-<framework>-...-dev (deprecated)
+IMAGE_PATTERN = re.compile(r"^dynamo:([A-F0-9]{6}\.[a-f0-9]+|[a-f0-9]+(\.IMAGE\.[0-9a-f]{6})?)-(none|vllm|sglang|trtllm)(-[a-zA-Z0-9.]+)*-dev$")
 
 # Pre-rendered fallback: used when local_dev.Dockerfile is not found on disk.
 # {base_image} is replaced at render time.
@@ -215,11 +218,11 @@ def ensure_image_local(image: str) -> None:
 
 
 def validate_image(image: str) -> re.Match[str]:
-    """Validate the image name matches dynamo:<sha>-<framework>[...]-dev."""
+    """Validate the image name matches dynamo:<IMAGE_SHA>.<commit_sha>-<framework>[...]-dev."""
     m = IMAGE_PATTERN.match(image)
     if not m:
         print(
-            f"ERROR: Image must match dynamo:<sha>-<framework>[...]-dev\n"
+            f"ERROR: Image must match dynamo:<IMAGE_SHA>.<commit_sha>-<framework>[...]-dev\n"
             f"       where framework is one of: none, vllm, sglang, trtllm\n"
             f"       Got: {image}",
             file=sys.stderr,
@@ -240,7 +243,7 @@ def main() -> None:
     )
     parser.add_argument(
         "image",
-        help="Dev base image, e.g. dynamo:<sha>-vllm-dev or dynamo:<sha>-vllm-cuda12.9-dev",
+        help="Dev base image, e.g. dynamo:A1B2C3.6d3e0137c-vllm-dev or dynamo:A1B2C3.6d3e0137c-vllm-cuda12.9-dev",
     )
     parser.add_argument(
         "--output", "-o",

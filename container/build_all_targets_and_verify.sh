@@ -127,7 +127,7 @@ build_all_targets() {
     print_msg "Building dev image..."
     if eval "$dev_build_cmd" 2>&1 | tee "$dev_log_file" >&2; then
         # Extract the actual dev image name from the log
-        # Look for pattern like: "#57 naming to docker.io/library/dynamo:v0.7.0.dev.824902f82-vllm 0.0s done"
+        # Look for pattern like: "#57 naming to docker.io/library/dynamo:E04427.a798e08c8-vllm 0.0s done"
         local dev_image=$(grep -E "naming to docker.io/library/dynamo:.*-${framework,,}" "$dev_log_file" | grep -v "dynamo-base" | tail -1 | sed 's/.*naming to docker.io\/library\///' | awk '{print $1}')
         if [ -z "$dev_image" ]; then
             # Fallback - construct from framework name

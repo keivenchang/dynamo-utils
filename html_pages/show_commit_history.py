@@ -114,6 +114,33 @@ STATUS_SUCCESS = 'success'
 STATUS_FAILED = 'failed'
 STATUS_BUILDING = 'building'
 
+
+def _parse_report_dir_to_commit_image(sha_dir_name: str) -> Tuple[Optional[str], Optional[str]]:
+    """Parse report directory name to (commit_sha, image_sha_6) for report_path_by_commit_image lookup.
+
+    Supports: fd839b8d5.IMAGE.e04427 (commit.IMAGE.image_sha) and E04427.fd839b8d5 (image_sha.commit).
+    Returns (commit_sha, image_sha_6_lower) or (None, None) if unparseable.
+    """
+    if not sha_dir_name:
+        return (None, None)
+    # commit.IMAGE.image_sha (e.g. fd839b8d5.IMAGE.e04427)
+    if ".IMAGE." in sha_dir_name:
+        left, right = sha_dir_name.split(".IMAGE.", 1)
+        commit_sha = left.strip() if len(left) >= 7 else None
+        image_sha = (right.strip() or "")[:6].lower()
+        return (commit_sha, image_sha) if (commit_sha and image_sha) else (None, None)
+    # image_sha.commit (e.g. E04427.fd839b8d5) - one dot, 6-7 char + 9 char
+    if sha_dir_name.count(".") == 1:
+        a, b = sha_dir_name.split(".", 1)
+        a, b = a.strip(), b.strip()
+        if len(a) >= 6 and len(b) >= 7:
+            # 6-7 char is image, 9 char is commit
+            image_sha = a[:6].lower()
+            commit_sha = b[:9]
+            return (commit_sha, image_sha)
+    return (None, None)
+
+
 # Grafana Individual Job Details dashboard URL template
 # Example: https://grafana.nvidia.com/d/beyv28rcnhs74b/individual-job-details?orgId=283&var-branch=pull-request%2F5516&var-job=All&var-job_status=All&${__url_time_range}&var-repo=All&var-commit=All&var-workflow=All&from=now-30d&to=now
 GRAFANA_PR_URL_TEMPLATE = "https://grafana.nvidia.com/d/beyv28rcnhs74b/individual-job-details?orgId=283&var-branch=pull-request%2F{pr_number}&var-job=All&var-job_status=All&var-repo=All&var-commit=All&var-workflow=All&from=now-30d&to=now"
@@ -497,7 +524,19 @@ class CommitHistoryGenerator:
                     if cached_entry and isinstance(cached_entry, dict):
                         meta_stats["full_hit"] += 1
                         COMMIT_HISTORY_PERF_STATS.composite_sha_cache_hit += 1
-                        composite_sha = cached_entry['composite_docker_sha']
+                        composite_sha = cached_entry.get('composite_docker_sha')
+                        if not composite_sha:
+                            t_sha = time.monotonic()
+                            try:
+                                composite_sha = repo_utils.generate_docker_image_sha_for_commit(commit.hexsha)
+                            except Exception as e:
+                                composite_sha = "ERROR"
+                                self.logger.error(f"Backfill Image SHA failed for {sha_short}: {e}")
+                                COMMIT_HISTORY_PERF_STATS.composite_sha_errors += 1
+                            COMMIT_HISTORY_PERF_STATS.composite_sha_compute_secs += max(0.0, time.monotonic() - t_sha)
+                            cached_entry['composite_docker_sha'] = composite_sha
+                            COMMIT_HISTORY_CACHE.put(sha_full, cached_entry)
+                            cache_updated = True
                         date_str = cached_entry['date']
                         author_name = cached_entry['author']
                         author_email = str(cached_entry.get("author_email") or "")
@@ -1039,7 +1078,7 @@ class CommitHistoryGenerator:
         # UX:
         # - Commit SHAs are rendered with alternating background colors *by Image SHA* (see template CSS),
         #   so commits that share an Image SHA share the same commit-SHA highlight.
-        # - IMAGE:xxxxxx badges no longer use background colors; they use a compact status-dot icon instead.
+        # - Image SHA badges (6-char uppercase) no longer use background colors; they use a compact status-dot icon instead.
         unique_cds: List[str] = []
         seen_cds: set[str] = set()
         for commit in (commit_data or []):
@@ -1104,6 +1143,7 @@ class CommitHistoryGenerator:
         # Build log paths dictionary and status indicators
         t_markers = time.monotonic()
         log_paths = {}  # Maps sha_short to list of (date, path) tuples
+        report_path_by_commit_image = {}  # Maps (sha_short, image_sha_6) -> (date, path) for report.html when report.json exists
         composite_to_status = {}  # Maps composite_sha to status (with priority: building > failed > success)
         commit_to_status = {}  # Maps commit sha_short to its own build status
         composite_to_commits = {}  # Maps composite_sha to list of commit SHAs
@@ -1135,57 +1175,74 @@ class CommitHistoryGenerator:
             # Build logs are keyed by individual commit SHA, not composite SHA
             matching_logs_for_composite = []
             for commit_sha in composite_to_commits[composite_sha]:
-                search_pattern = str(logs_dir / "*" / f"{commit_sha}*" / "report.html")
-                logs_for_this_commit = glob.glob(search_pattern)
+                search_pattern = str(logs_dir / "*" / f"*.{commit_sha}*" / "report.html")
+                search_pattern_legacy = str(logs_dir / "*" / f"{commit_sha}*" / "report.html")
+                logs_for_this_commit = glob.glob(search_pattern) + glob.glob(search_pattern_legacy)
+                logs_for_this_commit = sorted(set(logs_for_this_commit))
                 if logs_for_this_commit:
                     log_paths[commit_sha] = []
+                    output_dir = output_path.resolve().parent if output_path else Path(".")
                     for log_file in sorted(logs_for_this_commit):
                         log_path = Path(log_file).resolve()
                         # Extract date from parent's parent dir name (logs/{date}/{sha}/report.html)
                         date_str = log_path.parent.parent.name
                         try:
-                            # Calculate relative path from output HTML file to log file
-                            output_dir = output_path.resolve().parent
                             relative_path = os.path.relpath(log_path, output_dir)
-                            log_paths[commit_sha].append((date_str, relative_path))
                         except ValueError:
-                            log_paths[commit_sha].append((date_str, str(log_path)))
+                            relative_path = str(log_path)
+                        log_paths[commit_sha].append((date_str, relative_path))
+                        # If report.json exists in this dir, map (commit_sha, image_sha_6) -> report.html for this row
+                        sha_dir_name = log_path.parent.name
+                        json_path = log_path.parent / "report.json"
+                        if json_path.exists():
+                            _commit, _image_6 = _parse_report_dir_to_commit_image(sha_dir_name)
+                            if _commit and _image_6:
+                                report_path_by_commit_image[f"{_commit}|{_image_6}"] = (date_str, relative_path)
                     matching_logs_for_composite.extend(logs_for_this_commit)
             # If any commit in this composite_sha has logs, determine status
             if matching_logs_for_composite:
                 COMMIT_HISTORY_PERF_STATS.marker_composite_with_reports += 1
 
-                # Read build status from the BuildReport JSON (generated by
-                # build_images.py and backfilled for all historical reports).
-                log_path = Path(sorted(matching_logs_for_composite)[-1])
-                log_dir = log_path.parent.parent  # date dir (report.html is inside sha subdir)
-
-                status = STATUS_UNKNOWN
+                # Read build status per-commit from each commit's own report.json.
+                # Each commit gets its own status (not inherited from the first found).
+                composite_status = STATUS_UNKNOWN
                 for commit_sha in composite_to_commits[composite_sha]:
-                    json_pattern = str(log_dir / f"{commit_sha}*" / "report.json")
-                    json_files = sorted(glob.glob(json_pattern))
-                    if json_files:
-                        try:
-                            report = BuildReport.from_file(Path(json_files[-1]))
-                            os_upper = report.overall_status.upper()
-                            if os_upper == "PASS":
-                                status = STATUS_SUCCESS
-                            elif os_upper in ("FAIL", "KILLED"):
-                                status = STATUS_FAILED
-                            elif os_upper == "RUNNING":
-                                status = STATUS_BUILDING
-                            COMMIT_HISTORY_PERF_STATS.marker_composite_with_status += 1
-                            break
-                        except (OSError, IOError, ValueError, KeyError):
-                            pass  # JSON unreadable/corrupt; status stays unknown
+                    if commit_sha not in log_paths:
+                        continue
+                    # Search all date dirs for this commit's report.json (use the most recent)
+                    commit_json_files = []
+                    _output_dir = output_path.resolve().parent if output_path else Path(".")
+                    for _d, _rel in log_paths[commit_sha]:
+                        _abs = (_output_dir / _rel).resolve()
+                        _json = _abs.parent / "report.json"
+                        if _json.exists():
+                            commit_json_files.append(_json)
+                    if not commit_json_files:
+                        continue
+                    try:
+                        report = BuildReport.from_file(commit_json_files[-1])
+                        os_upper = report.overall_status.upper()
+                        if os_upper == "PASS":
+                            commit_to_status[commit_sha] = STATUS_SUCCESS
+                        elif os_upper in ("FAIL", "KILLED"):
+                            commit_to_status[commit_sha] = STATUS_FAILED
+                        elif os_upper == "RUNNING":
+                            commit_to_status[commit_sha] = STATUS_BUILDING
+                        else:
+                            commit_to_status[commit_sha] = STATUS_UNKNOWN
+                        COMMIT_HISTORY_PERF_STATS.marker_composite_with_status += 1
+                    except (OSError, IOError, ValueError, KeyError):
+                        pass
 
-                # Store status for all commits with logs in this composite_sha
-                for commit_sha in composite_to_commits[composite_sha]:
-                    if commit_sha in log_paths:
-                        commit_to_status[commit_sha] = status
-
-                # Store composite SHA status
-                composite_to_status[composite_sha] = status
+                # Composite status: SUCCESS if any commit passed, else FAILED if any failed
+                statuses = {commit_to_status.get(c) for c in composite_to_commits[composite_sha] if c in commit_to_status}
+                if STATUS_BUILDING in statuses:
+                    composite_status = STATUS_BUILDING
+                elif STATUS_SUCCESS in statuses:
+                    composite_status = STATUS_SUCCESS
+                elif STATUS_FAILED in statuses:
+                    composite_status = STATUS_FAILED
+                composite_to_status[composite_sha] = composite_status
             else:
                 COMMIT_HISTORY_PERF_STATS.marker_composite_without_reports += 1
                 # No report yet, status unknown
@@ -1217,29 +1274,29 @@ class CommitHistoryGenerator:
         # Marker scan time (glob+grouping) regardless of cache.
         COMMIT_HISTORY_PERF_STATS.marker_total_secs += max(0.0, time.monotonic() - t_markers)
         
-        # Now that local build status is known, add status icons for IMAGE SHA badges.
+        # Now that local build status is known, add status icons for Image SHA badges.
         #
         # UX request:
-        # - Remove background colors from IMAGE badges
-        # - Add a fixed-size filled circle icon in front of IMAGE:...
+        # - Remove background colors from Image SHA badges
+        # - Add a fixed-size filled circle icon in front of Image SHA
         #   - SUCCESS: green circle with check
         #   - FAILED: red circle with X
         #   - BUILDING: yellow circle with hourglass
         #   - UNKNOWN: gray circle (no glyph)
 
         def _image_status_icon_html(*, status: str) -> str:
-            """Return a fixed-size (12x12) status dot for IMAGE:... that matches tree-node style.
+            """Return a ball (filled circle) icon for Image SHA badge from PASSED/FAILED/build status.
 
-            Important: route through shared `status_icon_html` so all dashboards/icons are consistent.
+            Uses icon_px=7 so status_icon_html returns a simple colored dot (green/red/yellow/grey).
             """
             st = str(status or STATUS_UNKNOWN).strip().lower()
             if st == str(STATUS_SUCCESS).strip().lower():
-                return status_icon_html(status_norm="success", is_required=True)
+                return status_icon_html(status_norm="success", is_required=True, icon_px=7)
             if st == str(STATUS_FAILED).strip().lower():
-                return status_icon_html(status_norm="failure", is_required=True)
+                return status_icon_html(status_norm="failure", is_required=True, icon_px=7)
             if st == str(STATUS_BUILDING).strip().lower():
-                return status_icon_html(status_norm="in_progress", is_required=False)
-            return status_icon_html(status_norm="unknown", is_required=False)
+                return status_icon_html(status_norm="in_progress", is_required=False, icon_px=7)
+            return status_icon_html(status_norm="unknown", is_required=False, icon_px=7)
 
         for commit in commit_data:
             sha_short = str(commit.get("sha_short", "") or "")
@@ -1249,29 +1306,44 @@ class CommitHistoryGenerator:
         # Read dev registry images from BuildReport JSON files (produced by build_images.py).
         # For each commit with build reports, look for the corresponding .json file
         # alongside the .report.html and extract registry_images from it.
+        # Check all entries (newest first) and use the first one that has registry images,
+        # because reuse builds may lack registry_images while the original full build has them.
         dev_registry_images: Dict[str, List[Dict[str, Any]]] = {}
         for sha_short_key, log_entries in log_paths.items():
             if not log_entries:
                 continue
-            # Use the most recent (last) report for this SHA
-            _date_str, relative_html_path = log_entries[-1]
-            # Resolve back to absolute path from the relative path
             output_dir = output_path.resolve().parent if output_path else Path(".")
-            html_abs = (output_dir / relative_html_path).resolve()
-            json_abs = html_abs.parent / "report.json"
-            if not json_abs.exists():
+            report = None
+            imgs = []
+            json_abs = None
+            for _date_str, relative_html_path in reversed(log_entries):
+                html_abs = (output_dir / relative_html_path).resolve()
+                candidate_json = html_abs.parent / "report.json"
+                if not candidate_json.exists():
+                    continue
+                try:
+                    candidate_report = BuildReport.from_file(candidate_json)
+                    candidate_imgs = candidate_report.successful_registry_images()
+                    if candidate_imgs:
+                        report = candidate_report
+                        imgs = candidate_imgs
+                        json_abs = candidate_json
+                        break
+                except Exception:
+                    continue
+            if not imgs or json_abs is None:
                 continue
             try:
-                report = BuildReport.from_file(json_abs)
-                imgs = report.successful_registry_images()
-                if not imgs:
-                    continue
 
-                # Extract IMAGE segment from the sha directory name
-                # e.g. "a798e08c8.IMAGE.e2fc6d" -> ".IMAGE.e2fc6d"
+                # Extract image SHA from directory name.
+                # New format: "E04427.a798e08c8" -> image_sha="E04427"
+                # Legacy format: "a798e08c8.IMAGE.e2fc6d" (deprecated)
                 sha_dir_name = json_abs.parent.name
-                image_seg_m = re.search(r'(\.IMAGE\.[0-9a-f]{6})', sha_dir_name)
-                image_seg = image_seg_m.group(1) if image_seg_m else ""
+                if '.' in sha_dir_name and sha_dir_name[0].isupper():
+                    image_sha_part = sha_dir_name.split('.', 1)[0]
+                else:
+                    legacy_m = re.search(r'\.IMAGE\.([0-9a-f]{6})', sha_dir_name)
+                    image_sha_part = legacy_m.group(1).upper() if legacy_m else ""
 
                 formatted = []
                 for img in sorted(imgs, key=lambda x: x.tag):
@@ -1299,21 +1371,19 @@ class CommitHistoryGenerator:
                         except (ValueError, TypeError):
                             created_display = report.report_generated[:16]
 
-                    # Inject IMAGE segment into image names if not already present.
-                    # Old report.json may have "dynamo:a798e08c8-none-cuda12.9-dev";
-                    # registry now uses "dynamo:a798e08c8.IMAGE.e2fc6d-none-cuda12.9-dev".
-                    def _inject_image_seg(name: str, seg: str) -> str:
-                        if not seg or seg in name:
+                    # Ensure image names carry the image SHA prefix.
+                    # Format: "dynamo:E04427.a798e08c8-none-cuda12.9-dev"
+                    def _ensure_image_sha(name: str, img_sha: str) -> str:
+                        if not img_sha or img_sha in name.upper():
                             return name
-                        # Insert after the 9-char SHA: "dynamo:a798e08c8-..." -> "dynamo:a798e08c8.IMAGE.e2fc6d-..."
-                        return re.sub(r'([0-9a-f]{9})(-)', rf'\1{seg}\2', name, count=1)
+                        # Insert prefix: "dynamo:a798e08c8-..." -> "dynamo:E04427.a798e08c8-..."
+                        return re.sub(r'(dynamo:)([a-f0-9]{9})(-)', rf'\g<1>{img_sha}.\2\3', name, count=1)
 
-                    registry_image_name = _inject_image_seg(img.image_name, image_seg)
-                    registry_location = _inject_image_seg(img.location, image_seg)
-                    registry_tag = _inject_image_seg(img.tag, image_seg)
+                    registry_image_name = _ensure_image_sha(img.image_name, image_sha_part)
+                    registry_location = _ensure_image_sha(img.location, image_sha_part)
+                    registry_tag = _ensure_image_sha(img.tag, image_sha_part)
 
-                    # Local tag strips .IMAGE.xxx for a clean short name
-                    local_image = re.sub(r'\.IMAGE\.[0-9a-f]{6}', '', registry_image_name)
+                    local_image = registry_image_name
 
                     pull_dev_cmd = (
                         f"docker pull {registry_location}"
@@ -2141,6 +2211,7 @@ class CommitHistoryGenerator:
             mr_pipelines=mr_pipelines,
             pipeline_job_counts=pipeline_job_counts,
             log_paths=log_paths,
+            report_path_by_commit_image=report_path_by_commit_image,
             build_status=build_status,
             github_actions_status=github_actions_status,
             generated_time=generated_time,

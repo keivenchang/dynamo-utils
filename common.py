@@ -825,17 +825,16 @@ class DynamoRepositoryUtils(BaseUtils):
         """
         Generate Docker image SHA for the current HEAD commit.
 
-        Delegates to generate_docker_image_sha_for_commit("HEAD") so the result
-        is deterministic (only committed files are hashed, untracked/gitignored
-        artifacts like rendered Dockerfiles are excluded).
+        Delegates to generate_docker_image_sha_for_commit("HEAD"). The result is
+        an UPPERCASE SHA256 of the full `git ls-tree -r HEAD -- container/` output,
+        so any change to any tracked file under container/ changes the hash.
 
         Args:
-            full_hash: If True, return full 64-char SHA. If False, return first 12 chars.
+            full_hash: If True, return full 64-char SHA. If False, return first 6 chars.
 
         Returns:
-            SHA256 hash string, or error code:
+            UPPERCASE SHA256 hash string, or error code:
             - "NO_CONTAINER_DIR": container directory doesn't exist
-            - "NO_FILES": no relevant files found
             - "ERROR": error during calculation
         """
         return self.generate_docker_image_sha_for_commit("HEAD", full_hash=full_hash)
@@ -844,23 +843,21 @@ class DynamoRepositoryUtils(BaseUtils):
         """
         Generate Docker image SHA for a specific commit using git plumbing (no checkout required).
 
-        Hashes only committed (tracked) files under container/, so the result is
-        deterministic regardless of untracked/gitignored artifacts on disk.
+        Hashes the full recursive tree listing of container/ (mode, type, blob hash, path
+        for every tracked file). Any change to any file under container/ changes the hash.
+
+        Returns UPPERCASE hex. Convention: image SHA is always uppercase to
+        distinguish from git commit SHAs (lowercase).
 
         Args:
             commit_sha: Git commit SHA (short or full), or "HEAD".
-            full_hash: If True, return full 64-char SHA. If False, return first 12 chars.
+            full_hash: If True, return full 64-char SHA. If False, return first 6 chars.
 
         Returns:
-            SHA256 hash string, or error code:
+            UPPERCASE SHA256 hash string, or error code:
             - "NO_CONTAINER_DIR": no container/ tree at that commit
-            - "NO_FILES": no relevant files after filtering
             - "ERROR": git command failed
         """
-        excluded_extensions = {'.md', '.rst', '.log', '.bak', '.tmp', '.swp', '.swo', '.orig', '.rej'}
-        excluded_filenames = {'README', 'CHANGELOG', 'LICENSE', 'NOTICE', 'AUTHORS', 'CONTRIBUTORS'}
-        excluded_specific = {'launch_message.txt'}
-
         try:
             result = subprocess.run(
                 ["git", "-C", str(self.repo_path), "ls-tree", "-r", commit_sha, "--", "container/"],
@@ -873,44 +870,8 @@ class DynamoRepositoryUtils(BaseUtils):
         if not result.stdout.strip():
             return "NO_CONTAINER_DIR"
 
-        # Parse ls-tree output: "<mode> <type> <blob_hash>\t<path>"
-        entries = []
-        for line in result.stdout.strip().split('\n'):
-            meta, path = line.split('\t', 1)
-            _mode, _type, blob_hash = meta.split()
-            if _type != "blob":
-                continue
-
-            rel_path = Path(path)
-            parts_under_container = rel_path.relative_to("container").parts
-            if any(part.startswith('.') for part in parts_under_container):
-                continue
-            if rel_path.suffix.lower() in excluded_extensions:
-                continue
-            if rel_path.stem.upper() in excluded_filenames:
-                continue
-            if rel_path.name.lower() in excluded_specific:
-                continue
-
-            entries.append((str(rel_path), blob_hash))
-
-        if not entries:
-            return "NO_FILES"
-
-        # git ls-tree output is already sorted lexicographically
-        hasher = hashlib.sha256()
-        for file_rel_path, blob_hash in entries:
-            content = subprocess.run(
-                ["git", "-C", str(self.repo_path), "cat-file", "-p", blob_hash],
-                capture_output=True, check=True,
-            ).stdout
-            hasher.update(file_rel_path.encode('utf-8'))
-            hasher.update(b'\n')
-            hasher.update(content)
-            hasher.update(b'\n')
-
-        sha_full = hasher.hexdigest()
-        return sha_full if full_hash else sha_full[:12]
+        sha_full = hashlib.sha256(result.stdout.encode()).hexdigest().upper()
+        return sha_full if full_hash else sha_full[:6]
 
     MAX_DOCKER_IMAGE_SHA_LOOKBACK = 100
 
@@ -926,7 +887,7 @@ class DynamoRepositoryUtils(BaseUtils):
             n: Number of unique Docker image SHAs to find.
 
         Returns:
-            List of tuples [(commit_sha_9char, image_sha_7char), ...] in
+            List of tuples [(commit_sha_9char, image_sha_6char_UPPER), ...] in
             chronological order (oldest first, newest last).
         """
         result = subprocess.run(
@@ -947,13 +908,13 @@ class DynamoRepositoryUtils(BaseUtils):
             commit_sha = full_sha[:9]
             image_sha = self.generate_docker_image_sha_for_commit(full_sha)
 
-            if image_sha in ("ERROR", "NO_CONTAINER_DIR", "NO_FILES"):
+            if image_sha in ("ERROR", "NO_CONTAINER_DIR"):
                 self.logger.debug(f"Skipping commit {commit_sha}: {image_sha}")
                 continue
 
             if image_sha != prev_image_sha:
                 if prev_image_sha is not None and prev_image_sha not in {s for _, s in results}:
-                    results.append((prev_commit_sha, prev_image_sha[:7]))
+                    results.append((prev_commit_sha, prev_image_sha))
                     if len(results) >= n:
                         break
                 prev_image_sha = image_sha
@@ -961,7 +922,7 @@ class DynamoRepositoryUtils(BaseUtils):
             prev_commit_sha = commit_sha
 
         if len(results) < n and prev_image_sha is not None and prev_image_sha not in {s for _, s in results}:
-            results.append((prev_commit_sha, prev_image_sha[:7]))
+            results.append((prev_commit_sha, prev_image_sha))
 
         return list(reversed(results))
 
@@ -976,13 +937,13 @@ class DynamoRepositoryUtils(BaseUtils):
             commit_sha: Git commit SHA (short or full), or "HEAD".
 
         Returns:
-            Tuple of (introducing_commit_sha_9char, image_sha_7char).
+            Tuple of (introducing_commit_sha_9char, image_sha_6char_UPPER).
 
         Raises:
             ValueError: If the Docker image SHA cannot be computed for commit_sha.
         """
         target_sha = self.generate_docker_image_sha_for_commit(commit_sha, full_hash=True)
-        if target_sha in ("ERROR", "NO_CONTAINER_DIR", "NO_FILES"):
+        if target_sha in ("ERROR", "NO_CONTAINER_DIR"):
             raise ValueError(f"Cannot compute Docker image SHA for {commit_sha}: {target_sha}")
 
         result = subprocess.run(
@@ -1000,7 +961,7 @@ class DynamoRepositoryUtils(BaseUtils):
             else:
                 break
 
-        return (origin[:9], target_sha[:7])
+        return (origin[:9], target_sha[:6])
 
     DOCKER_IMAGE_SHA_FILE = ".last_docker_image_sha"
     DOCKER_IMAGE_SHA_FILE_COMPAT = ".last_build_composite_sha"  # TODO: remove after 2026-02-25
@@ -1074,7 +1035,7 @@ class DynamoRepositoryUtils(BaseUtils):
         self.logger.info(f"Docker image SHA file: {self.repo_path}/{self.DOCKER_IMAGE_SHA_FILE}")
 
         current_sha = self.generate_docker_image_sha(full_hash=True)
-        if current_sha in ("NO_CONTAINER_DIR", "NO_FILES", "ERROR"):
+        if current_sha in ("NO_CONTAINER_DIR", "ERROR"):
             self.logger.warning(f"Failed to generate Docker image SHA: {current_sha}")
             return True  # Assume rebuild needed
 
@@ -1143,10 +1104,9 @@ class DockerUtils(BaseUtils):
         framework and one target per SHA.
 
         Supported formats (non-exhaustive):
-          dynamo:v0.1.0.dev.ea07d51fc-sglang-local-dev
-          dynamo:d56439ec2-sglang-local-dev
-          dynamo:d56439ec2-sglang-cuda12.9-local-dev
-          dynamo:d56439ec2-trtllm-cuda13.1-dev-orig
+          dynamo:A1B2C3.d56439ec2-sglang-local-dev
+          dynamo:A1B2C3.d56439ec2-sglang-cuda12.9-local-dev
+          dynamo:A1B2C3.d56439ec2-trtllm-cuda13.1-dev-orig
         """
         all_frameworks = set(FRAMEWORKS) | {"none"}
         known_targets = {"local-dev", "dev-orig", "runtime", "dev"}

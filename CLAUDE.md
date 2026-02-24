@@ -363,7 +363,7 @@ python3 container/build_images.py --sanity-check-only --framework sglang --run-i
 
 **Parallel Build with Skip**:
 ```bash
-python3 container/build_images.py --reuse-if-image-exists --parallel --run-ignore-lock
+python3 container/build_images.py --reuse-dev-if-image-exists --parallel --run-ignore-lock
 ```
 
 **Full Build**:
