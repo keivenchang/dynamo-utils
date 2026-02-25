@@ -1288,14 +1288,14 @@ class CommitHistoryGenerator:
         #   - UNKNOWN: gray circle (no glyph)
 
         def _image_status_icon_html(*, status: str) -> str:
-            """Return status icon for Image SHA badge: same green circle-check / red circle-X as Legend; gray circle for unknown."""
+            """Return status icon for Image SHA badge: same as Legend (green circle-check, red circle-X, in-progress clock); gray circle for unknown."""
             st = str(status or STATUS_UNKNOWN).strip().lower()
             if st == str(STATUS_SUCCESS).strip().lower():
                 return status_icon_html(status_norm="success", is_required=True)
             if st == str(STATUS_FAILED).strip().lower():
                 return status_icon_html(status_norm="failure", is_required=True)
             if st == str(STATUS_BUILDING).strip().lower():
-                return status_icon_html(status_norm="in_progress", is_required=False, icon_px=7)
+                return status_icon_html(status_norm="in_progress", is_required=False)
             return status_icon_html(status_norm="unknown", is_required=False, icon_px=7)
 
         for commit in commit_data:
