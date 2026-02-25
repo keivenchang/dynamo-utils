@@ -363,11 +363,14 @@ OPTIONS:
     --router-mode MODE    Frontend router mode (e.g. "kv" for KV-aware routing).
                          Disagg mode defaults to "kv"; aggregated mode defaults to none.
                          Use "--router-mode kv" in aggregated mode to test router metrics.
-    --lmcache             Enable LMCache KV cache offloading (vLLM only, enabled by default)
-    --no-lmcache          Disable LMCache KV cache offloading (vLLM only)
-                         Note: LMCache only supported on x86 architecture
-                         Aggregated mode: Uses LMCacheConnectorV1
-                         Disaggregated mode: Prefill worker uses LMCache + NIXL multi-connector
+    --discovery-backend BACKEND
+                         Discovery backend to use. Default: etcd/NATS (requires running
+                         etcd and nats-server). Use "file" for file-based discovery
+                         when etcd/NATS are not available.
+    --lmcache             Enable LMCache KV cache offloading (vLLM only, disabled by default)
+                         Requires lmcache package to be installed.
+                         Aggregated mode: Uses LMCacheConnectorV1 via --kv-transfer-config
+                         Disaggregated mode: Prefill worker uses LMCache + NIXL via PdConnector
     --dryrun, --dry-run Show what would be executed without running
                        (dry run mode)
     --frontend             Run the frontend component
@@ -391,12 +394,13 @@ FRAMEWORK_SPECIFIED=false
 RUN_FRONTEND=false
 RUN_BACKEND=false
 DISAGG_MODE=false
-ENABLE_LMCACHE=true  # Enabled by default for vLLM (can be disabled with --no-lmcache)
+ENABLE_LMCACHE=false  # Disabled by default; enable with --lmcache (requires lmcache package)
 ENABLE_PREFIX_CACHING=false  # vLLM only; default disabled to reduce memory usage
 GPU_MEM_FRACTION_OVERRIDE=""  # Will override defaults if set
 ENABLE_LOCAL_INDEXER=false  # vLLM only; enable worker-local KV indexer
 USE_ORIGINAL_MODEL_NAME=false  # Use original model name instead of cached path
 ROUTER_MODE=""  # Frontend router mode (e.g. "kv"); empty = framework default
+DISCOVERY_BACKEND=""  # Discovery backend (e.g. "file"); empty = default (etcd/NATS)
 QWEN_MODEL="Qwen/Qwen3-0.6B"
 TINYLLAMA_MODEL="TinyLlama/TinyLlama-1.1B-Chat-v1.0"
 # deepseek-ai/DeepSeek-R1-Distill-Llama-8B
@@ -427,10 +431,6 @@ while [[ $# -gt 0 ]]; do
             ENABLE_LMCACHE=true
             shift
             ;;
-        --no-lmcache)
-            ENABLE_LMCACHE=false
-            shift
-            ;;
         --gpu-mem-fraction)
             GPU_MEM_FRACTION_OVERRIDE="$2"
             shift 2
@@ -449,6 +449,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --router-mode)
             ROUTER_MODE="$2"
+            shift 2
+            ;;
+        --discovery-backend)
+            DISCOVERY_BACKEND="$2"
             shift 2
             ;;
         --dryrun|--dry-run)
@@ -689,11 +693,15 @@ if [ -n "$GPU_MEM_FRACTION_OVERRIDE" ]; then
     echo "Using GPU memory fraction: $GPU_MEM_FRACTION_OVERRIDE"
 fi
 
-# Use file-based discovery to avoid requiring etcd/NATS for local dev
-DISCOVERY_ARGS="--discovery-backend file"
+# Build discovery args (empty = default etcd/NATS; "file" = file-based for local dev without etcd/NATS)
+DISCOVERY_ARGS=""
+if [ -n "$DISCOVERY_BACKEND" ]; then
+    DISCOVERY_ARGS="--discovery-backend $DISCOVERY_BACKEND"
+fi
 
 # Set framework-specific arguments
 BATCH_SIZE=2
+KV_TRANSFER_ARGS=""  # --kv-transfer-config JSON (vLLM only, set below if LMCache enabled)
 if [ "$FRAMEWORK" = "vllm" ]; then
     if [ "$ENABLE_PREFIX_CACHING" = true ]; then
         PREFIX_CACHING_ARGS="--enable-prefix-caching"
@@ -701,9 +709,9 @@ if [ "$FRAMEWORK" = "vllm" ]; then
         PREFIX_CACHING_ARGS="--no-enable-prefix-caching"
     fi
     FRAMEWORK_ARGS="--gpu-memory-utilization $GPU_MEMORY_UTIL_AGG --enforce-eager $PREFIX_CACHING_ARGS --max-num-seqs $BATCH_SIZE"
-    # Add LMCache connector if enabled
+    # Add LMCache connector if enabled (uses --kv-transfer-config; --connector was removed)
     if [ "$ENABLE_LMCACHE" = true ]; then
-        FRAMEWORK_ARGS="$FRAMEWORK_ARGS --connector lmcache"
+        KV_TRANSFER_ARGS='--kv-transfer-config {"kv_connector":"LMCacheConnectorV1","kv_role":"kv_both"}'
     fi
     # Add local indexer if enabled
     if [ "$ENABLE_LOCAL_INDEXER" = true ]; then
@@ -835,6 +843,7 @@ if [ "$RUN_BACKEND" = true ]; then
         DECODE_PORT=$((DYN_BACKEND_PORT + 1))
 
         # Set framework-specific memory args for disagg mode
+        PREFILL_KV_TRANSFER=""
         if [ "$FRAMEWORK" = "vllm" ]; then
             if [ "$ENABLE_PREFIX_CACHING" = true ]; then
                 PREFIX_CACHING_ARGS="--enable-prefix-caching"
@@ -845,9 +854,9 @@ if [ "$RUN_BACKEND" = true ]; then
             PREFILL_FLAG="--is-prefill-worker"
             DECODE_FLAG=""
 
-            # Add LMCache support for prefill worker only (uses multi-connector with NIXL)
+            # Add LMCache + NIXL for prefill worker (uses PdConnector multi-connector via --kv-transfer-config)
             if [ "$ENABLE_LMCACHE" = true ]; then
-                PREFILL_FLAG="$PREFILL_FLAG --connector lmcache nixl"
+                PREFILL_KV_TRANSFER='--kv-transfer-config {"kv_connector":"PdConnector","kv_role":"kv_both","kv_connector_extra_config":{"connectors":[{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_both"},{"kv_connector":"NixlConnector","kv_role":"kv_both"}]},"kv_connector_module_path":"kvbm.vllm_integration.connector"}'
             fi
             
             # Add local indexer if enabled (for both prefill and decode)
@@ -882,10 +891,10 @@ if [ "$RUN_BACKEND" = true ]; then
         # Launch prefill worker FIRST so it can register before decode worker tries to connect
         dry_run_echo "Launching prefill worker on port $PREFILL_PORT ($GPU_MEM_PERCENT GPU memory)..."
         if [ "$DRY_RUN" = false ]; then
-            ( set -x; VLLM_NIXL_SIDE_CHANNEL_PORT=$NIXL_PORT_PREFILL DYN_LOG=info DYN_SYSTEM_PORT=$PREFILL_PORT python3 -m dynamo.$FRAMEWORK --model "$MODEL" $DISAGG_FRAMEWORK_ARGS $PREFILL_FLAG $DISCOVERY_ARGS ) 2>&1 | sed 's/^/[PREFILL] /' &
+            ( set -x; VLLM_NIXL_SIDE_CHANNEL_PORT=$NIXL_PORT_PREFILL DYN_LOG=info DYN_SYSTEM_PORT=$PREFILL_PORT python3 -m dynamo.$FRAMEWORK --model "$MODEL" $DISAGG_FRAMEWORK_ARGS $PREFILL_FLAG $PREFILL_KV_TRANSFER $DISCOVERY_ARGS ) 2>&1 | sed 's/^/[PREFILL] /' &
             PREFILL_PID=$!
         else
-            ( set -x; : VLLM_NIXL_SIDE_CHANNEL_PORT=$NIXL_PORT_PREFILL DYN_LOG=info DYN_SYSTEM_PORT=$PREFILL_PORT python3 -m dynamo.$FRAMEWORK --model "$MODEL" $DISAGG_FRAMEWORK_ARGS $PREFILL_FLAG $DISCOVERY_ARGS ) 2>&1 | sed 's/^+ : /+ /'
+            ( set -x; : VLLM_NIXL_SIDE_CHANNEL_PORT=$NIXL_PORT_PREFILL DYN_LOG=info DYN_SYSTEM_PORT=$PREFILL_PORT python3 -m dynamo.$FRAMEWORK --model "$MODEL" $DISAGG_FRAMEWORK_ARGS $PREFILL_FLAG $PREFILL_KV_TRANSFER $DISCOVERY_ARGS ) 2>&1 | sed 's/^+ : /+ /'
             dry_run_echo "PREFILL_PID=\$!"
         fi
 
@@ -929,10 +938,10 @@ if [ "$RUN_BACKEND" = true ]; then
     else
         # Aggregated mode: Launch single worker
         if [ "$DRY_RUN" = false ]; then
-            ( set -x; DYN_LOG=info DYN_SYSTEM_PORT=$DYN_BACKEND_PORT python -m dynamo.$FRAMEWORK --model "$MODEL" $FRAMEWORK_ARGS $DISCOVERY_ARGS ) &
+            ( set -x; DYN_LOG=info DYN_SYSTEM_PORT=$DYN_BACKEND_PORT python -m dynamo.$FRAMEWORK --model "$MODEL" $FRAMEWORK_ARGS $KV_TRANSFER_ARGS $DISCOVERY_ARGS ) &
             BACKEND_PID=$!
         else
-            ( set -x; : DYN_LOG=info DYN_SYSTEM_PORT=$DYN_BACKEND_PORT python -m dynamo.$FRAMEWORK --model "$MODEL" $FRAMEWORK_ARGS $DISCOVERY_ARGS ) 2>&1 | sed 's/^+ : /+ /'
+            ( set -x; : DYN_LOG=info DYN_SYSTEM_PORT=$DYN_BACKEND_PORT python -m dynamo.$FRAMEWORK --model "$MODEL" $FRAMEWORK_ARGS $KV_TRANSFER_ARGS $DISCOVERY_ARGS ) 2>&1 | sed 's/^+ : /+ /'
             dry_run_echo "BACKEND_PID=\$!"
         fi
     fi

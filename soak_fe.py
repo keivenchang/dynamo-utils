@@ -39,7 +39,7 @@ class LoadTestConfig:
     def __init__(self):
         self.duration_sec = 60
         self.workers = 1
-        self.requests_per_worker = 0  # 0 = unlimited (run until duration expires)
+        self.requests_per_worker = 1  # 0 = unlimited (run until duration expires)
         self.port = 8000
         self.model = None  # Available models: "Qwen/Qwen3-0.6B", "deepseek-ai/DeepSeek-R1-Distill-Llama-8B", etc.
         self.max_tokens = 300
@@ -1072,8 +1072,8 @@ Examples:
     parser.add_argument(
         "--requests_per_worker",
         type=int,
-        default=0,
-        help="Requests per worker (default: 0 = unlimited, run until duration expires)",
+        default=1,
+        help="Requests per worker (default: 1, use 0 for unlimited until duration expires)",
     )
     parser.add_argument(
         "--port", type=int, default=8000, help="Backend port (default: 8000)"
