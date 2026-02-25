@@ -102,6 +102,10 @@ _report_no_build: bool = False
 # Global initial commit SHA tracking for detecting mid-build commits
 _initial_commit_sha_9: Optional[str] = None
 
+# Blocklisted commit SHAs: must never be checked out or built (problematic).
+BLOCKLISTED_COMMIT_SHAS = ["222c2e85c"]
+_BLOCKLISTED_9 = {s[:9].lower() for s in BLOCKLISTED_COMMIT_SHAS}
+
 
 def _rewrite_html_links_for_repo_root(html_content: str, image_and_commit_sha: str = "", date_str: str = "") -> str:
     """
@@ -4027,6 +4031,14 @@ def main() -> int:
         logger.error("Cannot use --pull-latest and --commit-sha together. They conflict in intent.")
         return 1
 
+    # Blocklisted commits: never allow user to specify or checkout
+    if args.commit_sha_9 and args.commit_sha_9[:9].lower() in _BLOCKLISTED_9:
+        logger.error(
+            f"Commit SHA {args.commit_sha_9[:9]} is blocklisted ({BLOCKLISTED_COMMIT_SHAS}). "
+            "Cannot be built or checked out. Use a different commit."
+        )
+        return 1
+
     # HTML-only mode: generate report without running tasks, lockfiles, or rebuild checks
     if args.generate_html_only:
         if args.pull_latest:
@@ -4054,6 +4066,12 @@ def main() -> int:
                 if resolved_commit_sha_9 != commit_sha_9:
                     logger.info(f"Auto-resolved build commit: {commit_sha_9} -> {resolved_commit_sha_9} "
                                 f"(Docker image SHA {image_sha_6})")
+                    if resolved_commit_sha_9[:9].lower() in _BLOCKLISTED_9:
+                        logger.error(
+                            f"Resolved commit {resolved_commit_sha_9} is blocklisted ({BLOCKLISTED_COMMIT_SHAS}). "
+                            "Cannot checkout or build."
+                        )
+                        return 1
                     repo.git.checkout(resolved_commit_sha_9)
                     commit_sha_9 = resolved_commit_sha_9
                 else:
@@ -4312,6 +4330,12 @@ def main() -> int:
             if resolved_commit_sha_9 != commit_sha_9:
                 logger.info(f"Auto-resolved build commit: {commit_sha_9} -> {resolved_commit_sha_9} "
                             f"(Docker image SHA {image_sha_6})")
+                if resolved_commit_sha_9[:9].lower() in _BLOCKLISTED_9:
+                    logger.error(
+                        f"Resolved commit {resolved_commit_sha_9} is blocklisted ({BLOCKLISTED_COMMIT_SHAS}). "
+                        "Cannot checkout or build."
+                    )
+                    return 1
                 repo.git.checkout(resolved_commit_sha_9)
                 commit_sha_9 = resolved_commit_sha_9
             else:
