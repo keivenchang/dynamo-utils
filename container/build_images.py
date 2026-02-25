@@ -3348,7 +3348,7 @@ def generate_html_report(
         header_color = "#28a745"  # Green
 
     # Extract commit_sha_9 and image_sha_6 from image_and_commit_sha (format: "E04427.a798e08c8")
-    if '.' in image_and_commit_sha and image_and_commit_sha[0].isupper():
+    if '.' in image_and_commit_sha and re.match(r'^[0-9A-F]{6}$', image_and_commit_sha.split('.', 1)[0]):
         image_sha_6 = image_and_commit_sha.split('.', 1)[0]
         commit_sha_9 = image_and_commit_sha.split('.', 1)[1]
     else:
@@ -3614,7 +3614,7 @@ def generate_build_report(
         overall_status = "PASS"
 
     # Extract the bare commit_sha_9 from image_and_commit_sha (e.g., "E04427.a798e08c8" → "a798e08c8")
-    commit_sha_9 = image_and_commit_sha.split('.', 1)[1] if '.' in image_and_commit_sha and image_and_commit_sha[0].isupper() else image_and_commit_sha
+    commit_sha_9 = image_and_commit_sha.split('.', 1)[1] if '.' in image_and_commit_sha and re.match(r'^[0-9A-F]{6}$', image_and_commit_sha.split('.', 1)[0]) else image_and_commit_sha
     commit_info_dict: Dict[str, Any] = {}
     if git:
         try:
@@ -4256,16 +4256,23 @@ def main() -> int:
             target_commit_sha_9 = effective_commit_sha_9[:9]
 
             if current_commit_sha_9 != target_commit_sha_9:
-                # Reset all *.lock files before checkout (they can be regenerated)
+                # Reset tracked *.lock files and delete untracked ones before checkout
                 lock_files = list(repo_path.glob('**/*.lock'))
                 if lock_files:
-                    logger.info(f"Resetting {len(lock_files)} *.lock file(s) before checkout...")
+                    tracked_files = set(repo.git.ls_files('--full-name').splitlines())
+                    restored, deleted = 0, 0
                     for lock_file in lock_files:
-                        try:
-                            repo.git.restore(str(lock_file.relative_to(repo_path)))
-                            logger.debug(f"  Reset {lock_file.relative_to(repo_path)}")
-                        except Exception as e:
-                            logger.warning(f"  Could not reset {lock_file.relative_to(repo_path)}: {e}")
+                        rel = str(lock_file.relative_to(repo_path))
+                        if rel in tracked_files:
+                            try:
+                                repo.git.restore(rel)
+                                restored += 1
+                            except Exception as e:
+                                logger.warning(f"  Could not reset {rel}: {e}")
+                        else:
+                            lock_file.unlink(missing_ok=True)
+                            deleted += 1
+                    logger.info(f"Lock files: {restored} restored (tracked), {deleted} deleted (untracked)")
 
                 logger.info(f"Checking out SHA: {effective_commit_sha_9}")
                 repo.git.checkout(effective_commit_sha_9)

@@ -20,6 +20,7 @@ import json
 import logging
 import os
 import re
+import socket
 import subprocess
 import sys
 import time
@@ -1339,7 +1340,7 @@ class CommitHistoryGenerator:
                 # New format: "E04427.a798e08c8" -> image_sha="E04427"
                 # Legacy format: "a798e08c8.IMAGE.e2fc6d" (deprecated)
                 sha_dir_name = json_abs.parent.name
-                if '.' in sha_dir_name and sha_dir_name[0].isupper():
+                if '.' in sha_dir_name and re.match(r'^[0-9A-F]{6}$', sha_dir_name.split('.', 1)[0]):
                     image_sha_part = sha_dir_name.split('.', 1)[0]
                 else:
                     legacy_m = re.search(r'\.IMAGE\.([0-9a-f]{6})', sha_dir_name)
@@ -2223,6 +2224,7 @@ class CommitHistoryGenerator:
             gha_per_commit_stats=gha_per_commit_stats,
             page_stats=page_stats,
             branch_name=branch_name or "main",
+            hostname=socket.gethostname(),
             # Icons (shared look; legend/tooltips/status bar must match across dashboards)
             **ci_status_icon_context(),
             pass_plus_style=PASS_PLUS_STYLE,
