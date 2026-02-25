@@ -799,7 +799,7 @@ def create_task_graph(
         command=f"{repo_path}/container/run.sh --image {runtime_image_tag} --hf-home {home_dir}/.cache/huggingface -- bash -c 'id && python3 /workspace/deploy/sanity_check.py --runtime-check{sanity_no_framework_flag}'",
         input_image=runtime_image_tag,
         parents=[f"{framework}-runtime-build"],
-        timeout=45.0,  # 45 seconds for sanity checks
+        timeout=240.0,  # 4 minutes for sanity checks (trtllm can exceed 3 min)
         ignore_exit_code=True,  # Runtime may fail some checks, we only care about Dynamo paths
     )
 
@@ -831,7 +831,7 @@ def create_task_graph(
         command=f"{repo_path}/container/run.sh --image {dev_orig_image_tag} --mount-workspace -v {home_dir}/.cargo:/root/.cargo -v {repo_path}/target/.{framework}:/workspace/target -- bash -c '{cargo_cmd}'",
         input_image=dev_orig_image_tag,
         parents=[f"{framework}-dev-build"],
-        timeout=600.0,  # 10 minutes for compilation
+        timeout=900.0,  # 15 minutes for compilation
     )
 
     # Level 4: Dev chown (runs after compilation, always runs even if compilation fails)
@@ -852,7 +852,7 @@ def create_task_graph(
         command=f"{repo_path}/container/run.sh --image {dev_orig_image_tag} --mount-workspace --hf-home {home_dir}/.cache/huggingface -v {home_dir}/.cargo:/root/.cargo -- bash -c 'id && python3 /workspace/deploy/sanity_check.py{sanity_no_framework_flag}'",
         input_image=dev_orig_image_tag,
         parents=[f"{framework}-dev-compilation"],
-        timeout=45.0,  # 45 seconds for sanity checks
+        timeout=240.0,  # 4 minutes for sanity checks (trtllm can exceed 3 min)
     )
 
     # Level 8: Dev upload (runs after compress-sanity, in parallel with local-dev build)
@@ -869,7 +869,7 @@ def create_task_graph(
         input_image=dev_image_tag,
         output_image=gitlab_dev_image_tag,
         parents=[f"{framework}-dev-compress-sanity"],
-        timeout=600.0,  # 10 minutes for upload
+        timeout=14400.0,  # 4 hours for upload
     )
 
     # Level 6: Dev compress (squash dev-orig image to produce dev)
@@ -942,7 +942,7 @@ docker images {dev_image_tag} --format 'Size: {{{{.Size}}}}'
         input_image=dev_orig_image_tag,
         output_image=dev_image_tag,
         parents=[f"{framework}-dev-sanity"],
-        timeout=300.0,  # 5 minutes for export/import
+        timeout=5400.0,  # 90 minutes for compress (export/import)
     )
 
     # Level 7: Compilation in the compressed dev image (verify cargo build works after squash)
@@ -952,7 +952,7 @@ docker images {dev_image_tag} --format 'Size: {{{{.Size}}}}'
         command=f"{repo_path}/container/run.sh --image {dev_image_tag} --mount-workspace -v {home_dir}/.cargo:/root/.cargo -v {repo_path}/target/.{framework}:/workspace/target -- bash -c '{cargo_cmd}'",
         input_image=dev_image_tag,
         parents=[f"{framework}-dev-compress"],
-        timeout=600.0,  # 10 minutes for compilation
+        timeout=900.0,  # 15 minutes for compilation
     )
 
     # Level 7b: Sanity check on the compressed dev image (after compilation)
@@ -962,7 +962,7 @@ docker images {dev_image_tag} --format 'Size: {{{{.Size}}}}'
         command=f"{repo_path}/container/run.sh --image {dev_image_tag} --mount-workspace --hf-home {home_dir}/.cache/huggingface -v {home_dir}/.cargo:/root/.cargo -- bash -c 'id && python3 /workspace/deploy/sanity_check.py{sanity_no_framework_flag}'",
         input_image=dev_image_tag,
         parents=[f"{framework}-dev-compress-compilation"],
-        timeout=45.0,  # 45 seconds for sanity checks
+        timeout=240.0,  # 4 minutes for sanity checks (trtllm can exceed 3 min)
     )
 
     # Level 8: Local-dev image build (runs after compress-sanity, in parallel with dev-upload)
@@ -984,7 +984,7 @@ docker images {dev_image_tag} --format 'Size: {{{{.Size}}}}'
         command=f"{repo_path}/container/run.sh --image {local_dev_image_tag} --mount-workspace -v {home_dir}/.cargo:/home/dynamo/.cargo -v {repo_path}/target/.{framework}:/workspace/target -- bash -c '{cargo_cmd}'",
         input_image=local_dev_image_tag,
         parents=[f"{framework}-local-dev-build", f"{framework}-dev-chown"],
-        timeout=600.0,  # 10 minutes for compilation
+        timeout=900.0,  # 15 minutes for compilation
     )
 
     # Level 10: Local-dev sanity check (runs after compilation, same for all frameworks)
@@ -994,7 +994,7 @@ docker images {dev_image_tag} --format 'Size: {{{{.Size}}}}'
         command=f"{repo_path}/container/run.sh --image {local_dev_image_tag} --mount-workspace --hf-home {home_dir}/.cache/huggingface -v {home_dir}/.cargo:/home/dynamo/.cargo -- bash -c 'id && (sudo id || true) && python3 /workspace/deploy/sanity_check.py{sanity_no_framework_flag}'",
         input_image=local_dev_image_tag,
         parents=[f"{framework}-local-dev-compilation"],
-        timeout=45.0,  # 45 seconds for sanity checks
+        timeout=240.0,  # 4 minutes for sanity checks (trtllm can exceed 3 min)
     )
 
     return tasks
@@ -1023,7 +1023,7 @@ def create_task_graph_reuse(
         command=f"{repo_path}/container/run.sh --image {dev_image_tag} --mount-workspace -v {home_dir}/.cargo:/root/.cargo -v {repo_path}/target/.{framework}:/workspace/target -- bash -c '{cargo_cmd}'",
         input_image=dev_image_tag,
         parents=[],
-        timeout=600.0,
+        timeout=900.0,  # 15 minutes for compilation
     )
 
     tasks[f"{framework}-dev-compress-sanity"] = CommandTask(
@@ -1032,7 +1032,7 @@ def create_task_graph_reuse(
         command=f"{repo_path}/container/run.sh --image {dev_image_tag} --mount-workspace --hf-home {home_dir}/.cache/huggingface -v {home_dir}/.cargo:/root/.cargo -- bash -c 'id && python3 /workspace/deploy/sanity_check.py{sanity_no_framework_flag}'",
         input_image=dev_image_tag,
         parents=[f"{framework}-dev-compress-compilation"],
-        timeout=45.0,
+        timeout=240.0,  # 4 minutes for sanity checks (trtllm can exceed 3 min)
     )
 
     return tasks
@@ -1061,7 +1061,7 @@ class BaseTask(ABC):
 
     # Command and execution
     command: str = ""
-    timeout: float = 600.0  # Default 10 minutes
+    timeout: float = 900.0  # Default 15 minutes
 
     # Docker image tracking
     input_image: Optional[str] = None   # Base/input Docker image (for builds or container runs)
@@ -1179,17 +1179,38 @@ class BaseTask(ABC):
                     _running_subprocesses.add(process)
 
                 try:
-                    # Stream output to log file
+                    # Stream output to log file; enforce task timeout via a timer that kills the process
                     if process.stdout is None:
                         raise ValueError("process.stdout is None")
-                    for line in process.stdout:
-                        log_fh.write(line)
+                    timeout_sec = self.timeout
+                    timed_out = threading.Event()
+
+                    def kill_after_timeout():
+                        if not timed_out.is_set():
+                            timed_out.set()
+                            try:
+                                process.kill()
+                            except ProcessLookupError:
+                                pass
+
+                    timer = threading.Timer(timeout_sec, kill_after_timeout)
+                    timer.daemon = True
+                    timer.start()
+                    try:
+                        for line in process.stdout:
+                            log_fh.write(line)
+                            log_fh.flush()
+                        process.wait()
+                    finally:
+                        timer.cancel()
+                    if timed_out.is_set():
+                        self.exit_code = -1
+                        self.error_message = f"Task timed out after {timeout_sec:.0f}s"
+                        self.logger.error(self.error_message)
+                        log_fh.write(f"\n\n[TIMEOUT] Killed after {timeout_sec:.0f}s\n")
                         log_fh.flush()
-
-                    # Wait for process to complete
-                    process.wait()
+                        return -1
                     self.exit_code = process.returncode
-
                     return self.exit_code
                 finally:
                     # Unregister subprocess

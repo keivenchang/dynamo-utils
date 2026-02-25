@@ -1042,7 +1042,7 @@ window.__dashboardOnReadyQueue.push(function() {
    class="triangle-toggle"
    onclick="toggleCommitInfo(event, '{{ sha_short }}'); return false;"
    style="margin-right: 4px;"
-   title="Show commit message and file changes">▶</a><a href="{{ commit_link }}" target="_blank">{{ sha_short }}</a>
+   title="Show commit message and file changes">▶</a>{{ sha_short }}
 </td>
 <td class="sha col-github" style="padding-left: 2px;"><span class="col-body">
 <span class="github-icons">
@@ -1317,6 +1317,7 @@ window.__dashboardOnReadyQueue.push(function() {
   <div style="margin: 0; padding: 0 14px;">
     <div style="margin: 8px 0 12px 0; padding: 8px; background-color: white; border: 1px solid #d0d7de; border-radius: 4px;">
       <div style="font-weight: 600; margin-bottom: 6px; font-size: 13px;">Commit Message:</div>
+      <div style="font-size: 12px; color: #57606a; margin-bottom: 6px;">Commit: <a href="{{ commit_link }}" target="_blank" rel="noopener noreferrer" style="color: #0969da; text-decoration: none;">{{ sha_short }}</a></div>
       <div style="font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace; font-size: 12px; color: #24292f; white-space: pre-wrap; margin-bottom: 8px;">{{ full_msg | safe }}</div>
       <div style="font-size: 12px; color: #57606a; margin-top: 6px;">
         <span style="color: #1a7f37; font-weight: 500;">+{{ insertions }}</span>
@@ -1427,7 +1428,7 @@ Framework: {{ img.framework }}">{{ display_tag }}</td>
 {# GitLab Dev Registry Images Section (dev/dynamo sub-repo) #}
 {% if dev_imgs %}
 <div style="margin-bottom: 12px; padding: 8px; background-color: white; border: 1px solid #d0d7de; border-radius: 4px;">
-<div style="font-weight: 600; margin-bottom: 4px; font-size: 13px;">GitLab Dev Registry Images: <a href="https://gitlab-master.nvidia.com/dl/ai-dynamo/dynamo/container_registry/165910?orderBy=PUBLISHED_AT&amp;sort=desc&amp;search[]={{ sha_short }}" target="_blank" style="color: #fc6d26; text-decoration: none; font-weight: 600; font-size: 12px;" title="View dev images for {{ sha_short }} in GitLab Container Registry">View Registry</a></div>
+<div style="font-weight: 600; margin-bottom: 4px; font-size: 13px;">GitLab Dev Registry Images: <a href="https://gitlab-master.nvidia.com/dl/ai-dynamo/dynamo/container_registry/165910?orderBy=PUBLISHED_AT&amp;sort=desc&amp;search%5B%5D={{ commit.commit_sha_9 }}" target="_blank" style="color: #fc6d26; text-decoration: none; font-weight: 600; font-size: 12px;" title="View dev images for {{ commit.commit_sha_9 }} in GitLab Container Registry">View Registry</a></div>
 <table style="border: none; background-color: white; border-collapse: collapse;">
 <thead>
 <tr>

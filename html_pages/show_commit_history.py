@@ -625,8 +625,10 @@ class CommitHistoryGenerator:
                     commit_data.append(
                         {
                             "sha_short": sha_short,
+                            "commit_sha_9": sha_short,
                             "sha_full": sha_full,
                             "composite_sha": composite_sha,
+                            "image_sha_6": composite_sha[:6] if composite_sha else "",
                             "date": date_str,
                             "date_epoch": date_epoch,
                             "merge_date": merge_date,
@@ -1286,15 +1288,12 @@ class CommitHistoryGenerator:
         #   - UNKNOWN: gray circle (no glyph)
 
         def _image_status_icon_html(*, status: str) -> str:
-            """Return a ball (filled circle) icon for Image SHA badge from PASSED/FAILED/build status.
-
-            Uses icon_px=7 so status_icon_html returns a simple colored dot (green/red/yellow/grey).
-            """
+            """Return status icon for Image SHA badge: same green circle-check / red circle-X as Legend; gray circle for unknown."""
             st = str(status or STATUS_UNKNOWN).strip().lower()
             if st == str(STATUS_SUCCESS).strip().lower():
-                return status_icon_html(status_norm="success", is_required=True, icon_px=7)
+                return status_icon_html(status_norm="success", is_required=True)
             if st == str(STATUS_FAILED).strip().lower():
-                return status_icon_html(status_norm="failure", is_required=True, icon_px=7)
+                return status_icon_html(status_norm="failure", is_required=True)
             if st == str(STATUS_BUILDING).strip().lower():
                 return status_icon_html(status_norm="in_progress", is_required=False, icon_px=7)
             return status_icon_html(status_norm="unknown", is_required=False, icon_px=7)
