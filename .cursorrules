@@ -104,25 +104,23 @@ TABLE OF CONTENTS
   3.5 Python Development
     3.5.1 Code Style
     3.5.2 File Organization
-    3.5.3 Error Handling
+    3.5.3 Error Handling (condensed; rules in 3.5.1)
     3.5.4 Testing
   3.6 JavaScript/TypeScript
   3.7 Common Code Patterns
     3.7.1 Terminal Width Detection
 
-4. UNIX/SHELL COMMANDS
-  4.1 General Rules
+4. UNIX/SHELL COMMANDS AND FILE OPERATIONS
+  4.1 Shell Rules
   4.2 File Operations
   4.3 Permissions
-  4.4 Path Display
-  4.5 Pre-commit
+  4.4 Pre-commit
 
 5. GIT WORKFLOW
   5.1 Review Before Git Operations
-  5.2 Merge Conflicts
-  5.3 Commit Process
-  5.4 Commit Message Format
-  5.5 Git Integration (for parsing commit messages)
+  5.2 Git Interactive Editors and Merge Conflicts
+  5.3 Commit Process and Message Format
+  5.4 Git Integration (for parsing commit messages)
 
 6. COMMUNICATION TEMPLATES AND CODE REVIEW
   6.1 Slack RFR Template
@@ -202,15 +200,7 @@ DO NOT use these BS words in docs/comments:
 - Cache expensive computations
 - Monitor resource usage in production
 
-**CRITICAL: CACHE DELETION POLICY**
-- **NEVER EVER delete caches unless explicitly requested and granted permission**
-- This includes but is not limited to:
-  - Python `__pycache__` directories
-  - Build caches (cargo target/, node_modules/, etc.)
-  - Application caches (.cache/, tmp/, etc.)
-  - Any other cached data or temporary files
-- Always ask for explicit permission before deleting any cache
-- Deleting caches without permission can break workflows and cause unnecessary rebuilds
+**(Cache deletion policy: see Section 0 "READ THIS FIRST")**
 
 ## 2.3 UNIX Command Execution and Workflow
 
@@ -242,6 +232,18 @@ DO NOT use these BS words in docs/comments:
 - This allows monitoring while keeping the terminal responsive
 - Do NOT use `-it` in scripts/background jobs (non-interactive runs will fail with `the input device is not a TTY`)
 - If you want to `tail -f`, write to a stable log path (e.g. `/tmp/output1.log`) and tail that file (don’t invent per-run filenames unless requested)
+
+**CRITICAL: Use `nohup` for processes that take >5 minutes.** Terminal sessions in Cursor can
+drop or abort, killing the child process. Always wrap long-running commands with `nohup`:
+```bash
+nohup python3 build_images.py --repo-path ... 2>&1 | tee /tmp/build.log &
+```
+Commands that MUST use `nohup`:
+- `build_images.py` (full builds: 45-90 min; reuse builds: 5-15 min)
+- `docker build` (10-60 min)
+- `update_html_pages.sh` (2-5 min)
+- `show_commit_history.py` (1-3 min)
+- Any inference server (`vllm serve`, `sglang`, `trtllm`)
 
 ### 2.3.3 Piping and Filtering
 **CRITICAL BEST PRACTICE: For long-running or expensive commands, ALWAYS capture the full, unprocessed output first (to a temp file) and only filter that saved file afterward.**
@@ -528,7 +530,7 @@ Dashboards / CI log work (recent learnings):
 - Always use --locked: cargo test --locked, cargo build --locked, cargo install --locked
 - Development build: cargo build --locked --features dynamo-llm/block-manager --workspace
 - Clean builds: cargo clean
-- **IMMEDIATELY after editing any .rs file: `cargo fmt`** (do NOT defer to commit time)
+- **(cargo fmt rule: see Section 0 — run IMMEDIATELY after editing .rs files)**
 - See section 7.2 (Pre-Merge CI Checks) for comprehensive build/test/lint commands
 
 ### 3.4.4 Type Inference for Examples
@@ -695,207 +697,42 @@ Notes:
 - Clear module separation
 - Tests in tests/ directory
 
-### 3.5.3 Error Handling and Anti-Patterns
+### 3.5.3 Error Handling
 
-**CRITICAL: FAIL FAST - NEVER HIDE ERRORS**
-
-**THIS IS AN ABSOLUTE RULE - NO EXCEPTIONS WITHOUT EXPLICIT USER PERMISSION**
-
-Hiding errors makes debugging impossible and creates bugs that will need fixing later. Every error-hiding pattern below is FORBIDDEN:
-
-```python
-# ❌ ABSOLUTELY FORBIDDEN:
-try:
-    something()
-except Exception:
-    pass  # NEVER DO THIS - Silent failure!
-
-# ❌ ABSOLUTELY FORBIDDEN:
-try:
-    something()
-except Exception as e:
-    logging.error(f"Error: {e}")  # NEVER DO THIS - Log and hide!
-    # Missing raise = hidden error!
-
-# ❌ ABSOLUTELY FORBIDDEN:
-try:
-    something()
-except Exception as e:
-    print(f"Error: {e}")  # NEVER DO THIS - Print and continue!
-    continue
-
-# ❌ ABSOLUTELY FORBIDDEN:
-try:
-    something()
-except Exception:  # NO NO NO!!!!!! DO NOT DO THIS!
-    return []  # NEVER DO THIS - Return default on error!
-
-# ❌ ABSOLUTELY FORBIDDEN:
-try:
-    something()
-except Exception as e:
-    logger.error(f"Failed: {e}")
-    return None  # NEVER DO THIS - Hide error with return!
-```
-
-**WHY THESE ARE FORBIDDEN:**
-- Makes debugging impossible (where did the error happen?)
-- Hides bugs until production
-- Wastes hours tracking down issues later
-- Corrupts data by continuing with invalid state
-- The user EXPLICITLY WANTS errors to fail immediately
-
-**ALWAYS FAIL EARLY AND LOUDLY**
+**Rules (already stated in 3.5.1, detailed examples here):**
+1. Remove the try/except if possible — let it crash
+2. Catch SPECIFIC exceptions only (FileNotFoundError, ValueError, etc.)
+3. If you catch Exception → you MUST `raise` after logging
 
 ```python
-# ✅ DO THIS - Let exceptions propagate:
-result = something()  # If it fails, let it crash!
+# ❌ FORBIDDEN — all of these hide errors:
+except Exception: pass
+except Exception as e: logging.error(e)   # missing raise!
+except Exception: return []               # hides error with default
 
-# ✅ DO THIS - Only catch SPECIFIC exceptions you can handle:
-try:
-    result = parse_config(file)
-except FileNotFoundError:
-    # Specific exception we know how to handle
-    result = DEFAULT_CONFIG
-except ValueError as e:
-    # Another specific exception we can handle
-    logger.warning(f"Invalid config format: {e}")
-    result = DEFAULT_CONFIG
-# Other exceptions propagate up!
+# ✅ CORRECT:
+result = something()                      # just let it crash
 
-# ✅ DO THIS - Re-raise after logging if you can't handle it:
-try:
+try:                                      # catch specific, handle intentionally
+    result = json.loads(text)
+except json.JSONDecodeError:
+    result = {}
+
+try:                                      # if you must catch broad, re-raise
     result = something()
 except Exception as e:
-    logger.error(f"Failed to do something: {e}")
-    raise  # Re-raise so caller knows it failed!
+    logger.error(f"Failed: {e}")
+    raise
 ```
 
-**CRITICAL: NEVER USE `except Exception:` WITHOUT RE-RAISING**
-
-❌ **ABSOLUTELY FORBIDDEN:**
-```python
-# Catching Exception without re-raising = hiding ALL errors!
-try:
-    something()
-except Exception:
-    pass  # HIDES ALL ERRORS!
-
-try:
-    something()
-except Exception as e:
-    logger.error(f"Error: {e}")  # HIDES ERROR FROM CALLER!
-    # Missing raise = silent failure
-
-try:
-    something()
-except Exception:
-    return []  # HIDES ERROR WITH DEFAULT VALUE!
-```
-
-✅ **CORRECT - Use SPECIFIC exception types:**
-```python
-# Catch only exceptions you know how to handle:
-try:
-    result = json.loads(text)
-except json.JSONDecodeError as e:
-    logger.error(f"Invalid JSON: {e}")
-    return {}  # OK: specific exception, intentional handling
-
-try:
-    file_size = os.path.getsize(path)
-except FileNotFoundError:
-    file_size = 0  # OK: specific exception, intentional default
-
-try:
-    value = int(string)
-except ValueError:
-    value = 0  # OK: specific exception, intentional default
-```
-
-**WHY `except Exception:` IS ALMOST ALWAYS WRONG:**
-- Catches **everything**: ValueError, TypeError, AttributeError, KeyError, etc.
-- Hides bugs you didn't anticipate
-- Makes debugging impossible ("where did the error come from?")
-- Violates fail-fast principle
-
-**THE RULE:**
-1. If you can remove the try/except → DO IT (let it fail fast!)
-2. If you must catch exceptions → Use SPECIFIC types (FileNotFoundError, ValueError, TypeError, etc.)
-3. If you catch Exception → You MUST re-raise it (or have explicit user permission)
-
-**Why this matters:**
-- Silent failures make debugging impossible
-- They hide bugs until production
-- They corrupt data by continuing with partial/invalid state
-- They waste hours of debugging time looking in the wrong places
-
-**If you're tempted to catch and ignore:**
-1. Ask: "Can I actually handle this error gracefully?"
-2. If yes: Handle it specifically
-3. If no: DON'T CATCH IT - let it fail fast!
-
-Regex / parsing changes (common source of subtle bugs):
-- Be very careful with escaping:
-  - In Python raw strings, `\s` is whitespace; `\\s` is a literal backslash + `s` (often wrong).
-- When changing a critical regex, add a tiny local one-line reproduction/"unit test" to prove the match works on representative input.
-
-**CRITICAL ANTI-PATTERN: NO REDUNDANT getattr() WHEN TYPES ARE KNOWN**
-
-**ABSOLUTE RULE: If you know the object has an attribute, access it directly - NO getattr()!**
-
-❌ **ABSOLUTELY FORBIDDEN (when types are known):**
-```python
-# If node is typed and has job_name attribute:
-getattr(node, "job_name", "")  # REDUNDANT - you already know it has job_name!
-str(getattr(node, "job_name", "") or "")  # REDUNDANT and hides None bugs!
-getattr(node, "job_name", None) or ""  # REDUNDANT defensive garbage!
-
-# If pr is typed PRInfo:
-getattr(pr, "number", 0)  # REDUNDANT - pr.number exists!
-```
-
-✅ **CORRECT (direct attribute access):**
-```python
-# Type is known, attribute exists - just use it!
-node.job_name
-str(node.job_name)
-pr.number
-```
-
-**WHY getattr() IS FORBIDDEN FOR KNOWN ATTRIBUTES:**
-- REDUNDANT - you already know the attribute exists from types
-- Masks AttributeError bugs that should fail immediately
-- Makes type checkers (mypy/pyright) completely useless
-- Hides None/empty string confusion
-- Defensive programming just delays finding real bugs
-- The user EXPLICITLY wants immediate failures, not defensive hiding
-
-**ONLY EXCEPTION - Unknown/Dynamic Attributes:**
-Use getattr() ONLY for truly optional/dynamic attributes on duck-typed objects:
-```python
-# OK for optional attributes:
-if hasattr(node, "optional_field"):
-    value = node.optional_field  # Direct access after hasattr check!
-
-# OK for dynamic plugin-style attributes:
-handler = getattr(self, f"handle_{event_type}", None)
-if handler:
-    handler()
-```
-
-**NEVER use getattr() as a "safe" way to access known attributes - that's what type hints are for!**
+**Regex / parsing** — be careful with escaping in raw strings (`\s` vs `\\s`).
+When changing a critical regex, add a one-line test to prove it matches.
 
 ### 3.5.4 Testing
-- Framework: pytest
-- **CRITICAL:** Always use `python3 -m pytest` (not bare `pytest`) to ensure the venv's pytest runs with correct `sys.path`
+- **See Section 0 "READ THIS FIRST" for pytest rules** (venv pytest, HF_TOKEN, flags)
 - Unit tests in tests/ directory
 - Use fixtures for common setup
 - Mock external services
-- Before running any `pytest`: see `READ THIS FIRST (NON-NEGOTIABLE)` for the required `HF_TOKEN` export pattern.
-- Always use: python3 -m pytest -xvv --basetemp=/tmp/pytest_temp --duration=0 tests/
-- Always pass `-xvv` to stop at first failure and get verbose output for fast analysis
-- Always pass `--duration=0` to show timing of all tests (helps detect slow/flaky tests)
 
 ### 3.5.5 Dynamo-utils dashboards + log categorization
 
@@ -917,51 +754,35 @@ width = get_terminal_width()  # Fallback to 80 if detection fails
 ```
 
 =============================================================================
-4. UNIX/SHELL COMMANDS
+4. UNIX/SHELL COMMANDS AND FILE OPERATIONS
 =============================================================================
 
-## 4.1 General Rules
-- Source .bashrc when shell starts (interactive shells). Cron jobs do **not** load `~/.bashrc` unless you explicitly source it.
+**(Command chaining, long-running programs, piping: see Section 2.3)**
+**(Cron environment: see Section 2.4)**
+
+## 4.1 Shell Rules
 - Never use "!" inside shell quotes
 - No trailing spaces/tabs on empty lines
 - Use proper quoting to prevent word splitting/globbing
-
-## 4.2 File Operations
-- Check if file is under git before moving
-- Use git mv for tracked files, mv for untracked
-- Delete *.lock files instead of stashing
-- Do not edit `.gitignore` unless explicitly requested (prefer leaving local-only scripts untracked or placing them under `/tmp/`)
-- Dedup safely: use hashes/diffs + reference search before deleting duplicates.
-- Symlinks: do **not** create “convenience” symlinks by default (they clutter). Only add symlinks when explicitly requested or when a stable link is truly required for compatibility.
-- When moving scripts, preserve history with `git mv`, ensure executable bits survive (`chmod +x`), and run a quick smoke test.
-
-## 4.3 Permissions
-```
-USER_ID=$(stat -c "%u" .)
-GROUP_ID=$(stat -c "%g" .)
-
-# 🚨 DO NOT DO THIS:
-# NEVER run recursive permission fixes on large trees (very slow, and easy to break things):
-#   chown -R $USER_ID:$GROUP_ID .
-#
-# Prefer targeted, non-recursive fixes on only the specific directories you need writable.
-# Examples:
-#   chown $USER_ID:$GROUP_ID /path/to/dir
-#   chown $USER_ID:$GROUP_ID /path/to/file
-#   find /path/to/dir -maxdepth 1 -type d -name 'target' -exec chown $USER_ID:$GROUP_ID {} \;
-```
-
-- If you add a new `.sh` script that is meant to be executed, ensure it has a shebang and is executable (`chmod +x`) before committing.
-- Permission-aware discovery: when scanning the filesystem (repos, logs, etc.), gate on permissions (e.g. world `r+x`) so dashboards don’t try to traverse private dirs.
-
-## 4.4 Path Display
 - Use tilde (~) instead of full paths: ~/path not /home/ubuntu/path
 
-## 4.5 Pre-commit
-ALWAYS run pre-commit checks before committing:
-- For single file: pre-commit run --files <file_path>
-- For all changed files: pre-commit run --all-files
-- Pre-commit runs automatically on git commit, but run manually to catch issues early
+## 4.2 File Operations
+- Use `git mv` for tracked files, `mv` for untracked
+- Delete *.lock files instead of stashing
+- Do not edit `.gitignore` unless explicitly requested
+- Dedup safely: use hashes/diffs + reference search before deleting duplicates
+- Do NOT create "convenience" symlinks unless explicitly requested
+- When moving scripts: preserve history with `git mv`, keep `chmod +x`, smoke test
+
+## 4.3 Permissions
+- NEVER run recursive chmod/chown on large trees (very slow, breaks things)
+- Prefer targeted, non-recursive fixes on specific directories
+- New `.sh` scripts: ensure shebang and `chmod +x` before committing
+- Permission-aware discovery: gate on world `r+x` when scanning filesystem
+
+## 4.4 Pre-commit
+**(See also Section 7.2.4 for full pre-commit hook reference)**
+- Run `pre-commit run --files <file>` before committing
 - Fix any issues reported before committing
 
 =============================================================================
@@ -972,94 +793,34 @@ ALWAYS run pre-commit checks before committing:
 Periodically review this .cursorrules before git operations
 - Don’t assume the current working directory is a git repo. Confirm repo root first (`git rev-parse --show-toplevel`) or use `git -C <dir> ...` for the intended repo.
 
-## 5.2 Git Interactive Editors
-- Git commands like `git rebase --continue`, `git commit --amend`, and `git rebase -i` launch interactive text editors (vim/nano)
-- Cursor does NOT have interactive editor
-- Therefore ALWAYS use `GIT_EDITOR=true` prefix to bypass interactive editors:
-  - `GIT_EDITOR=true git rebase --continue` - accepts default commit message
-  - `GIT_EDITOR=true git commit --amend -m "message"` - amends with new message
-  - For commits, use `-m "message"` flag instead of letting editor open
-- If editor opens accidentally, the command will hang waiting for user input
-- Example: `git rebase --continue` will open vim → use `GIT_EDITOR=true git rebase --continue` instead
+## 5.2 Git Interactive Editors and Merge Conflicts
+- Cursor has NO interactive editor. ALWAYS use `GIT_EDITOR=true` prefix or `-m "message"` flag.
+  - `GIT_EDITOR=true git rebase --continue` (accepts default message)
+  - `GIT_EDITOR=true git commit --amend -m "message"` (amends with message)
+- Merge conflict resolution:
+  1. `git add <resolved_files>` — MUST add each file to mark it resolved
+  2. If in rebase: `GIT_EDITOR=true git rebase --continue`
+  3. Run cargo fmt on affected directories
 
-## 5.3 Merge Conflicts
-After resolving:
-1. git add <resolved_files>
-   - You MUST `git add` each conflict-resolved file to mark it as resolved (merge/rebase/cherry-pick).
-   - Forgetting to `git add` after conflict resolution will cause the operation to fail or repeat conflicts.
-2. If in rebase: use `GIT_EDITOR=true git rebase --continue` (never let vim open)
-3. Run cargo fmt on directories
-
-## 5.4 Commit Process
-- NEVER launch vim or any editor (always provide -m flag with message)
-- Don’t suggest committing unless the user explicitly says to commit.
+## 5.3 Commit Process and Message Format
+- **(Commit policy, cargo fmt, cp/mv rules: see Section 0)**
 - Never commit top-level Cargo.toml or Cargo.lock (unless explicitly told)
 - Never use --no-verify
-- Signoff rules:
-  - In dynamo-utils repository: --signoff is NOT required
-  - In dynamo* repositories and /workspace: ALWAYS use --signoff (never skip it)
-- Run cargo fmt before committing Rust changes
-- Never add untracked files (unless explicitly told)
-- List untracked files separately from modified files
-- Prompt to git add modified files
-- Scope commits when asked: keep reorganizations, code changes, and docs changes as separate commits.
-- **BEFORE writing commit message:** Check `git log --oneline origin/main..HEAD`
-  - Empty output = FIRST commit = Use verbose format with prefix
-  - Shows commits = SUBSEQUENT commit = Use terse format without prefix
-- Diff changes and generate appropriate message based on commit position
+- Signoff: NOT required for dynamo-utils; REQUIRED (--signoff) for dynamo* repos and /workspace
+- Never add untracked files (unless explicitly told); list them separately
+- Scope commits when asked: keep reorganizations, code changes, and docs separate.
 - For merge commits: use git commit -m "Merge ..." or git commit --no-edit
 
-## 5.5 Commit Message Format
+**BEFORE writing commit message:** Check `git log --oneline origin/main..HEAD`
+- Empty = FIRST commit -> verbose with category prefix (feat:, fix:, docs:, etc.)
+- Has commits = SUBSEQUENT commit -> terse, no prefix, 1 line
 
-**CRITICAL: Determine commit type BEFORE writing the message**
-1. Check if branch has existing commits: `git log --oneline origin/main..HEAD`
-2. If output is EMPTY → This is the FIRST commit → Use INITIAL format
-3. If output shows commits → This is a SUBSEQUENT commit → Use SUBSEQUENT format
+FIRST commit examples: `feat: add user authentication`, `fix: resolve memory leak`
+SUBSEQUENT commit examples: `Quick fix of XYZ`, `Fix linting errors`, `Address review comments`
 
-### FIRST/INITIAL COMMIT (when branch has NO commits yet)
-**Format:** Verbose with category prefix (feat:, fix:, docs:, etc.)
-**Length:** Full descriptive sentence
-**Examples:**
-- feat: add new user authentication system
-- fix: resolve memory leak in data processing
-- docs: update API documentation
-- test: add unit tests for user module
-- ci: configure continuous integration pipeline
-- refactor: reuse code for better maintenance and readability
-- perf: optimize data processing for speed
-- chore: update dependencies and clean up
-- revert: undo previous commit due to issues
-- style: apply code formatting and style fixes
-- build: update build scripts for new environment
+**DO NOT** in subsequent commits: category prefixes, WIP messages, multi-paragraph messages.
 
-### SUBSEQUENT COMMITS (when branch ALREADY has commits)
-**Format:** Terse, no prefix, straight to the point
-**Length:** 1 line preferred, 2 lines maximum
-**Examples:**
-- Quick fix of the module in XYZ
-- Documentation updates on XYZ
-- Minor changing the usage of XYZ
-- Renaming of XYZ to ZYX
-- Remove leftover merge conflict marker
-- Fix linting errors
-- Address review comments
-- Update test assertions
-
-**DO NOT DO (subsequent commits):**
-- ❌ Use category prefixes (save these for the FIRST commit):
-  - feat: ...
-  - fix: ...
-  - refactor: ...
-- ❌ Use WIP / placeholder messages:
-  - WIP
-  - tmp
-  - stuff
-- ❌ Write a multi-paragraph commit message (put details in the PR description instead)
-- ❌ Restate the entire PR purpose (the FIRST commit already does that)
-
-**Why this matters:** The first commit establishes the PR's primary purpose and shows up in git history. Subsequent commits are implementation details that get squashed during merge.
-
-## 5.6 Git Integration (for parsing commit messages)
+## 5.4 Git Integration (for parsing commit messages)
 - Format: `title (#PR_NUMBER)`
 - Extract PR: r'\(#(\d+)\)'
 - GitHub repo: https://github.com/ai-dynamo/dynamo
