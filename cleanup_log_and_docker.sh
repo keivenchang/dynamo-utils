@@ -9,10 +9,12 @@
 #   - Runs dynamo-utils/container/cleanup_old_images.sh --retain <N> --keep-dev-and-local-dev-only
 #   - Runs: docker builder prune -a --force
 # - Log cleanup:
-#   - Deletes $DYNAMO_HOME/logs/YYYY-MM-DD/ directories older than <keep-days> (default: 30)
+#   - Deletes YYYY-MM-DD/ directories older than <keep-days> (default: 30) from:
+#     - $DYNAMO_HOME/logs/          (cron/dashboard logs)
+#     - $DYNAMO_HOME/dynamo_ci/logs/ (build report logs)
 #
 # Safety:
-# - Only deletes directories directly under $LOGS_DIR that match regex: ^20[0-9]{2}-[0-9]{2}-[0-9]{2}$
+# - Only deletes directories that match regex: ^20[0-9]{2}-[0-9]{2}-[0-9]{2}$
 # - Never deletes today's directory
 # - Uses a per-user flock to avoid overlapping runs
 #
@@ -107,10 +109,13 @@ cleanup_docker() {
   fi
 }
 
-cleanup_logs() {
-  echo "[$(date '+%Y-%m-%d %H:%M:%S')] Log cleanup..."
+cleanup_logs_in_dir() {
+  local target_dir="$1"
 
-  mkdir -p "$LOGS_DIR"
+  if [ ! -d "$target_dir" ]; then
+    echo "  $target_dir does not exist; skipping."
+    return 0
+  fi
 
   local today cutoff_epoch
   today="$(date +%F)"
@@ -119,7 +124,7 @@ cleanup_logs() {
   local deleted=0 kept=0 skipped=0 failed=0
 
   shopt -s nullglob
-  for dir in "$LOGS_DIR"/*; do
+  for dir in "$target_dir"/*; do
     [ -d "$dir" ] || continue
     local base
     base="$(basename "$dir")"
@@ -149,8 +154,6 @@ cleanup_logs() {
       if [ "$DRY_RUN" = true ]; then
         echo "+ rm -rf $dir"
       else
-        # Best-effort deletion: don't fail the whole cleanup if some directories contain
-        # read-only/immutable files or otherwise can't be removed.
         if rm -rf "$dir"; then
           :
         else
@@ -166,7 +169,14 @@ cleanup_logs() {
   done
   shopt -u nullglob
 
-  echo "[$(date '+%Y-%m-%d %H:%M:%S')] Log cleanup summary: deleted=$deleted kept=$kept skipped=$skipped failed=$failed (keep-days=$KEEP_DAYS)"
+  echo "  $target_dir: deleted=$deleted kept=$kept skipped=$skipped failed=$failed"
+}
+
+cleanup_logs() {
+  echo "[$(date '+%Y-%m-%d %H:%M:%S')] Log cleanup (keep-days=$KEEP_DAYS)..."
+  mkdir -p "$LOGS_DIR"
+  cleanup_logs_in_dir "$LOGS_DIR"
+  cleanup_logs_in_dir "$DYNAMO_HOME/dynamo_ci/logs"
 }
 
 cleanup_docker
