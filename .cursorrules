@@ -40,6 +40,24 @@ If you do only one thing: re-read this section before making changes or running 
   - The only operation allowed on production is `git pull` when explicitly requested.
   - If you catch yourself about to touch `dynamo-utils/`, STOP. Use `dynamo-utils.dev/` instead.
 
+- CRITICAL: Problematic commit 222c2e85c (binary .gz file causes checkout hangs):
+  - Commit 222c2e85c adds `docs/blogs/flash-indexer/data/kv_events_window.json.gz` (1.5 MB binary)
+  - Commit 4fbd8f1c6 (next commit) removes the file and fixes the issue
+  - **Where it DOES cause problems:**
+    - `build_images.py` — calls `repo.git.checkout(sha)` (lines ~4046, 4299, 4315).
+      If 222c2e85c is passed as `--commit-sha-9`, the checkout hangs on the binary file.
+    - Any manual `git checkout 222c2e85c` in the `~/dynamo/commits` repo.
+  - **Where it does NOT cause problems (safe — git plumbing, no checkout):**
+    - `show_commit_history.py` — uses `repo.iter_commits()`, never checks out commits.
+    - `generate_docker_image_sha_for_commit()` — uses `git ls-tree -r <sha> -- container/`.
+    - `find_docker_image_sha_origin()` — walks commit history via plumbing commands.
+  - **How to handle in automation:**
+    - If `build_images.py` receives 222c2e85c, substitute 4fbd8f1c6 instead (same Docker
+      image SHA — only docs/ changed, not container/). The image SHA is identical.
+    - If iterating a commit range and 222c2e85c appears, skip it; 4fbd8f1c6 covers
+      the same container/ state.
+  - **Recovery if stuck:** `git checkout -f 4fbd8f1c6` (force-checkout the fix commit)
+
 - Shell execution (MUST):
   - Chain multi-step commands into ONE shell invocation using `&&` / `;` (reduce latency).
   - For expensive/long-running commands: capture FULL output first (`2>&1` to a file or `tee`).
