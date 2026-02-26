@@ -8,7 +8,7 @@ Supports parallel data gathering for improved performance.
 
 Structure:
 - RepoNode (local directory) → BranchInfoNode (branch) → BranchCommitMessageNode, BranchMetadataNode,
-  PRNode, PRStatusWithJobsNode (PASSED/FAILED pill) → CIJobNode (CI jobs with hierarchy)
+  PRStatusWithJobsNode (PASSED/FAILED pill) → CIJobNode (CI jobs with hierarchy)
 
 IMPORTANT: Architecture Rule
 ---------------------------
@@ -34,7 +34,6 @@ classes/functions are in common_branch_nodes.py. This file only imports them.
 
 import argparse
 import getpass
-import hashlib
 import html
 import logging
 import json
@@ -48,7 +47,6 @@ import urllib.parse
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-import functools
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 from zoneinfo import ZoneInfo
@@ -124,32 +122,16 @@ def _detect_branch_merged_locally(*, repo_dir: Path, branch_sha: Optional[str], 
     if not sha:
         return False
     
-    # Prefer origin/main when present, otherwise main
-    has_origin_main = subprocess.run(
-        ["git", "-C", str(repo_dir), "show-ref", "--verify", "--quiet", "refs/remotes/origin/main"],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        check=False,
-    ).returncode == 0
-    base_ref = "origin/main" if has_origin_main else "main"
-    
     # Method 1: Direct ancestry check (works for fast-forward merges)
-    if subprocess.run(
-        ["git", "-C", str(repo_dir), "merge-base", "--is-ancestor", sha, base_ref],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        check=False,
-    ).returncode == 0:
+    if _is_sha_ancestor_of_main(repo_dir=repo_dir, sha=sha):
         return True
     
     # Method 2: Check if commit with same PR number exists in main (handles merge commits)
     pr_num = None
     
-    # First try to get PR number from PRInfo object (most reliable)
     if pr and pr.number:
         pr_num = str(pr.number)
     else:
-        # Fallback: extract from local commit message
         try:
             result = subprocess.run(
                 ["git", "-C", str(repo_dir), "log", "-1", "--format=%s", sha],
@@ -160,15 +142,21 @@ def _detect_branch_merged_locally(*, repo_dir: Path, branch_sha: Optional[str], 
             )
             if result.returncode == 0:
                 commit_msg = result.stdout.strip()
-                # Extract PR number from commit message (e.g., "fix: something (#1234)")
                 pr_match = re.search(r'\(#(\d+)\)', commit_msg)
                 if pr_match:
                     pr_num = pr_match.group(1)
         except Exception:
             pass
     
-    # If we have a PR number, check if it exists in main
     if pr_num:
+        # Determine base_ref for the PR-number grep
+        has_origin_main = subprocess.run(
+            ["git", "-C", str(repo_dir), "show-ref", "--verify", "--quiet", "refs/remotes/origin/main"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        ).returncode == 0
+        base_ref = "origin/main" if has_origin_main else "main"
         try:
             search_result = subprocess.run(
                 ["git", "-C", str(repo_dir), "log", "--oneline", base_ref, "--grep", f"(#{pr_num})"],
@@ -188,19 +176,14 @@ def _detect_branch_merged_locally(*, repo_dir: Path, branch_sha: Optional[str], 
 from common_branch_nodes import (
     BranchInfoNode,
     BranchNode,
-    CIJobNode,
-    BranchCommitMessageNode,
-    BranchMetadataNode,
-    PRNode,
     PRStatusWithJobsNode,
-    PRURLNode,
-    RawLogValidationError,
     RepoNode,
-    RerunLinkNode,
-    _assume_completed_for_check_row,
-    _duration_str_to_seconds,
-    _is_known_required_check,
-    generate_html,
+    _copy_icon_svg,
+    _is_sha_ancestor_of_main,
+    looks_like_git_repo_dir,
+    gitdir_from_git_file,
+    origin_url_from_git_config,
+    find_local_clone_of_repo,
 )
 from dataclasses import dataclass  # noqa: E402
 import html as html_module  # noqa: E402
@@ -335,77 +318,7 @@ DYNAMO_REPO_SLUG = f"{DYNAMO_OWNER}/{DYNAMO_REPO}"
 
 
 
-@functools.lru_cache(maxsize=1)
-def _copy_icon_svg(*, size_px: int = 12) -> str:
-    """Return the shared 'copy' icon SVG (2-squares), sourced from copy_icon_paths.svg."""
-    p = (Path(__file__).resolve().parent / "copy_icon_paths.svg").resolve()
-    paths = p.read_text(encoding="utf-8").strip()
-    return (
-        f'<svg width="{int(size_px)}" height="{int(size_px)}" viewBox="0 0 16 16" fill="currentColor" '
-        f'style="display: inline-block; vertical-align: middle;">{paths}</svg>'
-    )
-
-
-# Keep a module-level constant for existing call sites / template rendering.
 _COPY_ICON_SVG = _copy_icon_svg(size_px=12)
-
-
-def looks_like_git_repo_dir(p: Path) -> bool:
-    """Lightweight git repo detection without invoking GitPython.
-    
-    Supports normal repos ('.git' directory) and worktrees/submodules ('.git' file).
-    """
-    if not p.is_dir():
-        return False
-    git_marker = p / ".git"
-    return git_marker.is_dir() or git_marker.is_file()
-
-
-def gitdir_from_git_file(p: Path) -> Optional[Path]:
-    """Handle worktrees where .git is a file containing 'gitdir: <path>'."""
-    txt = (p / ".git").read_text(encoding="utf-8", errors="ignore").strip()
-    if not txt.startswith("gitdir:"):
-        return None
-    rest = txt.split("gitdir:", 1)[1].strip()
-    if not rest:
-        return None
-    gd = Path(rest)
-    if not gd.is_absolute():
-        gd = (p / gd).resolve()
-    return gd if gd.is_dir() else None
-
-
-def origin_url_from_git_config(repo_dir: Path) -> str:
-    """Extract origin URL from .git/config without loading GitPython."""
-    git_dir = repo_dir / ".git"
-    if git_dir.is_file():
-        gd = gitdir_from_git_file(repo_dir)
-        if gd:
-            git_dir = gd
-    config = git_dir / "config"
-    if not config.is_file():
-        return ""
-    txt = config.read_text(encoding="utf-8", errors="ignore")
-    m = re.search(r'\[remote\s+"origin"\].*?url\s*=\s*(.+?)(?:\n|\r\n|\r|$)', txt, re.IGNORECASE | re.DOTALL)
-    if m:
-        return m.group(1).strip()
-    return ""
-
-
-def find_local_clone_of_repo(base_dir: Path, *, repo_slug: str) -> Optional[Path]:
-    """Find a local clone of a specific repo (e.g. 'ai-dynamo/dynamo') under base_dir.
-    
-    Returns the first matching repo directory, or None if not found.
-    """
-    if not base_dir.is_dir():
-        return None
-    for d in base_dir.iterdir():
-        if not looks_like_git_repo_dir(d):
-            continue
-        url = origin_url_from_git_config(d)
-        if repo_slug in url:
-            return d
-    return None
 
 
 class LocalRepoScanner:
@@ -450,11 +363,6 @@ class LocalRepoScanner:
         mode = st.st_mode
         return bool(mode & stat.S_IROTH) and bool(mode & stat.S_IXOTH)
 
-    @staticmethod
-    def _looks_like_git_repo_dir(p: Path) -> bool:
-        """Lightweight git repo detection (delegates to module-level function)."""
-        return looks_like_git_repo_dir(p)
-
     def scan_repositories(self, base_dir: Path) -> BranchNode:
         """Scan all git repositories under `base_dir` (direct children only) and build tree structure."""
         root = BranchNode(label="")
@@ -468,7 +376,7 @@ class LocalRepoScanner:
         # Discover git repos among direct children (and include base_dir itself if it's a repo).
         # We intentionally do NOT walk the whole tree because this workspace can be huge.
         candidate_dirs: list[Path] = []
-        if self._looks_like_git_repo_dir(base_dir) and self._is_world_readable_executable_dir(base_dir):
+        if looks_like_git_repo_dir(base_dir) and self._is_world_readable_executable_dir(base_dir):
             candidate_dirs.append(base_dir)
 
         for d in base_dir.iterdir():
@@ -476,7 +384,7 @@ class LocalRepoScanner:
                 continue
             if not self._is_world_readable_executable_dir(d):
                 continue
-            if not self._looks_like_git_repo_dir(d):
+            if not looks_like_git_repo_dir(d):
                 continue
             candidate_dirs.append(d)
 
@@ -499,20 +407,192 @@ class LocalRepoScanner:
 
         return root
 
+    @staticmethod
+    def _format_pt_time(dt) -> Optional[str]:
+        if dt is None:
+            return None
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=ZoneInfo("UTC"))
+        pt = dt.astimezone(ZoneInfo("America/Los_Angeles"))
+        return f"{pt.strftime('%Y-%m-%d %H:%M')} PT"
+
+    @staticmethod
+    def _scan_and_classify_branches(
+        repo,
+        current_branch: Optional[str],
+        repo_node: LocalRepoNode,
+    ) -> Tuple[Dict[str, dict], List[dict]]:
+        """Scan local branches, fetch remotes, classify into remote-tracking and local-only.
+
+        Returns:
+            (branches_with_prs, local_only_branches) where branches_with_prs maps
+            branch_name -> info dict and local_only_branches is a list of info dicts.
+        """
+        remote = repo.remote('origin')
+        try:
+            remote.fetch()
+        except (git.exc.GitCommandError, OSError) as e:
+            repo_node.error = f"WARNING: git fetch failed (using cached refs): {e}"
+
+        branches_with_prs: Dict[str, dict] = {}
+        local_only_branches: List[dict] = []
+
+        for branch in repo.branches:  # type: ignore[attr-defined]
+            branch_name = branch.name
+            if branch_name in ['main', 'master']:
+                continue
+
+            tracking_branch = branch.tracking_branch()
+            has_remote = tracking_branch is not None
+
+            if not has_remote:
+                remote_branches = [ref.name for ref in repo.remote().refs]  # type: ignore[attr-defined]
+                if f'origin/{branch_name}' in remote_branches:
+                    has_remote = True
+
+            sha = branch.commit.hexsha[:7]
+            commit_dt = branch.commit.committed_datetime
+            commit_msg = str(branch.commit.message or "").strip()
+            is_current = (branch_name == current_branch)
+
+            if has_remote:
+                branches_with_prs[branch_name] = {
+                    'sha': sha,
+                    'is_current': is_current,
+                    'branch': branch,
+                    'commit_time_pt': LocalRepoScanner._format_pt_time(commit_dt),
+                    'commit_dt': commit_dt,
+                    'commit_message': commit_msg,
+                }
+            else:
+                local_only_branches.append({
+                    'name': branch_name,
+                    'sha': sha,
+                    'is_current': is_current,
+                    'commit_time_pt': LocalRepoScanner._format_pt_time(commit_dt),
+                    'commit_dt': commit_dt,
+                    'commit_message': commit_msg,
+                })
+
+        return branches_with_prs, local_only_branches
+
+    def _attach_dynamo_pr_branches(
+        self,
+        repo_node: LocalRepoNode,
+        repo_dir: Path,
+        branches_with_prs: Dict[str, dict],
+    ) -> None:
+        """Fetch PRs for dynamo branches and attach BranchInfoNode + PRStatusWithJobsNode to repo_node."""
+        pr_infos_by_branch = self.github_api.get_pr_info_for_branches(
+            DYNAMO_OWNER,
+            DYNAMO_REPO,
+            branches_with_prs.keys(),
+            include_closed=True,
+            refresh_closed=self.refresh_closed_prs,
+        )
+
+        branch_results = []
+        for branch_name, info in branches_with_prs.items():
+            prs = pr_infos_by_branch.get(branch_name) or []
+            if prs:
+                branch_results.append((branch_name, info, prs))
+
+        branch_results_sorted = sorted(
+            branch_results,
+            key=lambda t: (
+                (t[1].get("commit_dt") or datetime.min.replace(tzinfo=ZoneInfo("UTC"))),
+                str(t[0] or ""),
+            ),
+            reverse=True,
+        )
+
+        if self.max_branches is not None and self.max_branches > 0:
+            branch_results_sorted = branch_results_sorted[: int(self.max_branches)]
+
+        allow_fetch_branch_names: Set[str] = set()
+        if bool(self.cache_only_github):
+            allow_fetch_branch_names = set()
+        elif self.max_checks_fetch is not None and self.max_checks_fetch > 0:
+            allow_fetch_branch_names = {bn for (bn, _info, _prs) in branch_results_sorted[: int(self.max_checks_fetch)]}
+
+        for branch_name, info, prs in branch_results_sorted:
+            commit_url = f"https://github.com/{DYNAMO_REPO_SLUG}/commit/{info['sha']}" if info['sha'] else None
+            pr = prs[0] if prs else None
+
+            commit_msg = info.get('commit_message', '')
+            if pr:
+                commit_msg = str(pr.title or "").strip()
+                commit_msg = re.sub(r'^#\d+\s+', '', commit_msg)
+
+            branch_node = BranchInfoNode(
+                label=branch_name,
+                sha=info['sha'],
+                is_current=info['is_current'],
+                merged_local=_detect_branch_merged_locally(repo_dir=repo_dir, branch_sha=info.get("sha"), pr=pr),
+                commit_url=commit_url,
+                commit_time_pt=info.get('commit_time_pt'),
+                commit_datetime=info.get('commit_dt'),
+                commit_message=commit_msg,
+                pr=pr,
+            )
+
+            if pr:
+                allow_fetch_checks = (branch_name in allow_fetch_branch_names) if allow_fetch_branch_names else True
+                if bool(self.cache_only_github):
+                    allow_fetch_checks = False
+
+                branch_dt = info.get("commit_dt")
+                checks_ttl_s = GitHubAPIClient.compute_checks_cache_ttl_s(
+                    branch_dt,
+                    refresh=bool(self.refresh_closed_prs),
+                    pr_merged=bool(pr.is_merged),
+                )
+
+                status_node = PRStatusWithJobsNode(
+                    label="",
+                    pr=pr,
+                    github_api=self.github_api,
+                    repo_root=self.repo_root,
+                    page_root_dir=self.page_root_dir,
+                    refresh_checks=bool(self.refresh_closed_prs),
+                    branch_commit_dt=branch_dt,
+                    allow_fetch_checks=bool(allow_fetch_checks),
+                    context_key=f"{repo_dir.name}:{branch_name}:{info.get('sha','')}",
+                    enable_success_build_test_logs=bool(self.enable_success_build_test_logs),
+                )
+                branch_node.add_child(status_node)
+
+            repo_node.add_child(branch_node)
+
+        # Remote-tracking branches without PRs.
+        for branch_name, info in sorted(branches_with_prs.items(), key=lambda kv: kv[0]):
+            prs = pr_infos_by_branch.get(branch_name) or []
+            if prs:
+                continue
+            commit_url = f"https://github.com/{DYNAMO_REPO_SLUG}/commit/{info['sha']}" if info.get("sha") else None
+            branch_node = BranchInfoNode(
+                label=branch_name,
+                sha=info.get("sha"),
+                is_current=bool(info.get("is_current", False)),
+                merged_local=_detect_branch_merged_locally(repo_dir=repo_dir, branch_sha=info.get("sha")),
+                commit_url=commit_url,
+                commit_time_pt=info.get("commit_time_pt"),
+                commit_datetime=info.get("commit_dt"),
+                commit_message=info.get("commit_message"),
+            )
+            repo_node.add_child(branch_node)
+
     def _scan_repository(self, repo_dir: Path, page_root_dir: Path) -> Optional[LocalRepoNode]:
-        """Scan a single repository"""
+        """Scan a single repository."""
         repo_name = f"{repo_dir.name}/"
         repo_node = LocalRepoNode(label=repo_name, repo_path=repo_dir)
-        
-        # Store the relative path for the folder icon link
+
         try:
             rel_path = os.path.relpath(repo_dir, page_root_dir)
             repo_node.rel_path = rel_path
         except (ValueError, OSError):
             repo_node.rel_path = None
 
-        # <pre>Symlink repos: show repo line (with → target) but don't scan/render nested info
-        # (branches/PR/CI). Render as non-expandable in the UI.</pre>
         if Path(repo_dir).is_symlink():
             return repo_node
 
@@ -526,242 +606,40 @@ class LocalRepoScanner:
             repo_node.error = f"Not a valid git repository: {e}"
             return repo_node
 
-        # <pre>Capture origin URL. We no longer treat "non-dynamo" repos as an error;
-        # just skip PR/CI lookups wired to ai-dynamo/dynamo.</pre>
         is_dynamo_repo = False
         remote = repo.remote('origin')
         remote_url = next(remote.urls)
         repo_node.remote_url = remote_url
-
         is_dynamo_repo = (DYNAMO_REPO_SLUG in remote_url)
 
-        # Get current branch (handle detached HEAD state)
         if repo.head.is_detached:
-            current_branch = None  # Will be handled appropriately in branch scanning
+            current_branch = None
         else:
             current_branch = repo.active_branch.name
 
-        # Always capture current HEAD SHA (for display even when we skip "main" branches, or when detached).
         head_commit = repo.head.commit
         head_sha = head_commit.hexsha[:7]
         head_commit_dt = head_commit.committed_datetime
 
-        def _format_pt_time(dt) -> Optional[str]:
-            if dt is None:
-                return None
-            # GitPython often returns tz-aware datetimes; if not, assume UTC.
-            if dt.tzinfo is None:
-                dt = dt.replace(tzinfo=ZoneInfo("UTC"))
-            pt = dt.astimezone(ZoneInfo("America/Los_Angeles"))
-            return f"{pt.strftime('%Y-%m-%d %H:%M')} PT"
+        branches_with_prs, local_only_branches = self._scan_and_classify_branches(
+            repo, current_branch, repo_node,
+        )
 
-        # Collect branch information
-        branches_with_prs = {}
-        local_only_branches = []
-
-        # Get remote branches
-        remote = repo.remote('origin')
-        try:
-            # Best-effort: fetching can occasionally fail due to local ref lock contention/corruption
-            # (e.g. "cannot lock ref ... is at <sha> but expected <sha>").
-            # We do NOT want one bad repo to kill the entire dashboard generation, so on failure
-            # we continue using whatever remote refs are already present locally.
-            remote.fetch()
-        except (git.exc.GitCommandError, OSError) as e:
-            # GitPython exceptions for git command failures or OS errors.
-            # This is intentionally broad: the caller runs per-repo in a thread pool and MUST NOT raise.
-            repo_node.error = f"WARNING: git fetch failed (using cached refs): {e}"
-
-        # Scan all local branches
-        for branch in repo.branches:  # type: ignore[attr-defined]
-            branch_name = branch.name
-
-            # Skip main branches
-            if branch_name in ['main', 'master']:
-                continue
-
-            # Check if branch has remote tracking or matching remote branch
-            tracking_branch = branch.tracking_branch()
-            has_remote = tracking_branch is not None
-
-            # Also check if a remote branch exists with the same name (even if not tracking)
-            if not has_remote:
-                remote_branches = [ref.name for ref in repo.remote().refs]  # type: ignore[attr-defined]
-                # Check for origin/branch_name
-                if f'origin/{branch_name}' in remote_branches:
-                    has_remote = True
-
-            # Get commit SHA
-            sha = branch.commit.hexsha[:7]
-            commit_dt = branch.commit.committed_datetime
-            commit_msg = str(branch.commit.message or "").strip()
-
-            is_current = (branch_name == current_branch)
-
-            if has_remote:
-                # Get PR info in parallel (will be gathered later)
-                branches_with_prs[branch_name] = {
-                    'sha': sha,
-                    'is_current': is_current,
-                    'branch': branch,
-                    'commit_time_pt': _format_pt_time(commit_dt),
-                    'commit_dt': commit_dt,
-                    'commit_message': commit_msg,
-                }
-            else:
-                local_only_branches.append({
-                    'name': branch_name,
-                    'sha': sha,
-                    'is_current': is_current,
-                    'commit_time_pt': _format_pt_time(commit_dt),
-                    'commit_dt': commit_dt,
-                    'commit_message': commit_msg,
-                })
-
-        # Fetch PR information in parallel
         if branches_with_prs and is_dynamo_repo:
-            # Branches with PRs - add directly to repo_node (no section wrapper)
-            # NOTE: Avoid per-branch GitHub API calls. We list open PRs once per repo (cached),
-            # then match PRs to branch names locally.
-            pr_infos_by_branch = self.github_api.get_pr_info_for_branches(
-                DYNAMO_OWNER,
-                DYNAMO_REPO,
-                branches_with_prs.keys(),
-                include_closed=True,
-                refresh_closed=self.refresh_closed_prs,
-            )
+            self._attach_dynamo_pr_branches(repo_node, repo_dir, branches_with_prs)
 
-            branch_results = []
-            for branch_name, info in branches_with_prs.items():
-                prs = pr_infos_by_branch.get(branch_name) or []
-                if prs:
-                    branch_results.append((branch_name, info, prs))
-
-            # Small-mode caps:
-            # - Display at most N branches with PRs (choose most-recent by commit_dt).
-            # - Only allow network fetch of checks/CI hierarchy for the top K (most recent) branches.
-            #
-            # This keeps the page fast and keeps GitHub/gh calls bounded.
-            branch_results_sorted = sorted(
-                branch_results,
-                key=lambda t: (
-                    (t[1].get("commit_dt") or datetime.min.replace(tzinfo=ZoneInfo("UTC"))),
-                    str(t[0] or ""),
-                ),
-                reverse=True,
-            )
-
-            if self.max_branches is not None and self.max_branches > 0:
-                branch_results_sorted = branch_results_sorted[: int(self.max_branches)]
-
-            allow_fetch_branch_names: Set[str] = set()
-            if bool(self.cache_only_github):
-                allow_fetch_branch_names = set()
-            elif self.max_checks_fetch is not None and self.max_checks_fetch > 0:
-                allow_fetch_branch_names = {bn for (bn, _info, _prs) in branch_results_sorted[: int(self.max_checks_fetch)]}
-
-            # Build branch nodes (newest first)
-            for branch_name, info, prs in branch_results_sorted:
-                commit_url = f"https://github.com/{DYNAMO_REPO_SLUG}/commit/{info['sha']}" if info['sha'] else None
-                
-                # Get the PR (should be exactly one per branch in this structure)
-                pr = prs[0] if prs else None
-                
-                # Use PR title as commit message if available (like show_remote_branches.py)
-                commit_msg = info.get('commit_message', '')
-                if pr:
-                    commit_msg = str(pr.title or "").strip()
-                    # Remove leading "#1234 " pattern if present
-                    commit_msg = re.sub(r'^#\d+\s+', '', commit_msg)
-                
-                branch_node = BranchInfoNode(
-                    label=branch_name,
-                    sha=info['sha'],
-                    is_current=info['is_current'],
-                    merged_local=_detect_branch_merged_locally(repo_dir=repo_dir, branch_sha=info.get("sha"), pr=pr),
-                    commit_url=commit_url,
-                    commit_time_pt=info.get('commit_time_pt'),
-                    commit_datetime=info.get('commit_dt'),
-                    commit_message=commit_msg,
-                    pr=pr,  # Pass PR so commit message child shows (#PR) link
-                )
-
-                # Add PR status node if PR exists
-                if pr:
-                    allow_fetch_checks = (branch_name in allow_fetch_branch_names) if allow_fetch_branch_names else True
-                    if bool(self.cache_only_github):
-                        allow_fetch_checks = False
-                    
-                    pr_state_lc = (pr.state or "").lower()
-                    # Prefer the branch head commit time for "last push" heuristic.
-                    branch_dt = info.get("commit_dt")
-                    checks_ttl_s = GitHubAPIClient.compute_checks_cache_ttl_s(
-                        branch_dt,
-                        refresh=bool(self.refresh_closed_prs),
-                        pr_merged=bool(pr.is_merged),
-                    )
-                    
-                    # Create status node (will contain CI children)
-                    status_node = PRStatusWithJobsNode(
-                        label="",
-                        pr=pr,
-                        github_api=self.github_api,
-                        repo_root=self.repo_root,
-                        page_root_dir=self.page_root_dir,
-                        refresh_checks=bool(self.refresh_closed_prs),
-                        branch_commit_dt=branch_dt,
-                        allow_fetch_checks=bool(allow_fetch_checks),
-                        context_key=f"{repo_dir.name}:{branch_name}:{info.get('sha','')}",
-                        enable_success_build_test_logs=bool(self.enable_success_build_test_logs),
-                    )
-
-                    branch_node.add_child(status_node)
-
-                    # CI nodes will be built later in the pipeline (run_all_passes) inside PRStatusWithJobsNode.
-
-                    # With CI hierarchy embedded, we no longer render separate flat running/failed check lines here.
-
-                repo_node.add_child(branch_node)
-
-            # Branches without PRs - add directly to repo_node (no section wrapper)
-            #
-            # These are remote-tracking branches that don't have active PRs.
-            # Just show the branch line; no CI hierarchy (since there's no PR to get checks from).
-            for branch_name, info in sorted(branches_with_prs.items(), key=lambda kv: kv[0]):
-                prs = pr_infos_by_branch.get(branch_name) or []
-                if prs:
-                    continue
-                commit_url = f"https://github.com/{DYNAMO_REPO_SLUG}/commit/{info['sha']}" if info.get("sha") else None
-                branch_node = BranchInfoNode(
-                    label=branch_name,
-                    sha=info.get("sha"),
-                    is_current=bool(info.get("is_current", False)),
-                    merged_local=_detect_branch_merged_locally(repo_dir=repo_dir, branch_sha=info.get("sha")),
-                    commit_url=commit_url,
-                    commit_time_pt=info.get("commit_time_pt"),
-                    commit_datetime=info.get("commit_dt"),
-                    commit_message=info.get("commit_message"),
-                )
-                
-                repo_node.add_child(branch_node)
-
-        # For non-dynamo repos: show branches but skip PR/CI lookup (treat as "any other repo").
-        # Add directly to repo_node (no section wrapper)
+        # Non-dynamo repos: show branches without PR/CI lookup.
         if not is_dynamo_repo:
-
-            combined = []
+            combined: list[dict] = []
             for branch_name, info in branches_with_prs.items():
-                combined.append(
-                    {
-                        "name": branch_name,
-                        "sha": info.get("sha"),
-                        "is_current": bool(info.get("is_current")),
-                        "commit_time_pt": info.get("commit_time_pt"),
-                        "commit_dt": info.get("commit_dt"),
-                    }
-                )
+                combined.append({
+                    "name": branch_name,
+                    "sha": info.get("sha"),
+                    "is_current": bool(info.get("is_current")),
+                    "commit_time_pt": info.get("commit_time_pt"),
+                    "commit_dt": info.get("commit_dt"),
+                })
             combined.extend(local_only_branches)
-
             for b in sorted(combined, key=lambda x: x.get("name", "")):
                 repo_node.add_child(
                     BranchInfoNode(
@@ -773,9 +651,8 @@ class LocalRepoScanner:
                     )
                 )
 
-        # Add local-only branches - add directly to repo_node (no section wrapper)
+        # Local-only branches for dynamo repos.
         if local_only_branches and is_dynamo_repo:
-
             for branch_info in local_only_branches:
                 branch_node = BranchInfoNode(
                     label=branch_info['name'],
@@ -788,8 +665,7 @@ class LocalRepoScanner:
                 )
                 repo_node.add_child(branch_node)
 
-        # If the current checkout didn't show up in the PR/local sections (common when on main),
-        # add a single line for it so repos like commits/ and dynamo_ci/ are informative.
+        # Fallback: add current branch if not already present (common when on main).
         has_current_line = _tree_has_current_branch(repo_node)
         if not has_current_line:
             current_label = current_branch or "HEAD"
@@ -800,12 +676,11 @@ class LocalRepoScanner:
                     sha=head_sha,
                     is_current=True,
                     commit_url=commit_url,
-                    commit_time_pt=_format_pt_time(head_commit_dt),
+                    commit_time_pt=self._format_pt_time(head_commit_dt),
                     commit_datetime=head_commit_dt,
                 )
             )
 
-        # Add "no branches" message if needed
         if not repo_node.children:
             no_branches = BranchNode(label="No branches with PRs or local-only branches")
             repo_node.add_child(no_branches)
@@ -1010,15 +885,7 @@ Environment Variables:
     # those timings. This is intentionally low-tech and stable.
     elapsed_s = max(0.0, time.monotonic() - generation_t0)
 
-    def _count_prs(node: BranchNode) -> int:
-        n = 0
-        if isinstance(node, PRNode) and node.pr is not None:
-            n += 1
-        for ch in (node.children or []):
-            n += _count_prs(ch)
-        return n
-
-    pr_count = _count_prs(root)
+    pr_count = 0
 
     # New structure: root -> LocalUserNode -> LocalRepoNode -> ...
     maybe_user = (root.children or [None])[0]

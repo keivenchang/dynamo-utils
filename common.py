@@ -121,24 +121,6 @@ class PhaseTimer:
             parts.append(f"total={self.format_seconds(d.get('total', 0.0))}")
         return ", ".join(parts)
 
-    @staticmethod
-    def format_one_line_dict(d: Dict[str, Any], *, keys: Optional[List[str]] = None) -> str:
-        """Format a dict of {phase: seconds} similarly to `format_one_line()`."""
-        try:
-            dd: Dict[str, float] = {str(k): float(v) for k, v in (d or {}).items() if v is not None}
-        except (ValueError, TypeError):
-            dd = {}
-        if keys:
-            parts = []
-            for k in keys:
-                parts.append(f"{k}={PhaseTimer.format_seconds(dd.get(k, 0.0))}")
-            return ", ".join(parts)
-        ks = sorted([k for k in dd.keys() if k != "total"])
-        parts = [f"{k}={PhaseTimer.format_seconds(dd.get(k, 0.0))}" for k in ks]
-        if "total" in dd:
-            parts.append(f"total={PhaseTimer.format_seconds(dd.get('total', 0.0))}")
-        return ", ".join(parts)
-
 #
 # Cache policy constants (single source of truth)
 #
@@ -184,6 +166,17 @@ DEFAULT_RAW_LOG_TEXT_MAX_BYTES: int = 0
 DEFAULT_RAW_LOG_ERROR_SNIPPET_TAIL_BYTES: int = 512 * 1024
 # ^ When extracting error snippets, only read the tail of very large log files (bytes).
 #   Example: for a 50MB log, only read the last 512KB to find failures quickly.
+
+
+def format_duration_compact(seconds: int) -> str:
+    """Convert a duration in seconds to a compact human-readable string (e.g., '5m', '2h', '30d')."""
+    if seconds < 60:
+        return f"{seconds}s"
+    if seconds < 3600:
+        return f"{seconds // 60}m"
+    if seconds < 86400:
+        return f"{seconds // 3600}h"
+    return f"{seconds // 86400}d"
 
 
 # ======================================================================================
@@ -580,21 +573,6 @@ class GitUtils(BaseUtils):
             self.logger.error(f"Failed to checkout {ref}: {e}")
             return False
 
-    def get_commit(self, sha: str) -> Optional[Any]:
-        """Get commit object by SHA using GitPython API.
-
-        Args:
-            sha: Commit SHA (full or short)
-
-        Returns:
-            GitPython commit object or None if not found
-        """
-        try:
-            return self.repo.commit(sha)
-        except Exception as e:
-            self.logger.error(f"Failed to get commit {sha}: {e}")
-            return None
-
     def get_recent_commits(self, max_count: int = 50, branch: str = 'main') -> List[Any]:
         """Get recent commits from a branch using GitPython API.
 
@@ -619,105 +597,6 @@ class GitUtils(BaseUtils):
         except Exception as e:
             self.logger.error(f"Failed to get commits from {branch}: {e}")
             return []
-
-    def get_commit_info(self, commit: Any) -> Dict[str, Any]:
-        """Extract information from a commit object.
-
-        Args:
-            commit: GitPython commit object
-
-        Returns:
-            Dictionary with commit information
-
-            Example return value:
-            {
-                "sha_full": "21a03b316dc1e5031183965e5798b0d9fe2e64b3",
-                "sha_short": "21a03b316",
-                "author_name": "John Doe",
-                "author_email": "john@nvidia.com",
-                "committer_name": "John Doe",
-                "committer_email": "john@nvidia.com",
-                "date": datetime.datetime(2025, 11, 20, 17, 5, 58),
-                "message": "Fix Docker image fetching for recent commits\\n\\nDetailed description...",
-                "message_first_line": "Fix Docker image fetching for recent commits",
-                "parents": ["5fe0476e605d2564234f00e8123461e1594a9ce7"]
-            }
-        """
-
-        return {
-            'sha_full': commit.hexsha,
-            'sha_short': commit.hexsha[:9],
-            'author_name': commit.author.name,
-            'author_email': commit.author.email,
-            'committer_name': commit.committer.name,
-            'committer_email': commit.committer.email,
-            'date': datetime.fromtimestamp(commit.committed_date),
-            'message': commit.message.strip(),
-            'message_first_line': commit.message.split('\n')[0] if commit.message else '',
-            'parents': [p.hexsha for p in commit.parents]
-        }
-
-    def is_dirty(self) -> bool:
-        """Check if repository has uncommitted changes.
-
-        Returns:
-            True if there are uncommitted changes, False otherwise
-        """
-        return self.repo.is_dirty()
-
-    def get_untracked_files(self) -> List[str]:
-        """Get list of untracked files.
-
-        Returns:
-            List of untracked file paths
-
-            Example return value:
-            [
-                "test_output.txt",
-                ".env.local",
-                "debug.log",
-                "temp/cache_data.json"
-            ]
-        """
-        return self.repo.untracked_files
-
-    def get_tags(self) -> List[str]:
-        """Get all repository tags.
-
-        Returns:
-            List of tag names
-
-            Example return value:
-            [
-                "v1.0.0",
-                "v1.0.1",
-                "v1.1.0",
-                "release-2025-11-20"
-            ]
-        """
-        return [tag.name for tag in self.repo.tags]
-
-    def get_branches(self, remote: bool = False) -> List[str]:
-        """Get list of branches.
-
-        Args:
-            remote: If True, return remote branches. If False, return local branches.
-
-        Returns:
-            List of branch names
-
-            Example return value (local):
-            ["main", "feature/docker-caching", "bugfix/timezone-issue"]
-
-            Example return value (remote):
-            ["origin/main", "origin/develop", "origin/feature/docker-caching"]
-        """
-        if remote:
-            return [ref.name for ref in self.repo.remote().refs]
-        else:
-            return [head.name for head in self.repo.heads]
-
-
 
 class DynamoRepositoryUtils(BaseUtils):
     """Utilities for Dynamo repository operations including Docker image SHA calculation."""
@@ -1332,173 +1211,5 @@ class DockerUtils(BaseUtils):
                     results['failed'] += 1
 
         return results
-
-    def filter_unused_build_args(self, docker_command: str) -> str:
-        """Remove unused --build-arg flags from Docker build commands for base images.
-
-        DEPRECATION: V1 only. V2 does not use this.
-
-        Base images (dynamo-base) don't use most build arguments. Removing unused
-        args helps Docker recognize when builds are truly identical.
-        """
-
-        if not re.search(r'--tag\s+dynamo-base:', docker_command):
-            # Only filter base image builds
-            return docker_command
-
-        # List of build args that are typically unused by base images
-        unused_args = {
-            'PYTORCH_VERSION', 'CUDA_VERSION', 'PYTHON_VERSION',
-            'FRAMEWORK_VERSION', 'TARGET_ARCH', 'BUILD_TYPE'
-        }
-
-        # Split command into parts
-        parts = docker_command.split()
-        filtered_parts = []
-        filtered_args = []
-
-        i = 0
-        while i < len(parts):
-            if parts[i] == '--build-arg' and i + 1 < len(parts):
-                arg_name = parts[i + 1].split('=')[0]
-                if arg_name in unused_args:
-                    filtered_args.append(arg_name)
-                    i += 2  # Skip both --build-arg and its value
-                else:
-                    filtered_parts.extend([parts[i], parts[i + 1]])
-                    i += 2
-            else:
-                filtered_parts.append(parts[i])
-                i += 1
-
-        if filtered_args and self.verbose:
-            self.logger.info(f"Filtered {len(filtered_args)} unused base image build args: {', '.join(sorted(filtered_args))}")
-
-        return ' '.join(filtered_parts)
-
-    def normalize_command(self, docker_command: str) -> str:
-        """Normalize Docker command by removing whitespace and sorting build args.
-
-        DEPRECATION: V1 only. V2 does not use this.
-
-        Helps identify functionally identical commands with different formatting.
-        """
-
-        # Remove extra whitespace and normalize
-        normalized = ' '.join(docker_command.split())
-
-        # Sort build args to make commands with same args but different order equivalent
-        # Find all --build-arg KEY=VALUE pairs
-        build_args = []
-        other_parts = []
-
-        parts = normalized.split()
-        i = 0
-        while i < len(parts):
-            if parts[i] == '--build-arg' and i + 1 < len(parts):
-                build_args.append(f"--build-arg {parts[i + 1]}")
-                i += 2
-            else:
-                other_parts.append(parts[i])
-                i += 1
-
-        # Sort build args for consistent ordering
-        build_args.sort()
-
-        # Reconstruct command with sorted build args
-        if build_args:
-            # Insert sorted build args after 'docker build' but before other args
-            docker_build_idx = -1
-            for idx, part in enumerate(other_parts):
-                if part == 'build':
-                    docker_build_idx = idx
-                    break
-
-            if docker_build_idx >= 0:
-                result_parts = other_parts[:docker_build_idx + 1] + build_args + other_parts[docker_build_idx + 1:]
-            else:
-                result_parts = other_parts + build_args
-        else:
-            result_parts = other_parts
-
-        return ' '.join(result_parts)
-
-    def extract_base_image_from_command(self, docker_cmd: str) -> str:
-        """Extract the base/FROM image from docker build command arguments"""
-
-        # Look for --build-arg DYNAMO_BASE_IMAGE=... (framework-specific builds)
-        match = re.search(r'--build-arg\s+DYNAMO_BASE_IMAGE=([^\s]+)', docker_cmd)
-        if match:
-            return match.group(1)
-
-        # Look for --build-arg BASE_IMAGE=... and BASE_IMAGE_TAG=... (base builds)
-        base_image_match = re.search(r'--build-arg\s+BASE_IMAGE=([^\s]+)', docker_cmd)
-        base_tag_match = re.search(r'--build-arg\s+BASE_IMAGE_TAG=([^\s]+)', docker_cmd)
-
-        if base_image_match and base_tag_match:
-            return f"{base_image_match.group(1)}:{base_tag_match.group(1)}"
-        elif base_image_match:
-            return base_image_match.group(1)
-
-        # Look for --build-arg DEV_BASE=... (local-dev builds)
-        dev_base_match = re.search(r'--build-arg\s+DEV_BASE=([^\s]+)', docker_cmd)
-        if dev_base_match:
-            return dev_base_match.group(1)
-
-        # Return empty string if no base image found
-        return ""
-
-    def extract_image_tag_from_command(self, docker_cmd: str) -> str:
-        """
-        Extract the output tag from docker build command --tag argument.
-        Returns the tag string, or empty string if no tag found.
-        Raises error if multiple tags are found (should not happen after get_build_commands validation).
-        """
-
-        # Find all --tag arguments in the command
-        tags = re.findall(r'--tag\s+([^\s]+)', docker_cmd)
-
-        if len(tags) == 0:
-            return ""
-        elif len(tags) == 1:
-            return tags[0]
-        else:
-            # This should not happen if get_build_commands validation is working
-            self.logger.error(f"Multiple --tag arguments found in command: {tags}")
-            return tags[0]  # Return first tag as fallback
-
-
-# GitHub API utilities
-
-
-def select_shas_for_network_fetch(
-    sha_list: List[str],
-    sha_to_datetime: Optional[Dict[str, datetime]],
-    *,
-    max_fetch: int = 5,
-    recent_hours: int = DEFAULT_STABLE_AFTER_HOURS,
-) -> set[str]:
-    """Select a small set of SHAs where we're allowed to do network fetches.
-
-    Policy:
-    - Only consider the newest `max_fetch` SHAs (order as given in sha_list).
-    - Only allow fetch if the SHA's datetime is within `recent_hours`.
-    """
-    allow: set[str] = set()
-    if not sha_list or not sha_to_datetime:
-        return allow
-
-    now_utc = datetime.now(timezone.utc)
-    cutoff_s = float(recent_hours) * 3600.0
-    for sha in sha_list[: int(max_fetch or 0)]:
-        dt = sha_to_datetime.get(sha)
-        if dt is None:
-            continue
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
-        age_s = (now_utc - dt.astimezone(timezone.utc)).total_seconds()
-        if age_s < cutoff_s:
-            allow.add(sha)
-    return allow
 
 

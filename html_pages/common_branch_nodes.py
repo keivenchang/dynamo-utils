@@ -20,7 +20,6 @@ Complete Implementations (all in this file):
 - BranchInfoNode: Branch line with copy button, label, SHA, metadata
 - BranchCommitMessageNode: Commit message display
 - BranchMetadataNode: Branch metadata (modified, created, age)
-- PRNode: PR summary line with status pill and links
 - PRStatusWithJobsNode: PR status information with collapsible CI hierarchy
 - CIJobNode: CI job node with status icon, duration, logs
 - CIStepNode: CI job step node (synthetic, 7px icons)
@@ -106,16 +105,9 @@ from common_dashboard_runtime import (
     prune_partial_raw_log_caches,
 )
 import common
+from common import format_duration_compact
 import common_github
-
-
-def _hash10(s: str) -> str:
-    """Stable short hash for node identity in HTML trees.
-
-    IMPORTANT: Do NOT use Python's built-in hash() or id() for node keys because they are
-    process-dependent and will change across runs, breaking URL state restoration.
-    """
-    return hashlib.sha1(str(s or "").encode("utf-8")).hexdigest()[:10]
+from tree_rendering import _hash10
 
 
 def mock_build_ci_nodes(
@@ -352,20 +344,30 @@ def _html_small_link(*, url: str, label: str) -> str:
     return f'<a href="{url_esc}" style="font-size: 11px; color: #0969da;">{label_esc}</a>'
 
 
-def _aggregate_status(statuses: Iterable[str]) -> str:
-    """Aggregate multiple statuses into a single rollup status."""
-    statuses_list = list(statuses or [])
-    if not statuses_list:
-        return CIStatus.UNKNOWN
-    if any(s == CIStatus.FAILED for s in statuses_list):
-        return CIStatus.FAILED
-    if any(s == CIStatus.IN_PROGRESS for s in statuses_list):
-        return CIStatus.IN_PROGRESS
-    if all(s == CIStatus.SUCCESS for s in statuses_list):
-        return CIStatus.SUCCESS
-    if all(s == CIStatus.SKIPPED for s in statuses_list):
-        return CIStatus.SKIPPED
-    return CIStatus.UNKNOWN
+
+def _is_sha_ancestor_of_main(*, repo_dir: Path, sha: str) -> bool:
+    """Check if *sha* is an ancestor of main (fast-forward merge detection).
+
+    Determines the correct base ref (origin/main vs main) and runs
+    ``git merge-base --is-ancestor``.  Shared by local and remote branch
+    merge-detection helpers.
+    """
+    has_origin_main = subprocess.run(
+        ["git", "-C", str(repo_dir), "show-ref", "--verify", "--quiet", "refs/remotes/origin/main"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    ).returncode == 0
+    base_ref = "origin/main" if has_origin_main else "main"
+    return subprocess.run(
+        ["git", "-C", str(repo_dir), "merge-base", "--is-ancestor", sha, base_ref],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    ).returncode == 0
+
+
+_format_duration_compact = format_duration_compact
 
 
 def _format_age_compact(dt: Optional[datetime]) -> Optional[str]:
@@ -376,44 +378,26 @@ def _format_age_compact(dt: Optional[datetime]) -> Optional[str]:
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=ZoneInfo("UTC"))
     seconds = int((now - dt).total_seconds())
-    if seconds < 60:
-        return f"{seconds}s"
-    if seconds < 3600:
-        return f"{seconds // 60}m"
-    if seconds < 86400:
-        return f"{seconds // 3600}h"
-    return f"{seconds // 86400}d"
+    return format_duration_compact(seconds)
 
 
 
 def _format_age_with_style(dt: Optional[datetime]) -> Optional[str]:
     """Format age with styling: bold if <8h, gray if >1d, lighter gray if >3d."""
-    if dt is None:
+    age_str = _format_age_compact(dt)
+    if age_str is None:
         return None
     now = datetime.now(tz=ZoneInfo("UTC"))
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=ZoneInfo("UTC"))
     seconds = int((now - dt).total_seconds())
-    
-    # Get the age string
-    if seconds < 60:
-        age_str = f"{seconds}s"
-    elif seconds < 3600:
-        age_str = f"{seconds // 60}m"
-    elif seconds < 86400:
-        age_str = f"{seconds // 3600}h"
-    else:
-        age_str = f"{seconds // 86400}d"
-    
-    # Apply styling based on thresholds
     if seconds < 28800:  # <8 hours
         return f'<span style="font-weight: bold;">{age_str}</span>'
-    elif seconds > 259200:  # >3 days
+    if seconds > 259200:  # >3 days
         return f'<span style="color: #d0d7de;">{age_str}</span>'
-    elif seconds > 86400:  # >1 day
+    if seconds > 86400:  # >1 day
         return f'<span style="color: #8c959f;">{age_str}</span>'
-    else:
-        return age_str
+    return age_str
 
 def _format_branch_metadata_suffix(
     *,
@@ -870,42 +854,20 @@ class BranchInfoNode(BranchNode):
         self.created_at = created_at
         self.pr = pr
     
-    def to_tree_vm(self) -> TreeNodeVM:
-        """Convert to TreeNodeVM with structured children (commit message, metadata, then other children)."""
-        # Construct the main branch line HTML
-        parts = []
-        
-        # Copy button
-        clipboard_text = _strip_repo_prefix_for_clipboard(self.label)
-        parts.append(_html_copy_button(clipboard_text=clipboard_text, title=f"Copy branch name: {clipboard_text}"))
-        
-        # Current branch indicator (✪) - show right after copy button, before state tags
-        if self.is_current:
-            parts.append('<span style="color: #0969da; font-size: 14px;" title="Current branch">✪</span>')
-        
-        pr_state_lc = (self.pr.state or "").lower() if self.pr else ""
-        is_merged = bool(self.pr.is_merged) if self.pr else False
-        is_closed_not_merged = bool(self.pr) and pr_state_lc and pr_state_lc != "open" and not is_merged
+    def _compute_ci_status_tags(self) -> List[str]:
+        """Compute CI status tag HTML spans (FAILED/RUNNING/PASSED) from PR children.
 
-        # Branch/CI state tags should sit BETWEEN the copy button and the branch name.
-        # This keeps the left edge stable and makes scan-reading easier.
-        #
-        # Branch state tag (do NOT style/invert the branch name itself).
-        if bool(self.merged_local) or bool(is_merged):
-            parts.append('<span class="branch-tag merged-tag">Merged</span>')
-        elif bool(is_closed_not_merged):
-            # Closed tag should be reverse black/white; reuse existing CSS class.
-            parts.append('<span class="branch-tag closed-branch">Closed</span>')
+        Policy:
+        - If any REQUIRED check failed -> show FAILED only
+        - If anything is running/pending -> show RUNNING
+        - If all REQUIRED checks are already successful -> also show PASSED (can coexist with RUNNING)
+        - Else if all checks are successful and nothing is running -> show PASSED
 
-        # CI status tags derived from check rows when available.
-        #
-        # Policy:
-        # - If any REQUIRED check failed -> show FAILED only
-        # - If anything is running/pending -> show RUNNING
-        # - If all REQUIRED checks are already successful -> also show PASSED (can coexist with RUNNING)
-        # - Else if all checks are successful and nothing is running -> show PASSED
-        #
-        # NOTE: do NOT use object identity for anything here; this must be stable across runs.
+        NOTE: do NOT use object identity for anything here; this must be stable across runs.
+        """
+        if not self.pr:
+            return []
+
         ci_tags: list[str] = []
         if self.pr:
             # Prefer computing pills from the *rendered* CI children so the branch line
@@ -1067,13 +1029,30 @@ class BranchInfoNode(BranchNode):
                         ci_tags = ['<span class="status-indicator status-success">PASSED</span>']
             except Exception:
                 ci_tags = []
-        for t in (ci_tags or []):
+
+        return ci_tags
+
+    def _build_branch_label_html(self, *, is_merged: bool, is_closed_not_merged: bool) -> str:
+        """Build the HTML label for the branch line (copy button, state tags, CI tags, name, SHA)."""
+        parts: list[str] = []
+
+        clipboard_text = _strip_repo_prefix_for_clipboard(self.label)
+        parts.append(_html_copy_button(clipboard_text=clipboard_text, title=f"Copy branch name: {clipboard_text}"))
+
+        if self.is_current:
+            parts.append('<span style="color: #0969da; font-size: 14px;" title="Current branch">\u272a</span>')
+
+        # Branch state tag (Merged / Closed) sits between copy button and branch name.
+        if bool(self.merged_local) or bool(is_merged):
+            parts.append('<span class="branch-tag merged-tag">Merged</span>')
+        elif bool(is_closed_not_merged):
+            parts.append('<span class="branch-tag closed-branch">Closed</span>')
+
+        for t in self._compute_ci_status_tags():
             if t:
                 parts.append(t)
 
-        # Branch name (fixed font; keep normal style regardless of merged/closed).
-        # Strip repo prefix for display (e.g., "ai-dynamo/keivenchang/..." -> "keivenchang/...")
-        # Only bold branches with ✪ (current branches), others use normal weight
+        # Branch name (fixed font; only bold current branches)
         display_name = _strip_repo_prefix_for_clipboard(self.label)
         cls_attr = ' class="current"' if self.is_current else ""
         font_weight = "700" if self.is_current else "400"
@@ -1081,17 +1060,14 @@ class BranchInfoNode(BranchNode):
             f'<span{cls_attr} style="font-family: monospace; font-weight: {font_weight};">{html_module.escape(display_name)}</span>'
         )
 
-        # Merge target (→ base_branch) - show right after branch name
         base_branch_html = _format_base_branch_inline(self.pr)
         if base_branch_html:
             parts.append(base_branch_html)
-        
-        # Grafana link after merge target
+
         grafana_btn = _grafana_branch_button_html(branch_name=self.label) if self.show_grafana else ""
         if grafana_btn:
             parts.append(grafana_btn)
-        
-        # SHA link (if available)
+
         if self.sha and self.commit_url:
             sha_title = _format_commit_tooltip(self.commit_message)
             parts.append(
@@ -1102,19 +1078,24 @@ class BranchInfoNode(BranchNode):
         elif self.sha:
             sha_title = _format_commit_tooltip(self.commit_message)
             parts.append(f'<span style="color: #656d76; font-size: 12px;" title="{sha_title}">[{html_module.escape(self.sha)}]</span>')
-        
-        label_html = " ".join(parts)
-        
-        # Build children: commit message, then metadata, then other children
-        kids = []
-        
-        # 1) Commit message (single line) (if available)
+
+        return " ".join(parts)
+
+    def to_tree_vm(self) -> TreeNodeVM:
+        """Convert to TreeNodeVM with structured children (commit message, metadata, then other children)."""
+        pr_state_lc = (self.pr.state or "").lower() if self.pr else ""
+        is_merged = bool(self.pr.is_merged) if self.pr else False
+        is_closed_not_merged = bool(self.pr) and pr_state_lc and pr_state_lc != "open" and not is_merged
+
+        label_html = self._build_branch_label_html(is_merged=is_merged, is_closed_not_merged=is_closed_not_merged)
+
+        kids: list[TreeNodeVM] = []
+
         if self.commit_message:
             msg_lines = self.commit_message.split("\n")
             msg_display = msg_lines[0] if msg_lines else self.commit_message
             kids.append(BranchCommitMessageNode(label=msg_display, pr=self.pr).to_tree_vm())
 
-        # 2) Metadata (muted) (if available)
         metadata_suffix = _format_branch_metadata_suffix(
             commit_time_pt=self.commit_time_pt,
             commit_datetime=self.commit_datetime,
@@ -1122,129 +1103,30 @@ class BranchInfoNode(BranchNode):
         )
         if metadata_suffix:
             kids.append(BranchMetadataNode(label=metadata_suffix).to_tree_vm())
-        
-        # 3) Conflict/blocking warnings (if PR has issues)
+
         if self.pr:
             if self.pr.conflict_message:
                 kids.append(ConflictWarningNode(label=str(self.pr.conflict_message)).to_tree_vm())
             if self.pr.blocking_message:
                 kids.append(BlockedMessageNode(label=str(self.pr.blocking_message)).to_tree_vm())
-        
-        # 4) Other children (PR status, CI checks, etc.)
+
         for c in (self.children or []):
-            if 'pr_status_node' in locals() and (pr_status_node is not None) and (c is pr_status_node) and ('pr_status_vm' in locals()) and (pr_status_vm is not None):
-                kids.append(pr_status_vm)
-            else:
-                kids.append(c.to_tree_vm())
-        
+            kids.append(c.to_tree_vm())
+
         is_merged_effective = bool(self.merged_local) or bool(is_merged)
         is_closed_effective = bool(is_closed_not_merged)
-        # Collapse by default for merged/closed and special roots (main/remote).
         display_name_lc = _strip_repo_prefix_for_clipboard(self.label).strip().lower()
         is_special_root = display_name_lc in ("main", "master", "remote")
         default_expanded = (not (is_merged_effective or is_closed_effective)) and (not is_special_root)
 
         return TreeNodeVM(
-            # Stable key: branch name + (optional) SHA + (optional) PR number.
             node_key=f"branch_info:{self.label}:{self.sha or ''}:{(self.pr.number if self.pr else '')}",
             label_html=label_html,
             children=kids,
-            collapsible=True,  # Make branches collapsible like local branches
-            # If merged or closed, keep collapsed by default (user can still expand manually).
+            collapsible=True,
             default_expanded=bool(default_expanded),
         )
 
-
-class PRNode(BranchNode):
-    """PR summary line node (shows PR status pill and links)."""
-    
-    def __init__(self, label: str, *, pr: Optional[PRInfo] = None, children: Optional[List[BranchNode]] = None):
-        super().__init__(label=label, children=children, expanded=False)
-        self.pr = pr
-    
-    def to_tree_vm(self) -> TreeNodeVM:
-        """Convert to TreeNodeVM with PR status pill and links."""
-        if self.pr is None:
-            label_html = html_module.escape(self.label) if self.label else "(no PR)"
-            kids = [c.to_tree_vm() for c in (self.children or [])]
-            return TreeNodeVM(
-                node_key=f"pr:none:{_hash10(self.label)}",
-                label_html=label_html,
-                children=kids,
-                collapsible=False,
-                default_expanded=True,
-            )
-        
-        # Build PR line: status pill + PR number + title + base branch
-        parts = []
-        
-        # Status pill - derived from optional check rows (may be empty).
-        rows = list(self.pr.check_rows or [])
-        if rows:
-            summary = summarize_pr_check_rows(rows)
-            counts = summary.counts
-            status_html = compact_ci_summary_html(
-                success_required=int(counts.get("success_required", 0) or 0),
-                success_optional=int(counts.get("success_optional", 0) or 0),
-                failure_required=int(counts.get("failure_required", 0) or 0),
-                failure_optional=int(counts.get("failure_optional", 0) or 0),
-                in_progress_required=int(counts.get("in_progress", 0) or 0),
-                in_progress_optional=0,
-                pending=int(counts.get("pending", 0) or 0),
-                cancelled=int(counts.get("cancelled", 0) or 0),
-            )
-            if status_html:
-                parts.append(status_html)
-        
-        # PR number link
-        pr_link = _format_pr_number_link(self.pr)
-        if pr_link:
-            parts.append(pr_link)
-        
-        # PR title
-        title = str(self.pr.title or "").strip()
-        if title:
-            parts.append(html_module.escape(title))
-        
-        # Base branch (→ base)
-        base_branch_html = _format_base_branch_inline(self.pr)
-        if base_branch_html:
-            parts.append(base_branch_html)
-        
-        label_html = " ".join(parts)
-        kids = [c.to_tree_vm() for c in (self.children or [])]
-        
-        return TreeNodeVM(
-            node_key=f"pr:{self.pr.number}",
-            label_html=label_html,
-            children=kids,
-            collapsible=False,
-            default_expanded=True,
-        )
-
-
-class PRURLNode(BranchNode):
-    """PR URL node (renders as a clickable link)."""
-    
-    def __init__(self, label: str, *, pr: Optional[PRInfo] = None):
-        super().__init__(label=label, children=None, expanded=False)
-        self.pr = pr
-    
-    def to_tree_vm(self) -> TreeNodeVM:
-        """Convert to TreeNodeVM with clickable PR URL."""
-        url = str(self.pr.url or "").strip() if self.pr else ""
-        if url:
-            label_html = _html_small_link(url=url, label=self.label or "View PR")
-        else:
-            label_html = html_module.escape(self.label)
-        
-        return TreeNodeVM(
-            node_key=f"pr_url:{(self.pr.number if self.pr else '')}:{_hash10(url or self.label)}",
-            label_html=label_html,
-            children=[],
-            collapsible=False,
-            default_expanded=False,
-        )
 
 
 class BranchCommitMessageNode(BranchNode):
@@ -1558,88 +1440,47 @@ def _filter_latest_run_attempts(
 # build_ci_nodes_from_pr (moved from show_local_branches.py)
 # ======================================================================
 
-def build_ci_nodes_from_pr(
+
+def _prepare_check_rows(
     pr: PRInfo,
     github_api: GitHubAPIClient,
-    repo_path: Path,
     *,
-    page_root_dir: Optional[Path] = None,
     checks_ttl_s: int = 300,
     skip_fetch: bool = False,
-    validate_raw_logs: bool = True,
-    enable_success_build_test_logs: bool = False,
-) -> List[BranchNode]:
-    """Build a flat list of CI job nodes from a PR's GitHub check runs.
-    
-    Fetches check-run data from GitHub API and creates CIJobNode objects containing:
-    - Full verbatim job names (e.g., "Workflow Name / check-name (event)")
-    - Status (success/failure/pending/running/cancelled)
-    - Duration, URLs, error snippets, log caching
-    - Required vs optional (from branch protection rules)
-    
-    Returns List[BranchNode] where each item is actually a CIJobNode with
-    specific CI job information from the GitHub Actions API.
-    
-    Args:
-        pr: PRInfo object (must have valid pr.number >= 0) - FIRST param for importance
-        github_api: GitHub API client (REQUIRED - no Optional, API is essential for data)
-        repo_path: Path to the repository root
-        page_root_dir: Root directory for caching
-        checks_ttl_s: Cache TTL in seconds
-        skip_fetch: Skip network fetch if True
-        validate_raw_logs: Validate raw logs if True
-        
+) -> Tuple[List[GHPRCheckRow], Set[str], Dict[str, int], Dict[str, int]]:
+    """Fetch check rows for a PR, inject expected-check placeholders, filter reruns, and count names.
+
     Returns:
-        List[BranchNode]: Flat list of CIJobNode objects (no hierarchy).
-        Each node contains specific CI job details from GitHub API.
-        
-    Raises:
-        ValueError: If pr.number is negative (use mock_build_ci_nodes for dummy PRs)
+        (rows, required_set, name_counts, run_attempt_map)
     """
-    if pr.number <= 0:
-        return []
-    
     pr_number = int(pr.number)
-    if pr_number >= 100000000:
-        raise ValueError(f"build_ci_nodes_from_pr called with mock PR number {pr_number}. Use mock_build_ci_nodes instead.")
-    
-    pr_number = int(pr.number)
-    if pr_number >= 100000000:
-        raise ValueError(f"build_ci_nodes called with mock PR number {pr_number}. Use mock_build_ci_nodes instead.")
-    
-    # Ensure required-ness is correct even if PRInfo cache is stale.
-    # This uses `gh` (GraphQL statusCheckRollup isRequired), not our REST budget.
-    # ALWAYS fetch fresh required checks - don't trust cached pr.required_checks.
+
+    # Fetch fresh required checks (GraphQL, not REST budget).
     try:
         required_set = set(github_api.get_required_checks(DYNAMO_OWNER, DYNAMO_REPO, pr_number) or set())
     except (RuntimeError, FileNotFoundError, subprocess.TimeoutExpired, subprocess.SubprocessError) as e:
-        # Fall back to cached PRInfo fields if `gh`-based required-check discovery isn't available.
         logger.warning("Failed to fetch required checks for PR %s; using cached required_checks: %s", pr_number, e)
         required_set = set(pr.required_checks or [])
-    
+
     rows = github_api.get_pr_checks_rows(
         DYNAMO_OWNER,
         DYNAMO_REPO,
         pr_number,
         commit_sha=str(pr.head_sha or ""),
-        head_sha=str(pr.head_sha or ""),  # Pass head_sha to skip wasteful PR fetch (saves 1 API call)
+        head_sha=str(pr.head_sha or ""),
         required_checks=required_set,
         ttl_s=int(checks_ttl_s),
         skip_fetch=bool(skip_fetch),
     )
-    
-    if not rows:
-        return []
 
-    # Inject placeholders for expected checks that are missing from the reported contexts.
-    #
-    # This makes "missing required checks" visible even when GitHub never posts a check context for them.
-    present_norm = {common_github.normalize_check_name(str(r.name or "")) for r in (rows or [])}
-    seen_norm = set(present_norm)
+    if not rows:
+        return [], required_set, {}, {}
+
+    # Inject placeholders for expected checks missing from the reported contexts.
+    seen_norm = {common_github.normalize_check_name(str(r.name or "")) for r in rows}
     expected_required = {str(x) for x in (required_set or set()) if str(x).strip()}
     required_norm = {common_github.normalize_check_name(x) for x in expected_required}
 
-    # Expected checks from branch protection required checks.
     for nm0 in sorted(expected_required, key=lambda s: str(s).lower()):
         n0 = common_github.normalize_check_name(nm0)
         if n0 and n0 not in seen_norm:
@@ -1657,176 +1498,63 @@ def build_ci_nodes_from_pr(
             )
             seen_norm.add(n0)
 
-    # Filter check rows to show only the latest run_attempt for each check (rerun detection).
-    # For checks with the same (name, run_id), keep only the one from the highest run_attempt.
     rows, run_attempt_map = _filter_latest_run_attempts(rows, github_api, DYNAMO_OWNER, DYNAMO_REPO)
 
-    # Note: Sorting is now handled by PASS 4 (sort_by_name_pass) in the centralized pipeline.
-    # No need to pre-sort rows here.
-
-    # If the same check name appears multiple times (reruns), append a stable unique id
-    # so users can tell them apart.
     name_counts: Dict[str, int] = {}
-    for _r in (rows or []):
+    for _r in rows:
         nm0 = str(_r.name or "").strip()
         if nm0:
             name_counts[nm0] = int(name_counts.get(nm0, 0) or 0) + 1
 
-    # CI view: the expanded tree under the PR status line shows the check list and optional subsections.
-    out: List[BranchNode] = []
-    missing_failed_raw_logs: List[Tuple[str, str]] = []
-    any_failed = False
-    rerun_run_id: str = ""
-    for r in rows:
-        nm = str(r.name or "").strip()
-        raw = str(r.status_raw or "").strip().lower()
-        if raw in {"skipped", "skip", "neutral"}:
-            st = "skipped"
-        elif raw in {"pass", "success"}:
-            st = "success"
-        elif raw in {"fail", "failure", "timed_out", "action_required"}:
-            st = "failure"
-            any_failed = True
-        elif raw in {"in_progress", "in progress", "running"}:
-            st = "in_progress"
-        elif raw in {"queued", "pending"}:
-            st = "pending"
-        elif raw in {"cancelled", "canceled"}:
-            # Check if this is a timeout-cancelled (should show as both cancelled + timeout indicator)
-            if r.has_timeout_annotation:
-                st = "cancelled-timeout"  # Special status for timeout
-                any_failed = True  # Timeouts count as failures
-            else:
-                st = "cancelled"
-        else:
-            st = str(r.status_norm or "unknown")
+    return rows, required_set, name_counts, run_attempt_map
 
-        job_url = str(r.url or "").strip()
-        # Capture a run_id for the "Restart failed jobs" affordance.
-        # Prefer the row's parsed run_id (if present), otherwise parse from URL.
-        if (not rerun_run_id) and st == "failure":
-            rid = str(r.run_id or "").strip()
-            if not rid:
-                rid = str(common_github.parse_actions_run_id_from_url(job_url) or "").strip()
-            if rid:
-                rerun_run_id = rid
-        base_dir = (Path(page_root_dir) if page_root_dir is not None else repo_path)
-        raw_href = ""
-        raw_size = 0
-        snippet = ""
-        snippet_categories: List[str] = []
 
-        # For failed GitHub Actions jobs, always materialize a local raw log so the tree shows `[raw log]`.
-        # This is intentionally strict to avoid recurring regressions where errors have no raw logs.
-        # Also download logs for timeout-cancelled jobs so we can analyze what timed out.
-        if (st == "failure" or st == "cancelled-timeout") and (not skip_fetch):
-            try:
-                if extract_actions_job_id_from_url(job_url):
-                    raw_href = (
-                        materialize_job_raw_log_text_local_link(
-                            github_api,
-                            job_url=job_url,
-                            job_name=nm,
-                            owner=DYNAMO_OWNER,
-                            repo=DYNAMO_REPO,
-                            page_root_dir=base_dir,
-                            allow_fetch=True,
-                            assume_completed=_assume_completed_for_check_row(r),
-                        )
-                        or ""
-                    )
-            except (RuntimeError, FileNotFoundError, subprocess.TimeoutExpired, subprocess.SubprocessError) as e:
-                logger.warning("Failed to materialize raw log for %s: %s", job_url, e)
-                raw_href = ""
+def _create_ci_job_node_from_row(
+    r: GHPRCheckRow,
+    *,
+    pr_number: int,
+    name_counts: Dict[str, int],
+    run_attempt_map: Dict[str, int],
+    base_dir: Path,
+    github_api: GitHubAPIClient,
+    skip_fetch: bool,
+    enable_success_build_test_logs: bool,
+) -> Tuple[CIJobNode, str, Optional[Tuple[str, str]]]:
+    """Create a CIJobNode from a single check row.
 
-        if raw_href:
-            try:
-                raw_size = int((base_dir / raw_href).stat().st_size)
-            except OSError:
-                raw_size = 0
-            try:
-                # Use shared snippet cache (ALL dashboards now track snippet stats!)
-                snippet_body, _categories = SNIPPET_CACHE.get_or_compute(raw_log_path=base_dir / raw_href)
-                snippet = str(snippet_body or "")
-                snippet_categories = list(_categories or [])
-            except OSError:
-                snippet = ""
-                snippet_categories = []
-        elif st == "failure":
-            # Only validate failures that correspond to GitHub Actions jobs (others like DCO have no raw log).
+    Returns:
+        (node, normalized_status, missing_log_entry)
+        missing_log_entry is (name, url) when a failed Actions job has no raw log, else None.
+    """
+    nm = str(r.name or "").strip()
+    raw = str(r.status_raw or "").strip().lower()
+    if raw in {"skipped", "skip", "neutral"}:
+        st = "skipped"
+    elif raw in {"pass", "success"}:
+        st = "success"
+    elif raw in {"fail", "failure", "timed_out", "action_required"}:
+        st = "failure"
+    elif raw in {"in_progress", "in progress", "running"}:
+        st = "in_progress"
+    elif raw in {"queued", "pending"}:
+        st = "pending"
+    elif raw in {"cancelled", "canceled"}:
+        st = "cancelled-timeout" if r.has_timeout_annotation else "cancelled"
+    else:
+        st = str(r.status_norm or "unknown")
+
+    job_url = str(r.url or "").strip()
+    raw_href = ""
+    raw_size = 0
+    snippet = ""
+    snippet_categories: List[str] = []
+    missing_log_entry: Optional[Tuple[str, str]] = None
+
+    # Materialize raw logs for failed / timeout-cancelled Actions jobs.
+    if (st in ("failure", "cancelled-timeout")) and (not skip_fetch):
+        try:
             if extract_actions_job_id_from_url(job_url):
-                missing_failed_raw_logs.append((nm, job_url))
-
-        # Disambiguate duplicates by job_id (best) or run_id.
-        display_name = ""
-        if int(name_counts.get(nm, 0) or 0) > 1:
-            jid = str(r.job_id or "").strip()
-            rid = str(r.run_id or "").strip()
-            if jid:
-                display_name = f"{nm} [{jid}]"
-            elif rid:
-                display_name = f"{nm} [run {rid}]"
-        # Placeholder check row (expected but not yet reported).
-        if (not display_name) and (not job_url) and str(r.description or "").strip().lower() == "expected":
-            display_name = EXPECTED_CHECK_PLACEHOLDER_SYMBOL
-        
-        # Build the full verbatim job name with workflow name and event type
-        # Format: "Workflow Name / check-name (event)"
-        # Example: "NVIDIA Dynamo Github Validation / dynamo-status-check (pull_request)"
-        full_job_name = nm
-        workflow_name = str(r.workflow_name or "").strip()
-        event = str(r.event or "").strip()
-        if workflow_name and event:
-            full_job_name = f"{workflow_name} / {nm} ({event})"
-        elif workflow_name:
-            full_job_name = f"{workflow_name} / {nm}"
-
-        # Add timeout marker to error categories if this is a timeout-cancelled job
-        job_error_categories = list(snippet_categories or [])
-        if st == "cancelled-timeout":
-            job_error_categories.insert(0, "exceed-action-timeout")
-        
-        node = CIJobNode(
-            job_id=full_job_name,  # Use full verbatim name as job_id for display
-            display_name=nm,  # Use the original check name as display_name
-            status=str(st or "unknown"),
-            duration=str(r.duration or ""),
-            log_url=job_url,
-            actions_job_id=str(r.job_id or ""),
-            run_id=str(r.run_id or ""),  # Pass run_id for batch prefetching
-            is_required=bool(r.is_required),
-            children=[],
-            # Use base_dir (page_root_dir if provided, else repo_path) so downstream passes can resolve raw_log_href.
-            page_root_dir=base_dir,
-            context_key=f"{pr_number}:{full_job_name}",  # Unique context for caching
-            github_api=github_api,  # Pass github_api for raw log materialization
-            raw_log_href=raw_href,  # Pass pre-materialized raw log data
-            raw_log_size_bytes=raw_size,
-            error_snippet_text=snippet,
-            error_snippet_categories=job_error_categories if job_error_categories else None,
-        )
-        # Store the core job name (without workflow prefix/event suffix) for matching in merge
-        node.core_job_name = nm  # This is the original "name" from the check row
-        
-        # Attach run_attempt info for rerun badge display
-        rid = str(r.run_id or "").strip()
-        if rid and rid in run_attempt_map:
-            node.run_attempt = run_attempt_map[rid]
-        
-        # DEBUG: Verify it was set
-        logger.debug(f"[build_ci_nodes_from_pr] Set core_job_name='{nm}' on node with job_id='{full_job_name[:50]}'")
-
-        # For Build-and-Test jobs, optionally allow raw-log fetch even on success so we can parse pytest test durations.
-        # This covers: Build and Test - dynamo, vllm-build-test, sglang-build-test, trtllm-build-test, etc.
-        # The materialized raw log href is stored on the CIJobNode so add_job_steps_and_tests_pass can access it.
-        # Shared policy with commit history: which jobs should have pytest-per-test details.
-        from common_dashboard_lib import job_name_wants_pytest_details  # local import (avoid cycles)
-
-        is_build_test_job = job_name_wants_pytest_details(nm)
-        # Default: do NOT fetch raw logs for successful build-test jobs (can be slow). Opt-in via flag.
-        if enable_success_build_test_logs and is_build_test_job and str(st or "") == "success" and (not raw_href) and (not skip_fetch):
-            try:
-                additional_raw_href = (
+                raw_href = (
                     materialize_job_raw_log_text_local_link(
                         github_api,
                         job_url=job_url,
@@ -1839,36 +1567,183 @@ def build_ci_nodes_from_pr(
                     )
                     or ""
                 )
-                if additional_raw_href:
-                    node.raw_log_href = additional_raw_href
-                    # Also update size if available
-                    additional_raw_path = base_dir / additional_raw_href
-                    if additional_raw_path.exists():
-                        node.raw_log_size_bytes = additional_raw_path.stat().st_size
-            except (RuntimeError, FileNotFoundError, subprocess.TimeoutExpired, subprocess.SubprocessError, OSError) as e:
-                logger.warning("Failed to materialize raw log (for steps/tests) for %s: %s", job_url, e)
+        except (RuntimeError, FileNotFoundError, subprocess.TimeoutExpired, subprocess.SubprocessError) as e:
+            logger.warning("Failed to materialize raw log for %s: %s", job_url, e)
+            raw_href = ""
 
-        # NOTE: Step/test children are now added by add_job_steps_and_tests_pass in common_dashboard_lib.py
-        # This centralized pass runs as part of run_all_passes() to avoid duplication.
-        # The raw log href is stored on the CIJobNode so the pass can access it later.
+    if raw_href:
+        try:
+            raw_size = int((base_dir / raw_href).stat().st_size)
+        except OSError:
+            raw_size = 0
+        try:
+            snippet_body, _categories = SNIPPET_CACHE.get_or_compute(raw_log_path=base_dir / raw_href)
+            snippet = str(snippet_body or "")
+            snippet_categories = list(_categories or [])
+        except OSError:
+            snippet = ""
+            snippet_categories = []
+    elif st == "failure":
+        if extract_actions_job_id_from_url(job_url):
+            missing_log_entry = (nm, job_url)
 
+    # Disambiguate duplicates by job_id or run_id.
+    display_name = ""
+    if int(name_counts.get(nm, 0) or 0) > 1:
+        jid = str(r.job_id or "").strip()
+        rid = str(r.run_id or "").strip()
+        if jid:
+            display_name = f"{nm} [{jid}]"
+        elif rid:
+            display_name = f"{nm} [run {rid}]"
+    if (not display_name) and (not job_url) and str(r.description or "").strip().lower() == "expected":
+        display_name = EXPECTED_CHECK_PLACEHOLDER_SYMBOL
+
+    # Build full verbatim job name: "Workflow Name / check-name (event)"
+    full_job_name = nm
+    workflow_name = str(r.workflow_name or "").strip()
+    event = str(r.event or "").strip()
+    if workflow_name and event:
+        full_job_name = f"{workflow_name} / {nm} ({event})"
+    elif workflow_name:
+        full_job_name = f"{workflow_name} / {nm}"
+
+    job_error_categories = list(snippet_categories or [])
+    if st == "cancelled-timeout":
+        job_error_categories.insert(0, "exceed-action-timeout")
+
+    node = CIJobNode(
+        job_id=full_job_name,
+        display_name=nm,
+        status=str(st or "unknown"),
+        duration=str(r.duration or ""),
+        log_url=job_url,
+        actions_job_id=str(r.job_id or ""),
+        run_id=str(r.run_id or ""),
+        is_required=bool(r.is_required),
+        children=[],
+        page_root_dir=base_dir,
+        context_key=f"{pr_number}:{full_job_name}",
+        github_api=github_api,
+        raw_log_href=raw_href,
+        raw_log_size_bytes=raw_size,
+        error_snippet_text=snippet,
+        error_snippet_categories=job_error_categories if job_error_categories else None,
+    )
+    node.core_job_name = nm
+
+    rid = str(r.run_id or "").strip()
+    if rid and rid in run_attempt_map:
+        node.run_attempt = run_attempt_map[rid]
+
+    logger.debug(f"[build_ci_nodes_from_pr] Set core_job_name='{nm}' on node with job_id='{full_job_name[:50]}'")
+
+    # For build-test jobs, optionally fetch raw logs on success for pytest duration parsing.
+    from common_dashboard_lib import job_name_wants_pytest_details  # local import (avoid cycles)
+
+    is_build_test_job = job_name_wants_pytest_details(nm)
+    if enable_success_build_test_logs and is_build_test_job and st == "success" and (not raw_href) and (not skip_fetch):
+        try:
+            additional_raw_href = (
+                materialize_job_raw_log_text_local_link(
+                    github_api,
+                    job_url=job_url,
+                    job_name=nm,
+                    owner=DYNAMO_OWNER,
+                    repo=DYNAMO_REPO,
+                    page_root_dir=base_dir,
+                    allow_fetch=True,
+                    assume_completed=_assume_completed_for_check_row(r),
+                )
+                or ""
+            )
+            if additional_raw_href:
+                node.raw_log_href = additional_raw_href
+                additional_raw_path = base_dir / additional_raw_href
+                if additional_raw_path.exists():
+                    node.raw_log_size_bytes = additional_raw_path.stat().st_size
+        except (RuntimeError, FileNotFoundError, subprocess.TimeoutExpired, subprocess.SubprocessError, OSError) as e:
+            logger.warning("Failed to materialize raw log (for steps/tests) for %s: %s", job_url, e)
+
+    return node, st, missing_log_entry
+
+
+def build_ci_nodes_from_pr(
+    pr: PRInfo,
+    github_api: GitHubAPIClient,
+    repo_path: Path,
+    *,
+    page_root_dir: Optional[Path] = None,
+    checks_ttl_s: int = 300,
+    skip_fetch: bool = False,
+    validate_raw_logs: bool = True,
+    enable_success_build_test_logs: bool = False,
+) -> List[BranchNode]:
+    """Build a flat list of CI job nodes from a PR's GitHub check runs.
+
+    Fetches check-run data from GitHub API and creates CIJobNode objects containing:
+    - Full verbatim job names (e.g., "Workflow Name / check-name (event)")
+    - Status (success/failure/pending/running/cancelled)
+    - Duration, URLs, error snippets, log caching
+    - Required vs optional (from branch protection rules)
+
+    Returns List[BranchNode] where each item is actually a CIJobNode with
+    specific CI job information from the GitHub Actions API.
+
+    Raises:
+        ValueError: If pr.number is negative (use mock_build_ci_nodes for dummy PRs)
+    """
+    if pr.number <= 0:
+        return []
+
+    pr_number = int(pr.number)
+    if pr_number >= 100000000:
+        raise ValueError(f"build_ci_nodes_from_pr called with mock PR number {pr_number}. Use mock_build_ci_nodes instead.")
+
+    rows, required_set, name_counts, run_attempt_map = _prepare_check_rows(
+        pr, github_api, checks_ttl_s=checks_ttl_s, skip_fetch=skip_fetch,
+    )
+    if not rows:
+        return []
+
+    base_dir = (Path(page_root_dir) if page_root_dir is not None else repo_path)
+    out: List[BranchNode] = []
+    missing_failed_raw_logs: List[Tuple[str, str]] = []
+    any_failed = False
+    rerun_run_id: str = ""
+
+    for r in rows:
+        node, st, missing_log_entry = _create_ci_job_node_from_row(
+            r,
+            pr_number=pr_number,
+            name_counts=name_counts,
+            run_attempt_map=run_attempt_map,
+            base_dir=base_dir,
+            github_api=github_api,
+            skip_fetch=skip_fetch,
+            enable_success_build_test_logs=enable_success_build_test_logs,
+        )
         out.append(node)
 
-    # Validation gate: if a failed GitHub Actions job has no local raw log, fail generation
-    # (unless the caller explicitly disables it).
+        if st in ("failure", "cancelled-timeout"):
+            any_failed = True
+        if missing_log_entry is not None:
+            missing_failed_raw_logs.append(missing_log_entry)
+        # Capture first failed run_id for the "Restart failed jobs" affordance.
+        if (not rerun_run_id) and st == "failure":
+            job_url = str(r.url or "").strip()
+            rid = str(r.run_id or "").strip()
+            if not rid:
+                rid = str(common_github.parse_actions_run_id_from_url(job_url) or "").strip()
+            if rid:
+                rerun_run_id = rid
+
     if validate_raw_logs and (not skip_fetch) and missing_failed_raw_logs:
         examples = "; ".join([f"{n} -> {u}" for (n, u) in missing_failed_raw_logs[:8]])
         raise RawLogValidationError(
             f"Missing [cached raw log] for {len(missing_failed_raw_logs)} failed GitHub Actions job(s): {examples}"
         )
 
-    # NOTE: Sorting, failure marking, and expansion are handled by the centralized
-    # pipeline in PRStatusWithJobsNode.to_tree_vm() (via run_all_passes in common_dashboard_lib.py)
-
-    # If CI failed and we can identify a GitHub Actions run_id, include an explicit restart link.
-    #
-    # This is shown as a sibling of the checks list, so you can click straight into the workflow run page
-    # (and/or copy a `gh run rerun ... --failed` command).
     if any_failed and rerun_run_id:
         out.append(
             RerunLinkNode(

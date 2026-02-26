@@ -46,7 +46,6 @@ from common_dashboard_lib import (
     EXPECTED_CHECK_PLACEHOLDER_SYMBOL,
     PASS_PLUS_STYLE,
     TreeNodeVM,
-    build_and_test_dynamo_phases_from_actions_job,
     build_page_stats,
     check_line_html,
     ci_should_expand_by_default,
@@ -84,7 +83,6 @@ from common import (
     PhaseTimer,
     dynamo_utils_cache_dir,
     resolve_cache_path,
-    select_shas_for_network_fetch,
 )
 from common_branch_nodes import CIJobNode
 from common_github import (
@@ -100,6 +98,7 @@ from common_build_report import BuildReport
 from common_gitlab import (
     GitLabAPIClient,
 )
+from tree_rendering import _status_norm_from_actions_step
 
 
 # Jinja2 for HTML template rendering
@@ -798,6 +797,126 @@ class CommitHistoryGenerator:
             self.logger.error(f"Failed to get commit history: {e}", exc_info=True)
             return 1
 
+    @staticmethod
+    def _status_norm_for_check_run(*, status: str, conclusion: str) -> str:
+        return _status_norm_from_actions_step(status=status, conclusion=conclusion)
+
+    @staticmethod
+    def _build_gitlab_checks_tree_html(
+        *,
+        sha_full: str,
+        sha_short: str,
+        sha_to_pr_number: Optional[Dict[str, int]],
+        gitlab_pipelines: Optional[Dict[str, dict]],
+        mr_pipelines: Optional[Dict[int, Optional[dict]]],
+        pipeline_job_counts: Optional[Dict],
+    ) -> str:
+        pr_num = sha_to_pr_number.get(sha_full) if sha_to_pr_number else None
+        pipeline = gitlab_pipelines.get(sha_full) if gitlab_pipelines else None
+        if (not pipeline) and pr_num and mr_pipelines:
+            pipeline = mr_pipelines.get(int(pr_num))
+
+        if pipeline and isinstance(pipeline, dict):
+            pid = pipeline.get("id")
+            web_url = str(pipeline.get("web_url", "") or "")
+            status = str(pipeline.get("status", "") or "")
+
+            job_data = pipeline_job_counts.get(pid) if (pipeline_job_counts and pid is not None) else None
+            jobs = []
+            if isinstance(job_data, dict) and "counts" in job_data:
+                jobs = job_data.get("jobs") or []
+
+            children: List[TreeNodeVM] = []
+            for j in sorted(jobs, key=lambda x: (str(x.get("stage", "") or ""), str(x.get("name", "") or ""))):
+                j_stage = str(j.get("stage", "") or "unknown")
+                j_name = str(j.get("name", "") or "")
+                j_status = str(j.get("status", "") or "")
+                label_stage = ".pre" if j_stage == "pre" else j_stage
+                job_label = f"{label_stage}.{j_name}"
+                is_mandatory = (
+                    j_name.startswith(".pre")
+                    or (".pre" in job_label)
+                    or (label_stage in ("pre", ".pre"))
+                    or j_name.startswith("build")
+                    or j_name.startswith("test")
+                )
+                icon = status_icon_html(
+                    status_norm=(
+                        "in_progress"
+                        if j_status == "running"
+                        else (
+                            "pending"
+                            if j_status in ("pending", "created", "waiting_for_resource")
+                            else ("cancelled" if j_status in ("canceled", "cancelled") else ("success" if j_status == "success" else ("failure" if j_status == "failed" else "unknown")))
+                        )
+                    ),
+                    is_required=is_mandatory,
+                )
+                badge = mandatory_badge_html(
+                    is_mandatory=bool(is_mandatory),
+                    status_norm=(
+                        "in_progress"
+                        if j_status == "running"
+                        else (
+                            "pending"
+                            if j_status in ("pending", "created", "waiting_for_resource")
+                            else (
+                                "cancelled"
+                                if j_status in ("canceled", "cancelled")
+                                else ("success" if j_status == "success" else ("failure" if j_status == "failed" else "unknown"))
+                            )
+                        )
+                    ),
+                )
+                children.append(
+                    TreeNodeVM(
+                        node_key=f"gl:{sha_short}:{job_label}",
+                        label_html=(
+                            f'{icon} <span style="font-family: SFMono-Regular, Consolas, Liberation Mono, Menlo, monospace; font-size: 12px;">'
+                            f"{html.escape(job_label)}</span>{badge}"
+                        ),
+                        children=[],
+                        collapsible=True,
+                        default_expanded=False,
+                    )
+                )
+
+            root = TreeNodeVM(
+                node_key=f"gl-root:{sha_full}",
+                label_html=(
+                    f'<span style="font-weight: 600;">GitLab</span> '
+                    f'<a href="{html.escape(web_url, quote=True)}" target="_blank" style="color: #0969da; font-size: 11px; text-decoration: none;">[pipeline]</a> '
+                    f'<span style="color: #57606a; font-size: 12px;">({html.escape(status)})</span>'
+                ),
+                children=children,
+                collapsible=False,
+                default_expanded=True,
+                triangle_tooltip="GitLab",
+            )
+            return render_tree_divs([root])
+
+        # Always return a placeholder tree so the GitLab dropdown doesn't disappear.
+        root = TreeNodeVM(
+            node_key=f"gl-root:{sha_full}",
+            label_html=(
+                f'<span style="font-weight: 600;">GitLab</span> '
+                f'<a href="https://gitlab-master.nvidia.com/dl/ai-dynamo/dynamo/-/commit/{html.escape(sha_full)}" '
+                f'target="_blank" style="color: #0969da; font-size: 11px; text-decoration: none;">[commit]</a>'
+            ),
+            children=[
+                TreeNodeVM(
+                    node_key=f"gl-empty:{sha_full}",
+                    label_html='<span style="color: #57606a; font-size: 12px;">(no pipeline/job data found or cached for this SHA)</span>',
+                    children=[],
+                    collapsible=False,
+                )
+            ],
+            collapsible=False,
+            default_expanded=True,
+            triangle_tooltip="GitLab",
+        )
+        return render_tree_divs([root])
+
     def _generate_commit_history_html(
         self,
         commit_data: List[dict],
@@ -1464,23 +1583,6 @@ class CommitHistoryGenerator:
 
         # (Check line HTML is rendered via the shared dashboard UI helper `check_line_html`)
 
-        def _status_norm_for_check_run(*, status: str, conclusion: str) -> str:
-            s = (status or "").strip().lower()
-            c = (conclusion or "").strip().lower()
-            if c == CIStatus.SKIPPED.value:
-                return CIStatus.SKIPPED.value
-            if c in (CIStatus.SUCCESS.value, CIStatus.NEUTRAL.value):
-                return CIStatus.SUCCESS.value
-            if c in ("failure", "timed_out", "action_required"):
-                return CIStatus.FAILURE.value
-            if c in (CIStatus.CANCELLED.value, "canceled"):
-                return CIStatus.CANCELLED.value
-            if s in (CIStatus.IN_PROGRESS.value, "in progress"):
-                return CIStatus.IN_PROGRESS.value
-            if s in ("queued", CIStatus.PENDING.value):
-                return CIStatus.PENDING.value
-            return CIStatus.UNKNOWN.value
-
         def _build_github_checks_tree_html(*, repo_path: Path, sha_full: str, required_names: List[str]) -> Tuple[str, dict]:
             # INSTRUMENTATION: Track detailed timing breakdown
             timing_breakdown = {}
@@ -1599,7 +1701,7 @@ class CommitHistoryGenerator:
                     continue
                 is_expected_placeholder = bool(cr.get("_expected_placeholder", False))
                 url = "" if is_expected_placeholder else str(cr.get("html_url", "") or cr.get("details_url", "") or "").strip()
-                st = _status_norm_for_check_run(status=str(cr.get("status", "") or ""), conclusion=str(cr.get("conclusion", "") or ""))
+                st = self._status_norm_for_check_run(status=str(cr.get("status", "") or ""), conclusion=str(cr.get("conclusion", "") or ""))
                 is_req = bool(cr.get("is_required", False))
                 run_id = str(cr.get("run_id", "") or "").strip()
                 job_id = str(cr.get("job_id", "") or "").strip()
@@ -1800,113 +1902,6 @@ class CommitHistoryGenerator:
             logger.debug(f"[_build_github_checks_tree_html] {sha_full[:9]}: render_tree_divs returned {len(tree_html)} chars")
             return tree_html, timing_breakdown
 
-        def _build_gitlab_checks_tree_html(*, sha_full: str, sha_short: str) -> str:
-            pr_num = sha_to_pr_number.get(sha_full) if sha_to_pr_number else None
-            pipeline = gitlab_pipelines.get(sha_full) if gitlab_pipelines else None
-            if (not pipeline) and pr_num and mr_pipelines:
-                pipeline = mr_pipelines.get(int(pr_num))
-
-            if pipeline and isinstance(pipeline, dict):
-                pid = pipeline.get("id")
-                web_url = str(pipeline.get("web_url", "") or "")
-                status = str(pipeline.get("status", "") or "")
-
-                job_data = pipeline_job_counts.get(pid) if (pipeline_job_counts and pid is not None) else None
-                jobs = []
-                if isinstance(job_data, dict) and "counts" in job_data:
-                    jobs = job_data.get("jobs") or []
-
-                children: List[TreeNodeVM] = []
-                for j in sorted(jobs, key=lambda x: (str(x.get("stage", "") or ""), str(x.get("name", "") or ""))):
-                    j_stage = str(j.get("stage", "") or "unknown")
-                    j_name = str(j.get("name", "") or "")
-                    j_status = str(j.get("status", "") or "")
-                    label_stage = ".pre" if j_stage == "pre" else j_stage
-                    job_label = f"{label_stage}.{j_name}"
-                    is_mandatory = (
-                        j_name.startswith(".pre")
-                        or (".pre" in job_label)
-                        or (label_stage in ("pre", ".pre"))
-                        or j_name.startswith("build")
-                        or j_name.startswith("test")
-                    )
-                    icon = status_icon_html(
-                        status_norm=(
-                            "in_progress"
-                            if j_status == "running"
-                            else (
-                                "pending"
-                                if j_status in ("pending", "created", "waiting_for_resource")
-                                else ("cancelled" if j_status in ("canceled", "cancelled") else ("success" if j_status == "success" else ("failure" if j_status == "failed" else "unknown")))
-                            )
-                        ),
-                        is_required=is_mandatory,
-                    )
-                    badge = mandatory_badge_html(
-                        is_mandatory=bool(is_mandatory),
-                        status_norm=(
-                            "in_progress"
-                            if j_status == "running"
-                            else (
-                                "pending"
-                                if j_status in ("pending", "created", "waiting_for_resource")
-                                else (
-                                    "cancelled"
-                                    if j_status in ("canceled", "cancelled")
-                                    else ("success" if j_status == "success" else ("failure" if j_status == "failed" else "unknown"))
-                                )
-                            )
-                        ),
-                    )
-                    children.append(
-                        TreeNodeVM(
-                            node_key=f"gl:{sha_short}:{job_label}",
-                            label_html=(
-                                f'{icon} <span style="font-family: SFMono-Regular, Consolas, Liberation Mono, Menlo, monospace; font-size: 12px;">'
-                                f"{html.escape(job_label)}</span>{badge}"
-                            ),
-                            children=[],
-                            collapsible=True,
-                            default_expanded=False,
-                        )
-                    )
-
-                root = TreeNodeVM(
-                    node_key=f"gl-root:{sha_full}",
-                    label_html=(
-                        f'<span style="font-weight: 600;">GitLab</span> '
-                        f'<a href="{html.escape(web_url, quote=True)}" target="_blank" style="color: #0969da; font-size: 11px; text-decoration: none;">[pipeline]</a> '
-                        f'<span style="color: #57606a; font-size: 12px;">({html.escape(status)})</span>'
-                    ),
-                    children=children,
-                    collapsible=False,
-                    default_expanded=True,
-                    triangle_tooltip="GitLab",
-                )
-                return render_tree_divs([root])
-
-            # Always return a placeholder tree so the GitLab dropdown doesn't disappear.
-            root = TreeNodeVM(
-                node_key=f"gl-root:{sha_full}",
-                label_html=(
-                    f'<span style="font-weight: 600;">GitLab</span> '
-                    f'<a href="https://gitlab-master.nvidia.com/dl/ai-dynamo/dynamo/-/commit/{html.escape(sha_full)}" '
-                    f'target="_blank" style="color: #0969da; font-size: 11px; text-decoration: none;">[commit]</a>'
-                ),
-                children=[
-                    TreeNodeVM(
-                        node_key=f"gl-empty:{sha_full}",
-                        label_html='<span style="color: #57606a; font-size: 12px;">(no pipeline/job data found or cached for this SHA)</span>',
-                        children=[],
-                        collapsible=False,
-                    )
-                ],
-                collapsible=False,
-                default_expanded=True,
-                triangle_tooltip="GitLab",
-            )
-            return render_tree_divs([root])
-
         # Attach per-commit trees to commit dictionaries for the template to embed (split GH vs GL).
         #
         # IMPORTANT: do not assign to a local variable named `html` in this function.
@@ -1964,7 +1959,14 @@ class CommitHistoryGenerator:
             sha_full = str(commit_dict.get("sha_full", "") or "")
             sha_short = str(commit_dict.get("sha_short", "") or "")
             t0 = time.monotonic()
-            tree_html = _build_gitlab_checks_tree_html(sha_full=sha_full, sha_short=sha_short)
+            tree_html = self._build_gitlab_checks_tree_html(
+                sha_full=sha_full,
+                sha_short=sha_short,
+                sha_to_pr_number=sha_to_pr_number,
+                gitlab_pipelines=gitlab_pipelines,
+                mr_pipelines=mr_pipelines,
+                pipeline_job_counts=pipeline_job_counts,
+            )
             dt = max(0.0, time.monotonic() - t0)
             return (sha_full, sha_short, tree_html, dt)
 

@@ -10,7 +10,7 @@ instead of local repository directory.
 
 Structure:
 - UserNode (GitHub user) → BranchInfoNode (remote branch) → BranchCommitMessageNode, BranchMetadataNode,
-  PRNode, PRStatusWithJobsNode (PASSED/FAILED pill) → CIJobNode (CI jobs with hierarchy)
+  PRStatusWithJobsNode (PASSED/FAILED pill) → CIJobNode (CI jobs with hierarchy)
 
 IMPORTANT: Architecture Rule
 ---------------------------
@@ -56,37 +56,17 @@ from html_pages.common_dashboard_runtime import prune_dashboard_raw_logs, prune_
 from common_branch_nodes import (  # noqa: E402
     DYNAMO_OWNER,
     DYNAMO_REPO,
-    DYNAMO_REPO_SLUG,
     BranchNode,
     BranchInfoNode,
-    CIJobNode,
-    BranchCommitMessageNode,
-    BranchMetadataNode,
-    PRNode,
     PRStatusWithJobsNode,
-    PRURLNode,
-    RawLogValidationError,
-    RepoNode,
-    RerunLinkNode,
-    _assume_completed_for_check_row,
-    _duration_str_to_seconds,
-    _format_age_compact,
-    _format_branch_metadata_suffix,
-    _format_base_branch_inline,
-    _is_known_required_check,
-    _pr_needs_attention,
-    _strip_repo_prefix_for_clipboard,
+    _is_sha_ancestor_of_main,
     find_local_clone_of_repo,
     generate_html,
-    gitdir_from_git_file,
-    looks_like_git_repo_dir,
-    origin_url_from_git_config,
 )
 from common_dashboard_lib import TreeNodeVM, build_page_stats  # noqa: E402
 from dataclasses import dataclass  # noqa: E402
 from typing import Optional as Opt  # noqa: E402
 import html as html_module  # noqa: E402
-from common_dashboard_lib import github_api_stats_rows  # noqa: E402
 from common_branch_nodes import mock_get_open_pr_info_for_author  # noqa: E402
 from cache_snippet import SNIPPET_CACHE  # noqa: E402
 
@@ -100,23 +80,7 @@ def _detect_branch_merged_to_main(*, repo_path: Path, branch_sha: Optional[str])
     sha = str(branch_sha or "").strip()
     if not sha:
         return False
-    
-    # Check if origin/main exists, otherwise use main
-    has_origin_main = subprocess.run(
-        ["git", "-C", str(repo_path), "show-ref", "--verify", "--quiet", "refs/remotes/origin/main"],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        check=False,
-    ).returncode == 0
-    base_ref = "origin/main" if has_origin_main else "main"
-    
-    # Check if branch SHA is ancestor of main
-    return subprocess.run(
-        ["git", "-C", str(repo_path), "merge-base", "--is-ancestor", sha, base_ref],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        check=False,
-    ).returncode == 0
+    return _is_sha_ancestor_of_main(repo_dir=repo_path, sha=sha)
 
 
 @dataclass
