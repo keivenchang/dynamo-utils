@@ -835,7 +835,7 @@ def create_task_graph(
         command=f"{repo_path}/container/run.sh --image {dev_orig_image_tag} --mount-workspace -v {home_dir}/.cargo:/root/.cargo -v {repo_path}/target/.{framework}:/workspace/target -- bash -c '{cargo_cmd}'",
         input_image=dev_orig_image_tag,
         parents=[f"{framework}-dev-build"],
-        timeout=900.0,  # 15 minutes for compilation
+        timeout=1800.0,  # 30 minutes for compilation
     )
 
     # Level 4: Dev chown (runs after compilation, always runs even if compilation fails)
@@ -956,7 +956,7 @@ docker images {dev_image_tag} --format 'Size: {{{{.Size}}}}'
         command=f"{repo_path}/container/run.sh --image {dev_image_tag} --mount-workspace -v {home_dir}/.cargo:/root/.cargo -v {repo_path}/target/.{framework}:/workspace/target -- bash -c '{cargo_cmd}'",
         input_image=dev_image_tag,
         parents=[f"{framework}-dev-compress"],
-        timeout=900.0,  # 15 minutes for compilation
+        timeout=1800.0,  # 30 minutes for compilation
     )
 
     # Level 7b: Sanity check on the compressed dev image (after compilation)
@@ -988,7 +988,7 @@ docker images {dev_image_tag} --format 'Size: {{{{.Size}}}}'
         command=f"{repo_path}/container/run.sh --image {local_dev_image_tag} --mount-workspace -v {home_dir}/.cargo:/home/dynamo/.cargo -v {repo_path}/target/.{framework}:/workspace/target -- bash -c '{cargo_cmd}'",
         input_image=local_dev_image_tag,
         parents=[f"{framework}-local-dev-build", f"{framework}-dev-chown"],
-        timeout=900.0,  # 15 minutes for compilation
+        timeout=1800.0,  # 30 minutes for compilation
     )
 
     # Level 10: Local-dev sanity check (runs after compilation, same for all frameworks)
@@ -1027,7 +1027,7 @@ def create_task_graph_reuse(
         command=f"{repo_path}/container/run.sh --image {dev_image_tag} --mount-workspace -v {home_dir}/.cargo:/root/.cargo -v {repo_path}/target/.{framework}:/workspace/target -- bash -c '{cargo_cmd}'",
         input_image=dev_image_tag,
         parents=[],
-        timeout=900.0,  # 15 minutes for compilation
+        timeout=1800.0,  # 30 minutes for compilation
     )
 
     tasks[f"{framework}-dev-compress-sanity"] = CommandTask(
