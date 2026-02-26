@@ -265,7 +265,7 @@ class ImageRebuilder:
                 str(self.build_script),
                 "--repo-path", str(self.repo_path),
                 "--parallel",
-                "--run-ignore-lock",
+                "--run-no-matter-what",
             ]
 
             if self.email:

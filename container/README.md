@@ -35,27 +35,27 @@ container/
 | Goal | Command |
 |------|---------|
 | Dry run | `--repo-path <path> --dry-run -v` |
-| Build at image-SHA origin (HEAD) | `--repo-path <path> --parallel --skip --run-ignore-lock -v` |
-| Build specific commit | `--repo-path <path> --commit-sha <commit> --parallel --skip --run-ignore-lock -v` |
+| Build at image-SHA origin (HEAD) | `--repo-path <path> --parallel --skip --run-no-matter-what -v` |
+| Build specific commit | `--repo-path <path> --commit-sha <commit> --parallel --skip --run-no-matter-what -v` |
 | Reuse dev if image exists | `--repo-path <path> --reuse-dev-if-image-exists --parallel --skip -v` |
-| Sanity only | `--repo-path <path> --sanity-check-only --framework sglang --run-ignore-lock` |
+| Sanity only | `--repo-path <path> --sanity-check-only --framework sglang --run-no-matter-what` |
 
-Common flags: `--repo-path` (required), `--commit-sha`, `--parallel`, `--skip`, `--run-ignore-lock`, `--no-upload`, `--no-compress`, `-v`, `--dry-run`.
+Common flags: `--repo-path` (required), `--commit-sha`, `--parallel`, `--skip`, `--run-no-matter-what`, `--no-upload`, `--no-compress`, `-v`, `--dry-run`.
 
 ### Usage (examples)
 
 ```bash
 # Quick test (single framework)
-python3 container/build_images.py --repo-path ~/dynamo/dynamo_ci --sanity-check-only --framework sglang --run-ignore-lock
+python3 container/build_images.py --repo-path ~/dynamo/dynamo_ci --sanity-check-only --framework sglang --run-no-matter-what
 
 # Parallel build with skip
-python3 container/build_images.py --repo-path ~/dynamo/dynamo_ci --skip-action-if-already-passed --parallel --run-ignore-lock
+python3 container/build_images.py --repo-path ~/dynamo/dynamo_ci --skip-action-if-already-passed --parallel --run-no-matter-what
 
 # Full build
-python3 container/build_images.py --repo-path ~/dynamo/dynamo_ci --parallel --run-ignore-lock
+python3 container/build_images.py --repo-path ~/dynamo/dynamo_ci --parallel --run-no-matter-what
 
 # Without upload and compress (both are on by default)
-python3 container/build_images.py --repo-path ~/dynamo/dynamo_ci --parallel --skip --run-ignore-lock --no-upload --no-compress
+python3 container/build_images.py --repo-path ~/dynamo/dynamo_ci --parallel --skip --run-no-matter-what --no-upload --no-compress
 ```
 
 ### Commit SHA and image SHA
@@ -81,10 +81,10 @@ If you pass `--commit-sha <commit>` (e.g. `--commit-sha 6d3e0137c`), the script 
 
 ```bash
 # Build at image-SHA origin (default: use HEAD, resolve to introducing commit, then build)
-python3 container/build_images.py --repo-path ~/dynamo/dynamo_ci --parallel --skip --run-ignore-lock -v
+python3 container/build_images.py --repo-path ~/dynamo/dynamo_ci --parallel --skip --run-no-matter-what -v
 
 # Build a specific commit as-is (no traverse-back)
-python3 container/build_images.py --repo-path ~/dynamo/dynamo_ci --commit-sha 6d3e0137c --parallel --skip --run-ignore-lock -v
+python3 container/build_images.py --repo-path ~/dynamo/dynamo_ci --commit-sha 6d3e0137c --parallel --skip --run-no-matter-what -v
 ```
 
 ### Reuse dev images (`--reuse-dev-if-image-exists`)
@@ -109,6 +109,15 @@ python3 container/build_images.py --repo-path ~/dynamo/dynamo_ci --commit-sha fd
 - **Dev compress** squashes the dev image layers to reduce size. It is **on by default**.
 - To disable upload, pass **`--no-upload`**. To disable compress, pass **`--no-compress`**.
 - **Cron**: Upload and compress run automatically. To disable either, add the corresponding `--no-*` flag.
+
+### Skip behavior (incremental builds)
+
+Two tracking files in the repo root control what gets skipped on re-runs:
+
+- **`.last_docker_image_sha`**: Stores the SHA256 of `container/` contents from the last build. If unchanged, the entire build is skipped (no Docker image rebuild needed).
+- **`.last_compilation_sha`**: Stores the 9-char commit SHA from the last successful compilation. If unchanged, all compilation and chown tasks are skipped (artifacts are still valid).
+
+This means a re-run of the same commit does nothing, and a re-run after a code-only change (no `container/` changes) skips Docker builds but re-compiles. Pass `--run-no-matter-what` to bypass both checks.
 
 ### Features
 

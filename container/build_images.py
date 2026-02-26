@@ -1882,9 +1882,10 @@ def parse_args() -> argparse.Namespace:
         help="Show what would be executed without running commands",
     )
     parser.add_argument(
-        "--run-ignore-lock",
+        "--run-no-matter-what", "--run-ignore-lock",
         action="store_true",
-        help="Run-ignore-lock: force run even if Image SHA (hash of container/ contents; formerly shown as CDS) hasn't changed (bypasses lock check)",
+        dest="run_no_matter_what",
+        help="Force run regardless of: (1) lock file from a previous run, (2) unchanged Docker image SHA, (3) unchanged compilation SHA (.last_compilation_sha)",
     )
     parser.add_argument(
         "--reuse-dev-if-image-exists",
@@ -2223,25 +2224,28 @@ def execute_task_sequential(
 
     # DRY-RUN: Just print what would be executed
     if dry_run:
-        logger.info(f"[{task_id}] {task.description}")
-
-        # For BuildTask, show both build.sh command AND docker build command
-        if isinstance(task, BuildTask):
-            logger.info(f"  1. {sanitize_token(task.command)}")
-            docker_cmd = task.extract_docker_command_from_build_dryrun(repo_path)
-            if docker_cmd:
-                docker_lines = docker_cmd.split('\n')
-                for i, line in enumerate(docker_lines):
-                    if i == 0:
-                        logger.info(f"  2. {sanitize_token(line)}")
-                    else:
-                        logger.info(f"     {sanitize_token(line)}")
+        if task.status == TaskStatus.SKIPPED:
+            logger.info(f"[{task_id}] SKIPPED: {task.error_message or 'pre-skipped'}")
         else:
-            logger.info(f"→ {sanitize_token(task.get_command(repo_path))}")
-        logger.info("")
+            logger.info(f"[{task_id}] {task.description}")
 
-        # Mark as success for dry-run traversal
-        task.mark_status_as(TaskStatus.PASSED)
+            # For BuildTask, show both build.sh command AND docker build command
+            if isinstance(task, BuildTask):
+                logger.info(f"  1. {sanitize_token(task.command)}")
+                docker_cmd = task.extract_docker_command_from_build_dryrun(repo_path)
+                if docker_cmd:
+                    docker_lines = docker_cmd.split('\n')
+                    for i, line in enumerate(docker_lines):
+                        if i == 0:
+                            logger.info(f"  2. {sanitize_token(line)}")
+                        else:
+                            logger.info(f"     {sanitize_token(line)}")
+            else:
+                logger.info(f"→ {sanitize_token(task.get_command(repo_path))}")
+            logger.info("")
+
+            # Mark as success for dry-run traversal
+            task.mark_status_as(TaskStatus.PASSED)
 
         # Process children
         for child_id in task.children:
@@ -2652,6 +2656,12 @@ def execute_task_parallel(
 
         # DRY-RUN: Just print
         if dry_run:
+            if task.status == TaskStatus.SKIPPED:
+                with lock:
+                    logger.info(f"[{task_id}] SKIPPED: {task.error_message or 'pre-skipped'}")
+                    executed_tasks.add(task_id)
+                return True
+
             with lock:
                 logger.info(f"[{task_id}] {task.description}")
                 if isinstance(task, BuildTask):
@@ -4237,7 +4247,7 @@ def main() -> int:
     # Lock file lives outside the repo so git operations (reset, pull, checkout) can't destroy it.
     _lock_hash = hashlib.md5(str(repo_path.resolve()).encode()).hexdigest()[:8]
     lock_file = Path(f"/tmp/build_images.{_lock_hash}.lock")
-    if lock_file.exists() and not args.run_ignore_lock:
+    if lock_file.exists() and not args.run_no_matter_what:
         try:
             with open(lock_file, 'r') as f:
                 lock_info = f.read().strip().split('\n')
@@ -4306,7 +4316,7 @@ def main() -> int:
                 git_utils_temp.repo.git.reset('--hard', 'HEAD')
 
                 # Clean untracked files (except Docker image SHA tracking files)
-                sha_files_keep = {DynamoRepositoryUtils.DOCKER_IMAGE_SHA_FILE, DynamoRepositoryUtils.DOCKER_IMAGE_SHA_FILE_COMPAT, DynamoRepositoryUtils.COMPILATION_SHA_FILE}
+                sha_files_keep = {DynamoRepositoryUtils.DOCKER_IMAGE_SHA_FILE, DynamoRepositoryUtils.COMPILATION_SHA_FILE}
                 untracked = git_utils_temp.repo.untracked_files
                 if untracked:
                     logger.info(f"Removing {len(untracked)} untracked file(s)...")
@@ -4476,7 +4486,7 @@ def main() -> int:
         # Only check in non-dry-run mode to avoid writing .last_docker_image_sha
         # Skip this check in --no-build and reuse mode (no builds to skip)
         dynamo_repo_utils = DynamoRepositoryUtils(repo_path)
-        if not dynamo_repo_utils.check_if_rebuild_needed(force_run=bool(args.run_ignore_lock)):
+        if not dynamo_repo_utils.check_if_rebuild_needed(force_run=bool(args.run_no_matter_what)):
             logger.info("✅ No rebuild needed - exiting")
             return 0
 
@@ -4641,6 +4651,37 @@ def main() -> int:
 
         runnable = [tid for tid, t in all_tasks.items() if tid not in build_task_ids]
         logger.info(f"Will run {len(runnable)} tasks (compilation + sanity + chown)")
+
+    # Skip compilation if stored .last_compilation_sha matches current commit
+    dynamo_repo_utils_comp = DynamoRepositoryUtils(repo_path)
+    stored_comp_sha = dynamo_repo_utils_comp.get_stored_compilation_sha()
+    if stored_comp_sha and stored_comp_sha == commit_sha_9 and not args.run_no_matter_what:
+        comp_skip_ids = set()
+        for task_id in all_tasks:
+            if 'compilation' in task_id or 'chown' in task_id:
+                comp_skip_ids.add(task_id)
+
+        if comp_skip_ids:
+            logger.info(f"Compilation SHA unchanged ({commit_sha_9}) — skipping {len(comp_skip_ids)} compilation/chown tasks")
+            for task_id in comp_skip_ids:
+                all_tasks[task_id].mark_status_as(TaskStatus.SKIPPED, f"Compilation SHA unchanged ({commit_sha_9})")
+
+            for task_id, task in all_tasks.items():
+                if task_id not in comp_skip_ids:
+                    task.parents = [p for p in task.parents if p not in comp_skip_ids]
+    elif stored_comp_sha and stored_comp_sha != commit_sha_9 and not args.dry_run:
+        # Compilation SHA changed — remove stale PASSED markers for compilation/chown/sanity
+        # so --skip-action-if-already-passed doesn't skip tasks that must re-run.
+        stale_cleared = 0
+        for task_id, task in all_tasks.items():
+            if 'compilation' in task_id or 'chown' in task_id or 'sanity' in task_id:
+                if task.log_file:
+                    passed_marker = task.log_file.with_suffix(f'.{MARKER_PASSED}')
+                    if passed_marker.exists():
+                        passed_marker.unlink()
+                        stale_cleared += 1
+        if stale_cleared:
+            logger.info(f"Compilation SHA changed ({stored_comp_sha} → {commit_sha_9}) — cleared {stale_cleared} stale PASSED markers")
 
     # Execute tasks in dependency order
     mode = "parallel" if args.parallel else "sequential"

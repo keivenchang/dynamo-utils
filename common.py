@@ -843,7 +843,6 @@ class DynamoRepositoryUtils(BaseUtils):
         return (origin[:9], target_sha[:6])
 
     DOCKER_IMAGE_SHA_FILE = ".last_docker_image_sha"
-    DOCKER_IMAGE_SHA_FILE_COMPAT = ".last_build_composite_sha"  # TODO: remove after 2026-02-25
     COMPILATION_SHA_FILE = ".last_compilation_sha"
 
     def get_stored_docker_image_sha(self) -> str:
@@ -854,14 +853,9 @@ class DynamoRepositoryUtils(BaseUtils):
             Stored SHA string, or empty string if not found
         """
         sha_file = self.repo_path / self.DOCKER_IMAGE_SHA_FILE
-        compat_file = self.repo_path / self.DOCKER_IMAGE_SHA_FILE_COMPAT
         if sha_file.exists():
             stored = sha_file.read_text().strip()
             self.logger.debug(f"Found stored Docker image SHA: {stored[:12]}")
-            return stored
-        if compat_file.exists() and not compat_file.is_symlink():
-            stored = compat_file.read_text().strip()
-            self.logger.debug(f"Found stored Docker image SHA (compat): {stored[:12]}")
             return stored
         self.logger.debug("No stored Docker image SHA found")
         return ""
@@ -874,11 +868,7 @@ class DynamoRepositoryUtils(BaseUtils):
             sha: Docker image SHA to store
         """
         sha_file = self.repo_path / self.DOCKER_IMAGE_SHA_FILE
-        compat_file = self.repo_path / self.DOCKER_IMAGE_SHA_FILE_COMPAT
         sha_file.write_text(sha)
-        if compat_file.exists() or compat_file.is_symlink():
-            compat_file.unlink()
-        compat_file.symlink_to(self.DOCKER_IMAGE_SHA_FILE)
         self.logger.info(f"Stored Docker image SHA: {sha[:12]}")
 
     def get_stored_compilation_sha(self) -> str:
@@ -923,11 +913,11 @@ class DynamoRepositoryUtils(BaseUtils):
         if stored_sha:
             if current_sha == stored_sha:
                 if force_run:
-                    self.logger.info(f"Docker image SHA unchanged ({current_sha[:12]}) but --run-ignore-lock specified - proceeding")
+                    self.logger.info(f"Docker image SHA unchanged ({current_sha[:12]}) but --run-no-matter-what specified - proceeding")
                     return True
                 else:
                     self.logger.info(f"Docker image SHA unchanged ({current_sha[:12]}) - skipping rebuild")
-                    self.logger.info("Use --run-ignore-lock to force rebuild")
+                    self.logger.info("Use --run-no-matter-what to force rebuild")
                     return False  # No rebuild needed
             else:
                 self.logger.info("Docker image SHA changed:")

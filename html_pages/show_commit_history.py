@@ -5,7 +5,7 @@ SPDX-License-Identifier: Apache-2.0
 
 Dynamo Commit History Generator - Standalone Tool
 
-Generates commit history with Image SHA (hash of container/ contents; previously shown as CDS) and Docker image detection.
+Generates commit history with Image SHA (hash of container/ contents) and Docker image detection.
 HTML-only dashboard generator.
 """
 
@@ -377,7 +377,7 @@ class CommitHistoryGenerator:
         logs_dir: Optional[Path] = None,
         export_pipeline_pr_csv: Optional[Path] = None,
     ) -> int:
-        """Show recent commit history with Image SHA (hash of container/ contents; previously shown as CDS)
+        """Show recent commit history with Image SHA (hash of container/ contents)
 
         Args:
             max_commits: Maximum number of commits to show

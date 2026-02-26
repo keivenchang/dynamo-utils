@@ -381,17 +381,17 @@ COMMITS=(
 
 **Quick Test (Single Framework)**:
 ```bash
-python3 container/build_images.py --sanity-check-only --framework sglang --run-ignore-lock
+python3 container/build_images.py --sanity-check-only --framework sglang --run-no-matter-what
 ```
 
 **Parallel Build with Skip**:
 ```bash
-python3 container/build_images.py --reuse-dev-if-image-exists --parallel --run-ignore-lock
+python3 container/build_images.py --reuse-dev-if-image-exists --parallel --run-no-matter-what
 ```
 
 **Full Build**:
 ```bash
-python3 container/build_images.py --parallel --run-ignore-lock
+python3 container/build_images.py --parallel --run-no-matter-what
 ```
 
 ## 4.3 Go Operator Linting
