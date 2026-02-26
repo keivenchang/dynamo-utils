@@ -57,6 +57,7 @@ Cache:
 
 from __future__ import annotations
 
+import logging
 import sys
 import time
 from pathlib import Path
@@ -212,7 +213,13 @@ class PRHeadSHACached(CachedResourceBase[Optional[str]]):
         repo = str(kwargs["repo"])
         prn = int(kwargs["pr_number"])
 
-        pr = self.api.get(f"/repos/{owner}/{repo}/pulls/{prn}", timeout=10) or {}
+        try:
+            pr = self.api.get(f"/repos/{owner}/{repo}/pulls/{prn}", timeout=10) or {}
+        except Exception as exc:
+            if "404" in str(exc):
+                logging.getLogger(__name__).warning(f"PR #{prn} not found (404), skipping: {exc}")
+                return None, {"state": "not_found"}
+            raise
         head_sha = (((pr.get("head") or {}) if isinstance(pr, dict) else {}) or {}).get("sha")
         head_sha_s = str(head_sha or "").strip()
         state = str(pr.get("state", "") or "").strip() if isinstance(pr, dict) else ""
