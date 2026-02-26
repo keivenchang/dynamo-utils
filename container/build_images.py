@@ -3771,45 +3771,40 @@ def generate_build_report(
                 input_image=target_data.input_image,
             ))
 
-        # Registry images from dev-upload target
-        upload_data: FrameworkTargetData = fw_data.get('dev-upload', FrameworkTargetData())
-        if upload_data.output_image:
-            # output_image is the full gitlab registry URL
-            gitlab_location = upload_data.output_image
-            # Derive image_name (repo:tag) from location: last segment after "/"
-            image_name = gitlab_location.rsplit("/", 1)[-1] if "/" in gitlab_location else gitlab_location
-            # Derive tag from image_name: part after ":"
-            tag = image_name.split(":", 1)[-1] if ":" in image_name else image_name
+        # Registry images from dev-upload target -- only record if the upload
+        # actually ran and succeeded.  Reuse builds skip dev-upload but still
+        # have output_image set at task-creation time; recording those would
+        # create bogus entries for tags that don't exist in GitLab.
+        upload_task_id = f"{framework}-dev-upload"
+        upload_task = all_tasks.get(upload_task_id)
+        if upload_task and upload_task.status == TaskStatus.PASSED:
+            upload_data: FrameworkTargetData = fw_data.get('dev-upload', FrameworkTargetData())
+            if upload_data.output_image:
+                gitlab_location = upload_data.output_image
+                image_name = gitlab_location.rsplit("/", 1)[-1] if "/" in gitlab_location else gitlab_location
+                tag = image_name.split(":", 1)[-1] if ":" in image_name else image_name
+                pushed_at = (
+                    datetime.fromtimestamp(upload_task.end_time).isoformat()
+                    if upload_task.end_time else None
+                )
 
-            push_status = "SKIP"
-            pushed_at = None
-            if upload_data.build:
-                push_status = _normalize_status(upload_data.build.status)
-                # If the upload task completed, use its end_time as pushed_at
-                upload_task_id = f"{framework}-dev-upload"
-                upload_task = all_tasks.get(upload_task_id)
-                if upload_task and upload_task.end_time and upload_task.status == TaskStatus.PASSED:
-                    pushed_at = datetime.fromtimestamp(upload_task.end_time).isoformat()
+                compress_data: FrameworkTargetData = fw_data.get('dev-compress', FrameworkTargetData())
+                if compress_data.image_size:
+                    dev_size_bytes = _parse_size_to_bytes(compress_data.image_size)
+                else:
+                    dev_data: FrameworkTargetData = fw_data.get('dev', FrameworkTargetData())
+                    dev_size_bytes = _parse_size_to_bytes(dev_data.image_size)
 
-            # Get dev image size: prefer compressed size (what was actually uploaded)
-            # over the original dev-build size (which is the uncompressed dev-orig image)
-            compress_data: FrameworkTargetData = fw_data.get('dev-compress', FrameworkTargetData())
-            if compress_data.image_size:
-                dev_size_bytes = _parse_size_to_bytes(compress_data.image_size)
-            else:
-                dev_data: FrameworkTargetData = fw_data.get('dev', FrameworkTargetData())
-                dev_size_bytes = _parse_size_to_bytes(dev_data.image_size)
-
-            registry_images.append(RegistryImage(
-                location=gitlab_location,
-                image_name=image_name,
-                tag=tag,
-                framework=framework,
-                target="dev",
-                push_status=push_status,
-                size_bytes=dev_size_bytes,
-                pushed_at=pushed_at,
-            ))
+                registry_images.append(RegistryImage(
+                    location=gitlab_location,
+                    image_name=image_name,
+                    tag=tag,
+                    framework=framework,
+                    target="dev",
+                    push_status="PASS",
+                    size_bytes=dev_size_bytes,
+                    pushed_at=pushed_at,
+                ))
 
         framework_results.append(FrameworkResult(
             framework=framework,
