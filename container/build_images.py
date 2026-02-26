@@ -1515,10 +1515,14 @@ class BaseTask(ABC):
         else:
             duration = 0.0
 
+        from datetime import datetime as _dt
+        ended_str = _dt.fromtimestamp(self.end_time).isoformat() if self.end_time else _dt.now().isoformat()
+
         footer = f"\n"
         footer += f"-" * 80 + "\n"
         footer += f"Task:     {self.task_id}\n"
         footer += f"Duration: {duration:.2f}s\n"
+        footer += f"Ended:    {ended_str}\n"
         footer += f"Status:   {'SUCCESS' if success else 'FAILED'} (exit code: {self.exit_code if self.exit_code is not None else (0 if success else 1)})\n"
         footer += f"-" * 80 + "\n"
         return footer
