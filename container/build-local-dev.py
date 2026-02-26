@@ -275,7 +275,7 @@ def main() -> None:
 
     def suggest_run_command(tag: str) -> None:
         base = f"container/run.sh --image {tag} -it --mount-workspace --hf-home ~/.cache/huggingface"
-        with_sanity = f"{base} -- bash -c 'python /workspace/deploy/sanity_check.py && exec bash'"
+        with_sanity = f"{base} -- bash -c 'python /workspace/deploy/sanity_check.py; exec bash'"
         shell_only = f"{base} -- bash"
         print(f"\nYou can now use the image. Here are some commands you can try:")
         print(f"  (with sanity check)  {with_sanity}")
