@@ -4333,7 +4333,9 @@ def main() -> int:
                 origin = git_utils_temp.repo.remotes.origin
                 logger.info("Pulling latest from origin/main...")
                 origin.pull('main')
-                logger.info("✓ Successfully pulled latest code from main")
+                pulled_sha = git_utils_temp.repo.head.commit.hexsha[:9]
+                logger.info(f"✓ Successfully pulled latest code from main (HEAD: {pulled_sha})")
+                args.commit_sha_9 = pulled_sha
             except Exception as e:
                 logger.error(f"Failed to pull latest code: {e}")
                 return 1
