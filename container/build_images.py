@@ -828,22 +828,32 @@ def create_task_graph(
     # - CARGO_BUILD_JOBS=$(nproc): Parallel compilation
     # - CARGO_PROFILE_DEV_CODEGEN_UNITS=256: More parallel code generation
     cargo_cmd = "CARGO_INCREMENTAL=1 CARGO_PROFILE_DEV_OPT_LEVEL=0 CARGO_BUILD_JOBS=$(nproc) CARGO_PROFILE_DEV_CODEGEN_UNITS=256 cargo build --profile dev --features dynamo-llm/block-manager && cd /workspace/lib/bindings/python && CARGO_INCREMENTAL=1 CARGO_PROFILE_DEV_OPT_LEVEL=0 CARGO_BUILD_JOBS=$(nproc) CARGO_PROFILE_DEV_CODEGEN_UNITS=256 maturin develop --uv && uv pip install -e ."
-    # Compilation runs after dev-build (before sanity), same for all frameworks
+    chown_cmd = f"sudo chown -R $(id -u):$(id -g) {repo_path}/target/.{framework} {repo_path}/lib/bindings/python {home_dir}/.cargo || true"
+
+    # Level 3a: Pre-chown before dev compilation (fix ownership from previous root-owned builds)
+    tasks[f"{framework}-dev-pre-chown"] = CommandTask(
+        task_id=f"{framework}-dev-pre-chown",
+        description=f"Fix file ownership before {framework.upper()} dev compilation",
+        command=chown_cmd,
+        parents=[f"{framework}-dev-build"],
+        timeout=60.0,
+    )
+
+    # Compilation runs after pre-chown (before sanity), same for all frameworks
     tasks[f"{framework}-dev-compilation"] = CommandTask(
         task_id=f"{framework}-dev-compilation",
         description=f"Run workspace compilation in {framework.upper()} dev container",
         command=f"{repo_path}/container/run.sh --image {dev_orig_image_tag} --mount-workspace -v {home_dir}/.cargo:/root/.cargo -v {repo_path}/target/.{framework}:/workspace/target -- bash -c '{cargo_cmd}'",
         input_image=dev_orig_image_tag,
-        parents=[f"{framework}-dev-build"],
+        parents=[f"{framework}-dev-pre-chown"],
         timeout=1800.0,  # 30 minutes for compilation
     )
 
-    # Level 4: Dev chown (runs after compilation, always runs even if compilation fails)
+    # Level 4: Dev post-chown (runs after compilation, always runs even if compilation fails)
     tasks[f"{framework}-dev-chown"] = CommandTask(
         task_id=f"{framework}-dev-chown",
         description=f"Fix file ownership after {framework.upper()} dev compilation",
-        # chown can race with build outputs being deleted/renamed; don't fail the task on ENOENT.
-        command=f"sudo chown -R $(id -u):$(id -g) {repo_path}/target/.{framework} {repo_path}/lib/bindings/python {home_dir}/.cargo || true",
+        command=chown_cmd,
         parents=[f"{framework}-dev-compilation"],
         run_even_if_deps_fail=True,
         timeout=60.0,
@@ -949,14 +959,33 @@ docker images {dev_image_tag} --format 'Size: {{{{.Size}}}}'
         timeout=5400.0,  # 90 minutes for compress (export/import)
     )
 
+    # Level 7: Pre-chown before compressed dev compilation
+    tasks[f"{framework}-dev-compress-pre-chown"] = CommandTask(
+        task_id=f"{framework}-dev-compress-pre-chown",
+        description=f"Fix file ownership before compressed {framework.upper()} dev compilation",
+        command=chown_cmd,
+        parents=[f"{framework}-dev-compress"],
+        timeout=60.0,
+    )
+
     # Level 7: Compilation in the compressed dev image (verify cargo build works after squash)
     tasks[f"{framework}-dev-compress-compilation"] = CommandTask(
         task_id=f"{framework}-dev-compress-compilation",
         description=f"Run workspace compilation in compressed {framework.upper()} dev container",
         command=f"{repo_path}/container/run.sh --image {dev_image_tag} --mount-workspace -v {home_dir}/.cargo:/root/.cargo -v {repo_path}/target/.{framework}:/workspace/target -- bash -c '{cargo_cmd}'",
         input_image=dev_image_tag,
-        parents=[f"{framework}-dev-compress"],
+        parents=[f"{framework}-dev-compress-pre-chown"],
         timeout=1800.0,  # 30 minutes for compilation
+    )
+
+    # Level 7b: Post-chown after compressed dev compilation
+    tasks[f"{framework}-dev-compress-chown"] = CommandTask(
+        task_id=f"{framework}-dev-compress-chown",
+        description=f"Fix file ownership after compressed {framework.upper()} dev compilation",
+        command=chown_cmd,
+        parents=[f"{framework}-dev-compress-compilation"],
+        run_even_if_deps_fail=True,
+        timeout=60.0,
     )
 
     # Level 7b: Sanity check on the compressed dev image (after compilation)
@@ -981,13 +1010,22 @@ docker images {dev_image_tag} --format 'Size: {{{{.Size}}}}'
         timeout=3600.0,  # 60 minutes for builds
     )
 
-    # Level 9: Local-dev compilation (runs after local-dev-build + dev-chown, same for all frameworks)
+    # Level 9a: Pre-chown before local-dev compilation
+    tasks[f"{framework}-local-dev-pre-chown"] = CommandTask(
+        task_id=f"{framework}-local-dev-pre-chown",
+        description=f"Fix file ownership before {framework.upper()} local-dev compilation",
+        command=chown_cmd,
+        parents=[f"{framework}-local-dev-build", f"{framework}-dev-compress-chown"],
+        timeout=60.0,
+    )
+
+    # Level 9: Local-dev compilation (runs after local-dev-build + pre-chown)
     tasks[f"{framework}-local-dev-compilation"] = CommandTask(
         task_id=f"{framework}-local-dev-compilation",
         description=f"Run workspace compilation in {framework.upper()} local-dev container",
         command=f"{repo_path}/container/run.sh --image {local_dev_image_tag} --mount-workspace -v {home_dir}/.cargo:/home/dynamo/.cargo -v {repo_path}/target/.{framework}:/workspace/target -- bash -c '{cargo_cmd}'",
         input_image=local_dev_image_tag,
-        parents=[f"{framework}-local-dev-build", f"{framework}-dev-chown"],
+        parents=[f"{framework}-local-dev-pre-chown"],
         timeout=1800.0,  # 30 minutes for compilation
     )
 
@@ -1020,14 +1058,32 @@ def create_task_graph_reuse(
     home_dir = str(Path.home())
 
     cargo_cmd = "CARGO_INCREMENTAL=1 CARGO_PROFILE_DEV_OPT_LEVEL=0 CARGO_BUILD_JOBS=$(nproc) CARGO_PROFILE_DEV_CODEGEN_UNITS=256 cargo build --profile dev --features dynamo-llm/block-manager && cd /workspace/lib/bindings/python && CARGO_INCREMENTAL=1 CARGO_PROFILE_DEV_OPT_LEVEL=0 CARGO_BUILD_JOBS=$(nproc) CARGO_PROFILE_DEV_CODEGEN_UNITS=256 maturin develop --uv && uv pip install -e ."
+    chown_cmd = f"sudo chown -R $(id -u):$(id -g) {repo_path}/target/.{framework} {repo_path}/lib/bindings/python {home_dir}/.cargo || true"
+
+    tasks[f"{framework}-dev-compress-pre-chown"] = CommandTask(
+        task_id=f"{framework}-dev-compress-pre-chown",
+        description=f"Fix file ownership before compressed {framework.upper()} dev compilation (reuse)",
+        command=chown_cmd,
+        parents=[],
+        timeout=60.0,
+    )
 
     tasks[f"{framework}-dev-compress-compilation"] = CommandTask(
         task_id=f"{framework}-dev-compress-compilation",
         description=f"Run workspace compilation in compressed {framework.upper()} dev container (reuse)",
         command=f"{repo_path}/container/run.sh --image {dev_image_tag} --mount-workspace -v {home_dir}/.cargo:/root/.cargo -v {repo_path}/target/.{framework}:/workspace/target -- bash -c '{cargo_cmd}'",
         input_image=dev_image_tag,
-        parents=[],
+        parents=[f"{framework}-dev-compress-pre-chown"],
         timeout=1800.0,  # 30 minutes for compilation
+    )
+
+    tasks[f"{framework}-dev-compress-chown"] = CommandTask(
+        task_id=f"{framework}-dev-compress-chown",
+        description=f"Fix file ownership after compressed {framework.upper()} dev compilation (reuse)",
+        command=chown_cmd,
+        parents=[f"{framework}-dev-compress-compilation"],
+        run_even_if_deps_fail=True,
+        timeout=60.0,
     )
 
     tasks[f"{framework}-dev-compress-sanity"] = CommandTask(
@@ -1035,7 +1091,7 @@ def create_task_graph_reuse(
         description=f"Run sanity_check.py on compressed {framework.upper()} dev image (reuse)",
         command=f"{repo_path}/container/run.sh --image {dev_image_tag} --mount-workspace --hf-home {home_dir}/.cache/huggingface -v {home_dir}/.cargo:/root/.cargo -- bash -c 'id && python3 /workspace/deploy/sanity_check.py{sanity_no_framework_flag}'",
         input_image=dev_image_tag,
-        parents=[f"{framework}-dev-compress-compilation"],
+        parents=[f"{framework}-dev-compress-chown"],
         timeout=240.0,  # 4 minutes for sanity checks (trtllm can exceed 3 min)
     )
 
