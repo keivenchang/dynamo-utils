@@ -1000,7 +1000,7 @@ window.__dashboardOnReadyQueue.push(function() {
    style="margin-right: 2px;"
    title="Show Docker images">▶</a>
 {%- else -%}
-<span class="triangle-toggle disabled" style="margin-right: 2px;" title="No Docker images">▶</span>
+<span class="triangle-toggle disabled" style="margin-right: 2px; visibility: hidden;" title="No Docker images">▶</span>
 {%- endif -%}
 {# Local build status: ball icon (PASSED/FAILED) and link to report.html when report.json exists. #}
 {%- if log_paths_list -%}
@@ -1010,7 +1010,7 @@ window.__dashboardOnReadyQueue.push(function() {
 {%- set latest_date = report_entry[0] if report_entry else log_paths_list[-1][0] -%}
 {# UX: Ball icon (pass/fail) + Image SHA badge is the link to report.html. #}
 {%- set cds_label = composite_sha[:6]|upper -%}
-{%- if commit.image_status_icon -%}{{ commit.image_status_icon|safe }}{%- endif -%}<a href="{{ report_path }}" target="_blank" class="image-sha-badge" title="{%- if inherited -%}Inherited: {%- endif -%}{%- if status == 'success' -%}All local builds passed{%- elif status == 'failed' -%}Some local builds failed{%- else -%}Build in progress / no local build status{%- endif -%} - Click to view build logs">{{ cds_label }}</a>
+{%- if commit.build_and_test_status_icon -%}{{ commit.build_and_test_status_icon|safe }}{%- endif -%}<a href="{{ report_path }}" target="_blank" class="image-sha-badge" title="{%- if inherited -%}Inherited: {%- endif -%}{%- if status == 'success' -%}All local builds passed{%- elif status == 'failed' -%}Some local builds failed{%- else -%}Build in progress / no local build status{%- endif -%} - Click to view build logs">{{ cds_label }}</a>
 {%- if log_paths_list|length > 1 -%}
 <a href="#" onclick="toggleBuildHistory(event, '{{ sha_short }}'); return false;" style="text-decoration: none; margin-left: 0; color: #656d76; font-size: 10px; vertical-align: middle;" title="Show build history ({{ log_paths_list|length }} builds)">{{ log_paths_list|length }}</a>
 <div id="build-history-{{ sha_short }}" style="display: none; position: absolute; background: #fff; border: 1px solid #d0d7de; border-radius: 6px; padding: 8px; margin-top: 4px; z-index: 1000; box-shadow: 0 8px 24px rgba(140, 149, 159, 0.2);">
@@ -1023,9 +1023,9 @@ window.__dashboardOnReadyQueue.push(function() {
 </div>
 {%- endif -%}
 {%- else -%}
-{# No build logs: still render the Image SHA badge (not a link) with the status icon. #}
+{# No build logs: render Image SHA badge (not a link). #}
 {%- set cds_label = composite_sha[:6]|upper -%}
-{%- if commit.image_status_icon -%}{{ commit.image_status_icon|safe }}{%- endif -%}
+{%- if commit.build_and_test_status_icon -%}{{ commit.build_and_test_status_icon|safe }}{%- endif -%}
 {%- if has_composite_toggle -%}
 <a href="#"
    class="image-sha-badge"

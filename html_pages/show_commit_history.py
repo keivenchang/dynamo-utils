@@ -1287,8 +1287,8 @@ class CommitHistoryGenerator:
         #   - BUILDING: yellow circle with hourglass
         #   - UNKNOWN: gray circle (no glyph)
 
-        def _image_status_icon_html(*, status: str) -> str:
-            """Return status icon for Image SHA badge: same as Legend (green circle-check, red circle-X, in-progress clock); gray circle for unknown."""
+        def _build_and_test_status_icon_html(*, status: str) -> str:
+            """Return build and test status icon: green circle-check (passed), red circle-X (failed), in-progress clock, gray circle (no build yet)."""
             st = str(status or STATUS_UNKNOWN).strip().lower()
             if st == str(STATUS_SUCCESS).strip().lower():
                 return status_icon_html(status_norm="success", is_required=True)
@@ -1301,7 +1301,7 @@ class CommitHistoryGenerator:
         for commit in commit_data:
             sha_short = str(commit.get("sha_short", "") or "")
             st = str((build_status.get(sha_short) or {}).get("status", STATUS_UNKNOWN) or STATUS_UNKNOWN)
-            commit["image_status_icon"] = _image_status_icon_html(status=st)
+            commit["build_and_test_status_icon"] = _build_and_test_status_icon_html(status=st)
 
         # Read dev registry images from BuildReport JSON files (produced by build_images.py).
         # For each commit with build reports, look for the corresponding .json file
