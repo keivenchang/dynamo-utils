@@ -15,6 +15,9 @@ Usage:
     # Build specific commit SHAs
     python3 container/wipe_all_images_and_rebuild.py --repo-path ~/dynamo/dynamo_ci --commit-sha 90ed9ab0e --commit-sha 34c4882d8
 
+    # Cleanup only, no builds
+    python3 container/wipe_all_images_and_rebuild.py --repo-path ~/dynamo/dynamo_ci --num-image-sha-to-build 0 --prune-builder-cache
+
     # Dry run (show what would be done)
     python3 container/wipe_all_images_and_rebuild.py --repo-path ~/dynamo/dynamo_ci --num-image-sha-to-build 2 --dry-run
 """
@@ -58,39 +61,37 @@ class DockerCleaner:
     """Handles dangerous Docker cleanup operations."""
 
     @staticmethod
-    def stop_all_containers(dry_run: bool = False) -> bool:
-        """Stop all running Docker containers."""
+    def kill_all_containers(dry_run: bool = False) -> bool:
+        """Kill all running Docker containers."""
         logger.info(f"{Colors.BLUE}{'=' * 60}{Colors.RESET}")
-        logger.info(f"{Colors.BLUE}STEP 1: Stopping all containers{Colors.RESET}")
+        logger.info(f"{Colors.BLUE}STEP 1: Killing all running containers{Colors.RESET}")
         logger.info(f"{Colors.BLUE}{'=' * 60}{Colors.RESET}")
 
         if dry_run:
-            logger.info(f"{Colors.YELLOW}[DRY RUN] Would run: docker ps -aq | xargs docker stop{Colors.RESET}")
+            logger.info(f"{Colors.YELLOW}[DRY RUN] Would run: docker ps -q | xargs docker kill{Colors.RESET}")
             return True
 
         try:
-            # Get list of containers
             result = subprocess.run(
-                ["docker", "ps", "-aq"],
+                ["docker", "ps", "-q"],
                 capture_output=True,
                 text=True,
                 check=False
             )
 
             if result.returncode == 0 and result.stdout.strip():
-                # Stop containers
                 subprocess.run(
-                    ["docker", "stop"] + result.stdout.strip().split('\n'),
+                    ["docker", "kill"] + result.stdout.strip().split('\n'),
                     capture_output=True,
                     check=False
                 )
-                logger.info(f"{Colors.GREEN}✓ All containers stopped{Colors.RESET}")
+                logger.info(f"{Colors.GREEN}✓ All running containers killed{Colors.RESET}")
             else:
-                logger.info(f"{Colors.YELLOW}No containers to stop{Colors.RESET}")
+                logger.info(f"{Colors.YELLOW}No running containers found{Colors.RESET}")
 
             return True
         except Exception as e:
-            logger.error(f"{Colors.RED}Error stopping containers: {e}{Colors.RESET}")
+            logger.error(f"{Colors.RED}Error killing containers: {e}{Colors.RESET}")
             return False
 
     @staticmethod
@@ -167,7 +168,7 @@ class DockerCleaner:
 
     @staticmethod
     def prune_system(dry_run: bool = False, include_volumes: bool = True) -> bool:
-        """Prune Docker system."""
+        """Prune Docker system (unused containers, networks, images)."""
         logger.info(f"\n{Colors.BLUE}{'=' * 60}{Colors.RESET}")
         logger.info(f"{Colors.BLUE}STEP 4: Pruning Docker system{Colors.RESET}")
         logger.info(f"{Colors.BLUE}{'=' * 60}{Colors.RESET}")
@@ -189,6 +190,25 @@ class DockerCleaner:
             return True
         except Exception as e:
             logger.error(f"{Colors.RED}Error pruning system: {e}{Colors.RESET}")
+            return False
+
+    @staticmethod
+    def prune_builder_cache(dry_run: bool = False) -> bool:
+        """Prune Docker builder cache (BuildKit layer cache)."""
+        logger.info(f"\n{Colors.BLUE}{'=' * 60}{Colors.RESET}")
+        logger.info(f"{Colors.BLUE}STEP 5: Pruning Docker builder cache{Colors.RESET}")
+        logger.info(f"{Colors.BLUE}{'=' * 60}{Colors.RESET}")
+
+        if dry_run:
+            logger.info(f"{Colors.YELLOW}[DRY RUN] Would run: docker builder prune -af{Colors.RESET}")
+            return True
+
+        try:
+            subprocess.run(["docker", "builder", "prune", "-af"], check=False)
+            logger.info(f"{Colors.GREEN}✓ Builder cache pruned{Colors.RESET}")
+            return True
+        except Exception as e:
+            logger.error(f"{Colors.RED}Error pruning builder cache: {e}{Colors.RESET}")
             return False
 
 
@@ -302,6 +322,9 @@ Examples:
   # Build specific commit SHAs
   python3 container/wipe_all_images_and_rebuild.py --repo-path ~/dynamo/dynamo_ci --commit-sha 90ed9ab0e --commit-sha 34c4882d8
 
+  # Cleanup only (no builds), also prune builder cache
+  python3 container/wipe_all_images_and_rebuild.py --repo-path ~/dynamo/dynamo_ci --num 0 --prune-builder-cache
+
   # Dry run
   python3 container/wipe_all_images_and_rebuild.py --repo-path ~/dynamo/dynamo_ci --num-image-sha-to-build 2 --dry-run
         """
@@ -353,6 +376,12 @@ Examples:
         help="Don't prune Docker volumes during cleanup"
     )
 
+    parser.add_argument(
+        "--prune-builder-cache",
+        action="store_true",
+        help="Also prune Docker builder cache (BuildKit layer cache)"
+    )
+
     return parser.parse_args()
 
 
@@ -374,12 +403,12 @@ def main():
         logger.info(f"{Colors.YELLOW}Press Ctrl+C within 5 seconds to cancel...{Colors.RESET}")
         time.sleep(5)
 
-    # Step 1-4: Docker cleanup
+    # Step 1-5: Docker cleanup
     if not args.skip_cleanup:
         cleaner = DockerCleaner()
 
-        if not cleaner.stop_all_containers(args.dry_run):
-            logger.error(f"{Colors.RED}Failed to stop containers{Colors.RESET}")
+        if not cleaner.kill_all_containers(args.dry_run):
+            logger.error(f"{Colors.RED}Failed to kill containers{Colors.RESET}")
             return 1
 
         if not cleaner.remove_all_containers(args.dry_run):
@@ -393,6 +422,11 @@ def main():
         if not cleaner.prune_system(args.dry_run, not args.no_prune_volumes):
             logger.error(f"{Colors.RED}Failed to prune system{Colors.RESET}")
             return 1
+
+        if args.prune_builder_cache:
+            if not cleaner.prune_builder_cache(args.dry_run):
+                logger.error(f"{Colors.RED}Failed to prune builder cache{Colors.RESET}")
+                return 1
 
     # Determine which commit SHAs to build
     if args.num_image_sha_to_build is not None:
