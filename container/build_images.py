@@ -1510,6 +1510,8 @@ class BaseTask(ABC):
     def check_input_image_exists(self) -> bool:
         """
         Check if the input Docker image exists.
+        If input_image is a -dev-orig tag and doesn't exist, falls back to the
+        final -dev image (which is functionally equivalent for compilation/sanity).
 
         Returns:
             True if input image exists or no input image required, False otherwise
@@ -1517,15 +1519,31 @@ class BaseTask(ABC):
         if not self.input_image:
             return True  # No input image required
         # Runtime-build uses the Dockerfile base image; docker build will pull it. Do not require it locally.
-        if getattr(self, 'task_id', '') and str(self.task_id).endswith('-runtime-build'):
+        if self.task_id and str(self.task_id).endswith('-runtime-build'):
             return True
 
+        if self._docker_tag_exists(self.input_image):
+            return True
+
+        # Fallback: if -dev-orig doesn't exist, try the final -dev image
+        if self.input_image.endswith('-dev-orig'):
+            fallback = self.input_image.removesuffix('-orig')
+            if self._docker_tag_exists(fallback):
+                old_image = self.input_image
+                self.input_image = fallback
+                if self.command:
+                    self.command = self.command.replace(old_image, fallback)
+                self.logger.info(f"Using {fallback} instead of {old_image} (orig not found)")
+                return True
+
+        return False
+
+    @staticmethod
+    def _docker_tag_exists(tag: str) -> bool:
         try:
             result = subprocess.run(
-                ["docker", "inspect", self.input_image],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
+                ["docker", "inspect", tag],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
                 timeout=10
             )
             return result.returncode == 0
@@ -4695,12 +4713,7 @@ def main() -> int:
                 return "dev"
             return "runtime"
 
-        # Build implicit dependency set: dev requires runtime, local-dev requires dev+runtime
         needed_targets = set(requested_targets)
-        if "local-dev" in needed_targets:
-            needed_targets.update({"dev", "runtime"})
-        if "dev" in needed_targets:
-            needed_targets.add("runtime")
 
         skip_ids = set()
         for task_id in all_tasks:
