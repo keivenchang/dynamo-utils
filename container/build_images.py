@@ -32,7 +32,7 @@ import traceback
 from abc import ABC, abstractmethod
 from concurrent.futures import ThreadPoolExecutor, as_completed, wait
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from enum import Enum
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
@@ -1571,7 +1571,6 @@ class BaseTask(ABC):
         Returns:
             Formatted header string
         """
-        from datetime import datetime
         header = f"Task:        {self.task_id}\n"
         header += f"Description: {self.description}\n"
         header += f"Command:     {sanitize_token(self.get_command(repo_path))}\n"
@@ -1594,8 +1593,7 @@ class BaseTask(ABC):
         else:
             duration = 0.0
 
-        from datetime import datetime as _dt
-        ended_str = _dt.fromtimestamp(self.end_time).isoformat() if self.end_time else _dt.now().isoformat()
+        ended_str = datetime.fromtimestamp(self.end_time).isoformat() if self.end_time else datetime.now().isoformat()
 
         footer = f"\n"
         footer += f"-" * 80 + "\n"
@@ -1724,7 +1722,6 @@ class BuildTask(BaseTask):
         Returns:
             Formatted header string
         """
-        from datetime import datetime
         header = f"Task:        {self.task_id}\n"
         header += f"Description: {self.description}\n"
         header += f"Command:     {sanitize_token(self.get_command(repo_path))}\n"
@@ -3027,8 +3024,6 @@ def find_previous_log_file(
     Returns:
         Tuple of (log_file_path, log_dir) if found, None otherwise
     """
-    from datetime import datetime, timedelta
-
     logs_base = repo_path / "logs"
     if not logs_base.exists():
         return None
@@ -4685,6 +4680,42 @@ def main() -> int:
         )
         logger.info("Frameworks data cache initialized")
         # Note: HTML report will be generated when first task starts running
+
+    # Filter tasks based on --target (default: all targets)
+    requested_targets = {t.strip() for t in args.target.split(",")}
+    all_targets = {"runtime", "dev", "local-dev"}
+    if requested_targets != all_targets:
+        def _task_target(task_id: str) -> str:
+            """Map task_id to its target: 'local-dev', 'dev', or 'runtime'."""
+            # Strip framework prefix (e.g. "vllm-" from "vllm-runtime-build")
+            rest = task_id.split("-", 1)[1] if "-" in task_id else task_id
+            if rest.startswith("local-dev"):
+                return "local-dev"
+            if rest.startswith("dev"):
+                return "dev"
+            return "runtime"
+
+        # Build implicit dependency set: dev requires runtime, local-dev requires dev+runtime
+        needed_targets = set(requested_targets)
+        if "local-dev" in needed_targets:
+            needed_targets.update({"dev", "runtime"})
+        if "dev" in needed_targets:
+            needed_targets.add("runtime")
+
+        skip_ids = set()
+        for task_id in all_tasks:
+            if _task_target(task_id) not in needed_targets:
+                skip_ids.add(task_id)
+
+        if skip_ids:
+            excluded = all_targets - needed_targets
+            logger.info(f"--target {args.target}: skipping {len(skip_ids)} tasks for excluded targets ({', '.join(sorted(excluded))})")
+            for task_id in skip_ids:
+                all_tasks[task_id].mark_status_as(TaskStatus.SKIPPED, f"Target not requested (--target {args.target})")
+
+            for task_id, task in all_tasks.items():
+                if task_id not in skip_ids:
+                    task.parents = [p for p in task.parents if p not in skip_ids]
 
     # Filter tasks based on --sanity-check-only
     if args.sanity_check_only:
