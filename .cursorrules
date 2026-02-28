@@ -20,6 +20,8 @@ If you do only one thing: re-read this section before making changes or running 
   - Prefer alternative solutions that don't require Hugging Face integration
 
 - Pytest (MUST):
+  - **TIP:** Use `/test` skill to run pytest with correct setup automatically.
+    See: `.claude/skills/test/SKILL.md`
   - **CRITICAL: Multiple pytest installations exist.** The system `pytest` at `/usr/local/bin/pytest`
     is OUTSIDE the venv and cannot see venv-installed packages (like `dynamo`).
     ALWAYS use `python3 -m pytest` to ensure the venv's pytest runs with the correct `sys.path`.
@@ -902,6 +904,10 @@ Output in plain text surrounded by triple backticks (no formatting):
 ```
 
 ## 6.3 Code Review Guidelines
+
+**TIP:** Use `/review-code` skill to check code against project conventions and anti-patterns.
+See: `.claude/skills/review-code/SKILL.md`
+
 - Review for security vulnerabilities
 - Check for performance issues
 - Ensure proper error handling
@@ -1071,8 +1077,12 @@ cargo-deny --version || cargo install cargo-deny@0.16.4
 cargo-deny --no-default-features check --hide-inclusion-graph licenses bans --config deny.toml
 
 ### 7.2.7 Quick Pre-Commit Checklist
+
+**TIP:** Use `/pre-commit` skill to run these checks automatically.
+See: `.claude/skills/pre-commit/SKILL.md`
+
 Before committing Rust changes, run:
-- Prefer a single chained command (with separators) so it’s one copy/paste and one log stream.
+- Prefer a single chained command (with separators) so it's one copy/paste and one log stream.
 
 Rust-only (auto-fix formatting first):
 ```bash
