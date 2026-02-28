@@ -1202,9 +1202,40 @@ class BaseTask(ABC):
         """
         pass
 
-    def _run_command(self, command: str, repo_path: Path) -> int:
+    def _has_network_error(self) -> bool:
         """
-        Common method to run a command and log output.
+        Check if the log file contains network-related errors.
+
+        Returns:
+            True if network errors are detected in the log file
+        """
+        if self.log_file is None or not self.log_file.exists():
+            return False
+
+        network_error_patterns = [
+            "network is unreachable",
+            "dial tcp",
+            "failed to do request",
+            "connection refused",
+            "connection timeout",
+            "temporary failure in name resolution",
+            "could not resolve host",
+        ]
+
+        try:
+            with open(self.log_file, 'r') as f:
+                log_content = f.read().lower()
+                for pattern in network_error_patterns:
+                    if pattern in log_content:
+                        return True
+        except (OSError, IOError):
+            pass
+
+        return False
+
+    def _run_command_once(self, command: str, repo_path: Path) -> int:
+        """
+        Run a command once and log output (internal method).
 
         Args:
             command: Command to execute
@@ -1282,6 +1313,54 @@ class BaseTask(ABC):
             self.exit_code = -1
             self.logger.error(f"Command execution failed: {e}")
             raise
+
+    def _run_command(self, command: str, repo_path: Path) -> int:
+        """
+        Run a command with retry logic for network errors.
+
+        Retries up to 3 times if network-related errors are detected.
+
+        Args:
+            command: Command to execute
+            repo_path: Path to the repository
+
+        Returns:
+            Exit code of the command (0 for success, non-zero for failure)
+        """
+        max_retries = 3
+        retry_delay = 10  # seconds
+
+        for attempt in range(1, max_retries + 1):
+            exit_code = self._run_command_once(command, repo_path)
+
+            # If command succeeded, return immediately
+            if exit_code == 0:
+                return exit_code
+
+            # Check if failure was due to network error
+            if self._has_network_error():
+                if attempt < max_retries:
+                    msg = f"Network error detected (attempt {attempt}/{max_retries}). Retrying in {retry_delay}s..."
+                    self.logger.warning(msg)
+                    if self.log_file:
+                        with open(self.log_file, 'a') as log_fh:
+                            log_fh.write(f"\n[RETRY] {msg}\n\n")
+                            log_fh.flush()
+                    time.sleep(retry_delay)
+                    continue
+                else:
+                    msg = f"Network error persisted after {max_retries} attempts. Giving up."
+                    self.logger.error(msg)
+                    if self.log_file:
+                        with open(self.log_file, 'a') as log_fh:
+                            log_fh.write(f"\n[FAILED] {msg}\n\n")
+                            log_fh.flush()
+                    return exit_code
+            else:
+                # Non-network error, don't retry
+                return exit_code
+
+        return exit_code
 
     @abstractmethod
     def execute(self, repo_path: Path, dry_run: bool = False) -> bool:
