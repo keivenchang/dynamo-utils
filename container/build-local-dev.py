@@ -15,10 +15,10 @@ If the image is not available locally, pulls it from the GitLab registry
 short name, and removes the long registry name.
 
 Usage:
-    ./render_local_dev.py dynamo:A1B2C3.bbe82f182-vllm-dev
-    ./render_local_dev.py dynamo:A1B2C3.bbe82f182-none-dev --output /tmp/my.Dockerfile
-    ./render_local_dev.py dynamo:A1B2C3.bbe82f182-vllm-dev --build
-    ./render_local_dev.py dynamo:A1B2C3.bbe82f182-vllm-dev --build --dry-run
+    ./build-local-dev.py dynamo:A1B2C3.bbe82f182-vllm-dev
+    ./build-local-dev.py dynamo:A1B2C3.bbe82f182-none-dev --output /tmp/my.Dockerfile
+    ./build-local-dev.py dynamo:A1B2C3.bbe82f182-vllm-dev --build
+    ./build-local-dev.py dynamo:A1B2C3.bbe82f182-vllm-dev --build --dry-run
 """
 
 import argparse
@@ -277,9 +277,15 @@ def main() -> None:
         base = f"container/run.sh --image {tag} -it --mount-workspace --hf-home ~/.cache/huggingface"
         with_sanity = f"{base} -- bash -c 'python /workspace/deploy/sanity_check.py; exec bash'"
         shell_only = f"{base} -- bash"
+        pytest_isolated = (
+            f"container/run.sh --image {tag} --network bridge --mount-workspace"
+            f" -- python3 -m pytest -xvs --durations=10 -n auto"
+            f" -m 'gpu_0 and parallel' --ignore=tests/serve tests/"
+        )
         print(f"\nYou can now use the image. Here are some commands you can try:")
         print(f"  (with sanity check)  {with_sanity}")
         print(f"  (shell only)         {shell_only}")
+        print(f"  (pytest, isolated)   {pytest_isolated}")
 
     if args.build:
         out_tag = output_image_name(args.image)

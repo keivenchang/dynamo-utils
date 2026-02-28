@@ -81,9 +81,13 @@
         "source=${localEnv:HOME}/.bash_aliases,target=/home/dynamo/.bash_aliases,type=bind",
         "source=${localEnv:HOME}/.gitconfig,target=/home/dynamo/.gitconfig,type=bind",
         "source=${localEnv:HOME}/.ssh,target=/home/dynamo/.ssh,type=bind,readonly",
-        "source=${localEnv:HOME}/dynamo/dynamo-utils,target=/workspace/_,type=bind",
-        "source=${localEnv:HOME}/dynamo/dynamo-utils/pyrightconfig.json,target=/workspace/pyrightconfig.json,type=bind",
+        # .claude and .cursor are at the ~/ level because there's already a .claude directory in the home directory
+        "source=${localEnv:HOME}/dynamo/dynamo-utils/.claude,target=/home/dynamo/.claude,type=bind",
+        "source=${localEnv:HOME}/dynamo/dynamo-utils/.cursor,target=/home/dynamo/.cursor,type=bind",
+        # .cursorrules are at the repo-level
         "source=${localEnv:HOME}/dynamo/dynamo-utils/.cursorrules,target=/workspace/.cursorrules,type=bind",
-        "source=${localEnv:HOME}/dynamo/dynamo-utils/.cursorignore,target=/workspace/.cursorignore,type=bind"
+        "source=${localEnv:HOME}/dynamo/dynamo-utils/.cursorignore,target=/workspace/.cursorignore,type=bind",
+        "source=${localEnv:HOME}/dynamo/dynamo-utils,target=/workspace/_,type=bind",
+        "source=${localEnv:HOME}/dynamo/dynamo-utils/pyrightconfig.json,target=/workspace/pyrightconfig.json,type=bind"
     ]
 }
