@@ -804,7 +804,7 @@ def create_task_graph(
         input_image=runtime_image_tag,
         parents=[f"{framework}-runtime-build"],
         timeout=240.0,  # 4 minutes for sanity checks (trtllm can exceed 3 min)
-        ignore_exit_code=True,  # Runtime may fail some checks, we only care about Dynamo paths
+        ignore_exit_code=False,
     )
 
     # Level 1: Dev image build (waits for runtime to complete)
@@ -1509,40 +1509,20 @@ class BaseTask(ABC):
 
     def check_input_image_exists(self) -> bool:
         """
-        Check if the input Docker image exists.
-        If input_image is a -dev-orig tag and doesn't exist, falls back to the
-        final -dev image (which is functionally equivalent for compilation/sanity).
+        Check if the input Docker image exists locally.
 
         Returns:
             True if input image exists or no input image required, False otherwise
         """
         if not self.input_image:
-            return True  # No input image required
-        # Runtime-build uses the Dockerfile base image; docker build will pull it. Do not require it locally.
+            return True
+        # BuildTask Dockerfiles are self-contained; docker build pulls base images internally.
         if self.task_id and str(self.task_id).endswith('-runtime-build'):
             return True
 
-        if self._docker_tag_exists(self.input_image):
-            return True
-
-        # Fallback: if -dev-orig doesn't exist, try the final -dev image
-        if self.input_image.endswith('-dev-orig'):
-            fallback = self.input_image.removesuffix('-orig')
-            if self._docker_tag_exists(fallback):
-                old_image = self.input_image
-                self.input_image = fallback
-                if self.command:
-                    self.command = self.command.replace(old_image, fallback)
-                self.logger.info(f"Using {fallback} instead of {old_image} (orig not found)")
-                return True
-
-        return False
-
-    @staticmethod
-    def _docker_tag_exists(tag: str) -> bool:
         try:
             result = subprocess.run(
-                ["docker", "inspect", tag],
+                ["docker", "inspect", self.input_image],
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
                 timeout=10
             )
@@ -4715,20 +4695,21 @@ def main() -> int:
 
         needed_targets = set(requested_targets)
 
-        skip_ids = set()
+        remove_ids = set()
         for task_id in all_tasks:
             if _task_target(task_id) not in needed_targets:
-                skip_ids.add(task_id)
+                remove_ids.add(task_id)
 
-        if skip_ids:
+        if remove_ids:
             excluded = all_targets - needed_targets
-            logger.info(f"--target {args.target}: skipping {len(skip_ids)} tasks for excluded targets ({', '.join(sorted(excluded))})")
-            for task_id in skip_ids:
-                all_tasks[task_id].mark_status_as(TaskStatus.SKIPPED, f"Target not requested (--target {args.target})")
-
-            for task_id, task in all_tasks.items():
-                if task_id not in skip_ids:
-                    task.parents = [p for p in task.parents if p not in skip_ids]
+            logger.info(f"--target {args.target}: removing {len(remove_ids)} tasks for excluded targets ({', '.join(sorted(excluded))})")
+            for task_id in remove_ids:
+                del all_tasks[task_id]
+            for task in all_tasks.values():
+                task.parents = [p for p in task.parents if p not in remove_ids]
+                task.children = [c for c in task.children if c not in remove_ids]
+                # Dockerfiles are self-contained (render.py); no cross-target image deps
+                task.input_image = None
 
     # Filter tasks based on --sanity-check-only
     if args.sanity_check_only:
