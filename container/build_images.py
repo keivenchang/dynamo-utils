@@ -844,7 +844,7 @@ def create_task_graph(
         command=f"{repo_path}/container/run.sh --image {runtime_image_tag} --hf-home {home_dir}/.cache/huggingface -- bash -c 'id && python3 /workspace/deploy/sanity_check.py --runtime-check{sanity_no_framework_flag}'",
         input_image=runtime_image_tag,
         parents=[f"{framework}-runtime-build"],
-        timeout=360.0,  # 6 minutes for sanity checks (trtllm can be slow)
+        timeout=480.0,  # 8 minutes for sanity checks (trtllm can exceed 4 min)
         ignore_exit_code=False,
     )
 
@@ -916,7 +916,7 @@ def create_task_graph(
         command=f"{repo_path}/container/run.sh --image {dev_orig_image_tag} --mount-workspace --hf-home {home_dir}/.cache/huggingface -v {home_dir}/.cargo:/root/.cargo -v {repo_path}/target/.{framework}:/workspace/target -- bash -c '{sanity_install_cmd} && id && python3 /workspace/deploy/sanity_check.py{sanity_no_framework_flag}'",
         input_image=dev_orig_image_tag,
         parents=[f"{framework}-dev-compilation"],
-        timeout=360.0,  # 6 minutes for sanity checks (trtllm can be slow)
+        timeout=480.0,  # 8 minutes for sanity checks (trtllm can exceed 4 min)
     )
 
     # Level 8: Dev upload (runs after compress-sanity, in parallel with local-dev build)
@@ -1045,7 +1045,7 @@ docker images {dev_image_tag} --format 'Size: {{{{.Size}}}}'
         command=f"{repo_path}/container/run.sh --image {dev_image_tag} --mount-workspace --hf-home {home_dir}/.cache/huggingface -v {home_dir}/.cargo:/root/.cargo -v {repo_path}/target/.{framework}:/workspace/target -- bash -c '{sanity_install_cmd} && id && python3 /workspace/deploy/sanity_check.py{sanity_no_framework_flag}'",
         input_image=dev_image_tag,
         parents=[f"{framework}-dev-compress-compilation"],
-        timeout=360.0,  # 6 minutes for sanity checks (trtllm can be slow)
+        timeout=480.0,  # 8 minutes for sanity checks (trtllm can exceed 4 min)
     )
 
     # Level 8: Local-dev image build (runs after compress-sanity, in parallel with dev-upload)
@@ -1086,7 +1086,7 @@ docker images {dev_image_tag} --format 'Size: {{{{.Size}}}}'
         command=f"{repo_path}/container/run.sh --image {local_dev_image_tag} --mount-workspace --hf-home {home_dir}/.cache/huggingface -v {home_dir}/.cargo:/home/dynamo/.cargo -v {repo_path}/target/.{framework}:/workspace/target -- bash -c '{sanity_install_cmd} && id && (sudo id || true) && python3 /workspace/deploy/sanity_check.py{sanity_no_framework_flag}'",
         input_image=local_dev_image_tag,
         parents=[f"{framework}-local-dev-compilation"],
-        timeout=360.0,  # 6 minutes for sanity checks (trtllm can be slow)
+        timeout=480.0,  # 8 minutes for sanity checks (trtllm can exceed 4 min)
     )
 
     return tasks
@@ -1142,7 +1142,7 @@ def create_task_graph_reuse(
         command=f"{repo_path}/container/run.sh --image {dev_image_tag} --mount-workspace --hf-home {home_dir}/.cache/huggingface -v {home_dir}/.cargo:/root/.cargo -v {repo_path}/target/.{framework}:/workspace/target -- bash -c '{sanity_install_cmd} && id && python3 /workspace/deploy/sanity_check.py{sanity_no_framework_flag}'",
         input_image=dev_image_tag,
         parents=[f"{framework}-dev-compress-chown"],
-        timeout=360.0,  # 6 minutes for sanity checks (trtllm can be slow)
+        timeout=480.0,  # 8 minutes for sanity checks (trtllm can exceed 4 min)
     )
 
     return tasks
