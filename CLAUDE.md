@@ -59,8 +59,8 @@ When the user says "remember this" or "remember how to do this", document it in 
 
 ## 1.2 New Project Protocol
 When the user says "new project", always:
-1. Re-read `~/dynamo/dynamo-utils/.cursorrules`
-2. Re-read `~/dynamo/dynamo-utils/CLAUDE.md`
+1. Re-read `~/dynamo/dynamo-utils.PRODUCTION/.cursorrules`
+2. Re-read `~/dynamo/dynamo-utils.PRODUCTION/CLAUDE.md`
 
 These are the canonical project instructions. Do NOT read `.cursorrules` or `CLAUDE.md` from other project directories (dynamo1, dynamo2, dynamo3, dynamo_ci, etc.) unless explicitly instructed.
 
@@ -226,10 +226,10 @@ Container names (like `epic_satoshi`, `distracted_shockley`) are transient and s
 
 ## 2.3 Host-Container Directory Mapping
 The `dynamo-utils` directory on the host is mapped into the container at `/workspace/_` (same repo, bind-mounted):
-- Host: `<workspace>/dynamo-utils/` (e.g. `~/dynamo/dynamo-utils/`)
+- Host: `<workspace>/dynamo-utils.PRODUCTION/` (e.g. `~/dynamo/dynamo-utils.PRODUCTION/`)
 - Container: `/workspace/_/`
 
-Example: `<workspace>/dynamo-utils/notes/metrics-vllm.log` on the host appears at `/workspace/_/notes/metrics-vllm.log` inside the container.
+Example: `<workspace>/dynamo-utils.PRODUCTION/notes/metrics-vllm.log` on the host appears at `/workspace/_/notes/metrics-vllm.log` inside the container.
 
 ## 2.4 Backup File Convention
 When creating backups, use: `<filename>.<YYYY-MM-DD>.bak` (ignored by `.gitignore`).
@@ -303,7 +303,7 @@ docker exec <container_name> bash -c "mkdir -p /workspace/_/notes && curl -s loc
 ```
 
 Output:
-- Metrics saved to: `<workspace>/dynamo-utils/notes/metrics-<framework>.log` (e.g. `~/dynamo/dynamo-utils/notes/metrics-<framework>.log`) (on host)
+- Metrics saved to: `<workspace>/dynamo-utils.PRODUCTION/notes/metrics-<framework>.log` (e.g. `~/dynamo/dynamo-utils.PRODUCTION/notes/metrics-<framework>.log`) (on host)
 - Typical size: ~200-600 lines
 
 Repeat for other frameworks:

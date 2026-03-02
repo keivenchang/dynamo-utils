@@ -72,7 +72,7 @@ from common_dashboard_runtime import (
     prune_partial_raw_log_caches,
 )
 
-# Log/snippet helpers (shared library: `dynamo-utils/ci_log_errors/`)
+# Log/snippet helpers (shared library: `dynamo-utils.PRODUCTION/ci_log_errors/`)
 from ci_log_errors import snippet as ci_snippet
 from cache_snippet import SNIPPET_CACHE
 from cache_commit_history import COMMIT_HISTORY_CACHE

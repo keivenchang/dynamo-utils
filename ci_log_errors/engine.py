@@ -3,8 +3,8 @@
 Shared log error detection + categorization + snippet formatting utilities.
 
 This module is intentionally dependency-light so it can be shared by:
-- `dynamo-utils/common.py` (log/snippet extraction, cache logic)
-- `dynamo-utils/html_pages/common_dashboard_lib.py` (HTML rendering for snippets/tags)
+- `dynamo-utils.PRODUCTION/common.py` (log/snippet extraction, cache logic)
+- `dynamo-utils.PRODUCTION/html_pages/common_dashboard_lib.py` (HTML rendering for snippets/tags)
 
 For golden examples, training data, and self-test documentation, see:
 - ci_log_errors/golden_examples.txt
@@ -1416,7 +1416,7 @@ _SNIP_COPY_TEXT_STYLE = "flex: 1 1 auto; white-space: pre-wrap; overflow-wrap: a
 def _copy_icon_svg(*, size_px: int = 12) -> str:
     """Return the shared 'copy' icon SVG (2-squares), sourced from html_pages/copy_icon_paths.svg."""
     try:
-        # Shared icon lives in `dynamo-utils/html_pages/copy_icon_paths.svg` (sibling of this package).
+        # Shared icon lives in `dynamo-utils.PRODUCTION/html_pages/copy_icon_paths.svg` (sibling of this package).
         p = (Path(__file__).resolve().parent.parent / "html_pages" / "copy_icon_paths.svg").resolve()
         paths = p.read_text(encoding="utf-8").strip()
     except Exception:  # THIS IS A HORRIBLE ANTI-PATTERN, FIX IT

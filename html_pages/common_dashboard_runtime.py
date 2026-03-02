@@ -1,8 +1,8 @@
 """
 Dashboard runtime helpers (file/materialization/pruning) for html_pages/* scripts.
 
-These helpers are intentionally kept out of `dynamo-utils/common.py` because they are
-only used by the HTML dashboard generators in `dynamo-utils/html_pages/*`.
+These helpers are intentionally kept out of `dynamo-utils.PRODUCTION/common.py` because they are
+only used by the HTML dashboard generators in `dynamo-utils.PRODUCTION/html_pages/*`.
 """
 
 from __future__ import annotations

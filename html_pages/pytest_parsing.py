@@ -504,7 +504,7 @@ def step_window_snippet_from_cached_raw_log(
     if not a or not b:
         return ""
 
-    # Shared library (dependency-light): `dynamo-utils/ci_log_errors/`
+    # Shared library (dependency-light): `dynamo-utils.PRODUCTION/ci_log_errors/`
     from ci_log_errors import snippet as ci_snippet  # local import (avoid circulars)
 
     text = p.read_text(encoding="utf-8", errors="replace")

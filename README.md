@@ -123,8 +123,8 @@ python3 py_indent_report.py --self-check
 
 ## Dashboards / log categorization pitfalls (learnings)
 
-Repeated mistakes we hit while iterating on `dynamo-utils/html_pages/*` dashboards and
-`dynamo-utils/ci_log_errors/*` (shared library + CLI):
+Repeated mistakes we hit while iterating on `dynamo-utils.PRODUCTION/html_pages/*` dashboards and
+`dynamo-utils.PRODUCTION/ci_log_errors/*` (shared library + CLI):
 
 - **Golden logs + self-test discipline**
   - After changing categorization/snippet logic, run:
@@ -316,7 +316,7 @@ python3 gitlab_pipeline_pr_map.py 40743226 https://gitlab-master.nvidia.com/dl/a
 
 ```bash
 # Backup every 6 minutes
-*/6 * * * * DYNAMO_HOME=$HOME/dynamo $HOME/dynamo/dynamo-utils/cron_log.sh backup $HOME/dynamo/dynamo-utils/backup.sh --input-path $HOME/dynamo --output-path /mnt/sda/keivenc/dynamo
+*/6 * * * * DYNAMO_HOME=$HOME/dynamo $HOME/dynamo/dynamo-utils.PRODUCTION/cron_log.sh backup $HOME/dynamo/dynamo-utils.PRODUCTION/backup.sh --input-path $HOME/dynamo --output-path /mnt/sda/keivenc/dynamo
 ```
 
 ---

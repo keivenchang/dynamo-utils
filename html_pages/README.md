@@ -340,7 +340,7 @@ ls -lah ~/dynamo/speedoflight/stats/index.html  # stats landing page
 ```
 
 **Common foot-guns:**
-- There are **two repos**: `dynamo-utils.dev/` (dev) and `dynamo-utils/` (prod). If working on dev only, run the dev script: `dynamo-utils.dev/html_pages/update_html_pages.sh`
+- There are **two repos**: `dynamo-utils.dev/` (dev) and `dynamo-utils.PRODUCTION/` (prod). If working on dev only, run the dev script: `dynamo-utils.dev/html_pages/update_html_pages.sh`
 - `update_html_pages.sh --fast` is intentionally **removed**; use `--debug-html` instead
 - Per-component logs are **append-only** and may contain older, non-prefixed lines from previous runs
 - If a log message is missing commit SHA context, the caller didn't pass `commit_sha` through to helpers

@@ -6,7 +6,7 @@
 #
 # What it does (by default):
 # - Docker cleanup:
-#   - Runs dynamo-utils/container/cleanup_old_images.sh --retain <N> --keep-dev-and-local-dev-only
+#   - Runs dynamo-utils.PRODUCTION/container/cleanup_old_images.sh --retain <N> --keep-dev-and-local-dev-only
 #   - Runs: docker builder prune -a --force
 # - Log cleanup:
 #   - Deletes YYYY-MM-DD/ directories older than <keep-days> (default: 30) from:
@@ -19,7 +19,7 @@
 # - Uses a per-user flock to avoid overlapping runs
 #
 # Typical cron (recommended):
-#   0 2 * * * DYNAMO_HOME=$HOME/nvidia $HOME/nvidia/dynamo-utils/cron_log.sh cleanup_log_and_docker $HOME/nvidia/dynamo-utils/cleanup_log_and_docker.sh
+#   0 2 * * * DYNAMO_HOME=$HOME/nvidia $HOME/nvidia/dynamo-utils.PRODUCTION/cron_log.sh cleanup_log_and_docker $HOME/nvidia/dynamo-utils.PRODUCTION/cleanup_log_and_docker.sh
 
 set -euo pipefail
 

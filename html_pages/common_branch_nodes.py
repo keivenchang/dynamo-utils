@@ -276,7 +276,7 @@ def mock_get_open_pr_info_for_author(
     return prs
 
 
-# Log/snippet helpers (shared library: `dynamo-utils/ci_log_errors/`)
+# Log/snippet helpers (shared library: `dynamo-utils.PRODUCTION/ci_log_errors/`)
 from ci_log_errors import snippet as ci_snippet
 
 # Jinja2 for HTML template rendering

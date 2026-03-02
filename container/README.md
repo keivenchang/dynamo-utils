@@ -1,4 +1,4 @@
-# Container utilities (`dynamo-utils/container/`)
+# Container utilities (`dynamo-utils.PRODUCTION/container/`)
 
 Scripts in this directory are focused on **Docker image build/test**, **retagging**, and **cleanup/monitoring** for the Dynamo repos under your workspace (commonly `~/dynamo`).
 

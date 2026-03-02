@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Module entrypoint for `ci_log_errors`.
 
-Usage (from `dynamo-utils/`):
+Usage (from `dynamo-utils.PRODUCTION/`):
   - `python3 -m ci_log_errors --self-test-examples`
 """
 

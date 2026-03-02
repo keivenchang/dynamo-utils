@@ -57,7 +57,7 @@ fi
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # Base directory - can be overridden by environment variable
-# Default: parent of dynamo-utils/ (i.e. .../nvidia) because this script lives in dynamo-utils/html_pages/
+# Default: parent of dynamo-utils.PRODUCTION/ (i.e. .../nvidia) because this script lives in dynamo-utils.PRODUCTION/html_pages/
 UTILS_DIR="$(dirname "$SCRIPT_DIR")"
 DYNAMO_HOME="${DYNAMO_HOME:-$(dirname "$UTILS_DIR")}"
 
@@ -312,7 +312,7 @@ run_cmd_to_log_ts() {
 }
 
 # NOTE: log retention is handled by the dedicated cleanup cron:
-#   dynamo-utils/cleanup_log_and_docker.sh
+#   dynamo-utils.PRODUCTION/cleanup_log_and_docker.sh
 
 run_resource_report() {
     # Generate resource report HTML and prune older DB rows (best-effort; do not fail if DB is missing)

@@ -30,7 +30,7 @@ from zoneinfo import ZoneInfo
 
 from common_types import CIStatus, MarkerStatus
 
-# Log/snippet detection lives in the shared library: `dynamo-utils/ci_log_errors/`.
+# Log/snippet detection lives in the shared library: `dynamo-utils.PRODUCTION/ci_log_errors/`.
 # ======================================================================================
 # API inventory (where the dashboard data comes from)
 #

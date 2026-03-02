@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """
-Common dashboard helpers shared by HTML generators under dynamo-utils/html_pages/.
+Common dashboard helpers shared by HTML generators under dynamo-utils.PRODUCTION/html_pages/.
 
 FACADE MODULE: This file re-exports symbols from focused sub-modules for backward
 compatibility.  All new code should import from the sub-modules directly:

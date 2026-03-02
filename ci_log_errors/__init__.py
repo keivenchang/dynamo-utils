@@ -7,8 +7,8 @@ This package contains the *implementation* for:
 - snippet HTML rendering (copyable command blocks, highlighting)
 
 It is designed to be dependency-light so it can be reused by:
-- `dynamo-utils/common.py`
-- `dynamo-utils/html_pages/*` dashboards
+- `dynamo-utils.PRODUCTION/common.py`
+- `dynamo-utils.PRODUCTION/html_pages/*` dashboards
 
 Public API is re-exported from:
 - `ci_log_errors.engine` for log categorization primitives
