@@ -5046,8 +5046,9 @@ def main() -> int:
         exit_status = 0 if len(critical_failures) == 0 else 1
 
         # Store compilation SHA on success (tracks HEAD at last successful compilation)
+        # Store SHA if any compilation tasks PASSED or SKIPPED (SKIPPED means already passed previously)
         if exit_status == 0:
-            compilation_tasks = [tid for tid in all_tasks if 'compilation' in tid and all_tasks[tid].status == TaskStatus.PASSED]
+            compilation_tasks = [tid for tid in all_tasks if 'compilation' in tid and all_tasks[tid].status in (TaskStatus.PASSED, TaskStatus.SKIPPED)]
             if compilation_tasks:
                 dynamo_repo_utils = DynamoRepositoryUtils(repo_path)
                 dynamo_repo_utils.store_compilation_sha(commit_sha_9)
