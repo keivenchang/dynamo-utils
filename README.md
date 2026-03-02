@@ -28,8 +28,8 @@ This repository contains essential development tools, build scripts, and configu
 - **Host venv**: On the host machine, activate your local venv before running Python tooling (pre-commit, linters, etc.). On common setups this is typically `<workspace>/venv/bin/activate` (e.g. `~/dynamo/venv/bin/activate`).
 - **Dev container**: Inside the dev container, the environment is typically pre-configured/activated.
 - **Path mapping (common setup)**:
-  - Host: `~/dynamo/dynamo-utils`
-  - Dev container: `/workspace/_`
+  - Host: `~/dynamo/dynamo-utils.PRODUCTION`
+  - Dev container: `/workspace/.utils`
 
 ---
 

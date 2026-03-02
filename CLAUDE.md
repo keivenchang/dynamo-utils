@@ -225,11 +225,11 @@ The `vsc-` prefix indicates VS Code/Cursor dev containers, and the part after it
 Container names (like `epic_satoshi`, `distracted_shockley`) are transient and should not be documented.
 
 ## 2.3 Host-Container Directory Mapping
-The `dynamo-utils` directory on the host is mapped into the container at `/workspace/_` (same repo, bind-mounted):
+The `dynamo-utils.PRODUCTION` directory on the host is mapped into the container at `/workspace/.utils` (same repo, bind-mounted):
 - Host: `<workspace>/dynamo-utils.PRODUCTION/` (e.g. `~/dynamo/dynamo-utils.PRODUCTION/`)
-- Container: `/workspace/_/`
+- Container: `/workspace/.utils/`
 
-Example: `<workspace>/dynamo-utils.PRODUCTION/notes/metrics-vllm.log` on the host appears at `/workspace/_/notes/metrics-vllm.log` inside the container.
+Example: `<workspace>/dynamo-utils.PRODUCTION/notes/metrics-vllm.log` on the host appears at `/workspace/.utils/notes/metrics-vllm.log` inside the container.
 
 ## 2.4 Backup File Convention
 When creating backups, use: `<filename>.<YYYY-MM-DD>.bak` (ignored by `.gitignore`).
@@ -259,7 +259,7 @@ Prerequisites:
 Steps:
 1. Start inference server in background:
 ```bash
-docker exec <container_name> bash -c "cd ~/dynamo && nohup _/inference.sh > /tmp/inference-<framework>.log 2>&1 &"
+docker exec <container_name> bash -c "cd ~/dynamo && nohup .utils/inference.sh > /tmp/inference-<framework>.log 2>&1 &"
 ```
 
 2. Monitor inference server startup (wait ~30 seconds):
@@ -270,13 +270,13 @@ Look for: `added model model_name=...` indicating the model is ready.
 
 3. Run soak test to generate some load:
 ```bash
-docker exec <container_name> bash -c "cd ~/dynamo && python3 _/soak_fe.py --max-tokens 1000 --requests_per_worker 5"
+docker exec <container_name> bash -c "cd ~/dynamo && python3 .utils/soak_fe.py --max-tokens 1000 --requests_per_worker 5"
 ```
 Wait for: `All requests completed successfully.`
 
-4. Collect metrics and save to the mounted `_` directory:
+4. Collect metrics and save to the mounted `.utils` directory:
 ```bash
-docker exec <container_name> bash -c "curl -s localhost:8081/metrics > /workspace/_/notes/metrics-<framework>.log"
+docker exec <container_name> bash -c "curl -s localhost:8081/metrics > /workspace/.utils/notes/metrics-<framework>.log"
 ```
 
 Tip: Find the container name with:
@@ -286,20 +286,20 @@ docker ps --format "table {{.Names}}\t{{.Image}}" | grep dynamo
 
 Example for VLLM (copy/paste template):
 ```bash
-# Find container name (adjust grep to the repo you’re using: dynamo1/dynamo2/dynamo_ci/...)
+# Find container name (adjust grep to the repo you're using: dynamo1/dynamo2/dynamo_ci/...)
 docker ps --format "table {{.Names}}\t{{.Image}}" | grep dynamo1
 
 # Start inference
-docker exec <container_name> bash -c "cd ~/dynamo && nohup _/inference.sh > /tmp/inference-vllm.log 2>&1 &"
+docker exec <container_name> bash -c "cd ~/dynamo && nohup .utils/inference.sh > /tmp/inference-vllm.log 2>&1 &"
 
 # Wait and check log
 sleep 30 && docker exec <container_name> bash -c "tail -20 /tmp/inference-vllm.log"
 
 # Run soak test
-docker exec <container_name> bash -c "cd ~/dynamo && python3 _/soak_fe.py --max-tokens 1000 --requests_per_worker 5"
+docker exec <container_name> bash -c "cd ~/dynamo && python3 .utils/soak_fe.py --max-tokens 1000 --requests_per_worker 5"
 
 # Collect metrics
-docker exec <container_name> bash -c "mkdir -p /workspace/_/notes && curl -s localhost:8081/metrics > /workspace/_/notes/metrics-vllm.log"
+docker exec <container_name> bash -c "mkdir -p /workspace/.utils/notes && curl -s localhost:8081/metrics > /workspace/.utils/notes/metrics-vllm.log"
 ```
 
 Output:
