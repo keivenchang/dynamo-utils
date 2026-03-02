@@ -50,6 +50,47 @@ from jinja2 import Environment, FileSystemLoader, select_autoescape
 _running_subprocesses: Set[subprocess.Popen] = set()
 _subprocesses_lock = threading.Lock()
 
+# PID watchdog: detects when another instance supersedes this one
+_stop_pid_watchdog = threading.Event()
+_pid_file_path: Optional[Path] = None
+
+
+def _pid_watchdog():
+    """Background thread that checks if another instance has taken over the PID file.
+
+    If the PID in the file no longer matches os.getpid(), this instance has been
+    superseded. Kill all child subprocesses and exit immediately.
+    """
+    our_pid = os.getpid()
+    logger = logging.getLogger("pid_watchdog")
+    while not _stop_pid_watchdog.is_set():
+        if _stop_pid_watchdog.wait(3):
+            break
+        if _pid_file_path is None:
+            continue
+        try:
+            stored_pid = int(_pid_file_path.read_text().strip())
+        except (ValueError, FileNotFoundError, OSError):
+            continue
+        if stored_pid != our_pid:
+            logger.warning(f"Superseded by PID {stored_pid} (we are {our_pid}), shutting down...")
+            with _subprocesses_lock:
+                procs = list(_running_subprocesses)
+            for proc in procs:
+                try:
+                    proc.terminate()
+                except OSError:
+                    pass
+            time.sleep(2)
+            for proc in procs:
+                try:
+                    if proc.poll() is None:
+                        proc.kill()
+                except OSError:
+                    pass
+            logger.warning("All child processes terminated. Exiting.")
+            os._exit(0)
+
 try:
     select_autoescape  # type: ignore
 except NameError:
@@ -793,7 +834,7 @@ def create_task_graph(
         command=_build_cmd("runtime", runtime_image_tag),
         output_image=runtime_image_tag,
         input_image=runtime_base_image,
-        timeout=3600.0,  # 60 minutes for builds
+        timeout=5400.0,  # 90 minutes for builds
     )
 
     # Level 2: Runtime sanity check
@@ -803,11 +844,14 @@ def create_task_graph(
         command=f"{repo_path}/container/run.sh --image {runtime_image_tag} --hf-home {home_dir}/.cache/huggingface -- bash -c 'id && python3 /workspace/deploy/sanity_check.py --runtime-check{sanity_no_framework_flag}'",
         input_image=runtime_image_tag,
         parents=[f"{framework}-runtime-build"],
-        timeout=240.0,  # 4 minutes for sanity checks (trtllm can exceed 3 min)
+        timeout=360.0,  # 6 minutes for sanity checks (trtllm can be slow)
         ignore_exit_code=False,
     )
 
-    # Level 1: Dev image build (waits for runtime to complete)
+    # Level 0: Dev image build (runs in parallel with runtime-build).
+    # dev.Dockerfile uses `FROM runtime AS dev` but that references an internal Docker stage,
+    # not the externally tagged runtime image.  Docker resolves it within the same build context
+    # so there is no dependency on the runtime-build task completing first.
     # Builds as -dev-orig; compress step will later produce the final -dev image.
     dev_image_tag = f"dynamo:{version}-{framework}-{cuda_tag}-dev"
     dev_orig_image_tag = f"{dev_image_tag}-orig"
@@ -817,8 +861,8 @@ def create_task_graph(
         command=_build_cmd("dev", dev_orig_image_tag),
         input_image=runtime_image_tag,
         output_image=dev_orig_image_tag,
-        parents=[f"{framework}-runtime-build"],
-        timeout=3600.0,  # 60 minutes for builds
+        parents=[],
+        timeout=5400.0,  # 90 minutes for builds
     )
 
     # Level 3: Dev compilation
@@ -829,6 +873,10 @@ def create_task_graph(
     # - CARGO_PROFILE_DEV_CODEGEN_UNITS=256: More parallel code generation
     cargo_cmd = "CARGO_INCREMENTAL=1 CARGO_PROFILE_DEV_OPT_LEVEL=0 CARGO_BUILD_JOBS=$(nproc) CARGO_PROFILE_DEV_CODEGEN_UNITS=256 cargo build --profile dev --features dynamo-llm/block-manager && cd /workspace/lib/bindings/python && CARGO_INCREMENTAL=1 CARGO_PROFILE_DEV_OPT_LEVEL=0 CARGO_BUILD_JOBS=$(nproc) CARGO_PROFILE_DEV_CODEGEN_UNITS=256 maturin develop --uv && uv pip install -e ."
     chown_cmd = f"sudo chown -R $(id -u):$(id -g) {repo_path}/target/.{framework} {repo_path}/lib/bindings/python {home_dir}/.cargo || true"
+    # Quick install command for sanity checks: registers Python packages using
+    # the .so already built by compilation's maturin develop (on mounted workspace).
+    # No Rust recompilation — just two fast editable installs.
+    sanity_install_cmd = "uv pip install --no-deps -e /workspace/lib/bindings/python && uv pip install --no-deps -e /workspace"
 
     # Level 3a: Pre-chown before dev compilation (fix ownership from previous root-owned builds)
     tasks[f"{framework}-dev-pre-chown"] = CommandTask(
@@ -860,13 +908,15 @@ def create_task_graph(
     )
 
     # Level 4: Dev sanity check (runs after compilation, same for all frameworks)
+    # Mounts the target dir and re-runs the install (fast, uses compiled artifacts)
+    # because compilation and sanity run in separate containers.
     tasks[f"{framework}-dev-sanity"] = CommandTask(
         task_id=f"{framework}-dev-sanity",
         description=f"Run sanity_check.py in {framework.upper()} dev container",
-        command=f"{repo_path}/container/run.sh --image {dev_orig_image_tag} --mount-workspace --hf-home {home_dir}/.cache/huggingface -v {home_dir}/.cargo:/root/.cargo -- bash -c 'id && python3 /workspace/deploy/sanity_check.py{sanity_no_framework_flag}'",
+        command=f"{repo_path}/container/run.sh --image {dev_orig_image_tag} --mount-workspace --hf-home {home_dir}/.cache/huggingface -v {home_dir}/.cargo:/root/.cargo -v {repo_path}/target/.{framework}:/workspace/target -- bash -c '{sanity_install_cmd} && id && python3 /workspace/deploy/sanity_check.py{sanity_no_framework_flag}'",
         input_image=dev_orig_image_tag,
         parents=[f"{framework}-dev-compilation"],
-        timeout=240.0,  # 4 minutes for sanity checks (trtllm can exceed 3 min)
+        timeout=360.0,  # 6 minutes for sanity checks (trtllm can be slow)
     )
 
     # Level 8: Dev upload (runs after compress-sanity, in parallel with local-dev build)
@@ -992,10 +1042,10 @@ docker images {dev_image_tag} --format 'Size: {{{{.Size}}}}'
     tasks[f"{framework}-dev-compress-sanity"] = CommandTask(
         task_id=f"{framework}-dev-compress-sanity",
         description=f"Run sanity_check.py on compressed {framework.upper()} dev image",
-        command=f"{repo_path}/container/run.sh --image {dev_image_tag} --mount-workspace --hf-home {home_dir}/.cache/huggingface -v {home_dir}/.cargo:/root/.cargo -- bash -c 'id && python3 /workspace/deploy/sanity_check.py{sanity_no_framework_flag}'",
+        command=f"{repo_path}/container/run.sh --image {dev_image_tag} --mount-workspace --hf-home {home_dir}/.cache/huggingface -v {home_dir}/.cargo:/root/.cargo -v {repo_path}/target/.{framework}:/workspace/target -- bash -c '{sanity_install_cmd} && id && python3 /workspace/deploy/sanity_check.py{sanity_no_framework_flag}'",
         input_image=dev_image_tag,
         parents=[f"{framework}-dev-compress-compilation"],
-        timeout=240.0,  # 4 minutes for sanity checks (trtllm can exceed 3 min)
+        timeout=360.0,  # 6 minutes for sanity checks (trtllm can be slow)
     )
 
     # Level 8: Local-dev image build (runs after compress-sanity, in parallel with dev-upload)
@@ -1007,7 +1057,7 @@ docker images {dev_image_tag} --format 'Size: {{{{.Size}}}}'
         input_image=dev_image_tag,
         output_image=local_dev_image_tag,
         parents=[f"{framework}-dev-compress-sanity"],
-        timeout=3600.0,  # 60 minutes for builds
+        timeout=5400.0,  # 90 minutes for builds
     )
 
     # Level 9a: Pre-chown before local-dev compilation
@@ -1033,10 +1083,10 @@ docker images {dev_image_tag} --format 'Size: {{{{.Size}}}}'
     tasks[f"{framework}-local-dev-sanity"] = CommandTask(
         task_id=f"{framework}-local-dev-sanity",
         description=f"Run sanity_check.py in {framework.upper()} local-dev container",
-        command=f"{repo_path}/container/run.sh --image {local_dev_image_tag} --mount-workspace --hf-home {home_dir}/.cache/huggingface -v {home_dir}/.cargo:/home/dynamo/.cargo -- bash -c 'id && (sudo id || true) && python3 /workspace/deploy/sanity_check.py{sanity_no_framework_flag}'",
+        command=f"{repo_path}/container/run.sh --image {local_dev_image_tag} --mount-workspace --hf-home {home_dir}/.cache/huggingface -v {home_dir}/.cargo:/home/dynamo/.cargo -v {repo_path}/target/.{framework}:/workspace/target -- bash -c '{sanity_install_cmd} && id && (sudo id || true) && python3 /workspace/deploy/sanity_check.py{sanity_no_framework_flag}'",
         input_image=local_dev_image_tag,
         parents=[f"{framework}-local-dev-compilation"],
-        timeout=240.0,  # 4 minutes for sanity checks (trtllm can exceed 3 min)
+        timeout=360.0,  # 6 minutes for sanity checks (trtllm can be slow)
     )
 
     return tasks
@@ -1089,10 +1139,10 @@ def create_task_graph_reuse(
     tasks[f"{framework}-dev-compress-sanity"] = CommandTask(
         task_id=f"{framework}-dev-compress-sanity",
         description=f"Run sanity_check.py on compressed {framework.upper()} dev image (reuse)",
-        command=f"{repo_path}/container/run.sh --image {dev_image_tag} --mount-workspace --hf-home {home_dir}/.cache/huggingface -v {home_dir}/.cargo:/root/.cargo -- bash -c 'id && python3 /workspace/deploy/sanity_check.py{sanity_no_framework_flag}'",
+        command=f"{repo_path}/container/run.sh --image {dev_image_tag} --mount-workspace --hf-home {home_dir}/.cache/huggingface -v {home_dir}/.cargo:/root/.cargo -v {repo_path}/target/.{framework}:/workspace/target -- bash -c '{sanity_install_cmd} && id && python3 /workspace/deploy/sanity_check.py{sanity_no_framework_flag}'",
         input_image=dev_image_tag,
         parents=[f"{framework}-dev-compress-chown"],
-        timeout=240.0,  # 4 minutes for sanity checks (trtllm can exceed 3 min)
+        timeout=360.0,  # 6 minutes for sanity checks (trtllm can be slow)
     )
 
     return tasks
@@ -1517,7 +1567,8 @@ class BaseTask(ABC):
         if not self.input_image:
             return True
         # BuildTask Dockerfiles are self-contained; docker build pulls base images internally.
-        if self.task_id and str(self.task_id).endswith('-runtime-build'):
+        # runtime-build and dev-build both resolve their FROM stages within the same build context.
+        if self.task_id and (str(self.task_id).endswith('-runtime-build') or str(self.task_id).endswith('-dev-build')):
             return True
 
         try:
@@ -2260,8 +2311,8 @@ def execute_task_sequential(
 
         return True
 
-    # Check if we should skip dev-compress or dev-compress-sanity (--no-compress)
-    if not enable_dev_compress and (task_id.endswith("-dev-compress") or task_id.endswith("-dev-compress-sanity")):
+    # Check if we should skip all dev-compress tasks (--no-compress)
+    if not enable_dev_compress and "-dev-compress" in task_id:
         logger.info(f"⊘ Skipping {task_id}: compress disabled (--no-compress)")
         # When skipping dev-compress, retag -dev-orig to -dev so downstream tasks have the expected image
         if task_id.endswith("-dev-compress") and task.input_image and task.output_image:
@@ -2693,6 +2744,24 @@ def execute_task_parallel(
                     failed_tasks.add(task_id)
                     return False
 
+        # Framework-level fail-stop: if ANY task from the same framework already failed,
+        # skip this task.  This catches failures across independent branches (e.g. runtime
+        # failure cancels dev tasks even though dev-build has no parent dependency on runtime).
+        if not task.run_even_if_deps_fail:
+            fw = task_id.split("-", 1)[0]  # e.g. "vllm" from "vllm-dev-build"
+            with lock:
+                for fid in failed_tasks:
+                    if fid.split("-", 1)[0] == fw:
+                        reason = f"Framework {fw} has a failed task: {fid}"
+                        if dry_run:
+                            logger.info(f"Would skip {task_id}: {reason}")
+                        else:
+                            logger.info(f"Skipping {task_id}: {reason}")
+                        task.mark_status_as(TaskStatus.SKIPPED, reason)
+                        executed_tasks.add(task_id)
+                        failed_tasks.add(task_id)
+                        return False
+
         # Check if we should skip compilation tasks (--no-compile)
         if no_compile and isinstance(task, CommandTask) and 'compilation' in task_id.lower():
             with lock:
@@ -2702,8 +2771,8 @@ def execute_task_parallel(
                 executed_tasks.add(task_id)
             return True
 
-        # Check if we should skip dev-compress or dev-compress-sanity (--no-compress)
-        if not enable_dev_compress and (task_id.endswith("-dev-compress") or task_id.endswith("-dev-compress-sanity")):
+        # Check if we should skip all dev-compress tasks (--no-compress)
+        if not enable_dev_compress and "-dev-compress" in task_id:
             with lock:
                 logger.info(f"⊘ Skipping {task_id}: compress disabled (--no-compress)")
             # When skipping dev-compress, retag -dev-orig to -dev so downstream tasks have the expected image
@@ -4353,16 +4422,32 @@ def main() -> int:
         logger.error(f"Failed to create lock file: {e}")
         return 1
 
-    # Ensure lock file is removed on exit (only if we own it)
+    # Write PID file for self-dedup watchdog (skip in dry-run; no child processes to guard)
+    if not args.dry_run:
+        global _pid_file_path
+        _pid_file_path = repo_path / ".build_images_pid"
+        _pid_file_path.write_text(str(os.getpid()))
+        _watchdog_thread = threading.Thread(target=_pid_watchdog, daemon=True)
+        _watchdog_thread.start()
+
+    # Ensure lock file and PID file are removed on exit (only if we own them)
     _our_pid = os.getpid()
 
     def cleanup_lock():
+        _stop_pid_watchdog.set()
         try:
             if lock_file.exists():
                 with open(lock_file, 'r') as f:
                     stored_pid = int(f.readline().strip())
                 if stored_pid == _our_pid:
                     lock_file.unlink()
+        except (ValueError, IOError, OSError):
+            pass
+        try:
+            if _pid_file_path and _pid_file_path.exists():
+                stored_pid = int(_pid_file_path.read_text().strip())
+                if stored_pid == _our_pid:
+                    _pid_file_path.unlink()
         except (ValueError, IOError, OSError):
             pass
     atexit.register(cleanup_lock)
@@ -4710,6 +4795,12 @@ def main() -> int:
                 task.children = [c for c in task.children if c not in remove_ids]
                 # Dockerfiles are self-contained (render.py); no cross-target image deps
                 task.input_image = None
+
+        # Auto-disable upload when building a subset of targets (upload requires all targets).
+        # Compress is NOT auto-disabled; pass --no-compress explicitly to skip it.
+        if not args.no_upload:
+            args.no_upload = True
+            logger.info(f"--target {args.target}: auto-disabling upload (pass --no-upload=false to override)")
 
     # Filter tasks based on --sanity-check-only
     if args.sanity_check_only:
