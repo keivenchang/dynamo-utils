@@ -1505,13 +1505,13 @@ class CommitHistoryGenerator:
                     local_image = registry_image_name
 
                     pull_dev_cmd = (
-                        f"docker pull {registry_location}"
-                        f" && docker tag {registry_location} {local_image}"
-                        f" && docker rmi {registry_location}"
+                        f"(GL={registry_location} L={local_image}"
+                        f" && docker pull $GL && docker tag $GL $L && docker rmi $GL)"
                     )
                     local_dev_cmd = (
-                        f"{pull_dev_cmd}"
-                        f" && curl -sL {BUILD_LOCAL_DEV_SCRIPT_URL} | python3 - {local_image} --build"
+                        f"(GL={registry_location} L={local_image}"
+                        f" && docker pull $GL && docker tag $GL $L && docker rmi $GL"
+                        f" && curl -sL {BUILD_LOCAL_DEV_SCRIPT_URL} | python3 - $L --build)"
                     )
                     formatted.append({
                         "tag": registry_tag,

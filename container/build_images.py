@@ -3932,16 +3932,34 @@ def generate_build_report(
         # create bogus entries for tags that don't exist in GitLab.
         upload_task_id = f"{framework}-dev-upload"
         upload_task = all_tasks.get(upload_task_id)
+        upload_passed = False
+
+        # Check if upload succeeded either from task status or PASSED marker file
         if upload_task and upload_task.status == TaskStatus.PASSED:
+            upload_passed = True
+        elif not upload_task:
+            # Upload task not in all_tasks (e.g., reuse mode or filtered build)
+            # Check for PASSED marker in log directory
+            upload_log_file = log_dir / image_and_commit_sha / f"{upload_task_id}.{MARKER_PASSED}"
+            if upload_log_file.exists():
+                upload_passed = True
+
+        if upload_passed:
             upload_data: FrameworkTargetData = fw_data.get('dev-upload', FrameworkTargetData())
             if upload_data.output_image:
                 gitlab_location = upload_data.output_image
                 image_name = gitlab_location.rsplit("/", 1)[-1] if "/" in gitlab_location else gitlab_location
                 tag = image_name.split(":", 1)[-1] if ":" in image_name else image_name
-                pushed_at = (
-                    datetime.fromtimestamp(upload_task.end_time).isoformat()
-                    if upload_task.end_time else None
-                )
+                # Get pushed_at timestamp from upload task if available
+                if upload_task and upload_task.end_time:
+                    pushed_at = datetime.fromtimestamp(upload_task.end_time).isoformat()
+                else:
+                    # Try to get timestamp from log file mtime
+                    upload_log_path = log_dir / image_and_commit_sha / f"{upload_task_id}.log"
+                    if upload_log_path.exists():
+                        pushed_at = datetime.fromtimestamp(upload_log_path.stat().st_mtime).isoformat()
+                    else:
+                        pushed_at = None
 
                 compress_data: FrameworkTargetData = fw_data.get('dev-compress', FrameworkTargetData())
                 if compress_data.image_size:
