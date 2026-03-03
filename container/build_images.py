@@ -554,10 +554,10 @@ def _generate_error_html_and_exit(
 _CUDA_KEY_PATTERN = re.compile(r"^cuda(\d+\.\d+)$")
 
 
-def get_latest_cuda_version(repo_path: Path, framework: str) -> str:
+def get_oldest_cuda_version(repo_path: Path, framework: str) -> str:
     """
-    Parse container/context.yaml and return the latest CUDA version for the given framework.
-    Returns the highest cudaX.Y key present (e.g. "13.0" for vllm/sglang/none, "13.1" for trtllm).
+    Parse container/context.yaml and return the oldest CUDA version for the given framework.
+    Returns the lowest cudaX.Y key present (e.g. "12.9" for vllm/sglang/none, "13.1" for trtllm).
     Fallback: "13.1" for trtllm, "12.9" for others if context is missing or has no cuda keys.
     """
     context_path = repo_path / "container" / "context.yaml"
@@ -581,11 +581,10 @@ def get_latest_cuda_version(repo_path: Path, framework: str) -> str:
             versions.append(m.group(1))
     if not versions:
         return "13.1" if framework == "trtllm" else "12.9"
-    # Sort by (major, minor) and take latest
     def version_key(v: str) -> tuple:
         parts = v.split(".")
         return (int(parts[0]), int(parts[1]) if len(parts) > 1 else 0)
-    return max(versions, key=version_key)
+    return min(versions, key=version_key)
 
 
 def get_runtime_base_image(repo_path: Path, framework: str) -> Optional[str]:
@@ -604,7 +603,7 @@ def get_runtime_base_image(repo_path: Path, framework: str) -> Optional[str]:
     if not context:
         return None
     # Use latest CUDA version from context (same as create_task_graph)
-    cuda_version = get_latest_cuda_version(repo_path, framework)
+    cuda_version = get_oldest_cuda_version(repo_path, framework)
     cuda_key = f"cuda{cuda_version}"
     if framework == "none":
         # dynamo_runtime.Dockerfile uses FROM dynamo_base AS runtime; dynamo_base is FROM BASE_IMAGE:BASE_IMAGE_TAG
@@ -640,7 +639,7 @@ def detect_latest_image_sha(repo_path: Path, framework: str) -> Optional[str]:
     if result.returncode != 0:
         return None
 
-    cuda_version = get_latest_cuda_version(repo_path, framework)
+    cuda_version = get_oldest_cuda_version(repo_path, framework)
     cuda_tag = f"cuda{cuda_version}"
 
     # Prefer local-dev, then dev, then runtime
@@ -734,7 +733,7 @@ def _check_reuse_dev_images_exist(repo_path: Path, tag_version: str, frameworks:
     image_sha_6 = tag_version.split('.')[0] if '.' in tag_version else tag_version
     found: Dict[str, str] = {}
     for framework in frameworks:
-        cuda_version = get_latest_cuda_version(repo_path, framework)
+        cuda_version = get_oldest_cuda_version(repo_path, framework)
         cuda_tag = f"cuda{cuda_version}"
         existing = _find_dev_image(image_sha_6, framework, cuda_tag)
         if not existing:
@@ -799,7 +798,7 @@ def create_task_graph(
     # render.py uses "dynamo" instead of "none"
     render_fw = RENDER_FRAMEWORK_MAP.get(framework, framework)
     # CUDA version from context.yaml (latest cudaX.Y per framework)
-    render_cuda_version = get_latest_cuda_version(repo_path, framework)
+    render_cuda_version = get_oldest_cuda_version(repo_path, framework)
 
     def _build_cmd(target: str, image_tag: str) -> str:
         """Generate the build command for a given target and image tag."""
