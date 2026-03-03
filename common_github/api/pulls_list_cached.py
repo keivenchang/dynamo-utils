@@ -163,9 +163,10 @@ _CACHE = _PullsListCache(cache_file=_get_cache_file())
 
 
 class PullsListCached(CachedResourceBase[List[Dict[str, Any]]]):
-    def __init__(self, api: "GitHubAPIClient", *, ttl_s: int):
+    def __init__(self, api: "GitHubAPIClient", *, ttl_s: int, max_pages: int = 5):
         super().__init__(api)
         self._ttl_s = int(ttl_s)
+        self._max_pages = max_pages
 
     @property
     def cache_name(self) -> str:
@@ -254,7 +255,7 @@ class PullsListCached(CachedResourceBase[List[Dict[str, Any]]]):
 
         try:
             page = 1
-            max_pages = 5  # Limit to 5 pages (500 most recent PRs)
+            max_pages = self._max_pages
             while page <= max_pages:
                 params = {"state": state, "per_page": 100, "page": page}
                 url = f"{self.api.base_url}{endpoint}"
@@ -373,7 +374,8 @@ def list_pull_requests_cached(
     owner: str,
     repo: str,
     state: str = "open",
-    ttl_s: int
+    ttl_s: int,
+    max_pages: int = 5,
 ) -> List[Dict[str, Any]]:
     """List pull requests for a repo with a short-lived cache.
 
@@ -383,11 +385,12 @@ def list_pull_requests_cached(
         repo: Repository name
         state: "open" or "all" (default: "open")
         ttl_s: Cache TTL in seconds
+        max_pages: Max pages to fetch (100 PRs/page). Default 5 = 500 PRs.
 
     Returns:
         List of PR dicts (GitHub REST API /pulls response objects).
     """
-    return PullsListCached(api, ttl_s=int(ttl_s)).get(owner=owner, repo=repo, state=state)
+    return PullsListCached(api, ttl_s=int(ttl_s), max_pages=max_pages).get(owner=owner, repo=repo, state=state)
 
 
 def get_cache_sizes() -> Tuple[int, int]:
