@@ -27,9 +27,9 @@ If you do only one thing: re-read this section before making changes or running 
     ALWAYS use `python3 -m pytest` to ensure the venv's pytest runs with the correct `sys.path`.
   - Before running any `pytest`, do:
     - `export HF_HUB_OFFLINE=1 HF_TOKEN="$(cat ~/.cache/huggingface/token)" && python3 -m pytest ...`
-  - Prefer: `python3 -m pytest -xvv --basetemp=/tmp/pytest_temp --duration=0 tests/`
+  - Prefer: `python3 -m pytest -xvv --basetemp=/tmp/pytest_temp --durations=0 tests/`
   - Always pass `-xvv` to stop at first failure and get verbose output for fast analysis
-  - Always pass `--duration=0` to show timing of all tests (helps detect slow/flaky tests)
+  - Always pass `--durations=0` to show timing of all tests (helps detect slow/flaky tests)
   - Note: Only needed for existing tests that require HF authentication
 
 - Cache deletion policy (MUST):

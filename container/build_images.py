@@ -5096,59 +5096,65 @@ def main() -> int:
         logger.info(f"  Exit status: {exit_status}")
         logger.info(f"  Completed: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
+        # Skip report generation if all tasks were skipped (nothing changed)
+        all_tasks_skipped = (success_count == 0 and failed_count == 0 and skipped_count > 0)
+        if all_tasks_skipped:
+            logger.info(f"  All tasks skipped - report unchanged")
+
         # Generate HTML report (always, regardless of --framework flag)
         # This ensures all frameworks/targets are included in the report
-        try:
-            # Always generate HTML report with relative paths for file
-            html_content_file = generate_html_report(
-                all_tasks=all_tasks,
-                repo_path=repo_path,
-                image_and_commit_sha=image_and_commit_sha,
-                log_dir=log_dir,
-                date_str=log_date,
-                use_absolute_urls=False,
-            )
-
-            # Save HTML report, status marker, and JSON build report together
-            _write_report_and_json(html_content_file, all_tasks, repo_path, image_and_commit_sha, log_dir, log_date)
-            logger.info(f"  HTML + JSON Report saved to: {log_dir}")
-        except Exception as e:
-            logger.error(f"Failed to generate reports: {e}")
-            # Continue to try sending email even if report generation failed
-
-        # Send email notification (separate try-except to avoid hiding email errors)
-        if args.email:
+        if not all_tasks_skipped:
             try:
-                # Generate report with absolute URLs for email
-                html_content_email = generate_html_report(
+                # Always generate HTML report with relative paths for file
+                html_content_file = generate_html_report(
                     all_tasks=all_tasks,
                     repo_path=repo_path,
                     image_and_commit_sha=image_and_commit_sha,
                     log_dir=log_dir,
                     date_str=log_date,
-                    use_absolute_urls=True,
-                    hostname=args.hostname,
-                    html_path=args.html_path,
+                    use_absolute_urls=False,
                 )
 
-                # Collect failed task names for the email subject.
-                # Keep this consistent with exit-status calculation above: some failures are expected
-                # (framework=none compilation/sanity) and should not flip the overall status to FAIL.
-                failed_task_names = list(critical_failures)
-
-                # Send email
-                email_sent = send_email_notification(
-                    email=args.email,
-                    html_content=html_content_email,
-                    commit_sha_9=commit_sha_9[:7],
-                    failed_tasks=failed_task_names,
-                )
-
-                if not email_sent:
-                    logger.warning(f"⚠️  Email notification was not sent successfully")
+                # Save HTML report, status marker, and JSON build report together
+                _write_report_and_json(html_content_file, all_tasks, repo_path, image_and_commit_sha, log_dir, log_date)
+                logger.info(f"  HTML + JSON Report saved to: {log_dir}")
             except Exception as e:
-                logger.error(f"Failed to send email notification: {e}")
-                logger.debug(traceback.format_exc())
+                logger.error(f"Failed to generate reports: {e}")
+                # Continue to try sending email even if report generation failed
+
+            # Send email notification (separate try-except to avoid hiding email errors)
+            if args.email:
+                try:
+                    # Generate report with absolute URLs for email
+                    html_content_email = generate_html_report(
+                        all_tasks=all_tasks,
+                        repo_path=repo_path,
+                        image_and_commit_sha=image_and_commit_sha,
+                        log_dir=log_dir,
+                        date_str=log_date,
+                        use_absolute_urls=True,
+                        hostname=args.hostname,
+                        html_path=args.html_path,
+                    )
+
+                    # Collect failed task names for the email subject.
+                    # Keep this consistent with exit-status calculation above: some failures are expected
+                    # (framework=none compilation/sanity) and should not flip the overall status to FAIL.
+                    failed_task_names = list(critical_failures)
+
+                    # Send email
+                    email_sent = send_email_notification(
+                        email=args.email,
+                        html_content=html_content_email,
+                        commit_sha_9=commit_sha_9[:7],
+                        failed_tasks=failed_task_names,
+                    )
+
+                    if not email_sent:
+                        logger.warning(f"⚠️  Email notification was not sent successfully")
+                except Exception as e:
+                    logger.error(f"Failed to send email notification: {e}")
+                    logger.debug(traceback.format_exc())
 
         return exit_status
 
