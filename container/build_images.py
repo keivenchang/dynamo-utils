@@ -1109,6 +1109,7 @@ def create_task_graph_reuse(
 
     cargo_cmd = "CARGO_INCREMENTAL=1 CARGO_PROFILE_DEV_OPT_LEVEL=0 CARGO_BUILD_JOBS=$(nproc) CARGO_PROFILE_DEV_CODEGEN_UNITS=256 cargo build --profile dev --features dynamo-llm/block-manager && cd /workspace/lib/bindings/python && CARGO_INCREMENTAL=1 CARGO_PROFILE_DEV_OPT_LEVEL=0 CARGO_BUILD_JOBS=$(nproc) CARGO_PROFILE_DEV_CODEGEN_UNITS=256 maturin develop --uv && uv pip install -e ."
     chown_cmd = f"sudo chown -R $(id -u):$(id -g) {repo_path}/target/.{framework} {repo_path}/lib/bindings/python {home_dir}/.cargo || true"
+    sanity_install_cmd = "uv pip install --no-deps -e /workspace/lib/bindings/python && uv pip install --no-deps -e /workspace"
 
     tasks[f"{framework}-dev-compress-pre-chown"] = CommandTask(
         task_id=f"{framework}-dev-compress-pre-chown",
