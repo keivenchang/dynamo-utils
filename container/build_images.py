@@ -139,6 +139,7 @@ _html_out_file: Optional[Path] = None
 _report_no_compress: bool = False
 _report_no_upload: bool = False
 _report_no_build: bool = False
+_report_started_epoch: Optional[float] = None
 
 # Global initial commit SHA tracking for detecting mid-build commits
 _initial_commit_sha_9: Optional[str] = None
@@ -1078,13 +1079,23 @@ docker images {dev_image_tag} --format 'Size: {{{{.Size}}}}'
         timeout=1800.0,  # 30 minutes for compilation
     )
 
-    # Level 10: Local-dev sanity check (runs after compilation, same for all frameworks)
+    # Level 9b: Post-chown after local-dev compilation
+    tasks[f"{framework}-local-dev-chown"] = CommandTask(
+        task_id=f"{framework}-local-dev-chown",
+        description=f"Fix file ownership after {framework.upper()} local-dev compilation",
+        command=chown_cmd,
+        parents=[f"{framework}-local-dev-compilation"],
+        run_even_if_deps_fail=True,
+        timeout=60.0,
+    )
+
+    # Level 10: Local-dev sanity check (runs after chown, same for all frameworks)
     tasks[f"{framework}-local-dev-sanity"] = CommandTask(
         task_id=f"{framework}-local-dev-sanity",
         description=f"Run sanity_check.py in {framework.upper()} local-dev container",
         command=f"{repo_path}/container/run.sh --image {local_dev_image_tag} --mount-workspace --hf-home {home_dir}/.cache/huggingface -v {home_dir}/.cargo:/home/dynamo/.cargo -v {repo_path}/target/.{framework}:/workspace/target -- bash -c '{sanity_install_cmd} && id && (sudo id || true) && python3 /workspace/deploy/sanity_check.py{sanity_no_framework_flag}'",
         input_image=local_dev_image_tag,
-        parents=[f"{framework}-local-dev-compilation"],
+        parents=[f"{framework}-local-dev-chown"],
         timeout=480.0,  # 8 minutes for sanity checks (trtllm can exceed 4 min)
     )
 
@@ -3539,35 +3550,23 @@ def generate_html_report(
     running = sum(1 for t in all_tasks.values() if t.status == TaskStatus.RUNNING)
     queued = sum(1 for t in all_tasks.values() if t.status == TaskStatus.QUEUED)
 
-    # Calculate overall build elapsed time using absolute timestamps.
-    # Prefer .RUNNING marker mtimes (survive process restarts) over in-memory start_time.
-    absolute_start_times: List[float] = []
-    for t in all_tasks.values():
-        if t.log_file:
-            running_marker = t.log_file.with_suffix(f'.{MARKER_RUNNING}')
-            if running_marker.exists():
-                absolute_start_times.append(running_marker.stat().st_mtime)
-                continue
-            # For completed tasks, use log file mtime as a proxy for when the task ran
-            if t.log_file.exists() and t.status in (TaskStatus.PASSED, TaskStatus.FAILED, TaskStatus.KILLED):
-                absolute_start_times.append(t.log_file.stat().st_mtime)
-                continue
-        if t.start_time:
-            absolute_start_times.append(t.start_time)
+    # Build timing should come from in-memory task/runtime state and JSON fields,
+    # not from marker-file mtimes (which can be stale across interrupted runs).
+    report_started_epoch = _report_started_epoch
+    if report_started_epoch is None:
+        task_starts = [t.start_time for t in all_tasks.values() if t.start_time]
+        if task_starts:
+            report_started_epoch = min(task_starts)
 
     overall_elapsed_str = ""
-    if absolute_start_times:
-        earliest_start = min(absolute_start_times)
-
-        # If build is still in progress, calculate elapsed time
-        if running > 0 or queued > 0:
-            elapsed_seconds = time.time() - earliest_start
-            minutes = int(elapsed_seconds // 60)
-            seconds = int(elapsed_seconds % 60)
-            if minutes > 0:
-                overall_elapsed_str = f" (elapsed {minutes}m {seconds}s)"
-            else:
-                overall_elapsed_str = f" (elapsed {seconds}s)"
+    if report_started_epoch is not None and (running > 0 or queued > 0):
+        elapsed_seconds = max(0.0, time.time() - report_started_epoch)
+        minutes = int(elapsed_seconds // 60)
+        seconds = int(elapsed_seconds % 60)
+        if minutes > 0:
+            overall_elapsed_str = f" (elapsed {minutes}m {seconds}s)"
+        else:
+            overall_elapsed_str = f" (elapsed {seconds}s)"
 
     # Determine overall status (priority: failed > killed > running/queued > success)
     if failed > 0:
@@ -3724,6 +3723,11 @@ def generate_html_report(
             frameworks_dict[framework][target] = target_data.to_dict()
 
     now = datetime.now()
+    report_started_str = (
+        datetime.fromtimestamp(report_started_epoch).strftime('%Y-%m-%d %H:%M:%S')
+        if report_started_epoch is not None
+        else now.strftime('%Y-%m-%d %H:%M:%S')
+    )
     html = template.render(
         commit_sha_9=commit_info.get('commit_sha_9', commit_sha_9[:9]),
         commit_sha_40=commit_info.get('commit_sha_40', commit_sha_9),
@@ -3739,6 +3743,7 @@ def generate_html_report(
         running=running,
         queued=queued,
         build_date=now.strftime('%Y-%m-%d %H:%M:%S'),
+        report_started=report_started_str,
         report_generated=now.strftime('%Y-%m-%d %H:%M:%S'),
         commit=commit_info,
         frameworks=frameworks_dict,
@@ -3986,6 +3991,13 @@ def generate_build_report(
         ))
 
     now = datetime.now()
+    report_started_iso: Optional[str] = None
+    if _report_started_epoch is not None:
+        report_started_iso = datetime.fromtimestamp(_report_started_epoch).isoformat()
+    else:
+        task_starts = [t.start_time for t in all_tasks.values() if t.start_time]
+        if task_starts:
+            report_started_iso = datetime.fromtimestamp(min(task_starts)).isoformat()
     return BuildReport(
         schema_version=SCHEMA_VERSION,
         commit_sha_9=commit_sha_9[:9],
@@ -4000,6 +4012,7 @@ def generate_build_report(
         killed=killed,
         commit=commit,
         frameworks=framework_results,
+        report_started=report_started_iso,
     )
 
 
@@ -4671,6 +4684,8 @@ def main() -> int:
 
     # Track overall execution time
     execution_start_time = time.time()
+    global _report_started_epoch
+    _report_started_epoch = execution_start_time
 
     # Keep a stable "latest report" output path updated during execution
     # (defaults to <repo-path>/build.html)

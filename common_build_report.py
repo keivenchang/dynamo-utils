@@ -113,6 +113,7 @@ class BuildReport:
     killed: int
     commit: CommitInfo
     frameworks: List[FrameworkResult] = field(default_factory=list)
+    report_started: Optional[str] = None  # ISO 8601 when this build/report run started
 
     # ------------------------------------------------------------------
     # Serialization
@@ -194,6 +195,7 @@ class BuildReport:
             commit_sha_9=d.get("commit_sha_9", ""),
             commit_sha_40=d.get("commit_sha_40", ""),
             build_date=d.get("build_date", ""),
+            report_started=d.get("report_started"),
             report_generated=d.get("report_generated", ""),
             overall_status=d.get("overall_status", ""),
             total_tasks=d.get("total_tasks", 0),

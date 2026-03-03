@@ -87,7 +87,7 @@ h2 { margin: 0; font-size: 1.2em; font-weight: bold; }
 <body>
 <div class="header">
 <h2>DynamoDockerBuilder - {% if image_sha_6 %}{% if image_sha_url %}<a href="{{ image_sha_url }}" style="color: white; text-decoration: underline;">{{ image_sha_6 }}</a>{% else %}{{ image_sha_6 }}{% endif %}.{% endif %}<a href="https://github.com/ai-dynamo/dynamo/commit/{{ commit_sha_40 }}" style="color: white; text-decoration: underline;">{{ commit_sha_9 }}</a> - {{ overall_status }}</h2>
-<p style="margin: 5px 0 0 0; font-size: 0.9em; opacity: 0.9;">Report Generated: {{ report_generated }}</p>
+<p style="margin: 5px 0 0 0; font-size: 0.9em; opacity: 0.9;">Report started: {{ report_started or build_date }}, generated: {{ report_generated }}</p>
 </div>
 
 <div class="summary-boxes">
@@ -253,7 +253,7 @@ h2 { margin: 0; font-size: 1.2em; font-weight: bold; }
 </div>
 {%- elif target_name == 'dev-upload' %}
 <div class="chart-cell chart-status chart-cell-span-3" style="text-align: center;">
-{%- if no_upload %}<span style="color: #95a5a6;">Disabled (--no-upload)</span>
+{%- if no_upload and not (build_task and build_task.status == 'skipped' and build_task.prev_status) %}<span style="color: #95a5a6;">Disabled (--no-upload)</span>
 {%- elif build_task %}
 {%- if build_task.status == 'passed' %}
 <span class="success">✅ UPLOADED</span>{%- if build_task.time %} <span class="chart-timing">({{ build_task.time }})</span>{%- endif %}
