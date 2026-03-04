@@ -2221,6 +2221,7 @@ class CommitHistoryGenerator:
             github_actions_status=github_actions_status,
             generated_time=generated_time,
             job_started_time=job_started_time,
+            job_elapsed_str=f"{int(elapsed_s // 60)} minutes" if elapsed_s is not None else "",
             commit_count=len(commit_data),
             gha_success_count=gha_success_count,
             gha_failed_count=gha_failed_count,
