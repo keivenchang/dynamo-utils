@@ -8,51 +8,50 @@ Scope / intent:
 - Keep it short and executable: prefer checklists + commands over long narratives or huge pasted graphs.
 - Avoid duplicating `.cursorrules` content; link to it when the topic is coding/formatting/linting inside the container.
 
-=============================================================================
-TABLE OF CONTENTS
-=============================================================================
+---
+## TABLE OF CONTENTS
+
 1. META INSTRUCTIONS AND POLICIES
-  1.1 Remember This
-  1.2 New Project Protocol
-  1.3 Commit Policy
-  1.4 Permission Policy
-  1.5 Python Virtual Environment (Host vs Container)
-  1.6 CRITICAL ANTI-PATTERNS (Review Every 10 Minutes)
+   - 1.1 Remember This
+   - 1.2 New Project Protocol
+   - 1.3 Commit Policy
+   - 1.4 Permission Policy
+   - 1.5 Python Virtual Environment (Host vs Container)
+   - 1.6 CRITICAL ANTI-PATTERNS (Review Every 10 Minutes)
 
 2. ENVIRONMENT SETUP
-  2.1 All Projects Overview
-  2.2 Docker Container Naming
-  2.3 Host-Container Directory Mapping
-  2.4 Backup File Convention
+   - 2.1 All Projects Overview
+   - 2.2 Docker Container Naming
+   - 2.3 Host-Container Directory Mapping
+   - 2.4 Backup File Convention
 
 3. OPERATIONAL PROCEDURES
-  3.1 Running Inference Servers (Docker)
-    3.1.1 Collecting Prometheus Metrics (VLLM/SGLANG/TRTLLM)
+   - 3.1 Running Inference Servers (Docker)
+     - 3.1.1 Collecting Prometheus Metrics (VLLM/SGLANG/TRTLLM)
 
 4. TESTING AND CI-RELATED COMMANDS
-  4.1 Pytest with WORKSPACE_DIR (Docker exec)
-  4.2 Docker Builder Tests
-  4.3 Go Operator Linting
-  4.4 Documentation Build Test
-  4.5 Documentation Link Check
-  4.6 Analyzing CI Failures (log-grepping workflow)
-  4.7 GitHub CI job dependencies (needs:)
-  4.8 Dynamo-utils dashboards (operational runbook)
-    4.8.1 Running `update_html_pages.sh`
-    4.8.2 Outputs, logs, and “it ran too quickly”
-    4.8.3 Common UI pitfalls (links/buttons inside <details>)
+   - 4.1 Pytest with WORKSPACE_DIR (Docker exec)
+   - 4.2 Docker Builder Tests
+   - 4.3 Go Operator Linting
+   - 4.4 Documentation Build Test
+   - 4.5 Documentation Link Check
+   - 4.6 Analyzing CI Failures (log-grepping workflow)
+   - 4.7 GitHub CI job dependencies (needs:)
+   - 4.8 Dynamo-utils dashboards (operational runbook)
+     - 4.8.1 Running `update_html_pages.sh`
+     - 4.8.2 Outputs, logs, and "it ran too quickly"
+     - 4.8.3 Common UI pitfalls (links/buttons inside `<details>`)
 
 5. GITHUB OPERATIONS
-  5.1 GitHub API Access
-  5.2 Re-running Failed GitHub Actions
+   - 5.1 GitHub API Access
+   - 5.2 Re-running Failed GitHub Actions
 
 6. REMINDERS AND POINTERS
-  6.1 Important Reminders
-  6.2 Additional Documentation
+   - 6.1 Important Reminders
+   - 6.2 Additional Documentation
 
-=============================================================================
-1. META INSTRUCTIONS AND POLICIES
-=============================================================================
+---
+## 1. META INSTRUCTIONS AND POLICIES
 
 ## 1.1 Remember This
 When the user says "remember this" or "remember how to do this", document it in this `CLAUDE.md`.
@@ -203,9 +202,8 @@ Using `except Exception:` catches **everything** (ValueError, TypeError, Attribu
 
 **For complete details, see `.cursorrules` section 3.5.3 "Error Handling and Anti-Patterns"**
 
-=============================================================================
-2. ENVIRONMENT SETUP
-=============================================================================
+---
+## 2. ENVIRONMENT SETUP
 
 ## 2.1 All Projects Overview
 This workspace contains multiple projects:
@@ -239,9 +237,8 @@ Example:
 cp container/build_images.py container/build_images.py.2025-10-18.bak
 ```
 
-=============================================================================
-3. OPERATIONAL PROCEDURES
-=============================================================================
+---
+## 3. OPERATIONAL PROCEDURES
 
 ## 3.1 Running Inference Servers (Docker)
 
@@ -319,9 +316,8 @@ docker exec <container_name> bash -c "ps aux | grep -E '(inference|sglang|vllm|t
 docker exec <container_name> bash -c "ss -tlnp | grep -E '(8000|8081)' || echo 'Ports freed'"
 ```
 
-=============================================================================
-4. TESTING AND CI-RELATED COMMANDS
-=============================================================================
+---
+## 4. TESTING AND CI-RELATED COMMANDS
 
 ## 4.1 Pytest with WORKSPACE_DIR (Docker exec)
 
@@ -640,9 +636,8 @@ For operational procedures including:
 
 **See:** `html_pages/README.md` → "Operational Runbook" section
 
-=============================================================================
-5. GITHUB OPERATIONS
-=============================================================================
+---
+## 5. GITHUB OPERATIONS
 
 ## 5.1 GitHub API Access
 
@@ -696,9 +691,8 @@ gh run view <RUN_ID> --repo ai-dynamo/dynamo --json status,conclusion,url
 - From Actions URL: `https://github.com/ai-dynamo/dynamo/actions/runs/RUN_ID`
 - From PR check status: Use GitHubAPIClient to get commit check-runs, extract run ID from `html_url`
 
-=============================================================================
-6. REMINDERS AND POINTERS
-=============================================================================
+---
+## 6. REMINDERS AND POINTERS
 
 ## 6.1 Important Reminders
 - **NEVER delete `<workspace>/commits/index.html`** (e.g. `~/dynamo/commits/index.html`) - This is the production HTML page for commit history
