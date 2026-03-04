@@ -3559,27 +3559,27 @@ def generate_html_report(
             report_started_epoch = min(task_starts)
 
     overall_elapsed_str = ""
-    if report_started_epoch is not None and (running > 0 or queued > 0):
+    if report_started_epoch is not None:
         elapsed_seconds = max(0.0, time.time() - report_started_epoch)
         minutes = int(elapsed_seconds // 60)
         seconds = int(elapsed_seconds % 60)
         if minutes > 0:
-            overall_elapsed_str = f" (elapsed {minutes}m {seconds}s)"
+            overall_elapsed_str = f"elapsed {minutes}m {seconds}s"
         else:
-            overall_elapsed_str = f" (elapsed {seconds}s)"
+            overall_elapsed_str = f"elapsed {seconds}s"
 
     # Determine overall status (priority: failed > killed > running/queued > success)
     if failed > 0:
-        overall_status = f"❌ JOBS FAILED{overall_elapsed_str}"
+        overall_status = "❌ JOBS FAILED"
         header_color = "#dc3545"  # Red
     elif killed > 0:
-        overall_status = f"⚠️ JOBS KILLED{overall_elapsed_str}"
+        overall_status = "⚠️ JOBS KILLED"
         header_color = "#ff9800"  # Orange
     elif running > 0 or queued > 0:
-        overall_status = f"🔄 JOBS IN PROGRESS{overall_elapsed_str}"
+        overall_status = "🔄 JOBS IN PROGRESS"
         header_color = "#ffc107"  # Yellow
     else:
-        overall_status = f"✅ ALL JOBS PASSED{overall_elapsed_str}"
+        overall_status = "✅ ALL JOBS PASSED"
         header_color = "#28a745"  # Green
 
     # Extract commit_sha_9 and image_sha_6 from image_and_commit_sha (format: "E04427.a798e08c8")
@@ -3734,6 +3734,7 @@ def generate_html_report(
         image_sha_6=image_sha_6,
         image_sha_url=image_sha_url,
         overall_status=overall_status,
+        overall_elapsed_str=overall_elapsed_str,
         header_color=header_color,
         total_tasks=total_tasks,
         succeeded=succeeded,

@@ -87,7 +87,7 @@ h2 { margin: 0; font-size: 1.2em; font-weight: bold; }
 <body>
 <div class="header">
 <h2>DynamoDockerBuilder - {% if image_sha_6 %}{% if image_sha_url %}<a href="{{ image_sha_url }}" style="color: white; text-decoration: underline;">{{ image_sha_6 }}</a>{% else %}{{ image_sha_6 }}{% endif %}.{% endif %}<a href="https://github.com/ai-dynamo/dynamo/commit/{{ commit_sha_40 }}" style="color: white; text-decoration: underline;">{{ commit_sha_9 }}</a> - {{ overall_status }}</h2>
-<p style="margin: 5px 0 0 0; font-size: 0.9em; opacity: 0.9;">Jobs started: {{ report_started or build_date }}, Report generated: {{ report_generated }}</p>
+<p style="margin: 5px 0 0 0; font-size: 0.9em; opacity: 0.9;">Jobs started: {{ report_started or build_date }}, Report generated: {{ report_generated }}{% if overall_elapsed_str %} ({{ overall_elapsed_str }}){% endif %}</p>
 </div>
 
 <div class="summary-boxes">
