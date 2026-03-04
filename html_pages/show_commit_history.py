@@ -757,6 +757,7 @@ class CommitHistoryGenerator:
                     pr_to_required_checks=pr_to_required_checks,
                     generation_t0=generation_t0,
                     branch_name=original_ref if original_ref and not repo.head.is_detached else "main",
+                    job_started_time=job_started_time,
                 )
                 phase_t.stop("render_html", t0)
                 output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -928,6 +929,7 @@ class CommitHistoryGenerator:
         pr_to_required_checks: Optional[Dict[int, List[str]]] = None,
         generation_t0: Optional[float] = None,
         branch_name: Optional[str] = None,
+        job_started_time: Optional[str] = None,
     ) -> str:
         """Generate HTML report for commit history with Docker image detection
 
