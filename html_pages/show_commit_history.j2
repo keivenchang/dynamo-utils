@@ -844,7 +844,7 @@ window.__dashboardOnReadyQueue.push(function() {
 {# TODO: Unhardcode github.com/ai-dynamo/dynamo - should be a template variable (repo_owner/repo_name) #}
 {% block header_title %}
 <span><span style="color: #fbbf24;">Augmented</span> Commit History - <span style="font-size: smaller; font-weight: normal;">[{{ branch_name }}] branch on github.com/ai-dynamo/dynamo - last {{ commit_count }} commits</span></span>
-<span class="header-meta">Page generated: {{ generated_time }} <span id="page-age" class="page-age"></span></span>
+<span class="header-meta">Job started: {{ job_started_time }}, Report generated: {{ generated_time }} <span id="page-age" class="page-age"></span></span>
 {% endblock %}
 {% block header_subtitle %}{% endblock %}
 

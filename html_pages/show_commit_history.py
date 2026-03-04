@@ -388,6 +388,7 @@ class CommitHistoryGenerator:
             Exit code (0 for success, 1 for failure)
         """
         generation_t0 = time.monotonic()
+        job_started_time = datetime.now(ZoneInfo('America/Los_Angeles')).strftime('%Y-%m-%d %H:%M:%S %Z')
         phase_t = PhaseTimer()
 
         # Initialize repo utils for this operation
@@ -2217,6 +2218,7 @@ class CommitHistoryGenerator:
             build_status=build_status,
             github_actions_status=github_actions_status,
             generated_time=generated_time,
+            job_started_time=job_started_time,
             commit_count=len(commit_data),
             gha_success_count=gha_success_count,
             gha_failed_count=gha_failed_count,

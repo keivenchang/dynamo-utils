@@ -3570,16 +3570,16 @@ def generate_html_report(
 
     # Determine overall status (priority: failed > killed > running/queued > success)
     if failed > 0:
-        overall_status = f"❌ TESTS FAILED{overall_elapsed_str}"
+        overall_status = f"❌ JOBS FAILED{overall_elapsed_str}"
         header_color = "#dc3545"  # Red
     elif killed > 0:
-        overall_status = f"⚠️ BUILD KILLED{overall_elapsed_str}"
+        overall_status = f"⚠️ JOBS KILLED{overall_elapsed_str}"
         header_color = "#ff9800"  # Orange
     elif running > 0 or queued > 0:
-        overall_status = f"🔄 BUILD IN PROGRESS{overall_elapsed_str}"
+        overall_status = f"🔄 JOBS IN PROGRESS{overall_elapsed_str}"
         header_color = "#ffc107"  # Yellow
     else:
-        overall_status = f"✅ ALL TESTS PASSED{overall_elapsed_str}"
+        overall_status = f"✅ ALL JOBS PASSED{overall_elapsed_str}"
         header_color = "#28a745"  # Green
 
     # Extract commit_sha_9 and image_sha_6 from image_and_commit_sha (format: "E04427.a798e08c8")
