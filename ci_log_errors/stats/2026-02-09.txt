@@ -1,0 +1,70 @@
+Post-Merge CI Stats — Week of Feb 9
+=====================================
+Period: 2026-02-09 (Mon) to 2026-02-15 (Sun)
+Sources:
+  - Workflow-level: actions_runs_list.json cache (GitHub Status conclusions)
+  - Error-category-level: 354 raw post-merge job logs (local scan, no API)
+
+Workflow-Level Overview
+-----------------------
+Total post-merge runs:       934
+  success:                   705 (75.5%)
+  failure:                   220 (23.6%)
+  cancelled:                   9 ( 1.0%)
+
+Unique commits on main:      126
+Commits with >= 1 failure:   126 (100.0%)
+Post-merge failure rate:     23.6%
+
+Failures by Workflow (% of 220 failed runs)
+--------------------------------------------
+  1. Docs link check                  126 (57.27%)  [100% fail rate, 126 runs]
+  2. PR                                48 (21.82%)  [ 38% fail rate, 126 runs]
+  3. Fern Docs                         33 (15.00%)  [ 26% fail rate, 126 runs]
+  4. Build Frontend Image               4 ( 1.82%)  [  3% fail rate, 126 runs]
+  5. NVIDIA Dynamo Github Validation    3 ( 1.36%)  [  2% fail rate, 126 runs]
+  6. Pre Merge                          3 ( 1.36%)  [  2% fail rate, 126 runs]
+  7. NVIDIA Test Lab Validation         2 ( 0.91%)  [  2% fail rate, 116 runs]
+  8. Generate and Publish Docs          1 ( 0.45%)  [  2% fail rate,  62 runs]
+
+Error-Category Detail (raw log analysis, 354 job logs)
+-------------------------------------------------------
+Catch-alls excluded: vllm-error, sglang-error, trtllm-error, exit-139-sigsegv
+Total error hits: 439
+
+  1. network-error                     125 (28.47%)
+  2. k8s-error                          70 (15.95%)
+  3. helm-error                         64 (14.58%)
+  4. pytest-error                       51 (11.62%)
+  5. python-error                       40 ( 9.11%)
+  6. network-timeout-generic            39 ( 8.88%)
+  7. docker-build-error                 30 ( 6.83%)
+  8. network-timeout-https              13 ( 2.96%)
+  9. etcd-error                          3 ( 0.68%)
+ 10. docker-daemon-error-response        1 ( 0.23%)
+ 11. docker-upload-error                 1 ( 0.23%)
+ 12. network-port-conflict-error         1 ( 0.23%)
+ 13. network-timeout-github-action       1 ( 0.23%)
+
+High-Level Failure Mode
+------------------------
+  Infra:      252 (57.40%)
+    network-error: 125, k8s-error: 70, network-timeout-generic: 39,
+    network-timeout-https: 13, etcd-error: 3, network-port-conflict-error: 1,
+    network-timeout-github-action: 1
+
+  Testing:     91 (20.73%)
+    pytest-error: 51, python-error: 40
+
+  Build:       96 (21.87%)
+    helm-error: 64, docker-build-error: 30, docker-daemon-error-response: 1,
+    docker-upload-error: 1
+
+Key Observations
+-----------------
+- Docs link check failed 100% of runs this week (126/126), the worst week.
+- Infra dominates error categories at 57.4%, led by network-error (125).
+- Build errors unusually high (21.9%) vs other weeks, driven by helm (64)
+  and docker-build (30).
+- No Post-Merge CI Pipeline failures (workflow hadn't been introduced yet
+  or wasn't running this week).

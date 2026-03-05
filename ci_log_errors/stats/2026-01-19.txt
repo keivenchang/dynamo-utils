@@ -1,0 +1,57 @@
+Post-Merge CI Stats — Week of Jan 19
+======================================
+Period: 2026-01-19 (Mon) to 2026-01-25 (Sun)
+  NOTE: Post-merge log data starts Jan 24. Only 2 days (Sat-Sun) covered.
+  Sample size is very small (8 job logs). Treat as directional only.
+Sources:
+  - Workflow-level: actions_runs_list.json cache (GitHub Status conclusions)
+  - Error-category-level: 8 raw post-merge job logs (local scan, no API)
+
+Workflow-Level Overview
+-----------------------
+Total post-merge runs:       458
+  success:                   424 (92.6%)
+  failure:                    31 ( 6.8%)
+  cancelled:                   3 ( 0.7%)
+
+Unique commits on main:       66
+Commits with >= 1 failure:    22 (33.3%)
+Post-merge failure rate:      6.8%
+
+Failures by Workflow (% of 31 failed runs)
+-------------------------------------------
+  1. PR                                13 (41.94%)  [ 20% fail rate,  66 runs]
+  2. NVIDIA Dynamo Github Validation    8 (25.81%)  [ 12% fail rate,  66 runs]
+  3. Build Frontend Image               4 (12.90%)  [  6% fail rate,  66 runs]
+  4. NVIDIA Test Lab Validation         4 (12.90%)  [  6% fail rate,  62 runs]
+  5. Docs link check                    2 ( 6.45%)  [  3% fail rate,  66 runs]
+
+Error-Category Detail (raw log analysis, 8 job logs)
+-----------------------------------------------------
+Catch-alls excluded: vllm-error (3)
+Total error hits: 12
+
+  1. backend-failure                     3 (25.00%)
+  2. etcd-error                          2 (16.67%)
+  3. pytest-error                        2 (16.67%)
+  4. python-error                        2 (16.67%)
+  5. network-port-conflict-error         1 ( 8.33%)
+  6. network-timeout-generic             1 ( 8.33%)
+  7. rust-error                          1 ( 8.33%)
+
+High-Level Failure Mode
+------------------------
+  Infra:        4 (33.33%)
+    etcd-error: 2, network-port-conflict-error: 1, network-timeout-generic: 1
+
+  Testing:      8 (66.67%)
+    backend-failure: 3, pytest-error: 2, python-error: 2, rust-error: 1
+
+  Build:        0 ( 0.00%)
+
+Key Observations
+-----------------
+- Best workflow failure rate of any week at 6.8%. Docs link check was only
+  at 3% fail rate — far from the 67-100% seen in later weeks.
+- Only 33% of commits triggered a failure (vs 82-100% in later weeks).
+- Sample is too small (8 logs) for reliable error-category conclusions.

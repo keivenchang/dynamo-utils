@@ -1,0 +1,74 @@
+Post-Merge CI Stats — Week of Feb 23
+======================================
+Period: 2026-02-23 (Mon) to 2026-03-01 (Sun)
+Sources:
+  - Workflow-level: actions_runs_list.json cache (GitHub Status conclusions)
+  - Error-category-level: 274 raw post-merge job logs (local scan, no API)
+
+Workflow-Level Overview
+-----------------------
+Total post-merge runs:     1,085
+  success:                   917 (84.5%)
+  failure:                   167 (15.4%)
+  cancelled:                   1 ( 0.1%)
+
+Unique commits on main:      157
+Commits with >= 1 failure:   130 (82.8%)
+Post-merge failure rate:     15.4%
+
+Failures by Workflow (% of 167 failed runs)
+--------------------------------------------
+  1. Docs link check                  105 (62.87%)  [ 67% fail rate, 157 runs]
+  2. PR                                32 (19.16%)  [ 20% fail rate, 157 runs]
+  3. Post-Merge CI Pipeline             8 ( 4.79%)  [100% fail rate,   8 runs]
+  4. Fern Docs                          7 ( 4.19%)  [  4% fail rate, 157 runs]
+  5. Pre Merge                          6 ( 3.59%)  [  4% fail rate, 157 runs]
+  6. NVIDIA Dynamo Github Validation    4 ( 2.40%)  [  3% fail rate, 157 runs]
+  7. Build Frontend Image               3 ( 1.80%)  [  2% fail rate, 157 runs]
+  8. NVIDIA Test Lab Validation         2 ( 1.20%)  [  1% fail rate, 135 runs]
+
+Error-Category Detail (raw log analysis, 274 job logs)
+-------------------------------------------------------
+Catch-alls excluded: vllm-error, sglang-error, trtllm-error, exit-139-sigsegv (16)
+Total error hits: 362
+
+  1. pytest-error                       83 (22.93%)
+  2. k8s-error                          53 (14.64%)
+  3. python-error                       53 (14.64%)
+  4. helm-error                         49 (13.54%)
+  5. network-error                      38 (10.50%)
+  6. etcd-error                         31 ( 8.56%)
+  7. network-timeout-generic            17 ( 4.70%)
+  8. disk-space-error                   12 ( 3.31%)
+  9. network-timeout-https               6 ( 1.66%)
+ 10. pytest-timeout-error                6 ( 1.66%)
+ 11. ci-filter-coverage-error            5 ( 1.38%)
+ 12. docker-build-error                  3 ( 0.83%)
+ 13. exit-127-cmd-not-found              3 ( 0.83%)
+ 14. network-port-conflict-error         1 ( 0.28%)
+ 15. network-timeout-gitlab-mirror       1 ( 0.28%)
+ 16. oom                                 1 ( 0.28%)
+
+High-Level Failure Mode
+------------------------
+  Infra:      160 (44.20%)
+    k8s-error: 53, network-error: 38, etcd-error: 31,
+    network-timeout-generic: 17, disk-space-error: 12,
+    network-timeout-https: 6, network-port-conflict-error: 1,
+    network-timeout-gitlab-mirror: 1, oom: 1
+
+  Testing:    150 (41.44%)
+    pytest-error: 83, python-error: 53, pytest-timeout-error: 6,
+    ci-filter-coverage-error: 5, exit-127-cmd-not-found: 3
+
+  Build:       52 (14.36%)
+    helm-error: 49, docker-build-error: 3
+
+Key Observations
+-----------------
+- Best week by failure rate (15.4%) — significant improvement vs prior weeks.
+- Docs link check dropped to 67% fail rate (from 82-100% in prior weeks).
+- Error categories are evenly split: Infra (44.2%) vs Testing (41.4%).
+- etcd-error dropped from 176 to 31 (back to normal from Feb 16 spike).
+- disk-space-error dropped from 77 to 12 (infrastructure stabilized).
+- Post-Merge CI Pipeline ran only 8 times (all failed), vs 62 prior week.

@@ -1,0 +1,61 @@
+Post-Merge CI Stats — Week of Mar 2
+=====================================
+Period: 2026-03-02 (Mon) to 2026-03-03 (latest data)
+Sources:
+  - Workflow-level: actions_runs_list.json cache (GitHub Status conclusions)
+  - Error-category-level: 104 raw post-merge job logs (local scan, no API)
+
+Workflow-Level Overview
+-----------------------
+Total post-merge runs:       215
+  success:                   148 (68.8%)
+  failure:                    64 (29.8%)
+  cancelled:                   0 ( 0.0%)
+
+Unique commits on main:       31
+Commits with >= 1 failure:    31 (100.0%)
+Post-merge failure rate:     29.8%
+
+Failures by Workflow (% of 64 failed runs)
+-------------------------------------------
+  1. Docs link check                   31 (48.44%)  [100% fail rate,  31 runs]
+  2. Post-Merge CI Pipeline            18 (28.13%)  [ 82% fail rate,  22 runs]
+  3. NVIDIA Test Lab Validation        14 (21.88%)  [ 48% fail rate,  29 runs]
+  4. PR                                 1 ( 1.56%)  [ 11% fail rate,   9 runs]
+
+Error-Category Detail (raw log analysis, 104 job logs)
+-------------------------------------------------------
+Catch-alls excluded: vllm-error, sglang-error, trtllm-error, exit-139-sigsegv (6)
+Total error hits: 132
+
+  1. k8s-error                          34 (25.76%)
+  2. pytest-error                       30 (22.73%)
+  3. network-error                      25 (18.94%)
+  4. pytest-timeout-error               21 (15.91%)
+  5. network-timeout-generic            18 (13.64%)
+  6. helm-error                          2 ( 1.52%)
+  7. network-timeout-gitlab-mirror       1 ( 0.76%)
+  8. python-error                        1 ( 0.76%)
+
+High-Level Failure Mode
+------------------------
+  Infra:       78 (59.09%)
+    k8s-error: 34, network-error: 25, network-timeout-generic: 18,
+    network-timeout-gitlab-mirror: 1
+
+  Testing:     52 (39.39%)
+    pytest-error: 30, pytest-timeout-error: 21, python-error: 1
+
+  Build:        2 ( 1.52%)
+    helm-error: 2
+
+Key Observations
+-----------------
+- Only 2 days of data (Mon-Tue), so sample size is small (104 logs).
+- Workflow failure rate spiked to 29.8%, highest of the 4 weeks.
+- NVIDIA Test Lab Validation surged to 48% fail rate (14 failures) — was
+  1-3% in prior weeks. Suggests a new infra issue starting this week.
+- Docs link check is back to 100% fail rate (31/31 runs).
+- pytest-timeout-error jumped to 21 (15.9%) — was 0-6 in prior weeks.
+- Build errors nearly vanished (2 hits, 1.5%).
+- Infra dominates at 59.1%, the highest across all 4 weeks.

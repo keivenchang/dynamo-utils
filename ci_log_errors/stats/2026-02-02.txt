@@ -1,0 +1,76 @@
+Post-Merge CI Stats — Week of Feb 2
+=====================================
+Period: 2026-02-02 (Mon) to 2026-02-08 (Sun)
+Sources:
+  - Workflow-level: actions_runs_list.json cache (GitHub Status conclusions)
+  - Error-category-level: 248 raw post-merge job logs (local scan, no API)
+
+Workflow-Level Overview
+-----------------------
+Total post-merge runs:       867
+  success:                   648 (74.7%)
+  failure:                   217 (25.0%)
+  cancelled:                   2 ( 0.2%)
+
+Unique commits on main:      121
+Commits with >= 1 failure:   119 (98.3%)
+Post-merge failure rate:     25.0%
+
+Failures by Workflow (% of 217 failed runs)
+--------------------------------------------
+  1. Docs link check                  117 (53.92%)  [ 97% fail rate, 121 runs]
+  2. build-frontend-image.yaml         49 (22.58%)  [100% fail rate,  49 runs]
+  3. PR                                21 ( 9.68%)  [ 17% fail rate, 121 runs]
+  4. NVIDIA Dynamo Github Validation   18 ( 8.29%)  [ 15% fail rate, 121 runs]
+  5. NVIDIA Test Lab Validation         7 ( 3.23%)  [  7% fail rate, 103 runs]
+  6. Build Frontend Image               3 ( 1.38%)  [  4% fail rate,  82 runs]
+  7. Pre Merge                          2 ( 0.92%)  [  2% fail rate, 121 runs]
+
+Error-Category Detail (raw log analysis, 248 job logs)
+-------------------------------------------------------
+Catch-alls excluded: trtllm-error (4), vllm-error (2), sglang-error (1)
+Total error hits: 266
+
+  1. network-error                      80 (30.08%)
+  2. k8s-error                          68 (25.56%)
+  3. pytest-error                       27 (10.15%)
+  4. k8s-network-timeout-pod            24 ( 9.02%)
+  5. python-error                       13 ( 4.89%)
+  6. network-timeout-https              11 ( 4.14%)
+  7. helm-error                         10 ( 3.76%)
+  8. network-timeout-gitlab-mirror       6 ( 2.26%)
+  9. backend-failure                     5 ( 1.88%)
+ 10. ci-filter-coverage-error            4 ( 1.50%)
+ 11. disk-space-error                    4 ( 1.50%)
+ 12. network-timeout-generic             4 ( 1.50%)
+ 13. docker-build-error                  3 ( 1.13%)
+ 14. exit-127-cmd-not-found              2 ( 0.75%)
+ 15. network-port-conflict-error         2 ( 0.75%)
+ 16. docker-upload-error                 1 ( 0.38%)
+ 17. etcd-error                          1 ( 0.38%)
+ 18. rust-error                          1 ( 0.38%)
+
+High-Level Failure Mode
+------------------------
+  Infra:      200 (75.19%)
+    network-error: 80, k8s-error: 68, k8s-network-timeout-pod: 24,
+    network-timeout-https: 11, network-timeout-gitlab-mirror: 6,
+    disk-space-error: 4, network-timeout-generic: 4,
+    network-port-conflict-error: 2, etcd-error: 1
+
+  Testing:     52 (19.55%)
+    pytest-error: 27, python-error: 13, backend-failure: 5,
+    ci-filter-coverage-error: 4, exit-127-cmd-not-found: 2, rust-error: 1
+
+  Build:       14 ( 5.26%)
+    helm-error: 10, docker-build-error: 3, docker-upload-error: 1
+
+Key Observations
+-----------------
+- build-frontend-image.yaml appeared and immediately hit 100% fail rate
+  (49/49 runs). This broken workflow persisted through later weeks.
+- Docs link check escalated to 97% fail rate (from 78% prior week).
+- Infra dominates at 75.2% — the highest of any week. Driven by
+  network-error (80) and k8s-error (68).
+- k8s-network-timeout-pod remained high (24), continuing from prior week (42).
+- Build errors dropped to 5.3% — docker/helm issues subsiding.
