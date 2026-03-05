@@ -60,6 +60,12 @@ If you do only one thing: re-read this section before making changes or running 
       the same container/ state.
   - **Recovery if stuck:** `git checkout -f 4fbd8f1c6` (force-checkout the fix commit)
 
+- Commit SHA ranges (MUST):
+  - ALWAYS USE INCLUSIVE SHA RANGES. When building commit ranges (e.g., "from X to Y"),
+    ALWAYS INCLUDE BOTH ENDPOINTS. NEVER skip the starting or ending commit.
+    - "from 4c648b11e through 3dcc53d5a" means build BOTH 4c648b11e AND 3dcc53d5a
+    - "from 5d9586234 to d1bd210f1 (inclusive)" means build BOTH 5d9586234 AND d1bd210f1
+
 - Shell execution (MUST):
   - Chain multi-step commands into ONE shell invocation using `&&` / `;` (reduce latency).
   - NEVER issue multiple separate Shell calls that share the same working directory.

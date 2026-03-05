@@ -352,28 +352,7 @@ pytest --cache-dir=/tmp/pytest_cache --basetemp=/tmp/pytest_test ...
 
 ## 4.2 Docker Builder Tests
 
-**CRITICAL: ALWAYS USE INCLUSIVE SHA RANGES**
-
-When building commit ranges (e.g., "from X to Y"), **ALWAYS INCLUDE BOTH ENDPOINTS**.
-- "from 4c648b11e through 3dcc53d5a" means build BOTH 4c648b11e AND 3dcc53d5a
-- "from 5d9586234 to d1bd210f1 (inclusive)" means build BOTH 5d9586234 AND d1bd210f1
-- NEVER skip the starting or ending commit
-
-**Example** - Building commits 4c648b11e through 3dcc53d5a:
-```bash
-COMMITS=(
-  4c648b11e  # INCLUDE starting commit
-  3f99cf217
-  78436fbf7
-  8de1c3e07
-  01ecc8c74
-  03360b847
-  06fc5d5ec
-  4a71926d7
-  96fc1ab6d
-  3dcc53d5a  # INCLUDE ending commit
-)
-```
+**SHA inclusivity rule:** See `.cursorrules` → "Commit SHA ranges (MUST)".
 
 **Quick Test (Single Framework)**:
 ```bash
