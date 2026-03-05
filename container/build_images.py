@@ -906,7 +906,7 @@ def create_task_graph(
     sanity_install_cmd = "uv pip install --no-deps -e /workspace/lib/bindings/python && uv pip install --no-deps -e /workspace"
 
     # Dev compilation (includes pre/post chown so target/ access is atomic).
-    dev_compile_cmd = f"{chown_cmd}; {repo_path}/container/run.sh --image {dev_orig_image_tag} --mount-workspace -v {home_dir}/.cargo:/root/.cargo -v {repo_path}/target/.{framework}:/workspace/target -- bash -c '{cargo_cmd}'; rc=$?; {chown_cmd}; exit $rc"
+    dev_compile_cmd = f"{chown_cmd}; {repo_path}/container/run.sh --image {dev_orig_image_tag} --mount-workspace -v {home_dir}/.cargo:/root/.cargo -v {home_dir}/.rustup:/root/.rustup -v {repo_path}/target/.{framework}:/workspace/target -- bash -c '{cargo_cmd}'; rc=$?; {chown_cmd}; exit $rc"
     tasks[f"{framework}-dev-compilation"] = CommandTask(
         task_id=f"{framework}-dev-compilation",
         description=f"Run workspace compilation in {framework.upper()} dev container",
@@ -920,7 +920,7 @@ def create_task_graph(
     tasks[f"{framework}-dev-sanity"] = CommandTask(
         task_id=f"{framework}-dev-sanity",
         description=f"Run sanity_check.py in {framework.upper()} dev container",
-        command=f"{repo_path}/container/run.sh --image {dev_orig_image_tag} --mount-workspace --hf-home {home_dir}/.cache/huggingface -v {home_dir}/.cargo:/root/.cargo -v {repo_path}/target/.{framework}:/workspace/target -- bash -c '{sanity_install_cmd} && id && python3 /workspace/deploy/sanity_check.py{sanity_no_framework_flag}'",
+        command=f"{repo_path}/container/run.sh --image {dev_orig_image_tag} --mount-workspace --hf-home {home_dir}/.cache/huggingface -v {home_dir}/.cargo:/root/.cargo -v {home_dir}/.rustup:/root/.rustup -v {repo_path}/target/.{framework}:/workspace/target -- bash -c '{sanity_install_cmd} && id && python3 /workspace/deploy/sanity_check.py{sanity_no_framework_flag}'",
         input_image=dev_orig_image_tag,
         parents=[f"{framework}-dev-compilation"],
         timeout=480.0,  # 8 minutes for sanity checks (trtllm can exceed 4 min)
@@ -1017,7 +1017,7 @@ docker images {dev_image_tag} --format 'Size: {{{{.Size}}}}'
     )
 
     # Compressed dev compilation (includes pre/post chown).
-    dev_compress_compile_cmd = f"{chown_cmd}; {repo_path}/container/run.sh --image {dev_image_tag} --mount-workspace -v {home_dir}/.cargo:/root/.cargo -v {repo_path}/target/.{framework}:/workspace/target -- bash -c '{cargo_cmd}'; rc=$?; {chown_cmd}; exit $rc"
+    dev_compress_compile_cmd = f"{chown_cmd}; {repo_path}/container/run.sh --image {dev_image_tag} --mount-workspace -v {home_dir}/.cargo:/root/.cargo -v {home_dir}/.rustup:/root/.rustup -v {repo_path}/target/.{framework}:/workspace/target -- bash -c '{cargo_cmd}'; rc=$?; {chown_cmd}; exit $rc"
     tasks[f"{framework}-dev-compress-compilation"] = CommandTask(
         task_id=f"{framework}-dev-compress-compilation",
         description=f"Run workspace compilation in compressed {framework.upper()} dev container",
@@ -1031,7 +1031,7 @@ docker images {dev_image_tag} --format 'Size: {{{{.Size}}}}'
     tasks[f"{framework}-dev-compress-sanity"] = CommandTask(
         task_id=f"{framework}-dev-compress-sanity",
         description=f"Run sanity_check.py on compressed {framework.upper()} dev image",
-        command=f"{repo_path}/container/run.sh --image {dev_image_tag} --mount-workspace --hf-home {home_dir}/.cache/huggingface -v {home_dir}/.cargo:/root/.cargo -v {repo_path}/target/.{framework}:/workspace/target -- bash -c '{sanity_install_cmd} && id && python3 /workspace/deploy/sanity_check.py{sanity_no_framework_flag}'",
+        command=f"{repo_path}/container/run.sh --image {dev_image_tag} --mount-workspace --hf-home {home_dir}/.cache/huggingface -v {home_dir}/.cargo:/root/.cargo -v {home_dir}/.rustup:/root/.rustup -v {repo_path}/target/.{framework}:/workspace/target -- bash -c '{sanity_install_cmd} && id && python3 /workspace/deploy/sanity_check.py{sanity_no_framework_flag}'",
         input_image=dev_image_tag,
         parents=[f"{framework}-dev-compress-compilation"],
         timeout=480.0,  # 8 minutes for sanity checks (trtllm can exceed 4 min)
@@ -1055,7 +1055,7 @@ docker images {dev_image_tag} --format 'Size: {{{{.Size}}}}'
 
     # Local-dev compilation (includes pre/post chown).
     # Waits for dev-compress-sanity so target/ is fully released from the previous cycle.
-    local_dev_compile_cmd = f"{chown_cmd}; {repo_path}/container/run.sh --image {local_dev_image_tag} --mount-workspace -v {home_dir}/.cargo:/home/dynamo/.cargo -v {repo_path}/target/.{framework}:/workspace/target -- bash -c '{cargo_cmd}'; rc=$?; {chown_cmd}; exit $rc"
+    local_dev_compile_cmd = f"{chown_cmd}; {repo_path}/container/run.sh --image {local_dev_image_tag} --mount-workspace -v {home_dir}/.cargo:/home/dynamo/.cargo -v {home_dir}/.rustup:/home/dynamo/.rustup -v {repo_path}/target/.{framework}:/workspace/target -- bash -c '{cargo_cmd}'; rc=$?; {chown_cmd}; exit $rc"
     tasks[f"{framework}-local-dev-compilation"] = CommandTask(
         task_id=f"{framework}-local-dev-compilation",
         description=f"Run workspace compilation in {framework.upper()} local-dev container",
@@ -1069,7 +1069,7 @@ docker images {dev_image_tag} --format 'Size: {{{{.Size}}}}'
     tasks[f"{framework}-local-dev-sanity"] = CommandTask(
         task_id=f"{framework}-local-dev-sanity",
         description=f"Run sanity_check.py in {framework.upper()} local-dev container",
-        command=f"{repo_path}/container/run.sh --image {local_dev_image_tag} --mount-workspace --hf-home {home_dir}/.cache/huggingface -v {home_dir}/.cargo:/home/dynamo/.cargo -v {repo_path}/target/.{framework}:/workspace/target -- bash -c '{sanity_install_cmd} && id && (sudo id || true) && python3 /workspace/deploy/sanity_check.py{sanity_no_framework_flag}'",
+        command=f"{repo_path}/container/run.sh --image {local_dev_image_tag} --mount-workspace --hf-home {home_dir}/.cache/huggingface -v {home_dir}/.cargo:/home/dynamo/.cargo -v {home_dir}/.rustup:/home/dynamo/.rustup -v {repo_path}/target/.{framework}:/workspace/target -- bash -c '{sanity_install_cmd} && id && (sudo id || true) && python3 /workspace/deploy/sanity_check.py{sanity_no_framework_flag}'",
         input_image=local_dev_image_tag,
         parents=[f"{framework}-local-dev-compilation"],
         timeout=480.0,  # 8 minutes for sanity checks (trtllm can exceed 4 min)
@@ -1098,7 +1098,7 @@ def create_task_graph_reuse(
     sanity_install_cmd = "uv pip install --no-deps -e /workspace/lib/bindings/python && uv pip install --no-deps -e /workspace"
 
     # Compilation includes pre/post chown so target/ access is atomic.
-    reuse_compile_cmd = f"{chown_cmd}; {repo_path}/container/run.sh --image {dev_image_tag} --mount-workspace -v {home_dir}/.cargo:/root/.cargo -v {repo_path}/target/.{framework}:/workspace/target -- bash -c '{cargo_cmd}'; rc=$?; {chown_cmd}; exit $rc"
+    reuse_compile_cmd = f"{chown_cmd}; {repo_path}/container/run.sh --image {dev_image_tag} --mount-workspace -v {home_dir}/.cargo:/root/.cargo -v {home_dir}/.rustup:/root/.rustup -v {repo_path}/target/.{framework}:/workspace/target -- bash -c '{cargo_cmd}'; rc=$?; {chown_cmd}; exit $rc"
     tasks[f"{framework}-dev-compress-compilation"] = CommandTask(
         task_id=f"{framework}-dev-compress-compilation",
         description=f"Run workspace compilation in compressed {framework.upper()} dev container (reuse)",
@@ -1111,7 +1111,7 @@ def create_task_graph_reuse(
     tasks[f"{framework}-dev-compress-sanity"] = CommandTask(
         task_id=f"{framework}-dev-compress-sanity",
         description=f"Run sanity_check.py on compressed {framework.upper()} dev image (reuse)",
-        command=f"{repo_path}/container/run.sh --image {dev_image_tag} --mount-workspace --hf-home {home_dir}/.cache/huggingface -v {home_dir}/.cargo:/root/.cargo -v {repo_path}/target/.{framework}:/workspace/target -- bash -c '{sanity_install_cmd} && id && python3 /workspace/deploy/sanity_check.py{sanity_no_framework_flag}'",
+        command=f"{repo_path}/container/run.sh --image {dev_image_tag} --mount-workspace --hf-home {home_dir}/.cache/huggingface -v {home_dir}/.cargo:/root/.cargo -v {home_dir}/.rustup:/root/.rustup -v {repo_path}/target/.{framework}:/workspace/target -- bash -c '{sanity_install_cmd} && id && python3 /workspace/deploy/sanity_check.py{sanity_no_framework_flag}'",
         input_image=dev_image_tag,
         parents=[f"{framework}-dev-compress-compilation"],
         timeout=480.0,  # 8 minutes for sanity checks (trtllm can exceed 4 min)
