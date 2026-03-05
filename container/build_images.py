@@ -906,7 +906,7 @@ def create_task_graph(
     sanity_install_cmd = "uv pip install --no-deps -e /workspace/lib/bindings/python && uv pip install --no-deps -e /workspace"
 
     # Dev compilation (includes pre/post chown so target/ access is atomic).
-    dev_compile_cmd = f"{chown_cmd}; {repo_path}/container/run.sh --image {dev_orig_image_tag} --mount-workspace -v {home_dir}/.cargo:/root/.cargo -v {repo_path}/target/.{framework}:/workspace/target -- bash -c '{cargo_cmd}'; {chown_cmd}"
+    dev_compile_cmd = f"{chown_cmd}; {repo_path}/container/run.sh --image {dev_orig_image_tag} --mount-workspace -v {home_dir}/.cargo:/root/.cargo -v {repo_path}/target/.{framework}:/workspace/target -- bash -c '{cargo_cmd}'; rc=$?; {chown_cmd}; exit $rc"
     tasks[f"{framework}-dev-compilation"] = CommandTask(
         task_id=f"{framework}-dev-compilation",
         description=f"Run workspace compilation in {framework.upper()} dev container",
@@ -1017,7 +1017,7 @@ docker images {dev_image_tag} --format 'Size: {{{{.Size}}}}'
     )
 
     # Compressed dev compilation (includes pre/post chown).
-    dev_compress_compile_cmd = f"{chown_cmd}; {repo_path}/container/run.sh --image {dev_image_tag} --mount-workspace -v {home_dir}/.cargo:/root/.cargo -v {repo_path}/target/.{framework}:/workspace/target -- bash -c '{cargo_cmd}'; {chown_cmd}"
+    dev_compress_compile_cmd = f"{chown_cmd}; {repo_path}/container/run.sh --image {dev_image_tag} --mount-workspace -v {home_dir}/.cargo:/root/.cargo -v {repo_path}/target/.{framework}:/workspace/target -- bash -c '{cargo_cmd}'; rc=$?; {chown_cmd}; exit $rc"
     tasks[f"{framework}-dev-compress-compilation"] = CommandTask(
         task_id=f"{framework}-dev-compress-compilation",
         description=f"Run workspace compilation in compressed {framework.upper()} dev container",
@@ -1055,7 +1055,7 @@ docker images {dev_image_tag} --format 'Size: {{{{.Size}}}}'
 
     # Local-dev compilation (includes pre/post chown).
     # Waits for dev-compress-sanity so target/ is fully released from the previous cycle.
-    local_dev_compile_cmd = f"{chown_cmd}; {repo_path}/container/run.sh --image {local_dev_image_tag} --mount-workspace -v {home_dir}/.cargo:/home/dynamo/.cargo -v {repo_path}/target/.{framework}:/workspace/target -- bash -c '{cargo_cmd}'; {chown_cmd}"
+    local_dev_compile_cmd = f"{chown_cmd}; {repo_path}/container/run.sh --image {local_dev_image_tag} --mount-workspace -v {home_dir}/.cargo:/home/dynamo/.cargo -v {repo_path}/target/.{framework}:/workspace/target -- bash -c '{cargo_cmd}'; rc=$?; {chown_cmd}; exit $rc"
     tasks[f"{framework}-local-dev-compilation"] = CommandTask(
         task_id=f"{framework}-local-dev-compilation",
         description=f"Run workspace compilation in {framework.upper()} local-dev container",
@@ -1098,7 +1098,7 @@ def create_task_graph_reuse(
     sanity_install_cmd = "uv pip install --no-deps -e /workspace/lib/bindings/python && uv pip install --no-deps -e /workspace"
 
     # Compilation includes pre/post chown so target/ access is atomic.
-    reuse_compile_cmd = f"{chown_cmd}; {repo_path}/container/run.sh --image {dev_image_tag} --mount-workspace -v {home_dir}/.cargo:/root/.cargo -v {repo_path}/target/.{framework}:/workspace/target -- bash -c '{cargo_cmd}'; {chown_cmd}"
+    reuse_compile_cmd = f"{chown_cmd}; {repo_path}/container/run.sh --image {dev_image_tag} --mount-workspace -v {home_dir}/.cargo:/root/.cargo -v {repo_path}/target/.{framework}:/workspace/target -- bash -c '{cargo_cmd}'; rc=$?; {chown_cmd}; exit $rc"
     tasks[f"{framework}-dev-compress-compilation"] = CommandTask(
         task_id=f"{framework}-dev-compress-compilation",
         description=f"Run workspace compilation in compressed {framework.upper()} dev container (reuse)",
