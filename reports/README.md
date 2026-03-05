@@ -23,7 +23,7 @@ python3 reports/analyze_repo.py \
     --interval month
 ```
 
-### `git_stats.py` — Contributor rankings
+### `contributor_stats.py` — Contributor rankings
 
 Per-contributor breakdown for a time window:
 - Commits, lines added/deleted, net lines
@@ -31,7 +31,7 @@ Per-contributor breakdown for a time window:
 - Averages per contributor
 
 ```bash
-python3 reports/git_stats.py --repo ~/dynamo/dynamo_ci --days 90
+python3 reports/contributor_stats.py --repo ~/dynamo/dynamo_ci --days 90
 ```
 
 ### `pr_ci_report.py` — PR and CI health
@@ -61,5 +61,5 @@ Output: terminal text, JSON, and HTML reports.
 | Question | Script |
 |----------|--------|
 | How is the codebase growing? | `analyze_repo.py` |
-| Who are the top contributors? | `git_stats.py` |
+| Who are the top contributors? | `contributor_stats.py` |
 | Is CI stable? How long do PRs take? | `pr_ci_report.py` |
