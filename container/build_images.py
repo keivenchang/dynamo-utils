@@ -656,6 +656,31 @@ def detect_latest_image_sha(repo_path: Path, framework: str) -> Optional[str]:
     return None
 
 
+def _load_previous_report_task_statuses(report_json_path: Path) -> Dict[str, str]:
+    """
+    Load per-task statuses from a report.json file.
+    Returns: {task_id: status_str} e.g. {"none-dev-build": "PASS", "vllm-runtime-sanity": "RUNNING"}
+    """
+    logger = logging.getLogger(__name__)
+    if not report_json_path.exists():
+        return {}
+    try:
+        with open(report_json_path) as f:
+            data = json.load(f)
+        result: Dict[str, str] = {}
+        for fw in data.get("frameworks", []):
+            for tgt in fw.get("targets", []):
+                for key in ("build", "compilation", "sanity", "compress", "upload"):
+                    task = tgt.get(key)
+                    if task and isinstance(task, dict) and task.get("log_file"):
+                        tid = task["log_file"].replace(".log", "")
+                        result[tid] = task.get("status", "")
+        return result
+    except (json.JSONDecodeError, KeyError, OSError) as e:
+        logger.debug(f"Failed to load task statuses from {report_json_path}: {e}")
+        return {}
+
+
 def _load_previous_report_images(repo_path: Path, image_sha_6: str) -> Dict[str, Dict[str, Dict[str, Optional[str]]]]:
     """
     Find a previous report.json with the same Image SHA and extract image info.
@@ -848,10 +873,11 @@ def create_task_graph(
         ignore_exit_code=False,
     )
 
-    # Level 0: Dev image build (runs in parallel with runtime-build).
-    # dev.Dockerfile uses `FROM runtime AS dev` but that references an internal Docker stage,
-    # not the externally tagged runtime image.  Docker resolves it within the same build context
-    # so there is no dependency on the runtime-build task completing first.
+    # Dev image build (delayed 60s to let runtime-build warm Docker layer cache).
+    # dev.Dockerfile is `FROM runtime AS dev` -- Docker resolves the `runtime` stage
+    # internally.  The 60s delay is a best-effort hint so shared layers (dynamo_base,
+    # wheel_builder, framework) are likely cached when dev-build starts.
+    # If cache isn't warm yet, Docker just builds those layers itself -- no correctness issue.
     # Builds as -dev-orig; compress step will later produce the final -dev image.
     dev_image_tag = f"dynamo:{version}-{framework}-{cuda_tag}-dev"
     dev_orig_image_tag = f"{dev_image_tag}-orig"
@@ -862,6 +888,7 @@ def create_task_graph(
         input_image=runtime_image_tag,
         output_image=dev_orig_image_tag,
         parents=[],
+        start_delay=60.0,
         timeout=5400.0,  # 90 minutes for builds
     )
 
@@ -878,38 +905,18 @@ def create_task_graph(
     # No Rust recompilation — just two fast editable installs.
     sanity_install_cmd = "uv pip install --no-deps -e /workspace/lib/bindings/python && uv pip install --no-deps -e /workspace"
 
-    # Level 3a: Pre-chown before dev compilation (fix ownership from previous root-owned builds)
-    tasks[f"{framework}-dev-pre-chown"] = CommandTask(
-        task_id=f"{framework}-dev-pre-chown",
-        description=f"Fix file ownership before {framework.upper()} dev compilation",
-        command=chown_cmd,
-        parents=[f"{framework}-dev-build"],
-        timeout=60.0,
-    )
-
-    # Compilation runs after pre-chown (before sanity), same for all frameworks
+    # Dev compilation (includes pre/post chown so target/ access is atomic).
+    dev_compile_cmd = f"{chown_cmd}; {repo_path}/container/run.sh --image {dev_orig_image_tag} --mount-workspace -v {home_dir}/.cargo:/root/.cargo -v {repo_path}/target/.{framework}:/workspace/target -- bash -c '{cargo_cmd}'; {chown_cmd}"
     tasks[f"{framework}-dev-compilation"] = CommandTask(
         task_id=f"{framework}-dev-compilation",
         description=f"Run workspace compilation in {framework.upper()} dev container",
-        command=f"{repo_path}/container/run.sh --image {dev_orig_image_tag} --mount-workspace -v {home_dir}/.cargo:/root/.cargo -v {repo_path}/target/.{framework}:/workspace/target -- bash -c '{cargo_cmd}'",
+        command=dev_compile_cmd,
         input_image=dev_orig_image_tag,
-        parents=[f"{framework}-dev-pre-chown"],
+        parents=[f"{framework}-dev-build"],
         timeout=1800.0,  # 30 minutes for compilation
     )
 
-    # Level 4: Dev post-chown (runs after compilation, always runs even if compilation fails)
-    tasks[f"{framework}-dev-chown"] = CommandTask(
-        task_id=f"{framework}-dev-chown",
-        description=f"Fix file ownership after {framework.upper()} dev compilation",
-        command=chown_cmd,
-        parents=[f"{framework}-dev-compilation"],
-        run_even_if_deps_fail=True,
-        timeout=60.0,
-    )
-
-    # Level 4: Dev sanity check (runs after compilation, same for all frameworks)
-    # Mounts the target dir and re-runs the install (fast, uses compiled artifacts)
-    # because compilation and sanity run in separate containers.
+    # Dev sanity check (runs after compilation which includes chown).
     tasks[f"{framework}-dev-sanity"] = CommandTask(
         task_id=f"{framework}-dev-sanity",
         description=f"Run sanity_check.py in {framework.upper()} dev container",
@@ -1009,36 +1016,18 @@ docker images {dev_image_tag} --format 'Size: {{{{.Size}}}}'
         timeout=5400.0,  # 90 minutes for compress (export/import)
     )
 
-    # Level 7: Pre-chown before compressed dev compilation
-    tasks[f"{framework}-dev-compress-pre-chown"] = CommandTask(
-        task_id=f"{framework}-dev-compress-pre-chown",
-        description=f"Fix file ownership before compressed {framework.upper()} dev compilation",
-        command=chown_cmd,
-        parents=[f"{framework}-dev-compress"],
-        timeout=60.0,
-    )
-
-    # Level 7: Compilation in the compressed dev image (verify cargo build works after squash)
+    # Compressed dev compilation (includes pre/post chown).
+    dev_compress_compile_cmd = f"{chown_cmd}; {repo_path}/container/run.sh --image {dev_image_tag} --mount-workspace -v {home_dir}/.cargo:/root/.cargo -v {repo_path}/target/.{framework}:/workspace/target -- bash -c '{cargo_cmd}'; {chown_cmd}"
     tasks[f"{framework}-dev-compress-compilation"] = CommandTask(
         task_id=f"{framework}-dev-compress-compilation",
         description=f"Run workspace compilation in compressed {framework.upper()} dev container",
-        command=f"{repo_path}/container/run.sh --image {dev_image_tag} --mount-workspace -v {home_dir}/.cargo:/root/.cargo -v {repo_path}/target/.{framework}:/workspace/target -- bash -c '{cargo_cmd}'",
+        command=dev_compress_compile_cmd,
         input_image=dev_image_tag,
-        parents=[f"{framework}-dev-compress-pre-chown"],
+        parents=[f"{framework}-dev-compress"],
         timeout=1800.0,  # 30 minutes for compilation
     )
 
-    # Level 7b: Post-chown after compressed dev compilation
-    tasks[f"{framework}-dev-compress-chown"] = CommandTask(
-        task_id=f"{framework}-dev-compress-chown",
-        description=f"Fix file ownership after compressed {framework.upper()} dev compilation",
-        command=chown_cmd,
-        parents=[f"{framework}-dev-compress-compilation"],
-        run_even_if_deps_fail=True,
-        timeout=60.0,
-    )
-
-    # Level 7b: Sanity check on the compressed dev image (after compilation)
+    # Sanity check on the compressed dev image (after compilation which includes chown).
     tasks[f"{framework}-dev-compress-sanity"] = CommandTask(
         task_id=f"{framework}-dev-compress-sanity",
         description=f"Run sanity_check.py on compressed {framework.upper()} dev image",
@@ -1048,7 +1037,10 @@ docker images {dev_image_tag} --format 'Size: {{{{.Size}}}}'
         timeout=480.0,  # 8 minutes for sanity checks (trtllm can exceed 4 min)
     )
 
-    # Level 8: Local-dev image build (runs after compress-sanity, in parallel with dev-upload)
+    # Local-dev image build (delayed 120s to let dev-build warm Docker layer cache).
+    # local-dev Dockerfile is `FROM dev AS local-dev`; the 120s delay gives dev-build
+    # (which starts at 60s) time to cache the `dev` stage layers.
+    # local-dev only adds UID/GID remapping on top, so with warm cache it's fast (~30s).
     local_dev_image_tag = f"dynamo:{version}-{framework}-{cuda_tag}-local-dev"
     tasks[f"{framework}-local-dev-build"] = BuildTask(
         task_id=f"{framework}-local-dev-build",
@@ -1056,46 +1048,30 @@ docker images {dev_image_tag} --format 'Size: {{{{.Size}}}}'
         command=_build_cmd("local-dev", local_dev_image_tag),
         input_image=dev_image_tag,
         output_image=local_dev_image_tag,
-        parents=[f"{framework}-dev-compress-sanity"],
+        parents=[],
+        start_delay=120.0,
         timeout=5400.0,  # 90 minutes for builds
     )
 
-    # Level 9a: Pre-chown before local-dev compilation
-    tasks[f"{framework}-local-dev-pre-chown"] = CommandTask(
-        task_id=f"{framework}-local-dev-pre-chown",
-        description=f"Fix file ownership before {framework.upper()} local-dev compilation",
-        command=chown_cmd,
-        parents=[f"{framework}-local-dev-build", f"{framework}-dev-compress-chown"],
-        timeout=60.0,
-    )
-
-    # Level 9: Local-dev compilation (runs after local-dev-build + pre-chown)
+    # Local-dev compilation (includes pre/post chown).
+    # Waits for dev-compress-sanity so target/ is fully released from the previous cycle.
+    local_dev_compile_cmd = f"{chown_cmd}; {repo_path}/container/run.sh --image {local_dev_image_tag} --mount-workspace -v {home_dir}/.cargo:/home/dynamo/.cargo -v {repo_path}/target/.{framework}:/workspace/target -- bash -c '{cargo_cmd}'; {chown_cmd}"
     tasks[f"{framework}-local-dev-compilation"] = CommandTask(
         task_id=f"{framework}-local-dev-compilation",
         description=f"Run workspace compilation in {framework.upper()} local-dev container",
-        command=f"{repo_path}/container/run.sh --image {local_dev_image_tag} --mount-workspace -v {home_dir}/.cargo:/home/dynamo/.cargo -v {repo_path}/target/.{framework}:/workspace/target -- bash -c '{cargo_cmd}'",
+        command=local_dev_compile_cmd,
         input_image=local_dev_image_tag,
-        parents=[f"{framework}-local-dev-pre-chown"],
+        parents=[f"{framework}-local-dev-build", f"{framework}-dev-compress-sanity"],
         timeout=1800.0,  # 30 minutes for compilation
     )
 
-    # Level 9b: Post-chown after local-dev compilation
-    tasks[f"{framework}-local-dev-chown"] = CommandTask(
-        task_id=f"{framework}-local-dev-chown",
-        description=f"Fix file ownership after {framework.upper()} local-dev compilation",
-        command=chown_cmd,
-        parents=[f"{framework}-local-dev-compilation"],
-        run_even_if_deps_fail=True,
-        timeout=60.0,
-    )
-
-    # Level 10: Local-dev sanity check (runs after chown, same for all frameworks)
+    # Local-dev sanity check (runs after compilation which includes chown).
     tasks[f"{framework}-local-dev-sanity"] = CommandTask(
         task_id=f"{framework}-local-dev-sanity",
         description=f"Run sanity_check.py in {framework.upper()} local-dev container",
         command=f"{repo_path}/container/run.sh --image {local_dev_image_tag} --mount-workspace --hf-home {home_dir}/.cache/huggingface -v {home_dir}/.cargo:/home/dynamo/.cargo -v {repo_path}/target/.{framework}:/workspace/target -- bash -c '{sanity_install_cmd} && id && (sudo id || true) && python3 /workspace/deploy/sanity_check.py{sanity_no_framework_flag}'",
         input_image=local_dev_image_tag,
-        parents=[f"{framework}-local-dev-chown"],
+        parents=[f"{framework}-local-dev-compilation"],
         timeout=480.0,  # 8 minutes for sanity checks (trtllm can exceed 4 min)
     )
 
@@ -1121,30 +1097,15 @@ def create_task_graph_reuse(
     chown_cmd = f"sudo chown -R $(id -u):$(id -g) {repo_path}/target/.{framework} {repo_path}/lib/bindings/python {home_dir}/.cargo || true"
     sanity_install_cmd = "uv pip install --no-deps -e /workspace/lib/bindings/python && uv pip install --no-deps -e /workspace"
 
-    tasks[f"{framework}-dev-compress-pre-chown"] = CommandTask(
-        task_id=f"{framework}-dev-compress-pre-chown",
-        description=f"Fix file ownership before compressed {framework.upper()} dev compilation (reuse)",
-        command=chown_cmd,
-        parents=[],
-        timeout=60.0,
-    )
-
+    # Compilation includes pre/post chown so target/ access is atomic.
+    reuse_compile_cmd = f"{chown_cmd}; {repo_path}/container/run.sh --image {dev_image_tag} --mount-workspace -v {home_dir}/.cargo:/root/.cargo -v {repo_path}/target/.{framework}:/workspace/target -- bash -c '{cargo_cmd}'; {chown_cmd}"
     tasks[f"{framework}-dev-compress-compilation"] = CommandTask(
         task_id=f"{framework}-dev-compress-compilation",
         description=f"Run workspace compilation in compressed {framework.upper()} dev container (reuse)",
-        command=f"{repo_path}/container/run.sh --image {dev_image_tag} --mount-workspace -v {home_dir}/.cargo:/root/.cargo -v {repo_path}/target/.{framework}:/workspace/target -- bash -c '{cargo_cmd}'",
+        command=reuse_compile_cmd,
         input_image=dev_image_tag,
-        parents=[f"{framework}-dev-compress-pre-chown"],
+        parents=[],
         timeout=1800.0,  # 30 minutes for compilation
-    )
-
-    tasks[f"{framework}-dev-compress-chown"] = CommandTask(
-        task_id=f"{framework}-dev-compress-chown",
-        description=f"Fix file ownership after compressed {framework.upper()} dev compilation (reuse)",
-        command=chown_cmd,
-        parents=[f"{framework}-dev-compress-compilation"],
-        run_even_if_deps_fail=True,
-        timeout=60.0,
     )
 
     tasks[f"{framework}-dev-compress-sanity"] = CommandTask(
@@ -1152,7 +1113,7 @@ def create_task_graph_reuse(
         description=f"Run sanity_check.py on compressed {framework.upper()} dev image (reuse)",
         command=f"{repo_path}/container/run.sh --image {dev_image_tag} --mount-workspace --hf-home {home_dir}/.cache/huggingface -v {home_dir}/.cargo:/root/.cargo -v {repo_path}/target/.{framework}:/workspace/target -- bash -c '{sanity_install_cmd} && id && python3 /workspace/deploy/sanity_check.py{sanity_no_framework_flag}'",
         input_image=dev_image_tag,
-        parents=[f"{framework}-dev-compress-chown"],
+        parents=[f"{framework}-dev-compress-compilation"],
         timeout=480.0,  # 8 minutes for sanity checks (trtllm can exceed 4 min)
     )
 
@@ -1192,6 +1153,10 @@ class BaseTask(ABC):
     parents: List[str] = field(default_factory=list)
     children: List[str] = field(default_factory=list)
     run_even_if_deps_fail: bool = False  # Run even if dependencies fail
+
+    # Best-effort delay: sleep this many seconds (from pipeline start) before executing.
+    # Gives earlier Docker builds time to warm the layer cache. Not a correctness guarantee.
+    start_delay: float = 0.0
 
     # Execution state
     _status: TaskStatus = TaskStatus.QUEUED
@@ -1664,13 +1629,20 @@ class BaseTask(ABC):
         footer += f"-" * 80 + "\n"
         return footer
 
-    def passed_previously(self) -> bool:
+    def passed_previously(self, prev_statuses: Optional[Dict[str, str]] = None) -> bool:
         """
-        Check if this task passed in a previous run by looking for .PASSED marker.
+        Check if this task passed in a previous run by looking at report.json data,
+        falling back to .PASSED marker files.
+
+        Args:
+            prev_statuses: Preloaded {task_id: status} from report.json (preferred).
 
         Returns:
             True if task passed previously, False otherwise
         """
+        if prev_statuses and self.task_id in prev_statuses:
+            return prev_statuses[self.task_id] in ("PASS", "SKIP")
+
         if not self.log_file:
             return False
 
@@ -2257,6 +2229,7 @@ def execute_task_sequential(
     no_compile: bool = False,
     enable_dev_upload: bool = False,
     enable_dev_compress: bool = False,
+    prev_statuses: Optional[Dict[str, str]] = None,
 ) -> bool:
     """
     Execute a single task and its dependencies recursively (sequential mode).
@@ -2291,7 +2264,7 @@ def execute_task_sequential(
         if not execute_task_sequential(
             all_tasks, executed_tasks, failed_tasks, parent_id,
             repo_path, image_and_commit_sha, log_dir, log_date, dry_run, skip_action_if_already_passed,
-            no_compile, enable_dev_upload, enable_dev_compress
+            no_compile, enable_dev_upload, enable_dev_compress, prev_statuses
         ):
             # Parent failed
             if not task.run_even_if_deps_fail:
@@ -2317,7 +2290,7 @@ def execute_task_sequential(
                 execute_task_sequential(
                     all_tasks, executed_tasks, failed_tasks, child_id,
                     repo_path, image_and_commit_sha, log_dir, log_date, dry_run, skip_action_if_already_passed,
-                    no_compile, enable_dev_upload, enable_dev_compress
+                    no_compile, enable_dev_upload, enable_dev_compress, prev_statuses
                 )
 
         return True
@@ -2340,7 +2313,7 @@ def execute_task_sequential(
                 execute_task_sequential(
                     all_tasks, executed_tasks, failed_tasks, child_id,
                     repo_path, image_and_commit_sha, log_dir, log_date, dry_run, skip_action_if_already_passed,
-                    no_compile, enable_dev_upload, enable_dev_compress
+                    no_compile, enable_dev_upload, enable_dev_compress, prev_statuses
                 )
         return True
 
@@ -2357,7 +2330,7 @@ def execute_task_sequential(
                 execute_task_sequential(
                     all_tasks, executed_tasks, failed_tasks, child_id,
                     repo_path, image_and_commit_sha, log_dir, log_date, dry_run, skip_action_if_already_passed,
-                    no_compile, enable_dev_upload, enable_dev_compress
+                    no_compile, enable_dev_upload, enable_dev_compress, prev_statuses
                 )
 
         return True
@@ -2393,7 +2366,7 @@ def execute_task_sequential(
                 execute_task_sequential(
                     all_tasks, executed_tasks, failed_tasks, child_id,
                     repo_path, image_and_commit_sha, log_dir, log_date, dry_run, skip_action_if_already_passed,
-                    no_compile, enable_dev_upload, enable_dev_compress
+                    no_compile, enable_dev_upload, enable_dev_compress, prev_statuses
                 )
 
         return True
@@ -2407,31 +2380,34 @@ def execute_task_sequential(
     # Check if we should skip any task if it has already passed.
     # This must run BEFORE the input image check: if the task already passed,
     # we don't need the input image (it may have been cleaned up).
-    # IMPORTANT: A stale .PASSED marker is NOT sufficient to skip if the task produces
-    # a Docker image. The output image must still exist locally (users may have pruned).
+    # Logic:
+    #   BuildTask: skip if Docker image already exists locally.
+    #   Non-build (compilation, sanity, etc.): skip if previously passed AND
+    #     all parent tasks were skipped (no parent rebuilt, so previous results valid).
+    #     If any parent actually ran, re-run to pick up changes.
     if skip_action_if_already_passed:
         if isinstance(task, BuildTask):
             if task.image_exists():
                 skip_task = True
                 reason = "Docker image already exists"
-            elif task.passed_previously():
-                # Don't skip: marker may be stale if images were pruned.
+            elif task.passed_previously(prev_statuses):
                 skip_task = False
                 reason = ""
-                logger.info(f"Found .PASSED marker for {task_id} but output image is missing; rebuilding")
+                logger.info(f"Task {task_id} passed previously but output image is missing; rebuilding")
             else:
                 skip_task = False
                 reason = ""
         else:
-            has_output = bool(task.output_image)
-            output_ok = task.image_exists() if has_output else True
-            if task.passed_previously() and output_ok:
+            all_parents_skipped = all(
+                all_tasks[pid].status == TaskStatus.SKIPPED
+                for pid in task.parents if pid in all_tasks
+            )
+            if task.passed_previously(prev_statuses) and all_parents_skipped:
                 skip_task = True
-                reason = "Already passed previously"
-            elif task.passed_previously() and not output_ok:
+                reason = "Already passed (no parent rebuilt)"
+            elif task.passed_previously(prev_statuses) and not all_parents_skipped:
                 skip_task = False
                 reason = ""
-                logger.info(f"Found .PASSED marker for {task_id} but output image is missing; re-running")
             else:
                 skip_task = False
                 reason = ""
@@ -2447,7 +2423,7 @@ def execute_task_sequential(
                     execute_task_sequential(
                         all_tasks, executed_tasks, failed_tasks, child_id,
                         repo_path, image_and_commit_sha, log_dir, log_date, dry_run, skip_action_if_already_passed,
-                        no_compile, enable_dev_upload
+                        no_compile, enable_dev_upload, enable_dev_compress, prev_statuses
                     )
 
             return True
@@ -2579,7 +2555,7 @@ def execute_task_sequential(
                 execute_task_sequential(
                     all_tasks, executed_tasks, failed_tasks, child_id,
                     repo_path, image_and_commit_sha, log_dir, log_date, dry_run, skip_action_if_already_passed,
-                    no_compile, enable_dev_upload, enable_dev_compress
+                    no_compile, enable_dev_upload, enable_dev_compress, prev_statuses
                 )
 
     return task.status == TaskStatus.PASSED
@@ -2598,6 +2574,7 @@ def execute_task_parallel(
     enable_dev_upload: bool = False,
     enable_dev_compress: bool = False,
     max_workers: int = 4,
+    prev_statuses: Optional[Dict[str, str]] = None,
 ) -> Tuple[Set[str], Set[str]]:
     """
     Execute tasks in parallel respecting dependencies.
@@ -2613,10 +2590,11 @@ def execute_task_parallel(
         log_dir: Directory for log files (None in dry-run)
         log_date: Date string for log files (None in dry-run)
         dry_run: If True, only print commands without executing
-        skip_if_passed: If True, skip any task if .PASSED marker exists or if build image exists
+        skip_if_passed: If True, skip tasks that passed in report.json or have .PASSED marker
         no_compile: If True, skip all compilation tasks
         enable_dev_upload: If True, run dev-upload tasks; otherwise skip them and report as skipped
         max_workers: Maximum number of parallel threads
+        prev_statuses: Preloaded {task_id: status} from report.json for skip decisions
 
     Returns:
         Tuple of (executed_tasks, failed_tasks) sets
@@ -2845,33 +2823,35 @@ def execute_task_parallel(
         # Check if we should skip any task if it has already passed.
         # This must run BEFORE the input image check: if the task already passed,
         # we don't need the input image (it may have been cleaned up).
-        # IMPORTANT: A stale .PASSED marker is NOT sufficient to skip if the task produces
-        # a Docker image. The output image must still exist locally (users may have pruned).
+        # Logic:
+        #   BuildTask: skip if Docker image already exists locally.
+        #   Non-build (compilation, sanity, etc.): skip if previously passed AND
+        #     all parent tasks were skipped (no parent rebuilt, so previous results valid).
+        #     If any parent actually ran, re-run to pick up changes.
         if skip_if_passed:
             if isinstance(task, BuildTask):
                 if task.image_exists():
                     skip_task = True
                     reason = "Docker image already exists"
-                elif task.passed_previously():
-                    # Don't skip: marker may be stale if images were pruned.
+                elif task.passed_previously(prev_statuses):
                     skip_task = False
                     reason = ""
                     with lock:
-                        logger.info(f"Found .PASSED marker for {task_id} but output image is missing; rebuilding")
+                        logger.info(f"Task {task_id} passed previously but output image is missing; rebuilding")
                 else:
                     skip_task = False
                     reason = ""
             else:
-                has_output = bool(task.output_image)
-                output_ok = task.image_exists() if has_output else True
-                if task.passed_previously() and output_ok:
+                all_parents_skipped = all(
+                    all_tasks[pid].status == TaskStatus.SKIPPED
+                    for pid in task.parents if pid in all_tasks
+                )
+                if task.passed_previously(prev_statuses) and all_parents_skipped:
                     skip_task = True
-                    reason = "Already passed previously"
-                elif task.passed_previously() and not output_ok:
+                    reason = "Already passed (no parent rebuilt)"
+                elif task.passed_previously(prev_statuses) and not all_parents_skipped:
                     skip_task = False
                     reason = ""
-                    with lock:
-                        logger.info(f"Found .PASSED marker for {task_id} but output image is missing; re-running")
                 else:
                     skip_task = False
                     reason = ""
@@ -2927,6 +2907,15 @@ def execute_task_parallel(
                         logger.warning(f"Failed to generate HTML report after image-not-found failure: {e}")
 
             return False
+
+        # Staggered start: sleep until start_delay seconds after pipeline start
+        if task.start_delay > 0:
+            elapsed = time.time() - pipeline_start_time
+            remaining = task.start_delay - elapsed
+            if remaining > 0:
+                with lock:
+                    logger.info(f"Staggering {task_id}: waiting {remaining:.0f}s (start_delay={task.start_delay:.0f}s)")
+                time.sleep(remaining)
 
         with lock:
             logger.info(f"Executing: {task_id} ({task.description})")
@@ -3032,6 +3021,7 @@ def execute_task_parallel(
     # Execute tasks dynamically based on dependencies
     pending_tasks = set(all_tasks.keys())
     active_futures = {}
+    pipeline_start_time = time.time()
 
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         # Initial submission of root tasks
@@ -4149,6 +4139,8 @@ def print_dependency_tree(frameworks: List[str], commit_sha_9: str, repo_path: P
 
             # Print this task
             suffix = ""
+            if task.start_delay > 0:
+                suffix += f" [delay: {task.start_delay:.0f}s]"
             if task.run_even_if_deps_fail:
                 suffix += " [runs even if dependencies fail]"
             if len(task.parents) > 1:
@@ -4903,18 +4895,7 @@ def main() -> int:
                 if task_id not in comp_skip_ids:
                     task.parents = [p for p in task.parents if p not in comp_skip_ids]
     elif stored_comp_sha and stored_comp_sha != commit_sha_9 and not args.dry_run:
-        # Compilation SHA changed — remove stale PASSED markers for compilation/chown/sanity
-        # so --skip-action-if-already-passed doesn't skip tasks that must re-run.
-        stale_cleared = 0
-        for task_id, task in all_tasks.items():
-            if 'compilation' in task_id or 'chown' in task_id or 'sanity' in task_id:
-                if task.log_file:
-                    passed_marker = task.log_file.with_suffix(f'.{MARKER_PASSED}')
-                    if passed_marker.exists():
-                        passed_marker.unlink()
-                        stale_cleared += 1
-        if stale_cleared:
-            logger.info(f"Compilation SHA changed ({stored_comp_sha} → {commit_sha_9}) — cleared {stale_cleared} stale PASSED markers")
+        logger.info(f"Compilation SHA changed ({stored_comp_sha} → {commit_sha_9}) — using report.json for skip decisions")
 
     # Execute tasks in dependency order
     mode = "parallel" if args.parallel else "sequential"
@@ -4998,6 +4979,15 @@ def main() -> int:
     _report_no_upload = getattr(args, 'no_upload', False)
     _report_no_build = getattr(args, 'no_build', False)
 
+    # Load previous task statuses from report.json (used by --skip to avoid re-running passed tasks)
+    prev_statuses: Dict[str, str] = {}
+    if args.skip_action_if_already_passed and not args.dry_run:
+        report_json = log_dir / image_and_commit_sha / "report.json"
+        prev_statuses = _load_previous_report_task_statuses(report_json)
+        if prev_statuses:
+            passed_count = sum(1 for s in prev_statuses.values() if s in ("PASS", "SKIP"))
+            logger.info(f"Loaded {passed_count} previously passed/skipped tasks from report.json")
+
     # Execute based on mode
     if args.parallel:
         # Parallel execution
@@ -5018,6 +5008,7 @@ def main() -> int:
             enable_dev_upload=not args.no_upload,
             enable_dev_compress=not args.no_compress,
             max_workers=max_workers,
+            prev_statuses=prev_statuses,
         )
     else:
         # Sequential execution
@@ -5038,6 +5029,7 @@ def main() -> int:
                 no_compile=args.no_compile,
                 enable_dev_upload=not args.no_upload,
                 enable_dev_compress=not args.no_compress,
+                prev_statuses=prev_statuses,
             )
 
     # Calculate total execution time
