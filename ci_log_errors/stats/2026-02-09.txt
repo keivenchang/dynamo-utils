@@ -1,12 +1,39 @@
-Post-Merge CI Stats — Week of Feb 9
-=====================================
+# Post-Merge CI Stats — Week of Feb 9
+
 Period: 2026-02-09 (Mon) to 2026-02-15 (Sun)
 Sources:
   - Workflow-level: actions_runs_list.json cache (GitHub Status conclusions)
-  - Error-category-level: 354 raw post-merge job logs (local scan, no API)
+  - Error-category-level: 734 raw post-merge job logs (local scan, no API)
 
-Workflow-Level Overview
------------------------
+---
+
+## Development Metrics
+
+PRs submitted:               196
+PRs merged:                  144
+Days to merge (avg):         3.4
+Pushes per PR (avg):         4.3
+Manual re-trigger rate:      36%
+Re-triggers per affected PR: 3.2
+PR submission failure rate:  72%
+CI duration (avg, min):      115
+
+## Error Rate (% of Total Runs)
+
+Total runs (success + failure + cancelled): 1,023
+Group error hits as percentage of total runs:
+
+  Tests:            30.0%
+  Docker / build:   15.4%
+  K8s / Helm:       12.6%
+  Network:          22.4%
+  Infra / system:    3.1%
+  Auth:              0.0%
+
+---
+
+## Workflow-Level Overview
+
 Total post-merge runs:       934
   success:                   705 (75.5%)
   failure:                   220 (23.6%)
@@ -16,8 +43,8 @@ Unique commits on main:      126
 Commits with >= 1 failure:   126 (100.0%)
 Post-merge failure rate:     23.6%
 
-Failures by Workflow (% of 220 failed runs)
---------------------------------------------
+## Failures by Workflow
+
   1. Docs link check                  126 (57.27%)  [100% fail rate, 126 runs]
   2. PR                                48 (21.82%)  [ 38% fail rate, 126 runs]
   3. Fern Docs                         33 (15.00%)  [ 26% fail rate, 126 runs]
@@ -27,44 +54,64 @@ Failures by Workflow (% of 220 failed runs)
   7. NVIDIA Test Lab Validation         2 ( 0.91%)  [  2% fail rate, 116 runs]
   8. Generate and Publish Docs          1 ( 0.45%)  [  2% fail rate,  62 runs]
 
-Error-Category Detail (raw log analysis, 354 job logs)
--------------------------------------------------------
-Catch-alls excluded: vllm-error, sglang-error, trtllm-error, exit-139-sigsegv
-Total error hits: 439
+---
 
-  1. network-error                     125 (28.47%)
-  2. k8s-error                          70 (15.95%)
-  3. helm-error                         64 (14.58%)
-  4. pytest-error                       51 (11.62%)
-  5. python-error                       40 ( 9.11%)
-  6. network-timeout-generic            39 ( 8.88%)
-  7. docker-build-error                 30 ( 6.83%)
-  8. network-timeout-https              13 ( 2.96%)
-  9. etcd-error                          3 ( 0.68%)
- 10. docker-daemon-error-response        1 ( 0.23%)
- 11. docker-upload-error                 1 ( 0.23%)
- 12. network-port-conflict-error         1 ( 0.23%)
- 13. network-timeout-github-action       1 ( 0.23%)
+## Failure Distribution by Group
 
-High-Level Failure Mode
-------------------------
-  Infra:      252 (57.40%)
-    network-error: 125, k8s-error: 70, network-timeout-generic: 39,
-    network-timeout-https: 13, etcd-error: 3, network-port-conflict-error: 1,
-    network-timeout-github-action: 1
+  Tests:                  307 (30.52%)
+    pytest-error: 186, python-error: 107,
+    network-port-conflict-error: 11, backend-failure: 3
+  Network:                229 (22.76%)
+    network-timeout-generic: 223, network-timeout-gitlab-mirror: 3,
+    network-download-error: 2, network-error: 1
+  Docker / build:         158 (15.71%)
+    docker-build-error: 145, disk-space-error: 12,
+    docker-daemon-error-response-error: 1
+  Gates / policy:            135 (13.42%)
+    ci-status-check-error: 120, ci-filter-coverage-error: 15
+  Kubernetes / Helm:      129 (12.82%)
+    k8s-error: 65, helm-error: 64
+  Infra / system:          32 ( 3.18%)
+    exit-127-cmd-not-found: 28, etcd-error: 3, github-action-unavailable: 1
+  Docs:                    12 ( 1.19%)
+    broken-links: 12
+  Go operator:              4 ( 0.40%)
+    go-operator-lint-error: 4
 
-  Testing:     91 (20.73%)
-    pytest-error: 51, python-error: 40
+## Failure Distribution Detail
 
-  Build:       96 (21.87%)
-    helm-error: 64, docker-build-error: 30, docker-daemon-error-response: 1,
-    docker-upload-error: 1
+Catch-alls excluded: sglang-error (3), trtllm-error (3), vllm-error (3), exit-139-sigsegv (1) (10)
+Total error hits: 1,006
 
-Key Observations
------------------
+  1. network-timeout-generic           223 (22.17%)
+  2. pytest-error                      186 (18.49%)
+  3. docker-build-error                145 (14.41%)
+  4. ci-status-check-error             120 (11.93%)
+  5. python-error                      107 (10.64%)
+  6. k8s-error                          65 ( 6.46%)
+  7. helm-error                         64 ( 6.36%)
+  8. exit-127-cmd-not-found             28 ( 2.78%)
+  9. ci-filter-coverage-error           15 ( 1.49%)
+ 10. broken-links                       12 ( 1.19%)
+ 11. disk-space-error                   12 ( 1.19%)
+ 12. network-port-conflict-error        11 ( 1.09%)
+ 13. go-operator-lint-error              4 ( 0.40%)
+ 14. backend-failure                     3 ( 0.30%)
+ 15. etcd-error                          3 ( 0.30%)
+ 16. network-timeout-gitlab-mirror       3 ( 0.30%)
+ 17. network-download-error              2 ( 0.20%)
+ 18. docker-daemon-error-response-error  1 ( 0.10%)
+ 19. github-action-unavailable           1 ( 0.10%)
+ 20. network-error                       1 ( 0.10%)
+
+---
+
+## Key Observations
+
 - Docs link check failed 100% of runs this week (126/126), the worst week.
-- Infra dominates error categories at 57.4%, led by network-error (125).
-- Build errors unusually high (21.9%) vs other weeks, driven by helm (64)
-  and docker-build (30).
-- No Post-Merge CI Pipeline failures (workflow hadn't been introduced yet
-  or wasn't running this week).
+- Network (22.8%) led by network-timeout-generic (223), the largest single category.
+- Tests (30.5%) with pytest-error (186) and python-error (107).
+- Gates / policy (13.4%) driven by status-check-error (120).
+- Docker / build (15.7%) driven by docker-build-error (145).
+- K8s / Helm (12.8%) with k8s-error (65) and helm-error (64).
+- broken-links (12) appears as a new Docs category this week.

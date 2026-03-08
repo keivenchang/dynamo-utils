@@ -1,12 +1,39 @@
-Post-Merge CI Stats — Week of Jan 26
-======================================
+# Post-Merge CI Stats — Week of Jan 26
+
 Period: 2026-01-26 (Mon) to 2026-02-01 (Sun)
 Sources:
   - Workflow-level: actions_runs_list.json cache (GitHub Status conclusions)
-  - Error-category-level: 247 raw post-merge job logs (local scan, no API)
+  - Error-category-level: 144 raw post-merge job logs (local scan, no API)
 
-Workflow-Level Overview
------------------------
+---
+
+## Development Metrics
+
+PRs submitted:               198
+PRs merged:                  141
+Days to merge (avg):         2.2
+Pushes per PR (avg):         3.4
+Manual re-trigger rate:      24%
+Re-triggers per affected PR: 2.2
+PR submission failure rate:  71%
+CI duration (avg, min):      75
+
+## Error Rate (% of Total Runs)
+
+Total runs (success + failure + cancelled): 701
+Group error hits as percentage of total runs:
+
+  Tests:            15.1%
+  Docker / build:    1.9%
+  K8s / Helm:        2.0%
+  Network:           4.0%
+  Infra / system:    3.0%
+  Auth:              0.4%
+
+---
+
+## Workflow-Level Overview
+
 Total post-merge runs:       693
   success:                   526 (75.9%)
   failure:                   160 (23.1%)
@@ -16,8 +43,8 @@ Unique commits on main:      101
 Commits with >= 1 failure:    91 (90.1%)
 Post-merge failure rate:     23.1%
 
-Failures by Workflow (% of 160 failed runs)
---------------------------------------------
+## Failures by Workflow
+
   1. Docs link check                   79 (49.38%)  [ 78% fail rate, 101 runs]
   2. PR                                32 (20.00%)  [ 32% fail rate, 101 runs]
   3. NVIDIA Test Lab Validation        17 (10.63%)  [ 20% fail rate,  87 runs]
@@ -26,48 +53,60 @@ Failures by Workflow (% of 160 failed runs)
   6. Generate and Publish Docs          5 ( 3.13%)  [  5% fail rate, 101 runs]
   7. Rust pre-merge checks              2 ( 1.25%)  [  3% fail rate,  66 runs]
 
-Error-Category Detail (raw log analysis, 247 job logs)
--------------------------------------------------------
-Catch-alls excluded: vllm-error (20), sglang-error (2), trtllm-error (1)
-Total error hits: 283
+---
 
-  1. k8s-error                          58 (20.49%)
-  2. k8s-network-timeout-pod            42 (14.84%)
-  3. pytest-error                       31 (10.95%)
-  4. backend-failure                    23 ( 8.13%)
-  5. python-error                       23 ( 8.13%)
-  6. network-error                      22 ( 7.77%)
-  7. docker-build-error                 21 ( 7.42%)
-  8. network-timeout-gitlab-mirror      15 ( 5.30%)
-  9. etcd-error                         14 ( 4.95%)
- 10. helm-error                          8 ( 2.83%)
- 11. network-timeout-https               7 ( 2.47%)
- 12. pytest-timeout-error                7 ( 2.47%)
- 13. network-timeout-generic             6 ( 2.12%)
- 14. network-port-conflict-error         4 ( 1.41%)
- 15. huggingface-auth-error              1 ( 0.35%)
- 16. rust-error                          1 ( 0.35%)
+## Failure Distribution by Group
 
-High-Level Failure Mode
-------------------------
-  Infra:      168 (59.36%)
-    k8s-error: 58, k8s-network-timeout-pod: 42, network-error: 22,
-    network-timeout-gitlab-mirror: 15, etcd-error: 14,
-    network-timeout-https: 7, network-timeout-generic: 6,
-    network-port-conflict-error: 4
+  Tests:                  106 (49.30%)
+    pytest-error: 41, python-error: 31, backend-failure: 27,
+    network-port-conflict-error: 5, pytest-timeout-error: 2
+  Gates / policy:             30 (13.95%)
+    ci-status-check-error: 18, ci-filter-coverage-error: 12
+  Network:                 28 (13.02%)
+    network-timeout-gitlab-mirror: 17, network-timeout-generic: 6,
+    network-timeout-https: 4, network-error: 1
+  Infra / system:          21 ( 9.77%)
+    etcd-error: 21
+  Kubernetes / Helm:       14 ( 6.51%)
+    k8s-error: 7, k8s-network-timeout-pod: 7
+  Docker / build:          13 ( 6.05%)
+    docker-build-error: 8, docker-daemon-error-response-error: 2,
+    disk-space-error: 2, docker-upload-error: 1
+  Auth:                     3 ( 1.40%)
+    huggingface-auth-error: 3
 
-  Testing:     86 (30.39%)
-    pytest-error: 31, backend-failure: 23, python-error: 23,
-    pytest-timeout-error: 7, huggingface-auth-error: 1, rust-error: 1
+## Failure Distribution Detail
 
-  Build:       29 (10.25%)
-    docker-build-error: 21, helm-error: 8
+Catch-alls excluded: vllm-error (25), sglang-error (4), trtllm-error (3) (32)
+Total error hits: 215
 
-Key Observations
------------------
-- Docs link check jumped from 3% to 78% fail rate — the breakage started
+  1. pytest-error                       41 (19.07%)
+  2. python-error                       31 (14.42%)
+  3. backend-failure                    27 (12.56%)
+  4. etcd-error                         21 ( 9.77%)
+  5. ci-status-check-error              18 ( 8.37%)
+  6. network-timeout-gitlab-mirror      17 ( 7.91%)
+  7. ci-filter-coverage-error           12 ( 5.58%)
+  8. docker-build-error                  8 ( 3.72%)
+  9. k8s-error                           7 ( 3.26%)
+ 10. k8s-network-timeout-pod             7 ( 3.26%)
+ 11. network-timeout-generic             6 ( 2.79%)
+ 12. network-port-conflict-error         5 ( 2.33%)
+ 13. network-timeout-https               4 ( 1.86%)
+ 14. huggingface-auth-error              3 ( 1.40%)
+ 15. disk-space-error                    2 ( 0.93%)
+ 16. docker-daemon-error-response-error  2 ( 0.93%)
+ 17. pytest-timeout-error                2 ( 0.93%)
+ 18. docker-upload-error                 1 ( 0.47%)
+ 19. network-error                       1 ( 0.47%)
+
+---
+
+## Key Observations
+
+- Docs link check jumped from 3% to 78% fail rate -- the breakage started
   this week and persisted through all subsequent weeks.
-- k8s-error (58) + k8s-network-timeout-pod (42) = 100 hits, 35% of all
-  errors. Kubernetes was the dominant failure source.
-- NVIDIA Test Lab Validation at 20% fail rate — highest of any week.
-- backend-failure (23) was significant; it largely disappeared in later weeks.
+- Tests (49.3%) dominate: pytest-error (41), python-error (31), backend-failure (27).
+- Gates / policy (14.0%) newly visible: status-check-error (18), filter-coverage-error (12).
+- Infra / system (9.8%) driven entirely by etcd-error (21).
+- NVIDIA Test Lab Validation at 20% fail rate -- highest of any week.

@@ -16,13 +16,17 @@ Supported analyses (use one or more flags):
 
 import argparse
 import ast
+import hashlib
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
+import tempfile
 from collections import defaultdict
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
 
 # ===== Pytest defaults =====
@@ -53,6 +57,81 @@ DOC_EXTS = {".md", ".rst", ".txt", ".html", ".htm", ".xml", ".json", ".yaml", ".
 # Cached per-repo empty tree hash (varies between SHA-1 and SHA-256 repos)
 _empty_tree_cache: Dict[str, str] = {}
 
+# Commits that must never be used as snapshots (e.g. contain large binaries
+# that cause hangs, or represent broken intermediate states).
+# Use short prefixes; matching is prefix-based.
+BLACKLISTED_COMMITS: Set[str] = {
+    "222c2e85c",  # adds 1.5 MB binary .gz file, causes checkout hangs (see .cursorrules)
+}
+
+
+# ---------------------------------------------------------------------------
+# Disk cache — results keyed by commit SHA are immutable and safe to cache
+# ---------------------------------------------------------------------------
+
+CACHE_DIR = Path.home() / ".cache" / "dynamo-utils" / "analyze_repo"
+
+
+class AnalysisCache:
+    """Simple JSON-file cache keyed by (category, commit_sha, params_hash).
+
+    Git commit SHAs are immutable, so cached analysis results never go stale.
+    """
+
+    def __init__(self, enabled: bool = True):
+        self.enabled = enabled
+        self.hits = 0
+        self.misses = 0
+
+    @staticmethod
+    def _params_hash(*parts: str) -> str:
+        if not parts:
+            return ""
+        combined = "|".join(parts)
+        return hashlib.sha256(combined.encode()).hexdigest()[:8]
+
+    def _path(self, category: str, commit: str, *params: str) -> Path:
+        suffix = ""
+        if params:
+            suffix = "_" + self._params_hash(*params)
+        return CACHE_DIR / category / f"{commit[:12]}{suffix}.json"
+
+    def get(self, category: str, commit: str, *params: str) -> Optional[Dict]:
+        if not self.enabled:
+            return None
+        path = self._path(category, commit, *params)
+        if not path.exists():
+            self.misses += 1
+            return None
+        with open(path) as f:
+            self.hits += 1
+            return json.load(f)
+
+    def put(self, category: str, commit: str, data: Dict, *params: str) -> None:
+        if not self.enabled:
+            return
+        path = self._path(category, commit, *params)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "w") as f:
+            json.dump(data, f, separators=(",", ":"))
+
+    def clear(self) -> int:
+        count = 0
+        if CACHE_DIR.exists():
+            for f in CACHE_DIR.rglob("*.json"):
+                f.unlink()
+                count += 1
+        return count
+
+    def summary(self) -> str:
+        total = self.hits + self.misses
+        if total == 0:
+            return "Cache: no lookups"
+        return f"Cache: {self.hits}/{total} hits, {self.misses} computed"
+
+
+_cache = AnalysisCache(enabled=True)
+
 
 # ---------------------------------------------------------------------------
 # Git helpers (read-only plumbing, no checkout)
@@ -76,25 +155,45 @@ def run_git(
         return -1, "", "Timeout"
 
 
-def get_commit_at_date(repo_path: str, target_date: str) -> Optional[str]:
-    """Get the latest commit hash at or before a specific date (plumbing)."""
+def _is_blacklisted(sha: str) -> bool:
+    """Check if a commit SHA matches any blacklisted prefix."""
+    for prefix in BLACKLISTED_COMMITS:
+        if sha.startswith(prefix):
+            return True
+    return False
+
+
+def get_commit_at_date(repo_path: str, target_date: str, branch: str = "main") -> Optional[str]:
+    """Get the latest commit hash at or before a specific date (plumbing).
+
+    Restricts to *branch* (default: main) to avoid picking up commits
+    from side branches (e.g. fern docs branch) that have incomplete trees.
+    Skips commits in BLACKLISTED_COMMITS by fetching a few candidates.
+    """
     rc, stdout, _ = run_git(
-        ["rev-list", "-n", "1", f"--before={target_date} 23:59:59", "--all"],
+        ["rev-list", "-n", "10", f"--before={target_date} 23:59:59", branch],
         repo_path,
     )
     if rc != 0 or not stdout.strip():
         return None
-    return stdout.strip()
+    for sha in stdout.strip().splitlines():
+        sha = sha.strip()
+        if sha and not _is_blacklisted(sha):
+            return sha
+    return None
 
 
 def list_test_files_at_commit(
     repo_path: str, commit: str, test_dir: str
 ) -> List[str]:
-    """List test files (test_*.py, *_test.py) under test_dir at a commit."""
-    rc, stdout, _ = run_git(
-        ["ls-tree", "-r", "--name-only", commit, "--", test_dir + "/"],
-        repo_path,
-    )
+    """List test files (test_*.py, *_test.py) at a commit.
+
+    If test_dir is "." or empty, scans the entire tree.
+    """
+    cmd = ["ls-tree", "-r", "--name-only", commit]
+    if test_dir and test_dir != ".":
+        cmd += ["--", test_dir + "/"]
+    rc, stdout, _ = run_git(cmd, repo_path)
     if rc != 0 or not stdout.strip():
         return []
     paths = []
@@ -113,6 +212,163 @@ def read_file_at_commit(repo_path: str, commit: str, path: str) -> Optional[str]
     if rc != 0:
         return None
     return stdout
+
+
+# ---------------------------------------------------------------------------
+# Pytest collection via pytest --collect-only (preferred, accurate)
+# ---------------------------------------------------------------------------
+
+
+def _get_repo_head(repo_path: str) -> Optional[str]:
+    """Get the current HEAD commit SHA."""
+    rc, stdout, _ = run_git(["rev-parse", "HEAD"], repo_path)
+    if rc != 0:
+        return None
+    return stdout.strip()
+
+
+def _run_pytest_collect(
+    repo_path: str, marker_expr: Optional[str] = None, timeout: int = 180
+) -> Tuple[bool, int, int]:
+    """Run pytest --collect-only and return (success, test_count, file_count).
+
+    Parses the summary line like "526/1871 tests collected (1345 deselected)"
+    and counts unique file paths from the test IDs listed above it.
+    """
+    cmd = [sys.executable, "-m", "pytest", "--collect-only", "-q", "--no-header"]
+    if marker_expr:
+        cmd += ["-m", marker_expr]
+    try:
+        result = subprocess.run(
+            cmd, capture_output=True, text=True, check=False,
+            timeout=timeout, cwd=repo_path,
+        )
+    except subprocess.TimeoutExpired:
+        return (False, 0, 0)
+
+    stdout = result.stdout
+    test_count = 0
+    file_paths: Set[str] = set()
+
+    for line in stdout.strip().split("\n"):
+        line = line.strip()
+        if not line:
+            continue
+        if "::" in line and "collected" not in line and "deselected" not in line:
+            # Skip pytest-mypy plugin items (e.g. "path/to/file.py::mypy")
+            parts = line.split("::")
+            if len(parts) >= 2 and parts[-1].strip() in ("mypy", "mypy-status"):
+                continue
+            file_path = parts[0]
+            if file_path.endswith(".py"):
+                file_paths.add(file_path)
+                test_count += 1
+
+    # exit code 5 = no tests collected (valid for marker filtering)
+    if test_count == 0 and result.returncode == 5:
+        return (True, 0, 0)
+
+    if test_count > 0 or file_paths:
+        return (True, test_count, len(file_paths))
+
+    return (False, 0, 0)
+
+
+def analyze_pytests_via_collect(
+    repo_path: str,
+    tracked_markers: List[str],
+) -> Optional[Dict]:
+    """Count pytest tests using pytest --collect-only.
+
+    Runs once for total count, then once per marker.  Returns dict with same
+    shape as analyze_pytests_snapshot, or None if collection fails.
+    """
+    head_sha = _get_repo_head(repo_path)
+    if head_sha:
+        params = (",".join(sorted(tracked_markers)),)
+        cached = _cache.get("pytests_collect", head_sha, *params)
+        if cached is not None:
+            print("    (cached)", file=sys.stderr, flush=True)
+            return cached
+
+    print("    total ...", end="", file=sys.stderr, flush=True)
+    ok, total_tests, total_files = _run_pytest_collect(repo_path)
+    if not ok:
+        print(" FAILED", file=sys.stderr)
+        return None
+    print(f" {total_tests} tests, {total_files} files", file=sys.stderr, flush=True)
+
+    real_tracked = [m for m in tracked_markers if m != "unmarked"]
+    marker_counts: Dict[str, int] = {}
+
+    for marker in real_tracked:
+        print(f"    -m {marker} ...", end="", file=sys.stderr, flush=True)
+        ok_m, count, _ = _run_pytest_collect(repo_path, marker_expr=marker)
+        if not ok_m:
+            print(" FAILED", file=sys.stderr)
+            return None
+        marker_counts[marker] = count
+        print(f" {count}", file=sys.stderr, flush=True)
+
+    if "unmarked" in tracked_markers and real_tracked:
+        not_expr = " or ".join(real_tracked)
+        print("    -m unmarked ...", end="", file=sys.stderr, flush=True)
+        ok_u, unmarked, _ = _run_pytest_collect(
+            repo_path, marker_expr=f"not ({not_expr})"
+        )
+        if ok_u:
+            marker_counts["unmarked"] = unmarked
+            print(f" {unmarked}", file=sys.stderr, flush=True)
+        else:
+            marker_counts["unmarked"] = 0
+            print(" FAILED (set to 0)", file=sys.stderr, flush=True)
+
+    result = {
+        "test_files": total_files,
+        "total_tests": total_tests,
+        "markers": marker_counts,
+    }
+    # Cache collect results keyed by HEAD commit
+    head_sha = _get_repo_head(repo_path)
+    if head_sha:
+        params = (",".join(sorted(tracked_markers)),)
+        _cache.put("pytests_collect", head_sha, result, *params)
+    return result
+
+
+def collect_at_commit(
+    repo_path: str,
+    commit: str,
+    tracked_markers: List[str],
+) -> Optional[Dict]:
+    """Try pytest --collect-only at a specific commit via a temporary git worktree.
+
+    Creates a detached worktree, runs collection there, cleans up.
+    Returns dict compatible with analyze_pytests_snapshot, or None on failure.
+    """
+    # Fast path: check cache before creating a worktree
+    params = (",".join(sorted(tracked_markers)),)
+    cached = _cache.get("pytests_collect", commit, *params)
+    if cached is not None:
+        return cached
+
+    worktree_dir = tempfile.mkdtemp(prefix="analyze_wt_")
+    try:
+        rc, _, stderr = run_git(
+            ["worktree", "add", "--detach", "--force", worktree_dir, commit],
+            repo_path,
+            timeout=60,
+        )
+        if rc != 0:
+            print(f"worktree failed: {stderr.strip()}", file=sys.stderr)
+            return None
+
+        result = analyze_pytests_via_collect(worktree_dir, tracked_markers)
+        return result
+    finally:
+        run_git(["worktree", "remove", "--force", worktree_dir], repo_path, timeout=30)
+        if os.path.exists(worktree_dir):
+            shutil.rmtree(worktree_dir, ignore_errors=True)
 
 
 # ---------------------------------------------------------------------------
@@ -234,6 +490,11 @@ def analyze_pytests_snapshot(
     tracked_markers: List[str],
 ) -> Dict:
     """Count pytest test functions and markers at a commit."""
+    params = (test_dir, ",".join(sorted(tracked_markers)))
+    cached = _cache.get("pytests_ast", commit, *params)
+    if cached is not None:
+        return cached
+
     test_files = list_test_files_at_commit(repo_path, commit, test_dir)
 
     real_tracked = set(m for m in tracked_markers if m != "unmarked")
@@ -259,11 +520,13 @@ def analyze_pytests_snapshot(
     if "unmarked" in tracked_markers:
         marker_counts["unmarked"] = total_tests - marked_count
 
-    return {
+    result = {
         "test_files": len(test_files),
         "total_tests": total_tests,
         "markers": dict(marker_counts),
     }
+    _cache.put("pytests_ast", commit, result, *params)
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -285,6 +548,10 @@ def analyze_loc_snapshot(repo_path: str, commit: str) -> Dict:
     Uses `git diff --numstat EMPTY_TREE COMMIT` for a single-command line count
     of every file in the tree. Much faster than reading files individually.
     """
+    cached = _cache.get("loc", commit)
+    if cached is not None:
+        return cached
+
     empty_tree = _get_empty_tree(repo_path)
     rc, stdout, _ = run_git(
         ["diff", "--numstat", empty_tree, commit],
@@ -319,12 +586,14 @@ def analyze_loc_snapshot(repo_path: str, commit: str) -> Dict:
         elif ext in DOC_EXTS:
             doc_loc += lines
 
-    return {
+    result = {
         "python_loc": python_loc,
         "rust_loc": rust_loc,
         "doc_loc": doc_loc,
         "total_loc": total_loc,
     }
+    _cache.put("loc", commit, result)
+    return result
 
 
 def analyze_loc_churn(
@@ -334,6 +603,11 @@ def analyze_loc_churn(
 
     If prev_commit is None, diffs against the empty tree (all lines are 'added').
     """
+    cache_base = prev_commit or "EMPTY"
+    cached = _cache.get("loc_churn", curr_commit, cache_base)
+    if cached is not None:
+        return cached
+
     base = prev_commit if prev_commit else _get_empty_tree(repo_path)
     rc, stdout, _ = run_git(
         ["diff", "--numstat", base, curr_commit],
@@ -357,7 +631,9 @@ def analyze_loc_churn(
         added += int(a_str)
         deleted += int(d_str)
 
-    return {"lines_added": added, "lines_deleted": deleted}
+    result = {"lines_added": added, "lines_deleted": deleted}
+    _cache.put("loc_churn", curr_commit, result, cache_base)
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -367,6 +643,10 @@ def analyze_loc_churn(
 
 def analyze_rust_tests_snapshot(repo_path: str, commit: str) -> Dict:
     """Count Rust test functions at a commit using git-grep."""
+    cached = _cache.get("rust", commit)
+    if cached is not None:
+        return cached
+
     test_files = 0
     total_tests = 0
 
@@ -411,10 +691,12 @@ def analyze_rust_tests_snapshot(repo_path: str, commit: str) -> Dict:
 
     test_files = len(files_with_test)
 
-    return {
+    result = {
         "rust_test_files": test_files,
         "rust_total_tests": total_tests,
     }
+    _cache.put("rust", commit, result)
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -423,14 +705,14 @@ def analyze_rust_tests_snapshot(repo_path: str, commit: str) -> Dict:
 
 
 def count_commits_in_range(
-    repo_path: str, after_date: str, before_date: str
+    repo_path: str, after_date: str, before_date: str, branch: str = "main"
 ) -> int:
-    """Count commits between two dates."""
+    """Count commits between two dates on *branch*."""
     rc, stdout, _ = run_git(
         [
             "rev-list",
             "--count",
-            "--all",
+            branch,
             f"--after={after_date} 00:00:00",
             f"--before={before_date} 23:59:59",
         ],
@@ -441,10 +723,10 @@ def count_commits_in_range(
     return int(stdout.strip())
 
 
-def count_commits_before(repo_path: str, before_date: str) -> int:
-    """Count total commits up to a date."""
+def count_commits_before(repo_path: str, before_date: str, branch: str = "main") -> int:
+    """Count total commits up to a date on *branch*."""
     rc, stdout, _ = run_git(
-        ["rev-list", "--count", "--all", f"--before={before_date} 23:59:59"],
+        ["rev-list", "--count", branch, f"--before={before_date} 23:59:59"],
         repo_path,
     )
     if rc != 0 or not stdout.strip():
@@ -453,13 +735,13 @@ def count_commits_before(repo_path: str, before_date: str) -> int:
 
 
 def count_unique_authors_in_range(
-    repo_path: str, after_date: str, before_date: str
+    repo_path: str, after_date: str, before_date: str, branch: str = "main"
 ) -> int:
-    """Count unique commit authors between two dates."""
+    """Count unique commit authors between two dates on *branch*."""
     rc, stdout, _ = run_git(
         [
             "log",
-            "--all",
+            branch,
             "--format=%ae",
             f"--after={after_date} 00:00:00",
             f"--before={before_date} 23:59:59",
@@ -492,6 +774,18 @@ def generate_monthly_dates(start_date: str, end_date: str) -> List[str]:
 
     if dates and dates[-1] != end_date:
         dates.append(end_date)
+    return dates
+
+
+def generate_daily_dates(start_date: str, end_date: str) -> List[str]:
+    """Generate daily dates from start to end (inclusive)."""
+    start = datetime.strptime(start_date, "%Y-%m-%d")
+    end = datetime.strptime(end_date, "%Y-%m-%d")
+    dates: List[str] = []
+    current = start
+    while current <= end:
+        dates.append(current.strftime("%Y-%m-%d"))
+        current += timedelta(days=1)
     return dates
 
 
@@ -649,6 +943,9 @@ def build_combined_table(
 
         if has_pytests:
             s = all_results["pytests"][i]
+            method = s.get("method", "")
+            if method == "AST" and row:
+                row[0] = row[0] + "*"
             tf = s.get("test_files", 0)
             tt = s.get("total_tests", 0)
             markers = s.get("markers", {})
@@ -692,6 +989,16 @@ def build_combined_table(
 
     print_generic_table(col_keys, rows, group_boundaries)
 
+    # Footnote for AST fallback rows
+    if has_pytests:
+        methods = [r.get("method", "") for r in all_results["pytests"]]
+        has_ast = "AST" in methods
+        has_collect = "collect" in methods
+        if has_ast and has_collect:
+            print("\n* = AST-based count (pytest --collect-only used for unmarked rows)")
+        elif has_ast and not has_collect:
+            print("\n* = all rows used AST (pytest --collect-only unavailable)")
+
 
 # ---------------------------------------------------------------------------
 # CLI
@@ -728,6 +1035,7 @@ Examples:
     parser.add_argument("--months", type=int, help="Months to go back from today")
     parser.add_argument("--weeks", type=int, help="Weeks to go back (implies --weekly)")
     parser.add_argument("--weekly", action="store_true", help="Weekly snapshots (every Monday)")
+    parser.add_argument("--daily", action="store_true", help="Daily snapshots")
     parser.add_argument("--start", type=str, help="Start date (YYYY-MM-DD)")
     parser.add_argument(
         "--end", type=str, default=datetime.now().strftime("%Y-%m-%d"),
@@ -736,8 +1044,8 @@ Examples:
 
     # Pytest-specific
     parser.add_argument(
-        "--test-dir", type=str, default="tests",
-        help="Test directory relative to repo root (default: tests)",
+        "--test-dir", type=str, default=".",
+        help="Test directory relative to repo root (default: . = entire tree)",
     )
     parser.add_argument(
         "--markers", type=str, nargs="+", default=TRACKED_MARKERS_DEFAULT,
@@ -745,7 +1053,32 @@ Examples:
     )
     parser.add_argument("--json", type=str, help="Write results to a JSON file")
 
+    # Collection strategy
+    parser.add_argument(
+        "--collect", action="store_true",
+        help="Try pytest --collect-only for every commit (via git worktrees), fall back to AST",
+    )
+
+    # Cache control
+    parser.add_argument(
+        "--no-cache", action="store_true",
+        help="Bypass disk cache (recompute everything)",
+    )
+    parser.add_argument(
+        "--clear-cache", action="store_true",
+        help="Delete all cached results and exit",
+    )
+
     args = parser.parse_args()
+
+    # Cache control
+    global _cache
+    if args.clear_cache:
+        n = _cache.clear()
+        print(f"Cleared {n} cached entries from {CACHE_DIR}", file=sys.stderr)
+        sys.exit(0)
+    if args.no_cache:
+        _cache = AnalysisCache(enabled=False)
 
     # Validate analysis selection
     if not any([args.python, args.loc, args.rust, args.commits]):
@@ -787,8 +1120,15 @@ Examples:
         print(f"Error: Not a git repository: {repo_path}", file=sys.stderr)
         sys.exit(1)
 
-    dates = generate_weekly_dates(args.start, args.end) if args.weekly else generate_monthly_dates(args.start, args.end)
-    interval_label = "weekly" if args.weekly else "monthly"
+    if args.daily:
+        dates = generate_daily_dates(args.start, args.end)
+        interval_label = "daily"
+    elif args.weekly:
+        dates = generate_weekly_dates(args.start, args.end)
+        interval_label = "weekly"
+    else:
+        dates = generate_monthly_dates(args.start, args.end)
+        interval_label = "monthly"
 
     analyses = []
     if args.python:
@@ -827,13 +1167,63 @@ Examples:
     if args.python:
         print("  Running pytest analysis...", file=sys.stderr, flush=True)
         history: List[Dict] = []
-        for date, commit in date_commits:
-            if not commit:
-                history.append({"date": date, "test_files": 0, "total_tests": 0, "markers": {}})
-                continue
-            snap = analyze_pytests_snapshot(repo_path, commit, args.test_dir, args.markers)
-            snap["date"] = date
-            history.append(snap)
+
+        if args.collect:
+            # --collect: try pytest --collect-only for EVERY commit via worktrees
+            print("  Mode: pytest --collect-only per commit (worktree), AST fallback", file=sys.stderr)
+            for idx, (date, commit) in enumerate(date_commits):
+                if not commit:
+                    history.append({"date": date, "test_files": 0, "total_tests": 0, "markers": {}, "method": ""})
+                    continue
+                print(f"  [{idx+1}/{len(date_commits)}] {date} ({commit[:9]}): ", end="", file=sys.stderr, flush=True)
+                snap = collect_at_commit(repo_path, commit, args.markers)
+                if snap is not None:
+                    snap["date"] = date
+                    snap["method"] = "collect"
+                    print("collect OK", file=sys.stderr, flush=True)
+                else:
+                    snap = analyze_pytests_snapshot(repo_path, commit, args.test_dir, args.markers)
+                    snap["date"] = date
+                    snap["method"] = "AST"
+                    print("AST fallback", file=sys.stderr, flush=True)
+                history.append(snap)
+        else:
+            # Default: try collect at HEAD only, AST for the rest
+            head_sha = _get_repo_head(repo_path)
+            collect_cache: Optional[Dict] = None
+            if head_sha:
+                print(f"  Trying pytest --collect-only at HEAD ({head_sha[:9]})...", file=sys.stderr, flush=True)
+                collect_cache = analyze_pytests_via_collect(repo_path, args.markers)
+                if collect_cache:
+                    print("  Pytest collect succeeded (will use for HEAD snapshot).", file=sys.stderr, flush=True)
+                else:
+                    print("  Pytest collect failed; using AST for all snapshots.", file=sys.stderr, flush=True)
+
+            # Determine which row gets the collect result:
+            # exact SHA match first, otherwise the last row (closest to HEAD).
+            collect_row_idx: Optional[int] = None
+            if collect_cache and head_sha:
+                for idx, (_d, c) in enumerate(date_commits):
+                    if c == head_sha:
+                        collect_row_idx = idx
+                        break
+                if collect_row_idx is None:
+                    collect_row_idx = len(date_commits) - 1
+
+            for idx, (date, commit) in enumerate(date_commits):
+                if not commit:
+                    history.append({"date": date, "test_files": 0, "total_tests": 0, "markers": {}, "method": ""})
+                    continue
+                if collect_cache and idx == collect_row_idx:
+                    snap = dict(collect_cache)
+                    snap["date"] = date
+                    snap["method"] = "collect"
+                else:
+                    snap = analyze_pytests_snapshot(repo_path, commit, args.test_dir, args.markers)
+                    snap["date"] = date
+                    snap["method"] = "AST"
+                history.append(snap)
+
         all_results["pytests"] = history
 
     if args.loc:
@@ -870,11 +1260,14 @@ Examples:
     if args.commits:
         print("  Running commit analysis...", file=sys.stderr, flush=True)
         history = []
-        prev_date: Optional[str] = None
+        # Use the day before the first date as the implicit "previous" so the
+        # first row shows actual daily commits instead of all-time cumulative.
+        first_date_dt = datetime.strptime(dates[0], "%Y-%m-%d")
+        prev_date: Optional[str] = (first_date_dt - timedelta(days=1)).strftime("%Y-%m-%d")
         for date, commit in date_commits:
+            period = count_commits_in_range(repo_path, prev_date, date)
             cumulative = count_commits_before(repo_path, date)
-            period = count_commits_in_range(repo_path, prev_date, date) if prev_date else cumulative
-            authors = count_unique_authors_in_range(repo_path, prev_date, date) if prev_date else 0
+            authors = count_unique_authors_in_range(repo_path, prev_date, date)
             history.append({
                 "date": date,
                 "period_commits": period,
@@ -893,6 +1286,8 @@ Examples:
         with open(args.json, "w") as f:
             json.dump(all_results, f, indent=2)
         print(f"JSON written to: {args.json}", file=sys.stderr)
+
+    print(f"  {_cache.summary()}", file=sys.stderr)
 
 
 if __name__ == "__main__":

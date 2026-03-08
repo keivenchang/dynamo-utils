@@ -1,146 +1,307 @@
-Post-Merge CI Failure Analysis — 2026 Q1 Summary
-===================================================
+# Post-Merge Failure Analysis — 2026 Q1 Summary
+
+## Key Takeaways
+
+- **Test failures were the #1 driver of PR merge delays.** At peak (Feb 16), 46% of all post-merge job runs triggered a test failure. After targeted reliability fixes (mid-to-late Feb), that dropped to 14% by Feb 23 and 4% by Mar 2.
+- **Days to merge cut in half**: 4.2 days (Feb 16) → 2.6 days (Feb 23) → 2.1 days (Mar 2).
+- **Manual job re-trigger rate dropped 75%**: 36% (Feb 9) → 16% (Feb 23) → 9% (Mar 2). Developers stopped having to monitor and manually re-trigger their PR submissions.
+- **~323 developer-hours saved per week from test reliability improvements alone** (holding job duration constant) — equivalent to ~40 full (8-hour) work days reclaimed per week across the team. Combined impact with infrastructure speed improvements is detailed in [Time Savings Extrapolation](#time-savings-extrapolation).
+- **Busiest week on record saw the best metrics**: Feb 23 had 225 PRs, 195 merges, and 64 active authors — while every reliability metric improved.
+
+### Dev Metrics 2026 Q1
+
+Data sources:
+- **Pre-merge PR data** (columns: PRs through PR Fail %, Pre-merge Duration): PR lifecycle metrics from GitHub PR API and pre-merge workflow runs. Pre-merge runs include both `pull_request` event workflows (lint, copyright, "Pre Merge" Rust checks) and `push` event workflows on `pull-request/NNN` mirror branches ("NVIDIA Dynamo Github Validation" container build+test). Measures the developer experience during the PR review and feedback loop before merge.
+- **Post-merge job data** (column: Post-merge Duration): Measured from GitHub Actions runs on main (event="push", head_branch="main"). Post-merge runs include additional workflows (NVIDIA Validation, Test Lab, Post-Merge Pipeline) not triggered pre-merge. Error distributions in later sections also use this data source.
+
+| Week | PRs | PRs Merged | Days to merge/PR <sup>¶</sup> | Push/PR <sup>△</sup> | PR Re-trig % <sup>‡</sup> | Re-trig/PR <sup>‖</sup> | PR Fail % <sup>†</sup> | Pre-merge <sup>⊕</sup> (min) | Post-merge (min) |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Dec 29 | 35 | 14 | 1.5 | 2.3 | 16% | 1.4 | 89% | 54 | 109 |
+| Jan 05 | 167 | 133 | 2.8 | 2.9 | 21% | 1.4 | 76% | 59 | 108 |
+| Jan 12 | 138 | 114 | 2.7 | 3.2 | 19% | 1.3 | 62% | 53 | 123 |
+| Jan 19 | 118 | 76 | 3.5 | 3.9 | 16% | 1.6 | 67% | 45 | 66 |
+| Jan 26 | 198 | 141 | 2.2 | 3.4 | 24% | 2.2 | 71% | 50 | 75 |
+| Feb 02 | 185 | 158 | 3.6 | 4.3 | 25% | 3.0 | 71% | 53 | 61 |
+| Feb 09 | 196 | 144 | 3.4 | 4.3 | 36% | 3.2 | 72% | 55 | 115 |
+| Feb 16 | 150 | 106 | 4.2 | 4.5 | 21% | 2.2 | 73% | 39 | 128 |
+| **Feb 23** | 225 | **195 ↑** | **2.6 ↓** | 4.3 | **16% ↓** | **1.6 ↓** | **62% ↓** | **35 ↓** | **72 ↓** |
+| **Mar 02** | 50 | 41 | **2.1 ↓** | **2.8 ↓** | **9% ↓** | **1.3 ↓** | **49% ↓** | **27 ↓** | 86 |
+
+Note: Week of Mar 02 is partial (week not over yet), so those numbers are directional. Re-trig % means the share of PRs where we saw at least one manual job re-trigger; Re-trig/PR means average manual job re-triggers among affected PRs.
+
+### Developer Velocity
+
+$$\text{Developer Velocity} \approx \frac{\text{PRs Merged} \times (1 - \text{PR Fail \%}^†) \times (1 - \text{PR Re-trig \%}^‡)}{\text{Pre-merge Duration}^⊕ \times \text{Push/PR}^△}$$
+
+$$\text{PR Fail \%}^† = f(\text{test failures, docker/build errors, k8s/helm errors, network errors, infra errors, auth errors})$$
+
+$$\text{Pre-merge Duration}^⊕ = f(\text{failed tests that run to max timeout, tests without proper timeout limits, infrastructure speed})$$
+
+<sub>Note: Developer Velocity (DV) is a hypothetical composite metric constructed to illustrate how the measured metrics interact. Days to merge/PR <sup>¶</sup> is the observable output. Push/PR <sup>△</sup> partially captures the review iteration cycle.</sub>
+
+Mission: Improving test reliability to increase developer velocity
+
+- At its peak (Feb 16), **nearly half of all post-merge job runs (46%) triggered a test failure**. This was the single largest source of PR merge delays — every flaky or broken test meant a developer waiting for a re-trigger, adding hours to merge time.
+- Reducing test error rate from 46% to 14% of runs directly contributed to halving days-to-merge and eliminating ~323 hours of developer wait time per week (test reliability alone; ~365 hours combined with infrastructure speed improvements).
+- Feb 24 set the all-time single-day merge record.
+- At the peak of 1.0 code-freeze activity (week of Feb 23), we observed 225 PRs (busiest week on record), 195 merges, and 64 active authors, while key metrics improved in PR submission failure rate <sup>†</sup>, manual job re-trigger rate <sup>‡</sup>, and days to merge <sup>¶</sup>.
+- Several major changes were made from mid to late Feb (Feb 16 to Feb 27) to improve test stability, harden the workflow, and fix recurring issues — including fixing flaky pytest fixtures, adding timeouts to long-running tests that previously ran to the max timeout, adding retry logic for transient network errors in tests, disabling or quarantining chronically unstable tests, and hardening timeout/resource configurations.
+- Before mid Feb and after the stability fixes:
+  - Manual job re-trigger rate <sup>‡</sup> went from **36% to 16%**.
+  - Average manual job re-triggers per affected PR <sup>‖</sup> went from **3.2 to 1.6**.
+  - PR submission failure rate <sup>†</sup> hovered around 70% but went down to 62%.
+  - Days to merge <sup>¶</sup> went from **4.2 days down to 2.6 days**.
+
+---
+
 Period: 2026-01-24 to 2026-03-03 (6 weeks + 2 partial weeks)
-Source: 1,987 raw post-merge job logs + GitHub Actions workflow run data
+Source: 2,547 raw post-merge job logs + GitHub Actions workflow run data
 Methodology:
-  - Each failed job log assigned to exactly ONE bucket (no double-counting)
-  - Priority: Testing > Infra > Build
   - Catch-alls excluded: vllm-error, sglang-error, trtllm-error, exit-139-sigsegv
-  - "% of runs" = failures / total post-merge runs (including successes)
-  - Uncategorized = logs where the categorizer found a snippet but could not
-    match a known error pattern (~34% of failed logs)
+  - A single log can match multiple categories (hit-level counting)
+  - 8 failure groups: Tests, Docker/build, K8s/Helm, Network,
+    Auth, Docs, Go operator, Infra/system
 
-===========================================================================
-WEEKLY BREAKDOWN (% of all post-merge runs)
-===========================================================================
+---
 
-Week         | Runs  | Testing | Infra   | Build   | Uncat   | WF Fail% | Avg Time
--------------|-------|---------|---------|---------|---------|----------|--------
-Jan 19*      |   458 |   1.3%  |   0.0%  |   0.0%  |   0.4%  |   6.8%  |  21 min
-Jan 26       |   693 |   8.7%  |  13.4%  |   2.3%  |  11.3%  |  23.1%  |  21 min
-Feb 2        |   867 |   4.4%  |  16.8%  |   0.2%  |   7.2%  |  25.0%  |  12 min
-Feb 9        |   934 |   5.5%  |  17.7%  |   3.2%  |  11.6%  |  23.6%  |  18 min
-Feb 16       |   794 |  41.6%  |  12.7%  |  11.3%  |  29.1%  |  28.2%  |  27 min
-Feb 23       | 1,085 |   8.0%  |   4.0%  |   0.2%  |  13.1%  |  15.4%  |  15 min
-Mar 2**      |   215 |  11.2%  |  13.0%  |   0.0%  |  24.2%  |  29.8%  |  16 min
--------------|-------|---------|---------|---------|---------|----------|--------
-TOTAL        | 5,046 |  11.8%  |  11.4%  |   2.8%  |  13.4%  |  22.1%  |  18 min
+## Metric Definitions
 
-*  Jan 19 = partial week (Sat-Sun only, 8 logs)
-** Mar 2  = partial week (Mon-Tue, 2 days)
+Pre-merge PR metrics:
+- <sup>¶</sup> **Days to merge/PR** -- elapsed time (days) from first PR submission to final merge. Example: 2.6d means a PR took about 2.6 days to merge.
+- <sup>△</sup> **Push/PR** -- average number of code pushes per PR before merge.
+- <sup>‡</sup> **PR Re-trig %** -- the share of PRs that needed at least one manual job re-trigger after a failed run. Example: 20% means 1 out of every 5 PRs, someone manually triggered at least one re-run (without pushing new code).
+- <sup>‖</sup> **Re-trig/PR** -- average number of manual job re-triggers among PRs that were manually re-triggered. Example: 1.6 means each affected PR was manually re-run about 1 to 2 times.
+- <sup>†</sup> **PR Fail %** -- the share of PRs that had at least one failed automation run. Example: 33% means 1 out of every 3 PRs failed at least once.
+- <sup>⊕</sup> **Pre-merge (min)** -- average of max(workflow durations) per commit, across all pre-merge workflows triggered for that commit (including `pull_request` checks and validation runs on `pull-request/NNN` mirror branches). Since workflows run in parallel, the developer waits for the slowest one.
 
-===========================================================================
-BEFORE / AFTER FEB 23 (improvement snapshot)
-===========================================================================
+Post-merge job metrics:
+- **Post-merge (min)** -- average wall-clock time (minutes) from the first workflow created to the last workflow completed, per commit push on main. Post-merge runs include additional workflows (NVIDIA Validation, Test Lab, Post-Merge Pipeline) not triggered during pre-merge.
+- <sup>§</sup> **PR Avg (min)** -- average "PR" workflow run duration (minutes) from post-merge job data (created_at to updated_at). Reflects how long a single workflow run takes to complete.
+- **WF Failure %** -- post-merge workflow failure rate (% of runs with conclusion = failure). Not the same as <sup>†</sup>.
 
-| Category      | Before Feb 23 (5 wks, 3,746 runs) | After Feb 23 (2 wks, 1,300 runs) | Change |
-|---------------|-----------------------------------|----------------------------------|--------|
-| Testing       | 12.9% of runs                     | 8.5% of runs                     | -4.4pp |
-| Infra         | 13.5% of runs                     | 5.5% of runs                     | -8.0pp |
-| Build         | 3.7% of runs                      | 0.2% of runs                     | -3.5pp |
-| Uncategorized | 12.8% of runs                     | 15.0% of runs                    | +2.2pp |
-| **WF failure rate** | **22.7%**                    | **17.8%**                        | **-4.9pp** |
+### Time Savings Extrapolation
 
-All three failure categories improved after Feb 23. WF failure rate
-dropped from 22.7% to 17.8%.
+$$\text{Wasted Wait per PR (hours)} = \text{PR Re-trig \%}^‡ \times \text{Re-trig/PR}^‖ \times \text{Post-merge Duration (hours)}$$
 
-===========================================================================
-OVERALL FAILURE DISTRIBUTION
-===========================================================================
+**Calculation 1 — Test reliability improvements only** (hold job duration constant at 115 min / 1.92h):
+- Feb 9 baseline: 0.36 × 3.2 × 1.92 = **2.21 hours/PR**.
+- Feb 23 (with test fixes, but same job duration): 0.16 × 1.6 × 1.92 = **0.49 hours/PR**.
+- Reduction: 2.21 → 0.49 = **−78% wasted wait per PR**.
+- Scaled to actual PR volume: Feb 9 = 2.21 × 196 = 433.6 h/week; Feb 23 = 0.49 × 225 = 110.6 h/week.
+- **Savings from test reliability alone: ~323 hours/week** (40.4 work days).
 
-Of 1,987 failed post-merge job logs:
+**Calculation 2 — Combined: test reliability + infrastructure speed improvements**:
+- Job duration dropped from 115 min (1.92h) to 72 min (1.20h) between Feb 9 and Feb 23, thanks to infrastructure optimizations (build caching, parallel stages, runner improvements) that happened concurrently with these test stability fixes.
+- Feb 9 baseline: 0.36 × 3.2 × 1.92 = **2.21 hours/PR**.
+- Feb 23 (test fixes + faster jobs): 0.16 × 1.6 × 1.20 = **0.31 hours/PR**.
+- Reduction: 2.21 → 0.31 = **−86% wasted wait per PR**.
+- Scaled to actual PR volume: Feb 9 = 2.21 × 196 = 433.6 h/week; Feb 23 = 0.31 × 225 = 69.1 h/week.
+- **Combined savings: ~365 hours/week** (45.6 work days).
 
-| Category      | Count | % of all failed logs |
-|---------------|------:|---------------------:|
-| Testing       |   596 |               30.0%  |
-| Infra         |   576 |               29.0%  |
-| Build         |   140 |                7.0%  |
-| Uncategorized |   675 |               34.0%  |
+The job duration improvement (115 → 72 min, −37%) accounts for roughly 42 of those 365 hours — about 11% of the total savings. The remaining 89% comes from fewer re-triggers (lower flake rate and fewer re-triggers per affected PR).
 
-Testing and infra are nearly equal (~30% each of all failed logs).
-Build is a distant third at 7%. One-third of failures remain uncategorized.
+---
 
-===========================================================================
-KEY IMPROVEMENTS
-===========================================================================
+## Failure Distribution by Group (post-merge data)
 
-Testing Improvements
----------------------
-- Testing failures dropped from 12.9% to 8.5% of all runs after Feb 23
-  (-4.4 percentage points, a 34% relative reduction).
-- The Feb 16 spike (41.6% of runs) was a one-week anomaly driven by an
-  etcd-error surge (176 hits, up from 3 the prior week) that cascaded into
-  pytest failures. By Feb 23, testing was back to 8.0%.
-- pytest-error remains the single largest testing category but has stabilized
-  in the 5-8% of runs range post-Feb 23 (vs 41.6% during the spike).
-- pytest-timeout-error appeared in Mar 2 (21 hits, 20% of that week's logs),
-  suggesting a new slow-test issue worth monitoring.
+3,577 errors across 2,547 failed job logs (a log can match multiple groups):
 
-Infra Improvements
--------------------
-- Infra failures dropped from 13.5% to 5.5% of all runs after Feb 23
-  (-8.0 percentage points, a 59% relative reduction).
-- This is the largest absolute improvement of any category.
-- network-error and k8s-error, which were consistently 13-18% of runs
-  through Jan 26 - Feb 9, dropped to 4.0% the week of Feb 23.
-- etcd-error, which spiked to 176 hits during Feb 16, returned to
-  baseline (31 hits Feb 23, 0 hits Mar 2).
-- disk-space-error dropped from 77 hits (Feb 16) to 12 (Feb 23) to 0 (Mar 2).
-- Caveat: Mar 2 saw infra bounce back to 13.0% of runs, driven by
-  NVIDIA Test Lab Validation surging to 48% fail rate. This may be a
-  new issue or noise from the small 2-day sample.
+| Group           | Errors | % of errors |
+|-----------------|------:|----------:|
+| Tests           | 1,367 |    38.2%  |
+| Docker / build  |   627 |    17.5%  |
+| Network         |   445 |    12.4%  |
+| K8s / Helm      |   333 |     9.3%  |
+| Uncategorized / policy |   587 |    16.4%  |
+| Infra / system  |   171 |     4.8%  |
+| Auth            |    18 |     0.5%  |
+| Docs            |    15 |     0.4%  |
+| Go operator     |    14 |     0.4%  |
 
-Build Improvements
--------------------
-- Build failures dropped from 3.7% to 0.2% of all runs after Feb 23
-  (-3.5 percentage points, effectively eliminated).
-- helm-error dropped from 64 hits (Feb 9) to 49 (Feb 23) to 2 (Mar 2).
-- docker-build-error dropped from 30 hits (Feb 9) to 3 (Feb 23) to 0 (Mar 2).
-- docker-daemon-error-response, which spiked to 76 hits during Feb 16,
-  disappeared entirely by Feb 23.
-- Build is the clearest success story of Q1.
+Tests (38%) are the dominant failure domain. Docker/build (18%) and
+Network (12%) follow. K8s/Helm (9%) rounds out the infrastructure-adjacent
+failures.
 
-Uncategorized Errors
----------------------
-- ~34% of all failed job logs could not be classified into Testing, Infra,
-  or Build. These logs had error snippets extracted but did not match any
-  known categorization pattern.
-- Uncategorized rate increased slightly after Feb 23 (12.8% to 15.0% of
-  runs), meaning the categorizer's coverage did not improve as overall
-  errors dropped.
-- Week-by-week uncategorized % of runs:
-    Jan 19: 0.4%  |  Jan 26: 11.3%  |  Feb 2: 7.2%  |  Feb 9: 11.6%
-    Feb 16: 29.1% |  Feb 23: 13.1%  |  Mar 2: 24.2%
-- The Feb 16 and Mar 2 spikes in uncategorized suggest that during high-
-  failure periods, new error patterns emerge that the categorizer misses.
-- Improving categorizer coverage is a potential area for investment: ~675
-  of 1,987 failed logs remain unclassified. Better patterns could shift
-  some of these into actionable buckets.
+---
 
-===========================================================================
-WORKFLOW-LEVEL HIGHLIGHTS
-===========================================================================
+## Failure Distribution Detail (post-merge data)
+
+3,577 errors across 2,547 failed job logs (per-category breakdown of the groups above).
+
+| Category | Errors | % | Group |
+|---|---:|---:|---|
+| pytest-error | 732 | 20.5% | Tests |
+| python-error | 485 | 13.6% | Tests |
+| docker-build-error | 477 | 13.3% | Docker / build |
+| network-timeout-generic | 313 | 8.8% | Network |
+| k8s-error | 160 | 4.5% | K8s / Helm |
+| helm-error | 147 | 4.1% | K8s / Helm |
+| disk-space-error | 92 | 2.6% | Docker / build |
+| network-error | 90 | 2.5% | Network |
+| etcd-error | 82 | 2.3% | Infra / system |
+| backend-failure | 78 | 2.2% | Tests |
+| exit-127-cmd-not-found | 61 | 1.7% | Infra / system |
+| network-port-conflict-error | 46 | 1.3% | Tests |
+| network-timeout-gitlab-mirror | 30 | 0.8% | Network |
+| docker-registry-error | 25 | 0.7% | Docker / build |
+| docker-daemon-error-response-error | 21 | 0.6% | Docker / build |
+| timeout-exit-124 | 18 | 0.5% | K8s / Helm |
+| rust-error | 17 | 0.5% | Tests |
+| auth-token-expired | 15 | 0.4% | Auth |
+| broken-links | 15 | 0.4% | Docs |
+| go-operator-lint-error | 14 | 0.4% | Go operator |
+| oom | 14 | 0.4% | Infra / system |
+| cuda-error | 13 | 0.4% | Infra / system |
+| docker-upload-error | 12 | 0.3% | Docker / build |
+| pytest-timeout-error | 9 | 0.3% | Tests |
+| k8s-network-timeout-pod | 8 | 0.2% | K8s / Helm |
+| network-timeout-https | 7 | 0.2% | Network |
+| network-download-error | 5 | 0.1% | Network |
+| huggingface-auth-error | 3 | 0.1% | Auth |
+| github-action-unavailable | 1 | 0.0% | Infra / system |
+
+---
+
+## Post-Merge Run Conclusions
+
+| Conclusion | Count | % |
+|------------|------:|---:|
+| Success    | 3,934 | 78.0% |
+| Failure    | 1,083 | 21.5% |
+| Cancelled  |    26 |  0.5% |
+| **Total**  | **5,046** | |
+
+---
+
+## Weekly Error Distribution (post-merge data)
+
+Column definitions:
+- **Total Runs**: all post-merge workflow runs that week (success + failure + cancelled)
+- **Tests / Docker / K8s / Net / Infra / Auth**: group error hits as % of total runs
+
+| Week | Total Runs | Tests | Docker | K8s | Net | Infra | Auth |
+|----------|-----:|------:|-------:|----:|----:|------:|-----:|
+| Dec 29*  |   60 |  8.3% |  0.0% | 0.0%| 6.7%|  3.3% | 0.0% |
+| Jan 5    |  536 |  1.3% | 33.4% | 0.7%| 1.9%|  0.7% | 1.1% |
+| Jan 12   |  595 | 10.3% |  0.0% | 2.4%| 0.7%|  0.3% | 0.3% |
+| Jan 19   |  458 | 37.1% | 31.0% |17.5%|72.3%|  2.0% | 0.0% |
+| Jan 26   |  701 | 15.1% |  1.9% | 2.0%| 4.0%|  3.0% | 0.4% |
+| Feb 2    |  951 | 34.4% | 28.0% | 1.5%| 5.9%|  5.3% | 0.0% |
+| Feb 9    |1,023 | 30.0% | 15.4% |12.6%|22.4%|  3.1% | 0.0% |
+| Feb 16   |  858 | 46.3% |  6.4% | 7.0%|10.5%|  5.6% | 0.0% |
+| **Feb 23**   |1,105 | **14.3% ↓** |  8.1% |10.1%| **3.2% ↓**|  **1.8% ↓** | 0.0% |
+| **Mar 2** \*\*  |  215 | **4.2% ↓** | 11.2% | **0.9% ↓**| **1.4% ↓**|  **0.0% ↓** | 7.0% |
+
+\* Dec 29 = low log coverage (31 job logs for 60 runs); other early weeks now have full coverage after bulk log download (5,061 / 728 / 2,822 job logs respectively).
+\*\* Mar 2 = partial week (Mon-Thu, 4 days, through Mar 5).
+Docs and Go operator omitted for brevity (<1.6% of any week).
+
+---
+
+## Workflow-Level Highlights
 
 Three chronically broken workflows dominated post-merge failures:
   - Docs link check:             84% fail rate (544/650 runs)
   - build-frontend-image.yaml:  100% fail rate (49/49 runs)
-  - Post-Merge CI Pipeline:      95% fail rate (87/92 runs)
+  - Post-Merge Pipeline:         95% fail rate (87/92 runs)
 
 These 3 workflows account for 680 of 1,056 total workflow failures (64%).
 If fixed or disabled, the overall WF failure rate would drop from 22.1%
 to approximately 8%.
 
-===========================================================================
-METHODOLOGY NOTES
-===========================================================================
+---
 
+## Before / After Feb 23 (post-merge improvement snapshot)
+
+Error group hits as % of total runs, before and after Feb 23:
+
+| Group          | Before (5 wks, 3,991 runs) | After (2 wks, 1,320 runs) | Change |
+|----------------|---------------------------:|------------------------:|--------|
+| Tests          | 32.8% | 12.7% | -20.1pp |
+| Docker / build | 15.9% |  8.6% |  -7.3pp |
+| Network        | 18.4% |  2.9% | -15.5pp |
+| K8s / Helm     |  7.5% |  8.6% |  +1.1pp |
+| Infra / system |  4.0% |  1.5% |  -2.5pp |
+| Other          |  0.1% |  1.1% |  +1.0pp |
+
+WF failure rate dropped from 22.7% to 17.8% (-4.9pp).
+
+Tests (-20.1pp) saw the largest improvement, followed by Network (-15.5pp),
+Docker (-7.3pp), and Infra (-2.5pp). K8s/Helm increased slightly (+1.1pp),
+driven by k8s-error and helm-error concentrating in Feb 23.
+
+---
+
+## Key Improvements
+
+### Tests
+- Test error rate dropped from 32.8% to 12.7% of runs after Feb 23 (-20.1pp).
+- The Feb 16 spike (46.3% of runs) was a one-week anomaly driven by an
+  etcd-error surge (38 errors, up from 3 the prior week) that cascaded
+  into pytest failures. By Feb 23, the test error rate dropped to 14.3% of runs.
+- pytest-error (732 errors Q1-wide) is the single largest category overall.
+- pytest-timeout-error is small (9 errors) but appeared mainly in Mar 2,
+  suggesting a new slow-test issue worth monitoring.
+
+### Docker / build
+- Docker/build error rate dropped from 15.9% to 8.6% of runs after Feb 23 (-7.3pp).
+- docker-build-error (477 errors) is the largest category in this group,
+  peaking at Feb 2 (28.0% of runs) and tapering off.
+- disk-space-error (92 errors) spiked during Feb 2 (76 errors) and has
+  largely disappeared since.
+- docker-daemon-error-response-error (21 errors) was concentrated in
+  Jan 19 and largely disappeared afterward.
+
+### K8s / Helm
+- K8s/Helm error rate grew from 7.5% to 8.6% of runs after Feb 23 (+1.1pp), driven by
+  k8s-error and helm-error concentrating in the Feb 23 week.
+- timeout-exit-124 (18 errors) appeared in Feb 16 and Feb 23.
+
+### Network
+- Network error rate dropped from 18.4% to 2.9% of runs after Feb 23 (-15.5pp).
+- Network was elevated throughout Jan 19 (72.3% of runs, driven by a network-error
+  surge) and peaked again at Feb 9 (22.4% of runs, driven by network-timeout-generic).
+  After Feb 23, network errors dropped to low single digits.
+- network-error (90 errors) peaked at Feb 16 (68 errors) and improved.
+
+### Infra / system
+- Infra/system error rate dropped from 4.0% to 1.5% of runs after Feb 23 (-2.5pp).
+- etcd-error (82 errors) spiked to 38 during Feb 16 and returned to
+  baseline (12 errors Feb 23).
+- oom (14 errors) appeared mainly in Feb 16 (8) and Feb 23 (6).
+- Note: oom, etcd-error, and cuda-error are ambiguous — they could be
+  caused by bad tests (resource leaks, misconfigured GPU tests) or
+  actual infrastructure issues. The categorization boundary is not clear.
+
+---
+
+## Methodology Notes
+
+This document uses two data sources:
+
+**Post-merge job data** (error distributions, job duration, workflow conclusions):
 - "Post-merge" = GitHub Actions runs with event="push", head_branch="main"
 - Job logs downloaded via GitHub API, cached at ~/.cache/dynamo-utils/raw-log-text/
   (TTL: 365 days). No API calls needed for re-analysis.
-- Error categorization via ci_log_errors --scan-all-logs (local regex-based scan)
-- Each log assigned to one bucket by priority (Testing > Infra > Build) to
-  avoid double-counting when a log matches multiple categories
+- Early weeks (Dec 29 – Jan 19) supplemented with bulk log download (1,331 additional
+  job logs) to improve coverage for the Weekly Error Distribution table.
+- Error categorization via ci_log_errors engine (local regex-based scan)
+- Hit-level counting: a log matching categories in multiple groups is
+  counted in each group. Group percentages sum to 100% of all errors.
 - Workflow-level data from actions_runs_list.json cache (81,962 runs)
+- Post-merge runs execute the same workflows as pre-merge PR checks, so
+  post-merge failure rates serve as a proxy for the pre-merge developer experience.
+
+**Pre-merge PR data** (Development Metrics table):
+- PR lifecycle metrics (PRs, merges, days to merge, push/PR, re-trigger rates,
+  PR fail rates) computed from GitHub PR API data.
+- Pre-merge duration computed from workflow runs grouped by commit SHA, including
+  both `pull_request` event runs and `push` event runs on `pull-request/NNN` mirror
+  branches. Per-commit duration = max(individual workflow durations), since workflows
+  run in parallel and the developer waits for the slowest one.
+- These measure the developer experience during the PR review and feedback
+  loop before a PR is merged.
+
 - Weekly stats files in this directory contain per-week detail including
   full category breakdowns and workflow failure rates
 - See also: 2026-01-23.txt for pre-merge baseline (1,698 logs, pre-merge only)

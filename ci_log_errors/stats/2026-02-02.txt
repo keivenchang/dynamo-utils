@@ -1,12 +1,39 @@
-Post-Merge CI Stats — Week of Feb 2
-=====================================
+# Post-Merge CI Stats — Week of Feb 2
+
 Period: 2026-02-02 (Mon) to 2026-02-08 (Sun)
 Sources:
   - Workflow-level: actions_runs_list.json cache (GitHub Status conclusions)
-  - Error-category-level: 248 raw post-merge job logs (local scan, no API)
+  - Error-category-level: 516 raw post-merge job logs (local scan, no API)
 
-Workflow-Level Overview
------------------------
+---
+
+## Development Metrics
+
+PRs submitted:               185
+PRs merged:                  158
+Days to merge (avg):         3.6
+Pushes per PR (avg):         4.3
+Manual re-trigger rate:      25%
+Re-triggers per affected PR: 3.0
+PR submission failure rate:  71%
+CI duration (avg, min):      61
+
+## Error Rate (% of Total Runs)
+
+Total runs (success + failure + cancelled): 951
+Group error hits as percentage of total runs:
+
+  Tests:            34.4%
+  Docker / build:   28.0%
+  K8s / Helm:        1.5%
+  Network:           5.9%
+  Infra / system:    5.3%
+  Auth:              0.0%
+
+---
+
+## Workflow-Level Overview
+
 Total post-merge runs:       867
   success:                   648 (74.7%)
   failure:                   217 (25.0%)
@@ -16,8 +43,8 @@ Unique commits on main:      121
 Commits with >= 1 failure:   119 (98.3%)
 Post-merge failure rate:     25.0%
 
-Failures by Workflow (% of 217 failed runs)
---------------------------------------------
+## Failures by Workflow
+
   1. Docs link check                  117 (53.92%)  [ 97% fail rate, 121 runs]
   2. build-frontend-image.yaml         49 (22.58%)  [100% fail rate,  49 runs]
   3. PR                                21 ( 9.68%)  [ 17% fail rate, 121 runs]
@@ -26,51 +53,61 @@ Failures by Workflow (% of 217 failed runs)
   6. Build Frontend Image               3 ( 1.38%)  [  4% fail rate,  82 runs]
   7. Pre Merge                          2 ( 0.92%)  [  2% fail rate, 121 runs]
 
-Error-Category Detail (raw log analysis, 248 job logs)
--------------------------------------------------------
-Catch-alls excluded: trtllm-error (4), vllm-error (2), sglang-error (1)
-Total error hits: 266
+---
 
-  1. network-error                      80 (30.08%)
-  2. k8s-error                          68 (25.56%)
-  3. pytest-error                       27 (10.15%)
-  4. k8s-network-timeout-pod            24 ( 9.02%)
-  5. python-error                       13 ( 4.89%)
-  6. network-timeout-https              11 ( 4.14%)
-  7. helm-error                         10 ( 3.76%)
-  8. network-timeout-gitlab-mirror       6 ( 2.26%)
-  9. backend-failure                     5 ( 1.88%)
- 10. ci-filter-coverage-error            4 ( 1.50%)
- 11. disk-space-error                    4 ( 1.50%)
- 12. network-timeout-generic             4 ( 1.50%)
- 13. docker-build-error                  3 ( 1.13%)
- 14. exit-127-cmd-not-found              2 ( 0.75%)
- 15. network-port-conflict-error         2 ( 0.75%)
- 16. docker-upload-error                 1 ( 0.38%)
- 17. etcd-error                          1 ( 0.38%)
- 18. rust-error                          1 ( 0.38%)
+## Failure Distribution by Group
 
-High-Level Failure Mode
-------------------------
-  Infra:      200 (75.19%)
-    network-error: 80, k8s-error: 68, k8s-network-timeout-pod: 24,
-    network-timeout-https: 11, network-timeout-gitlab-mirror: 6,
-    disk-space-error: 4, network-timeout-generic: 4,
-    network-port-conflict-error: 2, etcd-error: 1
+  Tests:                  327 (41.39%)
+    pytest-error: 184, python-error: 98, backend-failure: 40,
+    network-port-conflict-error: 5
+  Docker / build:         266 (33.67%)
+    docker-build-error: 182, disk-space-error: 76, docker-upload-error: 8
+  Gates / policy:             67 ( 8.48%)
+    ci-status-check-error: 60, ci-filter-coverage-error: 7
+  Network:                 56 ( 7.09%)
+    network-timeout-generic: 46, network-error: 4,
+    network-timeout-gitlab-mirror: 4, network-timeout-https: 2
+  Infra / system:          50 ( 6.33%)
+    exit-127-cmd-not-found: 29, cuda-error: 13, etcd-error: 8
+  Kubernetes / Helm:       14 ( 1.77%)
+    k8s-error: 8, helm-error: 6
+  Go operator:             10 ( 1.27%)
+    go-operator-lint-error: 10
 
-  Testing:     52 (19.55%)
-    pytest-error: 27, python-error: 13, backend-failure: 5,
-    ci-filter-coverage-error: 4, exit-127-cmd-not-found: 2, rust-error: 1
+## Failure Distribution Detail
 
-  Build:       14 ( 5.26%)
-    helm-error: 10, docker-build-error: 3, docker-upload-error: 1
+Catch-alls excluded: vllm-error (32), trtllm-error (22), sglang-error (19) (73)
+Total error hits: 790
 
-Key Observations
------------------
+  1. pytest-error                      184 (23.29%)
+  2. docker-build-error                182 (23.04%)
+  3. python-error                       98 (12.41%)
+  4. disk-space-error                   76 ( 9.62%)
+  5. ci-status-check-error              60 ( 7.59%)
+  6. network-timeout-generic            46 ( 5.82%)
+  7. backend-failure                    40 ( 5.06%)
+  8. exit-127-cmd-not-found             29 ( 3.67%)
+  9. cuda-error                         13 ( 1.65%)
+ 10. go-operator-lint-error             10 ( 1.27%)
+ 11. docker-upload-error                 8 ( 1.01%)
+ 12. etcd-error                          8 ( 1.01%)
+ 13. k8s-error                           8 ( 1.01%)
+ 14. ci-filter-coverage-error            7 ( 0.89%)
+ 15. helm-error                          6 ( 0.76%)
+ 16. network-port-conflict-error         5 ( 0.63%)
+ 17. network-error                       4 ( 0.51%)
+ 18. network-timeout-gitlab-mirror       4 ( 0.51%)
+ 19. network-timeout-https               2 ( 0.25%)
+
+---
+
+## Key Observations
+
 - build-frontend-image.yaml appeared and immediately hit 100% fail rate
   (49/49 runs). This broken workflow persisted through later weeks.
 - Docs link check escalated to 97% fail rate (from 78% prior week).
-- Infra dominates at 75.2% — the highest of any week. Driven by
-  network-error (80) and k8s-error (68).
-- k8s-network-timeout-pod remained high (24), continuing from prior week (42).
-- Build errors dropped to 5.3% — docker/helm issues subsiding.
+- Tests (41.4%) and Docker / build (33.7%) dominate this week.
+- docker-build-error (182) and pytest-error (184) are nearly tied at the top.
+- disk-space-error (76) is a major contributor to Docker / build failures.
+- Gates / policy (8.5%) driven by status-check-error (60).
+- go-operator-lint-error (10) appears for the first time.

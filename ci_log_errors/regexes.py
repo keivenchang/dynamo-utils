@@ -30,7 +30,18 @@ CAT_BACKEND_BLOCK_START_RE: Pattern[str] = re.compile(r"\"(trtllm|sglang|vllm)\"
 CAT_BACKEND_RESULT_FAILURE_RE: Pattern[str] = re.compile(r"\"result\"\s*:\s*\"failure\"", re.IGNORECASE)
 
 # NOTE: These are intentionally *not* all IGNORECASE because many call sites lowercase the text first.
-CAT_BROKEN_LINKS_RE: Pattern[str] = re.compile(r"\bbroken\s+links?\b|\bdead\s+links?\b", re.IGNORECASE)
+CAT_BROKEN_LINKS_RE: Pattern[str] = re.compile(
+    r"(?:"
+    r"\bbroken\s+links?\b|\bdead\s+links?\b"
+    # Lychee link-checker output: "[404] <url> | Rejected status code"
+    r"|\[404\]\s+<?https?://[^\s>]+>?\s*\|\s*Rejected\s+status\s+code"
+    # Lychee summary: "### Errors in ./<file>"
+    r"|###\s+Errors\s+in\s+\./"
+    # Fern doc generation errors: "Found N errors"
+    r"|\bFound\s+\d+\s+errors?\b.*\bfern\s+check\b"
+    r")",
+    re.IGNORECASE,
+)
 
 CAT_BUILD_STATUS_CHECK_ERROR_RE: Pattern[str] = re.compile(
     r"(?:"
@@ -38,7 +49,17 @@ CAT_BUILD_STATUS_CHECK_ERROR_RE: Pattern[str] = re.compile(
     r"|\bbuild\s+status\s+for\s+'Build\b"
     r"|\bError:\s*Failed\s+to\s+query\s+GitHub\s+API\b"
     r"|\bBuild\s+failed\s+or\s+did\s+not\s+complete\s+successfully\.\s*(?:Failing\s+tests|Marking\s+tests\s+as\s+failed)\b"
+    # CI gate that checks upstream build job result
+    r"|\bBuild\s+did\s+not\s+succeed\b"
+    r"|\bBuild\s+status:\s*failure\b"
     r")",
+    re.IGNORECASE,
+)
+
+# Generic CI status-check jobs that jq-test JSON `"result": "failure"` blocks.
+# Covers deploy-operator, changed-files, build-frontend, etc. (broader than deploy-test-status-check).
+CAT_CI_STATUS_CHECK_ERROR_RE: Pattern[str] = re.compile(
+    r'"result":\s*"failure"',
     re.IGNORECASE,
 )
 
@@ -93,6 +114,21 @@ CAT_DOCKER_INFRA_ERROR_RE: Pattern[str] = re.compile(
     r")"
 )
 
+# Docker registry pull/push failures (layer transfer errors, manifest resolution, short reads)
+CAT_DOCKER_REGISTRY_ERROR_RE: Pattern[str] = re.compile(
+    r"(?:"
+    # Short read during layer transfer
+    r"\bshort\s+read:\s+expected\s+\d+\s+bytes\b"
+    # Explicit pull failure
+    r"|\berror\s+pulling\s+image\b"
+    # Failed commit on pull (buildkit)
+    r"|\bfailed\s+commit\s+on\s+ref\b.*\bexpected\b"
+    # Docker buildx create/inspect followed by error
+    r"|\bfailed\s+to\s+resolve\s+source\s+image\b"
+    r")",
+    re.IGNORECASE,
+)
+
 CAT_DOWNLOAD_ERROR_RE: Pattern[str] = re.compile(
     r"(?:"
     r"\bcaused by:\s*failed to download\b"
@@ -106,12 +142,23 @@ CAT_DOWNLOAD_ERROR_RE: Pattern[str] = re.compile(
 )
 
 CAT_ETCD_ERROR_RE: Pattern[str] = re.compile(
-    r"\bunable\s+to\s+create\s+lease\b|\bcheck\s+etcd\s+server\s+status\b|\betcd[^\n]{0,80}\blease\b|\blease\b[^\n]{0,80}\betcd\b"
+    r"(?:"
+    r"\bunable\s+to\s+create\s+lease\b"
+    r"|\bcheck\s+etcd\s+server\s+status\b"
+    # Require error-adjacent words, but exclude file paths (etcd/error.rs, etcd/lease.rs).
+    # Negative lookbehind for `/` prevents matching path components.
+    r"|(?<!/)\betcd\b(?!/)[^\n]{0,80}\b(?:failed|error|unavailable|connection\s+refused|timed?\s*out)\b"
+    r"|(?<!/)\blease\b(?!/)[^\n]{0,80}\b(?:failed|error|expired|revoked|not\s+found)\b"
+    r")"
 )
 
 # Full-line red highlighting for etcd lease/connection failures (often a hard stop in tests).
 RED_ETCD_ERROR_LINE_RE: Pattern[str] = re.compile(CAT_ETCD_ERROR_RE.pattern, re.IGNORECASE)
 
+CAT_EXIT_CODE_124_RE: Pattern[str] = re.compile(
+    r"process completed with exit code 124\b|exit code:\s*124\b",
+    re.IGNORECASE,
+)
 CAT_EXIT_CODE_127_RE: Pattern[str] = re.compile(
     r"process completed with exit code 127\b|exit code:\s*127\b|\bcommand not found\b",
     re.IGNORECASE,
@@ -120,6 +167,10 @@ CAT_EXIT_CODE_139_RE: Pattern[str] = re.compile(r"process completed with exit co
 
 CAT_GITHUB_ACTION_STEP_TIMEOUT_RE: Pattern[str] = re.compile(
     r"##\[error\].{0,40}\bhas\s+timed\s+out\s+after\s+\d+\s+minutes?\b",
+    re.IGNORECASE,
+)
+CAT_GITHUB_ACTION_UNAVAILABLE_RE: Pattern[str] = re.compile(
+    r"\bFailed\s+to\s+resolve\s+action\s+download\s+info\b",
     re.IGNORECASE,
 )
 CAT_GITHUB_API_RE: Pattern[str] = re.compile(
@@ -192,7 +243,15 @@ CAT_KUBECTL_PORTFORWARD_TIMEOUT_RE: Pattern[str] = re.compile(
 )
 
 CAT_NETWORK_ERROR_RE: Pattern[str] = re.compile(
-    r"\bnetwork\s+error:\s*connection\s+failed\b|\bconnection\s+failed\.\s*check\s+network\s+connectivity\b|\bfirewall\s+settings\b"
+    r"(?:"
+    r"\bnetwork\s+error:\s*connection\s+failed\b"
+    r"|\bconnection\s+failed\.\s*check\s+network\s+connectivity\b"
+    r"|\bfirewall\s+settings\b"
+    # HTTP 500 from mirrors/registries (curl or API responses)
+    r"|\b500\s+Internal\s+Server\s+Error\b"
+    r"|The\s+requested\s+URL\s+returned\s+error:\s*500\b"
+    r")",
+    re.IGNORECASE,
 )
 
 CAT_NETWORK_PORT_CONFLICT_ERROR_RE: Pattern[str] = re.compile(
@@ -260,6 +319,7 @@ CAT_RULES: List[Tuple[str, Pattern[str]]] = [
     ("docker-daemon-connection-error", CAT_DOCKER_DAEMON_CONNECTION_ERROR_RE),
     ("docker-daemon-error-response-error", CAT_DOCKER_DAEMON_ERROR_RESPONSE_RE),
     ("docker-cli-error", CAT_DOCKER_CLI_ERROR_RE),
+    ("docker-registry-error", CAT_DOCKER_REGISTRY_ERROR_RE),
     # NOTE: docker-image-error regex lives outside "categorization section" today; will be migrated next.
     ("k8s-error", CAT_K8S_ERROR_RE),
     # NOTE: python-error regex lives outside "categorization section" today; will be migrated next.
@@ -267,6 +327,9 @@ CAT_RULES: List[Tuple[str, Pattern[str]]] = [
     ("rust-error", CAT_RUST_TEST_FAIL_RE),
     ("exit-139-sigsegv", CAT_EXIT_CODE_139_RE),
     ("exit-127-cmd-not-found", CAT_EXIT_CODE_127_RE),
+    ("timeout-exit-124", CAT_EXIT_CODE_124_RE),
+    ("github-action-unavailable", CAT_GITHUB_ACTION_UNAVAILABLE_RE),
+    ("ci-status-check-error", CAT_CI_STATUS_CHECK_ERROR_RE),
 ]
 
 #

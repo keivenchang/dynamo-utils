@@ -1,0 +1,109 @@
+# Post-Merge CI Stats — Week of Jan 5
+
+Period: 2026-01-05 (Mon) to 2026-01-11 (Sun)
+Sources:
+  - Workflow-level: actions_runs_list.json cache (GitHub Status conclusions)
+  - Error-category-level: 5,061 raw post-merge job logs (local scan, no API)
+
+---
+
+## Development Metrics
+
+PRs submitted:               167
+PRs merged:                  133
+Days to merge (avg):         2.8
+Pushes per PR (avg):         2.9
+Manual re-trigger rate:      21%
+Re-triggers per affected PR: 1.4
+PR submission failure rate:  76%
+CI duration (avg, min):      108
+
+## Error Rate (% of Total Runs)
+
+Total runs (success + failure + cancelled): 536
+Group error hits as percentage of total runs:
+
+  Tests:             1.3%
+  Docker / build:   33.4%
+  K8s / Helm:        0.7%
+  Network:           1.9%
+  Infra / system:    0.7%
+  Auth:              1.1%
+
+---
+
+## Workflow-Level Overview
+
+Total post-merge runs:       536
+  success:                   384 (71.6%)
+  failure:                   147 (27.4%)
+  cancelled:                   5 ( 0.9%)
+
+Unique commits on main:       79
+Commits with >= 1 failure:    76 (96.2%)
+Post-merge failure rate:     27.4%
+
+## Failures by Workflow
+
+  1. NVIDIA Test Lab Validation         46 (31.3%)  [ 66% fail rate,  70 runs]
+  2. Build Frontend Image               35 (23.8%)  [ 95% fail rate,  37 runs]
+  3. Post-Merge CI Pipeline             34 (23.1%)  [100% fail rate,  34 runs]
+  4. Docker Build and Test              18 (12.2%)  [ 23% fail rate,  79 runs]
+  5. NVIDIA Dynamo Github Validation     8 ( 5.4%)  [ 10% fail rate,  79 runs]
+  6. Docs link check                     5 ( 3.4%)  [  6% fail rate,  79 runs]
+  7. Rust pre-merge checks               1 ( 0.7%)  [  1% fail rate,  79 runs]
+
+---
+
+## Failure Distribution by Group
+
+  Docker / build:         179 (82.5%)
+    docker-build-error: 174, docker-upload-error: 5
+  Network:                 10 ( 4.6%)
+    network-download-error: 6, network-error: 4
+  Tests:                    7 ( 3.2%)
+    pytest-error: 5, rust-error: 1, pytest-timeout-error: 1
+  Auth:                     6 ( 2.8%)
+    huggingface-auth-error: 6
+  Gates / policy:           4 ( 1.8%)
+    ci-status-check-error: 3, ci-filter-coverage-error: 1
+  Kubernetes / Helm:        4 ( 1.8%)
+    k8s-error: 4
+  Infra / system:           4 ( 1.8%)
+    cuda-error: 2, etcd-error: 1, github-action-unavailable: 1
+
+## Failure Distribution Detail
+
+Catch-alls excluded: (not tracked for this week)
+Total error hits: 217
+
+  1. docker-build-error                174 (80.2%)
+  2. network-download-error              6 ( 2.8%)
+  3. huggingface-auth-error              6 ( 2.8%)
+  4. pytest-error                        5 ( 2.3%)
+  5. docker-upload-error                 5 ( 2.3%)
+  6. network-error                       4 ( 1.8%)
+  7. k8s-error                           4 ( 1.8%)
+  8. ci-status-check-error               3 ( 1.4%)
+  9. cuda-error                          2 ( 0.9%)
+ 10. rust-error                          1 ( 0.5%)
+ 11. ci-filter-coverage-error            1 ( 0.5%)
+ 12. pytest-timeout-error                1 ( 0.5%)
+ 13. etcd-error                          1 ( 0.5%)
+ 14. github-action-unavailable           1 ( 0.5%)
+
+---
+
+## Key Observations
+
+- Docker/build errors dominate (82.5%), almost entirely docker-build-error (174/217).
+  This week was in the middle of major container infrastructure changes.
+- Post-Merge CI Pipeline at 100% fail rate (34/34 runs) — newly introduced and
+  consistently failing.
+- Build Frontend Image at 95% fail rate (35/37 runs).
+- NVIDIA Test Lab Validation at 66% fail rate — the highest of any week for this
+  workflow.
+- Test errors are low (3.2%) — only 7 hits. The project was still ramping up test
+  coverage at this point.
+- Auth errors (6 hits, all huggingface-auth-error) suggest token configuration
+  issues during this period.

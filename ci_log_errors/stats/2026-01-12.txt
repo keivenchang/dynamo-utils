@@ -1,0 +1,109 @@
+# Post-Merge CI Stats — Week of Jan 12
+
+Period: 2026-01-12 (Mon) to 2026-01-18 (Sun)
+Sources:
+  - Workflow-level: actions_runs_list.json cache (GitHub Status conclusions)
+  - Error-category-level: 728 raw post-merge job logs (local scan, no API)
+
+---
+
+## Development Metrics
+
+PRs submitted:               138
+PRs merged:                  114
+Days to merge (avg):         2.7
+Pushes per PR (avg):         3.2
+Manual re-trigger rate:      19%
+Re-triggers per affected PR: 1.3
+PR submission failure rate:  62%
+CI duration (avg, min):      123
+
+## Error Rate (% of Total Runs)
+
+Total runs (success + failure + cancelled): 595
+Group error hits as percentage of total runs:
+
+  Tests:            10.3%
+  Docker / build:    0.0%
+  K8s / Helm:        2.4%
+  Network:           0.7%
+  Infra / system:    0.3%
+  Auth:              0.3%
+
+---
+
+## Workflow-Level Overview
+
+Total post-merge runs:       595
+  success:                   474 (79.7%)
+  failure:                   118 (19.8%)
+  cancelled:                   3 ( 0.5%)
+
+Unique commits on main:       80
+Commits with >= 1 failure:    54 (67.5%)
+Post-merge failure rate:     19.8%
+
+## Failures by Workflow
+
+  1. Post-Merge CI Pipeline             44 (37.3%)  [100% fail rate,  44 runs]
+  2. Build Frontend Image               31 (26.3%)  [ 39% fail rate,  80 runs]
+  3. Docker Build and Test              20 (16.9%)  [ 42% fail rate,  48 runs]
+  4. NVIDIA Test Lab Validation          6 ( 5.1%)  [  8% fail rate,  71 runs]
+  5. Docs link check                     6 ( 5.1%)  [  8% fail rate,  80 runs]
+  6. NVIDIA Dynamo Github Validation     5 ( 4.2%)  [  6% fail rate,  80 runs]
+  7. PR                                  5 ( 4.2%)  [ 16% fail rate,  32 runs]
+  8. Rust pre-merge checks               1 ( 0.8%)  [  1% fail rate,  80 runs]
+
+---
+
+## Failure Distribution by Group
+
+  Tests:                   61 (62.2%)
+    pytest-error: 29, python-error: 25, pytest-timeout-error: 5,
+    backend-failure: 2
+  Kubernetes / Helm:       14 (14.3%)
+    k8s-error: 13, k8s-network-timeout-pod: 1
+  Gates / policy:           6 ( 6.1%)
+    ci-status-check-error: 4, ci-filter-coverage-error: 2
+  Network:                  4 ( 4.1%)
+    network-timeout-generic: 2, network-download-error: 1,
+    network-error: 1
+  Infra / system:           2 ( 2.0%)
+    etcd-error: 2
+  Auth:                     2 ( 2.0%)
+    huggingface-auth-error: 2
+
+## Failure Distribution Detail
+
+Catch-alls excluded: (not tracked for this week)
+Total error hits: 98
+
+  1. pytest-error                       29 (29.6%)
+  2. python-error                       25 (25.5%)
+  3. k8s-error                          13 (13.3%)
+  4. pytest-timeout-error                5 ( 5.1%)
+  5. ci-status-check-error               4 ( 4.1%)
+  6. etcd-error                          2 ( 2.0%)
+  7. network-timeout-generic             2 ( 2.0%)
+  8. huggingface-auth-error              2 ( 2.0%)
+  9. backend-failure                     2 ( 2.0%)
+ 10. ci-filter-coverage-error            2 ( 2.0%)
+ 11. k8s-network-timeout-pod             1 ( 1.0%)
+ 12. network-download-error              1 ( 1.0%)
+ 13. network-error                       1 ( 1.0%)
+
+Note: 9 hits of "invalid-task-type" (9.2%) are not mapped to any standard group
+and are excluded from the group totals above.
+
+---
+
+## Key Observations
+
+- Tests dominate (62.2%) — pytest-error (29) and python-error (25) are the
+  top two categories. This is the first week where tests become the primary
+  failure driver.
+- Post-Merge CI Pipeline still at 100% fail rate (44/44 runs).
+- K8s/Helm errors elevated at 14.3% — k8s-error (13) is the main contributor.
+- Post-merge failure rate improved to 19.8% (from 27.4% the prior week),
+  largely because docker-build-error disappeared entirely.
+- "invalid-task-type" (9 hits) is an unmapped category worth investigating.

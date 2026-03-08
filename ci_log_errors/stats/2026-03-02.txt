@@ -1,61 +1,104 @@
-Post-Merge CI Stats — Week of Mar 2
-=====================================
-Period: 2026-03-02 (Mon) to 2026-03-03 (latest data)
-Sources:
-  - Workflow-level: actions_runs_list.json cache (GitHub Status conclusions)
-  - Error-category-level: 104 raw post-merge job logs (local scan, no API)
+# Post-Merge CI Stats — Week of Mar 2
 
-Workflow-Level Overview
------------------------
-Total post-merge runs:       215
-  success:                   148 (68.8%)
-  failure:                    64 (29.8%)
+Period: 2026-03-02 (Mon) to 2026-03-05 (Wed) — partial week, 4 days
+Sources:
+  - Workflow-level: GitHub API (live fetch, Mar 2-5 inclusive)
+  - Error-category-level: 69 raw post-merge job logs (local scan)
+
+---
+
+## Development Metrics
+
+PRs submitted:               50
+PRs merged:                  41
+Days to merge (avg):         2.1
+Pushes per PR (avg):         2.8
+Manual re-trigger rate:      9%
+Re-triggers per affected PR: 1.3
+PR submission failure rate:  49%
+CI duration (avg, min):      86
+
+## Error Rate (% of Total Runs)
+
+Total runs (success + failure + cancelled): 215
+Group error hits as percentage of total runs:
+
+  Tests:             4.2%
+  Docker / build:   11.2%
+  K8s / Helm:        0.9%
+  Network:           1.4%
+  Infra / system:    0.0%
+  Auth:              7.0%
+
+---
+
+## Workflow-Level Overview
+
+Total post-merge runs:       702
+  success:                   539 (76.8%)
+  failure:                   163 (23.2%)
   cancelled:                   0 ( 0.0%)
 
-Unique commits on main:       31
-Commits with >= 1 failure:    31 (100.0%)
-Post-merge failure rate:     29.8%
+Unique commits on main:      101
+Commits with >= 1 failure:    89 (88.1%)
+Post-merge failure rate:     23.2%
 
-Failures by Workflow (% of 64 failed runs)
--------------------------------------------
-  1. Docs link check                   31 (48.44%)  [100% fail rate,  31 runs]
-  2. Post-Merge CI Pipeline            18 (28.13%)  [ 82% fail rate,  22 runs]
-  3. NVIDIA Test Lab Validation        14 (21.88%)  [ 48% fail rate,  29 runs]
-  4. PR                                 1 ( 1.56%)  [ 11% fail rate,   9 runs]
+## Failures by Workflow
 
-Error-Category Detail (raw log analysis, 104 job logs)
--------------------------------------------------------
-Catch-alls excluded: vllm-error, sglang-error, trtllm-error, exit-139-sigsegv (6)
-Total error hits: 132
+  1. Post-Merge CI Pipeline            78 (47.85%)  [ 85% fail rate,  92 runs]
+  2. Docs link check                   53 (32.52%)  [ 52% fail rate, 101 runs]
+  3. NVIDIA Test Lab Validation        24 (14.72%)  [ 25% fail rate,  96 runs]
+  4. Pre Merge                          3 ( 1.84%)  [  3% fail rate, 101 runs]
+  5. NVIDIA Dynamo Github Validation    2 ( 1.23%)  [  2% fail rate, 101 runs]
+  6. Build Frontend Image               1 ( 0.61%)  [  1% fail rate, 101 runs]
+  7. Fern Docs                          1 ( 0.61%)  [  1% fail rate, 101 runs]
+  8. PR                                 1 ( 0.61%)  [ 11% fail rate,   9 runs]
 
-  1. k8s-error                          34 (25.76%)
-  2. pytest-error                       30 (22.73%)
-  3. network-error                      25 (18.94%)
-  4. pytest-timeout-error               21 (15.91%)
-  5. network-timeout-generic            18 (13.64%)
-  6. helm-error                          2 ( 1.52%)
-  7. network-timeout-gitlab-mirror       1 ( 0.76%)
-  8. python-error                        1 ( 0.76%)
+---
 
-High-Level Failure Mode
-------------------------
-  Infra:       78 (59.09%)
-    k8s-error: 34, network-error: 25, network-timeout-generic: 18,
-    network-timeout-gitlab-mirror: 1
+## Failure Distribution by Group
 
-  Testing:     52 (39.39%)
-    pytest-error: 30, pytest-timeout-error: 21, python-error: 1
+  Docker / build:          24 (33.80%)
+    docker-build-error: 24
+  Auth:                    15 (21.13%)
+    auth-token-expired: 15
+  Tests:                    9 (12.68%)
+    pytest-error: 5, python-error: 4
+  Network:                  3 ( 4.23%)
+    network-timeout-gitlab-mirror: 2, network-timeout-generic: 1
+  Kubernetes / Helm:        2 ( 2.82%)
+    helm-error: 1, k8s-error: 1
+  Gates / policy:          18 (25.35%)
+    ci-status-check-error: 14, ci-filter-coverage-error: 4
 
-  Build:        2 ( 1.52%)
-    helm-error: 2
+## Failure Distribution Detail
 
-Key Observations
------------------
-- Only 2 days of data (Mon-Tue), so sample size is small (104 logs).
-- Workflow failure rate spiked to 29.8%, highest of the 4 weeks.
-- NVIDIA Test Lab Validation surged to 48% fail rate (14 failures) — was
-  1-3% in prior weeks. Suggests a new infra issue starting this week.
-- Docs link check is back to 100% fail rate (31/31 runs).
-- pytest-timeout-error jumped to 21 (15.9%) — was 0-6 in prior weeks.
-- Build errors nearly vanished (2 hits, 1.5%).
-- Infra dominates at 59.1%, the highest across all 4 weeks.
+Catch-alls excluded: exit-139-sigsegv (2)
+Total error hits: 71
+
+  1. docker-build-error                 24 (33.80%)
+  2. auth-token-expired                 15 (21.13%)
+  3. ci-status-check-error              14 (19.72%)
+  4. pytest-error                        5 ( 7.04%)
+  5. ci-filter-coverage-error            4 ( 5.63%)
+  6. python-error                        4 ( 5.63%)
+  7. network-timeout-gitlab-mirror       2 ( 2.82%)
+  8. helm-error                          1 ( 1.41%)
+  9. k8s-error                           1 ( 1.41%)
+ 10. network-timeout-generic             1 ( 1.41%)
+
+---
+
+## Key Observations
+
+- 4 days of data (Mon-Thu), partial week.
+- Post-Merge CI Pipeline is the #1 failure source (78/163 = 48%) at 85%
+  fail rate. This workflow alone accounts for nearly half of all failures.
+- Docs link check improved significantly: 52% fail rate (vs 84% average
+  in prior weeks).
+- Auth errors (15 hits, all auth-token-expired) emerged as a new category
+  this week — 7.0% of total runs, not seen before.
+- Test error rate at 4.2% of runs — the lowest of any full or partial week,
+  a strong signal that the reliability fixes are holding.
+- Network at 1.4% of runs — continued improvement from the Feb 9 peak (22.4%).
+- Infra/system at 0.0% of runs — first time this group registered zero errors.

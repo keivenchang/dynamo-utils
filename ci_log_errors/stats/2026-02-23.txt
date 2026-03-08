@@ -1,12 +1,39 @@
-Post-Merge CI Stats — Week of Feb 23
-======================================
+# Post-Merge CI Stats — Week of Feb 23
+
 Period: 2026-02-23 (Mon) to 2026-03-01 (Sun)
 Sources:
   - Workflow-level: actions_runs_list.json cache (GitHub Status conclusions)
-  - Error-category-level: 274 raw post-merge job logs (local scan, no API)
+  - Error-category-level: 389 raw post-merge job logs (local scan, no API)
 
-Workflow-Level Overview
------------------------
+---
+
+## Development Metrics
+
+PRs submitted:               225
+PRs merged:                  195
+Days to merge (avg):         2.6
+Pushes per PR (avg):         4.3
+Manual re-trigger rate:      16%
+Re-triggers per affected PR: 1.6
+PR submission failure rate:  62%
+CI duration (avg, min):      72
+
+## Error Rate (% of Total Runs)
+
+Total runs (success + failure + cancelled): 1,105
+Group error hits as percentage of total runs:
+
+  Tests:            14.3%
+  Docker / build:    8.1%
+  K8s / Helm:       10.1%
+  Network:           3.2%
+  Infra / system:    1.8%
+  Auth:              0.0%
+
+---
+
+## Workflow-Level Overview
+
 Total post-merge runs:     1,085
   success:                   917 (84.5%)
   failure:                   167 (15.4%)
@@ -16,8 +43,8 @@ Unique commits on main:      157
 Commits with >= 1 failure:   130 (82.8%)
 Post-merge failure rate:     15.4%
 
-Failures by Workflow (% of 167 failed runs)
---------------------------------------------
+## Failures by Workflow
+
   1. Docs link check                  105 (62.87%)  [ 67% fail rate, 157 runs]
   2. PR                                32 (19.16%)  [ 20% fail rate, 157 runs]
   3. Post-Merge CI Pipeline             8 ( 4.79%)  [100% fail rate,   8 runs]
@@ -27,48 +54,62 @@ Failures by Workflow (% of 167 failed runs)
   7. Build Frontend Image               3 ( 1.80%)  [  2% fail rate, 157 runs]
   8. NVIDIA Test Lab Validation         2 ( 1.20%)  [  1% fail rate, 135 runs]
 
-Error-Category Detail (raw log analysis, 274 job logs)
--------------------------------------------------------
-Catch-alls excluded: vllm-error, sglang-error, trtllm-error, exit-139-sigsegv (16)
-Total error hits: 362
+---
 
-  1. pytest-error                       83 (22.93%)
-  2. k8s-error                          53 (14.64%)
-  3. python-error                       53 (14.64%)
-  4. helm-error                         49 (13.54%)
-  5. network-error                      38 (10.50%)
-  6. etcd-error                         31 ( 8.56%)
-  7. network-timeout-generic            17 ( 4.70%)
-  8. disk-space-error                   12 ( 3.31%)
-  9. network-timeout-https               6 ( 1.66%)
- 10. pytest-timeout-error                6 ( 1.66%)
- 11. ci-filter-coverage-error            5 ( 1.38%)
- 12. docker-build-error                  3 ( 0.83%)
- 13. exit-127-cmd-not-found              3 ( 0.83%)
- 14. network-port-conflict-error         1 ( 0.28%)
- 15. network-timeout-gitlab-mirror       1 ( 0.28%)
- 16. oom                                 1 ( 0.28%)
+## Failure Distribution by Group
 
-High-Level Failure Mode
-------------------------
-  Infra:      160 (44.20%)
-    k8s-error: 53, network-error: 38, etcd-error: 31,
-    network-timeout-generic: 17, disk-space-error: 12,
-    network-timeout-https: 6, network-port-conflict-error: 1,
-    network-timeout-gitlab-mirror: 1, oom: 1
+  Tests:                  158 (31.85%)
+    pytest-error: 85, python-error: 58, pytest-timeout-error: 7,
+    network-port-conflict-error: 7, rust-error: 1
+  Kubernetes / Helm:      112 (22.58%)
+    k8s-error: 50, helm-error: 48, timeout-exit-124: 14
+  Docker / build:          90 (18.15%)
+    docker-build-error: 87, disk-space-error: 2, docker-upload-error: 1
+  Gates / policy:             78 (15.73%)
+    ci-status-check-error: 77, deploy-test-status-check: 1
+  Network:                 35 ( 7.06%)
+    network-error: 16, network-timeout-generic: 16,
+    network-download-error: 2, network-timeout-gitlab-mirror: 1
+  Infra / system:          20 ( 4.03%)
+    etcd-error: 12, oom: 6, exit-127-cmd-not-found: 2
+  Docs:                     3 ( 0.60%)
+    broken-links: 3
 
-  Testing:    150 (41.44%)
-    pytest-error: 83, python-error: 53, pytest-timeout-error: 6,
-    ci-filter-coverage-error: 5, exit-127-cmd-not-found: 3
+## Failure Distribution Detail
 
-  Build:       52 (14.36%)
-    helm-error: 49, docker-build-error: 3
+Catch-alls excluded: exit-139-sigsegv (14) (14)
+Total error hits: 496
 
-Key Observations
------------------
-- Best week by failure rate (15.4%) — significant improvement vs prior weeks.
+  1. docker-build-error                 87 (17.54%)
+  2. pytest-error                       85 (17.14%)
+  3. ci-status-check-error              77 (15.52%)
+  4. python-error                       58 (11.69%)
+  5. k8s-error                          50 (10.08%)
+  6. helm-error                         48 ( 9.68%)
+  7. network-error                      16 ( 3.23%)
+  8. network-timeout-generic            16 ( 3.23%)
+  9. timeout-exit-124                   14 ( 2.82%)
+ 10. etcd-error                         12 ( 2.42%)
+ 11. network-port-conflict-error         7 ( 1.41%)
+ 12. pytest-timeout-error                7 ( 1.41%)
+ 13. oom                                 6 ( 1.21%)
+ 14. broken-links                        3 ( 0.60%)
+ 15. disk-space-error                    2 ( 0.40%)
+ 16. exit-127-cmd-not-found              2 ( 0.40%)
+ 17. network-download-error              2 ( 0.40%)
+ 18. deploy-test-status-check            1 ( 0.20%)
+ 19. docker-upload-error                 1 ( 0.20%)
+ 20. network-timeout-gitlab-mirror       1 ( 0.20%)
+ 21. rust-error                          1 ( 0.20%)
+
+---
+
+## Key Observations
+
+- Best week by failure rate (15.4%) -- significant improvement vs prior weeks.
 - Docs link check dropped to 67% fail rate (from 82-100% in prior weeks).
-- Error categories are evenly split: Infra (44.2%) vs Testing (41.4%).
-- etcd-error dropped from 176 to 31 (back to normal from Feb 16 spike).
-- disk-space-error dropped from 77 to 12 (infrastructure stabilized).
+- Tests (31.9%) and K8s/Helm (22.6%) are the top failure domains.
+- Gates / policy (15.7%) newly visible due to status-check-error detection.
+- Docker / build (18.2%) driven almost entirely by docker-build-error (87).
+- etcd-error dropped to 12 (back to normal from Feb 16 spike of 38).
 - Post-Merge CI Pipeline ran only 8 times (all failed), vs 62 prior week.

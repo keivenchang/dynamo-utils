@@ -11,71 +11,88 @@ Snippet UX (what it should look like)
     and `[FAIL] incorrect date:` render the entire line in red (not bold).
 
 Log files to error markers -- training examples:
-Grouped (best-effort) so it's easier to find the golden log for a given category:
+Grouped by failure domain. Each log appears once under its primary group.
 
-CI / tooling:
+Tests (pytest / python / rust):
+- 58906141961.log => !pytest-error  # success run (passed/skipped), must NOT be tagged
+- 58097278528.log => pytest-error, !python-error, !huggingface-auth-error
+- 58179788784.log => pytest-error, pytest-timeout-error, !python-error, !huggingface-auth-error
+- 56700023895.log => pytest-error, python-error  # ModuleNotFoundError: sniffio (pytest parallel)
+- 56700029731.log => pytest-error, !etcd-error  # etcd/lease only as Rust module paths
+- 59347193958.log => etcd-error
+- 59418212320.log => etcd-error, pytest-error
+- 57521050539.log => pytest-error, etcd-error, python-error
+- 59520885010.log => pytest-error  # router decisions disagg failures
+- 58457161045.log => python-error, !pytest-error, !huggingface-auth-error
+- 58465471934.log => rust-error, !huggingface-auth-error
+- 59493756549.log => rust-error, !pytest-error
+- 59975400792.log => pytest-error, cuda-error  # 'cuda' not found in markers
+- 62096454660.log => network-port-conflict-error, pytest-error, python-error
+  # NOTE: Root cause "Zmq error: Address already in use" at line 6577, snippet shows final symptom.
+  # TODO: Improve snippet extraction to capture root cause exceptions, not just final symptoms.
+- 62815133304.log => pytest-error  # trtllm test_deployment[aggregated-2] AssertionError
+
+Backend status checks (vllm / sglang / trtllm):
+- 56701494636.log => backend-failure, trtllm-error, !ci-status-check-error
+- 57524186105.log => backend-failure, trtllm-error, sglang-error, !ci-status-check-error
+- 58471383691.log => vllm-error, !ci-status-check-error
+- 65350487761.log => deploy-test-status-check  # jq: deploy-test-sglang/trtllm "result": "failure"
+
+Gates / policy checks:
 - 59030780729.log => build-status-check-error
+- 64064425595.log => build-status-check-error  # "Build status: failure", upstream vllm arm64
+- 64064370253.log => build-status-check-error  # "Build did not succeed (status: )", trtllm gate
+- 65495734407.log => ci-status-check-error  # deploy-operator "result": "failure"
+- 65611464946.log => ci-status-check-error  # changed-files "result": "failure" (pre-merge gate)
 - 59652435193.log => ci-filter-coverage-error
-- 58887254616.log => broken-links
-- 57945094461.log => copyright-header-error
-- 56859612414.log => invalid-task-type  # invalid/missing task type (commit message policy)
-- 59030172010.log => helm-error, k8s-error
+- 56859612414.log => invalid-task-type  # commit message policy
+- 57945094461.log => copyright-header-error, !etcd-error  # etcd file paths in copyright output
+- 59520513875.log => copyright-header-error, !etcd-error  # same
+- 59525400060.log => copyright-header-error, !etcd-error  # same
+- 59539777738.log => copyright-header-error, !etcd-error  # same
 
-Docker:
-- 58861726335.log => network-timeout-https, docker-build-error, !pytest-error
+Docker / build:
 - 58745798050.log => network-download-error, docker-build-error
 - 58818079816.log => github-lfs-error, docker-build-error, !git-fetch, !pytest-error
 - 58861639352.log => docker-image-error
 - 62377203598.log => docker-upload-error
+- 63571520428.log => docker-registry-error  # "short read: expected N bytes" during pull
+- 62702682140.log => disk-space-error  # "No space left on device" during docker build
 
-Infra / system:
-- 57877945100.log => cuda-error
-- 59975400792.log => pytest-error, cuda-error  # 'cuda' not found in `markers` configuration option
-- 56700029731.log => etcd-error
-- 59347193958.log => etcd-error
-- 59418212320.log => etcd-error, pytest-error
-- 57521050539.log => pytest-error, etcd-error, python-error
-- 59520885010.log => pytest-error  # router decisions disagg failures (ea9503559 merge)
-- 59520513875.log => copyright-header-error, etcd-error  # includes "[FAIL] incorrect date: ..."
-- 59525400060.log => copyright-header-error, etcd-error  # includes "[FAIL] incorrect date: ..."
-- 59539777738.log => copyright-header-error, etcd-error  # includes "[FAIL] incorrect date: ..." (container/dev/*.sh)
+Kubernetes / Helm:
+- 59030172010.log => helm-error, k8s-error
 - 58588864118.log => k8s-error, k8s-network-timeout-pod, !pytest-error
-- 57877945085.log => exit-127-cmd-not-found
-- 57521050554.log => exit-139-sigsegv, !huggingface-auth-error
-- 58412373114.log => oom
-- 62702682140.log => disk-space-error
+- 58572103421.log => k8s-network-timeout-pod, k8s-error
+- 58463784363.log => k8s-network-timeout-portfwd, k8s-error, !network-timeout-generic
+- 63145272466.log => timeout-exit-124  # "timeout 300s kubectl rollout" -> exit code 124
 
 Network / timeouts:
 - 57930774858.log => network-error
-- 58745798050.log => network-download-error, docker-build-error
+- 61773313554.log => network-error  # mirror_repo.sh curl "500 Internal Server Error"
+- 58861726335.log => network-timeout-https, docker-build-error, !pytest-error
+- 59386365389.log => network-timeout-https, !broken-links
 - 57930747559.log => network-timeout-gitlab-mirror
 - 58575902063.log => network-timeout-github-action, !network-timeout-generic
-- 58861726335.log => network-timeout-https, docker-build-error
-- 59386365389.log => network-timeout-https, !broken-links
-- 58572103421.log => k8s-network-timeout-pod, k8s-error
-- 58463784363.log => k8s-network-timeout-portfwd, k8s-error, !network-timeout-generic
 
-Tests / languages:
-- 58906141961.log => !pytest-error  # success run (passed/skipped), should not be tagged as pytest-error
-- 58097278528.log => pytest-error, !python-error, !huggingface-auth-error
-- 58179788784.log => pytest-error, pytest-timeout-error, !python-error, !huggingface-auth-error
-- 56700023895.log => pytest-error, python-error  # ModuleNotFoundError: sniffio (pytest parallel)
-- 58457161045.log => python-error, !pytest-error, !huggingface-auth-error
-- 58465471934.log => rust-error, !huggingface-auth-error
-- 59493756549.log => rust-error, !pytest-error
+Auth / credentials:
+- 58604176773.log => huggingface-auth-error, !pytest-error, !network-download-error, !build-status-check-error
+- 65484640790.log => auth-token-expired  # mirror_repo.sh curl 401, "Token is expired"
 
-VLLM/SGLang/TRTLLM backends:
-- 56701494636.log => backend-failure, trtllm-error
-- 57524186105.log => backend-failure, trtllm-error, sglang-error
-- 58471383691.log => vllm-error
-- 62096454660.log => network-port-conflict-error, pytest-error, python-error
-  # NOTE: The root cause "Exception: Zmq error: Address already in use" appears at line 6577
-  # in the raw log, but the snippet currently shows only the final RuntimeError at the end.
-  # TODO: Improve snippet extraction to capture root cause exceptions, not just final symptoms.
-- 62815133304.log => pytest-error  # trtllm test_deployment[aggregated-2] AssertionError: Could not parse metric
+Docs / links:
+- 58887254616.log => broken-links
+- 61523756924.log => broken-links  # lychee [404] in docs + fern pages
+- 63283972458.log => broken-links  # fern doc generation "Found 2 errors"
 
-HuggingFace auth:
-- 58604176773.log => pytest-error, network-download-error, build-status-check-error, huggingface-auth-error
+Go operator:
+- 65470452968.log => go-operator-lint-error  # docker buildx --target linter, make check Error 1
+- 65793367668.log => go-operator-lint-error  # docker buildx --target linter, Makefile check fails
+
+Infra / system:
+- 57877945100.log => cuda-error
+- 57877945085.log => exit-127-cmd-not-found
+- 57521050554.log => exit-139-sigsegv, !huggingface-auth-error
+- 58412373114.log => oom
+- 65951572099.log => github-action-unavailable  # "Failed to resolve action download info"
 
 Category frequency summary:
 See ci_log_errors/stats.txt for latest statistics.

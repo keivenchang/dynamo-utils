@@ -36,6 +36,7 @@ from .regexes import (
     CAT_BROKEN_LINKS_RE,
     CAT_BUILD_STATUS_CHECK_ERROR_RE,
     CAT_CI_FILTER_UNCOVERED_RE,
+    CAT_CI_STATUS_CHECK_ERROR_RE,
     CAT_COPYRIGHT_HEADER_ERROR_RE,
     CAT_CUDA_ERROR_RE,
     CAT_DOCKER_BUILD_ERROR_RE,
@@ -43,12 +44,15 @@ from .regexes import (
     CAT_DOCKER_DAEMON_CONNECTION_ERROR_RE,
     CAT_DOCKER_DAEMON_ERROR_RESPONSE_RE,
     CAT_DOCKER_INFRA_ERROR_RE,
+    CAT_DOCKER_REGISTRY_ERROR_RE,
     CAT_DOCKER_UPLOAD_ERROR_RE,
     CAT_DOWNLOAD_ERROR_RE,
     CAT_ETCD_ERROR_RE,
+    CAT_EXIT_CODE_124_RE,
     CAT_EXIT_CODE_127_RE,
     CAT_EXIT_CODE_139_RE,
     CAT_GITHUB_ACTION_STEP_TIMEOUT_RE,
+    CAT_GITHUB_ACTION_UNAVAILABLE_RE,
     CAT_GITHUB_API_RE,
     CAT_GITHUB_FETCH_RE,
     CAT_GITHUB_LFS_RE,
@@ -1235,6 +1239,9 @@ def categorize_error_log_lines(lines: Sequence[str]) -> List[str]:
         # Exit code 127: command not found (missing dependency / PATH issue).
         if CAT_EXIT_CODE_127_RE.search(text):
             add("exit-127-cmd-not-found")
+        # Exit code 124: timeout command expired (e.g. `timeout 300s kubectl rollout ...`).
+        if CAT_EXIT_CODE_124_RE.search(text):
+            add("timeout-exit-124")
 
         # Git / GitHub LFS
         #
@@ -1324,6 +1331,27 @@ def categorize_error_log_lines(lines: Sequence[str]) -> List[str]:
             elif CAT_DOCKER_CLI_ERROR_RE.search(text):
                 add("docker-cli-error")
 
+        # Docker registry pull/push failures (layer short reads, manifest resolution)
+        if CAT_DOCKER_REGISTRY_ERROR_RE.search(text):
+            add("docker-registry-error")
+
+        # Deploy-test / CI status check: jq checks on JSON `"result": "failure"` blocks.
+        # Strip both timestamps and ANSI codes -- CI logs wrap JSON keys in color escapes
+        # and each line has a timestamp prefix that breaks cross-line regex matches.
+        text_clean = "\n".join(_strip_ts_and_ansi(ln) for ln in (lines[-4000:] if lines else []))
+        if re.search(r'"deploy-test-(?:vllm|sglang|trtllm)":\s*\{\s*"result":\s*"failure"', text_clean):
+            add("deploy-test-status-check")
+        elif CAT_CI_STATUS_CHECK_ERROR_RE.search(text_clean):
+            add("ci-status-check-error")
+
+        # Auth token expired (mirror repo curl 401)
+        if "token is expired" in t or ("curl" in t and "401" in t and "invalid_token" in t):
+            add("auth-token-expired")
+
+        # Go operator lint/test (docker buildx --target linter/tester, make check/test)
+        if re.search(r"--target\s+(?:linter|tester)\b", t) and re.search(r"make:\s+\*\*\*.*(?:check|test).*error", t, re.IGNORECASE):
+            add("go-operator-lint-error")
+
         # Backend result JSON-ish blocks (vllm/sglang/trtllm): multi-line aware.
         engines = _backend_failure_engines_from_lines(lines[-4000:] if lines else [])
         if engines:
@@ -1346,6 +1374,10 @@ def categorize_error_log_lines(lines: Sequence[str]) -> List[str]:
         # GitHub Actions step timeout markers.
         if CAT_GITHUB_ACTION_STEP_TIMEOUT_RE.search(text):
             add("network-timeout-github-action")
+
+        # GitHub Actions infra: runner failed to resolve action (Service Unavailable).
+        if CAT_GITHUB_ACTION_UNAVAILABLE_RE.search(text):
+            add("github-action-unavailable")
 
         # Timeout / infra flake
         #
@@ -1370,6 +1402,19 @@ def categorize_error_log_lines(lines: Sequence[str]) -> List[str]:
         # Disk space exhausted
         if re.search(r"no\s+space\s+left\s+on\s+device|disk.*full|ENOSPC", t, re.IGNORECASE):
             add("disk-space-error")
+
+        # Suppression: when huggingface-auth-error is the root cause, downstream categories
+        # (pytest failures, download errors, build-gate checks) are symptoms, not causes.
+        if "huggingface-auth-error" in cats:
+            for suppress in ("pytest-error", "network-download-error", "build-status-check-error"):
+                if suppress in cats:
+                    cats.remove(suppress)
+
+        # Suppression: ci-status-check-error is a generic catch-all for JSON "result": "failure".
+        # Remove it when a more specific category already covers the same signal.
+        if "ci-status-check-error" in cats:
+            if "backend-failure" in cats or "deploy-test-status-check" in cats or "build-status-check-error" in cats:
+                cats.remove("ci-status-check-error")
     except Exception:  # THIS IS A HORRIBLE ANTI-PATTERN, FIX IT
         return cats
 
@@ -1583,6 +1628,21 @@ def _apply_category_rules(*, text: str, lines: Sequence[str], out: List[str], se
         # Derived: helm errors are inherently Kubernetes-related; show k8s-error alongside helm-error.
         if "helm-error" in seen:
             add("k8s-error")
+
+        # Suppression: huggingface-auth-error is a root cause; downstream symptoms are noise.
+        if "huggingface-auth-error" in seen:
+            for suppress in ("pytest-error", "network-download-error", "build-status-check-error"):
+                if suppress in seen:
+                    seen.discard(suppress)
+                    if suppress in out:
+                        out.remove(suppress)
+
+        # Suppression: ci-status-check-error is generic; remove when a specific variant is present.
+        if "ci-status-check-error" in seen:
+            if any(s in seen for s in ("backend-failure", "deploy-test-status-check", "build-status-check-error")):
+                seen.discard("ci-status-check-error")
+                if "ci-status-check-error" in out:
+                    out.remove("ci-status-check-error")
     except Exception:  # THIS IS A HORRIBLE ANTI-PATTERN, FIX IT
         return
 
