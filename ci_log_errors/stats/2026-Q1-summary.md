@@ -5,7 +5,7 @@
 - **Test failures were the #1 driver of PR merge delays.** At peak (Feb 16), 46% of all post-merge job runs triggered a test failure. After targeted reliability fixes (mid-to-late Feb), that dropped to 14% by Feb 23 and 4% by Mar 2.
 - **Days to merge cut in half**: 4.2 days (Feb 16) → 2.6 days (Feb 23) → 2.1 days (Mar 2).
 - **Manual job re-trigger rate dropped 75%**: 36% (Feb 9) → 16% (Feb 23) → 9% (Mar 2). Developers stopped having to monitor and manually re-trigger their PR submissions.
-- **~323 developer-hours saved per week from test reliability improvements alone** (holding job duration constant) — equivalent to ~40 full (8-hour) work days reclaimed per week across the team. Combined impact with infrastructure speed improvements is detailed in [Time Savings Extrapolation](#time-savings-extrapolation).
+- **~155 developer-hours saved per week from test reliability improvements alone** (holding pre-merge duration constant) — equivalent to ~19 full (8-hour) work days reclaimed per week across the team. Combined impact with infrastructure speed improvements is detailed in [Time Savings Extrapolation](#time-savings-extrapolation).
 - **Busiest week on record saw the best metrics**: Feb 23 had 225 PRs, 195 merges, and 64 active authors — while every reliability metric improved.
 
 ### Dev Metrics 2026 Q1
@@ -42,7 +42,7 @@ $$\text{Pre-merge Duration}^⊕ = f(\text{failed tests that run to max timeout, 
 Mission: Improving test reliability to increase developer velocity
 
 - At its peak (Feb 16), **nearly half of all post-merge job runs (46%) triggered a test failure**. This was the single largest source of PR merge delays — every flaky or broken test meant a developer waiting for a re-trigger, adding hours to merge time.
-- Reducing test error rate from 46% to 14% of runs directly contributed to halving days-to-merge and eliminating ~323 hours of developer wait time per week (test reliability alone; ~365 hours combined with infrastructure speed improvements).
+- Reducing test error rate from 46% to 14% of runs directly contributed to halving days-to-merge and eliminating ~155 hours of developer wait time per week (test reliability alone; ~174 hours combined with infrastructure speed improvements).
 - Feb 24 set the all-time single-day merge record.
 - At the peak of 1.0 code-freeze activity (week of Feb 23), we observed 225 PRs (busiest week on record), 195 merges, and 64 active authors, while key metrics improved in PR submission failure rate <sup>†</sup>, manual job re-trigger rate <sup>‡</sup>, and days to merge <sup>¶</sup>.
 - Several major changes were made from mid to late Feb (Feb 16 to Feb 27) to improve test stability, harden the workflow, and fix recurring issues — including fixing flaky pytest fixtures, adding timeouts to long-running tests that previously ran to the max timeout, adding retry logic for transient network errors in tests, disabling or quarantining chronically unstable tests, and hardening timeout/resource configurations.
@@ -81,24 +81,26 @@ Post-merge job metrics:
 
 ### Time Savings Extrapolation
 
-$$\text{Wasted Wait per PR (hours)} = \text{PR Re-trig \%}^‡ \times \text{Re-trig/PR}^‖ \times \text{Post-merge Duration (hours)}$$
+$$\text{Wasted Wait per PR (hours)} = \text{PR Re-trig \%}^‡ \times \text{Re-trig/PR}^‖ \times \text{Pre-merge Duration}^⊕ \text{(hours)}$$
 
-**Calculation 1 — Test reliability improvements only** (hold job duration constant at 115 min / 1.92h):
-- Feb 9 baseline: 0.36 × 3.2 × 1.92 = **2.21 hours/PR**.
-- Feb 23 (with test fixes, but same job duration): 0.16 × 1.6 × 1.92 = **0.49 hours/PR**.
-- Reduction: 2.21 → 0.49 = **−78% wasted wait per PR**.
-- Scaled to actual PR volume: Feb 9 = 2.21 × 196 = 433.6 h/week; Feb 23 = 0.49 × 225 = 110.6 h/week.
-- **Savings from test reliability alone: ~323 hours/week** (40.4 work days).
+<sub>Developers wait during pre-merge checks. Once merged, post-merge runs happen in the background and don't block the developer.</sub>
+
+**Calculation 1 — Test reliability improvements only** (hold pre-merge duration constant at 55 min / 0.92h):
+- Feb 9 baseline: 0.36 × 3.2 × 0.92 = **1.06 hours/PR**.
+- Feb 23 (with test fixes, but same pre-merge duration): 0.16 × 1.6 × 0.92 = **0.24 hours/PR**.
+- Reduction: 1.06 → 0.24 = **−78% wasted wait per PR**.
+- Scaled to actual PR volume: Feb 9 = 1.06 × 196 = 207.8 h/week; Feb 23 = 0.24 × 225 = 53.3 h/week.
+- **Savings from test reliability alone: ~155 hours/week** (19.3 work days).
 
 **Calculation 2 — Combined: test reliability + infrastructure speed improvements**:
-- Job duration dropped from 115 min (1.92h) to 72 min (1.20h) between Feb 9 and Feb 23, thanks to infrastructure optimizations (build caching, parallel stages, runner improvements) that happened concurrently with these test stability fixes.
-- Feb 9 baseline: 0.36 × 3.2 × 1.92 = **2.21 hours/PR**.
-- Feb 23 (test fixes + faster jobs): 0.16 × 1.6 × 1.20 = **0.31 hours/PR**.
-- Reduction: 2.21 → 0.31 = **−86% wasted wait per PR**.
-- Scaled to actual PR volume: Feb 9 = 2.21 × 196 = 433.6 h/week; Feb 23 = 0.31 × 225 = 69.1 h/week.
-- **Combined savings: ~365 hours/week** (45.6 work days).
+- Pre-merge duration dropped from 55 min (0.92h) to 35 min (0.58h) between Feb 9 and Feb 23, thanks to infrastructure optimizations (build caching, parallel stages, runner improvements) that happened concurrently with these test stability fixes.
+- Feb 9 baseline: 0.36 × 3.2 × 0.92 = **1.06 hours/PR**.
+- Feb 23 (test fixes + faster pre-merge): 0.16 × 1.6 × 0.58 = **0.15 hours/PR**.
+- Reduction: 1.06 → 0.15 = **−86% wasted wait per PR**.
+- Scaled to actual PR volume: Feb 9 = 1.06 × 196 = 207.8 h/week; Feb 23 = 0.15 × 225 = 33.5 h/week.
+- **Combined savings: ~174 hours/week** (21.8 work days).
 
-The job duration improvement (115 → 72 min, −37%) accounts for roughly 42 of those 365 hours — about 11% of the total savings. The remaining 89% comes from fewer re-triggers (lower flake rate and fewer re-triggers per affected PR).
+The pre-merge duration improvement (55 → 35 min, −36%) accounts for roughly 20 of those 174 hours — about 11% of the total savings. The remaining 89% comes from fewer re-triggers (lower flake rate and fewer re-triggers per affected PR).
 
 ---
 
