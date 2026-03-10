@@ -1549,11 +1549,13 @@ def _create_ci_job_node_from_row(
     snippet = ""
     snippet_categories: List[str] = []
     missing_log_entry: Optional[Tuple[str, str]] = None
+    fetch_attempted = False
 
     # Materialize raw logs for failed / timeout-cancelled Actions jobs.
     if (st in ("failure", "cancelled-timeout")) and (not skip_fetch):
         try:
             if extract_actions_job_id_from_url(job_url):
+                fetch_attempted = True
                 raw_href = (
                     materialize_job_raw_log_text_local_link(
                         github_api,
@@ -1584,7 +1586,9 @@ def _create_ci_job_node_from_row(
             snippet = ""
             snippet_categories = []
     elif st == "failure":
-        if extract_actions_job_id_from_url(job_url):
+        # Only flag as missing if we never attempted the fetch (skip_fetch, no job_id, etc.).
+        # If fetch was attempted but returned empty (e.g. GitHub 404), that's not actionable.
+        if (not fetch_attempted) and extract_actions_job_id_from_url(job_url):
             missing_log_entry = (nm, job_url)
 
     # Disambiguate duplicates by job_id or run_id.
