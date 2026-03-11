@@ -67,6 +67,8 @@ These are the canonical project instructions. Do NOT read `.cursorrules` or `CLA
 **NEVER auto-commit changes without explicit user approval.**
 Always wait for the user to explicitly request a commit before running `git commit`.
 
+**Post-commit cleanup (MUST):** After every `git commit`, run `.utils/clean-commit.sh` to strip `Made-with:` lines and duplicate `Signed-off-by:` entries from the commit message. Use `--dry-run` first to preview changes.
+
 ## 1.4 Permission Policy
 - Full permission to run read-only operations without asking: `wget`, `curl`, `echo`, `cat`, `tail`, `head`, `grep`, `egrep`, `ls`, `uname`.
 - Always OK to `curl` without asking.

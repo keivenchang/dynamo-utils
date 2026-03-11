@@ -858,6 +858,8 @@ SUBSEQUENT commit examples: `Quick fix of XYZ`, `Fix linting errors`, `Address r
 
 **DO NOT** in subsequent commits: category prefixes, WIP messages, multi-paragraph messages.
 
+**Post-commit cleanup (MUST):** After every `git commit`, run `.utils/clean-commit.sh` to strip `Made-with:` lines and duplicate `Signed-off-by:` entries from the commit message. Use `--dry-run` first to preview changes.
+
 ## 5.4 Git Integration (for parsing commit messages)
 - Format: `title (#PR_NUMBER)`
 - Extract PR: r'\(#(\d+)\)'
