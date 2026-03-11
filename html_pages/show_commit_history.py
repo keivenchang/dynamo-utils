@@ -219,7 +219,7 @@ class CommitHistoryGenerator:
         # We allow fetches when entries are missing or stale so the dashboard self-heals and
         # raw logs can be materialized whenever they are needed.
 
-    def _snippets_for_raw_hrefs(self, raw_hrefs: List[str]) -> Dict[str, tuple[str, list[str]]]:
+    def _snippets_for_raw_hrefs(self, raw_hrefs: List[str], *, use_process_pool: bool = True) -> Dict[str, tuple[str, list[str]]]:
         """Batch snippet extraction for raw log hrefs (optionally in multiple processes).
 
         Args:
@@ -228,6 +228,10 @@ class CommitHistoryGenerator:
                 "dynamo_ci/logs/60392310930.log",
                 "dynamo_ci/logs/60392310931.log",
               ]
+            use_process_pool: if False, always use sequential extraction even when
+                parallel_workers > 1.  Pass False when already running inside a
+                ThreadPoolExecutor to avoid nested parallelism (threads x processes)
+                which exhausts file descriptors and hangs.
 
         Returns:
             Dict[str, Tuple[str, List[str]]] mapping raw_href -> (snippet_body, categories):
@@ -280,7 +284,7 @@ class CommitHistoryGenerator:
             return out
 
         # Compute misses and store into the unified shared snippet cache.
-        if int(self.parallel_workers or 0) > 1:
+        if use_process_pool and int(self.parallel_workers or 0) > 1:
             max_workers = int(self.parallel_workers)
             with concurrent.futures.ProcessPoolExecutor(max_workers=max_workers) as ex:
                 futs: Dict[concurrent.futures.Future, Tuple[str, Path]] = {}
@@ -504,7 +508,11 @@ class CommitHistoryGenerator:
             # HTML-only: no terminal formatting / printing
             try:
                 t0 = phase_t.start()
+                n_commits = len(commits)
+                self.logger.info("[progress] Phase 1/5: Processing %d commits (metadata + docker SHA)", n_commits)
                 for i, commit in enumerate(commits):
+                    if (i + 1) % 20 == 0 or (i + 1) == n_commits:
+                        self.logger.info("[progress]   commits: %d/%d (%.0f%%)", i + 1, n_commits, 100 * (i + 1) / n_commits)
                     sha_short = commit.hexsha[:9]
                     sha_full = commit.hexsha
                     t_sha_total = time.monotonic()
@@ -747,6 +755,7 @@ class CommitHistoryGenerator:
                 # can still show the earlier phases (cache/git/process) via `_last_timings`.
                 self._last_timings = dict(phase_t.as_dict(include_total=True))
 
+                self.logger.info("[progress] Phase 4/5: Rendering HTML for %d commits", len(commit_data))
                 t0 = phase_t.start()
                 html_content = self._generate_commit_history_html(
                     commit_data,
@@ -761,9 +770,11 @@ class CommitHistoryGenerator:
                 )
                 phase_t.stop("render_html", t0)
                 output_path.parent.mkdir(parents=True, exist_ok=True)
+                self.logger.info("[progress] Phase 5/5: Writing %d bytes to %s", len(html_content), output_path)
                 t0 = phase_t.start()
                 atomic_write_text(output_path, html_content, encoding="utf-8")
                 phase_t.stop("write_output", t0)
+                self.logger.info("[progress] Done. Total: %.1fs", phase_t.as_dict(include_total=True).get("total", 0))
                 # Cache miss summary
                 if self.verbose or self.debug:
                     self.logger.info(
@@ -1055,7 +1066,10 @@ class CommitHistoryGenerator:
             return (pr_num, shas, rows)
 
         # Parallelize API calls using ThreadPoolExecutor (I/O-bound work)
-        max_workers = min(32, len(pr_to_shas) or 1)
+        n_prs = len(pr_to_shas)
+        self.logger.info("[progress] Phase 2/5: Fetching check runs for %d PRs", n_prs)
+        max_workers = min(32, n_prs or 1)
+        pr_checks_done = 0
         with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = {
                 executor.submit(fetch_pr_checks, pr_num, shas): (pr_num, shas)
@@ -1064,6 +1078,9 @@ class CommitHistoryGenerator:
 
             for future in concurrent.futures.as_completed(futures):
                 pr_num, shas, rows = future.result()
+                pr_checks_done += 1
+                if pr_checks_done % 20 == 0 or pr_checks_done == n_prs:
+                    self.logger.info("[progress]   PR checks: %d/%d (%.0f%%)", pr_checks_done, n_prs, 100 * pr_checks_done / n_prs)
 
                 # Convert GHPRCheckRow objects to dict format for all SHAs in this PR
                 check_runs_dicts = []
@@ -1809,7 +1826,7 @@ class CommitHistoryGenerator:
                 logger.debug(f"[_build_github_checks_tree_html] {sha_full[:9]}: About to call self._snippets_for_raw_hrefs with {len(raw_hrefs_for_commit)} hrefs")
                 logger.debug(f"[_build_github_checks_tree_html] {sha_full[:9]}: type(self._snippets_for_raw_hrefs) = {type(self._snippets_for_raw_hrefs)}")
                 logger.debug(f"[_build_github_checks_tree_html] {sha_full[:9]}: self._snippets_for_raw_hrefs = {self._snippets_for_raw_hrefs}")
-                snippets_by_href = self._snippets_for_raw_hrefs(raw_hrefs_for_commit) if raw_hrefs_for_commit else {}
+                snippets_by_href = self._snippets_for_raw_hrefs(raw_hrefs_for_commit, use_process_pool=False) if raw_hrefs_for_commit else {}
             except TypeError as e:
                 logger.error(f"[_build_github_checks_tree_html] {sha_full[:9]}: TypeError calling _snippets_for_raw_hrefs: {e}. self={self}, raw_hrefs_for_commit={len(raw_hrefs_for_commit) if raw_hrefs_for_commit else 0}")
                 import traceback
@@ -2031,9 +2048,13 @@ class CommitHistoryGenerator:
                     required_names = []
 
             # Build trees in parallel using ThreadPoolExecutor
-            max_workers = min(32, len(commit_data) or 1)
+            n_trees = len(commit_data)
+            logger.info("[progress] Phase 3/5: Building CI trees for %d commits (GitHub + GitLab)", n_trees)
+            max_workers = min(32, n_trees or 1)
             github_results: Dict[str, Tuple[str, float]] = {}
             gitlab_results: Dict[str, Tuple[str, float]] = {}
+            gh_done = 0
+            gl_done = 0
 
             with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
                 # Submit all GitHub tree builds
@@ -2047,6 +2068,9 @@ class CommitHistoryGenerator:
                     github_results[sha_full] = (tree_html, dt)
                     build_github_s += dt
                     slow_github.append((dt, sha_short or sha_full[:9]))
+                    gh_done += 1
+                    if gh_done % 20 == 0 or gh_done == n_trees:
+                        logger.info("[progress]   GitHub trees: %d/%d (%.0f%%)", gh_done, n_trees, 100 * gh_done / n_trees)
                     
                     # Accumulate timing breakdown
                     for key, value in timing_breakdown.items():
@@ -2062,6 +2086,9 @@ class CommitHistoryGenerator:
                     gitlab_results[sha_full] = (tree_html, dt)
                     build_gitlab_s += dt
                     slow_gitlab.append((dt, sha_short or sha_full[:9]))
+                    gl_done += 1
+                    if gl_done % 20 == 0 or gl_done == n_trees:
+                        logger.info("[progress]   GitLab trees: %d/%d (%.0f%%)", gl_done, n_trees, 100 * gl_done / n_trees)
 
             # Attach results to commit dictionaries
             logger.debug(f"[attach_results] Attaching tree HTML to {len(commit_data)} commits. github_results has {len(github_results)} entries")

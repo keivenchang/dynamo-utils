@@ -4201,13 +4201,25 @@ class GitHubAPIClient:
                 # completed with unknown conclusion
                 return "unknown"
 
-            checks: List[Dict[str, Any]] = []
+            # Dedup check-runs by name: when a workflow is re-run, GitHub keeps
+            # both old and new check-runs for the same SHA.  The old job IDs'
+            # log endpoints return 404.  Keep only the highest-id entry per name
+            # (higher id = more recent attempt).
+            best_by_name: Dict[str, dict] = {}
             for cr in check_runs:
                 if not isinstance(cr, dict):
                     continue
                 name = str(cr.get("name", "") or "").strip()
                 if not name:
                     continue
+                cr_id = int(cr.get("id", 0) or 0)
+                prev = best_by_name.get(name)
+                if prev is not None and int(prev.get("id", 0) or 0) >= cr_id:
+                    continue
+                best_by_name[name] = cr
+
+            checks: List[Dict[str, Any]] = []
+            for name, cr in best_by_name.items():
                 status = str(cr.get("status", "") or "")
                 conclusion = str(cr.get("conclusion", "") or "")
                 url = str(cr.get("details_url") or cr.get("html_url") or "").strip()
@@ -4695,6 +4707,17 @@ class GitHubAPIClient:
             except (OSError, json.JSONDecodeError):
                 meta = {}
         ent = meta.get(job_id) if isinstance(meta, dict) else None
+
+        # Negative cache: if a previous fetch returned 404, skip re-fetching
+        # until the negative TTL expires (7 days).  These are jobs whose logs
+        # are permanently unavailable (mirror/trigger jobs, expired logs).
+        _NEG_CACHE_TTL_S = 7 * 24 * 3600
+        if isinstance(ent, dict) and ent.get("status") == "not_found":
+            neg_ts = int(ent.get("ts", 0) or 0)
+            if neg_ts and (now - neg_ts) <= _NEG_CACHE_TTL_S:
+                self._cache_hit("raw_log_text.negative")
+                return None
+
         # Prefer .log; fall back to legacy .txt.
         chosen_path = txt_path if txt_path.exists() else legacy_txt_path
         if chosen_path.exists() and isinstance(ent, dict):
@@ -4812,9 +4835,31 @@ class GitHubAPIClient:
             self._raw_log_text_mem_cache[job_id] = {"ts": now, "text": text}
             return text
         except Exception as e:
-            # Log the error for debugging but don't fail silently
             logger = logging.getLogger(__name__)
             logger.warning(f"Failed to fetch/cache raw log for job {job_id}: {type(e).__name__}: {e}")
+
+            # Negative cache: record 404s so we don't retry on every run.
+            is_404 = "404" in str(e)
+            if is_404:
+                def load_raw_log_index_neg():
+                    if self._raw_log_text_index_file.exists():
+                        try:
+                            data = json.loads(self._raw_log_text_index_file.read_text() or "{}")
+                            return data if isinstance(data, dict) else {}
+                        except (ValueError, TypeError):
+                            return {}
+                    return {}
+
+                _save_single_disk_cache_entry(
+                    cache_dir=self._raw_log_text_index_file.parent,
+                    cache_filename=self._raw_log_text_index_file.name,
+                    lock_filename=self._raw_log_text_index_file.name + ".lock",
+                    load_fn=load_raw_log_index_neg,
+                    json_dump_fn=lambda d: json.dumps(d),
+                    key=job_id,
+                    value={"ts": now, "status": "not_found"},
+                )
+
             return None
         finally:
             try:
