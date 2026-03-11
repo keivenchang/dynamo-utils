@@ -1,8 +1,11 @@
-# Post-Merge Failure Analysis — 2026 Q1 Summary
+# Dynamo PyTest Metrics Q1 2026
+
+**Important note:** This presentation focuses on **pytest stability** — not CI build time, infrastructure, or other aspects of the CI system. Developers write tests, and those tests directly impact merge velocity. When pytest stability suffers, the effects compound quickly: flaky tests trigger failed builds, failures trigger manual re-runs that waste compute and developer time, and developers gradually lose trust in test signals — leading them to ignore legitimate failures altogether.
 
 ## Key Takeaways
 
-- **Test failures were the #1 driver of PR merge delays.** At peak (Feb 16), 46% of all post-merge job runs triggered a test failure. After targeted reliability fixes (mid-to-late Feb), that dropped to 14% by Feb 23 and 4% by Mar 2.
+- **Test failures were the #1 driver of PR merge delays.** At peak (Feb 16), 46% of all post-merge job runs triggered a test failure.
+- After targeted reliability fixes (mid-to-late Feb), that dropped to **14% by Feb 23** and **4% by Mar 2**.
 - **Days to merge cut in half**: 4.2 days (Feb 16) → 2.6 days (Feb 23) → 2.1 days (Mar 2).
 - **Manual job re-trigger rate dropped 75%**: 36% (Feb 9) → 16% (Feb 23) → 9% (Mar 2). Developers stopped having to monitor and manually re-trigger their PR submissions.
 - **~155 developer-hours saved per week from test reliability improvements alone** (holding pre-merge duration constant) — equivalent to ~19 full (8-hour) work days reclaimed per week across the team. Combined impact with infrastructure speed improvements is detailed in [Time Savings Extrapolation](#time-savings-extrapolation).
@@ -14,18 +17,18 @@ Data sources:
 - **Pre-merge PR data** (columns: PRs through PR Fail %, Pre-merge Duration): PR lifecycle metrics from GitHub PR API and pre-merge workflow runs. Pre-merge runs include both `pull_request` event workflows (lint, copyright, "Pre Merge" Rust checks) and `push` event workflows on `pull-request/NNN` mirror branches ("NVIDIA Dynamo Github Validation" container build+test). Measures the developer experience during the PR review and feedback loop before merge.
 - **Post-merge job data** (column: Post-merge Duration): Measured from GitHub Actions runs on main (event="push", head_branch="main"). Post-merge runs include additional workflows (NVIDIA Validation, Test Lab, Post-Merge Pipeline) not triggered pre-merge. Error distributions in later sections also use this data source.
 
-| Week | PRs | PRs Merged | Days to merge/PR <sup>¶</sup> | Push/PR <sup>△</sup> | PR Re-trig % <sup>‡</sup> | Re-trig/PR <sup>‖</sup> | PR Fail % <sup>†</sup> | Pre-merge <sup>⊕</sup> (min) | Post-merge (min) |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| Dec 29 | 35 | 14 | 1.5 | 2.3 | 16% | 1.4 | 89% | 54 | 109 |
-| Jan 05 | 167 | 133 | 2.8 | 2.9 | 21% | 1.4 | 76% | 59 | 108 |
-| Jan 12 | 138 | 114 | 2.7 | 3.2 | 19% | 1.3 | 62% | 53 | 123 |
-| Jan 19 | 118 | 76 | 3.5 | 3.9 | 16% | 1.6 | 67% | 45 | 66 |
-| Jan 26 | 198 | 141 | 2.2 | 3.4 | 24% | 2.2 | 71% | 50 | 75 |
-| Feb 02 | 185 | 158 | 3.6 | 4.3 | 25% | 3.0 | 71% | 53 | 61 |
-| Feb 09 | 196 | 144 | 3.4 | 4.3 | 36% | 3.2 | 72% | 55 | 115 |
-| Feb 16 | 150 | 106 | 4.2 | 4.5 | 21% | 2.2 | 73% | 39 | 128 |
-| **Feb 23** | 225 | **195 ↑** | **2.6 ↓** | 4.3 | **16% ↓** | **1.6 ↓** | **62% ↓** | **35 ↓** | **72 ↓** |
-| **Mar 02** | 50 | 41 | **2.1 ↓** | **2.8 ↓** | **9% ↓** | **1.3 ↓** | **49% ↓** | **27 ↓** | 86 |
+| Week | PRs | PRs Merged | Avg Lines/PR <sup>⋆</sup> | Median Lines/PR <sup>⋆</sup> | Days to merge/PR <sup>¶</sup> | Push/PR <sup>△</sup> | PR Re-trig % <sup>‡</sup> | Re-trig/PR <sup>‖</sup> | PR Fail % <sup>†</sup> | Pre-merge <sup>⊕</sup> (min) | Post-merge (min) |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Dec&nbsp;29 | 35 | 14 | 395 | 52 | 1.5 | 2.3 | 16% | 1.4 | 89% | 54 | 109 |
+| Jan&nbsp;05 | 167 | 133 | 277 | 27 | 2.8 | 2.9 | 21% | 1.4 | 76% | 59 | 108 |
+| Jan&nbsp;12 | 138 | 114 | 588 ° | 28 ° | 2.7 | 3.2 | 19% | 1.3 | 62% | 53 | 123 |
+| Jan&nbsp;19 | 118 | 76 | 546 | 89 | 3.5 | 3.9 | 16% | 1.6 | 67% | 45 | 66 |
+| Jan&nbsp;26 | 198 | 141 | 532 | 56 | 2.2 | 3.4 | 24% | 2.2 | 71% | 50 | 75 |
+| Feb&nbsp;02 | 185 | 158 | 853 | 130 | 3.6 | 4.3 | 25% | 3.0 | 71% | 53 | 61 |
+| Feb&nbsp;09 | 196 | 144 | 1074 | 109 | 3.4 | 4.3 | 36% | 3.2 | 72% | 55 | 115 |
+| Feb&nbsp;16 | 150 | 106 | 834 | 122 | 4.2 | 4.5 | 21% | 2.2 | 73% | 39 | 128 |
+| **Feb&nbsp;23** | 225 | **195&nbsp;↑** | 638 | 113 | **2.6&nbsp;↓** | 4.3 | **16%&nbsp;↓** | **1.6&nbsp;↓** | **62%&nbsp;↓** | **35&nbsp;↓** | **72&nbsp;↓** |
+| **Mar&nbsp;02** | 50 | 41 | 542 | 219 | **2.1&nbsp;↓** | **2.8&nbsp;↓** | **9%&nbsp;↓** | **1.3&nbsp;↓** | **49%&nbsp;↓** | **27&nbsp;↓** | 86 |
 
 Note: Week of Mar 02 is partial (week not over yet), so those numbers are directional. Re-trig % means the share of PRs where we saw at least one manual job re-trigger; Re-trig/PR means average manual job re-triggers among affected PRs.
 
@@ -67,6 +70,7 @@ Methodology:
 ## Metric Definitions
 
 Pre-merge PR metrics:
+- <sup>⋆</sup> **Avg Lines/PR** and **Median Lines/PR** -- average and median lines changed (additions + deletions) per merged PR that week. Median is more representative of a typical PR; averages are skewed by a few large refactoring or auto-generated PRs. ° Jan 12 excludes 4 auto-generated attribution file PRs (150k-239k lines each); raw avg would be 8,103.
 - <sup>¶</sup> **Days to merge/PR** -- elapsed time (days) from first PR submission to final merge. Example: 2.6d means a PR took about 2.6 days to merge.
 - <sup>△</sup> **Push/PR** -- average number of code pushes per PR before merge.
 - <sup>‡</sup> **PR Re-trig %** -- the share of PRs that needed at least one manual job re-trigger after a failed run. Example: 20% means 1 out of every 5 PRs, someone manually triggered at least one re-run (without pushing new code).
@@ -74,7 +78,7 @@ Pre-merge PR metrics:
 - <sup>†</sup> **PR Fail %** -- the share of PRs that had at least one failed automation run. Example: 33% means 1 out of every 3 PRs failed at least once.
 - <sup>⊕</sup> **Pre-merge (min)** -- average of max(workflow durations) per commit, across all pre-merge workflows triggered for that commit (including `pull_request` checks and validation runs on `pull-request/NNN` mirror branches). Since workflows run in parallel, the developer waits for the slowest one.
 
-Post-merge job metrics:
+Post-merge job metrics (code that passed pre-merge validation and was merged to main):
 - **Post-merge (min)** -- average wall-clock time (minutes) from the first workflow created to the last workflow completed, per commit push on main. Post-merge runs include additional workflows (NVIDIA Validation, Test Lab, Post-Merge Pipeline) not triggered during pre-merge.
 - <sup>§</sup> **PR Avg (min)** -- average "PR" workflow run duration (minutes) from post-merge job data (created_at to updated_at). Reflects how long a single workflow run takes to complete.
 - **WF Failure %** -- post-merge workflow failure rate (% of runs with conclusion = failure). Not the same as <sup>†</sup>.
@@ -101,6 +105,24 @@ $$\text{Wasted Wait per PR (hours)} = \text{PR Re-trig \%}^‡ \times \text{Re-t
 - **Combined savings: ~174 hours/week** (21.8 work days).
 
 The pre-merge duration improvement (55 → 35 min, −36%) accounts for roughly 20 of those 174 hours — about 11% of the total savings. The remaining 89% comes from fewer re-triggers (lower flake rate and fewer re-triggers per affected PR).
+
+---
+
+### PR Size vs. Time to Merge
+
+683 merged PRs (Jan 19 – Mar 5) grouped by lines changed (additions + deletions):
+
+| Size | Lines | PRs | Avg&nbsp;Days | Median&nbsp;Days | P75&nbsp;Days |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| S | 1–50 | 251 (37%) | 2.5 | 0.3 | 1.1 |
+| M | 51–100 | 76 (11%) | 1.4 | 0.6 | 1.9 |
+| M+ | 101–200 | 86 (13%) | 3.8 | 0.9 | 2.8 |
+| L | 201–500 | 103 (15%) | 5.2 | 1.7 | 5.8 |
+| L+ | 501–1,000 | 59 (9%) | 5.3 | 1.7 | 7.0 |
+| XL | 1,001–5,000 | 90 (13%) | 6.6 | 3.2 | 6.5 |
+| XXL | 5,001+ | 17 (2%) | 8.7 | 7.1 | 11.8 |
+
+Larger PRs take significantly longer to merge: XXL PRs (5,001+ lines) take ~24x longer than S PRs at the median (7.1 vs 0.3 days). 61% of all PRs are 200 lines or fewer (S + M) and merge in under a day at the median.
 
 ---
 

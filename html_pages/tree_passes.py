@@ -246,7 +246,7 @@ def run_all_passes(
     import time  # For per-pass timing
     pass_timings = {}  # Track timing for each pass
     
-    logger.info(f"[run_all_passes] Starting with {len(ci_nodes)} nodes")
+    logger.debug(f"[run_all_passes] Starting with {len(ci_nodes)} nodes")
     
     # PASS 1: Add PRStatusWithJobsNode as children to BranchInfoNode (if PR exists)
     # This must run BEFORE all other passes (operates on BranchNode layer)
@@ -364,7 +364,7 @@ def run_all_passes(
         timing_str = ", ".join([f"{k}={v:.3f}s" for k, v in pass_timings.items()])
         logger.debug(f"[run_all_passes] Pass timing breakdown: {timing_str}")
     
-    logger.info(f"[run_all_passes] All passes complete (1-8), returning {len(final_nodes)} root nodes")
+    logger.debug(f"[run_all_passes] All passes complete (1-8), returning {len(final_nodes)} root nodes")
     return final_nodes
 
 
@@ -461,7 +461,7 @@ def add_pr_status_node_pass(
     for node in nodes:
         process_node(node)
     
-    logger.info(f"[PASS -1] add_pr_status_node_pass complete")
+    logger.debug(f"[PASS -1] add_pr_status_node_pass complete")
     return nodes
 
 
@@ -496,7 +496,7 @@ def prefetch_actions_job_details_pass(
     if not github_api:
         return ci_nodes
 
-    logger.info(f"[prefetch_actions_job_details_pass] Extracting run_ids from {len(ci_nodes)} nodes")
+    logger.debug(f"[prefetch_actions_job_details_pass] Extracting run_ids from {len(ci_nodes)} nodes")
 
     # Extract all unique run_ids from CI jobs
     run_ids: Set[str] = set()
@@ -515,10 +515,10 @@ def prefetch_actions_job_details_pass(
         extract_run_ids(node)
 
     if not run_ids:
-        logger.info(f"[prefetch_actions_job_details_pass] No run_ids found, skipping batch fetch")
+        logger.debug(f"[prefetch_actions_job_details_pass] No run_ids found, skipping batch fetch")
         return ci_nodes
 
-    logger.info(f"[prefetch_actions_job_details_pass] Batch fetching job details for {len(run_ids)} unique runs")
+    logger.debug(f"[prefetch_actions_job_details_pass] Batch fetching job details for {len(run_ids)} unique runs")
 
     try:
         # Batch fetch all jobs for these runs (populates cache)
@@ -528,12 +528,12 @@ def prefetch_actions_job_details_pass(
             run_ids=list(run_ids),
             ttl_s=30 * 24 * 3600,  # 30 days cache
         )
-        logger.info(f"[prefetch_actions_job_details_pass] Prefetched {len(job_map)} job details into cache")
+        logger.debug(f"[prefetch_actions_job_details_pass] Prefetched {len(job_map)} job details into cache")
     except Exception as e:
         logger.warning(f"[prefetch_actions_job_details_pass] Batch fetch failed: {e}")
 
     # Also prefetch run metadata (run_attempt, status, etc.) for rerun detection
-    logger.info(f"[prefetch_actions_job_details_pass] Batch fetching run metadata for {len(run_ids)} unique runs")
+    logger.debug(f"[prefetch_actions_job_details_pass] Batch fetching run metadata for {len(run_ids)} unique runs")
     try:
         from common_github.api.actions_run_metadata_cached import get_run_metadata_cached
         metadata_count = 0
@@ -548,11 +548,11 @@ def prefetch_actions_job_details_pass(
             )
             if metadata:
                 metadata_count += 1
-        logger.info(f"[prefetch_actions_job_details_pass] Prefetched {metadata_count} run metadata entries into cache")
+        logger.debug(f"[prefetch_actions_job_details_pass] Prefetched {metadata_count} run metadata entries into cache")
     except Exception as e:
         logger.warning(f"[prefetch_actions_job_details_pass] Run metadata fetch failed: {e}")
 
-    logger.info(f"[prefetch_actions_job_details_pass] Complete")
+    logger.debug(f"[prefetch_actions_job_details_pass] Complete")
     return ci_nodes
 
 
@@ -575,7 +575,7 @@ def add_job_steps_and_tests_pass(ci_nodes: List, repo_root: Path) -> List:
     import time  # For detailed timing
     from common_branch_nodes import CIJobNode, CIStepNode, CIPytestNode, _duration_str_to_seconds
     
-    logger.info(f"[add_job_steps_and_tests_pass] Processing {len(ci_nodes)} nodes")
+    logger.debug(f"[add_job_steps_and_tests_pass] Processing {len(ci_nodes)} nodes")
     
     # Track timing breakdown
     timing_stats = {
@@ -716,7 +716,7 @@ def add_job_steps_and_tests_pass(ci_nodes: List, repo_root: Path) -> List:
         f"create_nodes={timing_stats['create_step_nodes']:.3f}s"
     )
     
-    logger.info(f"[add_job_steps_and_tests_pass] Complete")
+    logger.debug(f"[add_job_steps_and_tests_pass] Complete")
     return ci_nodes
 
 
@@ -732,7 +732,7 @@ def convert_branch_nodes_to_tree_vm_pass(ci_nodes: List) -> List[TreeNodeVM]:
     Returns:
         List of TreeNodeVM objects representing actual CI info from GitHub
     """
-    logger.info(f"Converting {len(ci_nodes)} BranchNode objects to TreeNodeVM")
+    logger.debug(f"Converting {len(ci_nodes)} BranchNode objects to TreeNodeVM")
     
     ci_info_nodes: List[TreeNodeVM] = []
     for idx, ci_node in enumerate(ci_nodes):
@@ -746,7 +746,7 @@ def convert_branch_nodes_to_tree_vm_pass(ci_nodes: List) -> List[TreeNodeVM]:
         
         ci_info_nodes.append(node_vm)
     
-    logger.info(f"Converted {len(ci_info_nodes)} nodes to TreeNodeVM")
+    logger.debug(f"Converted {len(ci_info_nodes)} nodes to TreeNodeVM")
     return ci_info_nodes
 
 
@@ -935,7 +935,7 @@ def augment_ci_with_yaml_info_pass(
     """
     from common_branch_nodes import CIJobNode
     
-    logger.info(f"[augment_ci_with_yaml_info_pass] Augmenting {len(original_ci_nodes)} CI nodes with YAML info")
+    logger.debug(f"[augment_ci_with_yaml_info_pass] Augmenting {len(original_ci_nodes)} CI nodes with YAML info")
     
     # Extract mappings
     parent_child_mapping = yaml_mappings.get('parent_child_mapping', {})
@@ -951,7 +951,7 @@ def augment_ci_with_yaml_info_pass(
         long_to_short[yaml_job_name] = (yaml_job_id, dependencies)
         logger.debug(f"[augment_ci_with_yaml_info_pass] Mapping: '{yaml_job_name}' -> '{yaml_job_id}'")
     
-    logger.info(f"[augment_ci_with_yaml_info_pass] Built mapping with {len(long_to_short)} entries")
+    logger.debug(f"[augment_ci_with_yaml_info_pass] Built mapping with {len(long_to_short)} entries")
     
     # Traverse through each CI node and update
     augmented_count = 0
@@ -976,7 +976,7 @@ def augment_ci_with_yaml_info_pass(
         if core_name:
             logger.debug(f"[augment_ci_with_yaml_info_pass] No match for '{core_name}'")
     
-    logger.info(f"[augment_ci_with_yaml_info_pass] Augmented {augmented_count}/{len(original_ci_nodes)} CI nodes with YAML info")
+    logger.debug(f"[augment_ci_with_yaml_info_pass] Augmented {augmented_count}/{len(original_ci_nodes)} CI nodes with YAML info")
     
     # Convert the augmented CIJobNodes to TreeNodeVM
     augmented_tree_nodes = []
@@ -1003,7 +1003,7 @@ def move_jobs_by_prefix_batch_pass(
     Returns:
         List of TreeNodeVM nodes with all matching jobs moved under parents
     """
-    logger.info(f"[move_jobs_by_prefix_batch_pass] Processing {len(grouping_rules)} grouping rules in single pass")
+    logger.debug(f"[move_jobs_by_prefix_batch_pass] Processing {len(grouping_rules)} grouping rules in single pass")
     
     # Build lookup structures for all rules
     # parent_name -> {prefix_set, label, create_if_has_children, matched_jobs}
@@ -1074,7 +1074,7 @@ def move_jobs_by_prefix_batch_pass(
         if existing_parent:
             # Add to existing parent
             existing_parent.children.extend(matched_jobs)
-            logger.info(f"[move_jobs_by_prefix_batch_pass] Added {len(matched_jobs)} jobs to existing parent '{parent_name}'")
+            logger.debug(f"[move_jobs_by_prefix_batch_pass] Added {len(matched_jobs)} jobs to existing parent '{parent_name}'")
         else:
             # Create new parent
             parent_label = info["label"]
@@ -1089,9 +1089,9 @@ def move_jobs_by_prefix_batch_pass(
                 default_expanded=False,
             )
             remaining_nodes.append(parent_node)
-            logger.info(f"[move_jobs_by_prefix_batch_pass] Created new parent '{parent_name}' with {len(matched_jobs)} jobs")
+            logger.debug(f"[move_jobs_by_prefix_batch_pass] Created new parent '{parent_name}' with {len(matched_jobs)} jobs")
     
-    logger.info(f"[move_jobs_by_prefix_batch_pass] Returning {len(remaining_nodes)} root nodes")
+    logger.debug(f"[move_jobs_by_prefix_batch_pass] Returning {len(remaining_nodes)} root nodes")
     return remaining_nodes
 
 
@@ -1271,7 +1271,7 @@ def move_required_jobs_to_top_pass(nodes: List[TreeNodeVM]) -> List[TreeNodeVM]:
     Returns:
         List with required jobs at top, then non-required jobs, each group alphabetically sorted
     """
-    logger.info(f"[move_required_jobs_to_top] Processing {len(nodes)} root nodes")
+    logger.debug(f"[move_required_jobs_to_top] Processing {len(nodes)} root nodes")
     
     required_jobs = []
     non_required_jobs = []
@@ -1295,9 +1295,9 @@ def move_required_jobs_to_top_pass(nodes: List[TreeNodeVM]) -> List[TreeNodeVM]:
     
     result = required_jobs + non_required_jobs
     
-    logger.info(f"[move_required_jobs_to_top] Moved {len(required_jobs)} required jobs to top, {len(non_required_jobs)} non-required after")
+    logger.debug(f"[move_required_jobs_to_top] Moved {len(required_jobs)} required jobs to top, {len(non_required_jobs)} non-required after")
     if required_jobs:
-        logger.info(f"[move_required_jobs_to_top] Required jobs at top: {[node.short_job_name or node.job_name for node in required_jobs]}")
+        logger.debug(f"[move_required_jobs_to_top] Required jobs at top: {[node.short_job_name or node.job_name for node in required_jobs]}")
     
     return result
 
@@ -1321,7 +1321,7 @@ def verify_tree_structure_pass(tree_nodes: List[TreeNodeVM], original_ci_nodes: 
     
     # Format commit ref for logging
     commit_ref = f" (commit: {commit_sha[:7]})" if commit_sha else ""
-    logger.info(f"[verify_tree_structure_pass] Verifying tree structure ({len(tree_nodes)} root nodes){commit_ref}")
+    logger.debug(f"[verify_tree_structure_pass] Verifying tree structure ({len(tree_nodes)} root nodes){commit_ref}")
     
     # Collect all nodes (including nested)
     all_nodes = []
@@ -1460,7 +1460,7 @@ def verify_tree_structure_pass(tree_nodes: List[TreeNodeVM], original_ci_nodes: 
             logger.warning(f"[verify_tree_structure_pass]    ... and {len(required_after_non_required) - 5} more")
         logger.warning(f"[verify_tree_structure_pass] ⚠️  move_required_jobs_to_top_pass may not be working correctly!")
     else:
-        logger.info(f"[verify_tree_structure_pass] ✓ All REQUIRED jobs are at the top (first {first_non_required_idx or len(tree_nodes)} positions)")
+        logger.debug(f"[verify_tree_structure_pass] ✓ All REQUIRED jobs are at the top (first {first_non_required_idx or len(tree_nodes)} positions)")
     
     # Check 6: Verify build-test is under dynamo-status-check
     dynamo_node = None
@@ -1480,14 +1480,14 @@ def verify_tree_structure_pass(tree_nodes: List[TreeNodeVM], original_ci_nodes: 
                 break
         
         if has_build_test:
-            logger.info(f"[verify_tree_structure_pass] ✓ build-test is under dynamo-status-check")
+            logger.debug(f"[verify_tree_structure_pass] ✓ build-test is under dynamo-status-check")
         else:
             child_names = [(c.short_job_name or '', c.job_name or '') for c in (dynamo_node.children or [])]
             logger.warning(f"[verify_tree_structure_pass] ⚠️  build-test NOT found under dynamo-status-check. Children: {child_names}")
     else:
         logger.warning(f"[verify_tree_structure_pass] ⚠️  dynamo-status-check node not found")
     
-    logger.info(f"[verify_tree_structure_pass] Verification complete")
+    logger.debug(f"[verify_tree_structure_pass] Verification complete")
 
 
 def verify_job_details_pass(ci_nodes: List, commit_sha: str = "") -> None:
@@ -1516,7 +1516,7 @@ def verify_job_details_pass(ci_nodes: List, commit_sha: str = "") -> None:
 
     # Format commit ref for logging
     commit_ref = f" (commit: {commit_sha[:7]})" if commit_sha else ""
-    logger.info(f"[verify_job_details_pass] Verifying job details for {len(ci_nodes)} nodes{commit_ref}")
+    logger.debug(f"[verify_job_details_pass] Verifying job details for {len(ci_nodes)} nodes{commit_ref}")
 
     # Counters for reporting
     jobs_checked = 0
@@ -1632,6 +1632,6 @@ def verify_job_details_pass(ci_nodes: List, commit_sha: str = "") -> None:
 
     # Only log success if there are no issues
     if not jobs_missing_steps and not test_steps_missing_pytest and not jobs_missing_duration:
-        logger.info(f"[verify_job_details_pass] ✓ All {real_github_jobs_checked} real GitHub jobs have proper details (plus {synthetic_aggregators_checked} synthetic aggregators){commit_ref}")
+        logger.debug(f"[verify_job_details_pass] ✓ All {real_github_jobs_checked} real GitHub jobs have proper details (plus {synthetic_aggregators_checked} synthetic aggregators){commit_ref}")
 
-    logger.info(f"[verify_job_details_pass] Verification complete: {real_github_jobs_checked} real jobs, {synthetic_aggregators_checked} synthetic aggregators")
+    logger.debug(f"[verify_job_details_pass] Verification complete: {real_github_jobs_checked} real jobs, {synthetic_aggregators_checked} synthetic aggregators")

@@ -519,7 +519,7 @@ def build_and_test_dynamo_phases_from_actions_job(job: Dict[str, object]) -> Lis
         logger.warning("[build_and_test_dynamo_phases_from_actions_job] No steps found in job")
         return []
 
-    logger.info(f"[build_and_test_dynamo_phases_from_actions_job] Processing {len(steps)} steps from job")
+    logger.debug(f"[build_and_test_dynamo_phases_from_actions_job] Processing {len(steps)} steps from job")
     def _dur(st: Dict[str, object]) -> str:
         a = _parse_iso_utc(str(st.get("started_at", "") or ""))
         b = _parse_iso_utc(str(st.get("completed_at", "") or ""))
@@ -551,7 +551,7 @@ def build_and_test_dynamo_phases_from_actions_job(job: Dict[str, object]) -> Lis
             continue
         seen.add(k)
         uniq.append(ph)
-    logger.info(f"[build_and_test_dynamo_phases_from_actions_job] Returning {len(uniq)} unique phases")
+    logger.debug(f"[build_and_test_dynamo_phases_from_actions_job] Returning {len(uniq)} unique phases")
     return uniq
 
 
@@ -853,12 +853,12 @@ def ci_subsection_tuples_for_job(
         extra_steps = [(n, d, st, step_dict) for (n, d, st, step_dict) in (steps or []) if not _covered_by_phase(n)]
 
         out = [(p[0], p[1], p[2], p[3] if len(p) > 3 else None) for p in (phases or [])]  # Keep step dict
-        logger.info(f"[ci_subsection_tuples_for_job] Extracted {len(out)} phases for job '{nm}'")
+        logger.debug(f"[ci_subsection_tuples_for_job] Extracted {len(out)} phases for job '{nm}'")
         for i, (step_name, _, _, step_dict) in enumerate(out[:5]):  # Log first 5
             has_timestamps = False
             if step_dict and isinstance(step_dict, dict):
                 has_timestamps = bool(step_dict.get('started_at') and step_dict.get('completed_at'))
-            logger.info(f"[ci_subsection_tuples_for_job]   Phase {i}: '{step_name}', has_step_dict={bool(step_dict)}, has_timestamps={has_timestamps}")
+            logger.debug(f"[ci_subsection_tuples_for_job]   Phase {i}: '{step_name}', has_step_dict={bool(step_dict)}, has_timestamps={has_timestamps}")
         out.extend(extra_steps)  # extra_steps now include step_dict (4-tuples)
 
         # Apply pytest test extraction to "Run tests" steps and "test: pytest" phases
@@ -870,11 +870,11 @@ def ci_subsection_tuples_for_job(
             # If this is a "Run tests" step or a "test: pytest" phase, parse pytest slowest tests from raw log
             if is_python_test_step(step_name) and raw_log_path:
                 t0 = time.monotonic()
-                logger.info(f"[ci_subsection_tuples_for_job] About to call pytest_slowest_tests_from_raw_log for '{step_name}'")
-                logger.info(f"[ci_subsection_tuples_for_job]   step_dict type: {type(step_dict).__name__ if step_dict else 'None'}")
+                logger.debug(f"[ci_subsection_tuples_for_job] About to call pytest_slowest_tests_from_raw_log for '{step_name}'")
+                logger.debug(f"[ci_subsection_tuples_for_job]   step_dict type: {type(step_dict).__name__ if step_dict else 'None'}")
                 if step_dict and isinstance(step_dict, dict):
-                    logger.info(f"[ci_subsection_tuples_for_job]   step_dict has started_at: {bool(step_dict.get('started_at'))}, completed_at: {bool(step_dict.get('completed_at'))}")
-                    logger.info(f"[ci_subsection_tuples_for_job]   Timestamps: {step_dict.get('started_at')} -> {step_dict.get('completed_at')}")
+                    logger.debug(f"[ci_subsection_tuples_for_job]   step_dict has started_at: {bool(step_dict.get('started_at'))}, completed_at: {bool(step_dict.get('completed_at'))}")
+                    logger.debug(f"[ci_subsection_tuples_for_job]   Timestamps: {step_dict.get('started_at')} -> {step_dict.get('completed_at')}")
                 else:
                     logger.warning(f"[ci_subsection_tuples_for_job] WARNING: step_dict is None or not a dict for pytest step '{step_name}'!")
                     
@@ -1344,7 +1344,7 @@ def build_and_test_dynamo_phase_tuples(
     """
     phases3: List[Tuple[str, str, str, Optional[Dict[str, object]]]] = []
     jid = extract_actions_job_id_from_url(str(job_url or ""))
-    logger.info(f"[build_and_test_dynamo_phase_tuples] Called with job_url={job_url}, extracted job_id={jid}")
+    logger.debug(f"[build_and_test_dynamo_phase_tuples] Called with job_url={job_url}, extracted job_id={jid}")
     if github_api and jid:
         # Use 30-day TTL to match prefetch_actions_job_details_pass (prevents cache misses).
         # Job details are immutable once completed (verified by get_actions_job_details_cached),
@@ -1353,11 +1353,11 @@ def build_and_test_dynamo_phase_tuples(
         job = github_api.get_actions_job_details_cached(owner="ai-dynamo", repo="dynamo", job_id=jid, ttl_s=30 * 24 * 3600) or {}
         if isinstance(job, dict):
             phases3 = build_and_test_dynamo_phases_from_actions_job(job) or []
-            logger.info(f"[build_and_test_dynamo_phase_tuples] Got {len(phases3)} phases from build_and_test_dynamo_phases_from_actions_job")
+            logger.debug(f"[build_and_test_dynamo_phase_tuples] Got {len(phases3)} phases from build_and_test_dynamo_phases_from_actions_job")
         else:
             logger.warning(f"[build_and_test_dynamo_phase_tuples] Job data is not a dict: {type(job)}")
     else:
         logger.warning(f"[build_and_test_dynamo_phase_tuples] No github_api or no job_id (jid={jid})")
 
-    logger.info(f"[build_and_test_dynamo_phase_tuples] Returning {len(phases3)} phases")
+    logger.debug(f"[build_and_test_dynamo_phase_tuples] Returning {len(phases3)} phases")
     return phases3  # Return 4-tuples: (name, dur, status, step_dict)

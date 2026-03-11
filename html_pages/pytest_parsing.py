@@ -124,14 +124,14 @@ def pytest_slowest_tests_from_raw_log(
         
         lines = log_text.split('\n')
         
-        logger.info(f"[pytest_slowest_tests_from_raw_log] Called for '{step_name}', step_dict={type(step_dict).__name__}, is_dict={isinstance(step_dict, dict) if step_dict else False}")
+        logger.debug(f"[pytest_slowest_tests_from_raw_log] Called for '{step_name}', step_dict={type(step_dict).__name__}, is_dict={isinstance(step_dict, dict) if step_dict else False}")
         
         # Filter lines by timestamp if step_dict has started_at/completed_at
         if step_dict and isinstance(step_dict, dict):
-            logger.info(f"[pytest_slowest_tests_from_raw_log] step_dict provided for '{step_name}': {bool(step_dict)}, keys={list(step_dict.keys())}")
+            logger.debug(f"[pytest_slowest_tests_from_raw_log] step_dict provided for '{step_name}': {bool(step_dict)}, keys={list(step_dict.keys())}")
             started_at_str = str(step_dict.get("started_at", "") or "")
             completed_at_str = str(step_dict.get("completed_at", "") or "")
-            logger.info(f"[pytest_slowest_tests_from_raw_log] Timestamps: started={started_at_str}, completed={completed_at_str}")
+            logger.debug(f"[pytest_slowest_tests_from_raw_log] Timestamps: started={started_at_str}, completed={completed_at_str}")
             if started_at_str and completed_at_str:
                 started_at = _parse_iso_utc(started_at_str)
                 completed_at = _parse_iso_utc(completed_at_str)
@@ -149,7 +149,7 @@ def pytest_slowest_tests_from_raw_log(
                             # No timestamp, include it (safer)
                             filtered_lines.append(line)
                     lines = filtered_lines
-                    logger.info(
+                    logger.debug(
                         f"[pytest_slowest_tests_from_raw_log] Filtered to {len(lines)} lines "
                         f"between {started_at_str} and {completed_at_str} for step '{step_name}'"
                     )
@@ -289,7 +289,7 @@ def pytest_slowest_tests_from_raw_log(
 
         PYTEST_TIMINGS_CACHE.put(raw_log_path=p, step_name=step_name, rows=test_times)
 
-        logger.info(f"[pytest_slowest_tests_from_raw_log] Returning {len(test_times)} tests for step_name='{step_name}'")
+        logger.debug(f"[pytest_slowest_tests_from_raw_log] Returning {len(test_times)} tests for step_name='{step_name}'")
         return test_times
 
     except Exception as e:
@@ -374,7 +374,7 @@ def pytest_results_from_raw_log(
                             # No timestamp, include it (safer)
                             filtered_lines.append(line)
                     lines = filtered_lines
-                    logger.info(
+                    logger.debug(
                         f"[pytest_results_from_raw_log] Filtered to {len(lines)} lines "
                         f"between {started_at_str} and {completed_at_str} for step '{step_name}'"
                     )
