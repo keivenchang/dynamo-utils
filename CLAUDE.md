@@ -67,7 +67,7 @@ These are the canonical project instructions. Do NOT read `.cursorrules` or `CLA
 **NEVER auto-commit changes without explicit user approval.**
 Always wait for the user to explicitly request a commit before running `git commit`.
 
-**Post-commit cleanup (MUST):** After every `git commit`, run `.utils/clean-commit.sh` to strip `Made-with:` lines and duplicate `Signed-off-by:` entries from the commit message. Use `--dry-run` first to preview changes.
+**Post-commit cleanup (MUST):** After every `git commit`, run `/utils/clean-commit.sh` to strip `Made-with:` lines and duplicate `Signed-off-by:` entries from the commit message. Use `--dry-run` first to preview changes.
 
 ## 1.4 Permission Policy
 - Full permission to run read-only operations without asking: `wget`, `curl`, `echo`, `cat`, `tail`, `head`, `grep`, `egrep`, `ls`, `uname`.
@@ -225,11 +225,11 @@ The `vsc-` prefix indicates VS Code/Cursor dev containers, and the part after it
 Container names (like `epic_satoshi`, `distracted_shockley`) are transient and should not be documented.
 
 ## 2.3 Host-Container Directory Mapping
-The `dynamo-utils.PRODUCTION` directory on the host is mapped into the container at `/workspace/utils` (same repo, bind-mounted):
+The `dynamo-utils.PRODUCTION` directory on the host is mapped into the container at `/utils` (same repo, bind-mounted):
 - Host: `<workspace>/dynamo-utils.PRODUCTION/` (e.g. `~/dynamo/dynamo-utils.PRODUCTION/`)
-- Container: `/workspace/utils/`
+- Container: `/utils/`
 
-Example: `<workspace>/dynamo-utils.PRODUCTION/notes/metrics-vllm.log` on the host appears at `/workspace/utils/notes/metrics-vllm.log` inside the container.
+Example: `<workspace>/dynamo-utils.PRODUCTION/notes/metrics-vllm.log` on the host appears at `/utils/notes/metrics-vllm.log` inside the container.
 
 ## 2.4 Backup File Convention
 When creating backups, use: `<filename>.<YYYY-MM-DD>.bak` (ignored by `.gitignore`).
@@ -258,7 +258,7 @@ Prerequisites:
 Steps:
 1. Start inference server in background:
 ```bash
-docker exec <container_name> bash -c "cd ~/dynamo && nohup /utils/inference.sh > /tmp/inference-<framework>.log 2>&1 &"
+docker exec <container_name> bash -c "nohup /utils/inference.sh > /tmp/inference-<framework>.log 2>&1 &"
 ```
 
 2. Monitor inference server startup (wait ~30 seconds):
@@ -269,13 +269,13 @@ Look for: `added model model_name=...` indicating the model is ready.
 
 3. Run soak test to generate some load:
 ```bash
-docker exec <container_name> bash -c "cd ~/dynamo && python3 /utils/soak_fe.py --max-tokens 1000 --requests_per_worker 5"
+docker exec <container_name> bash -c "python3 /utils/soak_fe.py --max-tokens 1000 --requests_per_worker 5"
 ```
 Wait for: `All requests completed successfully.`
 
 4. Collect metrics and save to the mounted `/utils` directory:
 ```bash
-docker exec <container_name> bash -c "curl -s localhost:8081/metrics > /workspace/utils/notes/metrics-<framework>.log"
+docker exec <container_name> bash -c "curl -s localhost:8081/metrics > /utils/notes/metrics-<framework>.log"
 ```
 
 Tip: Find the container name with:
@@ -289,16 +289,16 @@ Example for VLLM (copy/paste template):
 docker ps --format "table {{.Names}}\t{{.Image}}" | grep dynamo1
 
 # Start inference
-docker exec <container_name> bash -c "cd ~/dynamo && nohup /utils/inference.sh > /tmp/inference-vllm.log 2>&1 &"
+docker exec <container_name> bash -c "nohup /utils/inference.sh > /tmp/inference-vllm.log 2>&1 &"
 
 # Wait and check log
 sleep 30 && docker exec <container_name> bash -c "tail -20 /tmp/inference-vllm.log"
 
 # Run soak test
-docker exec <container_name> bash -c "cd ~/dynamo && python3 /utils/soak_fe.py --max-tokens 1000 --requests_per_worker 5"
+docker exec <container_name> bash -c "python3 /utils/soak_fe.py --max-tokens 1000 --requests_per_worker 5"
 
 # Collect metrics
-docker exec <container_name> bash -c "mkdir -p /workspace/utils/notes && curl -s localhost:8081/metrics > /workspace/utils/notes/metrics-vllm.log"
+docker exec <container_name> bash -c "mkdir -p /utils/notes && curl -s localhost:8081/metrics > /utils/notes/metrics-vllm.log"
 ```
 
 Output:
