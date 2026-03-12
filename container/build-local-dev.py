@@ -294,6 +294,17 @@ def main() -> None:
     args = parser.parse_args()
 
     validate_image(args.image)
+
+    if "-runtime-" in args.image:
+        print(
+            f"ERROR: This looks like a runtime image (not a dev image).\n"
+            f"       build-local-dev.py requires a dev image as input.\n"
+            f"       The chain is: runtime -> dev -> local-dev.\n"
+            f"       Got: {args.image}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
     ensure_image_local(args.image)
 
     rendered, source = render(args.image)
