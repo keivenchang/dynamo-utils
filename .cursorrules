@@ -1,6 +1,10 @@
 Cursor Rules for Dynamo Project
 https://github.com/keivenchang/dynamo-utils/blob/main/.cursorrules
 
+**Convention:** `$UTILS` refers to the dynamo-utils directory. It resolves to:
+  - `/utils` inside containers (symlink to the repo checkout)
+  - `~/dynamo/dynamo-utils.dev/` on host machines
+
 =============================================================================
 READ THIS FIRST (NON-NEGOTIABLE)
 =============================================================================
@@ -66,25 +70,11 @@ If you do only one thing: re-read this section before making changes or running 
     - "from 4c648b11e through 3dcc53d5a" means build BOTH 4c648b11e AND 3dcc53d5a
     - "from 5d9586234 to d1bd210f1 (inclusive)" means build BOTH 5d9586234 AND d1bd210f1
 
-- Shell execution (MUST):
-  - Chain multi-step commands into ONE shell invocation using `&&` / `;` (reduce latency).
-  - NEVER issue multiple separate Shell calls that share the same working directory.
-    Combine them into a single `&&`-chained call.
-    - ❌ Bad (3 separate Shell calls, this is a huge mistake that should never be made):
-      ```
-      cd /workspace && git log --oneline origin/main..HEAD
-      cd /workspace && git diff origin/main..HEAD --stat
-      cd /workspace && git diff origin/main..HEAD
-      ```
-    - ✅ Good (1 Shell call):
-      ```
-      cd /workspace && git log --oneline origin/main..HEAD && git diff origin/main..HEAD --stat && git diff origin/main..HEAD
-      ```
-  - For expensive/long-running commands: capture FULL output first (`2>&1` to a file or `tee`).
-    - Never pipe the live output of expensive commands into `grep`/`head`/`tail`.
-  - Use `\cp` and `\mv` (backslash-escaped) instead of bare `cp` and `mv`.
-    The host shell aliases `cp` to `cp -i` and `mv` to `mv -i`, which prompt for
-    confirmation and hang in non-interactive shells. Always: `\cp -f`, `\mv -f`.
+- Shell execution (MUST): See Section 2.3 for full rules. Key points:
+  - Chain commands into ONE shell invocation (`&&` / `;`). NEVER issue multiple separate Shell calls.
+  - Capture full output first, then filter. Never pipe live expensive commands into grep/head/tail.
+  - Use `\cp -f` and `\mv -f` (host aliases cp/mv to -i, which hangs).
+  - Use `$UTILS/await_output.sh` instead of `sleep && grep`. See Section 2.3.4.
 
 - Rust formatting (MUST):
   - Run `cargo fmt` IMMEDIATELY after editing any `.rs` file. Do NOT wait until commit time.
@@ -185,6 +175,12 @@ TABLE OF CONTENTS
     7.2.5 Copyright Headers
     7.2.6 Cargo Deny (License Checks)
     7.2.7 Quick Pre-Commit Checklist
+
+8. PROCESS MANAGEMENT AND MONITORING (LEARNED RULES)
+  8.1 Process Cleanup (Safe Killing)
+  8.2 Persistent Output Locations
+  8.3 Single Process Discipline
+  8.4 Dynamo Compilation
 
 =============================================================================
 1. AI PERSONALITY AND DOCUMENTATION GUIDELINES
@@ -327,7 +323,7 @@ when a sentinel string appears (or on timeout). All output is logged to a file r
 
 **Usage:**
 ```bash
-$UTILS$/await_output.sh -t TIMEOUT [-s "SENTINEL" ...] [-p PID] [-l LOGFILE] [-q] -- COMMAND [ARGS...]
+$UTILS/await_output.sh -t TIMEOUT [-s "SENTINEL" ...] [-p PID] [-l LOGFILE] [-q] -- COMMAND [ARGS...]
 ```
 
 - `-t, --timeout SECONDS` — maximum wait time (**required**, no default)
@@ -368,6 +364,14 @@ $UTILS/await_output.sh -t 1200 -p $BUILD_PID -- tail -f /tmp/build.log
 Combine PID + sentinel (exit on whichever comes first):
 ```bash
 $UTILS/await_output.sh -t 600 -s "ERROR" -p $BUILD_PID -- tail -f /tmp/build.log
+```
+
+Monitor a backgrounded command (common pattern for profiling/serving):
+```bash
+some_command > /workspace/_profile/output.log 2>&1 &
+CMD_PID=$!
+$UTILS/await_output.sh -t 3600 -s "ALL RESULTS:" -p $CMD_PID \
+    -l /workspace/_profile/await.log -- tail -f /workspace/_profile/output.log
 ```
 
 **Why this matters:**
@@ -665,9 +669,8 @@ Validate dependency updates:
 
 ### 3.4.11 Python Bindings and Wheel Creation
 After changes in lib/bindings/python/rust/*:
-1. $UTILS could be either /utils (inside a container), or ~/dynamo/dynamo-utils.dev/ (on a host)
 1. cd lib/bindings/python && maturin develop --uv
-3. Or use $UTILS/compile.sh shortcut (handles full build workflow)
+2. Or use `$UTILS/compile.sh` shortcut (handles full build workflow)
 
 Notes:
 - `maturin develop` may update `Cargo.lock` if the dependency graph/features require it.
@@ -859,7 +862,7 @@ SUBSEQUENT commit examples: `Quick fix of XYZ`, `Fix linting errors`, `Address r
 
 **DO NOT** in subsequent commits: category prefixes, WIP messages, multi-paragraph messages.
 
-**Post-commit cleanup (MUST):** After every `git commit`, run `/utils/clean-commit.sh` to strip `Made-with:` lines and duplicate `Signed-off-by:` entries from the commit message. Use `--dry-run` first to preview changes.
+**Post-commit cleanup (MUST):** After every `git commit`, run `$UTILS/clean-commit.sh` to strip `Made-with:` lines and duplicate `Signed-off-by:` entries from the commit message. Use `--dry-run` first to preview changes.
 
 ## 5.4 Git Integration (for parsing commit messages)
 - Format: `title (#PR_NUMBER)`
@@ -1120,6 +1123,48 @@ If scripts or HTML generators changed: `python3 -m py_compile <touched_py_files>
 Expected result: All checks pass with no errors
 
 =============================================================================
+8. PROCESS MANAGEMENT AND MONITORING (LEARNED RULES)
+=============================================================================
+
+## 8.1 Process Cleanup (Safe Killing)
+- **NEVER use broad `pkill -f "dynamo"` or `pkill -f "vllm"`.** These patterns match
+  IDE processes (Cursor server), pytest processes (test_vllm.py in cmdline), and other
+  unrelated processes, killing the user's terminal sessions.
+- Use `$UTILS/kill_dynamo_processes.sh` for safe cleanup of inference processes.
+  It targets specific process patterns (python -m dynamo.vllm, VLLM::EngineCore, etc.).
+- Use `--all` flag only when etcd/nats also need killing.
+- **NEVER call kill_dynamo_processes.sh inside a loop that also runs pytest.**
+  The script's `pkill -f "vllm"` pattern will kill the pytest process itself (because
+  the test file path `test_vllm.py` contains "vllm").
+- For between-test cleanup in a profiling loop, use narrow patterns that ONLY match
+  inference server processes, NOT the test runner:
+  ```bash
+  pkill -f "python -m dynamo\\.vllm" 2>/dev/null || true
+  pkill -f "python -m dynamo\\.frontend" 2>/dev/null || true
+  pkill -f "VLLM::EngineCore" 2>/dev/null || true
+  pkill -f "etcd --name dynamo" 2>/dev/null || true
+  pkill -f "nats-server.*--port" 2>/dev/null || true
+  ```
+
+## 8.2 Persistent Output Locations
+- **NEVER use /tmp for important output.** Container restarts and tmp cleanups wipe it.
+- Use `/workspace/_profile/` or similar persistent workspace paths for profiling results,
+  logs, and scripts that need to survive across sessions.
+- /tmp is fine for throwaway scratch files that won't be needed after the command finishes.
+
+## 8.3 Single Process Discipline
+- **NEVER launch a new background process without first confirming no duplicate is running.**
+  Always check: `ps aux | grep <pattern> | grep -v grep` before launching.
+- When restarting, kill the old process FIRST, verify it's dead, THEN start the new one.
+- Track the PID and use it consistently for monitoring.
+
+## 8.4 Dynamo Compilation
+- The `dynamo` Python package must be installed for tests to run.
+- Check with: `python3 -c "import dynamo"` before running any pytest.
+- If missing: `$UTILS/compile.sh --dev` (takes ~15-30s).
+- After container restart, dynamo may need recompilation.
+
+=============================================================================
 NEVER VIOLATE (repeated from top -- re-read before every action)
 =============================================================================
 
@@ -1130,3 +1175,7 @@ NEVER VIOLATE (repeated from top -- re-read before every action)
 - NEVER hide errors (no `except Exception: pass`). Fail fast.
 - NEVER use `getattr()` on known typed attributes. Access directly.
 - NEVER import inside functions or use try/except for imports.
+- NEVER use `sleep N && cat/tail/head` to poll. Use `$UTILS/await_output.sh` (Section 2.3.4).
+- NEVER use broad `pkill -f "dynamo"` or `pkill -f "vllm"` — kills IDE/pytest (Section 8.1).
+- NEVER use /tmp for important output — use persistent workspace paths (Section 8.2).
+- NEVER launch duplicate background processes — check first, kill old, then start new (Section 8.3).
