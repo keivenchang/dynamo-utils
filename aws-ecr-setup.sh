@@ -8,7 +8,8 @@
 #   ./aws-ecr-setup.sh --logout     # stop refresh daemons + clear credentials
 #   ./aws-ecr-setup.sh --install    # one-time: install AWS CLI + nvsec
 #   ./aws-ecr-setup.sh --docker     # login + docker login for pull/push
-#   ./aws-ecr-setup.sh --list-images       # login + list ECR image tags (fetches from API)
+#   ./aws-ecr-setup.sh --list-images       # login + list ECR image tags (fast, tags only)
+#   ./aws-ecr-setup.sh --describe-images   # login + full metadata (size, dates) - slower
 #   ./aws-ecr-setup.sh --fast-list-images  # quick ECR check (first 20 tags, no login check)
 
 set -euo pipefail
@@ -151,6 +152,27 @@ list_tags() {
     echo "Saved $count tagged images to $out"
 }
 
+# Describe images: full metadata (size, push date, pull date) saved to cache.
+# Sorted by push date, newest first.
+describe_images() {
+    mkdir -p "$ECR_CACHE_DIR"
+    local out="$ECR_CACHE_DIR/aws-ecr-ai-dynamo-dynamo-details.json"
+    echo "=== Describing tagged images in ${REPO} (this may take a while) ==="
+    aws ecr describe-images \
+        --registry-id "$REGISTRY_ID" \
+        --repository-name "$REPO" \
+        --region "$REGION" \
+        --filter tagStatus=TAGGED \
+        --output json \
+        | python3 -c "
+import json, sys
+d = json.load(sys.stdin)
+d['imageDetails'].sort(key=lambda x: x.get('imagePushedAt', ''), reverse=True)
+json.dump(d, open('$out', 'w'), indent=2, default=str)
+print(f'Saved {len(d[\"imageDetails\"])} image details to $out')
+"
+}
+
 # Fast list: quick ECR call (first page only, no login check, no save).
 fast_list() {
     echo "=== Quick ECR check: ${REPO} ==="
@@ -186,6 +208,11 @@ case "${1:-}" in
         echo ""
         list_tags
         ;;
+    --describe-images)
+        login
+        echo ""
+        describe_images
+        ;;
     --fast-list-images)
         fast_list
         ;;
@@ -193,7 +220,7 @@ case "${1:-}" in
         login
         ;;
     *)
-        echo "Usage: $0 [--login|--logout|--install|--docker|--list-images|--fast-list-images]"
+        echo "Usage: $0 [--login|--logout|--install|--docker|--list-images|--describe-images|--fast-list-images]"
         exit 1
         ;;
 esac

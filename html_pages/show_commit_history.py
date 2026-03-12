@@ -115,6 +115,37 @@ STATUS_FAILED = 'failed'
 STATUS_BUILDING = 'building'
 
 
+def _parse_ecr_suffix(suffix: str) -> Tuple[str, str]:
+    """Parse an ECR tag suffix (after the 40-char SHA) into (framework, image_type).
+
+    Suffix patterns:
+      vllm-cuda13-amd64           -> (vllm, runtime)
+      vllm-test-cuda13-amd64      -> (vllm, test)
+      vllm-runtime-cuda13-amd64   -> (vllm, runtime)
+      dynamo-dev-cuda12-amd64     -> (dynamo, dev)
+      vllm-efa-cuda13-amd64       -> (vllm, efa)
+      operator                    -> (operator, operator)
+      frontend-arm64              -> (frontend, frontend)
+    """
+    KNOWN_FRAMEWORKS = {"vllm", "sglang", "trtllm", "dynamo"}
+    parts = suffix.split("-")
+    if not parts:
+        return ("unknown", "unknown")
+    fw = parts[0]
+    if fw not in KNOWN_FRAMEWORKS:
+        return (fw, fw)
+    # Remaining tokens after framework, before cuda/arch: e.g. ["runtime", "test", "cuda13", "amd64"]
+    mid = []
+    for p in parts[1:]:
+        if p.startswith("cuda") or p in ("amd64", "arm64"):
+            break
+        mid.append(p)
+    if not mid:
+        return (fw, "runtime")
+    image_type = "-".join(mid)
+    return (fw, image_type)
+
+
 def _parse_report_dir_to_commit_image(sha_dir_name: str) -> Tuple[Optional[str], Optional[str]]:
     """Parse report directory name to (commit_sha, image_sha_6) for report_path_by_commit_image lookup.
 
@@ -1447,7 +1478,7 @@ class CommitHistoryGenerator:
         # alongside the .report.html and extract registry_images from it.
         # Check all entries (newest first) and use the first one that has registry images,
         # because reuse builds may lack registry_images while the original full build has them.
-        dev_registry_images: Dict[str, List[Dict[str, Any]]] = {}
+        gitlab_dev_images: Dict[str, List[Dict[str, Any]]] = {}
         for sha_short_key, log_entries in log_paths.items():
             if not log_entries:
                 continue
@@ -1543,9 +1574,81 @@ class CommitHistoryGenerator:
                         "pull_dev_cmd": pull_dev_cmd,
                         "local_dev_cmd": local_dev_cmd,
                     })
-                dev_registry_images[sha_short_key] = formatted
+                gitlab_dev_images[sha_short_key] = formatted
             except Exception as e:
                 self.logger.warning(f"Failed to read BuildReport JSON {json_abs}: {e}")
+
+        # --- AWS ECR Registry Images ---
+        ECR_REGISTRY = "210086341041.dkr.ecr.us-west-2.amazonaws.com/ai-dynamo/dynamo"
+        ECR_CACHE_FILE = Path.home() / ".cache" / "dynamo-utils" / "ecr" / "aws-ecr-ai-dynamo-dynamo-details.json"
+        self.logger.info(f"ECR: cache file={ECR_CACHE_FILE}, exists={ECR_CACHE_FILE.exists()}, commit_data has {len(commit_data)} entries")
+        ecr_images_by_sha: Dict[str, List[Dict[str, str]]] = {}
+        if ECR_CACHE_FILE.exists():
+            try:
+                ecr_data = json.loads(ECR_CACHE_FILE.read_text())
+                ecr_details = ecr_data.get("imageDetails", []) if isinstance(ecr_data, dict) else []
+                ecr_by_sha: Dict[str, List[Dict]] = {}
+                for entry in ecr_details:
+                    for tag in entry.get("imageTags", []):
+                        parts = tag.split("-", 1)
+                        if len(parts) == 2 and len(parts[0]) == 40:
+                            ecr_by_sha.setdefault(parts[0], []).append({
+                                "tag": tag,
+                                "size_bytes": entry.get("imageSizeInBytes", 0),
+                                "pushed_at": entry.get("imagePushedAt", ""),
+                                "digest": entry.get("imageDigest", ""),
+                            })
+
+                commit_shas_set = {c["sha_full"] for c in commit_data}
+                for sha_full, detail_list in ecr_by_sha.items():
+                    if sha_full not in commit_shas_set:
+                        continue
+                    formatted_ecr = []
+                    for detail in sorted(detail_list, key=lambda d: d["tag"]):
+                        tag = detail["tag"]
+                        suffix = tag[41:]
+                        full_image = f"{ECR_REGISTRY}:{tag}"
+                        pull_cmd = f"(ECR={full_image} && docker pull $ECR)"
+                        framework, image_type = _parse_ecr_suffix(suffix)
+                        local_dev_cmd = ""
+                        if framework in ("vllm", "sglang", "trtllm", "dynamo", "none"):
+                            local_dev_cmd = (
+                                f"(ECR={full_image}"
+                                f" && docker pull $ECR"
+                                f" && curl -sL {BUILD_LOCAL_DEV_SCRIPT_URL} | python3 - $ECR --build)"
+                            )
+                        size_bytes = detail["size_bytes"]
+                        if size_bytes >= 1e9:
+                            size_display = f"{size_bytes / 1e9:.1f} GB"
+                        elif size_bytes >= 1e6:
+                            size_display = f"{size_bytes / 1e6:.0f} MB"
+                        else:
+                            size_display = f"{size_bytes} B"
+                        pushed_at = detail["pushed_at"]
+                        if pushed_at:
+                            try:
+                                dt = datetime.fromisoformat(pushed_at)
+                                created_display = dt.astimezone(ZoneInfo('America/Los_Angeles')).strftime('%Y-%m-%d %H:%M %Z')
+                            except (ValueError, TypeError):
+                                created_display = pushed_at[:19]
+                        else:
+                            created_display = ""
+                        formatted_ecr.append({
+                            "tag": tag,
+                            "suffix": suffix,
+                            "pull_cmd": pull_cmd,
+                            "full_image": full_image,
+                            "framework": framework,
+                            "image_type": image_type,
+                            "local_dev_cmd": local_dev_cmd,
+                            "size_display": size_display,
+                            "created_display": created_display,
+                            "digest": detail["digest"],
+                        })
+                    ecr_images_by_sha[sha_full] = formatted_ecr
+                self.logger.info(f"ECR cache: {len(ecr_images_by_sha)} commits with images (from {len(ecr_details)} details)")
+            except (OSError, json.JSONDecodeError, ValueError) as e:
+                self.logger.warning(f"Failed to load ECR cache {ECR_CACHE_FILE}: {e}")
 
         # Generate timestamp (PT)
         generated_time = datetime.now(ZoneInfo('America/Los_Angeles')).strftime('%Y-%m-%d %H:%M:%S %Z')
@@ -2234,10 +2337,12 @@ class CommitHistoryGenerator:
         build_trees_s = float(render_t.as_dict(include_total=False).get("build_trees") or 0.0)
 
         t0_tpl = time.monotonic()
+        self.logger.info(f"ECR DEBUG: passing ecr_images_by_sha with {len(ecr_images_by_sha)} entries to template, first keys: {list(ecr_images_by_sha.keys())[:3]}")
         rendered_html = template.render(
             commits=commit_data,
             docker_images=docker_images,
-            dev_registry_images=dev_registry_images,
+            gitlab_dev_images=gitlab_dev_images,
+            ecr_images=ecr_images_by_sha,
             gitlab_images=gitlab_images,
             gitlab_pipelines=gitlab_pipelines,
             mr_pipelines=mr_pipelines,

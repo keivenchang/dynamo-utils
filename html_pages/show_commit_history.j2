@@ -967,8 +967,10 @@ window.__dashboardOnReadyQueue.push(function() {
 {%- set commit_link = "https://github.com/ai-dynamo/dynamo/commit/" ~ sha_full -%}
 {%- set gitlab_commit_link = "https://gitlab-master.nvidia.com/dl/ai-dynamo/dynamo/-/commit/" ~ sha_full -%}
 {%- set has_docker_images = sha_short in docker_images and docker_images[sha_short] -%}
-{%- set has_dev_images = sha_short in dev_registry_images and dev_registry_images[sha_short] -%}
-{%- set dev_imgs = dev_registry_images.get(sha_short, []) -%}
+{%- set has_gitlab_dev_images = sha_short in gitlab_dev_images and gitlab_dev_images[sha_short] -%}
+{%- set gitlab_dev_imgs = gitlab_dev_images.get(sha_short, []) -%}
+{%- set ecr_imgs = ecr_images.get(sha_full, []) -%}
+{%- set has_ecr_images = ecr_imgs | length > 0 -%}
 {%- set has_gitlab = sha_full in gitlab_images and gitlab_images[sha_full] -%}
 {%- set gitlab_imgs = gitlab_images.get(sha_full, []) -%}
 {%- set composite_bg_color = commit.composite_bg_color -%}
@@ -989,7 +991,7 @@ window.__dashboardOnReadyQueue.push(function() {
 {%- set status_info = build_status.get(sha_short, {}) -%}
 {%- set status = status_info.get('status', 'unknown') -%}
 {%- set inherited = status_info.get('inherited', False) -%}
-{%- set has_composite_toggle = has_docker_images or has_dev_images -%}
+{%- set has_composite_toggle = has_docker_images or has_gitlab_dev_images or has_ecr_images -%}
 {# Expand/collapse triangle MUST be the first element in the cell (greyed out if nothing to expand). #}
 {%- if has_composite_toggle -%}
 <a href="#"
@@ -1010,7 +1012,7 @@ window.__dashboardOnReadyQueue.push(function() {
 {%- set latest_date = report_entry[0] if report_entry else log_paths_list[-1][0] -%}
 {# UX: Ball icon (pass/fail) + Image SHA badge is the link to report.html. #}
 {%- set cds_label = composite_sha[:6]|upper -%}
-{%- if commit.build_and_test_status_icon -%}{{ commit.build_and_test_status_icon|safe }}{%- endif -%}<a href="{{ report_path }}" target="_blank" class="image-sha-badge" title="{%- if inherited -%}Inherited: {%- endif -%}{%- if status == 'success' -%}All local builds passed{%- elif status == 'failed' -%}Some local builds failed{%- else -%}Build in progress / no local build status{%- endif -%} - Click to view build logs">{{ cds_label }}</a>
+{%- if commit.build_and_test_status_icon -%}{{ commit.build_and_test_status_icon|safe }}{%- endif -%}<a href="{{ report_path }}" target="_blank" class="image-sha-badge" title="{%- if inherited -%}Inherited: {%- endif -%}{%- if status == 'success' -%}All local builds passed{%- elif status == 'failed' -%}Some local builds failed{%- else -%}Build in progress / no local build status{%- endif -%} - Click to view build logs">{{ cds_label }}</a>{%- if has_gitlab_dev_images -%}<span style="display:inline-block;width:6px;height:6px;border-radius:50%;background:#d97706;margin-left:2px;vertical-align:middle;" title="GitLab Dev Registry images available"></span>{%- endif -%}
 {%- if log_paths_list|length > 1 -%}
 <a href="#" onclick="toggleBuildHistory(event, '{{ sha_short }}'); return false;" style="text-decoration: none; margin-left: 0; color: #656d76; font-size: 10px; vertical-align: middle;" title="Show build history ({{ log_paths_list|length }} builds)">{{ log_paths_list|length }}</a>
 <div id="build-history-{{ sha_short }}" style="display: none; position: absolute; background: #fff; border: 1px solid #d0d7de; border-radius: 6px; padding: 8px; margin-top: 4px; z-index: 1000; box-shadow: 0 8px 24px rgba(140, 149, 159, 0.2);">
@@ -1030,9 +1032,9 @@ window.__dashboardOnReadyQueue.push(function() {
 <a href="#"
    class="image-sha-badge"
    onclick="toggleDockerImages(event, document.getElementById('docker-toggle-{{ sha_short }}')); return false;"
-   title="{%- if inherited -%}Inherited: {%- endif -%}{%- if status == 'success' -%}All local builds passed{%- elif status == 'failed' -%}Some local builds failed{%- else -%}Build in progress / no local build status{%- endif -%} - Click to show Docker images">{{ cds_label }}</a>
+   title="{%- if inherited -%}Inherited: {%- endif -%}{%- if status == 'success' -%}All local builds passed{%- elif status == 'failed' -%}Some local builds failed{%- else -%}Build in progress / no local build status{%- endif -%} - Click to show Docker images">{{ cds_label }}</a>{%- if has_gitlab_dev_images -%}<span style="display:inline-block;width:6px;height:6px;border-radius:50%;background:#d97706;margin-left:2px;vertical-align:middle;" title="GitLab Dev Registry images available"></span>{%- endif -%}
 {%- else -%}
-<span class="image-sha-badge" title="{%- if inherited -%}Inherited: {%- endif -%}{%- if status == 'success' -%}All local builds passed{%- elif status == 'failed' -%}Some local builds failed{%- else -%}Build in progress / no local build status{%- endif -%}">{{ cds_label }}</span>
+<span class="image-sha-badge" title="{%- if inherited -%}Inherited: {%- endif -%}{%- if status == 'success' -%}All local builds passed{%- elif status == 'failed' -%}Some local builds failed{%- else -%}Build in progress / no local build status{%- endif -%}">{{ cds_label }}</span>{%- if has_gitlab_dev_images -%}<span style="display:inline-block;width:6px;height:6px;border-radius:50%;background:#d97706;margin-left:2px;vertical-align:middle;" title="GitLab Dev Registry images available"></span>{%- endif -%}
 {%- endif -%}
 {%- endif -%}
 </span></td>
@@ -1414,7 +1416,8 @@ Framework: {{ img.framework }}">{{ display_tag }}</td>
 {%- endif -%}
 
 {# Docker images row (Image SHA dropdown) if any local or dev registry images exist #}
-{% if has_docker_images or has_dev_images %}
+{# Docker images row: shown when any of local docker / GitLab dev registry / AWS ECR images exist #}
+{% if has_docker_images or has_gitlab_dev_images or has_ecr_images %}
 {%- set images = docker_images.get(sha_short, []) -%}
 
 <tr class="docker-images-row" id="docker-row-{{ sha_short }}" style="display: none;">
@@ -1427,7 +1430,7 @@ Framework: {{ img.framework }}">{{ display_tag }}</td>
           title="Close Docker images"><svg aria-hidden="true" viewBox="0 0 16 16" version="1.1" width="12" height="12" data-view-component="true" class="octicon octicon-x" fill="currentColor"><path fill-rule="evenodd" d="M3.72 3.72a.75.75 0 011.06 0L8 6.94l3.22-3.22a.75.75 0 111.06 1.06L9.06 8l3.22 3.22a.75.75 0 11-1.06 1.06L8 9.06l-3.22 3.22a.75.75 0 11-1.06-1.06L6.94 8 3.72 4.78a.75.75 0 010-1.06z"></path></svg></button>
 </div>
 {# GitLab Dev Registry Images Section (dev/dynamo sub-repo) #}
-{% if dev_imgs %}
+{% if gitlab_dev_imgs %}
 <div style="margin-bottom: 12px; padding: 8px; background-color: white; border: 1px solid #d0d7de; border-radius: 4px;">
 <div style="font-weight: 600; margin-bottom: 4px; font-size: 13px;">GitLab Dev Registry Images: <a href="https://gitlab-master.nvidia.com/dl/ai-dynamo/dynamo/container_registry/165910?orderBy=PUBLISHED_AT&amp;sort=desc&amp;search%5B%5D={{ commit.commit_sha_9 }}" target="_blank" style="color: #fc6d26; text-decoration: none; font-weight: 600; font-size: 12px;" title="View dev images for {{ commit.commit_sha_9 }} in GitLab Container Registry">View Registry</a></div>
 <table style="border: none; background-color: white; border-collapse: collapse;">
@@ -1442,11 +1445,41 @@ Framework: {{ img.framework }}">{{ display_tag }}</td>
 </tr>
 </thead>
 <tbody>
-{% for img in dev_imgs | sort(attribute='tag') %}
+{% for img in gitlab_dev_imgs | sort(attribute='tag') %}
 <tr>
 <td style="font-family: monospace; font-size: 11px; padding: 1px 4px; border: none; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="{{ img.location }}">{{ img.image_name }}</td>
 <td style="font-size: 11px; padding: 1px 4px; border: none; white-space: nowrap;"><button data-clipboard-text="{{ img.pull_dev_cmd }}" onclick="copyFromClipboardAttr(this)" style="padding: 1px 3px; font-size: 11px; background-color: transparent; color: #57606a; border: 1px solid #d0d7de; border-radius: 4px; cursor: pointer; display: inline-flex; align-items: center; vertical-align: middle; line-height: 1;" title="Click to copy: pull dev image + tag locally + remove registry prefix" onmouseover="this.style.backgroundColor='#f3f4f6'; this.style.borderColor='#8c959f';" onmouseout="this.style.backgroundColor='transparent'; this.style.borderColor='#d0d7de';"><svg width="10" height="10" viewBox="0 0 16 16" fill="currentColor" style="display: inline-block;">{% include "copy_icon_paths.svg" %}</svg></button><span style="margin-left: 3px;">copy command</span></td>
 <td style="font-size: 11px; padding: 1px 4px; border: none; white-space: nowrap;"><button data-clipboard-text="{{ img.local_dev_cmd }}" onclick="copyFromClipboardAttr(this)" style="padding: 1px 3px; font-size: 11px; background-color: transparent; color: #57606a; border: 1px solid #d0d7de; border-radius: 4px; cursor: pointer; display: inline-flex; align-items: center; vertical-align: middle; line-height: 1;" title="Click to copy: pull dev + build local-dev" onmouseover="this.style.backgroundColor='#f3f4f6'; this.style.borderColor='#8c959f';" onmouseout="this.style.backgroundColor='transparent'; this.style.borderColor='#d0d7de';"><svg width="10" height="10" viewBox="0 0 16 16" fill="currentColor" style="display: inline-block;">{% include "copy_icon_paths.svg" %}</svg></button><span style="margin-left: 3px;">copy command</span></td>
+<td style="font-size: 11px; padding: 1px 4px; border: none;">{{ img.framework }}</td>
+<td style="font-size: 11px; padding: 1px 4px; border: none;">{{ img.size_display }}</td>
+<td style="font-size: 11px; padding: 1px 4px; border: none;">{{ img.created_display }}</td>
+</tr>
+{% endfor %}
+</tbody>
+</table>
+</div>
+{% endif %}
+{# AWS ECR Registry Images Section #}
+{% if ecr_imgs %}
+<div style="margin-bottom: 12px; padding: 8px; background-color: white; border: 1px solid #d0d7de; border-radius: 4px;">
+<div style="font-weight: 600; margin-bottom: 4px; font-size: 13px;">AWS ECR Registry Images: ({{ ecr_imgs|length }}) <span style="font-weight: 400; font-size: 11px; color: #57606a;">Requires <a href="https://nvidia.enterprise.slack.com/docs/T04SYRAP3/F0AHW69HC8P" target="_blank" style="color: #0969da; text-decoration: none;">nvsec authentication</a></span></div>
+<table style="border: none; background-color: white; border-collapse: collapse;">
+<thead>
+<tr>
+<th style="padding: 2px 4px; border: none; font-size: 11px;">Image Tag</th>
+<th style="padding: 2px 4px; border: none; font-size: 11px;">pull</th>
+<th style="padding: 2px 4px; border: none; font-size: 11px;">pull+build local-dev</th>
+<th style="padding: 2px 4px; border: none; font-size: 11px;">Framework</th>
+<th style="padding: 2px 4px; border: none; font-size: 11px;">Size</th>
+<th style="padding: 2px 4px; border: none; font-size: 11px;">Created (PDT)</th>
+</tr>
+</thead>
+<tbody>
+{% for img in ecr_imgs %}
+<tr>
+<td style="font-family: monospace; font-size: 11px; padding: 1px 4px; border: none; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="{{ img.full_image }}">{{ img.tag }}</td>
+<td style="font-size: 11px; padding: 1px 4px; border: none; white-space: nowrap;"><button data-clipboard-text="{{ img.pull_cmd }}" onclick="copyFromClipboardAttr(this)" style="padding: 1px 3px; font-size: 11px; background-color: transparent; color: #57606a; border: 1px solid #d0d7de; border-radius: 4px; cursor: pointer; display: inline-flex; align-items: center; vertical-align: middle; line-height: 1;" title="Click to copy: {{ img.pull_cmd }}" onmouseover="this.style.backgroundColor='#f3f4f6'; this.style.borderColor='#8c959f';" onmouseout="this.style.backgroundColor='transparent'; this.style.borderColor='#d0d7de';"><svg width="10" height="10" viewBox="0 0 16 16" fill="currentColor" style="display: inline-block;">{% include "copy_icon_paths.svg" %}</svg></button><span style="margin-left: 3px;">copy command</span></td>
+<td style="font-size: 11px; padding: 1px 4px; border: none; white-space: nowrap;">{% if img.local_dev_cmd %}<button data-clipboard-text="{{ img.local_dev_cmd }}" onclick="copyFromClipboardAttr(this)" style="padding: 1px 3px; font-size: 11px; background-color: transparent; color: #57606a; border: 1px solid #d0d7de; border-radius: 4px; cursor: pointer; display: inline-flex; align-items: center; vertical-align: middle; line-height: 1;" title="Click to copy: pull + build local-dev" onmouseover="this.style.backgroundColor='#f3f4f6'; this.style.borderColor='#8c959f';" onmouseout="this.style.backgroundColor='transparent'; this.style.borderColor='#d0d7de';"><svg width="10" height="10" viewBox="0 0 16 16" fill="currentColor" style="display: inline-block;">{% include "copy_icon_paths.svg" %}</svg></button><span style="margin-left: 3px;">copy command</span>{% else %}<span style="color: #8c959f;">—</span>{% endif %}</td>
 <td style="font-size: 11px; padding: 1px 4px; border: none;">{{ img.framework }}</td>
 <td style="font-size: 11px; padding: 1px 4px; border: none;">{{ img.size_display }}</td>
 <td style="font-size: 11px; padding: 1px 4px; border: none;">{{ img.created_display }}</td>

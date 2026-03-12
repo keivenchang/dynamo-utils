@@ -32,10 +32,15 @@ from pathlib import Path
 TEMPLATE_REL_PATH = "container/templates/local_dev.Dockerfile"
 
 REGISTRY = "gitlab-master.nvidia.com:5005/dl/ai-dynamo/dynamo/dev"
+ECR_REGISTRY = "210086341041.dkr.ecr.us-west-2.amazonaws.com/ai-dynamo/dynamo"
 
 # dynamo:<IMAGE_SHA_UPPER>.<commit_sha>-<framework>[-optional-segments]-dev
 # Also accepts legacy format: dynamo:<sha>.IMAGE.<6hex>-<framework>-...-dev (deprecated)
 IMAGE_PATTERN = re.compile(r"^dynamo:([A-F0-9]{6}\.[a-f0-9]+|[a-f0-9]+(\.IMAGE\.[0-9a-f]{6})?)-(none|vllm|sglang|trtllm)(-[a-zA-Z0-9.]+)*-dev$")
+
+# ECR format: 210086341041.dkr.ecr.../<repo>:<40hex>-<framework>-<segments>
+# or dynamo:<40hex>-<framework>-<segments> (after local retag)
+ECR_PATTERN = re.compile(r"^(dynamo|[0-9]+\.dkr\.ecr\.[^/]+/[^:]+):([a-f0-9]{40})-(none|vllm|sglang|trtllm|dynamo)(-[a-zA-Z0-9.]+)*$")
 
 # Pre-rendered fallback: used when local_dev.Dockerfile is not found on disk.
 # {base_image} is replaced at render time.
@@ -190,13 +195,32 @@ def image_exists_locally(image: str) -> bool:
     return rc == 0
 
 
+def _is_ecr_image(image: str) -> bool:
+    """Check if image is an ECR full URL or an ECR-format local tag."""
+    return bool(ECR_PATTERN.match(image))
+
+
 def ensure_image_local(image: str) -> None:
-    """Pull from GitLab registry if the image is not available locally, then retag."""
+    """Pull from registry if the image is not available locally, then retag."""
     if image_exists_locally(image):
         print(f"Image {image} found locally.")
         return
 
-    # image is "dynamo:<tag>", remote is "REGISTRY/dynamo:<tag>"
+    if _is_ecr_image(image) and image.startswith(ECR_REGISTRY):
+        # ECR full URL — pull directly
+        print(f"Image not found locally. Pulling from ECR: {image} ...")
+        rc = subprocess.call(["docker", "pull", image])
+        if rc != 0:
+            print(f"ERROR: docker pull exited with code {rc}", file=sys.stderr)
+            sys.exit(rc)
+        # Retag to short name
+        short = f"dynamo:{image.split(':', 1)[1]}"
+        print(f"Retagging {image} -> {short}")
+        subprocess.call(["docker", "tag", image, short])
+        subprocess.call(["docker", "rmi", image])
+        return
+
+    # GitLab: image is "dynamo:<tag>", remote is "REGISTRY/dynamo:<tag>"
     remote = f"{REGISTRY}/{image}"
     print(f"Image {image} not found locally. Pulling {remote} ...")
     rc = subprocess.call(["docker", "pull", remote])
@@ -215,22 +239,30 @@ def ensure_image_local(image: str) -> None:
 
 
 def validate_image(image: str) -> re.Match[str]:
-    """Validate the image name matches dynamo:<IMAGE_SHA>.<commit_sha>-<framework>[...]-dev."""
+    """Validate the image name matches a supported format (GitLab or ECR)."""
     m = IMAGE_PATTERN.match(image)
-    if not m:
-        print(
-            f"ERROR: Image must match dynamo:<IMAGE_SHA>.<commit_sha>-<framework>[...]-dev\n"
-            f"       where framework is one of: none, vllm, sglang, trtllm\n"
-            f"       Got: {image}",
-            file=sys.stderr,
-        )
-        sys.exit(1)
-    return m
+    if m:
+        return m
+    m = ECR_PATTERN.match(image)
+    if m:
+        return m
+    print(
+        f"ERROR: Image must match one of:\n"
+        f"       dynamo:<IMAGE_SHA>.<commit_sha>-<framework>[...]-dev  (GitLab)\n"
+        f"       <ecr_registry>:<40hex_sha>-<framework>-<segments>     (ECR)\n"
+        f"       dynamo:<40hex_sha>-<framework>-<segments>             (ECR local)\n"
+        f"       where framework is one of: none, vllm, sglang, trtllm, dynamo\n"
+        f"       Got: {image}",
+        file=sys.stderr,
+    )
+    sys.exit(1)
 
 
 def output_image_name(image: str) -> str:
-    """Derive the local-dev output tag: replace trailing '-dev' with '-local-dev'."""
-    # Already validated by validate_image, so this is safe.
+    """Derive the local-dev output tag."""
+    if _is_ecr_image(image):
+        tag = image.split(":", 1)[1]
+        return f"dynamo:{tag}-local-dev"
     return re.sub(r"-dev$", "-local-dev", image)
 
 
