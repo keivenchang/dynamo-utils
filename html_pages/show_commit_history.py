@@ -1687,6 +1687,8 @@ class CommitHistoryGenerator:
                 for sha_full, detail_list in ecr_by_sha.items():
                     if sha_full not in commit_shas_set:
                         continue
+                    _ECR_TYPE_ORDER = {"dev": 0, "runtime": 1}
+                    _ECR_ARCH_ORDER = {"amd64": 0, "arm64": 1}
                     formatted_ecr = []
                     for detail in sorted(detail_list, key=lambda d: d["tag"]):
                         tag = detail["tag"]
@@ -1694,6 +1696,8 @@ class CommitHistoryGenerator:
                         full_image = f"{ECR_REGISTRY}:{tag}"
                         pull_cmd = f"(ECR={full_image} && docker pull $ECR)"
                         framework, image_type = _parse_ecr_suffix(suffix)
+                        suffix_parts = suffix.split("-")
+                        arch = suffix_parts[-1] if suffix_parts[-1] in ("amd64", "arm64") else "other"
                         local_dev_cmd = ""
                         if framework in ("vllm", "sglang", "trtllm", "dynamo", "none"):
                             local_dev_cmd = (
@@ -1717,18 +1721,29 @@ class CommitHistoryGenerator:
                                 created_display = pushed_at[:19]
                         else:
                             created_display = ""
+                        tag_html = html.escape(tag)
+                        tag_html = re.sub(r'-dev-', '-<b>dev</b>-', tag_html)
+                        tag_html = re.sub(r'-amd64\b', r'-<b style="color:#76b900">amd64</b> [x86]', tag_html)
+                        tag_html = re.sub(r'-arm64\b', r'-<b style="color:#e91e8c">arm64</b> [ARM]', tag_html)
                         formatted_ecr.append({
                             "tag": tag,
+                            "tag_html": tag_html,
                             "suffix": suffix,
                             "pull_cmd": pull_cmd,
                             "full_image": full_image,
                             "framework": framework,
                             "image_type": image_type,
+                            "arch": arch,
                             "local_dev_cmd": local_dev_cmd,
                             "size_display": size_display,
                             "created_display": created_display,
                             "digest": detail["digest"],
                         })
+                    formatted_ecr.sort(key=lambda x: (
+                        _ECR_ARCH_ORDER.get(x["arch"], 99),
+                        _ECR_TYPE_ORDER.get(x["image_type"], 99),
+                        x["tag"],
+                    ))
                     ecr_images_by_sha[sha_full] = formatted_ecr
                 self.logger.info(f"ECR cache: {len(ecr_images_by_sha)} commits with images (from {len(ecr_details)} details)")
             except (OSError, json.JSONDecodeError, ValueError) as e:
