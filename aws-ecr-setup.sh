@@ -3,11 +3,10 @@
 # Registry: 210086341041.dkr.ecr.us-west-2.amazonaws.com/ai-dynamo/dynamo
 #
 # Usage:
-#   ./aws-ecr-setup.sh              # login (skips browser if creds still valid)
+#   ./aws-ecr-setup.sh              # login (AWS + Docker ECR, skips browser if creds valid)
 #   ./aws-ecr-setup.sh --login      # same as above
-#   ./aws-ecr-setup.sh --logout     # stop refresh daemons + clear credentials
+#   ./aws-ecr-setup.sh --logout     # clear credentials + docker logout
 #   ./aws-ecr-setup.sh --install    # one-time: install AWS CLI + nvsec
-#   ./aws-ecr-setup.sh --docker     # login + docker login for pull/push
 #   ./aws-ecr-setup.sh --list-images       # login + list ECR image tags (fast, tags only)
 #   ./aws-ecr-setup.sh --describe-images   # login + full metadata (size, dates) - slower
 #   ./aws-ecr-setup.sh --fast-list-images  # quick ECR check (first 20 tags, no login check)
@@ -194,14 +193,11 @@ case "${1:-}" in
         ;;
     --login)
         login
+        echo ""
+        docker_login
         ;;
     --logout)
         logout
-        ;;
-    --docker)
-        login
-        echo ""
-        docker_login
         ;;
     --list-images)
         login
@@ -218,9 +214,11 @@ case "${1:-}" in
         ;;
     "")
         login
+        echo ""
+        docker_login
         ;;
     *)
-        echo "Usage: $0 [--login|--logout|--install|--docker|--list-images|--describe-images|--fast-list-images]"
+        echo "Usage: $0 [--login|--logout|--install|--list-images|--describe-images|--fast-list-images]"
         exit 1
         ;;
 esac
