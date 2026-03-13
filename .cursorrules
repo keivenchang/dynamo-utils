@@ -883,6 +883,10 @@ RFR (code: +123/-55 lines, documents: 50 lines changed):
 *Reviewers:* <top 3 reviewers based on past commits>, @Ryan McCormick, ...
 ```
 Then add 3 terse bullets about the PR
+
+**MUST: Before listing reviewers, run `git log --oneline --all --author=... -- <changed_dirs>` to identify
+the actual code owners from commit history. NEVER guess reviewers from the mapping list alone.
+The top reviewer should be whoever has the most recent/frequent commits on the files being changed.**
 Output in plain text surrounded by triple backticks
 
 ### 6.1.1 GitHub to Slack Login Mappings
@@ -903,6 +907,7 @@ Output in plain text surrounded by triple backticks
 
 If 0 document lines changed, omit "documents: ..." section
 Never show literal <PR#NUMBER>, ask if unknown
+NEVER output an RFR with a placeholder URL -- always ask for the PR number FIRST, then generate the RFR
 
 ## 6.2 GitHub PR Description Template
 Look at chain of continuous commits from same author
