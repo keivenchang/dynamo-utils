@@ -17,6 +17,12 @@ If you do only one thing: re-read this section before making changes or running 
   - Wait for explicit user request like "commit this" or "create a commit"
   - This applies even after completing tasks - just report what was done, don't offer to commit
 
+- Authentication tokens (MUST):
+  - NEVER print, echo, or display token values. Only use them via variable substitution in commands.
+  - GitHub: `GH_TOKEN=$(grep oauth_token ~/.config/gh/hosts.yml | head -1 | awk '{print $2}')`
+  - GitLab: `GL_TOKEN=$(cat ~/.config/gitlab-token)`
+  - Hugging Face: `HF_TOKEN=$(cat ~/.cache/huggingface/token)`
+
 - Hugging Face usage (MUST):
   - DO NOT use Hugging Face libraries or APIs in new code unless explicitly requested
   - Avoid dependencies on transformers, datasets, accelerate, tokenizers, etc.
