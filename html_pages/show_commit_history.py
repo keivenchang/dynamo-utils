@@ -409,6 +409,7 @@ class CommitHistoryGenerator:
         self,
         max_commits: int = 50,
         output_path: Optional[Path] = None,
+        output_json: Optional[Path] = None,
         logs_dir: Optional[Path] = None,
         export_pipeline_pr_csv: Optional[Path] = None,
     ) -> int:
@@ -788,7 +789,7 @@ class CommitHistoryGenerator:
 
                 self.logger.info("[progress] Phase 4/5: Rendering HTML for %d commits", len(commit_data))
                 t0 = phase_t.start()
-                html_content = self._generate_commit_history_html(
+                html_content, template_context = self._generate_commit_history_html(
                     commit_data,
                     logs_dir,
                     output_path,
@@ -805,6 +806,12 @@ class CommitHistoryGenerator:
                 t0 = phase_t.start()
                 atomic_write_text(output_path, html_content, encoding="utf-8")
                 phase_t.stop("write_output", t0)
+                if output_json is not None:
+                    json_data = self._build_json_output(template_context)
+                    json_str = json.dumps(json_data, ensure_ascii=False, indent=2, default=str)
+                    output_json.parent.mkdir(parents=True, exist_ok=True)
+                    atomic_write_text(output_json, json_str, encoding="utf-8")
+                    self.logger.info("[progress] JSON output: %d bytes to %s", len(json_str), output_json)
                 self.logger.info("[progress] Done. Total: %.1fs", phase_t.as_dict(include_total=True).get("total", 0))
                 # Cache miss summary
                 if self.verbose or self.debug:
@@ -961,6 +968,83 @@ class CommitHistoryGenerator:
         )
         return render_tree_divs([root])
 
+    def _build_json_output(self, template_context: Dict[str, Any]) -> Dict[str, Any]:
+        """Build a JSON-serializable dict from the template context.
+
+        Strips HTML-only fields (pre-rendered tree HTML, icon HTML, style strings).
+        Converts non-serializable types (datetime, Path, tuple) to strings/lists.
+        """
+        # Serialize commits: convert datetime -> ISO string, strip pre-rendered HTML fragments.
+        commits_json = []
+        for c in template_context.get("commits", []):
+            row: Dict[str, Any] = {}
+            for k, v in c.items():
+                if k in ("github_checks_tree_html", "gitlab_checks_tree_html", "build_and_test_status_icon"):
+                    continue  # HTML rendering artifacts — not useful in JSON
+                if hasattr(v, "isoformat"):
+                    row[k] = v.isoformat()
+                else:
+                    row[k] = v
+            commits_json.append(row)
+
+        # page_stats: list of 3-tuples -> list of dicts; strip html.* keys (rendering artifacts).
+        page_stats_json = [
+            {"key": k, "value": v, "description": d}
+            for k, v, d in template_context.get("page_stats", [])
+            if not str(k).startswith("html.")
+        ]
+
+        # log_paths: dict of lists of (date, path) tuples -> dict of lists of dicts
+        log_paths_json = {
+            sha: [{"date": d, "path": str(p)} for d, p in paths]
+            for sha, paths in (template_context.get("log_paths") or {}).items()
+        }
+
+        # report_path_by_commit_image: dict of (date, path) tuples -> dict of dicts
+        report_path_json = {
+            k: {"date": d, "path": str(p)}
+            for k, (d, p) in (template_context.get("report_path_by_commit_image") or {}).items()
+        }
+
+        # HTML-only / rendering-only keys to exclude from JSON output
+        html_only_keys = {
+            "commits", "log_paths", "report_path_by_commit_image", "page_stats",
+            "pass_plus_style",
+        }
+        # Also exclude all ci_status_icon_context keys (they are HTML strings)
+        icon_keys = set(ci_status_icon_context().keys())
+
+        result: Dict[str, Any] = {
+            "meta": {
+                "generated_time": template_context.get("generated_time"),
+                "job_started_time": template_context.get("job_started_time"),
+                "job_elapsed_str": template_context.get("job_elapsed_str"),
+                "branch_name": template_context.get("branch_name"),
+                "hostname": template_context.get("hostname"),
+                "commit_count": template_context.get("commit_count"),
+                "gha_success_count": template_context.get("gha_success_count"),
+                "gha_failed_count": template_context.get("gha_failed_count"),
+                "gha_in_progress_count": template_context.get("gha_in_progress_count"),
+                "gha_other_count": template_context.get("gha_other_count"),
+                "grafana_pr_url_template": template_context.get("grafana_pr_url_template"),
+            },
+            "commits": commits_json,
+            "github_actions_status": template_context.get("github_actions_status") or {},
+            "gha_per_commit_stats": template_context.get("gha_per_commit_stats") or {},
+            "gitlab_pipelines": template_context.get("gitlab_pipelines") or {},
+            "mr_pipelines": template_context.get("mr_pipelines") or {},
+            "pipeline_job_counts": template_context.get("pipeline_job_counts") or {},
+            "gitlab_images": template_context.get("gitlab_images") or {},
+            "gitlab_dev_images": template_context.get("gitlab_dev_images") or {},
+            "ecr_images": template_context.get("ecr_images") or {},
+            "docker_images": template_context.get("docker_images") or {},
+            "build_status": template_context.get("build_status") or {},
+            "log_paths": log_paths_json,
+            "report_path_by_commit_image": report_path_json,
+            "page_stats": page_stats_json,
+        }
+        return result
+
     def _generate_commit_history_html(
         self,
         commit_data: List[dict],
@@ -972,7 +1056,7 @@ class CommitHistoryGenerator:
         generation_t0: Optional[float] = None,
         branch_name: Optional[str] = None,
         job_started_time: Optional[str] = None,
-    ) -> str:
+    ) -> Tuple[str, Dict[str, Any]]:
         """Generate HTML report for commit history with Docker image detection
 
         Args:
@@ -984,7 +1068,7 @@ class CommitHistoryGenerator:
             pr_to_required_checks: Mapping PR number -> list of required check names (if known)
 
         Returns:
-            HTML content as string
+            Tuple of (HTML content as string, template context dict)
         """
         # Initialize optional parameters
         pr_to_merge_date = pr_to_merge_date or {}
@@ -2338,36 +2422,37 @@ class CommitHistoryGenerator:
 
         t0_tpl = time.monotonic()
         self.logger.info(f"ECR DEBUG: passing ecr_images_by_sha with {len(ecr_images_by_sha)} entries to template, first keys: {list(ecr_images_by_sha.keys())[:3]}")
-        rendered_html = template.render(
-            commits=commit_data,
-            docker_images=docker_images,
-            gitlab_dev_images=gitlab_dev_images,
-            ecr_images=ecr_images_by_sha,
-            gitlab_images=gitlab_images,
-            gitlab_pipelines=gitlab_pipelines,
-            mr_pipelines=mr_pipelines,
-            pipeline_job_counts=pipeline_job_counts,
-            log_paths=log_paths,
-            report_path_by_commit_image=report_path_by_commit_image,
-            build_status=build_status,
-            github_actions_status=github_actions_status,
-            generated_time=generated_time,
-            job_started_time=job_started_time,
-            job_elapsed_str=f"{int(elapsed_s // 60)} minutes" if elapsed_s is not None else "",
-            commit_count=len(commit_data),
-            gha_success_count=gha_success_count,
-            gha_failed_count=gha_failed_count,
-            gha_in_progress_count=gha_in_progress_count,
-            gha_other_count=gha_other_count,
-            gha_per_commit_stats=gha_per_commit_stats,
-            page_stats=page_stats,
-            branch_name=branch_name or "main",
-            hostname=socket.gethostname(),
+        template_context: Dict[str, Any] = {
+            "commits": commit_data,
+            "docker_images": docker_images,
+            "gitlab_dev_images": gitlab_dev_images,
+            "ecr_images": ecr_images_by_sha,
+            "gitlab_images": gitlab_images,
+            "gitlab_pipelines": gitlab_pipelines,
+            "mr_pipelines": mr_pipelines,
+            "pipeline_job_counts": pipeline_job_counts,
+            "log_paths": log_paths,
+            "report_path_by_commit_image": report_path_by_commit_image,
+            "build_status": build_status,
+            "github_actions_status": github_actions_status,
+            "generated_time": generated_time,
+            "job_started_time": job_started_time,
+            "job_elapsed_str": f"{int(elapsed_s // 60)} minutes" if elapsed_s is not None else "",
+            "commit_count": len(commit_data),
+            "gha_success_count": gha_success_count,
+            "gha_failed_count": gha_failed_count,
+            "gha_in_progress_count": gha_in_progress_count,
+            "gha_other_count": gha_other_count,
+            "gha_per_commit_stats": gha_per_commit_stats,
+            "page_stats": page_stats,
+            "branch_name": branch_name or "main",
+            "hostname": socket.gethostname(),
             # Icons (shared look; legend/tooltips/status bar must match across dashboards)
             **ci_status_icon_context(),
-            pass_plus_style=PASS_PLUS_STYLE,
-            grafana_pr_url_template=GRAFANA_PR_URL_TEMPLATE,
-        )
+            "pass_plus_style": PASS_PLUS_STYLE,
+            "grafana_pr_url_template": GRAFANA_PR_URL_TEMPLATE,
+        }
+        rendered_html = template.render(**template_context)
         tpl_render_s = max(0.0, time.monotonic() - t0_tpl)
 
         # Patch placeholders into the final HTML.
@@ -2376,7 +2461,7 @@ class CommitHistoryGenerator:
         rendered_html = rendered_html.replace(PH_RENDER, f"{(build_trees_s + tpl_render_s):.2f}s")
         rendered_html = rendered_html.replace("__TIMING_HTML_BUILD_TREES_GH__", f"{build_github_s:.2f}s")
         rendered_html = rendered_html.replace("__TIMING_HTML_BUILD_TREES_GL__", f"{build_gitlab_s:.2f}s")
-        return rendered_html
+        return rendered_html, template_context
 
     def _get_cached_gitlab_images_from_sha(self, commit_data: List[dict]) -> dict:
         """Get Docker images mapped by commit SHA using cache.
@@ -2712,6 +2797,14 @@ Environment Variables:
     )
 
     parser.add_argument(
+        '--output-json',
+        type=Path,
+        default=None,
+        dest='output_json',
+        help='Output path for JSON data file (optional; writes structured dashboard data as JSON alongside HTML)'
+    )
+
+    parser.add_argument(
         '--skip-gitlab-api',
         dest='gitlab_fetch_skip',
         action='store_true',
@@ -2808,6 +2901,7 @@ Environment Variables:
         rc = generator.show_commit_history(
         max_commits=args.max_commits,
         output_path=args.output,
+        output_json=args.output_json,
         logs_dir=args.logs_dir,
         export_pipeline_pr_csv=args.export_pipeline_pr_csv,
     )

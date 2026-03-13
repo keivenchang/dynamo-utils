@@ -520,6 +520,16 @@ run_show_commit_history() {
         COMMIT_HISTORY_BASENAME="debug.html"
     fi
     COMMIT_HISTORY_HTML="$DYNAMO_REPO/$COMMIT_HISTORY_BASENAME"
+    # JSON output: always generated alongside HTML (opt-out via OUTPUT_JSON=false).
+    OUTPUT_JSON_FLAG=""
+    if [ "${OUTPUT_JSON:-true}" != "false" ]; then
+        if [ "$FAST_DEBUG" = true ]; then
+            COMMIT_HISTORY_JSON="$DYNAMO_REPO/debug.json"
+        else
+            COMMIT_HISTORY_JSON="$DYNAMO_REPO/index.json"
+        fi
+        OUTPUT_JSON_FLAG="--output-json $COMMIT_HISTORY_JSON"
+    fi
     # Always enable: fetch/cache successful *-build-test raw logs so we can parse pytest test timings.
     SUCCESS_BUILD_TEST_FLAG="--enable-success-build-test-logs"
 
@@ -559,7 +569,7 @@ run_show_commit_history() {
         echo "[DRY-RUN]   Output: $COMMIT_HISTORY_HTML"
         echo "[DRY-RUN]   Max commits: $MAX_COMMITS"
         echo "[DRY-RUN]   Command: cd $DYNAMO_REPO && git checkout main && git pull origin main"
-        echo "[DRY-RUN]   Command: python3 $SCRIPT_DIR/show_commit_history.py --repo-path . --max-commits $MAX_COMMITS --output $COMMIT_HISTORY_HTML $SKIP_FLAG $MAX_GH_FLAG $PARALLEL_FLAG $SUCCESS_BUILD_TEST_FLAG $VERIFIER_FLAG"
+        echo "[DRY-RUN]   Command: python3 $SCRIPT_DIR/show_commit_history.py --repo-path . --max-commits $MAX_COMMITS --output $COMMIT_HISTORY_HTML $OUTPUT_JSON_FLAG $SKIP_FLAG $MAX_GH_FLAG $PARALLEL_FLAG $SUCCESS_BUILD_TEST_FLAG $VERIFIER_FLAG"
         return 0
     fi
 
@@ -584,7 +594,7 @@ run_show_commit_history() {
 
     echo "$(date '+%Y-%m-%d %H:%M:%S') - Generating commit history dashboard (max_commits=$MAX_COMMITS)" >> "$LOG_FILE"
     log_line_ts "$COMMIT_HISTORY_LOG" "===== run_show_commit_history start (max_commits=$MAX_COMMITS output=$COMMIT_HISTORY_HTML) ====="
-    if run_cmd_to_log_ts "$COMMIT_HISTORY_LOG" python3 "$SCRIPT_DIR/show_commit_history.py" --repo-path . --max-commits "$MAX_COMMITS" --output "$COMMIT_HISTORY_HTML" $SKIP_FLAG $MAX_GH_FLAG $PARALLEL_FLAG $SUCCESS_BUILD_TEST_FLAG $VERIFIER_FLAG; then
+    if run_cmd_to_log_ts "$COMMIT_HISTORY_LOG" python3 "$SCRIPT_DIR/show_commit_history.py" --repo-path . --max-commits "$MAX_COMMITS" --output "$COMMIT_HISTORY_HTML" $OUTPUT_JSON_FLAG $SKIP_FLAG $MAX_GH_FLAG $PARALLEL_FLAG $SUCCESS_BUILD_TEST_FLAG $VERIFIER_FLAG; then
         echo "$(date '+%Y-%m-%d %H:%M:%S') - Updated $COMMIT_HISTORY_HTML" >> "$LOG_FILE"
     else
         echo "$(date '+%Y-%m-%d %H:%M:%S') - ERROR: Failed to update commit-history.html" >> "$LOG_FILE"
