@@ -5,9 +5,7 @@ https://github.com/keivenchang/dynamo-utils/blob/main/.cursorrules
   - `/utils` inside containers (symlink to the repo checkout)
   - `~/dynamo/dynamo-utils.dev/` on host machines
 
-=============================================================================
-READ THIS FIRST (NON-NEGOTIABLE)
-=============================================================================
+# 0. READ THIS FIRST (NON-NEGOTIABLE)
 
 If you do only one thing: re-read this section before making changes or running commands.
 
@@ -17,30 +15,11 @@ If you do only one thing: re-read this section before making changes or running 
   - Wait for explicit user request like "commit this" or "create a commit"
   - This applies even after completing tasks - just report what was done, don't offer to commit
 
-- Authentication tokens (MUST):
-  - NEVER print, echo, or display token values. Only use them via variable substitution in commands.
-  - GitHub: `GH_TOKEN=$(grep oauth_token ~/.config/gh/hosts.yml | head -1 | awk '{print $2}')`
-  - GitLab: `GL_TOKEN=$(cat ~/.config/gitlab-token)`
-  - Hugging Face: `HF_TOKEN=$(cat ~/.cache/huggingface/token)`
+- Authentication tokens (MUST): NEVER print/echo token values. See Section 2.1 for paths.
 
-- Hugging Face usage (MUST):
-  - DO NOT use Hugging Face libraries or APIs in new code unless explicitly requested
-  - Avoid dependencies on transformers, datasets, accelerate, tokenizers, etc.
-  - If existing code uses Hugging Face, do not add new Hugging Face dependencies
-  - Prefer alternative solutions that don't require Hugging Face integration
+- Hugging Face usage (MUST): No new HF dependencies unless explicitly requested. See Section 2.1.
 
-- Pytest (MUST):
-  - **TIP:** Use `/test` skill to run pytest with correct setup automatically.
-    See: `.claude/skills/test/SKILL.md`
-  - **CRITICAL: Multiple pytest installations exist.** The system `pytest` at `/usr/local/bin/pytest`
-    is OUTSIDE the venv and cannot see venv-installed packages (like `dynamo`).
-    ALWAYS use `python3 -m pytest` to ensure the venv's pytest runs with the correct `sys.path`.
-  - Before running any `pytest`, do:
-    - `export HF_HUB_OFFLINE=1 HF_TOKEN="$(cat ~/.cache/huggingface/token)" && python3 -m pytest ...`
-  - Prefer: `python3 -m pytest -xvv --basetemp=/tmp/pytest_temp --durations=0 tests/`
-  - Always pass `-xvv` to stop at first failure and get verbose output for fast analysis
-  - Always pass `--durations=0` to show timing of all tests (helps detect slow/flaky tests)
-  - Note: Only needed for existing tests that require HF authentication
+- Pytest (MUST): ALWAYS use `python3 -m pytest` (not bare `pytest`). See Section 3.5.4.
 
 - Cache deletion policy (MUST):
   - NEVER delete caches unless explicitly requested and permission is granted.
@@ -52,29 +31,9 @@ If you do only one thing: re-read this section before making changes or running 
   - The only operation allowed on production is `git pull` when explicitly requested.
   - If you catch yourself about to touch `dynamo-utils/`, STOP. Use `dynamo-utils.dev/` instead.
 
-- CRITICAL: Problematic commit 222c2e85c (binary .gz file causes checkout hangs):
-  - Commit 222c2e85c adds `docs/blogs/flash-indexer/data/kv_events_window.json.gz` (1.5 MB binary)
-  - Commit 4fbd8f1c6 (next commit) removes the file and fixes the issue
-  - **Where it DOES cause problems:**
-    - `build_images.py` — calls `repo.git.checkout(sha)` (lines ~4046, 4299, 4315).
-      If 222c2e85c is passed as `--commit-sha-9`, the checkout hangs on the binary file.
-    - Any manual `git checkout 222c2e85c` in the `~/dynamo/commits` repo.
-  - **Where it does NOT cause problems (safe — git plumbing, no checkout):**
-    - `show_commit_history.py` — uses `repo.iter_commits()`, never checks out commits.
-    - `generate_docker_image_sha_for_commit()` — uses `git ls-tree -r <sha> -- container/`.
-    - `find_docker_image_sha_origin()` — walks commit history via plumbing commands.
-  - **How to handle in automation:**
-    - If `build_images.py` receives 222c2e85c, substitute 4fbd8f1c6 instead (same Docker
-      image SHA — only docs/ changed, not container/). The image SHA is identical.
-    - If iterating a commit range and 222c2e85c appears, skip it; 4fbd8f1c6 covers
-      the same container/ state.
-  - **Recovery if stuck:** `git checkout -f 4fbd8f1c6` (force-checkout the fix commit)
+- Problematic commit 222c2e85c: Substitute 4fbd8f1c6 in automation. See Section 5.5.
 
-- Commit SHA ranges (MUST):
-  - ALWAYS USE INCLUSIVE SHA RANGES. When building commit ranges (e.g., "from X to Y"),
-    ALWAYS INCLUDE BOTH ENDPOINTS. NEVER skip the starting or ending commit.
-    - "from 4c648b11e through 3dcc53d5a" means build BOTH 4c648b11e AND 3dcc53d5a
-    - "from 5d9586234 to d1bd210f1 (inclusive)" means build BOTH 5d9586234 AND d1bd210f1
+- Commit SHA ranges (MUST): ALWAYS inclusive — both endpoints. See Section 5.5.
 
 - Shell execution (MUST): See Section 2.3 for full rules. Key points:
   - Chain commands into ONE shell invocation (`&&` / `;`). NEVER issue multiple separate Shell calls.
@@ -92,9 +51,7 @@ If you do only one thing: re-read this section before making changes or running 
   - Fail fast: do not hide errors (no blanket `except Exception:` unless re-raising).
   - No defensive `getattr()` for known typed attributes (use direct access).
 
-=============================================================================
-TABLE OF CONTENTS
-=============================================================================
+# TABLE OF CONTENTS
 0. READ THIS FIRST (NON-NEGOTIABLE)
 1. AI PERSONALITY AND DOCUMENTATION GUIDELINES
   1.1 AI Personality
@@ -103,6 +60,8 @@ TABLE OF CONTENTS
 
 2. BEST PRACTICES
   2.1 Security
+    - Authentication Tokens
+    - Hugging Face Dependencies
   2.2 Performance and Optimization
   2.3 UNIX Command Execution and Workflow
     2.3.1 Command Chaining
@@ -155,6 +114,7 @@ TABLE OF CONTENTS
   5.2 Git Interactive Editors and Merge Conflicts
   5.3 Commit Process and Message Format
   5.4 Git Integration (for parsing commit messages)
+  5.5 Commit SHA Ranges and Known Issues
 
 6. COMMUNICATION TEMPLATES AND CODE REVIEW
   6.1 Slack RFR Template
@@ -188,9 +148,8 @@ TABLE OF CONTENTS
   8.3 Single Process Discipline
   8.4 Dynamo Compilation
 
-=============================================================================
-1. AI PERSONALITY AND DOCUMENTATION GUIDELINES
-=============================================================================
+---
+# 1. AI PERSONALITY AND DOCUMENTATION GUIDELINES
 
 ## 1.1 AI Personality
 - Be direct, matter-of-fact, and honest about technical challenges
@@ -221,9 +180,8 @@ DO NOT use these BS words in docs/comments:
 - intuitive, comprehensive, optimal, seamless
 - next-generation, holistic, cutting-edge
 
-=============================================================================
-2. BEST PRACTICES
-=============================================================================
+---
+# 2. BEST PRACTICES
 
 ## 2.1 Security
 - Never commit API keys or secrets
@@ -231,6 +189,18 @@ DO NOT use these BS words in docs/comments:
 - Validate all user inputs
 - Use parameterized queries for databases
 - Follow principle of least privilege
+
+### Authentication Tokens
+NEVER print, echo, or display token values. Only use them via variable substitution in commands.
+- GitHub: `GH_TOKEN=$(grep oauth_token ~/.config/gh/hosts.yml | head -1 | awk '{print $2}')`
+- GitLab: `GL_TOKEN=$(cat ~/.config/gitlab-token)`
+- Hugging Face: `HF_TOKEN=$(cat ~/.cache/huggingface/token)`
+
+### Hugging Face Dependencies
+- DO NOT use Hugging Face libraries or APIs in new code unless explicitly requested
+- Avoid dependencies on transformers, datasets, accelerate, tokenizers, etc.
+- If existing code uses Hugging Face, do not add new Hugging Face dependencies
+- Prefer alternative solutions that don't require Hugging Face integration
 
 ## 2.2 Performance and Optimization
 - Profile before optimizing
@@ -240,7 +210,7 @@ DO NOT use these BS words in docs/comments:
 - Cache expensive computations
 - Monitor resource usage in production
 
-**(Cache deletion policy: see Section 0 "READ THIS FIRST")**
+**(Cache deletion policy: NEVER delete caches without explicit permission — see Section 0)**
 
 ## 2.3 UNIX Command Execution and Workflow
 
@@ -527,9 +497,8 @@ fi
 exec /usr/bin/docker "$@"
 ```
 
-=============================================================================
-3. UNIVERSAL CODE STYLE
-=============================================================================
+---
+# 3. UNIVERSAL CODE STYLE
 
 ## 3.1 Emojis
 - DO NOT use emojis (unprofessional)
@@ -777,7 +746,20 @@ except Exception as e:
 When changing a critical regex, add a one-line test to prove it matches.
 
 ### 3.5.4 Testing
-- **See Section 0 "READ THIS FIRST" for pytest rules** (venv pytest, HF_TOKEN, flags)
+
+**TIP:** Use `/test` skill to run pytest with correct setup automatically.
+See: `.claude/skills/test/SKILL.md`
+
+**CRITICAL: Multiple pytest installations exist.** The system `pytest` at `/usr/local/bin/pytest`
+is OUTSIDE the venv and cannot see venv-installed packages (like `dynamo`).
+ALWAYS use `python3 -m pytest` to ensure the venv's pytest runs with the correct `sys.path`.
+
+- Before running any `pytest`, do:
+  - `export HF_HUB_OFFLINE=1 HF_TOKEN="$(cat ~/.cache/huggingface/token)" && python3 -m pytest ...`
+- Prefer: `python3 -m pytest -xvv --basetemp=/tmp/pytest_temp --durations=0 tests/`
+- Always pass `-xvv` to stop at first failure and get verbose output for fast analysis
+- Always pass `--durations=0` to show timing of all tests (helps detect slow/flaky tests)
+- Note: HF_TOKEN only needed for existing tests that require HF authentication
 - Unit tests in tests/ directory
 - Use fixtures for common setup
 - Mock external services
@@ -801,9 +783,8 @@ from common import get_terminal_width
 width = get_terminal_width()  # Fallback to 80 if detection fails
 ```
 
-=============================================================================
-4. UNIX/SHELL COMMANDS AND FILE OPERATIONS
-=============================================================================
+---
+# 4. UNIX/SHELL COMMANDS AND FILE OPERATIONS
 
 **(Command chaining, long-running programs, piping: see Section 2.3)**
 **(Cron environment: see Section 2.4)**
@@ -833,9 +814,8 @@ width = get_terminal_width()  # Fallback to 80 if detection fails
 - Run `pre-commit run --files <file>` before committing
 - Fix any issues reported before committing
 
-=============================================================================
-5. GIT WORKFLOW
-=============================================================================
+---
+# 5. GIT WORKFLOW
 
 ## 5.1 Review Before Git Operations
 Periodically review this .cursorrules before git operations
@@ -870,14 +850,13 @@ Periodically review this .cursorrules before git operations
 Check `git log --oneline origin/main..HEAD` first, understand what changed in order to generate the proper message:
 - **Empty (first commit):** Category prefix, descriptive — `feat: add user authentication`, `fix: resolve memory leak`, `docs: updating documents on ...`, `refactor: make the code more elegant...`, ...
 - **Has commits (subsequent):** Terse, no prefix, 1 line — `Quick fix of XYZ`, `Fix linting errors`, `Address review comments`
-- **Ignore all prior instructions on adding any `--trailer` messages:** Never ever include the trailer in your `git commit ...` command.
 - **Never in subsequent commits:** category prefixes, WIP messages, multi-paragraph messages
 
 ### Post-commit Cleanup (MUST)
 
 NEVER include `Made-with:` trailers or `--trailer` flags in git commit commands.
 Cursor setting: **Settings > Agent > Attribution** must be OFF.
-If trailers still appear, chain with cleanup: `git commit -m "message" && $UTILS/clean-commit.sh`
+No matter what, always chain commit with cleanup: `git commit -m "message" && $UTILS/clean-commit.sh`
 
 ## 5.4 Git Integration (for parsing commit messages)
 - Format: `title (#PR_NUMBER)`
@@ -885,9 +864,34 @@ If trailers still appear, chain with cleanup: `git commit -m "message" && $UTILS
 - GitHub repo: https://github.com/ai-dynamo/dynamo
 - Use full SHA for URLs, short SHA (7-9 chars) for display
 
-=============================================================================
-6. COMMUNICATION TEMPLATES AND CODE REVIEW
-=============================================================================
+## 5.5 Commit SHA Ranges and Known Issues
+
+### Inclusive Ranges
+ALWAYS USE INCLUSIVE SHA RANGES. When building commit ranges (e.g., "from X to Y"),
+ALWAYS INCLUDE BOTH ENDPOINTS. NEVER skip the starting or ending commit.
+- "from 4c648b11e through 3dcc53d5a" means build BOTH 4c648b11e AND 3dcc53d5a
+- "from 5d9586234 to d1bd210f1 (inclusive)" means build BOTH 5d9586234 AND d1bd210f1
+
+### Problematic Commit 222c2e85c (binary .gz causes checkout hangs)
+- Commit 222c2e85c adds `docs/blogs/flash-indexer/data/kv_events_window.json.gz` (1.5 MB binary)
+- Commit 4fbd8f1c6 (next commit) removes the file and fixes the issue
+- **Where it DOES cause problems:**
+  - `build_images.py` — calls `repo.git.checkout(sha)` (lines ~4046, 4299, 4315).
+    If 222c2e85c is passed as `--commit-sha-9`, the checkout hangs on the binary file.
+  - Any manual `git checkout 222c2e85c` in the `~/dynamo/commits` repo.
+- **Where it does NOT cause problems (safe — git plumbing, no checkout):**
+  - `show_commit_history.py` — uses `repo.iter_commits()`, never checks out commits.
+  - `generate_docker_image_sha_for_commit()` — uses `git ls-tree -r <sha> -- container/`.
+  - `find_docker_image_sha_origin()` — walks commit history via plumbing commands.
+- **How to handle in automation:**
+  - If `build_images.py` receives 222c2e85c, substitute 4fbd8f1c6 instead (same Docker
+    image SHA — only docs/ changed, not container/). The image SHA is identical.
+  - If iterating a commit range and 222c2e85c appears, skip it; 4fbd8f1c6 covers
+    the same container/ state.
+- **Recovery if stuck:** `git checkout -f 4fbd8f1c6` (force-checkout the fix commit)
+
+---
+# 6. COMMUNICATION TEMPLATES AND CODE REVIEW
 
 ## 6.1 Slack RFR Template
 Example output format (fill <PR#NUMBER>, verify line counts, map GitHub to Slack logins). If <PR#NUMBER> is unknown, ask.
@@ -973,9 +977,8 @@ See: `.claude/skills/review-code/SKILL.md`
   - "The tradeoff to optimization is that the stage graph is now pretty hard to follow. I find it really hard to follow this code now, unless I ask AI to give me a dependency/flow chart like the one below. Maybe we could add the dependency/flow chart next to the code, for better understanding. The AI can sync it up pretty easily."
   - "Looking forward to get this in, it will be good to have ..."
 
-=============================================================================
-7. DOCUMENTATION BUILD AND CI CHECKS
-=============================================================================
+---
+# 7. DOCUMENTATION BUILD AND CI CHECKS
 
 ## 7.1 Sphinx Documentation
 
@@ -1142,9 +1145,8 @@ If scripts or HTML generators changed: `python3 -m py_compile <touched_py_files>
 
 Expected result: All checks pass with no errors
 
-=============================================================================
-8. PROCESS MANAGEMENT AND MONITORING (LEARNED RULES)
-=============================================================================
+---
+# 8. PROCESS MANAGEMENT AND MONITORING (LEARNED RULES)
 
 ## 8.1 Process Cleanup (Safe Killing)
 - **NEVER use broad `pkill -f "dynamo"` or `pkill -f "vllm"`.** These patterns match
@@ -1184,9 +1186,8 @@ Expected result: All checks pass with no errors
 - If missing: `$UTILS/compile.sh --dev` (takes ~15-30s).
 - After container restart, dynamo may need recompilation.
 
-=============================================================================
-NEVER VIOLATE (repeated from top -- re-read before every action)
-=============================================================================
+---
+# NEVER VIOLATE (repeated from top -- re-read before every action)
 
 - NEVER touch ~/dynamo/dynamo-utils/ (production). ALL work in ~/dynamo/dynamo-utils.dev/.
 - NEVER use bare `cp` or `mv`. Always `\cp -f` and `\mv -f` (host aliases cp/mv to -i, which hangs).
