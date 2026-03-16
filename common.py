@@ -968,13 +968,15 @@ class DockerUtils(BaseUtils):
         """Parse dynamo image name to extract framework, version, and target.
 
         Walks the hyphen-separated segments of the tag to find a known framework
-        and a known target. Everything before the framework is the version/SHA,
-        everything after is optional attributes + target. There is only one
-        framework and one target per SHA.
+        and a known target. Everything before the framework is the version/SHA.
 
-        Supported formats (non-exhaustive):
-          dynamo:A1B2C3.d56439ec2-sglang-local-dev
-          dynamo:A1B2C3.d56439ec2-sglang-cuda12.9-local-dev
+        New format (primary):
+          dynamo:A1B2C3.d56439ec2-sglang-dev-cuda12.9-amd64
+          dynamo:A1B2C3.d56439ec2-trtllm-dev-orig-cuda13.1-amd64
+          dynamo:A1B2C3.d56439ec2-vllm-local-dev-cuda12.9-amd64
+
+        Legacy format (still supported; TODO: remove after 2026-04-20):
+          dynamo:A1B2C3.d56439ec2-sglang-cuda12.9-dev
           dynamo:A1B2C3.d56439ec2-trtllm-cuda13.1-dev-orig
         """
         all_frameworks = set(FRAMEWORKS) | {"none"}
@@ -989,13 +991,12 @@ class DockerUtils(BaseUtils):
         else:
             return None
 
-        # Split tag into segments: e.g. "ea02149e4-sglang-cuda12.9-local-dev"
-        # -> ["ea02149e4", "sglang", "cuda12.9", "local", "dev"]
+        # Split tag into segments: e.g. "EBC003.56b448a60-sglang-dev-cuda12.9-amd64"
         parts = tag.split("-")
         if len(parts) < 2:
             return None
 
-        # Find frameworks: scan all segments for known names
+        # Find framework: scan all segments for known names
         fw_matches = [(i, parts[i].lower()) for i, part in enumerate(parts) if part.lower() in all_frameworks]
         if not fw_matches:
             return None
@@ -1011,29 +1012,29 @@ class DockerUtils(BaseUtils):
 
         version_part = "-".join(parts[:fw_idx])
 
-        # Find target: try joining trailing segments (longest match first)
-        # e.g. parts = [..., "local", "dev"] -> try "local-dev" then "dev"
+        # After framework, try to find target by scanning forward from fw_idx+1.
+        # New format: target immediately follows framework (before cuda/arch).
+        # Legacy format: target is at the end (after cuda).
         remaining = parts[fw_idx + 1:]
-        target_matches = []
-        for length in range(len(remaining), 0, -1):
-            candidate = "-".join(remaining[-length:])
+        target = ""
+
+        # Forward scan: try longest multi-segment targets first from the start
+        # e.g. remaining = ["local", "dev", "cuda12.9", "amd64"] -> "local-dev"
+        # e.g. remaining = ["dev", "orig", "cuda12.9", "amd64"] -> "dev-orig"
+        for length in range(min(len(remaining), 2), 0, -1):
+            candidate = "-".join(remaining[:length])
             if candidate in known_targets:
-                target_matches.append(candidate)
-        if len(target_matches) > 1:
-            # Multiple lengths matched (e.g. "dev" and "local-dev"); longest wins,
-            # but if two non-overlapping targets matched that's a real collision.
-            unique = set(target_matches)
-            # "local-dev" contains "dev", so if both matched it's not a collision
-            # (longest-first already picked the right one). But if genuinely
-            # different targets appear, error out.
-            longest = max(unique, key=len)
-            non_substrings = {t for t in unique if t not in longest}
-            if non_substrings:
-                self.logger.error(
-                    f"Multiple targets in tag '{image_name}': {sorted(unique)}"
-                )
-                return None
-        target = target_matches[0] if target_matches else ""
+                target = candidate
+                break
+
+        # Fallback: legacy format where target is at the end
+        # TODO: remove after 2026-04-20
+        if not target:
+            for length in range(min(len(remaining), 2), 0, -1):
+                candidate = "-".join(remaining[-length:])
+                if candidate in known_targets:
+                    target = candidate
+                    break
 
         return DynamoImageInfo(
             version=version_part,

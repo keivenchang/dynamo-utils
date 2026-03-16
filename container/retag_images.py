@@ -3,9 +3,9 @@
 Retag versioned dynamo local-dev Docker images to latest tags.
 
 Example mappings:
-  dynamo:A1B2C3.d56439ec2-vllm-local-dev   -> dynamo:latest-vllm-local-dev
-  dynamo:A1B2C3.d56439ec2-sglang-local-dev -> dynamo:latest-sglang-local-dev
-  dynamo:A1B2C3.d56439ec2-trtllm-local-dev -> dynamo:latest-trtllm-local-dev
+  dynamo:A1B2C3.d56439ec2-vllm-local-dev-cuda12.9-amd64   -> dynamo:latest-vllm-local-dev
+  dynamo:A1B2C3.d56439ec2-sglang-local-dev-cuda12.9-amd64 -> dynamo:latest-sglang-local-dev
+  dynamo:A1B2C3.d56439ec2-trtllm-local-dev-cuda13.1-amd64 -> dynamo:latest-trtllm-local-dev
 """
 
 import argparse

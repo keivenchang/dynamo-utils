@@ -60,7 +60,7 @@ python3 container/build_images.py --repo-path ~/dynamo/dynamo_ci --parallel --sk
 
 ### Commit SHA and image SHA
 
-- **Image SHA** is a 6-char uppercase SHA256 of `git ls-tree -r <commit> -- container/`. Any change in `container/` produces a new hash. Image tags include it (e.g. `dynamo:C62194.6d3e0137c-none-cuda13.0-runtime`).
+- **Image SHA** is a 6-char uppercase SHA256 of `git ls-tree -r <commit> -- container/`. Any change in `container/` produces a new hash. Image tags include it (e.g. `dynamo:C62194.6d3e0137c-none-runtime-cuda13.0-amd64`).
 - **Commit SHA** is the git commit used for the build (logs, report paths, and the first part of the image tag).
 
 **Default (no `--commit-sha`) – build at image-SHA origin**
@@ -202,8 +202,8 @@ curl --request DELETE \
 ```
 
 **Image naming convention**:
-- **Current format**: `AABB11.commit_sha-variant-cuda-type`
-- **Example**: `1FA782.9a15730a7-none-cuda12.9-dev`
+- **Current format**: `AABB11.commit_sha-variant-type-cuda-arch`
+- **Example**: `1FA782.9a15730a7-none-dev-cuda12.9-amd64`
 - **`AABB11`**: uppercase 6-char SHA256 of `git ls-tree -r <commit> -- container/` (identifies container content)
 - **`commit_sha`**: lowercase 9-char git commit SHA (identifies code version)
 

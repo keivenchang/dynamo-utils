@@ -50,7 +50,7 @@ class TargetResult:
     build: Optional[TaskResult] = None
     compilation: Optional[TaskResult] = None
     sanity: Optional[TaskResult] = None
-    image_name: Optional[str] = None  # e.g. "dynamo:A1B2C3.c8ad4aa67-vllm-dev"
+    image_name: Optional[str] = None  # e.g. "dynamo:A1B2C3.c8ad4aa67-vllm-dev-cuda12.9-amd64"
     image_size_bytes: Optional[int] = None  # from local docker
     input_image: Optional[str] = None  # base image used
 
@@ -60,8 +60,8 @@ class RegistryImage:
     """A container image pushed to a remote registry."""
 
     location: str  # full pull URL
-    image_name: str  # repo:tag portion, e.g. "dynamo:A1B2C3.c8ad4aa67-vllm-dev"
-    tag: str  # just the tag, e.g. "A1B2C3.c8ad4aa67-vllm-dev"
+    image_name: str  # repo:tag portion, e.g. "dynamo:A1B2C3.c8ad4aa67-vllm-dev-cuda12.9-amd64"
+    tag: str  # just the tag, e.g. "A1B2C3.c8ad4aa67-vllm-dev-cuda12.9-amd64"
     framework: str  # "none", "vllm", "sglang", "trtllm"
     target: str  # "dev" (currently only dev images are uploaded)
     push_status: str  # "PASS", "FAIL", "SKIP", "KILLED", "RUNNING", "QUEUED"

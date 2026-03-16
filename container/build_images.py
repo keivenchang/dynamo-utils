@@ -37,6 +37,8 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
+import platform
+
 import yaml
 
 # Add parent directory to path to import common.py
@@ -554,6 +556,15 @@ def _generate_error_html_and_exit(
     return 1
 
 
+_UNAME_TO_DOCKER_ARCH = {"x86_64": "amd64", "aarch64": "arm64"}
+
+
+def detect_docker_arch() -> str:
+    """Return Docker-convention arch string (amd64, arm64) from uname -m."""
+    machine = platform.machine()
+    return _UNAME_TO_DOCKER_ARCH.get(machine, machine)
+
+
 # Keys in context.yaml that define CUDA versions (e.g. cuda12.9, cuda13.0, cuda13.1)
 _CUDA_KEY_PATTERN = re.compile(r"^cuda(\d+\.\d+)$")
 
@@ -632,7 +643,7 @@ def get_runtime_base_image(repo_path: Path, framework: str) -> Optional[str]:
 def detect_latest_image_sha(repo_path: Path, framework: str) -> Optional[str]:
     """
     Auto-detect the latest local Docker image SHA for a framework.
-    Looks for images matching dynamo:*-{framework}-cuda*-local-dev or dynamo:*-{framework}-cuda*-dev
+    Looks for images matching dynamo:*-{framework}-{target}-cuda*-{arch}
     and returns the SHA portion (version prefix in the tag).
     """
     import subprocess as _sp
@@ -645,17 +656,23 @@ def detect_latest_image_sha(repo_path: Path, framework: str) -> Optional[str]:
 
     cuda_version = get_oldest_cuda_version(repo_path, framework)
     cuda_tag = f"cuda{cuda_version}"
+    arch = detect_docker_arch()
 
-    # Prefer local-dev, then dev, then runtime
+    # Prefer local-dev, then dev, then runtime.
+    # Try new format first (fw-target-cuda-arch), then legacy (fw-cuda-target).
+    # TODO: remove legacy pattern after 2026-04-20
     for target in ("local-dev", "dev", "runtime"):
-        pattern = f"-{framework}-{cuda_tag}-{target}"
-        for line in result.stdout.strip().splitlines():
-            if pattern in line:
-                # Tag format: dynamo:{IMAGE_SHA}.{commit_sha_9}-{framework}-cuda{ver}-{target}
-                tag = line.split(":", 1)[1] if ":" in line else line
-                tag_version = tag.split(f"-{framework}-")[0]
-                if tag_version:
-                    return tag_version
+        patterns = [
+            f"-{framework}-{target}-{cuda_tag}-{arch}",
+            f"-{framework}-{cuda_tag}-{target}",
+        ]
+        for pattern in patterns:
+            for line in result.stdout.strip().splitlines():
+                if pattern in line:
+                    tag = line.split(":", 1)[1] if ":" in line else line
+                    tag_version = tag.split(f"-{framework}-")[0]
+                    if tag_version:
+                        return tag_version
     return None
 
 
@@ -737,19 +754,33 @@ def _find_dev_image(image_sha_6: str, framework: str, cuda_tag: str) -> Optional
     """
     Find an existing dev image with the given Image SHA.
     Returns the full tag string if found, None otherwise.
+
+    Searches new format first (fw-dev-cuda-arch), then falls back to
+    legacy format (fw-cuda-dev) so --reuse picks up old-convention images.
+    TODO: remove legacy pattern after 2026-04-20
     """
-    try:
-        result = subprocess.run(
-            ["docker", "images", "--format", "{{.Repository}}:{{.Tag}}",
-             "--filter", f"reference=dynamo:{image_sha_6}.*-{framework}-{cuda_tag}-dev"],
-            capture_output=True, text=True, timeout=10,
-        )
-        if result.returncode != 0:
-            return None
-        existing_tags = [t.strip() for t in result.stdout.strip().splitlines() if t.strip()]
-        return existing_tags[0] if existing_tags else None
-    except (subprocess.TimeoutExpired, OSError):
-        return None
+    arch = detect_docker_arch()
+    # New format: dynamo:EBC003.*-sglang-dev-cuda12.9-amd64
+    # Legacy:     dynamo:EBC003.*-sglang-cuda12.9-dev
+    patterns = [
+        f"reference=dynamo:{image_sha_6}.*-{framework}-dev-{cuda_tag}-{arch}",
+        f"reference=dynamo:{image_sha_6}.*-{framework}-{cuda_tag}-dev",
+    ]
+    for pattern in patterns:
+        try:
+            result = subprocess.run(
+                ["docker", "images", "--format", "{{.Repository}}:{{.Tag}}",
+                 "--filter", pattern],
+                capture_output=True, text=True, timeout=10,
+            )
+            if result.returncode != 0:
+                continue
+            existing_tags = [t.strip() for t in result.stdout.strip().splitlines() if t.strip()]
+            if existing_tags:
+                return existing_tags[0]
+        except (subprocess.TimeoutExpired, OSError):
+            continue
+    return None
 
 
 def _check_reuse_dev_images_exist(repo_path: Path, tag_version: str, frameworks: List[str]) -> Optional[Dict[str, str]]:
@@ -805,9 +836,10 @@ def create_task_graph(
 
     Image Dependency Chain (render_py):
         render.py generates a Dockerfile, then docker build produces the image.
-        1. Runtime: render.py + docker build → dynamo:{commit_sha_9}-{framework}-cuda{cuda_version}-runtime
-        2. Dev: render.py + docker build → dynamo:{commit_sha_9}-{framework}-cuda{cuda_version}-dev
-        3. Local-dev: render.py + docker build → dynamo:{commit_sha_9}-{framework}-cuda{cuda_version}-local-dev
+        Tag format: dynamo:{IMAGE_SHA}.{commit_sha_9}-{framework}-{target}-cuda{ver}-{arch}
+        1. Runtime: render.py + docker build → dynamo:{version}-{framework}-runtime-cuda{ver}-{arch}
+        2. Dev: render.py + docker build → dynamo:{version}-{framework}-dev-cuda{ver}-{arch}
+        3. Local-dev: render.py + docker build → dynamo:{version}-{framework}-local-dev-cuda{ver}-{arch}
     """
     # Task ID format: framework-target-type (all lowercase)
     # Example: vllm-runtime-build, vllm-dev-compilation, vllm-runtime-sanity
@@ -815,7 +847,7 @@ def create_task_graph(
     # Determine version if not provided
     if version is None:
         if build_method == BUILD_METHOD_RENDER_PY:
-            # render.py method: use IMAGE_SHA.commit_sha_9 as version (tag: dynamo:{IMAGE_SHA}.{commit_sha_9}-{fw}-cuda{ver}-{target})
+            # render.py method: use IMAGE_SHA.commit_sha_9 as version (tag: dynamo:{IMAGE_SHA}.{commit_sha_9}-{fw}-{target}-cuda{ver}-{arch})
             version = commit_sha_9
         else:
             version = extract_version_from_build_sh(framework, repo_path)
@@ -849,13 +881,14 @@ def create_task_graph(
         # build_sh method
         return f"{repo_path}/container/build.sh --no-tag-latest --framework {framework} --target {target}"
 
-    # Embed CUDA version in image tags so the tag encodes framework, CUDA, and target
+    # Embed CUDA version and arch in image tags: dynamo:{ver}-{fw}-{target}-{cuda}-{arch}
     cuda_tag = f"cuda{render_cuda_version}"
+    arch = detect_docker_arch()
 
     # Level 0: Runtime image build (builds directly from CUDA base image).
     # Set input_image for report display only; check_input_image_exists() skips runtime-build (docker build pulls base).
     runtime_base_image = get_runtime_base_image(repo_path, framework)
-    runtime_image_tag = f"dynamo:{version}-{framework}-{cuda_tag}-runtime"
+    runtime_image_tag = f"dynamo:{version}-{framework}-runtime-{cuda_tag}-{arch}"
     tasks[f"{framework}-runtime-build"] = BuildTask(
         task_id=f"{framework}-runtime-build",
         description=f"Build {framework.upper()} runtime image",
@@ -882,8 +915,8 @@ def create_task_graph(
     # wheel_builder, framework) are likely cached when dev-build starts.
     # If cache isn't warm yet, Docker just builds those layers itself -- no correctness issue.
     # Builds as -dev-orig; compress step will later produce the final -dev image.
-    dev_image_tag = f"dynamo:{version}-{framework}-{cuda_tag}-dev"
-    dev_orig_image_tag = f"{dev_image_tag}-orig"
+    dev_image_tag = f"dynamo:{version}-{framework}-dev-{cuda_tag}-{arch}"
+    dev_orig_image_tag = f"dynamo:{version}-{framework}-dev-orig-{cuda_tag}-{arch}"
     tasks[f"{framework}-dev-build"] = BuildTask(
         task_id=f"{framework}-dev-build",
         description=f"Build {framework.upper()} dev image",
@@ -1044,7 +1077,7 @@ docker images {dev_image_tag} --format 'Size: {{{{.Size}}}}'
     # local-dev Dockerfile is `FROM dev AS local-dev`; the 120s delay gives dev-build
     # (which starts at 60s) time to cache the `dev` stage layers.
     # local-dev only adds UID/GID remapping on top, so with warm cache it's fast (~30s).
-    local_dev_image_tag = f"dynamo:{version}-{framework}-{cuda_tag}-local-dev"
+    local_dev_image_tag = f"dynamo:{version}-{framework}-local-dev-{cuda_tag}-{arch}"
     tasks[f"{framework}-local-dev-build"] = BuildTask(
         task_id=f"{framework}-local-dev-build",
         description=f"Build {framework.upper()} local-dev image",
@@ -1583,8 +1616,8 @@ class BaseTask(ABC):
         if _docker_image_exists(self.output_image):
             return True
 
-        if self.output_image.endswith("-dev-orig"):
-            final_dev = self.output_image.replace("-dev-orig", "-dev")
+        if "-dev-orig-" in self.output_image:
+            final_dev = self.output_image.replace("-dev-orig-", "-dev-")
             if _docker_image_exists(final_dev):
                 self.logger.info(f"  Final image {final_dev} exists (skipping {self.output_image} rebuild)")
                 return True
@@ -2054,7 +2087,7 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help=(
             "Image SHA to use for existing Docker image tags "
-            "with --no-build. E.g. --image-sha C62194.6d3e0137c uses dynamo:C62194.6d3e0137c-vllm-cuda12.9-dev. "
+            "with --no-build. E.g. --image-sha C62194.6d3e0137c uses dynamo:C62194.6d3e0137c-vllm-dev-cuda12.9-amd64. "
             "If omitted with --no-build, auto-detects from the latest local Docker images."
         ),
     )
@@ -4353,7 +4386,7 @@ def main() -> int:
         version_error_message = ""
         for framework in frameworks:
             if build_method == BUILD_METHOD_RENDER_PY:
-                # render.py method: use IMAGE_SHA.commit_sha_9 as version (tag: dynamo:{IMAGE_SHA}.{commit_sha_9}-{fw}-cuda{ver}-{target})
+                # render.py method: use IMAGE_SHA.commit_sha_9 as version (tag: dynamo:{IMAGE_SHA}.{commit_sha_9}-{fw}-{target}-cuda{ver}-{arch})
                 version = commit_sha_9
                 logger.info(f"  Using SHA as version for {framework.upper()}: {version}")
             else:
@@ -4623,7 +4656,7 @@ def main() -> int:
         print_dependency_tree(frameworks, commit_sha_9, repo_path, verbose=args.verbose)
 
     # Handle --no-build + --image-sha: determine which image tags to use
-    # image_version overrides the version in Docker tags (dynamo:<version>-fw-cuda-target)
+    # image_version overrides the version in Docker tags (dynamo:<version>-fw-target-cuda-arch)
     # but commit_sha_9 stays as the repo commit SHA for logs, reports, and filenames.
     no_build = getattr(args, 'no_build', False)
     image_tag_override = getattr(args, 'image_tag_override', None)
@@ -4730,7 +4763,7 @@ def main() -> int:
 
     # Create task graph for each framework
     # For build_sh: extract version once per framework to avoid repeated build.sh calls
-    # For render_py: use IMAGE_SHA.commit_sha_9 as version (e.g. dynamo:C62194.6d3e0137c-none-cuda13.0-runtime)
+    # For render_py: use IMAGE_SHA.commit_sha_9 as version (e.g. dynamo:C62194.6d3e0137c-none-runtime-cuda13.0-amd64)
     all_tasks = {}
     version_extraction_failed = False
     version_error_message = ""

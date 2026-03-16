@@ -5,8 +5,9 @@
 """
 Render a standalone local-dev Dockerfile from the Jinja2 template.
 
-Takes a dev image name (e.g. dynamo:A1B2C3.bbe82f182-vllm-dev) and produces
-a plain Dockerfile in /tmp/ that can be built directly with `docker build`.
+Takes a dev image name (e.g. dynamo:A1B2C3.bbe82f182-vllm-dev-cuda12.9-amd64)
+and produces a plain Dockerfile in /tmp/ that can be built directly with
+`docker build`.
 
 Image names use the format <IMAGE_SHA_UPPER>.<commit_sha> (content hash of container/).
 
@@ -15,10 +16,10 @@ If the image is not available locally, pulls it from the GitLab registry
 short name, and removes the long registry name.
 
 Usage:
-    ./build-local-dev.py dynamo:A1B2C3.bbe82f182-vllm-dev
-    ./build-local-dev.py dynamo:A1B2C3.bbe82f182-none-dev --output /tmp/my.Dockerfile
-    ./build-local-dev.py dynamo:A1B2C3.bbe82f182-vllm-dev --build
-    ./build-local-dev.py dynamo:A1B2C3.bbe82f182-vllm-dev --build --dry-run
+    ./build-local-dev.py dynamo:A1B2C3.bbe82f182-vllm-dev-cuda12.9-amd64
+    ./build-local-dev.py dynamo:A1B2C3.bbe82f182-none-dev-cuda12.9-amd64 --output /tmp/my.Dockerfile
+    ./build-local-dev.py dynamo:A1B2C3.bbe82f182-vllm-dev-cuda12.9-amd64 --build
+    ./build-local-dev.py dynamo:A1B2C3.bbe82f182-vllm-dev-cuda12.9-amd64 --build --dry-run
 """
 
 import argparse
@@ -34,9 +35,15 @@ TEMPLATE_REL_PATH = "container/templates/local_dev.Dockerfile"
 REGISTRY = "gitlab-master.nvidia.com:5005/dl/ai-dynamo/dynamo/dev"
 ECR_REGISTRY = "210086341041.dkr.ecr.us-west-2.amazonaws.com/ai-dynamo/dynamo"
 
-# dynamo:<IMAGE_SHA_UPPER>.<commit_sha>-<framework>[-optional-segments]-dev
-# Also accepts legacy format: dynamo:<sha>.IMAGE.<6hex>-<framework>-...-dev (deprecated)
-IMAGE_PATTERN = re.compile(r"^dynamo:([A-F0-9]{6}\.[a-f0-9]+|[a-f0-9]+(\.IMAGE\.[0-9a-f]{6})?)-(none|vllm|sglang|trtllm)(-[a-zA-Z0-9.]+)*-dev$")
+# New format: dynamo:<IMAGE_SHA>.<commit_sha>-<framework>-dev-<cuda>-<arch>
+# Legacy:     dynamo:<IMAGE_SHA>.<commit_sha>-<framework>[-optional]-dev
+# TODO: remove legacy pattern after 2026-04-20
+IMAGE_PATTERN = re.compile(
+    r"^dynamo:([A-F0-9]{6}\.[a-f0-9]+|[a-f0-9]+(\.IMAGE\.[0-9a-f]{6})?)"
+    r"-(none|vllm|sglang|trtllm)"
+    r"-dev"
+    r"(-[a-zA-Z0-9.]+)*$"
+)
 
 # ECR format: 210086341041.dkr.ecr.../<repo>:<40hex>-<framework>-<segments>
 # or dynamo:<40hex>-<framework>-<segments> (after local retag)
@@ -248,9 +255,10 @@ def validate_image(image: str) -> re.Match[str]:
         return m
     print(
         f"ERROR: Image must match one of:\n"
-        f"       dynamo:<IMAGE_SHA>.<commit_sha>-<framework>[...]-dev  (GitLab)\n"
-        f"       <ecr_registry>:<40hex_sha>-<framework>-<segments>     (ECR)\n"
-        f"       dynamo:<40hex_sha>-<framework>-<segments>             (ECR local)\n"
+        f"       dynamo:<IMAGE_SHA>.<commit_sha>-<framework>-dev-<cuda>-<arch>  (new format)\n"
+        f"       dynamo:<IMAGE_SHA>.<commit_sha>-<framework>[...]-dev           (legacy)\n"
+        f"       <ecr_registry>:<40hex_sha>-<framework>-<segments>              (ECR)\n"
+        f"       dynamo:<40hex_sha>-<framework>-<segments>                      (ECR local)\n"
         f"       where framework is one of: none, vllm, sglang, trtllm, dynamo\n"
         f"       Got: {image}",
         file=sys.stderr,
@@ -259,10 +267,18 @@ def validate_image(image: str) -> re.Match[str]:
 
 
 def output_image_name(image: str) -> str:
-    """Derive the local-dev output tag."""
+    """Derive the local-dev output tag from a dev image tag.
+
+    New format: dynamo:X-fw-dev-cuda12.9-amd64 -> dynamo:X-fw-local-dev-cuda12.9-amd64
+    Legacy:     dynamo:X-fw-dev               -> dynamo:X-fw-local-dev
+    """
     if _is_ecr_image(image):
         tag = image.split(":", 1)[1]
         return f"dynamo:{tag}-local-dev"
+    # Replace first "-dev-" (new format) or trailing "-dev" (legacy)
+    # TODO: remove trailing "-dev" fallback after 2026-04-20
+    if "-dev-" in image:
+        return image.replace("-dev-", "-local-dev-", 1)
     return re.sub(r"-dev$", "-local-dev", image)
 
 
@@ -272,7 +288,7 @@ def main() -> None:
     )
     parser.add_argument(
         "image",
-        help="Dev base image, e.g. dynamo:A1B2C3.6d3e0137c-vllm-dev or dynamo:A1B2C3.6d3e0137c-vllm-cuda12.9-dev",
+        help="Dev base image, e.g. dynamo:A1B2C3.6d3e0137c-vllm-dev-cuda12.9-amd64",
     )
     parser.add_argument(
         "--output", "-o",

@@ -1626,7 +1626,7 @@ class CommitHistoryGenerator:
                             created_display = report.report_generated[:16]
 
                     # Ensure image names carry the image SHA prefix.
-                    # Format: "dynamo:E04427.a798e08c8-none-cuda12.9-dev"
+                    # Format: "dynamo:E04427.a798e08c8-none-dev-cuda12.9-amd64"
                     def _ensure_image_sha(name: str, img_sha: str) -> str:
                         if not img_sha or img_sha in name.upper():
                             return name
