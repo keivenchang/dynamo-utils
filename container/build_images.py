@@ -479,11 +479,14 @@ def _generate_error_html_and_exit(
 
         # Write a log file for each task so log links in the HTML report work
         try:
+            now = datetime.now().isoformat()
             with open(task.log_file, 'w') as log_fh:
-                log_fh.write(f"Task: {task_id}\n")
+                log_fh.write(f"Started:     {now}\n")
+                log_fh.write(f"Task:        {task_id}\n")
                 log_fh.write(f"Description: {task.description}\n")
-                log_fh.write(f"Error: {error_message}\n")
+                log_fh.write(f"Error:       {error_message}\n")
                 log_fh.write("=" * 80 + "\n")
+                log_fh.write(f"Ended:       {now}\n")
         except (OSError, IOError) as e:
             logger.warning(f"Failed to write error log for {task_id}: {e}")
 
@@ -859,7 +862,7 @@ def create_task_graph(
         command=_build_cmd("runtime", runtime_image_tag),
         output_image=runtime_image_tag,
         input_image=runtime_base_image,
-        timeout=5400.0,  # 90 minutes for builds
+        timeout=7200.0,  # 120 minutes for builds
     )
 
     # Level 2: Runtime sanity check
@@ -889,7 +892,7 @@ def create_task_graph(
         output_image=dev_orig_image_tag,
         parents=[],
         start_delay=60.0,
-        timeout=5400.0,  # 90 minutes for builds
+        timeout=7200.0,  # 120 minutes for builds
     )
 
     # Level 3: Dev compilation
@@ -1013,7 +1016,7 @@ docker images {dev_image_tag} --format 'Size: {{{{.Size}}}}'
         input_image=dev_orig_image_tag,
         output_image=dev_image_tag,
         parents=[f"{framework}-dev-sanity"],
-        timeout=5400.0,  # 90 minutes for compress (export/import)
+        timeout=7200.0,  # 120 minutes for compress (export/import)
     )
 
     # Compressed dev compilation (includes pre/post chown).
@@ -1050,7 +1053,7 @@ docker images {dev_image_tag} --format 'Size: {{{{.Size}}}}'
         output_image=local_dev_image_tag,
         parents=[],
         start_delay=120.0,
-        timeout=5400.0,  # 90 minutes for builds
+        timeout=7200.0,  # 120 minutes for builds
     )
 
     # Local-dev compilation (includes pre/post chown).
@@ -1596,10 +1599,10 @@ class BaseTask(ABC):
         Returns:
             Formatted header string
         """
-        header = f"Task:        {self.task_id}\n"
+        header = f"Started:     {datetime.now().isoformat()}\n"
+        header += f"Task:        {self.task_id}\n"
         header += f"Description: {self.description}\n"
         header += f"Command:     {sanitize_token(self.get_command(repo_path))}\n"
-        header += f"Started:     {datetime.now().isoformat()}\n"
         header += "-" * 80 + "\n"
         return header
 
@@ -1624,9 +1627,8 @@ class BaseTask(ABC):
         footer += f"-" * 80 + "\n"
         footer += f"Task:     {self.task_id}\n"
         footer += f"Duration: {duration:.2f}s\n"
-        footer += f"Ended:    {ended_str}\n"
         footer += f"Status:   {'SUCCESS' if success else 'FAILED'} (exit code: {self.exit_code if self.exit_code is not None else (0 if success else 1)})\n"
-        footer += f"-" * 80 + "\n"
+        footer += f"Ended:    {ended_str}\n"
         return footer
 
     def passed_previously(self, prev_statuses: Optional[Dict[str, str]] = None) -> bool:
@@ -1754,10 +1756,10 @@ class BuildTask(BaseTask):
         Returns:
             Formatted header string
         """
-        header = f"Task:        {self.task_id}\n"
+        header = f"Started:     {datetime.now().isoformat()}\n"
+        header += f"Task:        {self.task_id}\n"
         header += f"Description: {self.description}\n"
         header += f"Command:     {sanitize_token(self.get_command(repo_path))}\n"
-        header += f"Started:     {datetime.now().isoformat()}\n"
         header += "-" * 80 + "\n"
         return header
 
@@ -2439,15 +2441,18 @@ def execute_task_sequential(
         executed_tasks.add(task_id)
         failed_tasks.add(task_id)
 
+        now = datetime.now().isoformat()
         with open(task.log_file, 'w') as log_fh:
-            log_fh.write(f"Task: {task_id}\n")
+            log_fh.write(f"Started:     {now}\n")
+            log_fh.write(f"Task:        {task_id}\n")
             log_fh.write(f"Description: {task.description}\n")
-            log_fh.write(f"Error: Input image not found: {task.input_image}\n")
+            log_fh.write(f"Error:       Input image not found: {task.input_image}\n")
             if head_changed_warning:
                 log_fh.write("\n")
                 log_fh.write(head_changed_warning)
                 log_fh.write("\n")
             log_fh.write("=" * 80 + "\n")
+            log_fh.write(f"Ended:       {now}\n")
 
         update_frameworks_data_cache(task, use_absolute_urls=False)
 
@@ -2875,15 +2880,18 @@ def execute_task_parallel(
                 logger.error(f"✗ Skipping {task_id}: Input image missing ({task.input_image})")
             task.mark_status_as(TaskStatus.FAILED, f"Input image not found: {task.input_image}")
 
+            now = datetime.now().isoformat()
             with open(task.log_file, 'w') as log_fh:
-                log_fh.write(f"Task: {task_id}\n")
+                log_fh.write(f"Started:     {now}\n")
+                log_fh.write(f"Task:        {task_id}\n")
                 log_fh.write(f"Description: {task.description}\n")
-                log_fh.write(f"Error: Input image not found: {task.input_image}\n")
+                log_fh.write(f"Error:       Input image not found: {task.input_image}\n")
                 if head_changed_warning:
                     log_fh.write("\n")
                     log_fh.write(head_changed_warning)
                     log_fh.write("\n")
                 log_fh.write("=" * 80 + "\n")
+                log_fh.write(f"Ended:       {now}\n")
 
             with lock:
                 executed_tasks.add(task_id)

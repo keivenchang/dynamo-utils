@@ -195,6 +195,12 @@ NEVER print, echo, or display token values. Only use them via variable substitut
 - GitHub: `GH_TOKEN=$(grep oauth_token ~/.config/gh/hosts.yml | head -1 | awk '{print $2}')`
 - GitLab: `GL_TOKEN=$(cat ~/.config/gitlab-token)`
 - Hugging Face: `HF_TOKEN=$(cat ~/.cache/huggingface/token)`
+- Docker registries: `~/.docker/config.json`. May contain auths for:
+  - `nvcr.io` — NVIDIA Container Registry
+  - `gitlab-master.nvidia.com:5005` — GitLab container registry
+  - `210086341041.dkr.ecr.us-west-2.amazonaws.com` — AWS ECR (tokens expire every few hours;
+    re-auth via `aws-ecr-setup.sh` which launches a browser for nvsec login)
+- NGC: `~/.ngc/config` (API key, org, team). Managed by `ngc config set`.
 
 ### Hugging Face Dependencies
 - DO NOT use Hugging Face libraries or APIs in new code unless explicitly requested
@@ -507,7 +513,7 @@ exec /usr/bin/docker "$@"
 ## 3.2 License Headers
 - Use first 2 lines only:
 ```
-// SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 ```
 
