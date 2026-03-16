@@ -11,6 +11,7 @@ DRY_RUN=false
 FORCE=false
 RETAIN_COUNT=2
 KEEP_DEV_AND_LOCAL_DEV_ONLY=false
+CLEAN_VSC=false
 
 # Function to show usage
 usage() {
@@ -30,6 +31,7 @@ OPTIONS:
     --force                Use docker rmi -f to force removal of images
     --retain N             Number of recent images to retain per variant (default: $RETAIN_COUNT)
     --keep-dev-and-local-dev-only  Remove only runtime images; keeps BOTH dev and local-dev (both or nothing)
+    --clean-vsc            Remove all vsc-* containers (stopped+running) and vsc-* images
     -h, --help             Show this help message
 
 EXAMPLES:
@@ -39,6 +41,8 @@ EXAMPLES:
     $0 --dry-run --retain 3             # Retain top 3 images per variant
     $0 --force --retain 1               # Force delete, retain only 1 recent image per variant
     $0 --force --keep-dev-and-local-dev-only   # Remove runtime only; keep BOTH dev and local-dev
+    $0 --clean-vsc --dry-run             # Show vsc-* containers/images that would be removed
+    $0 --clean-vsc --force               # Remove all vsc-* containers and images
 
 EOF
 }
@@ -72,6 +76,10 @@ while [[ $# -gt 0 ]]; do
             KEEP_DEV_AND_LOCAL_DEV_ONLY=true
             shift
             ;;
+        --clean-vsc)
+            CLEAN_VSC=true
+            shift
+            ;;
         -h|--help)
             usage
             exit 0
@@ -86,8 +94,8 @@ done
 
 # Function to get images for a specific framework variant, sorted by creation time (newest first)
 # Generic pattern: dynamo:<IMAGE_SHA>.<sha>-<framework>-<anything>
-# Examples: dynamo:A1B2C3.98df1a2c5-vllm-dev, dynamo:D4E5F6.ef2583a9d-sglang-cuda12.9-local-dev,
-#           dynamo:A1B2C3.d38954c75-none-cuda12.9-dev-orig
+# Examples: dynamo:A1B2C3.98df1a2c5-vllm-dev-cuda12.9-amd64, dynamo:D4E5F6.ef2583a9d-sglang-local-dev-cuda12.9-amd64,
+#           dynamo:A1B2C3.d38954c75-none-dev-orig-cuda12.9-amd64
 # Excludes latest-* tags (those are always kept).
 get_variant_images() {
     local variant=$1
@@ -114,9 +122,9 @@ process_variant() {
     
     echo "Found images (keeping newest $RETAIN_COUNT, marking older for deletion):"
     
-    # Separate local-dev from regular images
-    local local_dev_images=$(echo "$images" | grep -E ".*-local-dev " || true)
-    local regular_images=$(echo "$images" | grep -v -E ".*-local-dev " || true)
+    # Separate local-dev from regular images (match mid-tag or end-of-tag)
+    local local_dev_images=$(echo "$images" | grep -E ".*-local-dev[ -]" || true)
+    local regular_images=$(echo "$images" | grep -v -E ".*-local-dev[ -]" || true)
     
     # Process local-dev images
     if [ -n "$local_dev_images" ]; then
@@ -276,10 +284,10 @@ remove_runtime_images() {
     while IFS= read -r line; do
         [ -z "$line" ] && continue
         local repo_tag=$(echo "$line" | awk '{print $1}')
-        # Keep latest-*; keep BOTH *-dev and *-local-dev; remove only *-runtime* (no -dev in tag)
+        # Keep latest-*; keep BOTH *-dev-* / *-dev and *-local-dev-* / *-local-dev; remove only *-runtime* (no -dev in tag)
         case "$repo_tag" in dynamo:latest-*) continue ;; esac
-        case "$repo_tag" in *-local-dev) continue ;; esac
-        case "$repo_tag" in *-dev) continue ;; esac
+        case "$repo_tag" in *-local-dev-*|*-local-dev) continue ;; esac
+        case "$repo_tag" in *-dev-*|*-dev) continue ;; esac
         case "$repo_tag" in *-runtime*) ;; *) continue ;; esac
         targets+=("$repo_tag")
     done < <(docker images --format "{{.Repository}}:{{.Tag}} {{.ID}}" | grep "^dynamo:")
@@ -287,7 +295,7 @@ remove_runtime_images() {
     # Sanity: must not remove any dev or local-dev (both or nothing)
     local bad=
     for t in "${targets[@]}"; do
-        case "$t" in *-local-dev|*-dev) bad=1; break ;; esac
+        case "$t" in *-local-dev-*|*-local-dev|*-dev-*|*-dev) bad=1; break ;; esac
     done
     if [ -n "$bad" ]; then
         echo "ERROR: Would remove a dev/local-dev image; aborting (keep both or nothing)." >&2
@@ -334,6 +342,38 @@ remove_runtime_images() {
         fi
     done
     echo "Deleted $deleted, failed $failed"
+    echo
+}
+
+# Remove stopped (exited) containers to reclaim their writable-layer space
+prune_stopped_containers() {
+    echo "Removing stopped containers..."
+
+    local stopped
+    stopped=$(docker ps -a --filter "status=exited" --format "{{.ID}}\t{{.Names}}\t{{.Size}}\t{{.Status}}" || true)
+    if [ -z "$stopped" ]; then
+        echo "No stopped containers found."
+        echo
+        return
+    fi
+
+    local count
+    count=$(echo "$stopped" | wc -l)
+    echo "Found $count stopped container(s):"
+    echo "$stopped" | while IFS=$'\t' read -r cid cname csize cstatus; do
+        echo "  $cname  $csize  ($cstatus)"
+    done
+
+    if [ "$DRY_RUN" = true ]; then
+        echo "DRY RUN: Would remove $count stopped container(s)"
+        echo
+        return
+    fi
+
+    local cids
+    cids=$(echo "$stopped" | awk -F'\t' '{print $1}')
+    echo "$cids" | xargs docker rm -f 2>/dev/null || true
+    echo "Removed $count stopped container(s)"
     echo
 }
 
@@ -391,6 +431,58 @@ prune_build_cache() {
     echo
 }
 
+# Remove all vsc-* containers (running + stopped) and vsc-* images
+cleanup_vsc() {
+    echo "=== VSC Container/Image Cleanup ==="
+    echo
+
+    # Stop and remove vsc-* containers
+    local container_lines
+    container_lines=$(docker ps -a --format "{{.ID}}\t{{.Names}}\t{{.Status}}" | grep "	vsc-" || true)
+    if [ -n "$container_lines" ]; then
+        local count
+        count=$(echo "$container_lines" | wc -l)
+        echo "Found $count vsc-* container(s):"
+        echo "$container_lines" | while IFS=$'\t' read -r cid cname cstatus; do
+            echo "  $cname ($cstatus)"
+        done
+        local cids
+        cids=$(echo "$container_lines" | awk -F'\t' '{print $1}')
+        if [ "$DRY_RUN" = true ]; then
+            echo "DRY RUN: Would stop and remove $count container(s)"
+        else
+            echo "$cids" | xargs docker rm -f 2>/dev/null || true
+            echo "Removed $count container(s)"
+        fi
+    else
+        echo "No vsc-* containers found."
+    fi
+    echo
+
+    # Remove vsc-* images
+    local image_lines
+    image_lines=$(docker images --format "{{.Repository}}:{{.Tag}}\t{{.ID}}\t{{.Size}}" | grep "^vsc-" || true)
+    if [ -n "$image_lines" ]; then
+        local count
+        count=$(echo "$image_lines" | wc -l)
+        echo "Found $count vsc-* image(s):"
+        echo "$image_lines" | while IFS=$'\t' read -r repo_tag iid isize; do
+            echo "  $repo_tag ($isize)"
+        done
+        local repo_tags
+        repo_tags=$(echo "$image_lines" | awk -F'\t' '{print $1}')
+        if [ "$DRY_RUN" = true ]; then
+            echo "DRY RUN: Would remove $count image(s)"
+        else
+            echo "$repo_tags" | xargs docker rmi -f 2>/dev/null || true
+            echo "Removed $count image(s)"
+        fi
+    else
+        echo "No vsc-* images found."
+    fi
+    echo
+}
+
 # Main execution
 main() {
     echo "=== Docker Image Cleanup Script ==="
@@ -424,9 +516,17 @@ main() {
         remove_runtime_images
     fi
 
+    # Remove stopped containers (reclaims writable-layer space)
+    prune_stopped_containers
+
     # Prune orphan image layers (unreferenced after deletions above)
     prune_orphan_images
     
+    # Remove vsc-* containers and images if requested
+    if [ "$CLEAN_VSC" = true ]; then
+        cleanup_vsc
+    fi
+
     # Prune Docker build cache (often the largest consumer of disk space)
     prune_build_cache
     
