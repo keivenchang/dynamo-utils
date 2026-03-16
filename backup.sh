@@ -222,6 +222,7 @@ else
 --exclude='.git/objects/' --exclude='.git/lfs/' --exclude='.git/FETCH_HEAD' \
 --exclude='.git/HEAD' --exclude='.git/index' --exclude='.git/logs/' \
 --exclude='*.log' --exclude='/tmp/' --exclude='*.tmp' \
+--exclude='.cache/huggingface/' \
 --exclude='*.swp' --exclude='*.swo' --exclude='*~' --exclude='*.bak' \
 --exclude='core' --exclude='core.*'"
 fi
