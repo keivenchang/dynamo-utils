@@ -68,6 +68,7 @@ If you do only one thing: re-read this section before making changes or running 
     2.3.2 Long-Running Programs
     2.3.3 Piping and Filtering
     2.3.4 Waiting for Output (await_output.sh)
+    2.3.5 Tmux Remote Control
   2.4 Cron
     2.4.1 Environment and Variables
     2.4.2 Locks and Logging
@@ -362,6 +363,48 @@ $UTILS/await_output.sh -t 3600 -s "ALL RESULTS:" -p $CMD_PID \
 - `--pid` avoids `tail -f` hanging forever after a background process finishes
 - Output is always captured to a log file for later inspection
 - Timeout ensures the script never hangs forever
+
+### 2.3.5 Tmux Remote Control
+
+The user may have tmux sessions running on this machine (e.g. holding SSH connections to
+remote HPC clusters like ptyche that require MFA). Use tmux commands to interact with them
+instead of trying to SSH directly.
+
+**Discover sessions:**
+```bash
+tmux list-sessions
+```
+
+**Read what's on screen (last N lines of a pane):**
+```bash
+tmux capture-pane -t <session>:<window> -p | tail -30
+```
+- `-t ptyche:0` = session "ptyche", window 0
+- `-p` prints to stdout instead of a buffer
+
+**Send a command to a pane:**
+```bash
+tmux send-keys -t <session>:<window> 'command here' Enter
+```
+- The `Enter` at the end presses the Enter key
+- The command runs in whatever shell is active in that pane
+
+**Workflow for remote commands (send + wait + read):**
+```bash
+tmux send-keys -t ptyche:0 'squeue -u $(whoami)' Enter
+sleep 5
+tmux capture-pane -t ptyche:0 -p | tail -20
+```
+
+**Multiple windows:** Use `tmux send-keys -t ptyche:1` for window 1, etc.
+Check status bar in capture output for window list (e.g. `0:bash* 1:salloc-`).
+
+**Key rules:**
+- NEVER try to SSH to MFA-gated hosts (ptyche, lyris) directly — it will hang.
+  Use tmux send-keys to the user's existing session instead.
+- Chain `send-keys` + `sleep` + `capture-pane` into a single Shell call to avoid
+  multiple round-trips.
+- For long-running commands, send the command, then poll with capture-pane at intervals.
 
 ## 2.4 Cron
 

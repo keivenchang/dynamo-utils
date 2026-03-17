@@ -12,12 +12,13 @@ Scope / intent:
 ## TABLE OF CONTENTS
 
 1. META INSTRUCTIONS AND POLICIES
-   - 1.1 Remember This
+   - 1.1 Remember This / Compounding Engineering
    - 1.2 New Project Protocol
    - 1.3 Commit Policy
    - 1.4 Permission Policy
    - 1.5 Python Virtual Environment (Host vs Container)
    - 1.6 CRITICAL ANTI-PATTERNS (Review Every 10 Minutes)
+   - 1.7 AI EFFECTIVENESS PATTERNS (from Boris Cherny / Claude Code team)
 
 2. ENVIRONMENT SETUP
    - 2.1 All Projects Overview
@@ -53,8 +54,13 @@ Scope / intent:
 ---
 ## 1. META INSTRUCTIONS AND POLICIES
 
-## 1.1 Remember This
+## 1.1 Remember This / Compounding Engineering
 When the user says "remember this" or "remember how to do this", document it in this `CLAUDE.md`.
+
+**Proactive self-update loop (from Boris Cherny's Claude Code best practices):**
+- When the AI makes a mistake and the user corrects it, the AI should **proactively offer** to add the lesson to `.cursorrules` or `CLAUDE.md` so it doesn't happen again.
+- After every correction, consider: "Should this be a new rule?" If the mistake could recur, document it.
+- Claude is good at writing rules for itself -- let it draft the rule, then the user approves.
 
 ## 1.2 New Project Protocol
 When the user says "new project", always:
@@ -203,6 +209,48 @@ Using `except Exception:` catches **everything** (ValueError, TypeError, Attribu
 **WHY:** Silent failures make debugging impossible, hide bugs until production, waste hours of debugging time, and corrupt data by continuing with invalid state.
 
 **For complete details, see `.cursorrules` section 3.5.3 "Error Handling and Anti-Patterns"**
+
+## 1.7 AI EFFECTIVENESS PATTERNS (from Boris Cherny / Claude Code team)
+
+Source: `dynamo-utils.dev/system-prompts/boris-cherny-claude-code-tips.md`
+
+### 1.7.1 File Size Discipline
+- Keep individual instruction files (CLAUDE.md, .cursorrules) as focused as possible.
+- When a file grows beyond ~500 lines, consider splitting into sub-files or linking to external docs.
+- Long files cause context pressure -- rules near the end get lower adherence than rules near the top.
+- Periodically audit: remove stale rules, deduplicate, and tighten wording.
+
+### 1.7.2 Context Window Awareness
+- In long conversations, rule adherence degrades. If the AI starts violating known rules, suggest starting a fresh chat.
+- For multi-step tasks, break work into subtasks small enough to complete without exhausting context.
+- When context is getting heavy (many files read, long outputs), prioritize finishing the current task over expanding scope.
+
+### 1.7.3 Quality Escalation Prompts
+Useful prompts to get better output (user-side techniques):
+- **"Prove to me this works"** -- force the AI to diff behavior between main and the feature branch.
+- **"Knowing everything you know now, scrap this and implement the elegant solution"** -- after a mediocre first attempt, push for a clean rewrite.
+- **"Grill me on these changes"** -- make the AI act as a staff engineer reviewer before finalizing.
+- **Don't accept the first solution.** Push for better -- it usually can.
+
+### 1.7.4 Auto-Formatting Enforcement
+- Advisory rules ("run cargo fmt after editing") get violated under time pressure.
+- Prefer deterministic enforcement: pre-commit hooks, CI checks, or post-edit scripts.
+- For Rust: the `cargo fmt` rule in `.cursorrules` section 0 is the advisory version. CI (`7.2.1`) is the enforcement backstop.
+- For Python: `ruff format` + `pre-commit run --files` is the enforcement backstop.
+
+### 1.7.5 Per-Task Notes Directory
+- For complex multi-session projects, maintain a notes directory (`notes/<task-name>/`) updated after each session.
+- Include: what was done, what failed, key decisions, and next steps.
+- Point CLAUDE.md at these notes so future sessions have context without re-exploring.
+
+### 1.7.6 Verification as the #1 Quality Driver
+"Give Claude a way to verify its work. If Claude has that feedback loop, it will 2-3x the quality of the final result." -- Boris Cherny
+
+Always close the feedback loop:
+- **Code changes**: run tests, linters, type checkers after edits (`.cursorrules` 7.2.7)
+- **CI failures**: grep logs for errors, don't read sequentially (CLAUDE.md 4.6)
+- **Docker builds**: sanity-check with `--sanity-check-only` before full builds
+- **HTML/docs**: build locally and verify output before pushing
 
 ---
 ## 2. ENVIRONMENT SETUP
