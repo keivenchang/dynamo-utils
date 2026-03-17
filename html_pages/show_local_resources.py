@@ -25,6 +25,7 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 # Shared dashboard runtime helper (atomic output writes)
 from common_dashboard_runtime import atomic_write_text
+from common_lock import ComponentLock
 
 logger = logging.getLogger(__name__)
 
@@ -3262,6 +3263,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     p.add_argument("--min-net-sent-spike-mibps", type=float, default=20.0, help="Minimum net out MiB/s for a spike")
     p.add_argument("--net-spike-sigma", type=float, default=4.0, help="MAD-based sigma threshold multiplier for net spikes")
     p.add_argument("--max-net-spikes", type=int, default=50, help="Max net spikes to show/annotate")
+    p.add_argument("--run-ignore-lock", action="store_true", help="Force-acquire the PID lock (supersede any running instance)")
     return p.parse_args(argv)
 
 
@@ -3270,6 +3272,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     db_path: Path = args.db_path
     out_path: Path = args.output
     out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    lock = ComponentLock(out_path.parent, "show_local_resources", force=args.run_ignore_lock)
+    if not lock.acquire():
+        return 0
 
     con = _connect(db_path)
     try:

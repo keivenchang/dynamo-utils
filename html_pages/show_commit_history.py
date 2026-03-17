@@ -25,6 +25,7 @@ import subprocess
 import sys
 import time
 from collections import Counter, defaultdict
+from common_lock import ComponentLock
 
 import git  # type: ignore[import-not-found]
 from datetime import datetime, timezone
@@ -2854,6 +2855,11 @@ Environment Variables:
         type=Path,
         help='Write a CSV mapping GitLab pipeline URL/ID -> commit SHA -> PR number for the commit window'
     )
+    parser.add_argument(
+        '--run-ignore-lock',
+        action='store_true',
+        help='Force-acquire the PID lock (supersede any running instance)'
+    )
 
     args = parser.parse_args()
 
@@ -2865,6 +2871,10 @@ Environment Variables:
     if not (args.repo_path / '.git').exists():
         sys.stderr.write(f"Error: Not a git repository: {args.repo_path}\n")
         return 1
+
+    lock = ComponentLock(args.repo_path, "show_commit_history", force=args.run_ignore_lock)
+    if not lock.acquire():
+        return 0
 
     # Prune locally-served raw logs to avoid unbounded growth and delete any partial/unverified artifacts.
     # We only render `[raw log]` links when the local file exists (or was materialized),

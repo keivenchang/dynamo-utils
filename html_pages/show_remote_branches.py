@@ -64,6 +64,7 @@ from common_branch_nodes import (  # noqa: E402
     generate_html,
 )
 from common_dashboard_lib import TreeNodeVM, build_page_stats  # noqa: E402
+from common_lock import ComponentLock  # noqa: E402
 from dataclasses import dataclass  # noqa: E402
 from typing import Optional as Opt  # noqa: E402
 import html as html_module  # noqa: E402
@@ -160,6 +161,7 @@ Environment Variables:
     parser.add_argument("--use-text-trees", action="store_true", help="Use old text-based tree rendering instead of interactive <div> (legacy)")
     parser.add_argument("--create-dummy-prs", action="store_true", help="Create 2 dummy PRs to visualize YAML structure (for testing)")
     parser.add_argument("--debug", action="store_true", help="Enable debug logging")
+    parser.add_argument("--run-ignore-lock", action="store_true", help="Force-acquire the PID lock (supersede any running instance)")
     args = parser.parse_args()
     
     # Configure logging
@@ -167,6 +169,11 @@ Environment Variables:
         logging.basicConfig(level=logging.DEBUG, format='[%(levelname)s] %(message)s')
     else:
         logging.basicConfig(level=logging.INFO, format='[%(levelname)s] %(message)s')
+
+    base_dir_resolved = Path(args.base_dir).resolve()
+    lock = ComponentLock(base_dir_resolved, "show_remote_branches", force=args.run_ignore_lock)
+    if not lock.acquire():
+        return 0
 
     user = str(args.github_user or "").strip()
     owner = str(args.owner or "").strip()

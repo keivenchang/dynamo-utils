@@ -51,6 +51,8 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 from zoneinfo import ZoneInfo
 
+from common_lock import ComponentLock
+
 logger = logging.getLogger(__name__)
 
 # Ensure we can import sibling utilities (common.py) from the parent dynamo-utils directory
@@ -824,9 +826,18 @@ Environment Variables:
         action='store_true',
         help='Opt-in: cache raw logs for successful *-build-test jobs so we can parse pytest slowest tests under "Run tests" (slower).'
     )
+    parser.add_argument(
+        '--run-ignore-lock',
+        action='store_true',
+        help='Force-acquire the PID lock (supersede any running instance)'
+    )
     args = parser.parse_args()
 
     base_dir = (args.repo_path or args.base_dir or Path.cwd()).resolve()
+
+    lock = ComponentLock(base_dir, "show_local_branches", force=args.run_ignore_lock)
+    if not lock.acquire():
+        return
     out_path = (Path(args.output).resolve() if args.output is not None else (Path.home() / "dynamo/speedoflight/dynamo/users/keivenchang/local.html"))
     page_root_dir = out_path.parent.resolve()
 

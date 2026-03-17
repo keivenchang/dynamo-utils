@@ -35,7 +35,7 @@
 #   --skip-gitlab-api     Skip fetching from GitLab API (commit-history only); use cached data only (faster).
 #   --gitlab-fetch          Explicitly allow GitLab fetching (overrides --debug-html default).
 #   --dry-run               Print what would be executed without actually running commands
-#   --run-ignore-lock        Bypass the /tmp lock (no flock). Useful for manual runs when a stale lock exists.
+#   --run-ignore-lock        Force-acquire PID lock in Python scripts (supersede running instances).
 # Behavior:
 # - On failure, errors are printed to stderr AND logged to component log files
 #   (e.g., show_local_branches.log, show_commit_history.log)
@@ -89,19 +89,15 @@ Flags:
   --github-token <token>    GitHub token to pass to all show_*.py scripts.
 
   --dry-run                 Print what would be executed without actually running commands
-  --run-ignore-lock         Bypass the /tmp lock (no flock). Useful for manual runs when a stale lock exists.
+  --run-ignore-lock         Force-acquire the PID lock in each Python script (supersede any running instance).
   -h, --help                Show this help and exit
 
 Notes:
   - On failure, errors are printed to stderr AND logged to component log files
   - Logs are written under: $DYNAMO_HOME/logs/<YYYY-MM-DD>/
     - cron.log (high-level), plus show_local_branches.log, show_commit_history.log, show_remote_branches.log, resource_report.log
-  - Per-component locks allow parallel execution of different components:
-    - /tmp/dynamo-utils.show_local_branches.$USER.lock
-    - /tmp/dynamo-utils.show_commit_history.$USER.lock
-    - /tmp/dynamo-utils.show_local_resources.$USER.lock
-    - /tmp/dynamo-utils.show_remote_branches.$USER.lock
-  - Each component can run independently without blocking others
+  - Per-component PID-file locks (in each script's --repo-path) allow parallel execution of different components
+  - A background thread in each Python script polls the PID file every 5s; if overwritten, the old process exits
 EOF
 }
 
@@ -197,62 +193,11 @@ if [ "$FAST_DEBUG" = true ]; then
 fi
 BRANCHES_OUTPUT_FILE="$DYNAMO_HOME/speedoflight/dynamo/users/$GITHUB_USERNAME/$BRANCHES_BASENAME"
 
-# Prevent concurrent runs (cron can overlap if a run takes longer than its interval).
-# Use per-component locks in /tmp so different components can run in parallel.
-acquire_lock() {
-    local lock_name="$1"
-    local lock_file="/tmp/dynamo-utils.${lock_name}.${USER_NAME}.lock"
-    
-    if [ "$IGNORE_LOCK" = true ]; then
-        echo "[$(date '+%Y-%m-%d %H:%M:%S')] WARNING: --run-ignore-lock set; bypassing lock (lock=$lock_file)" >&2
-        return 0
-    fi
-    
-    # Use a file descriptor dynamically (fd 200 + component index)
-    local fd="$2"
-    eval "exec ${fd}>\"${lock_file}\""
-    if ! flock -n "${fd}"; then
-        echo "[$(date '+%Y-%m-%d %H:%M:%S')] WARNING: ${lock_name} is locked (lock=${lock_file}); skipping this component" >&2
-        return 1
-    fi
-    return 0
-}
-
-# Acquire locks for each component that will run
-LOCK_FD_BASE=200
-LOCK_FD_BRANCHES=$((LOCK_FD_BASE + 0))
-LOCK_FD_COMMIT_HISTORY=$((LOCK_FD_BASE + 1))
-LOCK_FD_RESOURCE=$((LOCK_FD_BASE + 2))
-LOCK_FD_REMOTE=$((LOCK_FD_BASE + 3))
-
-# Track which components successfully acquired locks
-CAN_RUN_BRANCHES=false
-CAN_RUN_COMMIT_HISTORY=false
-CAN_RUN_RESOURCE=false
-CAN_RUN_REMOTE=false
-
-if [ "$RUN_SHOW_DYNAMO_BRANCHES" = true ]; then
-    if acquire_lock "show_local_branches" "$LOCK_FD_BRANCHES"; then
-        CAN_RUN_BRANCHES=true
-    fi
-fi
-
-if [ "$RUN_SHOW_COMMIT_HISTORY" = true ]; then
-    if acquire_lock "show_commit_history" "$LOCK_FD_COMMIT_HISTORY"; then
-        CAN_RUN_COMMIT_HISTORY=true
-    fi
-fi
-
-if [ "$RUN_RESOURCE_REPORT" = true ]; then
-    if acquire_lock "show_local_resources" "$LOCK_FD_RESOURCE"; then
-        CAN_RUN_RESOURCE=true
-    fi
-fi
-
-if [ "$RUN_SHOW_REMOTE_BRANCHES" = true ]; then
-    if acquire_lock "show_remote_branches" "$LOCK_FD_REMOTE"; then
-        CAN_RUN_REMOTE=true
-    fi
+# Locking is now handled by PID files inside each Python script (common_lock.py).
+# --run-ignore-lock is passed through to Python so it can force-acquire the PID lock.
+LOCK_FLAG=""
+if [ "$IGNORE_LOCK" = true ]; then
+    LOCK_FLAG="--run-ignore-lock"
 fi
 
 #
@@ -357,7 +302,7 @@ run_resource_report() {
             --days "$RESOURCE_DAYS" \
             --prune-db-days 4 \
             --db-checkpoint-truncate \
-            --title "keivenc-linux Resource Report"; then
+            --title "keivenc-linux Resource Report" $LOCK_FLAG; then
             echo "$(date '+%Y-%m-%d %H:%M:%S') - Updated $RESOURCE_REPORT_HTML" >> "$LOG_FILE"
         else
             echo "$(date '+%Y-%m-%d %H:%M:%S') - WARNING: Failed to update $RESOURCE_REPORT_HTML" >> "$LOG_FILE"
@@ -405,7 +350,7 @@ run_show_local_branches() {
     
     echo "$(date '+%Y-%m-%d %H:%M:%S') - Generating branches dashboard" >> "$LOG_FILE"
     log_line_ts "$BRANCHES_LOG" "===== run_show_local_branches start (output=$BRANCHES_OUTPUT_FILE) ====="
-    if run_cmd_to_log_ts "$BRANCHES_LOG" python3 "$SCRIPT_DIR/show_local_branches.py" --repo-path "$DYNAMO_HOME" --output "$BRANCHES_OUTPUT_FILE" $TOKEN_FLAG $REFRESH_CLOSED_FLAG $MAX_GH_FLAG $SUCCESS_BUILD_TEST_FLAG; then
+    if run_cmd_to_log_ts "$BRANCHES_LOG" python3 "$SCRIPT_DIR/show_local_branches.py" --repo-path "$DYNAMO_HOME" --output "$BRANCHES_OUTPUT_FILE" $TOKEN_FLAG $REFRESH_CLOSED_FLAG $MAX_GH_FLAG $SUCCESS_BUILD_TEST_FLAG $LOCK_FLAG; then
         echo "$(date '+%Y-%m-%d %H:%M:%S') - Updated $BRANCHES_OUTPUT_FILE" >> "$LOG_FILE"
     else
         echo "$(date '+%Y-%m-%d %H:%M:%S') - ERROR: Failed to update $BRANCHES_OUTPUT_FILE" >> "$LOG_FILE"
@@ -502,7 +447,8 @@ run_show_remote_branches() {
             --output "$OUT_FILE" \
                 $TOKEN_FLAG \
                 $MAX_GH_FLAG \
-                $SUCCESS_BUILD_TEST_FLAG; then
+                $SUCCESS_BUILD_TEST_FLAG \
+                $LOCK_FLAG; then
             echo "$(date '+%Y-%m-%d %H:%M:%S') - Updated $OUT_FILE" >> "$LOG_FILE"
         else
             echo "$(date '+%Y-%m-%d %H:%M:%S') - ERROR: Failed to update $OUT_FILE" >> "$LOG_FILE"
@@ -594,7 +540,7 @@ run_show_commit_history() {
 
     echo "$(date '+%Y-%m-%d %H:%M:%S') - Generating commit history dashboard (max_commits=$MAX_COMMITS)" >> "$LOG_FILE"
     log_line_ts "$COMMIT_HISTORY_LOG" "===== run_show_commit_history start (max_commits=$MAX_COMMITS output=$COMMIT_HISTORY_HTML) ====="
-    if run_cmd_to_log_ts "$COMMIT_HISTORY_LOG" python3 "$SCRIPT_DIR/show_commit_history.py" --repo-path . --max-commits "$MAX_COMMITS" --output "$COMMIT_HISTORY_HTML" $OUTPUT_JSON_FLAG $SKIP_FLAG $MAX_GH_FLAG $PARALLEL_FLAG $SUCCESS_BUILD_TEST_FLAG $VERIFIER_FLAG; then
+    if run_cmd_to_log_ts "$COMMIT_HISTORY_LOG" python3 "$SCRIPT_DIR/show_commit_history.py" --repo-path . --max-commits "$MAX_COMMITS" --output "$COMMIT_HISTORY_HTML" $OUTPUT_JSON_FLAG $SKIP_FLAG $MAX_GH_FLAG $PARALLEL_FLAG $SUCCESS_BUILD_TEST_FLAG $VERIFIER_FLAG $LOCK_FLAG; then
         echo "$(date '+%Y-%m-%d %H:%M:%S') - Updated $COMMIT_HISTORY_HTML" >> "$LOG_FILE"
     else
         echo "$(date '+%Y-%m-%d %H:%M:%S') - ERROR: Failed to update commit-history.html" >> "$LOG_FILE"
@@ -604,16 +550,16 @@ run_show_commit_history() {
     fi
 }
 
-if [ "$RUN_SHOW_REMOTE_BRANCHES" = true ] && [ "$CAN_RUN_REMOTE" = true ]; then
+if [ "$RUN_SHOW_REMOTE_BRANCHES" = true ]; then
     run_show_remote_branches
 fi
-if [ "$RUN_SHOW_DYNAMO_BRANCHES" = true ] && [ "$CAN_RUN_BRANCHES" = true ]; then
+if [ "$RUN_SHOW_DYNAMO_BRANCHES" = true ]; then
     run_show_local_branches
 fi
-if [ "$RUN_SHOW_COMMIT_HISTORY" = true ] && [ "$CAN_RUN_COMMIT_HISTORY" = true ]; then
+if [ "$RUN_SHOW_COMMIT_HISTORY" = true ]; then
     run_show_commit_history
 fi
-if [ "$RUN_RESOURCE_REPORT" = true ] && [ "$CAN_RUN_RESOURCE" = true ]; then
+if [ "$RUN_RESOURCE_REPORT" = true ]; then
     run_resource_report
 fi
 
