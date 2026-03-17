@@ -5,8 +5,7 @@
         "examples",
         "tests",
         "benchmarks",
-        "deploy",
-        "_"
+        "deploy"
     ],
     "exclude": [
         "**/__pycache__",
