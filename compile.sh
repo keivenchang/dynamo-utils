@@ -479,12 +479,12 @@ if [ -n "$BUILD_TYPE" ]; then
         dry_run_echo "Building ai-dynamo-runtime package..."
 
         if [ "$BUILD_TYPE" = "development" ]; then
-            cmd bash -c "cd $WORKSPACE_DIR/lib/bindings/python && DYNAMO_USE_PREBUILT_KERNELS=1 CARGO_PROFILE_DEV_OPT_LEVEL=0 CARGO_BUILD_JOBS=$CARGO_BUILD_JOBS CARGO_PROFILE_DEV_CODEGEN_UNITS=256 maturin develop --uv"
+            cmd bash -c "cd $WORKSPACE_DIR/lib/bindings/python && DYNAMO_USE_PREBUILT_KERNELS=1 CARGO_PROFILE_DEV_OPT_LEVEL=0 CARGO_BUILD_JOBS=$CARGO_BUILD_JOBS CARGO_PROFILE_DEV_CODEGEN_UNITS=256 maturin develop --uv --features kv-indexer"
 
             dry_run_echo "Installing components package in editable mode..."
             cmd bash -c "cd $WORKSPACE_DIR/ && uv pip install -e ."
         else
-            cmd bash -c "cd $WORKSPACE_DIR/lib/bindings/python && DYNAMO_USE_PREBUILT_KERNELS=1 maturin build --release --out $WHEEL_OUTPUT_DIR"
+            cmd bash -c "cd $WORKSPACE_DIR/lib/bindings/python && DYNAMO_USE_PREBUILT_KERNELS=1 maturin build --release --features kv-indexer --out $WHEEL_OUTPUT_DIR"
 
             if [ "$DRY_RUN" = false ]; then
                 if ls $WHEEL_OUTPUT_DIR/*.whl 1> /dev/null 2>&1; then
