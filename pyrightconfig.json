@@ -2,6 +2,7 @@
     "include": [
         "components/*/src",
         "lib/bindings/python/src",
+        "lib/gpu_memory_service",
         "examples",
         "tests",
         "benchmarks",
@@ -25,6 +26,7 @@
         "components/backends/llama_cpp/src",
         "components/backends/mocker/src",
         "lib/bindings/python/src",
+        "lib/gpu_memory_service",
         "/opt/vllm",
         "/sgl-workspace/sglang/python"
     ],
@@ -44,6 +46,7 @@
                 "components/backends/llama_cpp/src",
                 "components/backends/mocker/src",
                 "lib/bindings/python/src",
+                "lib/gpu_memory_service",
                 "/opt/vllm",
                 "/sgl-workspace/sglang/python"
             ]
