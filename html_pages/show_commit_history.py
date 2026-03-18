@@ -1650,6 +1650,7 @@ class CommitHistoryGenerator:
                         f" && curl -sL {BUILD_LOCAL_DEV_SCRIPT_URL} | python3 - $L --build)"
                     )
                     image_name_html = html.escape(registry_image_name)
+                    image_name_html = re.sub(r'-local-dev-', '-<b>local-dev</b>-', image_name_html)
                     image_name_html = re.sub(r'-dev-', '-<b>dev</b>-', image_name_html)
                     image_name_html = re.sub(r'-amd64\b', r'-<b style="color:#76b900">amd64</b>', image_name_html)
                     image_name_html = re.sub(r'-arm64\b', r'-<b style="color:#e91e8c">arm64</b>', image_name_html)
@@ -1728,6 +1729,7 @@ class CommitHistoryGenerator:
                         else:
                             created_display = ""
                         tag_html = html.escape(tag)
+                        tag_html = re.sub(r'-local-dev-', '-<b>local-dev</b>-', tag_html)
                         tag_html = re.sub(r'-dev-', '-<b>dev</b>-', tag_html)
                         tag_html = re.sub(r'-amd64\b', r'-<b style="color:#76b900">amd64</b> [x86]', tag_html)
                         tag_html = re.sub(r'-arm64\b', r'-<b style="color:#e91e8c">arm64</b> [ARM]', tag_html)
@@ -2716,6 +2718,7 @@ class CommitHistoryGenerator:
                     for sha in sha_list:
                         if sha in tag:
                             tag_html_val = html.escape(tag)
+                            tag_html_val = re.sub(r'-local-dev-', '-<b>local-dev</b>-', tag_html_val)
                             tag_html_val = re.sub(r'-dev-', '-<b>dev</b>-', tag_html_val)
                             tag_html_val = re.sub(r'-amd64\b', r'-<b style="color:#76b900">amd64</b>', tag_html_val)
                             tag_html_val = re.sub(r'-arm64\b', r'-<b style="color:#e91e8c">arm64</b>', tag_html_val)
