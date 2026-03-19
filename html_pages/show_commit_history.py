@@ -1652,8 +1652,8 @@ class CommitHistoryGenerator:
                     image_name_html = html.escape(registry_image_name)
                     image_name_html = re.sub(r'-local-dev-', '-<b>local-dev</b>-', image_name_html)
                     image_name_html = re.sub(r'-dev-', '-<b>dev</b>-', image_name_html)
-                    image_name_html = re.sub(r'-amd64\b', r'-<b style="color:#76b900">amd64</b>', image_name_html)
-                    image_name_html = re.sub(r'-arm64\b', r'-<b style="color:#e91e8c">arm64</b>', image_name_html)
+                    image_name_html = re.sub(r'-amd64\b', r'-<b style="color:#76b900">amd64</b> [x86]', image_name_html)
+                    image_name_html = re.sub(r'-arm64\b', r'-<b style="color:#e91e8c">arm64</b> [ARM]', image_name_html)
                     formatted.append({
                         "tag": registry_tag,
                         "framework": img.framework,
@@ -2720,8 +2720,8 @@ class CommitHistoryGenerator:
                             tag_html_val = html.escape(tag)
                             tag_html_val = re.sub(r'-local-dev-', '-<b>local-dev</b>-', tag_html_val)
                             tag_html_val = re.sub(r'-dev-', '-<b>dev</b>-', tag_html_val)
-                            tag_html_val = re.sub(r'-amd64\b', r'-<b style="color:#76b900">amd64</b>', tag_html_val)
-                            tag_html_val = re.sub(r'-arm64\b', r'-<b style="color:#e91e8c">arm64</b>', tag_html_val)
+                            tag_html_val = re.sub(r'-amd64\b', r'-<b style="color:#76b900">amd64</b> [x86]', tag_html_val)
+                            tag_html_val = re.sub(r'-arm64\b', r'-<b style="color:#e91e8c">arm64</b> [ARM]', tag_html_val)
                             sha_to_images[sha].append({
                                 'tag': tag,
                                 'tag_html': tag_html_val,
