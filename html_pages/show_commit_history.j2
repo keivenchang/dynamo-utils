@@ -1068,7 +1068,7 @@ window.__dashboardOnReadyQueue.push(function() {
 {%- set gha_title = 'GitHub Actions: No checks' -%}
 {%- endif -%}
 {# GitHub section #}
-{%- if commit.github_checks_tree_html -%}<a href="#"
+{%- if commit.github_checks_tree_html or commit.post_merge_checks_tree_html -%}<a href="#"
    id="github-tree-toggle-{{ sha_short }}"
    class="triangle-toggle"
    onclick="toggleCommitGitHubTree(event, '{{ sha_short }}'); return false;"
@@ -1343,8 +1343,8 @@ window.__dashboardOnReadyQueue.push(function() {
 </td>
 </tr>
 
-{# GitHub checks tree row (hidden by default) #}
-{%- if commit.github_checks_tree_html -%}
+{# GitHub checks tree row (hidden by default) — includes pre-merge + post-merge CI trees #}
+{%- if commit.github_checks_tree_html or commit.post_merge_checks_tree_html -%}
 <tr id="github-tree-row-{{ sha_short }}" style="display: none;">
 <td colspan="9" style="padding: 0;">
 <div style="padding: 0; border-top: 0;">
@@ -1354,7 +1354,12 @@ window.__dashboardOnReadyQueue.push(function() {
                     style="padding: 0 6px; height: 18px; line-height: 16px; font-size: 14px; border: 1px solid #d0d7de; border-radius: 999px; background: #ffffff; color: #57606a; cursor: pointer;"
                     title="Close GitHub checks"><svg aria-hidden="true" viewBox="0 0 16 16" version="1.1" width="12" height="12" data-view-component="true" class="octicon octicon-x" fill="currentColor"><path fill-rule="evenodd" d="M3.72 3.72a.75.75 0 011.06 0L8 6.94l3.22-3.22a.75.75 0 111.06 1.06L9.06 8l3.22 3.22a.75.75 0 11-1.06 1.06L8 9.06l-3.22 3.22a.75.75 0 11-1.06-1.06L6.94 8 3.72 4.78a.75.75 0 010-1.06z"></path></svg></button>
           </div>
+          {%- if commit.github_checks_tree_html -%}
           <div style="margin: 0; padding: 0 0 0 14px;">{{ commit.github_checks_tree_html | safe }}</div>
+          {%- endif -%}
+          {%- if commit.post_merge_checks_tree_html -%}
+          <div style="margin: 0; padding: 8px 0 0 14px;">{{ commit.post_merge_checks_tree_html | safe }}</div>
+          {%- endif -%}
 </div>
 </td>
 </tr>

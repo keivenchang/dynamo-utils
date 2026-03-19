@@ -282,6 +282,7 @@ GITHUB_API_STATS = _GitHubAPIStats()
 
 # Cached resources that need `GITHUB_API_STATS` at import time.
 from .api.pr_checks_cached import get_pr_checks_rows_cached
+from .api.commit_checks_cached import get_commit_checks_rows_cached
 
 
 class _CommitHistoryPerfStats:
@@ -439,6 +440,9 @@ class PRInfo:
     failed_checks: List['FailedCheck'] = field(default_factory=list)
     running_checks: List['RunningCheck'] = field(default_factory=list)
     rerun_url: Optional[str] = None
+    # Merge commit SHA (from GitHub REST API `merge_commit_sha` field).
+    # Available for merged PRs; used to fetch post-merge CI check-runs.
+    merge_commit_sha: Optional[str] = None
     # Optional: cached PR checks rows (used by some dashboards to show a compact status pill).
     # Keeping this on the concrete type avoids hasattr/getattr patterns downstream.
     check_rows: List['GHPRCheckRow'] = field(default_factory=list)
@@ -2846,6 +2850,7 @@ class GitHubAPIClient:
             "base_ref": pr.base_ref,
             "created_at": pr.created_at,
             "updated_at": pr.updated_at,
+            "merge_commit_sha": pr.merge_commit_sha,
         }
 
     def _pr_data_to_pr_info_min(self, pr_data: Dict[str, Any]) -> Optional["PRInfo"]:
@@ -2867,6 +2872,8 @@ class GitHubAPIClient:
 
             base = pr_data.get("base") or {}
             base_ref = str(base.get("ref", "") or "") if isinstance(base, dict) else ""
+
+            merge_sha = str(pr_data.get("merge_commit_sha") or "").strip() or None
 
             return PRInfo(
                 number=int(pr_data.get("number") or 0),
@@ -2892,6 +2899,7 @@ class GitHubAPIClient:
                 failed_checks=[],
                 running_checks=[],
                 rerun_url=None,
+                merge_commit_sha=merge_sha,
             )
         except AttributeError:  # .get() on non-dict
             return None
@@ -2923,6 +2931,7 @@ class GitHubAPIClient:
                 failed_checks=[],
                 running_checks=[],
                 rerun_url=None,
+                merge_commit_sha=d.get("merge_commit_sha"),
             )
         except AttributeError:  # .get() on non-dict
             return None
@@ -3009,6 +3018,7 @@ class GitHubAPIClient:
                 "failed_checks": [GitHubAPIClient._failed_check_to_dict(fc) for fc in (pr.failed_checks or [])],
                 "running_checks": [GitHubAPIClient._running_check_to_dict(rc) for rc in (pr.running_checks or [])],
                 "rerun_url": pr.rerun_url,
+                "merge_commit_sha": pr.merge_commit_sha,
             }
         except (TypeError, ValueError):  # list conversion
             return GitHubAPIClient._pr_info_min_to_dict(pr)
@@ -3052,6 +3062,7 @@ class GitHubAPIClient:
                 failed_checks=failed,
                 running_checks=running,
                 rerun_url=d.get("rerun_url"),
+                merge_commit_sha=d.get("merge_commit_sha"),
             )
         except AttributeError:  # .get() on non-dict
             return None
@@ -3623,6 +3634,7 @@ class GitHubAPIClient:
             failed_checks=failed_checks,
             running_checks=running_checks,
             rerun_url=rerun_url,
+            merge_commit_sha=str(pr_data.get("merge_commit_sha") or "").strip() or None,
         )
 
     def _get_cached_pr_info_if_unchanged(
@@ -3754,6 +3766,36 @@ class GitHubAPIClient:
             required_checks=required_checks,
             ttl_s=int(ttl_s),
             pr_updated_at_epoch=pr_updated_at_epoch,
+            skip_fetch=bool(skip_fetch),
+        )
+
+    def get_commit_checks_rows(
+        self,
+        owner: str,
+        repo: str,
+        commit_sha: str,
+        *,
+        ttl_s: int = 300,
+        skip_fetch: bool = False,
+    ) -> List[GHPRCheckRow]:
+        """Get check-runs for a specific commit SHA (e.g. merge commit for post-merge CI).
+
+        Unlike get_pr_checks_rows (which fetches pre-merge CI via the PR head SHA),
+        this fetches all check-runs associated with a commit directly. This captures
+        post-merge CI workflows triggered by `on: push` to main.
+
+        Args:
+            commit_sha: Full commit SHA to fetch check-runs for.
+            ttl_s: Cache TTL in seconds. Use long TTL (360 days) for merged commits
+                   since post-merge CI results are immutable once complete.
+            skip_fetch: If True, only return cached data (no API calls).
+        """
+        return get_commit_checks_rows_cached(
+            self,
+            owner=owner,
+            repo=repo,
+            commit_sha=str(commit_sha),
+            ttl_s=int(ttl_s),
             skip_fetch=bool(skip_fetch),
         )
 

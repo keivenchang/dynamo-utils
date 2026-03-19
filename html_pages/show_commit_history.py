@@ -1031,6 +1031,7 @@ class CommitHistoryGenerator:
             },
             "commits": commits_json,
             "github_actions_status": template_context.get("github_actions_status") or {},
+            "post_merge_status": template_context.get("post_merge_status") or {},
             "gha_per_commit_stats": template_context.get("gha_per_commit_stats") or {},
             "gitlab_pipelines": template_context.get("gitlab_pipelines") or {},
             "mr_pipelines": template_context.get("mr_pipelines") or {},
@@ -1274,6 +1275,60 @@ class CommitHistoryGenerator:
                 check['is_required'] = _is_required_check_name(check_name, required_norm)
                 # Add short name for tooltip display
                 check['short_name'] = job_name_to_short.get(check_name, check_name)
+
+        # --- Phase 2b: Fetch post-merge check-runs (by merge commit SHA) ---
+        post_merge_status: Dict[str, Dict[str, Any]] = {}
+        all_commit_shas = [str(c.get("sha_full", "") or "") for c in commit_data if c.get("sha_full")]
+
+        def fetch_commit_checks(sha: str) -> Tuple[str, List[Any]]:
+            rows = self.github_client.get_commit_checks_rows(
+                owner='ai-dynamo',
+                repo='dynamo',
+                commit_sha=sha,
+                ttl_s=360 * 24 * 3600,
+                skip_fetch=bool(cache_only_github),
+            )
+            return (sha, rows)
+
+        n_commits = len(all_commit_shas)
+        self.logger.info("[progress] Phase 2b/5: Fetching post-merge check runs for %d commits", n_commits)
+        pm_done = 0
+        max_workers_pm = min(32, n_commits or 1)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers_pm) as executor:
+            futures_pm = {
+                executor.submit(fetch_commit_checks, sha): sha
+                for sha in all_commit_shas
+            }
+            for future in concurrent.futures.as_completed(futures_pm):
+                sha, rows = future.result()
+                pm_done += 1
+                if pm_done % 20 == 0 or pm_done == n_commits:
+                    self.logger.info("[progress]   Post-merge checks: %d/%d (%.0f%%)", pm_done, n_commits, 100 * pm_done / n_commits)
+
+                if rows:
+                    check_runs_dicts = []
+                    for row in rows:
+                        check_runs_dicts.append({
+                            'name': row.name,
+                            'short_name': row.name,
+                            'status': row.status_raw if row.status_raw not in {'pass', 'fail'} else 'completed',
+                            'conclusion': 'success' if row.status_raw == 'pass' else ('failure' if row.status_raw == 'fail' else row.status_raw),
+                            'html_url': row.url,
+                            'details_url': row.url,
+                            'run_id': row.run_id,
+                            'job_id': row.job_id,
+                            'duration': row.duration,
+                            'workflow_name': row.workflow_name,
+                            'event': row.event,
+                        })
+                    post_merge_status[sha] = {
+                        'status': 'completed',
+                        'conclusion': 'success',
+                        'total_count': len(check_runs_dicts),
+                        'check_runs': check_runs_dicts,
+                    }
+
+        self.logger.info("Post-merge checks: %d/%d commits have post-merge CI data", len(post_merge_status), n_commits)
 
         # Process GitLab images: deduplicate and format
         gitlab_images = {}
@@ -1760,14 +1815,30 @@ class CommitHistoryGenerator:
         # Generate timestamp (PT)
         generated_time = datetime.now(ZoneInfo('America/Los_Angeles')).strftime('%Y-%m-%d %H:%M:%S %Z')
         
-        # Calculate GitHub Actions status counts (overall summary)
+        # Merge pre-merge + post-merge check-runs for combined status computation.
+        combined_actions_status: Dict[str, Dict[str, Any]] = {}
+        for sha_full in [c['sha_full'] for c in commit_data]:
+            pre = github_actions_status.get(sha_full) or {}
+            post = post_merge_status.get(sha_full) or {}
+            pre_runs = list(pre.get('check_runs') or [])
+            post_runs = list(post.get('check_runs') or [])
+            all_runs = pre_runs + post_runs
+            if all_runs:
+                combined_actions_status[sha_full] = {
+                    'status': 'completed',
+                    'conclusion': 'success',
+                    'total_count': len(all_runs),
+                    'check_runs': all_runs,
+                }
+
+        # Calculate GitHub Actions status counts (overall summary, pre-merge + post-merge)
         gha_success_count = 0
         gha_failed_count = 0
         gha_in_progress_count = 0
         gha_other_count = 0
 
         for sha_full in [c['sha_full'] for c in commit_data]:
-            gha_status = github_actions_status.get(sha_full)
+            gha_status = combined_actions_status.get(sha_full)
             if gha_status and gha_status.get('conclusion') == 'success':
                 gha_success_count += 1
             elif gha_status and gha_status.get('conclusion') == 'failure':
@@ -1780,7 +1851,7 @@ class CommitHistoryGenerator:
         # Calculate per-commit check statistics (includes required vs optional failure split)
         gha_per_commit_stats = {}
         for sha_full in [c['sha_full'] for c in commit_data]:
-            gha_status = github_actions_status.get(sha_full)
+            gha_status = combined_actions_status.get(sha_full)
             if not gha_status or not gha_status.get('check_runs'):
                 gha_per_commit_stats[sha_full] = {
                     'success_required': 0,
@@ -2200,6 +2271,76 @@ class CommitHistoryGenerator:
             dt = max(0.0, time.monotonic() - t0)
             return (sha_full, sha_short, tree_html, dt)
 
+        def build_post_merge_tree(commit_dict: dict) -> Tuple[str, str, str, float]:
+            """Build post-merge CI tree for a single commit (parallelizable worker)."""
+            sha_full = str(commit_dict.get("sha_full", "") or "")
+            sha_short = str(commit_dict.get("sha_short", "") or "")
+            t0 = time.monotonic()
+            tree_html = ""
+
+            pm_data = post_merge_status.get(sha_full)
+            if not pm_data:
+                dt = max(0.0, time.monotonic() - t0)
+                return (sha_full, sha_short, "", dt)
+
+            pm_check_runs = pm_data.get("check_runs") or []
+            if not pm_check_runs:
+                dt = max(0.0, time.monotonic() - t0)
+                return (sha_full, sha_short, "", dt)
+
+            ci_job_nodes: List[CIJobNode] = []
+            for cr in pm_check_runs:
+                if not isinstance(cr, dict):
+                    continue
+                name = str(cr.get("name", "") or "").strip()
+                if not name:
+                    continue
+                st = self._status_norm_for_check_run(
+                    status=str(cr.get("status", "") or ""),
+                    conclusion=str(cr.get("conclusion", "") or ""),
+                )
+                url = str(cr.get("html_url", "") or cr.get("details_url", "") or "").strip()
+                dur = str(cr.get("duration", "") or "")
+                run_id = str(cr.get("run_id", "") or "")
+                job_id = str(cr.get("job_id", "") or "")
+                workflow_name = str(cr.get("workflow_name", "") or "")
+
+                node = CIJobNode(
+                    job_id=name,
+                    display_name=name,
+                    status=st,
+                    duration=dur,
+                    log_url=url,
+                    actions_job_id=job_id,
+                    run_id=run_id,
+                    is_required=False,
+                    children=[],
+                    page_root_dir=(output_path.parent if output_path else Path(self.repo_path)).resolve(),
+                    context_key=f"pm:{sha_full}:{name}",
+                    github_api=self.github_client,
+                )
+                node.core_job_name = name
+                ci_job_nodes.append(node)
+
+            children: List[TreeNodeVM] = [node.to_tree_vm() for node in ci_job_nodes]
+            children.sort(key=lambda vm: (vm.label_html or "").lower())
+
+            root = TreeNodeVM(
+                node_key=f"pm-root:{sha_full}",
+                label_html=(
+                    f'<span style="font-weight: 600;">Post-Merge CI</span> '
+                    f'<a href="https://github.com/ai-dynamo/dynamo/commit/{html.escape(sha_full)}/checks" '
+                    f'target="_blank" style="color: #0969da; font-size: 11px; text-decoration: none;">[checks]</a>'
+                ),
+                children=children,
+                collapsible=False,
+                default_expanded=True,
+                triangle_tooltip="Post-Merge CI",
+            )
+            tree_html = render_tree_divs([root])
+            dt = max(0.0, time.monotonic() - t0)
+            return (sha_full, sha_short, tree_html, dt)
+
         with render_t.phase("build_trees"):
             # OPTIMIZATION (2026-01-22): Ensure raw log directory exists ONCE before parallel loop
             # Previously: mkdir() called inside materialize_job_raw_log_text_local_link() for each job
@@ -2259,18 +2400,22 @@ class CommitHistoryGenerator:
 
             # Build trees in parallel using ThreadPoolExecutor
             n_trees = len(commit_data)
-            logger.info("[progress] Phase 3/5: Building CI trees for %d commits (GitHub + GitLab)", n_trees)
+            logger.info("[progress] Phase 3/5: Building CI trees for %d commits (GitHub + GitLab + Post-Merge)", n_trees)
             max_workers = min(32, n_trees or 1)
             github_results: Dict[str, Tuple[str, float]] = {}
             gitlab_results: Dict[str, Tuple[str, float]] = {}
+            post_merge_results: Dict[str, Tuple[str, float]] = {}
             gh_done = 0
             gl_done = 0
+            pm_tree_done = 0
 
             with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
                 # Submit all GitHub tree builds
                 github_futures = {executor.submit(build_github_tree, c): c for c in commit_data}
                 # Submit all GitLab tree builds
                 gitlab_futures = {executor.submit(build_gitlab_tree, c): c for c in commit_data}
+                # Submit all post-merge tree builds
+                post_merge_futures = {executor.submit(build_post_merge_tree, c): c for c in commit_data}
 
                 # Collect GitHub results
                 for future in concurrent.futures.as_completed(github_futures):
@@ -2300,6 +2445,17 @@ class CommitHistoryGenerator:
                     if gl_done % 20 == 0 or gl_done == n_trees:
                         logger.info("[progress]   GitLab trees: %d/%d (%.0f%%)", gl_done, n_trees, 100 * gl_done / n_trees)
 
+                # Collect post-merge results
+                for future in concurrent.futures.as_completed(post_merge_futures):
+                    sha_full, sha_short, tree_html, dt = future.result()
+                    if tree_html:
+                        post_merge_results[sha_full] = (tree_html, dt)
+                    pm_tree_done += 1
+                    if pm_tree_done % 20 == 0 or pm_tree_done == n_trees:
+                        logger.info("[progress]   Post-merge trees: %d/%d (%.0f%%)", pm_tree_done, n_trees, 100 * pm_tree_done / n_trees)
+
+            logger.info("Post-merge trees: %d/%d commits have post-merge tree HTML", len(post_merge_results), n_trees)
+
             # Attach results to commit dictionaries
             logger.debug(f"[attach_results] Attaching tree HTML to {len(commit_data)} commits. github_results has {len(github_results)} entries")
             for c in commit_data:
@@ -2314,6 +2470,8 @@ class CommitHistoryGenerator:
                     logger.debug(f"[attach_results] {sha_short} ({sha_full[:12]}): NOT in github_results dict")
                 if sha_full in gitlab_results:
                     c["gitlab_checks_tree_html"] = gitlab_results[sha_full][0]
+                if sha_full in post_merge_results:
+                    c["post_merge_checks_tree_html"] = post_merge_results[sha_full][0]
 
         # Render template
         template_dir = Path(__file__).parent
@@ -2458,6 +2616,7 @@ class CommitHistoryGenerator:
             "report_path_by_commit_image": report_path_by_commit_image,
             "build_status": build_status,
             "github_actions_status": github_actions_status,
+            "post_merge_status": post_merge_status,
             "generated_time": generated_time,
             "job_started_time": job_started_time,
             "job_elapsed_str": f"{int(elapsed_s // 60)} minutes" if elapsed_s is not None else "",

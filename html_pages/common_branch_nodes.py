@@ -2206,6 +2206,68 @@ class PRStatusWithJobsNode(BranchNode):
             github_api=gh,
         )
 
+        # Post-merge CI: if PR is merged and has a merge commit SHA, fetch and display
+        # post-merge check-runs (triggered by `on: push` to main).
+        merge_sha = pr.merge_commit_sha
+        if pr.is_merged and merge_sha and gh:
+            pm_rows = gh.get_commit_checks_rows(
+                owner="ai-dynamo",
+                repo="dynamo",
+                commit_sha=merge_sha,
+                ttl_s=360 * 24 * 3600,
+                skip_fetch=not bool(self.allow_fetch_checks),
+            )
+            if pm_rows:
+                pm_ci_nodes: List[BranchNode] = []
+                for row in pm_rows:
+                    st_raw = str(row.status_raw or "").strip().lower()
+                    if st_raw in {"pass"}:
+                        st_norm = "success"
+                    elif st_raw in {"fail", "failure", "timed_out", "action_required"}:
+                        st_norm = "failure"
+                    elif st_raw in {"cancelled", "canceled"}:
+                        st_norm = "cancelled"
+                    elif st_raw in {"in_progress", "running"}:
+                        st_norm = "in_progress"
+                    elif st_raw in {"pending", "queued"}:
+                        st_norm = "pending"
+                    elif st_raw in {"skipped", "neutral"}:
+                        st_norm = "success"
+                    else:
+                        st_norm = "unknown"
+                    node = CIJobNode(
+                        job_id=row.name,
+                        display_name=row.name,
+                        status=st_norm,
+                        duration=row.duration,
+                        log_url=row.url,
+                        actions_job_id=row.job_id,
+                        run_id=row.run_id,
+                        is_required=False,
+                        children=[],
+                        page_root_dir=self.page_root_dir,
+                        context_key=f"pm:{merge_sha}:{row.name}",
+                        github_api=gh,
+                    )
+                    node.core_job_name = row.name
+                    pm_ci_nodes.append(node)
+
+                pm_kids: List[TreeNodeVM] = [node.to_tree_vm() for node in pm_ci_nodes]
+                pm_kids.sort(key=lambda vm: (vm.label_html or "").lower())
+                pm_root = TreeNodeVM(
+                    node_key=f"pm-root:{merge_sha}",
+                    label_html=(
+                        f'<span style="font-weight: 600;">Post-Merge CI</span> '
+                        f'<a href="https://github.com/ai-dynamo/dynamo/commit/{html_module.escape(merge_sha)}/checks" '
+                        f'target="_blank" style="color: #0969da; font-size: 11px; text-decoration: none;">[checks]</a>'
+                    ),
+                    children=pm_kids,
+                    collapsible=True,
+                    default_expanded=False,
+                    triangle_tooltip="Post-Merge CI",
+                )
+                kids.append(pm_root)
+
         # Add special nodes at the end (not processed by pipeline).
         for child in sorted_children:
             node_type = type(child).__name__
