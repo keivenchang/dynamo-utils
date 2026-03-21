@@ -1073,20 +1073,19 @@ docker images {dev_image_tag} --format 'Size: {{{{.Size}}}}'
         timeout=480.0,  # 8 minutes for sanity checks (trtllm can exceed 4 min)
     )
 
-    # Local-dev image build (delayed 120s to let dev-build warm Docker layer cache).
-    # local-dev Dockerfile is `FROM dev AS local-dev`; the 120s delay gives dev-build
-    # (which starts at 60s) time to cache the `dev` stage layers.
-    # local-dev only adds UID/GID remapping on top, so with warm cache it's fast (~30s).
+    # Local-dev image build: layers UID/GID remapping on top of the compressed dev image.
+    # Uses build_localdev_from_dev.py (self-contained script, 1:1 with upstream local_dev.Dockerfile).
+    # Depends on dev-compress so the dev image is ready. Fast (~10s) since it's just user remapping.
+    localdev_script = Path(__file__).parent / "build_localdev_from_dev.py"
     local_dev_image_tag = f"dynamo:{version}-{framework}-local-dev-{cuda_tag}-{arch}"
     tasks[f"{framework}-local-dev-build"] = BuildTask(
         task_id=f"{framework}-local-dev-build",
         description=f"Build {framework.upper()} local-dev image",
-        command=_build_cmd("local-dev", local_dev_image_tag),
+        command=f"python3 {localdev_script} --skip-pull --output-tag {local_dev_image_tag} --no-tag-latest {dev_image_tag}",
         input_image=dev_image_tag,
         output_image=local_dev_image_tag,
-        parents=[],
-        start_delay=120.0,
-        timeout=7200.0,  # 120 minutes for builds
+        parents=[f"{framework}-dev-compress"],
+        timeout=300.0,  # 5 minutes (typically ~10s)
     )
 
     # Local-dev compilation (includes pre/post chown).

@@ -177,9 +177,9 @@ def _parse_report_dir_to_commit_image(sha_dir_name: str) -> Tuple[Optional[str],
 # Example: https://grafana.nvidia.com/d/beyv28rcnhs74b/individual-job-details?orgId=283&var-branch=pull-request%2F5516&var-job=All&var-job_status=All&${__url_time_range}&var-repo=All&var-commit=All&var-workflow=All&from=now-30d&to=now
 GRAFANA_PR_URL_TEMPLATE = "https://grafana.nvidia.com/d/beyv28rcnhs74b/individual-job-details?orgId=283&var-branch=pull-request%2F{pr_number}&var-job=All&var-job_status=All&var-repo=All&var-commit=All&var-workflow=All&from=now-30d&to=now"
 
-# URL to container/build-local-dev.py (curl and pipe to python3 to create local-dev image).
+# URL to container/build_localdev_from_dev.py (curl and pipe to python3 to create local-dev image).
 # Derived from this script's repo (dynamo-utils or dynamo-utils.dev) so the copy command matches where the dashboard runs from.
-BUILD_LOCAL_DEV_SCRIPT_URL = f"http://speedoflight.nvidia.com/dynamo/{_UTILS_DIR.name}/container/build-local-dev.py"
+BUILD_LOCAL_DEV_SCRIPT_URL = f"http://speedoflight.nvidia.com/dynamo/{_UTILS_DIR.name}/container/build_localdev_from_dev.py"
 
 
 _normalize_check_name = normalize_check_name
@@ -1702,7 +1702,7 @@ class CommitHistoryGenerator:
                     local_dev_cmd = (
                         f"(GL={registry_location} L={local_image}"
                         f" && docker pull $GL && docker tag $GL $L && docker rmi $GL"
-                        f" && curl -sL {BUILD_LOCAL_DEV_SCRIPT_URL} | python3 - $L --build)"
+                        f" && curl -sL {BUILD_LOCAL_DEV_SCRIPT_URL} | python3 - --skip-pull $L)"
                     )
                     image_name_html = html.escape(registry_image_name)
                     image_name_html = re.sub(r'-local-dev-', '-<b>local-dev</b>-', image_name_html)
@@ -1765,7 +1765,7 @@ class CommitHistoryGenerator:
                             local_dev_cmd = (
                                 f"(ECR={full_image}"
                                 f" && docker pull $ECR"
-                                f" && curl -sL {BUILD_LOCAL_DEV_SCRIPT_URL} | python3 - $ECR --build)"
+                                f" && curl -sL {BUILD_LOCAL_DEV_SCRIPT_URL} | python3 - --skip-pull $ECR)"
                             )
                         size_bytes = detail["size_bytes"]
                         if size_bytes >= 1e9:
