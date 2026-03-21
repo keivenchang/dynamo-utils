@@ -148,13 +148,19 @@ for sha in "${NOT_RUN[@]}"; do
         PASSED_COUNT=$((PASSED_COUNT + 1))
 
         # Move logs to LOG_REPO if it differs from BUILD_REPO
+        # build_images.py truncates commit SHAs to 9 chars in directory names
         if [[ "$BUILD_REPO" != "$LOG_REPO" ]]; then
-            for d in "$BUILD_REPO"/logs/2026-*/*."$sha"; do
+            for d in "$BUILD_REPO"/logs/2026-*/*."${sha:0:9}"*; do
                 [ -d "$d" ] || continue
                 date_dir=$(basename "$(dirname "$d")")
+                dest="$LOG_REPO/logs/$date_dir/$(basename "$d")"
                 mkdir -p "$LOG_REPO/logs/$date_dir"
-                \mv -f "$d" "$LOG_REPO/logs/$date_dir/"
-                echo "Moved $(basename "$d") -> $LOG_REPO/logs/$date_dir/"
+                if [ -d "$dest" ]; then
+                    echo "Skip $(basename "$d") (already in $LOG_REPO/logs/$date_dir/)"
+                else
+                    \mv -f "$d" "$LOG_REPO/logs/$date_dir/"
+                    echo "Moved $(basename "$d") -> $LOG_REPO/logs/$date_dir/"
+                fi
             done
         fi
     else

@@ -18,6 +18,7 @@
         ".git"
     ],
     "extraPaths": [
+        "components/src",
         "components/frontend/src",
         "components/planner/src",
         "components/backends/vllm/src",
@@ -38,6 +39,7 @@
             "pythonVersion": "3.12",
             "pythonPlatform": "Linux",
             "extraPaths": [
+                "components/src",
                 "components/frontend/src",
                 "components/planner/src",
                 "components/backends/vllm/src",
