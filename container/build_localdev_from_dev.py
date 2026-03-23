@@ -375,8 +375,11 @@ Examples:
     logger.info(f"Image: {output_tag}")
     if latest_tag is not None:
         logger.info(f"Latest: {latest_tag}")
-    logger.info(f"\nTo run:")
-    logger.info(f"  ./container/run.sh --image {output_tag} --mount-workspace -it")
+    base = f"./container/run.sh --image {output_tag} --mount-workspace --hf-home ~/.cache/huggingface"
+    logger.info(f"\nYou can now use the image. Here are some commands you can try:")
+    logger.info(f"  (shell only)         {base} -it")
+    logger.info(f"  (with sanity check)  {base} -- bash -c 'python3 /workspace/deploy/sanity_check.py; exec bash'")
+    logger.info(f"  (pytest, isolated)   {base} -- python3 -m pytest -xvs --durations=10 tests/")
 
 
 if __name__ == "__main__":
