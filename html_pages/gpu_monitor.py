@@ -56,7 +56,7 @@ def parse_args():
     p.add_argument("--interval", type=int, default=75, help="Fast collection interval ms (CPU, disk)")
     p.add_argument("--gpu-interval", type=int, default=500, help="Slow collection interval ms (GPU mem, util, PCIe)")
     p.add_argument("--push-interval", type=int, default=150, help="WebSocket push interval ms")
-    p.add_argument("--window", type=int, default=600, help="Rolling window seconds")
+    p.add_argument("--window", type=int, default=600, help="Rolling window seconds (default 600 = 10min)")
     return p.parse_args()
 
 
@@ -301,7 +301,10 @@ class MetricsCollector:
         self.timestamps: deque[float] = deque(maxlen=maxlen)
         self.cpu_pct: deque[float] = deque(maxlen=maxlen)
         self._prev_disk = psutil.disk_io_counters()
+        self._prev_net = psutil.net_io_counters()
         self._prev_mono = time.monotonic()
+        self.net_sent_mbps: deque[float] = deque(maxlen=maxlen)
+        self.net_recv_mbps: deque[float] = deque(maxlen=maxlen)
         self.proc_gpu_mem: list[ProcessTracker] = []
         self.proc_disk_io = ProcessTracker(maxlen, prune=True)
         self._prev_proc_io: dict[int, int] = {}
@@ -347,6 +350,9 @@ class MetricsCollector:
                 dt = self.interval_sec
             self.timestamps.append(now)
             self.cpu_pct.append(psutil.cpu_percent(interval=None))
+            # Network I/O: repeat last (sampled in slow loop)
+            self.net_sent_mbps.append(self.net_sent_mbps[-1] if self.net_sent_mbps else 0.0)
+            self.net_recv_mbps.append(self.net_recv_mbps[-1] if self.net_recv_mbps else 0.0)
             self._prev_mono = now_mono
             # GPU: PCIe sampled live, util repeats last, memory queried from NVML
             if HAS_NVML:
@@ -384,8 +390,27 @@ class MetricsCollector:
             scan_dt = scan_mono - self._last_disk_scan_mono
             if scan_dt <= 0:
                 scan_dt = 0.5
-            self._last_disk_rates = self._scan_process_disk(scan_dt)
+            raw_rates = self._scan_process_disk(scan_dt)
+            # EMA smooth disk I/O per process (alpha=0.2)
+            alpha = 0.2
+            for pid, rate in raw_rates.items():
+                prev = self._last_disk_rates.get(pid, rate)
+                raw_rates[pid] = alpha * rate + (1 - alpha) * prev
+            self._last_disk_rates = raw_rates
             self._last_disk_scan_mono = scan_mono
+
+            # Network I/O (smoothed: overwrite last value with averaged rate)
+            net = psutil.net_io_counters()
+            net_dt = scan_dt if scan_dt > 0 else 0.5
+            sent_rate = (net.bytes_sent - self._prev_net.bytes_sent) / (1024 * 1024) / net_dt
+            recv_rate = (net.bytes_recv - self._prev_net.bytes_recv) / (1024 * 1024) / net_dt
+            self._prev_net = net
+            # Heavy EMA smoothing (alpha=0.15) + client-side spline
+            alpha = 0.15
+            if self.net_sent_mbps:
+                self.net_sent_mbps[-1] = alpha * sent_rate + (1 - alpha) * self.net_sent_mbps[-1]
+            if self.net_recv_mbps:
+                self.net_recv_mbps[-1] = alpha * recv_rate + (1 - alpha) * self.net_recv_mbps[-1]
 
             # GPU utilization (overwrite last value with fresh reading)
             if HAS_NVML:
@@ -455,6 +480,10 @@ class MetricsCollector:
             all_vals.extend(pcie_rx)
             cpu = list(self.cpu_pct)
             all_vals.append(cpu)
+            net_sent = list(self.net_sent_mbps)
+            net_recv = list(self.net_recv_mbps)
+            all_vals.append(net_sent)
+            all_vals.append(net_recv)
 
             times, ds_arrays = self._downsample_init(times_full, all_vals)
 
@@ -480,6 +509,10 @@ class MetricsCollector:
             ds_pcie_rx = [ds_arrays[idx + i] for i in range(len(pcie_rx))]
             idx += len(pcie_rx)
             ds_cpu = ds_arrays[idx]
+            idx += 1
+            ds_net_sent = ds_arrays[idx]
+            idx += 1
+            ds_net_recv = ds_arrays[idx]
 
             return {
                 "type": "init",
@@ -493,6 +526,8 @@ class MetricsCollector:
                 "pcie_tx": ds_pcie_tx,
                 "pcie_rx": ds_pcie_rx,
                 "cpu": ds_cpu,
+                "net_sent": ds_net_sent,
+                "net_recv": ds_net_recv,
                 "disk_io": disk_io,
             }
 
@@ -517,6 +552,8 @@ class MetricsCollector:
             pcie_tx = [list(self.gpu_pcie_tx[i])[since_idx:] for i in range(self.gpu_count)] if self.has_pcie else []
             pcie_rx = [list(self.gpu_pcie_rx[i])[since_idx:] for i in range(self.gpu_count)] if self.has_pcie else []
             cpu = list(self.cpu_pct)[since_idx:]
+            net_sent = list(self.net_sent_mbps)[since_idx:]
+            net_recv = list(self.net_recv_mbps)[since_idx:]
             return {
                 "type": "delta",
                 "timestamps": new_times,
@@ -526,6 +563,8 @@ class MetricsCollector:
                 "pcie_tx": pcie_tx,
                 "pcie_rx": pcie_rx,
                 "cpu": cpu,
+                "net_sent": net_sent,
+                "net_recv": net_recv,
                 "disk_io": [{"pid": p, "name": n, "color": c, "vals": v[since_idx:] if since_idx < len(v) else []} for p, n, c, v in disk_io],
                 "disk_keys": [p for p, _, _, _ in disk_io],
             }
@@ -669,6 +708,15 @@ HTML_PAGE = r"""<!DOCTYPE html>
         updateY.push(msg.disk_io[i].vals);
       }
     }
+    // Network
+    if (traceMap['net_sent'] !== undefined) {
+      indices.push(traceMap['net_sent']);
+      updateX.push(times);
+      updateY.push(msg.net_sent);
+      indices.push(traceMap['net_recv']);
+      updateX.push(times);
+      updateY.push(msg.net_recv);
+    }
 
     if (indices.length > 0) {
       Plotly.extendTraces(gd, {x: updateX, y: updateY}, indices, MAX_POINTS);
@@ -687,7 +735,16 @@ HTML_PAGE = r"""<!DOCTYPE html>
     const hasPcie = msg.has_pcie;
     const gpuCount = msg.gpu_count;
     // Rows: N gpu_mem + 1 gpu_util + 1 cpu + 1 disk
+    // Rows: N gpu_mem (weight 5) + 1 gpu_util (weight 3) + 1 cpu (weight 3) + 1 disk+net (weight 3)
     const nRows = (hasGpu ? gpuCount + 1 : 0) + 2;
+    // Row weights: GPU mem rows = 5, others = 3
+    const rowWeights = [];
+    if (hasGpu) {
+      for (let gi = 0; gi < gpuCount; gi++) rowWeights.push(5);
+      rowWeights.push(3); // GPU util
+    }
+    rowWeights.push(3); // CPU
+    rowWeights.push(3); // Disk+Net
 
     // Helper: axis name for row r (1-indexed)
     const xax = r => r === 1 ? 'x' : 'x' + r;
@@ -775,21 +832,41 @@ HTML_PAGE = r"""<!DOCTYPE html>
       legendgroup: 'cpu', legendgrouptitle: {text: 'CPU'},
     });
 
-    // Disk I/O row
+    // Disk I/O + Network I/O row (interleaved, network on secondary y-axis)
     row++;
     const diskRow = row;
+    const netYIdx = nRows + (hasPcie ? 2 : 1); // secondary y-axis for network
+    const netY = 'y' + netYIdx;
     const diskData = msg.disk_io;
     for (let i = 0; i < diskData.length; i++) {
       const d = diskData[i];
+      const diskPatterns = ['/', '\\', 'x', '+', '-', '|', '.', ''];
+      const diskPatIdx = Math.abs(d.pid) % diskPatterns.length;
       traceMap['disk_' + d.pid] = traceCount++;
       traces.push({
         x: times, y: d.vals, name: d.name, type: 'scatter', mode: 'lines',
         line: {width: 0.5, color: d.color}, stackgroup: 'disk_io',
         fillcolor: hexToRgba(d.color, 0.55),
+        fillpattern: {shape: diskPatterns[diskPatIdx], solidity: 0.15, size: 8, bgcolor: hexToRgba(d.color, 0.55), fgcolor: 'rgba(13,13,20,0.4)'},
         xaxis: xax(diskRow), yaxis: yax(diskRow),
         legendgroup: 'disk_io', legendgrouptitle: {text: 'Disk I/O'},
       });
     }
+    // Network I/O overlaid
+    traceMap['net_sent'] = traceCount++;
+    traces.push({
+      x: times, y: msg.net_sent, name: 'Net TX', type: 'scatter',
+      line: {color: '#18ffff', width: 0.5, shape: 'spline', smoothing: 1.3},
+      xaxis: xax(diskRow), yaxis: netY,
+      legendgroup: 'net', legendgrouptitle: {text: 'Network'},
+    });
+    traceMap['net_recv'] = traceCount++;
+    traces.push({
+      x: times, y: msg.net_recv, name: 'Net RX', type: 'scatter',
+      line: {color: '#ff80ab', width: 0.5, shape: 'spline', smoothing: 1.3},
+      xaxis: xax(diskRow), yaxis: netY,
+      legendgroup: 'net',
+    });
 
     // Store keys for change detection (per-GPU arrays)
     config._last_gpu_keys = msg.gpu_mem.map(gm => gm.map(m => m.pid));
@@ -804,13 +881,20 @@ HTML_PAGE = r"""<!DOCTYPE html>
       rowLabels.push(hasPcie ? 'GPU Util (%) + PCIe (MB/s)' : 'GPU Util (%)');
     }
     rowLabels.push('CPU Usage (%)');
-    rowLabels.push('Disk I/O by Process (MB/s)');
+    rowLabels.push('Disk I/O (MB/s) + Network (MB/s)');
 
     const domain = function(i, total) {
-      const gap = 0.03;
-      const h = (1 - gap * (total - 1)) / total;
-      const y0 = (total - 1 - i) * (h + gap);
-      return [y0, y0 + h];
+      const gap = 0.025;
+      const totalWeight = rowWeights.reduce((a, b) => a + b, 0);
+      const totalGap = gap * (total - 1);
+      const usable = 1 - totalGap;
+      // Compute y0 from bottom up (row 0 = top)
+      let y1 = 1;
+      for (let r = 0; r < i; r++) {
+        y1 -= (rowWeights[r] / totalWeight) * usable + gap;
+      }
+      const h = (rowWeights[i] / totalWeight) * usable;
+      return [y1 - h, y1];
     };
 
     const layout = {
@@ -862,6 +946,14 @@ HTML_PAGE = r"""<!DOCTYPE html>
     const diskYName = diskRow === 1 ? 'yaxis' : 'yaxis' + diskRow;
     layout[diskYName].title = {text: 'MB/s', font: {size: 10}};
     layout[diskYName].rangemode = 'tozero';
+    // Network secondary y-axis (log) overlaying disk row
+    const netYName = 'yaxis' + netYIdx;
+    layout[netYName] = {
+      domain: domain(diskRow - 1, nRows),
+      title: {text: 'Net MB/s (log)', font: {color: '#18ffff', size: 10}},
+      overlaying: yax(diskRow), side: 'right', showgrid: false,
+      type: 'log', autorange: true,
+    };
 
     // Add background shapes and labels
     const axPairs = [];
@@ -1038,7 +1130,7 @@ def build_server(collector: MetricsCollector, args):
 def main():
     args = parse_args()
     print(f"Fast collect : {args.interval}ms (CPU, PCIe, GPU mem)")
-    print(f"Slow collect : {args.gpu_interval}ms (GPU util, disk I/O)")
+    print(f"Slow collect : {args.gpu_interval}ms (GPU util, disk I/O, network)")
     print(f"Push interval: {args.push_interval}ms")
     print(f"Rolling window  : {args.window}s ({args.window // 60}m {args.window % 60}s)")
 
