@@ -53,8 +53,8 @@ def parse_args():
     p = argparse.ArgumentParser(description="Real-time GPU/CPU/Disk monitor")
     p.add_argument("--port", type=int, default=8051)
     p.add_argument("--host", default="127.0.0.1")
-    p.add_argument("--interval", type=int, default=100, help="Collection interval ms")
-    p.add_argument("--push-interval", type=int, default=100, help="WebSocket push interval ms")
+    p.add_argument("--interval", type=int, default=75, help="Collection interval ms")
+    p.add_argument("--push-interval", type=int, default=150, help="WebSocket push interval ms")
     p.add_argument("--window", type=int, default=600, help="Rolling window seconds")
     return p.parse_args()
 
@@ -474,7 +474,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
   let lastServerLen = 0; // tracks how many points the server has sent total
   let scrollRAF = null;
 
-  const socket = io({transports: ['websocket']});
+  const socket = io({transports: ['polling', 'websocket'], upgrade: true});
 
   socket.on('connect', function() {
     document.getElementById('status').textContent = 'Connected. Waiting for data...';
@@ -692,7 +692,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
       layout.xaxis2 = {domain: [0, 0.92], anchor: 'y2', showticklabels: false, gridcolor: '#262640'};
       layout.yaxis2 = {domain: domain(1, totalRows), title: {text: '%', font: {size: 10}}, range: [0, 105], gridcolor: '#262640'};
       if (hasPcie) {
-        layout.yaxis3 = {domain: domain(1, totalRows), title: {text: 'PCIe MB/s', font: {color: '#40c4ff', size: 10}}, overlaying: 'y2', side: 'right', showgrid: false, rangemode: 'tozero'};
+        layout.yaxis3 = {domain: domain(1, totalRows), title: {text: 'PCIe MB/s (log)', font: {color: '#40c4ff', size: 10}}, overlaying: 'y2', side: 'right', showgrid: false, type: 'log', autorange: true};
       }
       layout.xaxis3 = {domain: [0, 0.92], anchor: 'y4', showticklabels: false, gridcolor: '#262640'};
       layout.yaxis4 = {domain: domain(2, totalRows), title: {text: '%', font: {size: 10}}, range: [0, 105], gridcolor: '#262640'};
