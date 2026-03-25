@@ -155,8 +155,12 @@ for sha in "${NOT_RUN[@]}"; do
                 date_dir=$(basename "$(dirname "$d")")
                 dest="$LOG_REPO/logs/$date_dir/$(basename "$d")"
                 mkdir -p "$LOG_REPO/logs/$date_dir"
-                if [ -d "$dest" ]; then
-                    echo "Skip $(basename "$d") (already in $LOG_REPO/logs/$date_dir/)"
+                if [ -d "$dest" ] && [ -f "$dest/report.FAILED" ]; then
+                    rm -rf "$dest"
+                    \mv -f "$d" "$LOG_REPO/logs/$date_dir/"
+                    echo "Replaced FAILED $(basename "$d") -> $LOG_REPO/logs/$date_dir/"
+                elif [ -d "$dest" ]; then
+                    echo "Skip $(basename "$d") (already passed in $LOG_REPO/logs/$date_dir/)"
                 else
                     \mv -f "$d" "$LOG_REPO/logs/$date_dir/"
                     echo "Moved $(basename "$d") -> $LOG_REPO/logs/$date_dir/"
