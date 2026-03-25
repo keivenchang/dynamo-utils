@@ -64,6 +64,15 @@ def _resolve_process_name(pid: int) -> str:
         proc = psutil.Process(pid)
         cmdline = proc.cmdline()
         full_cmd = " ".join(cmdline) if cmdline else ""
+        proc_name = proc.name()
+
+        # VLLM EngineCore: walk parent chain for model name + launch script
+        if proc_name == "VLLM::EngineCore" or "EngineCore" in full_cmd:
+            context = _vllm_context(proc)
+            if context:
+                return f"VLLM::EngineCore {context}:{pid}"
+            return f"VLLM::EngineCore:{pid}"
+
         if cmdline and os.path.basename(cmdline[0]) == "node":
             label = _classify_node_process(full_cmd)
             if label:
@@ -71,19 +80,70 @@ def _resolve_process_name(pid: int) -> str:
         if cmdline and cmdline[0] == "docker" and "exec" in cmdline:
             if "node" in full_cmd:
                 return f"Docker/Cursor:{pid}"
-        if cmdline:
-            base = os.path.basename(cmdline[0])
-            if base.startswith("python") and len(cmdline) > 1:
+
+        # Python with dynamo module: extract module + model context
+        if cmdline and os.path.basename(cmdline[0]).startswith("python"):
+            if len(cmdline) > 1 and "-m" in cmdline:
+                m_idx = cmdline.index("-m")
+                if m_idx + 1 < len(cmdline):
+                    module = cmdline[m_idx + 1]
+                    model = _extract_arg(cmdline, "--model")
+                    short_model = os.path.basename(model) if model else ""
+                    if short_model:
+                        return f"{module} {short_model}:{pid}"
+                    return f"{module}:{pid}"
+            if len(cmdline) > 1:
                 script = os.path.basename(cmdline[1])
                 if len(script) > 25:
                     script = script[:22] + "..."
                 return f"{script}:{pid}"
+
+        if cmdline:
+            base = os.path.basename(cmdline[0])
             if len(base) > 25:
                 base = base[:22] + "..."
             return f"{base}:{pid}"
-        return f"{proc.name()}:{pid}"
+        return f"{proc_name}:{pid}"
     except (psutil.NoSuchProcess, psutil.AccessDenied):
         return f"pid:{pid}"
+
+
+def _vllm_context(proc) -> str:
+    """Walk parent chain of a VLLM::EngineCore to find model name and launch script."""
+    parts = []
+    try:
+        parent = proc.parent()
+        if parent:
+            pcmd = parent.cmdline()
+            model = _extract_arg(pcmd, "--model")
+            if model:
+                parts.append(os.path.basename(model))
+            grandparent = parent.parent()
+            if grandparent:
+                gcmd = grandparent.cmdline()
+                if gcmd:
+                    script = os.path.basename(gcmd[-1]) if gcmd[-1].endswith(".sh") else ""
+                    if not script:
+                        for arg in gcmd:
+                            if arg.endswith(".sh"):
+                                script = os.path.basename(arg)
+                                break
+                    if script:
+                        parts.append(f"({script})")
+    except (psutil.NoSuchProcess, psutil.AccessDenied):
+        pass
+    return " ".join(parts)
+
+
+def _extract_arg(cmdline: list[str], flag: str) -> str:
+    """Extract the value after a CLI flag like --model."""
+    try:
+        idx = cmdline.index(flag)
+        if idx + 1 < len(cmdline):
+            return cmdline[idx + 1]
+    except ValueError:
+        pass
+    return ""
 
 
 def _classify_node_process(full_cmd: str) -> str:
@@ -129,13 +189,15 @@ class ProcessTracker:
         self.names: dict[int, str] = {}
         self._colors: dict[int, str] = {}
         self._color_idx = 0
+        self.first_seen: dict[int, float] = {}
 
-    def record(self, data: dict[int, float], name_resolver):
+    def record(self, data: dict[int, float], name_resolver, timestamp: float = 0):
         for pid in data:
             if pid not in self.series:
                 backfill = min(self._len, self.maxlen)
                 self.series[pid] = deque([0.0] * backfill, maxlen=self.maxlen)
                 self.names[pid] = name_resolver(pid)
+                self.first_seen[pid] = timestamp
         for pid, dq in self.series.items():
             dq.append(data.get(pid, 0.0))
         self._len += 1
@@ -273,7 +335,7 @@ class MetricsCollector:
                             gpu_proc_mem[p.pid] = gpu_proc_mem.get(p.pid, 0.0) + mem_gib
                     except pynvml.NVMLError:
                         pass
-            self.proc_gpu_mem.record(gpu_proc_mem, _resolve_process_name)
+            self.proc_gpu_mem.record(gpu_proc_mem, _resolve_process_name, now)
         self._disk_scan_ctr += 1
         if self._disk_scan_ctr >= DISK_SCAN_EVERY:
             self._disk_scan_ctr = 0
@@ -283,7 +345,7 @@ class MetricsCollector:
                 scan_dt = self.interval_sec * DISK_SCAN_EVERY
             self._last_disk_rates = self._scan_process_disk(scan_dt)
             self._last_disk_scan_mono = scan_mono
-        self.proc_disk_io.record(self._last_disk_rates, _resolve_process_name)
+        self.proc_disk_io.record(self._last_disk_rates, _resolve_process_name, now)
 
     def _scan_process_disk(self, dt: float) -> dict[int, float]:
         rates: dict[int, float] = {}
@@ -320,7 +382,8 @@ class MetricsCollector:
                 "gpu_names": self.gpu_names,
                 "gpu_mem_total_gib": self.gpu_mem_total_gib,
                 "has_pcie": self.has_pcie,
-                "gpu_mem": [{"pid": p, "name": n, "color": c, "vals": v} for p, n, c, v in gpu_mem],
+                "gpu_mem": [{"pid": p, "name": n, "color": c, "vals": v,
+                             "first_seen": self.proc_gpu_mem.first_seen.get(p, 0)} for p, n, c, v in gpu_mem],
                 "gpu_util": gpu_util,
                 "pcie_tx": pcie_tx,
                 "pcie_rx": pcie_rx,
@@ -386,10 +449,10 @@ HTML_PAGE = r"""<!DOCTYPE html>
   <h1>System Monitor</h1>
   <div>
     <button class="btn range-btn" data-min="1">1m</button>
-    <button class="btn range-btn" data-min="2">2m</button>
+    <button class="btn range-btn active" data-min="2">2m</button>
     <button class="btn range-btn" data-min="5">5m</button>
     <button class="btn range-btn" data-min="10">10m</button>
-    <button class="btn range-btn active" data-min="0">All</button>
+    <button class="btn range-btn" data-min="0">All</button>
     <button class="btn" id="pause-btn">Pause</button>
     <button class="btn" id="snapshot-btn">Snapshot</button>
   </div>
@@ -402,7 +465,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
   "use strict";
 
   const MAX_POINTS = 60000;
-  let viewMinutes = 0;
+  let viewMinutes = 2;
   let paused = false;
   let gd = null; // plotly graph div
   let config = null; // server config (gpu_count, has_pcie, etc.)
@@ -491,6 +554,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
     if (indices.length > 0) {
       Plotly.extendTraces(gd, {x: updateX, y: updateY}, indices, MAX_POINTS);
     }
+
   });
 
   function buildChart(msg) {
@@ -533,7 +597,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
 
       // Row 2: GPU Util + PCIe
       row++;
-      const gpuColors = ['#00e5ff', '#ff1744', '#76ff03', '#d500f9'];
+      const gpuColors = ['#76b900', '#ff1744', '#76ff03', '#d500f9'];
       for (let i = 0; i < msg.gpu_count; i++) {
         const color = gpuColors[i % gpuColors.length];
         const label = msg.gpu_count > 1 ? 'GPU ' + i + ' Util' : 'GPU Util';
@@ -552,14 +616,14 @@ HTML_PAGE = r"""<!DOCTYPE html>
           traceMap['pcie_tx_' + i] = traceCount++;
           traces.push({
             x: times, y: msg.pcie_tx[i], name: 'PCIe TX' + suffix, type: 'scatter',
-            line: {color: '#40c4ff', width: 1.5, dash: 'dash'},
+            line: {color: '#40c4ff', width: 0.5},
             xaxis: 'x2', yaxis: 'y3',
             legendgroup: 'pcie', legendgrouptitle: {text: 'PCIe'},
           });
           traceMap['pcie_rx_' + i] = traceCount++;
           traces.push({
             x: times, y: msg.pcie_rx[i], name: 'PCIe RX' + suffix, type: 'scatter',
-            line: {color: '#ff6e40', width: 1.5, dash: 'dash'},
+            line: {color: '#ff6e40', width: 0.5},
             xaxis: 'x2', yaxis: 'y3',
             legendgroup: 'pcie',
           });
@@ -628,7 +692,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
       layout.xaxis2 = {domain: [0, 0.92], anchor: 'y2', showticklabels: false, gridcolor: '#262640'};
       layout.yaxis2 = {domain: domain(1, totalRows), title: {text: '%', font: {size: 10}}, range: [0, 105], gridcolor: '#262640'};
       if (hasPcie) {
-        layout.yaxis3 = {domain: domain(1, totalRows), title: {text: 'PCIe MB/s', font: {color: '#40c4ff', size: 10}}, overlaying: 'y2', side: 'right', showgrid: false, range: [0, 100]};
+        layout.yaxis3 = {domain: domain(1, totalRows), title: {text: 'PCIe MB/s', font: {color: '#40c4ff', size: 10}}, overlaying: 'y2', side: 'right', showgrid: false, rangemode: 'tozero'};
       }
       layout.xaxis3 = {domain: [0, 0.92], anchor: 'y4', showticklabels: false, gridcolor: '#262640'};
       layout.yaxis4 = {domain: domain(2, totalRows), title: {text: '%', font: {size: 10}}, range: [0, 105], gridcolor: '#262640'};
@@ -672,6 +736,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
         xref: 'x domain', yref: 'y', showarrow: false,
         font: {size: 11, color: '#ff5252'}, xanchor: 'right',
       });
+
     }
 
     Plotly.newPlot(gd, traces, layout, {
@@ -686,14 +751,14 @@ HTML_PAGE = r"""<!DOCTYPE html>
       if (!paused && gd && viewMinutes > 0) {
         const now = new Date();
         const start = new Date(now.getTime() - viewMinutes * 60000);
-        const axUpdates = {};
+        const upd = {};
         const axes = config.gpu_count > 0
           ? ['xaxis', 'xaxis2', 'xaxis3', 'xaxis4']
           : ['xaxis', 'xaxis2'];
         for (const ax of axes) {
-          axUpdates[ax + '.range'] = [start, now];
+          upd[ax + '.range'] = [start, now];
         }
-        Plotly.relayout(gd, axUpdates);
+        Plotly.relayout(gd, upd);
       }
       scrollRAF = requestAnimationFrame(tick);
     }
