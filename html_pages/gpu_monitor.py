@@ -53,7 +53,8 @@ def parse_args():
     p = argparse.ArgumentParser(description="Real-time GPU/CPU/Disk monitor")
     p.add_argument("--port", type=int, default=8051)
     p.add_argument("--host", default="127.0.0.1")
-    p.add_argument("--interval", type=int, default=75, help="Collection interval ms")
+    p.add_argument("--interval", type=int, default=75, help="Fast collection interval ms (CPU, disk)")
+    p.add_argument("--gpu-interval", type=int, default=500, help="Slow collection interval ms (GPU mem, util, PCIe)")
     p.add_argument("--push-interval", type=int, default=150, help="WebSocket push interval ms")
     p.add_argument("--window", type=int, default=600, help="Rolling window seconds")
     return p.parse_args()
@@ -68,10 +69,26 @@ def _resolve_process_name(pid: int) -> str:
 
         # VLLM EngineCore: walk parent chain for model name + launch script
         if proc_name == "VLLM::EngineCore" or "EngineCore" in full_cmd:
-            context = _vllm_context(proc)
-            if context:
-                return f"VLLM::EngineCore {context}:{pid}"
-            return f"VLLM::EngineCore:{pid}"
+            model, script = _vllm_context(proc)
+            parts = ["VLLM::EngineCore"]
+            if model:
+                parts.append(model)
+            if script:
+                parts.append(script)
+            parts.append(f"PID={pid}")
+            return ", ".join(parts)
+
+        # SGLang, TRT-LLM, or other GPU processes with custom names
+        if "sglang" in proc_name.lower() or "sglang" in full_cmd.lower() or \
+           "trtllm" in proc_name.lower() or "trtllm" in full_cmd.lower():
+            model, script = _gpu_process_context(proc)
+            parts = [proc_name]
+            if model:
+                parts.append(model)
+            if script:
+                parts.append(script)
+            parts.append(f"PID={pid}")
+            return ", ".join(parts)
 
         if cmdline and os.path.basename(cmdline[0]) == "node":
             label = _classify_node_process(full_cmd)
@@ -90,13 +107,13 @@ def _resolve_process_name(pid: int) -> str:
                     model = _extract_arg(cmdline, "--model")
                     short_model = os.path.basename(model) if model else ""
                     if short_model:
-                        return f"{module} {short_model}:{pid}"
-                    return f"{module}:{pid}"
+                        return f"{module}, {short_model}, PID={pid}"
+                    return f"{module}, PID={pid}"
             if len(cmdline) > 1:
                 script = os.path.basename(cmdline[1])
                 if len(script) > 25:
                     script = script[:22] + "..."
-                return f"{script}:{pid}"
+                return f"{script}, PID={pid}"
 
         if cmdline:
             base = os.path.basename(cmdline[0])
@@ -108,41 +125,64 @@ def _resolve_process_name(pid: int) -> str:
         return f"pid:{pid}"
 
 
-def _vllm_context(proc) -> str:
+def _gpu_process_context(proc) -> tuple[str, str]:
+    """Walk parent chain of any GPU process to find model name and launch script."""
+    model = ""
+    script = ""
+    try:
+        for ancestor in proc.parents():
+            acmd = ancestor.cmdline()
+            if not acmd:
+                continue
+            if not model:
+                m = _extract_arg(acmd, "--model")
+                if m:
+                    model = os.path.basename(m)
+            if not script:
+                for arg in acmd:
+                    if arg.endswith(".sh"):
+                        script = os.path.basename(arg)
+                        break
+            if model and script:
+                break
+    except (psutil.NoSuchProcess, psutil.AccessDenied):
+        pass
+    return model, script
+
+
+def _vllm_context(proc) -> tuple[str, str]:
     """Walk parent chain of a VLLM::EngineCore to find model name and launch script."""
-    parts = []
+    model = ""
+    script = ""
     try:
         parent = proc.parent()
         if parent:
             pcmd = parent.cmdline()
-            model = _extract_arg(pcmd, "--model")
-            if model:
-                parts.append(os.path.basename(model))
+            m = _extract_arg(pcmd, "--model")
+            if m:
+                model = os.path.basename(m)
             grandparent = parent.parent()
             if grandparent:
                 gcmd = grandparent.cmdline()
                 if gcmd:
-                    script = os.path.basename(gcmd[-1]) if gcmd[-1].endswith(".sh") else ""
-                    if not script:
-                        for arg in gcmd:
-                            if arg.endswith(".sh"):
-                                script = os.path.basename(arg)
-                                break
-                    if script:
-                        parts.append(f"({script})")
+                    for arg in gcmd:
+                        if arg.endswith(".sh"):
+                            script = os.path.basename(arg)
+                            break
     except (psutil.NoSuchProcess, psutil.AccessDenied):
         pass
-    return " ".join(parts)
+    return model, script
 
 
 def _extract_arg(cmdline: list[str], flag: str) -> str:
-    """Extract the value after a CLI flag like --model."""
-    try:
-        idx = cmdline.index(flag)
-        if idx + 1 < len(cmdline):
-            return cmdline[idx + 1]
-    except ValueError:
-        pass
+    """Extract the value after a CLI flag like --model. Also checks --model-path."""
+    for f in (flag, flag + "-path"):
+        try:
+            idx = cmdline.index(f)
+            if idx + 1 < len(cmdline):
+                return cmdline[idx + 1]
+        except ValueError:
+            pass
     return ""
 
 
@@ -262,7 +302,7 @@ class MetricsCollector:
         self.cpu_pct: deque[float] = deque(maxlen=maxlen)
         self._prev_disk = psutil.disk_io_counters()
         self._prev_mono = time.monotonic()
-        self.proc_gpu_mem = ProcessTracker(maxlen, prune=False)
+        self.proc_gpu_mem: list[ProcessTracker] = []
         self.proc_disk_io = ProcessTracker(maxlen, prune=True)
         self._prev_proc_io: dict[int, int] = {}
         self._disk_scan_ctr = DISK_SCAN_EVERY
@@ -285,6 +325,7 @@ class MetricsCollector:
                 self.gpu_names.append(name)
                 mem = pynvml.nvmlDeviceGetMemoryInfo(handle)
                 self.gpu_mem_total_gib.append(mem.total / (1024**3))
+                self.proc_gpu_mem.append(ProcessTracker(maxlen, prune=False))
                 self.gpu_util.append(deque(maxlen=maxlen))
                 self.gpu_pcie_tx.append(deque(maxlen=maxlen))
                 self.gpu_pcie_rx.append(deque(maxlen=maxlen))
@@ -296,56 +337,65 @@ class MetricsCollector:
                 except pynvml.NVMLError:
                     self.has_pcie = False
 
-    def sample(self):
+    def sample_fast(self):
+        """Fast-tier: CPU + disk I/O (called at --interval rate)."""
         with self.lock:
-            self._sample_locked()
+            now = time.time()
+            now_mono = time.monotonic()
+            dt = now_mono - self._prev_mono
+            if dt <= 0:
+                dt = self.interval_sec
+            self.timestamps.append(now)
+            self.cpu_pct.append(psutil.cpu_percent(interval=None))
+            self._prev_mono = now_mono
+            # GPU: PCIe sampled live, util repeats last, memory queried from NVML
+            if HAS_NVML:
+                for i in range(self.gpu_count):
+                    handle = pynvml.nvmlDeviceGetHandleByIndex(i)
+                    self.gpu_util[i].append(self.gpu_util[i][-1] if self.gpu_util[i] else 0.0)
+                    if self.has_pcie:
+                        try:
+                            tx = pynvml.nvmlDeviceGetPcieThroughput(handle, pynvml.NVML_PCIE_UTIL_TX_BYTES)
+                            rx = pynvml.nvmlDeviceGetPcieThroughput(handle, pynvml.NVML_PCIE_UTIL_RX_BYTES)
+                            self.gpu_pcie_tx[i].append(tx / 1024.0)
+                            self.gpu_pcie_rx[i].append(rx / 1024.0)
+                        except pynvml.NVMLError:
+                            self.gpu_pcie_tx[i].append(self.gpu_pcie_tx[i][-1] if self.gpu_pcie_tx[i] else 0.0)
+                            self.gpu_pcie_rx[i].append(self.gpu_pcie_rx[i][-1] if self.gpu_pcie_rx[i] else 0.0)
+                    # GPU memory per-process: query NVML every fast tick
+                    gpu_proc_mem: dict[int, float] = {}
+                    for getter in (pynvml.nvmlDeviceGetComputeRunningProcesses,
+                                   pynvml.nvmlDeviceGetGraphicsRunningProcesses):
+                        try:
+                            for p in getter(handle):
+                                mem_gib = (p.usedGpuMemory or 0) / (1024**3)
+                                gpu_proc_mem[p.pid] = gpu_proc_mem.get(p.pid, 0.0) + mem_gib
+                        except pynvml.NVMLError:
+                            pass
+                    self.proc_gpu_mem[i].record(gpu_proc_mem, _resolve_process_name, now)
+            self.proc_disk_io.record(self._last_disk_rates, _resolve_process_name, now)
 
-    def _sample_locked(self):
-        now = time.time()
-        now_mono = time.monotonic()
-        dt = now_mono - self._prev_mono
-        if dt <= 0:
-            dt = self.interval_sec
-        self.timestamps.append(now)
-        self.cpu_pct.append(psutil.cpu_percent(interval=None))
-        self._prev_mono = now_mono
-        if HAS_NVML:
-            gpu_proc_mem: dict[int, float] = {}
-            for i in range(self.gpu_count):
-                handle = pynvml.nvmlDeviceGetHandleByIndex(i)
-                try:
-                    util = pynvml.nvmlDeviceGetUtilizationRates(handle)
-                    self.gpu_util[i].append(util.gpu)
-                except pynvml.NVMLError:
-                    self.gpu_util[i].append(0.0)
-                if self.has_pcie:
-                    try:
-                        tx = pynvml.nvmlDeviceGetPcieThroughput(handle, pynvml.NVML_PCIE_UTIL_TX_BYTES)
-                        rx = pynvml.nvmlDeviceGetPcieThroughput(handle, pynvml.NVML_PCIE_UTIL_RX_BYTES)
-                        self.gpu_pcie_tx[i].append(tx / 1024.0)
-                        self.gpu_pcie_rx[i].append(rx / 1024.0)
-                    except pynvml.NVMLError:
-                        self.gpu_pcie_tx[i].append(0.0)
-                        self.gpu_pcie_rx[i].append(0.0)
-                for getter in (pynvml.nvmlDeviceGetComputeRunningProcesses,
-                               pynvml.nvmlDeviceGetGraphicsRunningProcesses):
-                    try:
-                        for p in getter(handle):
-                            mem_gib = (p.usedGpuMemory or 0) / (1024**3)
-                            gpu_proc_mem[p.pid] = gpu_proc_mem.get(p.pid, 0.0) + mem_gib
-                    except pynvml.NVMLError:
-                        pass
-            self.proc_gpu_mem.record(gpu_proc_mem, _resolve_process_name, now)
-        self._disk_scan_ctr += 1
-        if self._disk_scan_ctr >= DISK_SCAN_EVERY:
-            self._disk_scan_ctr = 0
+    def sample_slow(self):
+        """Slow-tier: GPU memory, GPU utilization, disk I/O (called at --gpu-interval rate)."""
+        with self.lock:
+            now = time.time()
+            # Disk I/O per-process scan
             scan_mono = time.monotonic()
             scan_dt = scan_mono - self._last_disk_scan_mono
             if scan_dt <= 0:
-                scan_dt = self.interval_sec * DISK_SCAN_EVERY
+                scan_dt = 0.5
             self._last_disk_rates = self._scan_process_disk(scan_dt)
             self._last_disk_scan_mono = scan_mono
-        self.proc_disk_io.record(self._last_disk_rates, _resolve_process_name, now)
+
+            # GPU utilization (overwrite last value with fresh reading)
+            if HAS_NVML:
+                for i in range(self.gpu_count):
+                    handle = pynvml.nvmlDeviceGetHandleByIndex(i)
+                    try:
+                        util = pynvml.nvmlDeviceGetUtilizationRates(handle)
+                        self.gpu_util[i][-1] = util.gpu
+                    except pynvml.NVMLError:
+                        pass
 
     def _scan_process_disk(self, dt: float) -> dict[int, float]:
         rates: dict[int, float] = {}
@@ -365,16 +415,72 @@ class MetricsCollector:
         self._prev_proc_io = current_io
         return rates
 
+    @staticmethod
+    def _downsample_init(times, arrays, max_recent=1600, max_total=3200):
+        """Downsample for init: keep last max_recent at full res, older data subsampled."""
+        n = len(times)
+        if n <= max_total:
+            return times, arrays
+        older_count = n - max_recent
+        older_target = max_total - max_recent
+        step = max(1, older_count // older_target)
+        # Build indices: subsampled older + full recent
+        older_indices = list(range(0, older_count, step))
+        recent_indices = list(range(older_count, n))
+        indices = older_indices + recent_indices
+        ds_times = [times[i] for i in indices]
+        ds_arrays = [[arr[i] for i in indices] if len(arr) == n else arr for arr in arrays]
+        return ds_times, ds_arrays
+
     def snapshot_full(self) -> dict:
-        """Return full state for initial browser load."""
+        """Return full state for initial browser load (downsampled for browser perf)."""
         with self.lock:
-            times = list(self.timestamps)
-            gpu_mem = self.proc_gpu_mem.get_all_sorted()
-            disk_io = self.proc_disk_io.get_top_sorted(20)
+            times_full = list(self.timestamps)
+            gpu_mem_per_gpu_full = []
+            all_vals = []
+            for gi in range(self.gpu_count):
+                tracker = self.proc_gpu_mem[gi]
+                procs = tracker.get_all_sorted()
+                gpu_mem_per_gpu_full.append(procs)
+                for _, _, _, v in procs:
+                    all_vals.append(v)
+            disk_io_full = self.proc_disk_io.get_top_sorted(20)
+            for _, _, _, v in disk_io_full:
+                all_vals.append(v)
             gpu_util = [list(self.gpu_util[i]) for i in range(self.gpu_count)]
+            all_vals.extend(gpu_util)
             pcie_tx = [list(self.gpu_pcie_tx[i]) for i in range(self.gpu_count)] if self.has_pcie else []
             pcie_rx = [list(self.gpu_pcie_rx[i]) for i in range(self.gpu_count)] if self.has_pcie else []
+            all_vals.extend(pcie_tx)
+            all_vals.extend(pcie_rx)
             cpu = list(self.cpu_pct)
+            all_vals.append(cpu)
+
+            times, ds_arrays = self._downsample_init(times_full, all_vals)
+
+            # Rebuild structures from downsampled arrays
+            idx = 0
+            gpu_mem_per_gpu = []
+            for gi in range(self.gpu_count):
+                procs = gpu_mem_per_gpu_full[gi]
+                ds_procs = []
+                for p, n, c, v in procs:
+                    ds_procs.append({"pid": p, "name": n, "color": c, "vals": ds_arrays[idx],
+                                     "first_seen": self.proc_gpu_mem[gi].first_seen.get(p, 0)})
+                    idx += 1
+                gpu_mem_per_gpu.append(ds_procs)
+            disk_io = []
+            for p, n, c, v in disk_io_full:
+                disk_io.append({"pid": p, "name": n, "color": c, "vals": ds_arrays[idx]})
+                idx += 1
+            ds_gpu_util = [ds_arrays[idx + i] for i in range(self.gpu_count)]
+            idx += self.gpu_count
+            ds_pcie_tx = [ds_arrays[idx + i] for i in range(len(pcie_tx))]
+            idx += len(pcie_tx)
+            ds_pcie_rx = [ds_arrays[idx + i] for i in range(len(pcie_rx))]
+            idx += len(pcie_rx)
+            ds_cpu = ds_arrays[idx]
+
             return {
                 "type": "init",
                 "timestamps": times,
@@ -382,13 +488,12 @@ class MetricsCollector:
                 "gpu_names": self.gpu_names,
                 "gpu_mem_total_gib": self.gpu_mem_total_gib,
                 "has_pcie": self.has_pcie,
-                "gpu_mem": [{"pid": p, "name": n, "color": c, "vals": v,
-                             "first_seen": self.proc_gpu_mem.first_seen.get(p, 0)} for p, n, c, v in gpu_mem],
-                "gpu_util": gpu_util,
-                "pcie_tx": pcie_tx,
-                "pcie_rx": pcie_rx,
-                "cpu": cpu,
-                "disk_io": [{"pid": p, "name": n, "color": c, "vals": v} for p, n, c, v in disk_io],
+                "gpu_mem": gpu_mem_per_gpu,
+                "gpu_util": ds_gpu_util,
+                "pcie_tx": ds_pcie_tx,
+                "pcie_rx": ds_pcie_rx,
+                "cpu": ds_cpu,
+                "disk_io": disk_io,
             }
 
     def snapshot_delta(self, since_idx: int) -> dict:
@@ -398,7 +503,15 @@ class MetricsCollector:
             if since_idx >= cur_len:
                 return {"type": "delta", "timestamps": [], "gpu_mem_keys": [], "disk_keys": []}
             new_times = list(self.timestamps)[since_idx:]
-            gpu_mem = self.proc_gpu_mem.get_all_sorted()
+            gpu_mem_per_gpu = []
+            gpu_mem_keys_per_gpu = []
+            for gi in range(self.gpu_count):
+                gm = self.proc_gpu_mem[gi].get_all_sorted()
+                gpu_mem_per_gpu.append([
+                    {"pid": p, "name": n, "color": c, "vals": v[since_idx:] if since_idx < len(v) else []}
+                    for p, n, c, v in gm
+                ])
+                gpu_mem_keys_per_gpu.append([p for p, _, _, _ in gm])
             disk_io = self.proc_disk_io.get_top_sorted(20)
             gpu_util = [list(self.gpu_util[i])[since_idx:] for i in range(self.gpu_count)]
             pcie_tx = [list(self.gpu_pcie_tx[i])[since_idx:] for i in range(self.gpu_count)] if self.has_pcie else []
@@ -407,8 +520,8 @@ class MetricsCollector:
             return {
                 "type": "delta",
                 "timestamps": new_times,
-                "gpu_mem": [{"pid": p, "name": n, "color": c, "vals": v[since_idx:] if since_idx < len(v) else []} for p, n, c, v in gpu_mem],
-                "gpu_mem_keys": [p for p, _, _, _ in gpu_mem],
+                "gpu_mem": gpu_mem_per_gpu,
+                "gpu_mem_keys": gpu_mem_keys_per_gpu,
                 "gpu_util": gpu_util,
                 "pcie_tx": pcie_tx,
                 "pcie_rx": pcie_rx,
@@ -464,7 +577,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
 (function() {
   "use strict";
 
-  const MAX_POINTS = 60000;
+  const MAX_POINTS = 4000;
   let viewMinutes = 2;
   let paused = false;
   let gd = null; // plotly graph div
@@ -478,6 +591,9 @@ HTML_PAGE = r"""<!DOCTYPE html>
 
   socket.on('connect', function() {
     document.getElementById('status').textContent = 'Connected. Waiting for data...';
+    setTimeout(function() {
+      if (!config) socket.emit('request_init');
+    }, 3000);
   });
 
   socket.on('init', function(msg) {
@@ -510,13 +626,16 @@ HTML_PAGE = r"""<!DOCTYPE html>
     const updateY = [];
     const indices = [];
 
-    // GPU mem traces
-    for (let i = 0; i < msg.gpu_mem.length; i++) {
-      const key = 'gpu_mem_' + msg.gpu_mem[i].pid;
-      if (traceMap[key] !== undefined) {
-        indices.push(traceMap[key]);
-        updateX.push(times);
-        updateY.push(msg.gpu_mem[i].vals);
+    // GPU mem traces (per-GPU)
+    for (let gi = 0; gi < msg.gpu_mem.length; gi++) {
+      const gpuMem = msg.gpu_mem[gi];
+      for (let i = 0; i < gpuMem.length; i++) {
+        const key = 'gpu_mem_' + gi + '_' + gpuMem[i].pid;
+        if (traceMap[key] !== undefined) {
+          indices.push(traceMap[key]);
+          updateX.push(times);
+          updateY.push(gpuMem[i].vals);
+        }
       }
     }
     // GPU util
@@ -566,84 +685,99 @@ HTML_PAGE = r"""<!DOCTYPE html>
 
     const hasGpu = msg.gpu_count > 0;
     const hasPcie = msg.has_pcie;
-    const nRows = (hasGpu ? 2 : 0) + 2; // gpu_mem + gpu_util + cpu + disk
+    const gpuCount = msg.gpu_count;
+    // Rows: N gpu_mem + 1 gpu_util + 1 cpu + 1 disk
+    const nRows = (hasGpu ? gpuCount + 1 : 0) + 2;
+
+    // Helper: axis name for row r (1-indexed)
+    const xax = r => r === 1 ? 'x' : 'x' + r;
+    const yax = r => r === 1 ? 'y' : 'y' + r;
+    // Track which y-axis index is the PCIe secondary overlay
+    let pcieYIdx = null;
 
     let row = 0;
 
-    // Row 1: GPU Memory (stacked area)
+    // Rows 1..N: GPU Memory per GPU (stacked area each)
     if (hasGpu) {
-      row++;
-      const gpuMem = msg.gpu_mem;
-      // Reversed so largest at bottom of stack
-      for (let i = gpuMem.length - 1; i >= 0; i--) {
-        const m = gpuMem[i];
-        traceMap['gpu_mem_' + m.pid] = traceCount++;
-        traces.push({
-          x: times, y: m.vals, name: m.name, type: 'scatter', mode: 'lines',
-          line: {width: 0.5, color: m.color}, stackgroup: 'gpu_mem',
-          fillcolor: hexToRgba(m.color, 0.6),
-          xaxis: 'x', yaxis: 'y',
-          legendgroup: 'gpu_mem', legendgrouptitle: {text: 'GPU Mem'},
-        });
-      }
-      if (gpuMem.length === 0) {
-        traceMap['gpu_mem_empty'] = traceCount++;
-        traces.push({
-          x: times, y: times.map(() => 0), name: 'GPU Mem: 0', type: 'scatter',
-          mode: 'lines', line: {width: 1, color: '#555'},
-          xaxis: 'x', yaxis: 'y', legendgroup: 'gpu_mem',
-        });
+      for (let gi = 0; gi < gpuCount; gi++) {
+        row++;
+        const gpuMem = msg.gpu_mem[gi] || [];
+        const stackName = 'gpu_mem_' + gi;
+        for (let i = gpuMem.length - 1; i >= 0; i--) {
+          const m = gpuMem[i];
+          traceMap['gpu_mem_' + gi + '_' + m.pid] = traceCount++;
+          traces.push({
+            x: times, y: m.vals, name: m.name, type: 'scatter', mode: 'lines',
+            line: {width: 0.5, color: m.color}, stackgroup: stackName,
+            fillcolor: hexToRgba(m.color, 0.6),
+            xaxis: xax(row), yaxis: yax(row),
+            legendgroup: 'gpu_mem_' + gi, legendgrouptitle: {text: 'GPU ' + gi + ' Mem'},
+          });
+        }
+        if (gpuMem.length === 0) {
+          traceMap['gpu_mem_' + gi + '_empty'] = traceCount++;
+          traces.push({
+            x: times, y: times.map(() => 0), name: 'GPU ' + gi + ' Mem: 0', type: 'scatter',
+            mode: 'lines', line: {width: 1, color: '#555'},
+            xaxis: xax(row), yaxis: yax(row), legendgroup: 'gpu_mem_' + gi,
+          });
+        }
       }
 
-      // Row 2: GPU Util + PCIe
+      // Next row: GPU Util + PCIe
       row++;
+      const utilRow = row;
       const gpuColors = ['#76b900', '#ff1744', '#76ff03', '#d500f9'];
-      for (let i = 0; i < msg.gpu_count; i++) {
+      for (let i = 0; i < gpuCount; i++) {
         const color = gpuColors[i % gpuColors.length];
-        const label = msg.gpu_count > 1 ? 'GPU ' + i + ' Util' : 'GPU Util';
+        const label = 'GPU ' + i + ' Util';
         traceMap['gpu_util_' + i] = traceCount++;
         traces.push({
           x: times, y: msg.gpu_util[i], name: label, type: 'scatter',
           line: {color: color, width: 2}, fill: 'tozeroy',
           fillcolor: hexToRgba(color, 0.12),
-          xaxis: 'x2', yaxis: 'y2',
+          xaxis: xax(utilRow), yaxis: yax(utilRow),
           legendgroup: 'util', legendgrouptitle: {text: 'GPU Util'},
         });
       }
       if (hasPcie) {
-        for (let i = 0; i < msg.gpu_count; i++) {
-          const suffix = msg.gpu_count > 1 ? ' (GPU ' + i + ')' : '';
+        pcieYIdx = nRows + 1; // secondary y-axis overlaying utilRow
+        const pcieY = 'y' + pcieYIdx;
+        for (let i = 0; i < gpuCount; i++) {
+          const suffix = ' (GPU ' + i + ')';
           traceMap['pcie_tx_' + i] = traceCount++;
           traces.push({
             x: times, y: msg.pcie_tx[i], name: 'PCIe TX' + suffix, type: 'scatter',
             line: {color: '#40c4ff', width: 0.5},
-            xaxis: 'x2', yaxis: 'y3',
+            xaxis: xax(utilRow), yaxis: pcieY,
             legendgroup: 'pcie', legendgrouptitle: {text: 'PCIe'},
           });
           traceMap['pcie_rx_' + i] = traceCount++;
           traces.push({
             x: times, y: msg.pcie_rx[i], name: 'PCIe RX' + suffix, type: 'scatter',
             line: {color: '#ff6e40', width: 0.5},
-            xaxis: 'x2', yaxis: 'y3',
+            xaxis: xax(utilRow), yaxis: pcieY,
             legendgroup: 'pcie',
           });
         }
       }
     }
 
-    // Row 3: CPU
+    // CPU row
     row++;
+    const cpuRow = row;
     traceMap['cpu'] = traceCount++;
     traces.push({
       x: times, y: msg.cpu, name: 'CPU', type: 'scatter',
       line: {color: '#ffcc00', width: 1}, fill: 'tozeroy',
       fillcolor: 'rgba(255,204,0,0.10)',
-      xaxis: hasGpu ? 'x3' : 'x', yaxis: hasGpu ? 'y4' : 'y',
+      xaxis: xax(cpuRow), yaxis: yax(cpuRow),
       legendgroup: 'cpu', legendgrouptitle: {text: 'CPU'},
     });
 
-    // Row 4: Disk I/O
+    // Disk I/O row
     row++;
+    const diskRow = row;
     const diskData = msg.disk_io;
     for (let i = 0; i < diskData.length; i++) {
       const d = diskData[i];
@@ -652,20 +786,25 @@ HTML_PAGE = r"""<!DOCTYPE html>
         x: times, y: d.vals, name: d.name, type: 'scatter', mode: 'lines',
         line: {width: 0.5, color: d.color}, stackgroup: 'disk_io',
         fillcolor: hexToRgba(d.color, 0.55),
-        xaxis: hasGpu ? 'x4' : 'x2', yaxis: hasGpu ? 'y5' : 'y2',
+        xaxis: xax(diskRow), yaxis: yax(diskRow),
         legendgroup: 'disk_io', legendgrouptitle: {text: 'Disk I/O'},
       });
     }
 
-    // Store keys for change detection
-    config._last_gpu_keys = msg.gpu_mem.map(m => m.pid);
+    // Store keys for change detection (per-GPU arrays)
+    config._last_gpu_keys = msg.gpu_mem.map(gm => gm.map(m => m.pid));
     config._last_disk_keys = msg.disk_io.map(d => d.pid);
 
-    const maxGib = msg.gpu_mem_total_gib.length > 0 ? Math.max(...msg.gpu_mem_total_gib) : 1;
     const bgColors = ['#101020', '#181830'];
-    const rowLabels = hasGpu
-      ? ['GPU Memory by Process (GiB)', hasPcie ? 'GPU Util (%) + PCIe (MB/s)' : 'GPU Util (%)', 'CPU Usage (%)', 'Disk I/O by Process (MB/s)']
-      : ['CPU Usage (%)', 'Disk I/O by Process (MB/s)'];
+    const rowLabels = [];
+    if (hasGpu) {
+      for (let gi = 0; gi < gpuCount; gi++) {
+        rowLabels.push('GPU ' + gi + ' Memory (GiB)');
+      }
+      rowLabels.push(hasPcie ? 'GPU Util (%) + PCIe (MB/s)' : 'GPU Util (%)');
+    }
+    rowLabels.push('CPU Usage (%)');
+    rowLabels.push('Disk I/O by Process (MB/s)');
 
     const domain = function(i, total) {
       const gap = 0.03;
@@ -684,31 +823,51 @@ HTML_PAGE = r"""<!DOCTYPE html>
       shapes: [], annotations: [],
     };
 
-    const totalRows = hasGpu ? 4 : 2;
-    // Build axis layout dynamically
-    if (hasGpu) {
-      layout.xaxis = {domain: [0, 0.92], anchor: 'y', showticklabels: false, gridcolor: '#262640'};
-      layout.yaxis = {domain: domain(0, totalRows), title: {text: 'GiB', font: {size: 10}}, range: [0, maxGib * 1.02], gridcolor: '#262640'};
-      layout.xaxis2 = {domain: [0, 0.92], anchor: 'y2', showticklabels: false, gridcolor: '#262640'};
-      layout.yaxis2 = {domain: domain(1, totalRows), title: {text: '%', font: {size: 10}}, range: [0, 105], gridcolor: '#262640'};
-      if (hasPcie) {
-        layout.yaxis3 = {domain: domain(1, totalRows), title: {text: 'PCIe MB/s (log)', font: {color: '#40c4ff', size: 10}}, overlaying: 'y2', side: 'right', showgrid: false, type: 'log', autorange: true};
-      }
-      layout.xaxis3 = {domain: [0, 0.92], anchor: 'y4', showticklabels: false, gridcolor: '#262640'};
-      layout.yaxis4 = {domain: domain(2, totalRows), title: {text: '%', font: {size: 10}}, range: [0, 105], gridcolor: '#262640'};
-      layout.xaxis4 = {domain: [0, 0.92], anchor: 'y5', gridcolor: '#262640'};
-      layout.yaxis5 = {domain: domain(3, totalRows), title: {text: 'MB/s', font: {size: 10}}, gridcolor: '#262640'};
-    } else {
-      layout.xaxis = {domain: [0, 0.92], anchor: 'y', showticklabels: false, gridcolor: '#262640'};
-      layout.yaxis = {domain: domain(0, totalRows), title: {text: '%', font: {size: 10}}, range: [0, 105], gridcolor: '#262640'};
-      layout.xaxis2 = {domain: [0, 0.92], anchor: 'y2', gridcolor: '#262640'};
-      layout.yaxis2 = {domain: domain(1, totalRows), title: {text: 'MB/s', font: {size: 10}}, gridcolor: '#262640'};
+    // Build axis layout dynamically for all rows
+    for (let r = 1; r <= nRows; r++) {
+      const xName = r === 1 ? 'xaxis' : 'xaxis' + r;
+      const yName = r === 1 ? 'yaxis' : 'yaxis' + r;
+      const yRef = r === 1 ? 'y' : 'y' + r;
+      const showTick = (r === nRows);
+      layout[xName] = {domain: [0, 0.92], anchor: yRef, showticklabels: showTick, gridcolor: '#262640'};
+      layout[yName] = {domain: domain(r - 1, nRows), gridcolor: '#262640'};
     }
 
+    // Set y-axis types per row
+    if (hasGpu) {
+      for (let gi = 0; gi < gpuCount; gi++) {
+        const yName = gi === 0 ? 'yaxis' : 'yaxis' + (gi + 1);
+        const maxGib = msg.gpu_mem_total_gib[gi] || 1;
+        layout[yName].title = {text: 'GiB', font: {size: 10}};
+        layout[yName].range = [0, maxGib * 1.02];
+      }
+      const utilRowIdx = gpuCount + 1;
+      const utilYName = 'yaxis' + utilRowIdx;
+      layout[utilYName].title = {text: '%', font: {size: 10}};
+      layout[utilYName].range = [0, 105];
+
+      if (hasPcie && pcieYIdx) {
+        const pcieYName = 'yaxis' + pcieYIdx;
+        layout[pcieYName] = {
+          domain: domain(gpuCount, nRows),
+          title: {text: 'PCIe MB/s (log)', font: {color: '#40c4ff', size: 10}},
+          overlaying: 'y' + utilRowIdx, side: 'right', showgrid: false,
+          type: 'log', autorange: true,
+        };
+      }
+    }
+    const cpuYName = cpuRow === 1 ? 'yaxis' : 'yaxis' + cpuRow;
+    layout[cpuYName].title = {text: '%', font: {size: 10}};
+    layout[cpuYName].range = [0, 105];
+    const diskYName = diskRow === 1 ? 'yaxis' : 'yaxis' + diskRow;
+    layout[diskYName].title = {text: 'MB/s', font: {size: 10}};
+    layout[diskYName].rangemode = 'tozero';
+
     // Add background shapes and labels
-    const axPairs = hasGpu
-      ? [['x','y'], ['x2','y2'], ['x3','y4'], ['x4','y5']]
-      : [['x','y'], ['x2','y2']];
+    const axPairs = [];
+    for (let r = 1; r <= nRows; r++) {
+      axPairs.push([xax(r), yax(r)]);
+    }
     for (let i = 0; i < axPairs.length; i++) {
       layout.shapes.push({
         type: 'rect', x0: 0, x1: 1, y0: 0, y1: 1,
@@ -724,19 +883,23 @@ HTML_PAGE = r"""<!DOCTYPE html>
       });
     }
 
-    // GPU total memory dashed line
-    if (hasGpu && maxGib > 0) {
-      layout.shapes.push({
-        type: 'line', x0: 0, x1: 1, y0: maxGib, y1: maxGib,
-        xref: 'x domain', yref: 'y',
-        line: {color: '#ff5252', width: 1, dash: 'dash'},
-      });
-      layout.annotations.push({
-        text: maxGib.toFixed(1) + ' GiB total', x: 1, y: maxGib,
-        xref: 'x domain', yref: 'y', showarrow: false,
-        font: {size: 11, color: '#ff5252'}, xanchor: 'right',
-      });
-
+    // GPU total memory dashed line per GPU
+    if (hasGpu) {
+      for (let gi = 0; gi < gpuCount; gi++) {
+        const maxGib = msg.gpu_mem_total_gib[gi] || 1;
+        const yr = yax(gi + 1);
+        const xr = xax(gi + 1);
+        layout.shapes.push({
+          type: 'line', x0: 0, x1: 1, y0: maxGib, y1: maxGib,
+          xref: xr + ' domain', yref: yr,
+          line: {color: '#ff5252', width: 1, dash: 'dash'},
+        });
+        layout.annotations.push({
+          text: maxGib.toFixed(1) + ' GiB', x: 1, y: maxGib,
+          xref: xr + ' domain', yref: yr, showarrow: false,
+          font: {size: 10, color: '#ff5252'}, xanchor: 'right',
+        });
+      }
     }
 
     Plotly.newPlot(gd, traces, layout, {
@@ -752,10 +915,10 @@ HTML_PAGE = r"""<!DOCTYPE html>
         const now = new Date();
         const start = new Date(now.getTime() - viewMinutes * 60000);
         const upd = {};
-        const axes = config.gpu_count > 0
-          ? ['xaxis', 'xaxis2', 'xaxis3', 'xaxis4']
-          : ['xaxis', 'xaxis2'];
-        for (const ax of axes) {
+        const gc = config.gpu_count || 0;
+        const nr = (gc > 0 ? gc + 1 : 0) + 2;
+        for (let r = 1; r <= nr; r++) {
+          const ax = r === 1 ? 'xaxis' : 'xaxis' + r;
           upd[ax + '.range'] = [start, now];
         }
         Plotly.relayout(gd, upd);
@@ -773,11 +936,13 @@ HTML_PAGE = r"""<!DOCTYPE html>
       viewMinutes = parseInt(this.dataset.min);
       if (viewMinutes === 0 && gd) {
         // Reset to autorange
-        const axes = config.gpu_count > 0
-          ? ['xaxis', 'xaxis2', 'xaxis3', 'xaxis4']
-          : ['xaxis', 'xaxis2'];
+        const gc2 = config.gpu_count || 0;
+        const nr2 = (gc2 > 0 ? gc2 + 1 : 0) + 2;
         const upd = {};
-        for (const ax of axes) { upd[ax + '.autorange'] = true; }
+        for (let r = 1; r <= nr2; r++) {
+          const ax = r === 1 ? 'xaxis' : 'xaxis' + r;
+          upd[ax + '.autorange'] = true;
+        }
         Plotly.relayout(gd, upd);
       }
     });
@@ -828,13 +993,24 @@ def build_server(collector: MetricsCollector, args):
 
     @socketio.on("connect")
     def handle_connect():
-        data = collector.snapshot_full()
-        socketio.emit("init", data)
+        from flask import request as flask_request
+        sid = flask_request.sid
+        # Wait for data to be available before sending init
+        def send_init():
+            for _ in range(50):
+                with collector.lock:
+                    if len(collector.timestamps) > 5:
+                        break
+                time.sleep(0.1)
+            data = collector.snapshot_full()
+            socketio.emit("init", data, to=sid)
+        threading.Thread(target=send_init, daemon=True).start()
 
     @socketio.on("request_init")
     def handle_request_init():
+        from flask import request as flask_request
         data = collector.snapshot_full()
-        socketio.emit("init", data)
+        socketio.emit("init", data, to=flask_request.sid)
 
     @socketio.on("pause")
     def handle_pause(is_paused):
@@ -861,8 +1037,9 @@ def build_server(collector: MetricsCollector, args):
 
 def main():
     args = parse_args()
-    print(f"Collect interval: {args.interval}ms")
-    print(f"Push interval   : {args.push_interval}ms")
+    print(f"Fast collect : {args.interval}ms (CPU, PCIe, GPU mem)")
+    print(f"Slow collect : {args.gpu_interval}ms (GPU util, disk I/O)")
+    print(f"Push interval: {args.push_interval}ms")
     print(f"Rolling window  : {args.window}s ({args.window // 60}m {args.window % 60}s)")
 
     if HAS_NVML:
@@ -883,14 +1060,22 @@ def main():
     app, socketio, ui_state, push_loop = build_server(collector, args)
 
     # Collection thread
-    def _collection_loop():
+    def _fast_loop():
         interval_sec = args.interval / 1000.0
         while True:
             if not ui_state["paused"]:
-                collector.sample()
+                collector.sample_fast()
             time.sleep(interval_sec)
 
-    threading.Thread(target=_collection_loop, daemon=True).start()
+    def _slow_loop():
+        interval_sec = args.gpu_interval / 1000.0
+        while True:
+            if not ui_state["paused"]:
+                collector.sample_slow()
+            time.sleep(interval_sec)
+
+    threading.Thread(target=_fast_loop, daemon=True).start()
+    threading.Thread(target=_slow_loop, daemon=True).start()
     threading.Thread(target=push_loop, daemon=True).start()
 
     print(f"Open http://{args.host}:{args.port} in your browser")
