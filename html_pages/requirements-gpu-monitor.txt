@@ -1,5 +1,4 @@
-dash
-plotly
+flask
+flask-socketio
 psutil
 pynvml
-kaleido
