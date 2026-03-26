@@ -21,6 +21,7 @@ Usage:
 import argparse
 import json
 import os
+import socket
 import threading
 import time
 from collections import deque
@@ -56,7 +57,7 @@ def parse_args():
     p.add_argument("--interval", type=int, default=75, help="Fast collection interval ms (CPU, disk)")
     p.add_argument("--gpu-interval", type=int, default=500, help="Slow collection interval ms (GPU mem, util, PCIe)")
     p.add_argument("--push-interval", type=int, default=150, help="WebSocket push interval ms")
-    p.add_argument("--window", type=int, default=600, help="Rolling window seconds (default 600 = 10min)")
+    p.add_argument("--window", type=int, default=900, help="Rolling window seconds (default 900 = 15min)")
     return p.parse_args()
 
 
@@ -299,6 +300,7 @@ class MetricsCollector:
         maxlen = int(window_sec * 1000 / interval_ms)
         self.interval_sec = interval_ms / 1000.0
         self.timestamps: deque[float] = deque(maxlen=maxlen)
+        self.sample_counter: int = 0
         self.cpu_pct: deque[float] = deque(maxlen=maxlen)
         self._prev_disk = psutil.disk_io_counters()
         self._prev_net = psutil.net_io_counters()
@@ -332,7 +334,8 @@ class MetricsCollector:
                 self.gpu_util.append(deque(maxlen=maxlen))
                 self.gpu_pcie_tx.append(deque(maxlen=maxlen))
                 self.gpu_pcie_rx.append(deque(maxlen=maxlen))
-            if self.gpu_count > 0:
+        self.gpu_temp: list[deque[float]] = [deque(maxlen=maxlen) for _ in range(self.gpu_count)]
+        if self.gpu_count > 0:
                 try:
                     h = pynvml.nvmlDeviceGetHandleByIndex(0)
                     pynvml.nvmlDeviceGetPcieThroughput(h, pynvml.NVML_PCIE_UTIL_TX_BYTES)
@@ -349,6 +352,7 @@ class MetricsCollector:
             if dt <= 0:
                 dt = self.interval_sec
             self.timestamps.append(now)
+            self.sample_counter += 1
             self.cpu_pct.append(psutil.cpu_percent(interval=None))
             # Network I/O: repeat last (sampled in slow loop)
             self.net_sent_mbps.append(self.net_sent_mbps[-1] if self.net_sent_mbps else 0.0)
@@ -359,6 +363,7 @@ class MetricsCollector:
                 for i in range(self.gpu_count):
                     handle = pynvml.nvmlDeviceGetHandleByIndex(i)
                     self.gpu_util[i].append(self.gpu_util[i][-1] if self.gpu_util[i] else 0.0)
+                    self.gpu_temp[i].append(self.gpu_temp[i][-1] if self.gpu_temp[i] else 0.0)
                     if self.has_pcie:
                         try:
                             tx = pynvml.nvmlDeviceGetPcieThroughput(handle, pynvml.NVML_PCIE_UTIL_TX_BYTES)
@@ -421,6 +426,11 @@ class MetricsCollector:
                         self.gpu_util[i][-1] = util.gpu
                     except pynvml.NVMLError:
                         pass
+                    try:
+                        temp = pynvml.nvmlDeviceGetTemperature(handle, pynvml.NVML_TEMPERATURE_GPU)
+                        self.gpu_temp[i][-1] = float(temp)
+                    except pynvml.NVMLError:
+                        pass
 
     def _scan_process_disk(self, dt: float) -> dict[int, float]:
         rates: dict[int, float] = {}
@@ -441,7 +451,7 @@ class MetricsCollector:
         return rates
 
     @staticmethod
-    def _downsample_init(times, arrays, max_recent=1600, max_total=3200):
+    def _downsample_init(times, arrays, max_recent=1200, max_total=2400):
         """Downsample for init: keep last max_recent at full res, older data subsampled."""
         n = len(times)
         if n <= max_total:
@@ -474,6 +484,8 @@ class MetricsCollector:
                 all_vals.append(v)
             gpu_util = [list(self.gpu_util[i]) for i in range(self.gpu_count)]
             all_vals.extend(gpu_util)
+            gpu_temp = [list(self.gpu_temp[i]) for i in range(self.gpu_count)]
+            all_vals.extend(gpu_temp)
             pcie_tx = [list(self.gpu_pcie_tx[i]) for i in range(self.gpu_count)] if self.has_pcie else []
             pcie_rx = [list(self.gpu_pcie_rx[i]) for i in range(self.gpu_count)] if self.has_pcie else []
             all_vals.extend(pcie_tx)
@@ -504,6 +516,8 @@ class MetricsCollector:
                 idx += 1
             ds_gpu_util = [ds_arrays[idx + i] for i in range(self.gpu_count)]
             idx += self.gpu_count
+            ds_gpu_temp = [ds_arrays[idx + i] for i in range(self.gpu_count)]
+            idx += self.gpu_count
             ds_pcie_tx = [ds_arrays[idx + i] for i in range(len(pcie_tx))]
             idx += len(pcie_tx)
             ds_pcie_rx = [ds_arrays[idx + i] for i in range(len(pcie_rx))]
@@ -516,6 +530,7 @@ class MetricsCollector:
 
             return {
                 "type": "init",
+                "sample_counter": self.sample_counter,
                 "timestamps": times,
                 "gpu_count": self.gpu_count,
                 "gpu_names": self.gpu_names,
@@ -523,6 +538,7 @@ class MetricsCollector:
                 "has_pcie": self.has_pcie,
                 "gpu_mem": gpu_mem_per_gpu,
                 "gpu_util": ds_gpu_util,
+                "gpu_temp": ds_gpu_temp,
                 "pcie_tx": ds_pcie_tx,
                 "pcie_rx": ds_pcie_rx,
                 "cpu": ds_cpu,
@@ -531,12 +547,15 @@ class MetricsCollector:
                 "disk_io": disk_io,
             }
 
-    def snapshot_delta(self, since_idx: int) -> dict:
-        """Return only new data since since_idx."""
+    def snapshot_delta(self, since_counter: int) -> dict:
+        """Return only new data since the given sample_counter value."""
         with self.lock:
-            cur_len = len(self.timestamps)
-            if since_idx >= cur_len:
+            cur_counter = self.sample_counter
+            if since_counter >= cur_counter:
                 return {"type": "delta", "timestamps": [], "gpu_mem_keys": [], "disk_keys": []}
+            new_count = cur_counter - since_counter
+            cur_len = len(self.timestamps)
+            since_idx = max(0, cur_len - new_count)
             new_times = list(self.timestamps)[since_idx:]
             gpu_mem_per_gpu = []
             gpu_mem_keys_per_gpu = []
@@ -549,6 +568,7 @@ class MetricsCollector:
                 gpu_mem_keys_per_gpu.append([p for p, _, _, _ in gm])
             disk_io = self.proc_disk_io.get_top_sorted(20)
             gpu_util = [list(self.gpu_util[i])[since_idx:] for i in range(self.gpu_count)]
+            gpu_temp = [list(self.gpu_temp[i])[since_idx:] for i in range(self.gpu_count)]
             pcie_tx = [list(self.gpu_pcie_tx[i])[since_idx:] for i in range(self.gpu_count)] if self.has_pcie else []
             pcie_rx = [list(self.gpu_pcie_rx[i])[since_idx:] for i in range(self.gpu_count)] if self.has_pcie else []
             cpu = list(self.cpu_pct)[since_idx:]
@@ -560,6 +580,7 @@ class MetricsCollector:
                 "gpu_mem": gpu_mem_per_gpu,
                 "gpu_mem_keys": gpu_mem_keys_per_gpu,
                 "gpu_util": gpu_util,
+                "gpu_temp": gpu_temp,
                 "pcie_tx": pcie_tx,
                 "pcie_rx": pcie_rx,
                 "cpu": cpu,
@@ -604,7 +625,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
     <button class="btn range-btn active" data-min="2">2m</button>
     <button class="btn range-btn" data-min="5">5m</button>
     <button class="btn range-btn" data-min="10">10m</button>
-    <button class="btn range-btn" data-min="0">All</button>
+    <button class="btn range-btn" data-min="15">15m</button>
     <button class="btn" id="pause-btn">Pause</button>
     <button class="btn" id="snapshot-btn">Snapshot</button>
   </div>
@@ -616,7 +637,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
 (function() {
   "use strict";
 
-  const MAX_POINTS = 4000;
+  const MAX_POINTS = 2400;
   let viewMinutes = 2;
   let paused = false;
   let gd = null; // plotly graph div
@@ -626,13 +647,21 @@ HTML_PAGE = r"""<!DOCTYPE html>
   let lastServerLen = 0; // tracks how many points the server has sent total
   let scrollRAF = null;
 
-  const socket = io({transports: ['polling', 'websocket'], upgrade: true});
+  const socket = io({transports: ['polling'], reconnection: true, reconnectionDelay: 500, reconnectionAttempts: Infinity, timeout: 60000});
 
   socket.on('connect', function() {
     document.getElementById('status').textContent = 'Connected. Waiting for data...';
-    setTimeout(function() {
-      if (!config) socket.emit('request_init');
-    }, 3000);
+    if (config) {
+      socket.emit('request_init');
+    } else {
+      setTimeout(function() {
+        if (!config) socket.emit('request_init');
+      }, 3000);
+    }
+  });
+
+  socket.on('disconnect', function() {
+    document.getElementById('status').textContent = 'Disconnected -- reconnecting...';
   });
 
   socket.on('init', function(msg) {
@@ -684,6 +713,17 @@ HTML_PAGE = r"""<!DOCTYPE html>
       updateX.push(times);
       updateY.push(msg.gpu_util[i]);
     }
+    // GPU temp
+    if (msg.gpu_temp) {
+      for (let i = 0; i < msg.gpu_temp.length; i++) {
+        const key = 'gpu_temp_' + i;
+        if (traceMap[key] !== undefined) {
+          indices.push(traceMap[key]);
+          updateX.push(times);
+          updateY.push(msg.gpu_temp[i]);
+        }
+      }
+    }
     // PCIe
     if (config.has_pcie) {
       for (let i = 0; i < msg.pcie_tx.length; i++) {
@@ -734,40 +774,49 @@ HTML_PAGE = r"""<!DOCTYPE html>
     const hasGpu = msg.gpu_count > 0;
     const hasPcie = msg.has_pcie;
     const gpuCount = msg.gpu_count;
-    // Rows: N gpu_mem + 1 gpu_util + 1 cpu + 1 disk
-    // Rows: N gpu_mem (weight 5) + 1 gpu_util (weight 3) + 1 cpu (weight 3) + 1 disk+net (weight 3)
-    const nRows = (hasGpu ? gpuCount + 1 : 0) + 2;
-    // Row weights: GPU mem rows = 5, others = 3
+    // Rows: 2*N (mem+util per GPU) + 1 cpu + 1 disk+net
+    const nRows = (hasGpu ? gpuCount * 2 : 0) + 2;
+    // Row weights: GPU mem=5, GPU util=5, CPU=3, Disk+Net=3
     const rowWeights = [];
     if (hasGpu) {
-      for (let gi = 0; gi < gpuCount; gi++) rowWeights.push(5);
-      rowWeights.push(3); // GPU util
+      for (let gi = 0; gi < gpuCount; gi++) {
+        rowWeights.push(7); // mem
+        rowWeights.push(3); // util+temp
+      }
     }
     rowWeights.push(3); // CPU
     rowWeights.push(3); // Disk+Net
 
-    // Helper: axis name for row r (1-indexed)
     const xax = r => r === 1 ? 'x' : 'x' + r;
     const yax = r => r === 1 ? 'y' : 'y' + r;
-    // Track which y-axis index is the PCIe secondary overlay
-    let pcieYIdx = null;
+    const pcieYIdxPerGpu = []; // secondary y-axis index per GPU
 
     let row = 0;
 
-    // Rows 1..N: GPU Memory per GPU (stacked area each)
+    const gpuUtilColors = ['#76b900', '#ff1744', '#448aff', '#ffea00', '#d500f9', '#ff9100', '#00e676', '#ff6d00'];
+    const gpuPcieColors = ['#40c4ff', '#ff6e40', '#b388ff', '#ffd54f', '#ea80fc', '#ffab40', '#64ffda', '#ff8a65'];
+
+    // Per-GPU blocks: Memory+PCIe row + Util+Temp row
+    const pcieYIdxPerGpu_mem = [];
+    const tempYIdxPerGpu = [];
     if (hasGpu) {
       for (let gi = 0; gi < gpuCount; gi++) {
+        // Memory + PCIe row
         row++;
+        const memRow = row;
         const gpuMem = msg.gpu_mem[gi] || [];
         const stackName = 'gpu_mem_' + gi;
+        const memPatterns = ['/', '\\', 'x', '+', '-', '|', '.', ''];
         for (let i = gpuMem.length - 1; i >= 0; i--) {
           const m = gpuMem[i];
+          const patIdx = Math.abs(m.pid) % memPatterns.length;
           traceMap['gpu_mem_' + gi + '_' + m.pid] = traceCount++;
           traces.push({
-            x: times, y: m.vals, name: m.name, type: 'scatter', mode: 'lines',
-            line: {width: 0.5, color: m.color}, stackgroup: stackName,
+            x: times, y: m.vals, name: m.name, type: 'scatter', mode: 'none',
+            line: {width: 0, color: m.color}, stackgroup: stackName,
             fillcolor: hexToRgba(m.color, 0.6),
-            xaxis: xax(row), yaxis: yax(row),
+            fillpattern: {shape: memPatterns[patIdx], solidity: 0.15, size: 8, bgcolor: hexToRgba(m.color, 0.6), fgcolor: 'rgba(13,13,20,0.4)'},
+            xaxis: xax(memRow), yaxis: yax(memRow),
             legendgroup: 'gpu_mem_' + gi, legendgrouptitle: {text: 'GPU ' + gi + ' Mem'},
           });
         }
@@ -776,47 +825,54 @@ HTML_PAGE = r"""<!DOCTYPE html>
           traces.push({
             x: times, y: times.map(() => 0), name: 'GPU ' + gi + ' Mem: 0', type: 'scatter',
             mode: 'lines', line: {width: 1, color: '#555'},
-            xaxis: xax(row), yaxis: yax(row), legendgroup: 'gpu_mem_' + gi,
+            xaxis: xax(memRow), yaxis: yax(memRow), legendgroup: 'gpu_mem_' + gi,
           });
         }
-      }
+        if (hasPcie) {
+          const pyIdx = nRows + 1 + gi;
+          pcieYIdxPerGpu_mem.push({idx: pyIdx, memRow: memRow});
+          const pcieY = 'y' + pyIdx;
+          const pColor = gpuPcieColors[gi % gpuPcieColors.length];
+          traceMap['pcie_tx_' + gi] = traceCount++;
+          traces.push({
+            x: times, y: msg.pcie_tx[gi], name: 'PCIe W (GPU ' + gi + ')', type: 'scatter',
+            line: {color: pColor, width: 0.5},
+            xaxis: xax(memRow), yaxis: pcieY,
+            legendgroup: 'pcie_' + gi, legendgrouptitle: {text: 'GPU ' + gi + ' PCIe'},
+          });
+          traceMap['pcie_rx_' + gi] = traceCount++;
+          traces.push({
+            x: times, y: msg.pcie_rx[gi], name: 'PCIe R (GPU ' + gi + ')', type: 'scatter',
+            line: {color: pColor, width: 0.5, dash: 'dot'},
+            xaxis: xax(memRow), yaxis: pcieY,
+            legendgroup: 'pcie_' + gi,
+          });
+        }
 
-      // Next row: GPU Util + PCIe
-      row++;
-      const utilRow = row;
-      const gpuColors = ['#76b900', '#ff1744', '#76ff03', '#d500f9'];
-      for (let i = 0; i < gpuCount; i++) {
-        const color = gpuColors[i % gpuColors.length];
-        const label = 'GPU ' + i + ' Util';
-        traceMap['gpu_util_' + i] = traceCount++;
+        // Util + Temperature row for this GPU
+        row++;
+        const utilRow = row;
+        const uColor = '#76b900';
+        traceMap['gpu_util_' + gi] = traceCount++;
         traces.push({
-          x: times, y: msg.gpu_util[i], name: label, type: 'scatter',
-          line: {color: color, width: 2}, fill: 'tozeroy',
-          fillcolor: hexToRgba(color, 0.12),
+          x: times, y: msg.gpu_util[gi], name: 'GPU ' + gi + ' Util', type: 'scatter',
+          line: {color: uColor, width: 2}, fill: 'tozeroy',
+          fillcolor: hexToRgba(uColor, 0.25),
           xaxis: xax(utilRow), yaxis: yax(utilRow),
-          legendgroup: 'util', legendgrouptitle: {text: 'GPU Util'},
+          legendgroup: 'util_' + gi, legendgrouptitle: {text: 'GPU ' + gi + ' Util'},
         });
-      }
-      if (hasPcie) {
-        pcieYIdx = nRows + 1; // secondary y-axis overlaying utilRow
-        const pcieY = 'y' + pcieYIdx;
-        for (let i = 0; i < gpuCount; i++) {
-          const suffix = ' (GPU ' + i + ')';
-          traceMap['pcie_tx_' + i] = traceCount++;
-          traces.push({
-            x: times, y: msg.pcie_tx[i], name: 'PCIe TX' + suffix, type: 'scatter',
-            line: {color: '#40c4ff', width: 0.5},
-            xaxis: xax(utilRow), yaxis: pcieY,
-            legendgroup: 'pcie', legendgrouptitle: {text: 'PCIe'},
-          });
-          traceMap['pcie_rx_' + i] = traceCount++;
-          traces.push({
-            x: times, y: msg.pcie_rx[i], name: 'PCIe RX' + suffix, type: 'scatter',
-            line: {color: '#ff6e40', width: 0.5},
-            xaxis: xax(utilRow), yaxis: pcieY,
-            legendgroup: 'pcie',
-          });
-        }
+        // GPU Temperature on secondary y-axis
+        const tIdx = nRows + gpuCount + 1 + gi;
+        tempYIdxPerGpu.push({idx: tIdx, utilRow: utilRow, gi: gi});
+        const tempY = 'y' + tIdx;
+        const tColor = '#ff6e40';
+        traceMap['gpu_temp_' + gi] = traceCount++;
+        traces.push({
+          x: times, y: msg.gpu_temp[gi], name: 'GPU ' + gi + ' Temp', type: 'scatter',
+          line: {color: tColor, width: 1.5, dash: 'dot'},
+          xaxis: xax(utilRow), yaxis: tempY,
+          legendgroup: 'util_' + gi,
+        });
       }
     }
 
@@ -827,7 +883,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
     traces.push({
       x: times, y: msg.cpu, name: 'CPU', type: 'scatter',
       line: {color: '#ffcc00', width: 1}, fill: 'tozeroy',
-      fillcolor: 'rgba(255,204,0,0.10)',
+      fillcolor: hexToRgba('#ffcc00', 0.25),
       xaxis: xax(cpuRow), yaxis: yax(cpuRow),
       legendgroup: 'cpu', legendgrouptitle: {text: 'CPU'},
     });
@@ -835,7 +891,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
     // Disk I/O + Network I/O row (interleaved, network on secondary y-axis)
     row++;
     const diskRow = row;
-    const netYIdx = nRows + (hasPcie ? 2 : 1); // secondary y-axis for network
+    const netYIdx = nRows + pcieYIdxPerGpu_mem.length + tempYIdxPerGpu.length + 1;
     const netY = 'y' + netYIdx;
     const diskData = msg.disk_io;
     for (let i = 0; i < diskData.length; i++) {
@@ -876,9 +932,9 @@ HTML_PAGE = r"""<!DOCTYPE html>
     const rowLabels = [];
     if (hasGpu) {
       for (let gi = 0; gi < gpuCount; gi++) {
-        rowLabels.push('GPU ' + gi + ' Memory (GiB)');
+        rowLabels.push(hasPcie ? 'GPU ' + gi + ' Memory (GiB) + PCIe' : 'GPU ' + gi + ' Memory (GiB)');
+        rowLabels.push('GPU ' + gi + ' Util (%) + Temp (\u00b0C)');
       }
-      rowLabels.push(hasPcie ? 'GPU Util (%) + PCIe (MB/s)' : 'GPU Util (%)');
     }
     rowLabels.push('CPU Usage (%)');
     rowLabels.push('Disk I/O (MB/s) + Network (MB/s)');
@@ -913,38 +969,52 @@ HTML_PAGE = r"""<!DOCTYPE html>
       const yName = r === 1 ? 'yaxis' : 'yaxis' + r;
       const yRef = r === 1 ? 'y' : 'y' + r;
       const showTick = (r === nRows);
-      layout[xName] = {domain: [0, 0.92], anchor: yRef, showticklabels: showTick, gridcolor: '#262640'};
+      const xRange = viewMinutes > 0 ? [new Date(Date.now() - viewMinutes * 60000), new Date()] : undefined;
+      layout[xName] = {domain: [0, 0.92], anchor: yRef, showticklabels: showTick, gridcolor: '#262640', range: xRange};
       layout[yName] = {domain: domain(r - 1, nRows), gridcolor: '#262640'};
     }
 
     // Set y-axis types per row
     if (hasGpu) {
       for (let gi = 0; gi < gpuCount; gi++) {
-        const yName = gi === 0 ? 'yaxis' : 'yaxis' + (gi + 1);
+        const memRowIdx = 2 * gi + 1;
+        const utilRowIdx = 2 * gi + 2;
+        const memYName = memRowIdx === 1 ? 'yaxis' : 'yaxis' + memRowIdx;
+        const utilYName = 'yaxis' + utilRowIdx;
         const maxGib = msg.gpu_mem_total_gib[gi] || 1;
-        layout[yName].title = {text: 'GiB', font: {size: 10}};
-        layout[yName].range = [0, maxGib * 1.02];
+        layout[memYName].title = {text: '<span style="color:#76b900">GPU ' + gi + ' GiB</span>', font: {size: 10}};
+        layout[memYName].range = [0, maxGib * 1.02];
+        layout[utilYName].title = {text: '<span style="color:#76b900">GPU ' + gi + ' %</span>', font: {size: 10}};
+        layout[utilYName].range = [0, 105];
       }
-      const utilRowIdx = gpuCount + 1;
-      const utilYName = 'yaxis' + utilRowIdx;
-      layout[utilYName].title = {text: '%', font: {size: 10}};
-      layout[utilYName].range = [0, 105];
-
-      if (hasPcie && pcieYIdx) {
-        const pcieYName = 'yaxis' + pcieYIdx;
+      // PCIe secondary axes (one per GPU mem row)
+      for (const pci of pcieYIdxPerGpu_mem) {
+        const pcieYName = 'yaxis' + pci.idx;
+        const gi = (pci.memRow - 1) / 2;
+        const pColor = gpuPcieColors[gi % gpuPcieColors.length];
         layout[pcieYName] = {
-          domain: domain(gpuCount, nRows),
-          title: {text: 'PCIe MB/s (log)', font: {color: '#40c4ff', size: 10}},
-          overlaying: 'y' + utilRowIdx, side: 'right', showgrid: false,
+          domain: domain(pci.memRow - 1, nRows),
+          title: {text: 'PCIe (log)', font: {color: pColor, size: 10}},
+          overlaying: yax(pci.memRow), side: 'right', showgrid: false,
           type: 'log', autorange: true,
+        };
+      }
+      // GPU Temp secondary axes (one per GPU util row)
+      for (const tmp of tempYIdxPerGpu) {
+        const tempYName = 'yaxis' + tmp.idx;
+        layout[tempYName] = {
+          domain: domain(tmp.utilRow - 1, nRows),
+          title: {text: '\u00b0C', font: {color: '#ff6e40', size: 10}},
+          overlaying: yax(tmp.utilRow), side: 'right', showgrid: false,
+          range: [20, 95],
         };
       }
     }
     const cpuYName = cpuRow === 1 ? 'yaxis' : 'yaxis' + cpuRow;
-    layout[cpuYName].title = {text: '%', font: {size: 10}};
+    layout[cpuYName].title = {text: '<span style="color:#ffcc00">CPU %</span>', font: {size: 10}};
     layout[cpuYName].range = [0, 105];
     const diskYName = diskRow === 1 ? 'yaxis' : 'yaxis' + diskRow;
-    layout[diskYName].title = {text: 'MB/s', font: {size: 10}};
+    layout[diskYName].title = {text: '<span style="color:#ff9800">Disk I/O MB/s</span>', font: {size: 10}};
     layout[diskYName].rangemode = 'tozero';
     // Network secondary y-axis (log) overlaying disk row
     const netYName = 'yaxis' + netYIdx;
@@ -979,8 +1049,8 @@ HTML_PAGE = r"""<!DOCTYPE html>
     if (hasGpu) {
       for (let gi = 0; gi < gpuCount; gi++) {
         const maxGib = msg.gpu_mem_total_gib[gi] || 1;
-        const yr = yax(gi + 1);
-        const xr = xax(gi + 1);
+        const yr = yax(2 * gi + 1);
+        const xr = xax(2 * gi + 1);
         layout.shapes.push({
           type: 'line', x0: 0, x1: 1, y0: maxGib, y1: maxGib,
           xref: xr + ' domain', yref: yr,
@@ -1001,23 +1071,21 @@ HTML_PAGE = r"""<!DOCTYPE html>
   }
 
   function startScrollLoop() {
-    if (scrollRAF) cancelAnimationFrame(scrollRAF);
-    function tick() {
+    if (scrollRAF) clearInterval(scrollRAF);
+    scrollRAF = setInterval(function() {
       if (!paused && gd && viewMinutes > 0) {
         const now = new Date();
         const start = new Date(now.getTime() - viewMinutes * 60000);
         const upd = {};
         const gc = config.gpu_count || 0;
-        const nr = (gc > 0 ? gc + 1 : 0) + 2;
+        const nr = (gc > 0 ? gc * 2 : 0) + 2;
         for (let r = 1; r <= nr; r++) {
           const ax = r === 1 ? 'xaxis' : 'xaxis' + r;
           upd[ax + '.range'] = [start, now];
         }
         Plotly.relayout(gd, upd);
       }
-      scrollRAF = requestAnimationFrame(tick);
-    }
-    scrollRAF = requestAnimationFrame(tick);
+    }, 200);
   }
 
   // --- Controls ---
@@ -1029,7 +1097,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
       if (viewMinutes === 0 && gd) {
         // Reset to autorange
         const gc2 = config.gpu_count || 0;
-        const nr2 = (gc2 > 0 ? gc2 + 1 : 0) + 2;
+        const nr2 = (gc2 > 0 ? gc2 * 2 : 0) + 2;
         const upd = {};
         for (let r = 1; r <= nr2; r++) {
           const ax = r === 1 ? 'xaxis' : 'xaxis' + r;
@@ -1075,7 +1143,8 @@ HTML_PAGE = r"""<!DOCTYPE html>
 def build_server(collector: MetricsCollector, args):
     app = Flask(__name__)
     app.config["SECRET_KEY"] = "gpu_monitor"
-    socketio = SocketIO(app, cors_allowed_origins="*", async_mode="threading")
+    socketio = SocketIO(app, cors_allowed_origins="*", async_mode="threading",
+                        ping_timeout=60, ping_interval=25, max_http_buffer_size=50 * 1024 * 1024)
 
     ui_state = {"paused": False}
 
@@ -1111,18 +1180,21 @@ def build_server(collector: MetricsCollector, args):
     def push_loop():
         """Background thread that pushes deltas to all clients."""
         push_sec = args.push_interval / 1000.0
-        last_len = 0
+        last_counter = 0
         while True:
             time.sleep(push_sec)
             if ui_state["paused"]:
                 continue
             with collector.lock:
-                cur_len = len(collector.timestamps)
-            if cur_len <= last_len:
+                cur_counter = collector.sample_counter
+            if cur_counter <= last_counter:
                 continue
-            delta = collector.snapshot_delta(last_len)
-            last_len = cur_len
-            socketio.emit("delta", delta)
+            try:
+                delta = collector.snapshot_delta(last_counter)
+                last_counter = cur_counter
+                socketio.emit("delta", delta)
+            except Exception as e:
+                print(f"[push_loop] error: {e}", flush=True)
 
     return app, socketio, ui_state, push_loop
 
@@ -1171,6 +1243,8 @@ def main():
     threading.Thread(target=push_loop, daemon=True).start()
 
     print(f"Open http://{args.host}:{args.port} in your browser")
+    import socketserver
+    socketserver.TCPServer.allow_reuse_address = True
     socketio.run(app, host=args.host, port=args.port, allow_unsafe_werkzeug=True)
 
 
