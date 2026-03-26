@@ -58,6 +58,8 @@ def parse_args():
     p.add_argument("--gpu-interval", type=int, default=500, help="Slow collection interval ms (GPU mem, util, PCIe)")
     p.add_argument("--push-interval", type=int, default=150, help="WebSocket push interval ms")
     p.add_argument("--window", type=int, default=900, help="Rolling window seconds (default 900 = 15min)")
+    p.add_argument("--top-n", type=int, default=20, help="Show top N processes per chart, rest grouped as Other")
+    p.add_argument("--fill-patterns", action="store_true", default=False, help="Enable fill patterns on stacked areas")
     return p.parse_args()
 
 
@@ -270,12 +272,24 @@ class ProcessTracker:
         return [(pid, self.names[pid], self.get_color(pid), list(self.series[pid]))
                 for pid in sorted_pids if max(self.series[pid]) > 0]
 
-    def get_top_sorted(self, n=20) -> list[tuple[int, str, str, list[float]]]:
+    def get_top_sorted(self, n=20, sort_by: str = "recency") -> list[tuple[int, str, str, list[float]]]:
         if not self.series:
             return []
-        sorted_pids = sorted(self.series.keys(),
-                             key=lambda p: max(self.series[p]) if self.series[p] else 0,
-                             reverse=True)
+
+        if sort_by == "recency":
+            def _key(p):
+                s = self.series[p]
+                last_active = -1
+                for i in range(len(s) - 1, -1, -1):
+                    if s[i] > 0:
+                        last_active = i
+                        break
+                return (last_active, max(s) if s else 0)
+        else:
+            def _key(p):
+                return sum(self.series[p])
+
+        sorted_pids = sorted(self.series.keys(), key=_key, reverse=True)
         top = sorted_pids[:n]
         rest = sorted_pids[n:]
         result = [(pid, self.names[pid], self.get_color(pid), list(self.series[pid]))
@@ -295,10 +309,12 @@ class ProcessTracker:
 
 
 class MetricsCollector:
-    def __init__(self, window_sec: int, interval_ms: int):
+    def __init__(self, window_sec: int, interval_ms: int, top_n: int = 10, fill_patterns: bool = False):
         self.lock = threading.Lock()
         maxlen = int(window_sec * 1000 / interval_ms)
         self.interval_sec = interval_ms / 1000.0
+        self.top_n = top_n
+        self.fill_patterns = fill_patterns
         self.timestamps: deque[float] = deque(maxlen=maxlen)
         self.sample_counter: int = 0
         self.cpu_pct: deque[float] = deque(maxlen=maxlen)
@@ -451,7 +467,7 @@ class MetricsCollector:
         return rates
 
     @staticmethod
-    def _downsample_init(times, arrays, max_recent=1200, max_total=2400):
+    def _downsample_init(times, arrays, max_recent=1000, max_total=1500):
         """Downsample for init: keep last max_recent at full res, older data subsampled."""
         n = len(times)
         if n <= max_total:
@@ -475,11 +491,11 @@ class MetricsCollector:
             all_vals = []
             for gi in range(self.gpu_count):
                 tracker = self.proc_gpu_mem[gi]
-                procs = tracker.get_all_sorted()
+                procs = tracker.get_top_sorted(self.top_n)
                 gpu_mem_per_gpu_full.append(procs)
                 for _, _, _, v in procs:
                     all_vals.append(v)
-            disk_io_full = self.proc_disk_io.get_top_sorted(20)
+            disk_io_full = self.proc_disk_io.get_top_sorted(self.top_n, sort_by="total")
             for _, _, _, v in disk_io_full:
                 all_vals.append(v)
             gpu_util = [list(self.gpu_util[i]) for i in range(self.gpu_count)]
@@ -536,6 +552,7 @@ class MetricsCollector:
                 "gpu_names": self.gpu_names,
                 "gpu_mem_total_gib": self.gpu_mem_total_gib,
                 "has_pcie": self.has_pcie,
+                "fill_patterns": self.fill_patterns,
                 "gpu_mem": gpu_mem_per_gpu,
                 "gpu_util": ds_gpu_util,
                 "gpu_temp": ds_gpu_temp,
@@ -547,8 +564,8 @@ class MetricsCollector:
                 "disk_io": disk_io,
             }
 
-    def snapshot_delta(self, since_counter: int) -> dict:
-        """Return only new data since the given sample_counter value."""
+    def snapshot_delta(self, since_counter: int, step: int = 1) -> dict:
+        """Return only new data since the given sample_counter value, subsampled by step."""
         with self.lock:
             cur_counter = self.sample_counter
             if since_counter >= cur_counter:
@@ -556,24 +573,25 @@ class MetricsCollector:
             new_count = cur_counter - since_counter
             cur_len = len(self.timestamps)
             since_idx = max(0, cur_len - new_count)
-            new_times = list(self.timestamps)[since_idx:]
+            sl = slice(since_idx, None, step)
+            new_times = list(self.timestamps)[sl]
             gpu_mem_per_gpu = []
             gpu_mem_keys_per_gpu = []
             for gi in range(self.gpu_count):
-                gm = self.proc_gpu_mem[gi].get_all_sorted()
+                gm = self.proc_gpu_mem[gi].get_top_sorted(self.top_n)
                 gpu_mem_per_gpu.append([
-                    {"pid": p, "name": n, "color": c, "vals": v[since_idx:] if since_idx < len(v) else []}
+                    {"pid": p, "name": n, "color": c, "vals": v[sl] if since_idx < len(v) else []}
                     for p, n, c, v in gm
                 ])
                 gpu_mem_keys_per_gpu.append([p for p, _, _, _ in gm])
-            disk_io = self.proc_disk_io.get_top_sorted(20)
-            gpu_util = [list(self.gpu_util[i])[since_idx:] for i in range(self.gpu_count)]
-            gpu_temp = [list(self.gpu_temp[i])[since_idx:] for i in range(self.gpu_count)]
-            pcie_tx = [list(self.gpu_pcie_tx[i])[since_idx:] for i in range(self.gpu_count)] if self.has_pcie else []
-            pcie_rx = [list(self.gpu_pcie_rx[i])[since_idx:] for i in range(self.gpu_count)] if self.has_pcie else []
-            cpu = list(self.cpu_pct)[since_idx:]
-            net_sent = list(self.net_sent_mbps)[since_idx:]
-            net_recv = list(self.net_recv_mbps)[since_idx:]
+            disk_io = self.proc_disk_io.get_top_sorted(self.top_n, sort_by="total")
+            gpu_util = [list(self.gpu_util[i])[sl] for i in range(self.gpu_count)]
+            gpu_temp = [list(self.gpu_temp[i])[sl] for i in range(self.gpu_count)]
+            pcie_tx = [list(self.gpu_pcie_tx[i])[sl] for i in range(self.gpu_count)] if self.has_pcie else []
+            pcie_rx = [list(self.gpu_pcie_rx[i])[sl] for i in range(self.gpu_count)] if self.has_pcie else []
+            cpu = list(self.cpu_pct)[sl]
+            net_sent = list(self.net_sent_mbps)[sl]
+            net_recv = list(self.net_recv_mbps)[sl]
             return {
                 "type": "delta",
                 "timestamps": new_times,
@@ -637,7 +655,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
 (function() {
   "use strict";
 
-  const MAX_POINTS = 2400;
+  const MAX_POINTS = 3000;
   let viewMinutes = 2;
   let paused = false;
   let gd = null; // plotly graph div
@@ -645,12 +663,13 @@ HTML_PAGE = r"""<!DOCTYPE html>
   let traceMap = {}; // maps logical trace id -> plotly trace index
   let traceCount = 0;
   let lastServerLen = 0; // tracks how many points the server has sent total
-  let scrollRAF = null;
+  
 
   const socket = io({transports: ['polling'], reconnection: true, reconnectionDelay: 500, reconnectionAttempts: Infinity, timeout: 60000});
 
   socket.on('connect', function() {
     document.getElementById('status').textContent = 'Connected. Waiting for data...';
+    socket.emit('view_minutes', viewMinutes);
     if (config) {
       socket.emit('request_init');
     } else {
@@ -759,6 +778,16 @@ HTML_PAGE = r"""<!DOCTYPE html>
     }
 
     if (indices.length > 0) {
+      if (viewMinutes > 0) {
+        const now = new Date();
+        const start = new Date(now.getTime() - viewMinutes * 60000);
+        const gc = config.gpu_count || 0;
+        const nr = (gc > 0 ? gc * 2 : 0) + 2;
+        for (let r = 1; r <= nr; r++) {
+          const ax = r === 1 ? 'xaxis' : 'xaxis' + r;
+          gd.layout[ax].range = [start, now];
+        }
+      }
       Plotly.extendTraces(gd, {x: updateX, y: updateY}, indices, MAX_POINTS);
     }
 
@@ -807,18 +836,22 @@ HTML_PAGE = r"""<!DOCTYPE html>
         const gpuMem = msg.gpu_mem[gi] || [];
         const stackName = 'gpu_mem_' + gi;
         const memPatterns = ['/', '\\', 'x', '+', '-', '|', '.', ''];
+        const usePat = msg.fill_patterns;
         for (let i = gpuMem.length - 1; i >= 0; i--) {
           const m = gpuMem[i];
           const patIdx = Math.abs(m.pid) % memPatterns.length;
           traceMap['gpu_mem_' + gi + '_' + m.pid] = traceCount++;
-          traces.push({
+          const trace = {
             x: times, y: m.vals, name: m.name, type: 'scatter', mode: 'none',
-            line: {width: 0, color: m.color}, stackgroup: stackName,
+            line: {width: 0, color: m.color, shape: 'spline', smoothing: 0.8}, stackgroup: stackName,
             fillcolor: hexToRgba(m.color, 0.6),
-            fillpattern: {shape: memPatterns[patIdx], solidity: 0.15, size: 8, bgcolor: hexToRgba(m.color, 0.6), fgcolor: 'rgba(13,13,20,0.4)'},
             xaxis: xax(memRow), yaxis: yax(memRow),
             legendgroup: 'gpu_mem_' + gi, legendgrouptitle: {text: 'GPU ' + gi + ' Mem'},
-          });
+          };
+          if (usePat) {
+            trace.fillpattern = {shape: memPatterns[patIdx], solidity: 0.15, size: 8, bgcolor: hexToRgba(m.color, 0.6), fgcolor: 'rgba(13,13,20,0.4)'};
+          }
+          traces.push(trace);
         }
         if (gpuMem.length === 0) {
           traceMap['gpu_mem_' + gi + '_empty'] = traceCount++;
@@ -894,19 +927,22 @@ HTML_PAGE = r"""<!DOCTYPE html>
     const netYIdx = nRows + pcieYIdxPerGpu_mem.length + tempYIdxPerGpu.length + 1;
     const netY = 'y' + netYIdx;
     const diskData = msg.disk_io;
+    const diskPatterns = ['/', '\\', 'x', '+', '-', '|', '.', ''];
     for (let i = 0; i < diskData.length; i++) {
       const d = diskData[i];
-      const diskPatterns = ['/', '\\', 'x', '+', '-', '|', '.', ''];
       const diskPatIdx = Math.abs(d.pid) % diskPatterns.length;
       traceMap['disk_' + d.pid] = traceCount++;
-      traces.push({
+      const dTrace = {
         x: times, y: d.vals, name: d.name, type: 'scatter', mode: 'lines',
-        line: {width: 0.5, color: d.color}, stackgroup: 'disk_io',
+        line: {width: 0.5, color: d.color, shape: 'spline', smoothing: 0.8}, stackgroup: 'disk_io',
         fillcolor: hexToRgba(d.color, 0.55),
-        fillpattern: {shape: diskPatterns[diskPatIdx], solidity: 0.15, size: 8, bgcolor: hexToRgba(d.color, 0.55), fgcolor: 'rgba(13,13,20,0.4)'},
         xaxis: xax(diskRow), yaxis: yax(diskRow),
         legendgroup: 'disk_io', legendgrouptitle: {text: 'Disk I/O'},
-      });
+      };
+      if (msg.fill_patterns) {
+        dTrace.fillpattern = {shape: diskPatterns[diskPatIdx], solidity: 0.15, size: 8, bgcolor: hexToRgba(d.color, 0.55), fgcolor: 'rgba(13,13,20,0.4)'};
+      }
+      traces.push(dTrace);
     }
     // Network I/O overlaid
     traceMap['net_sent'] = traceCount++;
@@ -932,8 +968,8 @@ HTML_PAGE = r"""<!DOCTYPE html>
     const rowLabels = [];
     if (hasGpu) {
       for (let gi = 0; gi < gpuCount; gi++) {
-        rowLabels.push(hasPcie ? 'GPU ' + gi + ' Memory (GiB) + PCIe' : 'GPU ' + gi + ' Memory (GiB)');
-        rowLabels.push('GPU ' + gi + ' Util (%) + Temp (\u00b0C)');
+        rowLabels.push(hasPcie ? 'GPU ' + gi + ' Memory (GiB) + PCIe (MB/s)' : 'GPU ' + gi + ' Memory (GiB)');
+        rowLabels.push('GPU ' + gi + ' Util (%) + GPU \u00b0C');
       }
     }
     rowLabels.push('CPU Usage (%)');
@@ -994,7 +1030,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
         const pColor = gpuPcieColors[gi % gpuPcieColors.length];
         layout[pcieYName] = {
           domain: domain(pci.memRow - 1, nRows),
-          title: {text: 'PCIe (log)', font: {color: pColor, size: 10}},
+          title: {text: 'PCIe MB/s (log)', font: {color: pColor, size: 10}},
           overlaying: yax(pci.memRow), side: 'right', showgrid: false,
           type: 'log', autorange: true,
         };
@@ -1004,7 +1040,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
         const tempYName = 'yaxis' + tmp.idx;
         layout[tempYName] = {
           domain: domain(tmp.utilRow - 1, nRows),
-          title: {text: '\u00b0C', font: {color: '#ff6e40', size: 10}},
+          title: {text: 'GPU \u00b0C', font: {color: '#ff6e40', size: 10}},
           overlaying: yax(tmp.utilRow), side: 'right', showgrid: false,
           range: [20, 95],
         };
@@ -1070,22 +1106,22 @@ HTML_PAGE = r"""<!DOCTYPE html>
     });
   }
 
+  function doScroll() {
+    if (paused || !gd || viewMinutes <= 0) return;
+    const now = new Date();
+    const start = new Date(now.getTime() - viewMinutes * 60000);
+    const upd = {};
+    const gc = config.gpu_count || 0;
+    const nr = (gc > 0 ? gc * 2 : 0) + 2;
+    for (let r = 1; r <= nr; r++) {
+      const ax = r === 1 ? 'xaxis' : 'xaxis' + r;
+      upd[ax + '.range'] = [start, now];
+    }
+    Plotly.relayout(gd, upd);
+  }
+
   function startScrollLoop() {
-    if (scrollRAF) clearInterval(scrollRAF);
-    scrollRAF = setInterval(function() {
-      if (!paused && gd && viewMinutes > 0) {
-        const now = new Date();
-        const start = new Date(now.getTime() - viewMinutes * 60000);
-        const upd = {};
-        const gc = config.gpu_count || 0;
-        const nr = (gc > 0 ? gc * 2 : 0) + 2;
-        for (let r = 1; r <= nr; r++) {
-          const ax = r === 1 ? 'xaxis' : 'xaxis' + r;
-          upd[ax + '.range'] = [start, now];
-        }
-        Plotly.relayout(gd, upd);
-      }
-    }, 200);
+    // Scrolling now happens in delta handler after extendTraces
   }
 
   // --- Controls ---
@@ -1094,6 +1130,8 @@ HTML_PAGE = r"""<!DOCTYPE html>
       document.querySelectorAll('.range-btn').forEach(b => b.classList.remove('active'));
       this.classList.add('active');
       viewMinutes = parseInt(this.dataset.min);
+      socket.emit('view_minutes', viewMinutes);
+      doScroll();
       if (viewMinutes === 0 && gd) {
         // Reset to autorange
         const gc2 = config.gpu_count || 0;
@@ -1177,11 +1215,23 @@ def build_server(collector: MetricsCollector, args):
     def handle_pause(is_paused):
         ui_state["paused"] = bool(is_paused)
 
+    @socketio.on("view_minutes")
+    def handle_view_minutes(vm):
+        ui_state["view_minutes"] = int(vm)
+
     def push_loop():
         """Background thread that pushes deltas to all clients."""
-        push_sec = args.push_interval / 1000.0
         last_counter = 0
         while True:
+            vm = ui_state.get("view_minutes", 2)
+            if vm <= 2:
+                push_sec = args.push_interval / 1000.0
+            elif vm <= 5:
+                push_sec = 0.5
+            elif vm <= 10:
+                push_sec = 1.0
+            else:
+                push_sec = 2.0
             time.sleep(push_sec)
             if ui_state["paused"]:
                 continue
@@ -1190,7 +1240,15 @@ def build_server(collector: MetricsCollector, args):
             if cur_counter <= last_counter:
                 continue
             try:
-                delta = collector.snapshot_delta(last_counter)
+                if vm <= 2:
+                    step = 1
+                elif vm <= 5:
+                    step = 4
+                elif vm <= 10:
+                    step = 8
+                else:
+                    step = 12
+                delta = collector.snapshot_delta(last_counter, step=step)
                 last_counter = cur_counter
                 socketio.emit("delta", delta)
             except Exception as e:
@@ -1218,7 +1276,8 @@ def main():
         print("No NVIDIA GPUs detected -- CPU + Disk only")
     print()
 
-    collector = MetricsCollector(window_sec=args.window, interval_ms=args.interval)
+    collector = MetricsCollector(window_sec=args.window, interval_ms=args.interval,
+                                    top_n=args.top_n, fill_patterns=args.fill_patterns)
     psutil.cpu_percent(interval=None)
 
     app, socketio, ui_state, push_loop = build_server(collector, args)
