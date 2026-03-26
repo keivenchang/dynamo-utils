@@ -81,7 +81,7 @@ def dashboard_served_raw_log_repo_cache_dir(*, page_root_dir: Path) -> Path:
     return served
 
 
-def prune_dashboard_raw_logs(*, page_root_dir: Path, max_age_days: int = 90) -> int:
+def prune_dashboard_raw_logs(*, page_root_dir: Path, max_age_days: int = 180) -> int:
     """Prune dashboard-served raw logs under the consolidated repo-local cache.
 
     Safety: only delete files that look like GitHub Actions job logs:
@@ -137,7 +137,9 @@ def prune_partial_raw_log_caches(*, page_root_dirs: List[Path]) -> Dict[str, int
             p.unlink()
             stats["deleted_global_txt"] += 1
 
-    # 2) Global .log without completed=true in index: delete
+    # 2) Global .log without completed=true in index: delete (with 180-day grace period)
+    grace_s = 180.0 * 24.0 * 3600.0
+    now = time.time()
     for p in cache_dir.glob("*.log"):
         if not p.is_file():
             continue
@@ -146,6 +148,9 @@ def prune_partial_raw_log_caches(*, page_root_dirs: List[Path]) -> Dict[str, int
         job_id = p.stem
         ent = meta.get(job_id) if isinstance(meta, dict) else None
         if not (isinstance(ent, dict) and bool(ent.get("completed", False))):
+            age_s = now - float(p.stat().st_mtime)
+            if age_s < grace_s:
+                continue
             p.unlink()
             stats["deleted_global_log_unverified"] += 1
 
