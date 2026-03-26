@@ -5,6 +5,13 @@ https://github.com/keivenchang/dynamo-utils/blob/main/.cursorrules
   - `/utils` inside containers (symlink to the repo checkout)
   - `~/dynamo/dynamo-utils.dev/` on host machines
 
+**IMPORTANT:** `$UTILS` is NOT a real shell environment variable — it is only a shorthand
+used in this document. Before running any command that references `$UTILS`, resolve it first:
+  - Check if inside a container (`test -d /utils && echo container || echo host`)
+  - Container: use `/utils/`
+  - Host: use `~/dynamo/dynamo-utils.dev/`
+  - Or set it yourself: `UTILS=~/dynamo/dynamo-utils.dev` at the start of a shell session.
+
 # 0. READ THIS FIRST (NON-NEGOTIABLE)
 
 If you do only one thing: re-read this section before making changes or running commands.
@@ -148,6 +155,9 @@ If you do only one thing: re-read this section before making changes or running 
   8.2 Persistent Output Locations
   8.3 Single Process Discipline
   8.4 Dynamo Compilation
+
+9. CONTINUING PREVIOUS CONVERSATIONS (TRANSCRIPTS)
+  9.1 read_cursor_transcript.py
 
 ---
 # 1. AI PERSONALITY AND DOCUMENTATION GUIDELINES
@@ -1234,6 +1244,23 @@ Expected result: All checks pass with no errors
 - Check with: `python3 -c "import dynamo"` before running any pytest.
 - If missing: `$UTILS/compile.sh --dev` (takes ~15-30s).
 - After container restart, dynamo may need recompilation.
+
+---
+# 9. CONTINUING PREVIOUS CONVERSATIONS (TRANSCRIPTS)
+
+## 9.1 read_cursor_transcript.py
+
+When the user says "continue transcript", "continue last chat", "pick up where we left off",
+or similar, use `read_cursor_transcript.py` to load the previous conversation context.
+
+```bash
+python3 $UTILS/read_cursor_transcript.py --list                    # find a transcript
+python3 $UTILS/read_cursor_transcript.py --search "keyword"        # search by topic
+python3 $UTILS/read_cursor_transcript.py --latest --continue       # resume most recent
+python3 $UTILS/read_cursor_transcript.py --id 806f --continue      # resume specific (prefix OK)
+```
+
+Run `--help` for all options (`--tail`, `--full`, `--json`, `--raw`).
 
 ---
 # NEVER VIOLATE (repeated from top -- re-read before every action)
