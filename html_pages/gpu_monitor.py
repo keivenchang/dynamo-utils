@@ -1042,7 +1042,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
           domain: domain(tmp.utilRow - 1, nRows),
           title: {text: 'GPU \u00b0C', font: {color: '#ff6e40', size: 10}},
           overlaying: yax(tmp.utilRow), side: 'right', showgrid: false,
-          range: [20, 95],
+          autorange: true, minallowed: 30,
         };
       }
     }
