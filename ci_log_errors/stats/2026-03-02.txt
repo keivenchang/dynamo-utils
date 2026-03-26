@@ -1,104 +1,111 @@
 # Post-Merge CI Stats — Week of Mar 2
 
-Period: 2026-03-02 (Mon) to 2026-03-05 (Wed) — partial week, 4 days
+Period: 2026-03-02 (Mon) to 2026-03-08 (Sun)
 Sources:
-  - Workflow-level: GitHub API (live fetch, Mar 2-5 inclusive)
-  - Error-category-level: 69 raw post-merge job logs (local scan)
+  - Workflow-level: actions_runs_list.json cache (GitHub Status conclusions)
+  - Error-category-level: 327 raw post-merge job logs (local scan, no API)
 
 ---
 
 ## Development Metrics
 
-PRs submitted:               50
-PRs merged:                  41
-Days to merge (avg):         2.1
-Pushes per PR (avg):         2.8
-Manual re-trigger rate:      9%
-Re-triggers per affected PR: 1.3
-PR submission failure rate:  49%
-CI duration (avg, min):      86
+PRs submitted:               306
+PRs merged:                  220
+Avg lines/PR:                1,271
+Median lines/PR:             73
+Days to merge (avg):         1.1
+Pushes per PR (avg):         3.5
+Manual re-trigger rate:      1%
+Re-triggers per affected PR: 1.0
+PR submission failure rate:  45%
+CI duration (avg, min):      45
 
 ## Error Rate (% of Total Runs)
 
-Total runs (success + failure + cancelled): 215
+Total runs (success + failure + cancelled): 1,001
 Group error hits as percentage of total runs:
 
-  Tests:             4.2%
-  Docker / build:   11.2%
-  K8s / Helm:        0.9%
-  Network:           1.4%
-  Infra / system:    0.0%
-  Auth:              7.0%
+  Tests:                 19.2%
+  Docker / build:         0.2%
+  K8s / Helm:            12.2%
+  Network:               15.1%
+  Infra / system:         1.2%
+  Auth:                   1.2%
 
 ---
 
 ## Workflow-Level Overview
 
-Total post-merge runs:       702
-  success:                   539 (76.8%)
-  failure:                   163 (23.2%)
-  cancelled:                   0 ( 0.0%)
+Total post-merge runs:     1,001
+  success:                   799 (79.8%)
+  failure:                   196 (19.6%)
+  cancelled:                   3 (0.3%)
 
-Unique commits on main:      101
-Commits with >= 1 failure:    89 (88.1%)
-Post-merge failure rate:     23.2%
+Unique commits on main:      144
+Commits with >= 1 failure:   119 (82.6%)
+Post-merge failure rate:     19.6%
 
 ## Failures by Workflow
 
-  1. Post-Merge CI Pipeline            78 (47.85%)  [ 85% fail rate,  92 runs]
-  2. Docs link check                   53 (32.52%)  [ 52% fail rate, 101 runs]
-  3. NVIDIA Test Lab Validation        24 (14.72%)  [ 25% fail rate,  96 runs]
-  4. Pre Merge                          3 ( 1.84%)  [  3% fail rate, 101 runs]
-  5. NVIDIA Dynamo Github Validation    2 ( 1.23%)  [  2% fail rate, 101 runs]
-  6. Build Frontend Image               1 ( 0.61%)  [  1% fail rate, 101 runs]
-  7. Fern Docs                          1 ( 0.61%)  [  1% fail rate, 101 runs]
-  8. PR                                 1 ( 0.61%)  [ 11% fail rate,   9 runs]
+  1. Post-Merge CI Pipeline                   105 (53.57%)  [ 78% fail rate,  135 runs]
+  2. Docs link check                           58 (29.59%)  [ 40% fail rate,  144 runs]
+  3. NVIDIA Test Lab Validation                24 (12.24%)  [ 18% fail rate,  137 runs]
+  4. NVIDIA Dynamo Github Validation            3 ( 1.53%)  [  2% fail rate,  144 runs]
+  5. Pre Merge                                  3 ( 1.53%)  [  2% fail rate,  144 runs]
+  6. Build Frontend Image                       1 ( 0.51%)  [  1% fail rate,  144 runs]
+  7. Fern Docs                                  1 ( 0.51%)  [  1% fail rate,  144 runs]
+  8. PR                                         1 ( 0.51%)  [ 11% fail rate,    9 runs]
 
 ---
 
 ## Failure Distribution by Group
 
-  Docker / build:          24 (33.80%)
-    docker-build-error: 24
-  Auth:                    15 (21.13%)
-    auth-token-expired: 15
-  Tests:                    9 (12.68%)
-    pytest-error: 5, python-error: 4
-  Network:                  3 ( 4.23%)
-    network-timeout-gitlab-mirror: 2, network-timeout-generic: 1
-  Kubernetes / Helm:        2 ( 2.82%)
-    helm-error: 1, k8s-error: 1
-  Gates / policy:          18 (25.35%)
-    ci-status-check-error: 14, ci-filter-coverage-error: 4
+  Tests:                     192 (30.52%)
+    pytest-error: 106, pytest-timeout-error: 68, python-error: 17, rust-error: 1
+  Docker / build:              2 (0.32%)
+    docker-build-error: 2
+  K8s / Helm:                122 (19.40%)
+    k8s-error: 104, helm-error: 18
+  Network:                   151 (24.01%)
+    network-timeout-generic: 74, network-error: 53, network-port-conflict-error: 14, network-timeout-https: 5, network-timeout-gitlab-mirror: 3, network-download-error: 2
+  Infra / system:             12 (1.91%)
+    oom: 7, github-action-unavailable: 3, etcd-error: 2
+  Auth:                       12 (1.91%)
+    auth-token-expired: 12
+  Gates / policy:             65 (10.33%)
+    deploy-test-status-check: 47, ci-status-check-error: 18
+  Docs:                       56 (8.90%)
+    broken-links: 56
+  Build:                      15 (2.38%)
+    go-operator-lint-error: 15
 
 ## Failure Distribution Detail
 
-Catch-alls excluded: exit-139-sigsegv (2)
-Total error hits: 71
+Catch-alls excluded: exit-139-sigsegv (6)
+Total error hits: 629
 
-  1. docker-build-error                 24 (33.80%)
-  2. auth-token-expired                 15 (21.13%)
-  3. ci-status-check-error              14 (19.72%)
-  4. pytest-error                        5 ( 7.04%)
-  5. ci-filter-coverage-error            4 ( 5.63%)
-  6. python-error                        4 ( 5.63%)
-  7. network-timeout-gitlab-mirror       2 ( 2.82%)
-  8. helm-error                          1 ( 1.41%)
-  9. k8s-error                           1 ( 1.41%)
- 10. network-timeout-generic             1 ( 1.41%)
+  1. pytest-error                           106 (16.85%)
+  2. k8s-error                              104 (16.53%)
+  3. network-timeout-generic                 74 (11.76%)
+  4. pytest-timeout-error                    68 (10.81%)
+  5. broken-links                            56 ( 8.90%)
+  6. network-error                           53 ( 8.43%)
+  7. deploy-test-status-check                47 ( 7.47%)
+  8. helm-error                              18 ( 2.86%)
+  9. ci-status-check-error                   18 ( 2.86%)
+ 10. python-error                            17 ( 2.70%)
+ 11. go-operator-lint-error                  15 ( 2.38%)
+ 12. network-port-conflict-error             14 ( 2.23%)
+ 13. auth-token-expired                      12 ( 1.91%)
+ 14. oom                                      7 ( 1.11%)
+ 15. network-timeout-https                    5 ( 0.79%)
+ 16. github-action-unavailable                3 ( 0.48%)
+ 17. network-timeout-gitlab-mirror            3 ( 0.48%)
+ 18. etcd-error                               2 ( 0.32%)
+ 19. docker-daemon-error-response-error       2 ( 0.32%)
+ 20. network-download-error                   2 ( 0.32%)
+ 21. docker-build-error                       2 ( 0.32%)
+ 22. rust-error                               1 ( 0.16%)
 
 ---
 
-## Key Observations
-
-- 4 days of data (Mon-Thu), partial week.
-- Post-Merge CI Pipeline is the #1 failure source (78/163 = 48%) at 85%
-  fail rate. This workflow alone accounts for nearly half of all failures.
-- Docs link check improved significantly: 52% fail rate (vs 84% average
-  in prior weeks).
-- Auth errors (15 hits, all auth-token-expired) emerged as a new category
-  this week — 7.0% of total runs, not seen before.
-- Test error rate at 4.2% of runs — the lowest of any full or partial week,
-  a strong signal that the reliability fixes are holding.
-- Network at 1.4% of runs — continued improvement from the Feb 9 peak (22.4%).
-- Infra/system at 0.0% of runs — first time this group registered zero errors.

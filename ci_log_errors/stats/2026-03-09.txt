@@ -1,0 +1,104 @@
+# Post-Merge CI Stats — Week of Mar 9
+
+Period: 2026-03-09 (Mon) to 2026-03-15 (Sun)
+Sources:
+  - Workflow-level: actions_runs_list.json cache (GitHub Status conclusions)
+  - Error-category-level: 578 raw post-merge job logs (local scan, no API)
+
+---
+
+## Development Metrics
+
+PRs submitted:               322
+PRs merged:                  253
+Avg lines/PR:                2,681
+Median lines/PR:             93
+Days to merge (avg):         1.4
+Pushes per PR (avg):         4.6
+Manual re-trigger rate:      2%
+Re-triggers per affected PR: 1.0
+PR submission failure rate:  67%
+CI duration (avg, min):      130
+
+## Error Rate (% of Total Runs)
+
+Total runs (success + failure + cancelled): 1,310
+Group error hits as percentage of total runs:
+
+  Tests:                 36.9%
+  Docker / build:         0.5%
+  K8s / Helm:             2.6%
+  Network:               10.7%
+  Infra / system:         8.1%
+  Auth:                   0.0%
+
+---
+
+## Workflow-Level Overview
+
+Total post-merge runs:     1,310
+  success:                 1,042 (79.5%)
+  failure:                   264 (20.2%)
+  cancelled:                   4 (0.3%)
+
+Unique commits on main:      190
+Commits with >= 1 failure:   167 (87.9%)
+Post-merge failure rate:     20.2%
+
+## Failures by Workflow
+
+  1. Post-Merge CI Pipeline                   143 (54.17%)  [ 75% fail rate,  190 runs]
+  2. NVIDIA Test Lab Validation                50 (18.94%)  [ 29% fail rate,  170 runs]
+  3. Docs link check                           37 (14.02%)  [ 19% fail rate,  190 runs]
+  4. NVIDIA Dynamo Github Validation           21 ( 7.95%)  [ 11% fail rate,  190 runs]
+  5. Fern Docs                                 13 ( 4.92%)  [  7% fail rate,  190 runs]
+
+---
+
+## Failure Distribution by Group
+
+  Tests:                     483 (52.44%)
+    pytest-error: 246, python-error: 138, pytest-timeout-error: 96, rust-error: 3
+  Docker / build:              7 (0.76%)
+    docker-build-error: 7
+  K8s / Helm:                 34 (3.69%)
+    k8s-error: 25, helm-error: 9
+  Network:                   140 (15.20%)
+    network-port-conflict-error: 57, network-error: 53, network-timeout-generic: 19, network-download-error: 6, network-timeout-https: 4, network-timeout-gitlab-mirror: 1
+  Infra / system:            106 (11.51%)
+    etcd-error: 98, oom: 8
+  Gates / policy:             54 (5.86%)
+    ci-status-check-error: 38, deploy-test-status-check: 16
+  Docs:                       50 (5.43%)
+    broken-links: 50
+  Build:                      19 (2.06%)
+    go-operator-lint-error: 19
+
+## Failure Distribution Detail
+
+Catch-alls excluded: exit-139-sigsegv (1)
+Total error hits: 921
+
+  1. pytest-error                           246 (26.71%)
+  2. python-error                           138 (14.98%)
+  3. etcd-error                              98 (10.64%)
+  4. pytest-timeout-error                    96 (10.42%)
+  5. network-port-conflict-error             57 ( 6.19%)
+  6. network-error                           53 ( 5.75%)
+  7. broken-links                            50 ( 5.43%)
+  8. ci-status-check-error                   38 ( 4.13%)
+  9. cuda-error                              28 ( 3.04%)
+ 10. k8s-error                               25 ( 2.71%)
+ 11. go-operator-lint-error                  19 ( 2.06%)
+ 12. network-timeout-generic                 19 ( 2.06%)
+ 13. deploy-test-status-check                16 ( 1.74%)
+ 14. helm-error                               9 ( 0.98%)
+ 15. oom                                      8 ( 0.87%)
+ 16. docker-build-error                       7 ( 0.76%)
+ 17. network-download-error                   6 ( 0.65%)
+ 18. network-timeout-https                    4 ( 0.43%)
+ 19. rust-error                               3 ( 0.33%)
+ 20. network-timeout-gitlab-mirror            1 ( 0.11%)
+
+---
+
