@@ -3,22 +3,29 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """
-Real-time GPU/CPU/Disk monitor with smooth 60fps scrolling.
+Real-time GPU/CPU/Disk/Network monitor.
 
-Backend: Flask + flask-socketio pushes incremental data via WebSocket.
-Frontend: Raw Plotly.js with extendTraces() + requestAnimationFrame scrolling.
+Architecture (multiprocess, bypasses GIL):
+  - 1 subprocess per GPU: PCIe TX/RX sampling at 10/s
+  - 1 subprocess: CPU + GPU mem/util/temp + network at 5/s
+  - 1 subprocess: disk I/O per process at 2/s
+  - Main process: poll pipes, push deltas via WebSocket
 
-Layout:
-  1. GPU Memory by Process (GiB) -- stacked area
-  2. GPU Util (%) + PCIe (GB/s)  -- lines, secondary y-axis
-  3. CPU Usage (%)               -- line
-  4. Disk I/O by Process (MB/s)  -- stacked area
+Backend: Flask + flask-socketio. Frontend: Plotly.js + requestAnimationFrame.
+
+Chart rows per GPU:
+  1. GPU Memory by Process (GiB, stacked) + PCIe (GB/s, secondary y-axis)
+  2. GPU Util (%) + Temperature (C, secondary y-axis)
+Then:
+  3. CPU Usage (%)
+  4. Disk I/O (MB/s, stacked) + Network (MB/s, secondary y-axis)
 
 Usage:
-    python3 gpu_monitor.py [--port 8051] [--host 127.0.0.1]
+    python3 gpu_monitor.py [--port 8051] [--host 0.0.0.0]
 """
 
 import argparse
+import multiprocessing
 import os
 import threading
 import time
@@ -69,22 +76,16 @@ def parse_args():
     p.add_argument("--port", type=int, default=8051)
     p.add_argument("--host", default="127.0.0.1")
     p.add_argument(
-        "--interval",
+        "--main-interval",
         type=int,
-        default=75,
-        help="Fast collection interval ms (CPU only)",
+        default=200,
+        help="Main collection interval ms (CPU + GPU mem/util/temp + network, 5/s)",
     )
     p.add_argument(
-        "--pcie-interval",
-        type=int,
-        default=35,
-        help="PCIe collection interval ms (default 35)",
-    )
-    p.add_argument(
-        "--gpu-interval",
+        "--disk-interval",
         type=int,
         default=500,
-        help="Slow collection interval ms (GPU mem, util, temp, disk, network)",
+        help="Disk I/O collection interval ms (2/s)",
     )
     p.add_argument(
         "--push-interval", type=int, default=150, help="WebSocket push interval ms"
@@ -274,23 +275,59 @@ def _classify_node_process(full_cmd: str) -> str:
     return ""
 
 
+class SharedColorMap:
+    """Global PID-to-color map so the same process gets the same color across GPUs."""
+
+    def __init__(self):
+        self._colors: dict[int, str] = {}
+        self._idx = 0
+
+    def get(self, pid: int) -> str:
+        if pid not in self._colors:
+            self._colors[pid] = PROCESS_COLORS[self._idx % len(PROCESS_COLORS)]
+            self._idx += 1
+        return self._colors[pid]
+
+    def discard(self, pid: int):
+        self._colors.pop(pid, None)
+
+
 class ProcessTracker:
-    def __init__(self, maxlen: int, prune: bool = True):
+    def __init__(
+        self,
+        maxlen: int,
+        prune: bool = True,
+        shared_colors: SharedColorMap | None = None,
+    ):
         self.maxlen = maxlen
         self._prune_enabled = prune
         self._len = 0
         self.series: dict[int, deque[float]] = {}
         self.names: dict[int, str] = {}
+        self._shared_colors = shared_colors
         self._colors: dict[int, str] = {}
         self._color_idx = 0
         self.first_seen: dict[int, float] = {}
 
-    def record(self, data: dict[int, float], name_resolver, timestamp: float = 0):
+    def new_pids(self, data: dict[int, float]) -> set[int]:
+        """Return PIDs in data that aren't tracked yet (call outside lock)."""
+        return set(data.keys()) - set(self.series.keys())
+
+    def record(
+        self,
+        data: dict[int, float],
+        name_resolver,
+        timestamp: float = 0,
+        pre_resolved: dict[int, str] | None = None,
+    ):
         for pid in data:
             if pid not in self.series:
                 backfill = min(self._len, self.maxlen)
                 self.series[pid] = deque([0.0] * backfill, maxlen=self.maxlen)
-                self.names[pid] = name_resolver(pid)
+                if pre_resolved and pid in pre_resolved:
+                    self.names[pid] = pre_resolved[pid]
+                else:
+                    self.names[pid] = name_resolver(pid)
                 self.first_seen[pid] = timestamp
         for pid, dq in self.series.items():
             dq.append(data.get(pid, 0.0))
@@ -311,6 +348,8 @@ class ProcessTracker:
             self._colors.pop(pid, None)
 
     def get_color(self, pid: int) -> str:
+        if self._shared_colors is not None:
+            return self._shared_colors.get(pid)
         if pid not in self._colors:
             self._colors[pid] = PROCESS_COLORS[self._color_idx % len(PROCESS_COLORS)]
             self._color_idx += 1
@@ -374,46 +413,149 @@ class ProcessTracker:
         return result
 
 
+# ---------------------------------------------------------------------------
+# Multiprocess workers (each gets its own GIL)
+# ---------------------------------------------------------------------------
+
+
+def _pcie_worker(conn, gpu_idx):
+    """Subprocess: sample PCIe TX/RX for one GPU at ~10/s."""
+    import pynvml as _nvml
+
+    _nvml.nvmlInit()
+    handle = _nvml.nvmlDeviceGetHandleByIndex(gpu_idx)
+    TX = _nvml.NVML_PCIE_UTIL_TX_BYTES
+    RX = _nvml.NVML_PCIE_UTIL_RX_BYTES
+    while True:
+        now = time.time()
+        try:
+            tx = _nvml.nvmlDeviceGetPcieThroughput(handle, TX) / (1024.0 * 1024.0)
+            rx = _nvml.nvmlDeviceGetPcieThroughput(handle, RX) / (1024.0 * 1024.0)
+        except _nvml.NVMLError:
+            tx, rx = 0.0, 0.0
+        conn.send(("pcie", now, gpu_idx, tx, rx))
+        time.sleep(0.1)
+
+
+def _main_worker(conn, gpu_count, interval_sec):
+    """Subprocess: CPU + GPU mem/util/temp + network (5/s)."""
+    import psutil as _ps
+    import pynvml as _nvml
+
+    _nvml.nvmlInit()
+    handles = [_nvml.nvmlDeviceGetHandleByIndex(i) for i in range(gpu_count)]
+    _ps.cpu_percent(interval=None)
+    prev_net = _ps.net_io_counters()
+    last_mono = time.monotonic()
+    while True:
+        now = time.time()
+        mono = time.monotonic()
+        dt = mono - last_mono
+        if dt <= 0:
+            dt = interval_sec
+        cpu = _ps.cpu_percent(interval=None)
+        gpu_data = []
+        for h in handles:
+            proc_mem: dict[int, float] = {}
+            for getter in (
+                _nvml.nvmlDeviceGetComputeRunningProcesses,
+                _nvml.nvmlDeviceGetGraphicsRunningProcesses,
+            ):
+                try:
+                    for p in getter(h):
+                        mem_gib = (p.usedGpuMemory or 0) / (1024**3)
+                        proc_mem[p.pid] = proc_mem.get(p.pid, 0.0) + mem_gib
+                except _nvml.NVMLError:
+                    pass
+            try:
+                util = _nvml.nvmlDeviceGetUtilizationRates(h).gpu
+            except _nvml.NVMLError:
+                util = 0.0
+            try:
+                temp = float(
+                    _nvml.nvmlDeviceGetTemperature(h, _nvml.NVML_TEMPERATURE_GPU)
+                )
+            except _nvml.NVMLError:
+                temp = 0.0
+            gpu_data.append((proc_mem, util, temp))
+        net = _ps.net_io_counters()
+        sent_rate = (net.bytes_sent - prev_net.bytes_sent) / (1024 * 1024) / dt
+        recv_rate = (net.bytes_recv - prev_net.bytes_recv) / (1024 * 1024) / dt
+        prev_net = net
+        last_mono = mono
+        conn.send(("main", now, cpu, gpu_data, sent_rate, recv_rate))
+        time.sleep(interval_sec)
+
+
+def _disk_worker(conn, interval_sec):
+    """Subprocess: disk I/O per process (2/s)."""
+    import psutil as _ps
+
+    prev_proc_io: dict[int, int] = {}
+    last_mono = time.monotonic()
+    while True:
+        now = time.time()
+        mono = time.monotonic()
+        dt = mono - last_mono
+        if dt <= 0:
+            dt = interval_sec
+        rates: dict[int, float] = {}
+        current_io: dict[int, int] = {}
+        for proc in _ps.process_iter(["pid"]):
+            pid = proc.info["pid"]
+            try:
+                io = proc.io_counters()
+                total = io.read_bytes + io.write_bytes
+                current_io[pid] = total
+                if pid in prev_proc_io:
+                    delta = total - prev_proc_io[pid]
+                    if delta > 0:
+                        rates[pid] = delta / (1024 * 1024) / dt
+            except (_ps.NoSuchProcess, _ps.AccessDenied, _ps.ZombieProcess):
+                continue
+        prev_proc_io = current_io
+        last_mono = mono
+        conn.send(("disk", now, rates))
+        time.sleep(interval_sec)
+
+
 class MetricsCollector:
     def __init__(
         self,
         window_sec: int,
-        interval_ms: int,
-        pcie_interval_ms: int = 35,
-        slow_interval_ms: int = 500,
+        main_interval_ms: int = 200,
+        disk_interval_ms: int = 500,
+        pcie_rate_hz: int = 10,
         top_n: int = 10,
         fill_patterns: bool = False,
     ):
         self.lock = threading.Lock()
-        maxlen_fast = int(window_sec * 1000 / interval_ms)
-        maxlen_pcie = int(window_sec * 1000 / pcie_interval_ms)
-        maxlen_slow = int(window_sec * 1000 / slow_interval_ms)
+        maxlen_main = int(window_sec * 1000 / main_interval_ms)
+        maxlen_pcie = window_sec * pcie_rate_hz
+        maxlen_disk = int(window_sec * 1000 / disk_interval_ms)
         self.top_n = top_n
         self.fill_patterns = fill_patterns
-        # 3 independent timestamp groups
-        self.ts_fast: deque[float] = deque(maxlen=maxlen_fast)
-        self.ts_pcie: deque[float] = deque(maxlen=maxlen_pcie)
-        self.ts_slow: deque[float] = deque(maxlen=maxlen_slow)
-        self.counter_fast: int = 0
-        self.counter_pcie: int = 0
-        self.counter_slow: int = 0
-        # Fast group: CPU only
-        self.cpu_pct: deque[float] = deque(maxlen=maxlen_fast)
-        # Slow group: GPU mem, GPU util, GPU temp, network, disk I/O
+        # Main group: CPU + GPU mem/util/temp + network (5/s)
+        self.ts_main: deque[float] = deque(maxlen=maxlen_main)
+        self.counter_main: int = 0
+        self.cpu_pct: deque[float] = deque(maxlen=maxlen_main)
+        self._gpu_color_map = SharedColorMap()
         self.proc_gpu_mem: list[ProcessTracker] = []
-        self._prev_net = psutil.net_io_counters()
-        self._prev_mono = time.monotonic()
-        self.net_sent_mbps: deque[float] = deque(maxlen=maxlen_slow)
-        self.net_recv_mbps: deque[float] = deque(maxlen=maxlen_slow)
         self.gpu_util: list[deque[float]] = []
-        self.proc_disk_io = ProcessTracker(maxlen_slow, prune=True)
-        self._prev_proc_io: dict[int, int] = {}
-        self._last_disk_rates: dict[int, float] = {}
-        self._last_disk_scan_mono = time.monotonic()
-        # PCIe group
+        self.net_sent_mbps: deque[float] = deque(maxlen=maxlen_main)
+        self.net_recv_mbps: deque[float] = deque(maxlen=maxlen_main)
+        # PCIe group: per-GPU (max rate)
+        self.ts_pcie: list[deque[float]] = []
+        self.counter_pcie: list[int] = []
         self.gpu_pcie_tx: list[deque[float]] = []
         self.gpu_pcie_rx: list[deque[float]] = []
         self.has_pcie = False
+        # Disk group: disk I/O (2/s)
+        self.ts_disk: deque[float] = deque(maxlen=maxlen_disk)
+        self.counter_disk: int = 0
+        self.proc_disk_io = ProcessTracker(maxlen_disk, prune=True)
+        self._last_disk_rates: dict[int, float] = {}
+        # GPU info
         self.gpu_count = 0
         self.gpu_names: list[str] = []
         self.gpu_mem_total_gib: list[float] = []
@@ -427,12 +569,18 @@ class MetricsCollector:
                 self.gpu_names.append(name)
                 mem = pynvml.nvmlDeviceGetMemoryInfo(handle)
                 self.gpu_mem_total_gib.append(mem.total / (1024**3))
-                self.proc_gpu_mem.append(ProcessTracker(maxlen_slow, prune=False))
-                self.gpu_util.append(deque(maxlen=maxlen_slow))
+                self.proc_gpu_mem.append(
+                    ProcessTracker(
+                        maxlen_main, prune=False, shared_colors=self._gpu_color_map
+                    )
+                )
+                self.gpu_util.append(deque(maxlen=maxlen_main))
                 self.gpu_pcie_tx.append(deque(maxlen=maxlen_pcie))
                 self.gpu_pcie_rx.append(deque(maxlen=maxlen_pcie))
+                self.ts_pcie.append(deque(maxlen=maxlen_pcie))
+                self.counter_pcie.append(0)
         self.gpu_temp: list[deque[float]] = [
-            deque(maxlen=maxlen_slow) for _ in range(self.gpu_count)
+            deque(maxlen=maxlen_main) for _ in range(self.gpu_count)
         ]
         if self.gpu_count > 0:
             try:
@@ -442,70 +590,40 @@ class MetricsCollector:
             except pynvml.NVMLError:
                 self.has_pcie = False
 
-    def sample_fast(self):
-        """Fast-tier: CPU only (called at --interval rate)."""
+    def ingest_pcie(self, now: float, gpu_idx: int, tx_val: float, rx_val: float):
+        """Store PCIe data for one GPU received from its worker process."""
         with self.lock:
-            now = time.time()
-            self.ts_fast.append(now)
-            self.counter_fast += 1
-            self.cpu_pct.append(psutil.cpu_percent(interval=None))
+            self.ts_pcie[gpu_idx].append(now)
+            self.counter_pcie[gpu_idx] += 1
+            self.gpu_pcie_tx[gpu_idx].append(tx_val)
+            self.gpu_pcie_rx[gpu_idx].append(rx_val)
 
-    def sample_pcie(self):
-        """PCIe-tier: PCIe throughput per GPU (called at --pcie-interval rate)."""
-        if not self.has_pcie:
-            return
+    def ingest_main(
+        self,
+        now: float,
+        cpu: float,
+        gpu_data: list[tuple[dict, float, float]],
+        sent_rate: float,
+        recv_rate: float,
+    ):
+        """Store CPU + GPU mem/util/temp + network (main group, 5/s)."""
+        gpu_names: list[dict[int, str]] = []
+        for i, (gpu_proc_mem, _, _) in enumerate(gpu_data):
+            new = self.proc_gpu_mem[i].new_pids(gpu_proc_mem)
+            gpu_names.append({pid: _resolve_process_name(pid) for pid in new})
         with self.lock:
-            now = time.time()
-            self.ts_pcie.append(now)
-            self.counter_pcie += 1
-            for i in range(self.gpu_count):
-                handle = pynvml.nvmlDeviceGetHandleByIndex(i)
-                try:
-                    tx = pynvml.nvmlDeviceGetPcieThroughput(
-                        handle, pynvml.NVML_PCIE_UTIL_TX_BYTES
-                    )
-                    rx = pynvml.nvmlDeviceGetPcieThroughput(
-                        handle, pynvml.NVML_PCIE_UTIL_RX_BYTES
-                    )
-                    self.gpu_pcie_tx[i].append(tx / (1024.0 * 1024.0))
-                    self.gpu_pcie_rx[i].append(rx / (1024.0 * 1024.0))
-                except pynvml.NVMLError:
-                    self.gpu_pcie_tx[i].append(
-                        self.gpu_pcie_tx[i][-1] if self.gpu_pcie_tx[i] else 0.0
-                    )
-                    self.gpu_pcie_rx[i].append(
-                        self.gpu_pcie_rx[i][-1] if self.gpu_pcie_rx[i] else 0.0
-                    )
-
-    def sample_slow(self):
-        """Slow-tier: GPU util, GPU temp, network, disk I/O (called at --gpu-interval rate)."""
-        with self.lock:
-            now = time.time()
-            self.ts_slow.append(now)
-            self.counter_slow += 1
-            # Disk I/O per-process scan
-            scan_mono = time.monotonic()
-            scan_dt = scan_mono - self._last_disk_scan_mono
-            if scan_dt <= 0:
-                scan_dt = 0.5
-            raw_rates = self._scan_process_disk(scan_dt)
-            alpha = 0.2
-            for pid, rate in raw_rates.items():
-                prev = self._last_disk_rates.get(pid, rate)
-                raw_rates[pid] = alpha * rate + (1 - alpha) * prev
-            self._last_disk_rates = raw_rates
-            self._last_disk_scan_mono = scan_mono
-            self.proc_disk_io.record(self._last_disk_rates, _resolve_process_name, now)
-            # Network I/O (append with EMA smoothing)
-            net = psutil.net_io_counters()
-            net_dt = scan_dt if scan_dt > 0 else 0.5
-            sent_rate = (
-                (net.bytes_sent - self._prev_net.bytes_sent) / (1024 * 1024) / net_dt
-            )
-            recv_rate = (
-                (net.bytes_recv - self._prev_net.bytes_recv) / (1024 * 1024) / net_dt
-            )
-            self._prev_net = net
+            self.ts_main.append(now)
+            self.counter_main += 1
+            self.cpu_pct.append(cpu)
+            for i, (gpu_proc_mem, util, temp) in enumerate(gpu_data):
+                self.proc_gpu_mem[i].record(
+                    gpu_proc_mem,
+                    _resolve_process_name,
+                    now,
+                    pre_resolved=gpu_names[i],
+                )
+                self.gpu_util[i].append(util)
+                self.gpu_temp[i].append(temp)
             alpha_net = 0.15
             prev_sent = self.net_sent_mbps[-1] if self.net_sent_mbps else 0.0
             prev_recv = self.net_recv_mbps[-1] if self.net_recv_mbps else 0.0
@@ -515,61 +633,25 @@ class MetricsCollector:
             self.net_recv_mbps.append(
                 alpha_net * recv_rate + (1 - alpha_net) * prev_recv
             )
-            # GPU: memory per-process, utilization, temperature
-            if HAS_NVML:
-                for i in range(self.gpu_count):
-                    handle = pynvml.nvmlDeviceGetHandleByIndex(i)
-                    # GPU memory per-process
-                    gpu_proc_mem: dict[int, float] = {}
-                    for getter in (
-                        pynvml.nvmlDeviceGetComputeRunningProcesses,
-                        pynvml.nvmlDeviceGetGraphicsRunningProcesses,
-                    ):
-                        try:
-                            for p in getter(handle):
-                                mem_gib = (p.usedGpuMemory or 0) / (1024**3)
-                                gpu_proc_mem[p.pid] = (
-                                    gpu_proc_mem.get(p.pid, 0.0) + mem_gib
-                                )
-                        except pynvml.NVMLError:
-                            pass
-                    self.proc_gpu_mem[i].record(
-                        gpu_proc_mem, _resolve_process_name, now
-                    )
-                    try:
-                        util = pynvml.nvmlDeviceGetUtilizationRates(handle)
-                        self.gpu_util[i].append(util.gpu)
-                    except pynvml.NVMLError:
-                        self.gpu_util[i].append(
-                            self.gpu_util[i][-1] if self.gpu_util[i] else 0.0
-                        )
-                    try:
-                        temp = pynvml.nvmlDeviceGetTemperature(
-                            handle, pynvml.NVML_TEMPERATURE_GPU
-                        )
-                        self.gpu_temp[i].append(float(temp))
-                    except pynvml.NVMLError:
-                        self.gpu_temp[i].append(
-                            self.gpu_temp[i][-1] if self.gpu_temp[i] else 0.0
-                        )
 
-    def _scan_process_disk(self, dt: float) -> dict[int, float]:
-        rates: dict[int, float] = {}
-        current_io: dict[int, int] = {}
-        for proc in psutil.process_iter(["pid"]):
-            pid = proc.info["pid"]
-            try:
-                io = proc.io_counters()
-                total = io.read_bytes + io.write_bytes
-                current_io[pid] = total
-                if pid in self._prev_proc_io:
-                    delta = total - self._prev_proc_io[pid]
-                    if delta > 0:
-                        rates[pid] = delta / (1024 * 1024) / dt
-            except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
-                continue
-        self._prev_proc_io = current_io
-        return rates
+    def ingest_disk(self, now: float, disk_rates: dict):
+        """Store disk IO per process (disk group, 2/s)."""
+        alpha = 0.2
+        for pid, rate in disk_rates.items():
+            prev = self._last_disk_rates.get(pid, rate)
+            disk_rates[pid] = alpha * rate + (1 - alpha) * prev
+        disk_new = self.proc_disk_io.new_pids(disk_rates)
+        disk_names = {pid: _resolve_process_name(pid) for pid in disk_new}
+        with self.lock:
+            self.ts_disk.append(now)
+            self.counter_disk += 1
+            self._last_disk_rates = disk_rates
+            self.proc_disk_io.record(
+                self._last_disk_rates,
+                _resolve_process_name,
+                now,
+                pre_resolved=disk_names,
+            )
 
     @staticmethod
     def _downsample_init(times, arrays, max_recent=1000, max_total=1500):
@@ -593,52 +675,24 @@ class MetricsCollector:
     def snapshot_full(self) -> dict:
         """Return full state for initial browser load (downsampled for browser perf)."""
         with self.lock:
-            # --- Fast group: CPU only ---
-            cpu = list(self.cpu_pct)
-            ts_fast_ds, fast_ds = self._downsample_init(list(self.ts_fast), [cpu])
-            ds_cpu = fast_ds[0]
-
-            # --- PCIe group ---
-            pcie_vals = []
-            pcie_tx_raw = (
-                [list(self.gpu_pcie_tx[i]) for i in range(self.gpu_count)]
-                if self.has_pcie
-                else []
-            )
-            pcie_rx_raw = (
-                [list(self.gpu_pcie_rx[i]) for i in range(self.gpu_count)]
-                if self.has_pcie
-                else []
-            )
-            pcie_vals.extend(pcie_tx_raw)
-            pcie_vals.extend(pcie_rx_raw)
-            ts_pcie_ds, pcie_ds = self._downsample_init(list(self.ts_pcie), pcie_vals)
-            pidx = 0
-            ds_pcie_tx = [pcie_ds[pidx + i] for i in range(len(pcie_tx_raw))]
-            pidx += len(pcie_tx_raw)
-            ds_pcie_rx = [pcie_ds[pidx + i] for i in range(len(pcie_rx_raw))]
-
-            # --- Slow group: GPU mem, GPU util, temp, network, disk ---
-            slow_vals = []
+            # --- Main group: CPU + GPU mem/util/temp + network ---
+            main_vals = [list(self.cpu_pct)]
             gpu_mem_per_gpu_full = []
             for gi in range(self.gpu_count):
                 procs = self.proc_gpu_mem[gi].get_top_sorted(self.top_n)
                 gpu_mem_per_gpu_full.append(procs)
                 for _, _, _, v in procs:
-                    slow_vals.append(v)
+                    main_vals.append(v)
             gpu_util = [list(self.gpu_util[i]) for i in range(self.gpu_count)]
             gpu_temp = [list(self.gpu_temp[i]) for i in range(self.gpu_count)]
-            slow_vals.extend(gpu_util)
-            slow_vals.extend(gpu_temp)
-            net_sent = list(self.net_sent_mbps)
-            net_recv = list(self.net_recv_mbps)
-            slow_vals.append(net_sent)
-            slow_vals.append(net_recv)
-            disk_io_full = self.proc_disk_io.get_top_sorted(5, sort_by="total")
-            for _, _, _, v in disk_io_full:
-                slow_vals.append(v)
-            ts_slow_ds, slow_ds = self._downsample_init(list(self.ts_slow), slow_vals)
-            sidx = 0
+            main_vals.extend(gpu_util)
+            main_vals.extend(gpu_temp)
+            main_vals.append(list(self.net_sent_mbps))
+            main_vals.append(list(self.net_recv_mbps))
+            ts_main_ds, main_ds = self._downsample_init(list(self.ts_main), main_vals)
+            midx = 0
+            ds_cpu = main_ds[midx]
+            midx += 1
             gpu_mem_per_gpu = []
             for gi in range(self.gpu_count):
                 ds_procs = []
@@ -648,33 +702,49 @@ class MetricsCollector:
                             "pid": p,
                             "name": n,
                             "color": c,
-                            "vals": slow_ds[sidx],
+                            "vals": main_ds[midx],
                             "first_seen": self.proc_gpu_mem[gi].first_seen.get(p, 0),
                         }
                     )
-                    sidx += 1
+                    midx += 1
                 gpu_mem_per_gpu.append(ds_procs)
-            ds_gpu_util = [slow_ds[sidx + i] for i in range(self.gpu_count)]
-            sidx += self.gpu_count
-            ds_gpu_temp = [slow_ds[sidx + i] for i in range(self.gpu_count)]
-            sidx += self.gpu_count
-            ds_net_sent = slow_ds[sidx]
-            sidx += 1
-            ds_net_recv = slow_ds[sidx]
-            sidx += 1
+            ds_gpu_util = [main_ds[midx + i] for i in range(self.gpu_count)]
+            midx += self.gpu_count
+            ds_gpu_temp = [main_ds[midx + i] for i in range(self.gpu_count)]
+            midx += self.gpu_count
+            ds_net_sent = main_ds[midx]
+            ds_net_recv = main_ds[midx + 1]
+
+            # --- PCIe group (per-GPU timestamps) ---
+            ds_pcie_tx = []
+            ds_pcie_rx = []
+            ts_pcie_per_gpu = []
+            if self.has_pcie:
+                for i in range(self.gpu_count):
+                    ts_raw = list(self.ts_pcie[i])
+                    tx_raw = list(self.gpu_pcie_tx[i])
+                    rx_raw = list(self.gpu_pcie_rx[i])
+                    ts_ds, vals_ds = self._downsample_init(ts_raw, [tx_raw, rx_raw])
+                    ts_pcie_per_gpu.append(ts_ds)
+                    ds_pcie_tx.append(vals_ds[0])
+                    ds_pcie_rx.append(vals_ds[1])
+
+            # --- Disk group ---
+            disk_io_full = self.proc_disk_io.get_top_sorted(5, sort_by="total")
+            disk_vals = [v for _, _, _, v in disk_io_full]
+            ts_disk_ds, disk_ds = self._downsample_init(list(self.ts_disk), disk_vals)
             disk_io = []
-            for p, n, c, v in disk_io_full:
-                disk_io.append({"pid": p, "name": n, "color": c, "vals": slow_ds[sidx]})
-                sidx += 1
+            for di, (p, n, c, v) in enumerate(disk_io_full):
+                disk_io.append({"pid": p, "name": n, "color": c, "vals": disk_ds[di]})
 
             return {
                 "type": "init",
-                "counter_fast": self.counter_fast,
-                "counter_pcie": self.counter_pcie,
-                "counter_slow": self.counter_slow,
-                "ts_fast": ts_fast_ds,
-                "ts_pcie": ts_pcie_ds,
-                "ts_slow": ts_slow_ds,
+                "counter_main": self.counter_main,
+                "counter_pcie": list(self.counter_pcie),
+                "counter_disk": self.counter_disk,
+                "ts_main": ts_main_ds,
+                "ts_pcie": ts_pcie_per_gpu,
+                "ts_disk": ts_disk_ds,
                 "hostname": os.uname().nodename,
                 "gpu_count": self.gpu_count,
                 "gpu_names": self.gpu_names,
@@ -693,41 +763,21 @@ class MetricsCollector:
             }
 
     def snapshot_delta(
-        self, since_fast: int, since_pcie: int, since_slow: int, step: int = 1
+        self,
+        since_main: int,
+        since_pcie: list[int],
+        since_disk: int,
+        step: int = 1,
     ) -> dict:
         """Return new data since the given counters, subsampled by step."""
         with self.lock:
-            # Fast group (CPU only)
-            new_fast = self.counter_fast - since_fast
-            fast_len = len(self.ts_fast)
-            fast_idx = max(0, fast_len - new_fast) if new_fast > 0 else fast_len
-            sl_f = slice(fast_idx, None, step)
-            new_ts_fast = list(self.ts_fast)[sl_f]
-            cpu = list(self.cpu_pct)[sl_f]
-
-            # PCIe group
-            new_pcie = self.counter_pcie - since_pcie
-            pcie_len = len(self.ts_pcie)
-            pcie_idx = max(0, pcie_len - new_pcie) if new_pcie > 0 else pcie_len
-            sl_p = slice(pcie_idx, None, step)
-            new_ts_pcie = list(self.ts_pcie)[sl_p]
-            pcie_tx = (
-                [list(self.gpu_pcie_tx[i])[sl_p] for i in range(self.gpu_count)]
-                if self.has_pcie
-                else []
-            )
-            pcie_rx = (
-                [list(self.gpu_pcie_rx[i])[sl_p] for i in range(self.gpu_count)]
-                if self.has_pcie
-                else []
-            )
-
-            # Slow group (GPU mem, util, temp, network, disk)
-            new_slow = self.counter_slow - since_slow
-            slow_len = len(self.ts_slow)
-            slow_idx = max(0, slow_len - new_slow) if new_slow > 0 else slow_len
-            sl_s = slice(slow_idx, None, step)
-            new_ts_slow = list(self.ts_slow)[sl_s]
+            # Main group
+            new_main = self.counter_main - since_main
+            main_len = len(self.ts_main)
+            main_idx = max(0, main_len - new_main) if new_main > 0 else main_len
+            sl_m = slice(main_idx, None, step)
+            new_ts_main = list(self.ts_main)[sl_m]
+            cpu = list(self.cpu_pct)[sl_m]
             gpu_mem_per_gpu = []
             gpu_mem_keys_per_gpu = []
             for gi in range(self.gpu_count):
@@ -738,26 +788,49 @@ class MetricsCollector:
                             "pid": p,
                             "name": n,
                             "color": c,
-                            "vals": v[sl_s] if slow_idx < len(v) else [],
+                            "vals": v[sl_m] if main_idx < len(v) else [],
                         }
                         for p, n, c, v in gm
                     ]
                 )
                 gpu_mem_keys_per_gpu.append([p for p, _, _, _ in gm])
-            gpu_util = [list(self.gpu_util[i])[sl_s] for i in range(self.gpu_count)]
-            gpu_temp = [list(self.gpu_temp[i])[sl_s] for i in range(self.gpu_count)]
-            net_sent = list(self.net_sent_mbps)[sl_s]
-            net_recv = list(self.net_recv_mbps)[sl_s]
+            gpu_util = [list(self.gpu_util[i])[sl_m] for i in range(self.gpu_count)]
+            gpu_temp = [list(self.gpu_temp[i])[sl_m] for i in range(self.gpu_count)]
+            net_sent = list(self.net_sent_mbps)[sl_m]
+            net_recv = list(self.net_recv_mbps)[sl_m]
+
+            # PCIe group (per-GPU timestamps, thinned to ~5/s)
+            pcie_step = max(step, 2)
+            pcie_tx = []
+            pcie_rx = []
+            new_ts_pcie = []
+            if self.has_pcie:
+                for i in range(self.gpu_count):
+                    sp = since_pcie[i] if i < len(since_pcie) else 0
+                    new_p = self.counter_pcie[i] - sp
+                    p_len = len(self.ts_pcie[i])
+                    p_idx = max(0, p_len - new_p) if new_p > 0 else p_len
+                    sl_p = slice(p_idx, None, pcie_step)
+                    new_ts_pcie.append(list(self.ts_pcie[i])[sl_p])
+                    pcie_tx.append(list(self.gpu_pcie_tx[i])[sl_p])
+                    pcie_rx.append(list(self.gpu_pcie_rx[i])[sl_p])
+
+            # Disk group
+            new_disk = self.counter_disk - since_disk
+            disk_len = len(self.ts_disk)
+            disk_idx = max(0, disk_len - new_disk) if new_disk > 0 else disk_len
+            sl_d = slice(disk_idx, None, step)
+            new_ts_disk = list(self.ts_disk)[sl_d]
             disk_io = self.proc_disk_io.get_top_sorted(5, sort_by="total")
 
             return {
                 "type": "delta",
-                "counter_fast": self.counter_fast,
-                "counter_pcie": self.counter_pcie,
-                "counter_slow": self.counter_slow,
-                "ts_fast": new_ts_fast,
+                "counter_main": self.counter_main,
+                "counter_pcie": list(self.counter_pcie),
+                "counter_disk": self.counter_disk,
+                "ts_main": new_ts_main,
                 "ts_pcie": new_ts_pcie,
-                "ts_slow": new_ts_slow,
+                "ts_disk": new_ts_disk,
                 "gpu_mem": gpu_mem_per_gpu,
                 "gpu_mem_keys": gpu_mem_keys_per_gpu,
                 "gpu_util": gpu_util,
@@ -772,7 +845,7 @@ class MetricsCollector:
                         "pid": p,
                         "name": n,
                         "color": c,
-                        "vals": v[sl_s] if slow_idx < len(v) else [],
+                        "vals": v[sl_d] if disk_idx < len(v) else [],
                     }
                     for p, n, c, v in disk_io
                 ],
@@ -834,12 +907,135 @@ HTML_PAGE = r"""<!DOCTYPE html>
   let config = null;
   let traceMap = {};
   let traceCount = 0;
-  let prev_srv_fast = 0, prev_srv_pcie = 0, prev_srv_slow = 0;
-  let cur_srv_fast = 0, cur_srv_pcie = 0, cur_srv_slow = 0;
+  let prev_srv_main = 0, prev_srv_pcie = [], prev_srv_disk = 0;
+  let cur_srv_main = 0, cur_srv_pcie = [], cur_srv_disk = 0;
   let lastRateCheck = Date.now();
-  let rate_fast = 0, rate_pcie = 0, rate_slow = 0;
+  let rate_main = 0, rate_pcie = 0, rate_disk = 0;
+  let rate_pcie_per_gpu = [];
   let rowAnnotations = []; // [{index, baseText, group}]
-  
+  let pendingDeltas = [];
+  let rafScheduled = false;
+
+  function flushDeltas() {
+    rafScheduled = false;
+    if (!gd || !config || pendingDeltas.length === 0) return;
+    const batch = pendingDeltas;
+    pendingDeltas = [];
+    const gc = config.gpu_count || 0;
+    const nr = (gc > 0 ? gc * 2 : 0) + 2;
+
+    // Accumulators: one extendTraces call per group
+    const mx = {}, my = {};  // traceIndex -> [concatenated x], [concatenated y]
+    const pcieX = {}, pcieY = {};
+    const diskX = {}, diskY = {};
+
+    for (const msg of batch) {
+      const tm = msg.ts_main || [], tp = msg.ts_pcie || [], td = msg.ts_disk || [];
+
+      // Main group
+      if (tm.length > 0) {
+        const times_m = tm.map(t => new Date(t * 1000));
+        const cpuIdx = traceMap['cpu'];
+        if (cpuIdx !== undefined) {
+          if (!mx[cpuIdx]) { mx[cpuIdx] = []; my[cpuIdx] = []; }
+          mx[cpuIdx].push(...times_m); my[cpuIdx].push(...msg.cpu);
+        }
+        for (let gi = 0; gi < (msg.gpu_mem || []).length; gi++) {
+          for (let i = 0; i < msg.gpu_mem[gi].length; i++) {
+            const idx = traceMap['gpu_mem_' + gi + '_' + msg.gpu_mem[gi][i].pid];
+            if (idx !== undefined) {
+              if (!mx[idx]) { mx[idx] = []; my[idx] = []; }
+              mx[idx].push(...times_m); my[idx].push(...msg.gpu_mem[gi][i].vals);
+            }
+          }
+        }
+        for (let i = 0; i < (msg.gpu_util || []).length; i++) {
+          const idx = traceMap['gpu_util_' + i];
+          if (idx !== undefined) {
+            if (!mx[idx]) { mx[idx] = []; my[idx] = []; }
+            mx[idx].push(...times_m); my[idx].push(...msg.gpu_util[i]);
+          }
+        }
+        for (let i = 0; i < (msg.gpu_temp || []).length; i++) {
+          const idx = traceMap['gpu_temp_' + i];
+          if (idx !== undefined) {
+            if (!mx[idx]) { mx[idx] = []; my[idx] = []; }
+            mx[idx].push(...times_m); my[idx].push(...msg.gpu_temp[i]);
+          }
+        }
+        if (traceMap['net_sent'] !== undefined) {
+          const si = traceMap['net_sent'], ri = traceMap['net_recv'];
+          if (!mx[si]) { mx[si] = []; my[si] = []; }
+          if (!mx[ri]) { mx[ri] = []; my[ri] = []; }
+          mx[si].push(...times_m); my[si].push(...msg.net_sent);
+          mx[ri].push(...times_m); my[ri].push(...msg.net_recv);
+        }
+      }
+
+      // PCIe group
+      if (tp.length > 0 && config.has_pcie) {
+        for (let i = 0; i < (msg.pcie_tx || []).length; i++) {
+          if (!tp[i] || tp[i].length === 0) continue;
+          const times_p = tp[i].map(t => new Date(t * 1000));
+          const txIdx = traceMap['pcie_tx_' + i], rxIdx = traceMap['pcie_rx_' + i];
+          if (txIdx !== undefined) {
+            if (!pcieX[txIdx]) { pcieX[txIdx] = []; pcieY[txIdx] = []; }
+            pcieX[txIdx].push(...times_p); pcieY[txIdx].push(...msg.pcie_tx[i]);
+          }
+          if (rxIdx !== undefined) {
+            if (!pcieX[rxIdx]) { pcieX[rxIdx] = []; pcieY[rxIdx] = []; }
+            pcieX[rxIdx].push(...times_p); pcieY[rxIdx].push(...msg.pcie_rx[i]);
+          }
+        }
+      }
+
+      // Disk group
+      if (td.length > 0) {
+        const times_d = td.map(t => new Date(t * 1000));
+        for (let i = 0; i < (msg.disk_io || []).length; i++) {
+          const idx = traceMap['disk_' + msg.disk_io[i].pid];
+          if (idx !== undefined) {
+            if (!diskX[idx]) { diskX[idx] = []; diskY[idx] = []; }
+            diskX[idx].push(...times_d); diskY[idx].push(...msg.disk_io[i].vals);
+          }
+        }
+      }
+    }
+
+    // Single extendTraces per group
+    const mIndices = Object.keys(mx).map(Number);
+    if (mIndices.length > 0) {
+      Plotly.extendTraces(gd, {
+        x: mIndices.map(i => mx[i]),
+        y: mIndices.map(i => my[i])
+      }, mIndices, MAX_POINTS);
+    }
+    const pIndices = Object.keys(pcieX).map(Number);
+    if (pIndices.length > 0) {
+      Plotly.extendTraces(gd, {
+        x: pIndices.map(i => pcieX[i]),
+        y: pIndices.map(i => pcieY[i])
+      }, pIndices, MAX_POINTS);
+    }
+    const dIndices = Object.keys(diskX).map(Number);
+    if (dIndices.length > 0) {
+      Plotly.extendTraces(gd, {
+        x: dIndices.map(i => diskX[i]),
+        y: dIndices.map(i => diskY[i])
+      }, dIndices, MAX_POINTS);
+    }
+
+    // Single scroll + annotation update
+    if (!paused && viewMinutes > 0) {
+      const now = new Date();
+      const start = new Date(now.getTime() - viewMinutes * 60000);
+      for (let r = 1; r <= nr; r++) {
+        const ax = r === 1 ? 'xaxis' : 'xaxis' + r;
+        gd.layout[ax].range = [start, now];
+        gd.layout[ax].autorange = false;
+      }
+    }
+  }
 
   const socket = io({transports: ['polling'], reconnection: true, reconnectionDelay: 500, reconnectionAttempts: Infinity, timeout: 60000});
 
@@ -867,6 +1063,15 @@ HTML_PAGE = r"""<!DOCTYPE html>
       if (ax1 && ax1.range) savedRange = [ax1.range[0], ax1.range[1]];
     }
     config = msg;
+    pendingDeltas = [];
+    rafScheduled = false;
+    cur_srv_main = msg.counter_main || 0;
+    prev_srv_main = cur_srv_main;
+    cur_srv_pcie = msg.counter_pcie || [];
+    prev_srv_pcie = cur_srv_pcie.slice();
+    cur_srv_disk = msg.counter_disk || 0;
+    prev_srv_disk = cur_srv_disk;
+    lastRateCheck = Date.now();
     buildChart(msg);
     if (savedRange && savedVM === 0) {
       viewMinutes = 0;
@@ -893,12 +1098,13 @@ HTML_PAGE = r"""<!DOCTYPE html>
 
   socket.on('delta', function(msg) {
     if (!gd || !config) return;
-    const tf = msg.ts_fast || [], tp = msg.ts_pcie || [], ts = msg.ts_slow || [];
-    if (tf.length === 0 && tp.length === 0 && ts.length === 0) return;
+    const tm = msg.ts_main || [], tp = msg.ts_pcie || [], td = msg.ts_disk || [];
+    const hasPcieData = tp.length > 0 && tp.some(a => a.length > 0);
+    if (tm.length === 0 && !hasPcieData && td.length === 0) return;
 
-    cur_srv_fast = msg.counter_fast || cur_srv_fast;
-    cur_srv_pcie = msg.counter_pcie || cur_srv_pcie;
-    cur_srv_slow = msg.counter_slow || cur_srv_slow;
+    cur_srv_main = msg.counter_main || cur_srv_main;
+    if (Array.isArray(msg.counter_pcie)) cur_srv_pcie = msg.counter_pcie;
+    cur_srv_disk = msg.counter_disk || cur_srv_disk;
 
     const gpuKeysChanged = JSON.stringify(msg.gpu_mem_keys) !== JSON.stringify(config._last_gpu_keys);
     const diskKeysChanged = JSON.stringify(msg.disk_keys) !== JSON.stringify(config._last_disk_keys);
@@ -907,87 +1113,13 @@ HTML_PAGE = r"""<!DOCTYPE html>
       return;
     }
 
-    const gc = config.gpu_count || 0;
-    const nr = (gc > 0 ? gc * 2 : 0) + 2;
-
-    // Fast group: CPU only
-    if (tf.length > 0) {
-      const times_f = tf.map(t => new Date(t * 1000));
-      const fx = [], fy = [], fi = [];
-      fi.push(traceMap['cpu']); fx.push(times_f); fy.push(msg.cpu);
-      if (fi.length > 0) Plotly.extendTraces(gd, {x: fx, y: fy}, fi, MAX_POINTS);
+    pendingDeltas.push(msg);
+    if (!rafScheduled) {
+      rafScheduled = true;
+      requestAnimationFrame(flushDeltas);
     }
-
-    // PCIe group
-    if (tp.length > 0 && config.has_pcie) {
-      const times_p = tp.map(t => new Date(t * 1000));
-      const px = [], py = [], pi = [];
-      for (let i = 0; i < msg.pcie_tx.length; i++) {
-        pi.push(traceMap['pcie_tx_' + i]); px.push(times_p); py.push(msg.pcie_tx[i]);
-        pi.push(traceMap['pcie_rx_' + i]); px.push(times_p); py.push(msg.pcie_rx[i]);
-      }
-      if (pi.length > 0) Plotly.extendTraces(gd, {x: px, y: py}, pi, MAX_POINTS);
-    }
-
-    // Slow group: GPU mem, GPU util, temp, network, disk
-    if (ts.length > 0) {
-      const times_s = ts.map(t => new Date(t * 1000));
-      const sx = [], sy = [], si = [];
-      for (let gi = 0; gi < msg.gpu_mem.length; gi++) {
-        for (let i = 0; i < msg.gpu_mem[gi].length; i++) {
-          const key = 'gpu_mem_' + gi + '_' + msg.gpu_mem[gi][i].pid;
-          if (traceMap[key] !== undefined) {
-            si.push(traceMap[key]); sx.push(times_s); sy.push(msg.gpu_mem[gi][i].vals);
-          }
-        }
-      }
-      for (let i = 0; i < msg.gpu_util.length; i++) {
-        si.push(traceMap['gpu_util_' + i]); sx.push(times_s); sy.push(msg.gpu_util[i]);
-      }
-      if (msg.gpu_temp) {
-        for (let i = 0; i < msg.gpu_temp.length; i++) {
-          if (traceMap['gpu_temp_' + i] !== undefined) {
-            si.push(traceMap['gpu_temp_' + i]); sx.push(times_s); sy.push(msg.gpu_temp[i]);
-          }
-        }
-      }
-      for (let i = 0; i < msg.disk_io.length; i++) {
-        const key = 'disk_' + msg.disk_io[i].pid;
-        if (traceMap[key] !== undefined) {
-          si.push(traceMap[key]); sx.push(times_s); sy.push(msg.disk_io[i].vals);
-        }
-      }
-      if (traceMap['net_sent'] !== undefined) {
-        si.push(traceMap['net_sent']); sx.push(times_s); sy.push(msg.net_sent);
-        si.push(traceMap['net_recv']); sx.push(times_s); sy.push(msg.net_recv);
-      }
-      if (si.length > 0) Plotly.extendTraces(gd, {x: sx, y: sy}, si, MAX_POINTS);
-    }
-
-    // Scroll
-    if (!paused && viewMinutes > 0) {
-      const now = new Date();
-      const start = new Date(now.getTime() - viewMinutes * 60000);
-      for (let r = 1; r <= nr; r++) {
-        const ax = r === 1 ? 'xaxis' : 'xaxis' + r;
-        gd.layout[ax].range = [start, now];
-        gd.layout[ax].autorange = false;
-      }
-    }
-
-    // Update row annotation rates
-    for (const ra of rowAnnotations) {
-      let rateStr = '';
-      if (ra.group === 'slow_pcie') rateStr = rate_slow + ' samples/s, ' + rate_pcie + ' samples/s';
-      else if (ra.group === 'fast') rateStr = rate_fast + ' samples/s';
-      else if (ra.group === 'slow') rateStr = rate_slow + ' samples/s';
-      else if (ra.group === 'pcie') rateStr = rate_pcie + ' samples/s';
-      gd.layout.annotations[ra.index].text = '  ' + ra.baseText + '  (' + rateStr + ')  ';
-    }
-    syncing = true;
-    Plotly.relayout(gd, {});
-    syncing = false;
   });
+
 
   function buildChart(msg) {
     gd = document.getElementById('chart');
@@ -995,9 +1127,10 @@ HTML_PAGE = r"""<!DOCTYPE html>
     traceCount = 0;
     rowAnnotations = [];
     const traces = [];
-    const times_fast = (msg.ts_fast || []).map(t => new Date(t * 1000));
-    const times_pcie = (msg.ts_pcie || []).map(t => new Date(t * 1000));
-    const times_slow = (msg.ts_slow || []).map(t => new Date(t * 1000));
+    const times_main = (msg.ts_main || []).map(t => new Date(t * 1000));
+    const ts_pcie_raw = msg.ts_pcie || [];
+    const times_pcie_per_gpu = ts_pcie_raw.map(a => (a || []).map(t => new Date(t * 1000)));
+    const times_disk = (msg.ts_disk || []).map(t => new Date(t * 1000));
 
     const hasGpu = msg.gpu_count > 0;
     const hasPcie = msg.has_pcie;
@@ -1043,7 +1176,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
           const m = gpuMem[i];
           traceMap['gpu_mem_' + gi + '_' + m.pid] = traceCount++;
           const trace = {
-            x: times_slow, y: m.vals, name: m.name, type: 'scatter', mode: 'none',
+            x: times_main, y: m.vals, name: m.name, type: 'scatter', mode: 'none',
             line: {width: 0, color: m.color}, stackgroup: stackName,
             fillcolor: hexToRgba(m.color, 0.6),
             xaxis: xax(memRow), yaxis: yax(memRow),
@@ -1058,7 +1191,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
         if (gpuMem.length === 0) {
           traceMap['gpu_mem_' + gi + '_empty'] = traceCount++;
           traces.push({
-            x: times_slow, y: times_slow.map(() => 0), name: 'GPU ' + gi + ' Mem: 0', type: 'scatter',
+            x: times_main, y: times_main.map(() => 0), name: 'GPU ' + gi + ' Mem: 0', type: 'scatter',
             mode: 'lines', line: {width: 1, color: '#555'},
             xaxis: xax(memRow), yaxis: yax(memRow), legendgroup: 'gpu_mem_' + gi, legend: gpuLeg,
           });
@@ -1067,18 +1200,18 @@ HTML_PAGE = r"""<!DOCTYPE html>
           const pyIdx = nRows + 1 + gi;
           pcieYIdxPerGpu_mem.push({idx: pyIdx, memRow: memRow});
           const pcieY = 'y' + pyIdx;
-          const pColor = gpuPcieColors[gi % gpuPcieColors.length];
+          const tp_gpu = times_pcie_per_gpu[gi] || [];
           traceMap['pcie_tx_' + gi] = traceCount++;
           traces.push({
-            x: times_pcie, y: msg.pcie_tx[gi], name: 'PCIe W (GPU ' + gi + ')', type: 'scatter',
-            line: {color: pColor, width: 0.5},
+            x: tp_gpu, y: msg.pcie_tx[gi], name: 'PCIe W (GPU ' + gi + ')', type: 'scatter',
+            line: {color: '#ef5350', width: 0.5},
             xaxis: xax(memRow), yaxis: pcieY,
             legendgroup: 'pcie_' + gi, legendgrouptitle: {text: 'GPU ' + gi + ' PCIe'}, legend: gpuLeg,
           });
           traceMap['pcie_rx_' + gi] = traceCount++;
           traces.push({
-            x: times_pcie, y: msg.pcie_rx[gi], name: 'PCIe R (GPU ' + gi + ')', type: 'scatter',
-            line: {color: pColor, width: 0.5, dash: 'dot'},
+            x: tp_gpu, y: msg.pcie_rx[gi], name: 'PCIe R (GPU ' + gi + ')', type: 'scatter',
+            line: {color: '#69f0ae', width: 0.5, dash: 'dot'},
             xaxis: xax(memRow), yaxis: pcieY,
             legendgroup: 'pcie_' + gi, legend: gpuLeg,
           });
@@ -1090,7 +1223,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
         const uColor = '#76b900';
         traceMap['gpu_util_' + gi] = traceCount++;
         traces.push({
-          x: times_slow, y: msg.gpu_util[gi], name: 'GPU ' + gi + ' Util', type: 'scatter',
+          x: times_main, y: msg.gpu_util[gi], name: 'GPU ' + gi + ' Util', type: 'scatter',
           line: {color: uColor, width: 2}, fill: 'tozeroy',
           fillcolor: hexToRgba(uColor, 0.25),
           xaxis: xax(utilRow), yaxis: yax(utilRow),
@@ -1103,7 +1236,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
         const tColor = '#ff6e40';
         traceMap['gpu_temp_' + gi] = traceCount++;
         traces.push({
-          x: times_slow, y: msg.gpu_temp[gi], name: 'GPU ' + gi + ' Temp', type: 'scatter',
+          x: times_main, y: msg.gpu_temp[gi], name: 'GPU ' + gi + ' Temp', type: 'scatter',
           line: {color: tColor, width: 1.5, dash: 'dot'},
           xaxis: xax(utilRow), yaxis: tempY,
           legendgroup: 'util_' + gi, legend: gpuLeg,
@@ -1116,7 +1249,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
     const cpuRow = row;
     traceMap['cpu'] = traceCount++;
     traces.push({
-      x: times_fast, y: msg.cpu, name: 'CPU', type: 'scatter',
+      x: times_main, y: msg.cpu, name: 'CPU', type: 'scatter',
       line: {color: '#ffcc00', width: 1}, fill: 'tozeroy',
       fillcolor: hexToRgba('#ffcc00', 0.25),
       xaxis: xax(cpuRow), yaxis: yax(cpuRow),
@@ -1135,7 +1268,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
       const diskPatIdx = Math.abs(d.pid) % diskPatterns.length;
       traceMap['disk_' + d.pid] = traceCount++;
       const dTrace = {
-        x: times_slow, y: d.vals, name: d.name, type: 'scatter', mode: 'lines',
+        x: times_disk, y: d.vals, name: d.name, type: 'scatter', mode: 'lines',
         line: {width: 0.5, color: d.color, shape: 'spline', smoothing: 0.8}, stackgroup: 'disk_io',
         fillcolor: hexToRgba(d.color, 0.55),
         xaxis: xax(diskRow), yaxis: yax(diskRow),
@@ -1149,14 +1282,14 @@ HTML_PAGE = r"""<!DOCTYPE html>
     // Network I/O overlaid
     traceMap['net_sent'] = traceCount++;
     traces.push({
-      x: times_slow, y: msg.net_sent, name: 'Net TX', type: 'scatter',
+      x: times_main, y: msg.net_sent, name: 'Net TX', type: 'scatter',
       line: {color: '#18ffff', width: 0.5, shape: 'spline', smoothing: 1.3},
       xaxis: xax(diskRow), yaxis: netY,
       legendgroup: 'net', legendgrouptitle: {text: 'Network'}, legend: sysLegName,
     });
     traceMap['net_recv'] = traceCount++;
     traces.push({
-      x: times_slow, y: msg.net_recv, name: 'Net RX', type: 'scatter',
+      x: times_main, y: msg.net_recv, name: 'Net RX', type: 'scatter',
       line: {color: '#ff80ab', width: 0.5, shape: 'spline', smoothing: 1.3},
       xaxis: xax(diskRow), yaxis: netY,
       legendgroup: 'net', legend: sysLegName,
@@ -1172,15 +1305,15 @@ HTML_PAGE = r"""<!DOCTYPE html>
     if (hasGpu) {
       for (let gi = 0; gi < gpuCount; gi++) {
         rowLabels.push(hasPcie ? 'GPU ' + gi + ' Memory (GiB) + PCIe (GB/s)' : 'GPU ' + gi + ' Memory (GiB)');
-        rowGroups.push(hasPcie ? 'slow_pcie' : 'slow');
+        rowGroups.push(hasPcie ? 'main_pcie' : 'main');
         rowLabels.push('GPU ' + gi + ' %-util + GPU \u00b0C');
-        rowGroups.push('slow');
+        rowGroups.push('main');
       }
     }
     rowLabels.push('CPU Usage (%)');
-    rowGroups.push('fast');
+    rowGroups.push('main');
     rowLabels.push('Disk I/O (MB/s) + Network (MB/s)');
-    rowGroups.push('slow');
+    rowGroups.push('disk');
 
     // Per-row gaps: small between mem+util (same GPU), large between GPU groups and before CPU
     const rowGaps = [];
@@ -1243,11 +1376,9 @@ HTML_PAGE = r"""<!DOCTYPE html>
       // PCIe secondary axes (one per GPU mem row)
       for (const pci of pcieYIdxPerGpu_mem) {
         const pcieYName = 'yaxis' + pci.idx;
-        const gi = (pci.memRow - 1) / 2;
-        const pColor = gpuPcieColors[gi % gpuPcieColors.length];
         layout[pcieYName] = {
           domain: domain(pci.memRow - 1, nRows),
-          title: {text: 'PCIe GB/s (log)', font: {color: pColor, size: 10}},
+          title: {text: 'PCIe GB/s (log)', font: {color: '#999', size: 10}},
           overlaying: yax(pci.memRow), side: 'right', showgrid: false,
           type: 'log', autorange: true,
         };
@@ -1399,25 +1530,45 @@ HTML_PAGE = r"""<!DOCTYPE html>
     const now = Date.now();
     const elapsed = (now - lastRateCheck) / 1000;
     if (elapsed > 0) {
-      rate_fast = ((cur_srv_fast - prev_srv_fast) / elapsed).toFixed(1);
-      rate_pcie = ((cur_srv_pcie - prev_srv_pcie) / elapsed).toFixed(1);
-      rate_slow = ((cur_srv_slow - prev_srv_slow) / elapsed).toFixed(1);
+      rate_main = ((cur_srv_main - prev_srv_main) / elapsed).toFixed(1);
+      rate_disk = ((cur_srv_disk - prev_srv_disk) / elapsed).toFixed(1);
+      rate_pcie_per_gpu = [];
+      let pcieSum = 0;
+      for (let i = 0; i < cur_srv_pcie.length; i++) {
+        const prev = (prev_srv_pcie[i] || 0);
+        const r = ((cur_srv_pcie[i] - prev) / elapsed);
+        rate_pcie_per_gpu.push(r.toFixed(1));
+        pcieSum += r;
+      }
+      rate_pcie = cur_srv_pcie.length > 0
+        ? (pcieSum / cur_srv_pcie.length).toFixed(1) : '0.0';
     }
-    prev_srv_fast = cur_srv_fast;
-    prev_srv_pcie = cur_srv_pcie;
-    prev_srv_slow = cur_srv_slow;
+    prev_srv_main = cur_srv_main;
+    prev_srv_pcie = cur_srv_pcie.slice();
+    prev_srv_disk = cur_srv_disk;
     lastRateCheck = now;
     const el = document.getElementById('status');
     const base = paused ? 'Paused' : 'Live';
-    el.textContent = base + '  |  fast ' + rate_fast + ' samples/s  pcie ' + rate_pcie + ' samples/s  slow ' + rate_slow + ' samples/s';
+    const pcieRates = rate_pcie_per_gpu.map((r, i) => 'gpu' + i + ' ' + r).join(', ');
+    el.textContent = base + '  |  main ' + rate_main + '/s  pcie [' + pcieRates + ']/s  disk ' + rate_disk + '/s';
     if (gd && rowAnnotations.length > 0) {
+      let changed = false;
       for (const ra of rowAnnotations) {
         let rateStr = '';
-        if (ra.group === 'slow_pcie') rateStr = rate_slow + ' samples/s, ' + rate_pcie + ' samples/s';
-        else if (ra.group === 'fast') rateStr = rate_fast + ' samples/s';
-        else if (ra.group === 'slow') rateStr = rate_slow + ' samples/s';
+        if (ra.group === 'main_pcie') rateStr = rate_main + ' samples/s, ' + rate_pcie + ' samples/s';
+        else if (ra.group === 'main') rateStr = rate_main + ' samples/s';
+        else if (ra.group === 'disk') rateStr = rate_disk + ' samples/s';
         else if (ra.group === 'pcie') rateStr = rate_pcie + ' samples/s';
-        gd.layout.annotations[ra.index].text = '  ' + ra.baseText + '  (' + rateStr + ')  ';
+        const newText = '  ' + ra.baseText + '<br>' + rateStr + '  ';
+        if (gd.layout.annotations[ra.index].text !== newText) {
+          gd.layout.annotations[ra.index].text = newText;
+          changed = true;
+        }
+      }
+      if (changed) {
+        syncing = true;
+        Plotly.relayout(gd, {});
+        syncing = false;
       }
     }
   }, 5000);
@@ -1546,7 +1697,7 @@ def build_server(collector: MetricsCollector, args):
         def send_init():
             for _ in range(50):
                 with collector.lock:
-                    if len(collector.ts_fast) > 5:
+                    if len(collector.ts_main) > 5:
                         break
                 time.sleep(0.1)
             data = collector.snapshot_full()
@@ -1569,9 +1720,9 @@ def build_server(collector: MetricsCollector, args):
 
     def push_loop():
         """Background thread that pushes deltas to all clients."""
-        last_fast = 0
-        last_pcie = 0
-        last_slow = 0
+        last_main = 0
+        last_pcie: list[int] = [0] * collector.gpu_count
+        last_disk = 0
         while True:
             vm = ui_state.get("view_minutes", 2)
             if vm <= 2:
@@ -1584,10 +1735,10 @@ def build_server(collector: MetricsCollector, args):
                 push_sec = 2.0
             time.sleep(push_sec)
             with collector.lock:
-                cf = collector.counter_fast
-                cp = collector.counter_pcie
-                cs = collector.counter_slow
-            if cf <= last_fast and cp <= last_pcie and cs <= last_slow:
+                cm = collector.counter_main
+                cp = list(collector.counter_pcie)
+                cd = collector.counter_disk
+            if cm <= last_main and cp == last_pcie and cd <= last_disk:
                 continue
             try:
                 if vm <= 2:
@@ -1599,11 +1750,11 @@ def build_server(collector: MetricsCollector, args):
                 else:
                     step = 12
                 delta = collector.snapshot_delta(
-                    last_fast, last_pcie, last_slow, step=step
+                    last_main, last_pcie, last_disk, step=step
                 )
-                last_fast = cf
+                last_main = cm
                 last_pcie = cp
-                last_slow = cs
+                last_disk = cd
                 socketio.emit("delta", delta)
             except Exception as e:
                 print(f"[push_loop] error: {e}", flush=True)
@@ -1614,16 +1765,24 @@ def build_server(collector: MetricsCollector, args):
 
 def main():
     args = parse_args()
-    print(f"Fast collect : {args.interval}ms (CPU only)")
-    print(f"PCIe collect : {args.pcie_interval}ms")
-    print(f"Slow collect : {args.gpu_interval}ms (GPU mem, util, temp, disk, network)")
+    gpu_count = 0
+    if HAS_NVML:
+        gpu_count = pynvml.nvmlDeviceGetCount()
+
+    main_sec = args.main_interval / 1000.0
+    disk_sec = args.disk_interval / 1000.0
+    print(f"Main collect : {args.main_interval}ms (CPU + GPU mem/util/temp + network)")
+    print(
+        f"PCIe collect : 10/s ({gpu_count} subprocess{'es' if gpu_count != 1 else ''})"
+    )
+    print(f"Disk collect : {args.disk_interval}ms (disk I/O per process)")
     print(f"Push interval: {args.push_interval}ms")
     print(
         f"Rolling window  : {args.window}s ({args.window // 60}m {args.window % 60}s)"
     )
 
     if HAS_NVML:
-        for i in range(pynvml.nvmlDeviceGetCount()):
+        for i in range(gpu_count):
             handle = pynvml.nvmlDeviceGetHandleByIndex(i)
             name = pynvml.nvmlDeviceGetName(handle)
             if isinstance(name, bytes):
@@ -1636,37 +1795,63 @@ def main():
 
     collector = MetricsCollector(
         window_sec=args.window,
-        interval_ms=args.interval,
-        pcie_interval_ms=args.pcie_interval,
-        slow_interval_ms=args.gpu_interval,
+        main_interval_ms=args.main_interval,
+        disk_interval_ms=args.disk_interval,
         top_n=args.top_n,
         fill_patterns=args.fill_patterns,
     )
-    psutil.cpu_percent(interval=None)
 
     app, socketio, ui_state, push_loop = build_server(collector, args)
 
-    def _fast_loop():
-        interval_sec = args.interval / 1000.0
-        while True:
-            collector.sample_fast()
-            time.sleep(interval_sec)
+    workers: list[multiprocessing.Process] = []
+    pipes: list[multiprocessing.connection.Connection] = []
 
-    def _pcie_loop():
-        interval_sec = args.pcie_interval / 1000.0
-        while True:
-            collector.sample_pcie()
-            time.sleep(interval_sec)
+    # 1 PCIe subprocess per GPU (10/s)
+    if HAS_NVML and gpu_count > 0:
+        for gi in range(gpu_count):
+            pcie_parent, pcie_child = multiprocessing.Pipe(duplex=False)
+            pipes.append(pcie_parent)
+            workers.append(
+                multiprocessing.Process(
+                    target=_pcie_worker, args=(pcie_child, gi), daemon=True
+                )
+            )
+        # 1 main subprocess: CPU + GPU mem/util/temp + network
+        main_parent, main_child = multiprocessing.Pipe(duplex=False)
+        pipes.append(main_parent)
+        workers.append(
+            multiprocessing.Process(
+                target=_main_worker,
+                args=(main_child, gpu_count, main_sec),
+                daemon=True,
+            )
+        )
 
-    def _slow_loop():
-        interval_sec = args.gpu_interval / 1000.0
-        while True:
-            collector.sample_slow()
-            time.sleep(interval_sec)
+    # 1 disk subprocess
+    disk_parent, disk_child = multiprocessing.Pipe(duplex=False)
+    pipes.append(disk_parent)
+    workers.append(
+        multiprocessing.Process(
+            target=_disk_worker, args=(disk_child, disk_sec), daemon=True
+        )
+    )
 
-    threading.Thread(target=_fast_loop, daemon=True).start()
-    threading.Thread(target=_pcie_loop, daemon=True).start()
-    threading.Thread(target=_slow_loop, daemon=True).start()
+    def _poll_pipes():
+        while True:
+            ready = multiprocessing.connection.wait(pipes, timeout=0.5)
+            for conn in ready:
+                msg = conn.recv()
+                tag = msg[0]
+                if tag == "pcie":
+                    collector.ingest_pcie(msg[1], msg[2], msg[3], msg[4])
+                elif tag == "main":
+                    collector.ingest_main(msg[1], msg[2], msg[3], msg[4], msg[5])
+                elif tag == "disk":
+                    collector.ingest_disk(msg[1], msg[2])
+
+    for w in workers:
+        w.start()
+    threading.Thread(target=_poll_pipes, daemon=True).start()
     threading.Thread(target=push_loop, daemon=True).start()
 
     print(f"Open http://{args.host}:{args.port} in your browser")
