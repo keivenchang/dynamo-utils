@@ -25,11 +25,14 @@ Usage:
 """
 
 import argparse
+import json
 import multiprocessing
 import os
+import signal
 import threading
 import time
 from collections import deque
+from pathlib import Path
 
 import socketserver
 
@@ -46,29 +49,31 @@ except pynvml.NVMLError as e:
     print(f"NVML init failed ({e}) -- GPU monitoring disabled")
 
 PROCESS_COLORS = [
-    "#00e5ff",
-    "#ff1744",
-    "#76ff03",
-    "#ffea00",
-    "#d500f9",
-    "#ff9100",
-    "#00e676",
-    "#ff6d00",
-    "#448aff",
-    "#e040fb",
-    "#18ffff",
-    "#f50057",
-    "#64ffda",
-    "#ff80ab",
-    "#b2ff59",
-    "#ffd740",
-    "#ea80fc",
-    "#ff9e80",
-    "#a7ffeb",
-    "#ff8a80",
+    "#00e5ff",  # cyan
+    "#ff1744",  # red
+    "#76ff03",  # green
+    "#448aff",  # blue
+    "#ff9100",  # orange
+    "#d500f9",  # purple
+    "#ffea00",  # yellow
+    "#f50057",  # pink
+    "#00e676",  # emerald
+    "#ff6d00",  # dark orange
+    "#18ffff",  # light cyan
+    "#ea80fc",  # lavender
+    "#b2ff59",  # lime
+    "#ff80ab",  # rose
+    "#64ffda",  # teal
+    "#ffd740",  # amber
+    "#e040fb",  # magenta
+    "#ff9e80",  # salmon
+    "#a7ffeb",  # mint
+    "#ff8a80",  # coral
 ]
-OTHER_COLOR = "#555555"
+OTHER_COLOR = "#9e9e9e"
 DISK_SCAN_EVERY = 10
+CACHE_DIR = Path.home() / ".cache" / "gpu_monitor"
+CACHE_FILE = CACHE_DIR / "metrics.json"
 
 
 def parse_args():
@@ -84,11 +89,8 @@ def parse_args():
     p.add_argument(
         "--disk-interval",
         type=int,
-        default=500,
-        help="Disk I/O collection interval ms (2/s)",
-    )
-    p.add_argument(
-        "--push-interval", type=int, default=150, help="WebSocket push interval ms"
+        default=1000,
+        help="Disk I/O collection interval ms (1/s)",
     )
     p.add_argument(
         "--window",
@@ -99,14 +101,8 @@ def parse_args():
     p.add_argument(
         "--top-n",
         type=int,
-        default=20,
-        help="Show top N processes per chart, rest grouped as Other",
-    )
-    p.add_argument(
-        "--fill-patterns",
-        action="store_true",
-        default=False,
-        help="Enable fill patterns on stacked areas",
+        default=12,
+        help="Show top N processes per chart, rest grouped as Other (gray)",
     )
     return p.parse_args()
 
@@ -275,39 +271,17 @@ def _classify_node_process(full_cmd: str) -> str:
     return ""
 
 
-class SharedColorMap:
-    """Global PID-to-color map so the same process gets the same color across GPUs."""
-
-    def __init__(self):
-        self._colors: dict[int, str] = {}
-        self._idx = 0
-
-    def get(self, pid: int) -> str:
-        if pid not in self._colors:
-            self._colors[pid] = PROCESS_COLORS[self._idx % len(PROCESS_COLORS)]
-            self._idx += 1
-        return self._colors[pid]
-
-    def discard(self, pid: int):
-        self._colors.pop(pid, None)
-
-
 class ProcessTracker:
-    def __init__(
-        self,
-        maxlen: int,
-        prune: bool = True,
-        shared_colors: SharedColorMap | None = None,
-    ):
+    def __init__(self, maxlen: int, prune: bool = True):
         self.maxlen = maxlen
         self._prune_enabled = prune
         self._len = 0
         self.series: dict[int, deque[float]] = {}
         self.names: dict[int, str] = {}
-        self._shared_colors = shared_colors
-        self._colors: dict[int, str] = {}
-        self._color_idx = 0
         self.first_seen: dict[int, float] = {}
+        self._pid_slot: dict[int, int] = {}
+        self._free_slots: list[int] = []
+        self._next_slot: int = 0
 
     def new_pids(self, data: dict[int, float]) -> set[int]:
         """Return PIDs in data that aren't tracked yet (call outside lock)."""
@@ -329,6 +303,12 @@ class ProcessTracker:
                 else:
                     self.names[pid] = name_resolver(pid)
                 self.first_seen[pid] = timestamp
+                if self._free_slots:
+                    slot = self._free_slots.pop(0)
+                else:
+                    slot = self._next_slot
+                    self._next_slot += 1
+                self._pid_slot[pid] = slot
         for pid, dq in self.series.items():
             dq.append(data.get(pid, 0.0))
         self._len += 1
@@ -345,15 +325,36 @@ class ProcessTracker:
         for pid in dead:
             del self.series[pid]
             del self.names[pid]
-            self._colors.pop(pid, None)
+            if pid in self._pid_slot:
+                self._free_slots.append(self._pid_slot.pop(pid))
 
-    def get_color(self, pid: int) -> str:
-        if self._shared_colors is not None:
-            return self._shared_colors.get(pid)
-        if pid not in self._colors:
-            self._colors[pid] = PROCESS_COLORS[self._color_idx % len(PROCESS_COLORS)]
-            self._color_idx += 1
-        return self._colors[pid]
+    def to_dict(self) -> dict:
+        return {
+            "maxlen": self.maxlen,
+            "_prune_enabled": self._prune_enabled,
+            "_len": self._len,
+            "series": {str(k): list(v) for k, v in self.series.items()},
+            "names": {str(k): v for k, v in self.names.items()},
+            "first_seen": {str(k): v for k, v in self.first_seen.items()},
+            "_pid_slot": {str(k): v for k, v in self._pid_slot.items()},
+            "_free_slots": self._free_slots,
+            "_next_slot": self._next_slot,
+        }
+
+    def load_dict(self, d: dict):
+        self._len = d.get("_len", 0)
+        for k, v in d.get("series", {}).items():
+            pid = int(k)
+            self.series[pid] = deque(v, maxlen=self.maxlen)
+        self.names = {int(k): v for k, v in d.get("names", {}).items()}
+        self.first_seen = {int(k): v for k, v in d.get("first_seen", {}).items()}
+        self._pid_slot = {int(k): v for k, v in d.get("_pid_slot", {}).items()}
+        self._free_slots = d.get("_free_slots", [])
+        self._next_slot = d.get("_next_slot", 0)
+
+    def _color_for(self, pid: int) -> str:
+        slot = self._pid_slot.get(pid, 0)
+        return PROCESS_COLORS[slot % len(PROCESS_COLORS)]
 
     def get_all_sorted(self) -> list[tuple[int, str, str, list[float]]]:
         """Return (pid, name, color, values) sorted by peak desc."""
@@ -365,7 +366,7 @@ class ProcessTracker:
             reverse=True,
         )
         return [
-            (pid, self.names[pid], self.get_color(pid), list(self.series[pid]))
+            (pid, self.names[pid], self._color_for(pid), list(self.series[pid]))
             for pid in sorted_pids
             if max(self.series[pid]) > 0
         ]
@@ -395,7 +396,7 @@ class ProcessTracker:
         top = sorted_pids[:n]
         rest = sorted_pids[n:]
         result = [
-            (pid, self.names[pid], self.get_color(pid), list(self.series[pid]))
+            (pid, self.names[pid], self._color_for(pid), list(self.series[pid]))
             for pid in top
             if max(self.series[pid]) > 0
         ]
@@ -438,7 +439,7 @@ def _pcie_worker(conn, gpu_idx):
 
 
 def _main_worker(conn, gpu_count, interval_sec):
-    """Subprocess: CPU + GPU mem/util/temp + network (5/s)."""
+    """Subprocess: CPU + GPU mem/util + network at 5/s; temperature at 1/s."""
     import psutil as _ps
     import pynvml as _nvml
 
@@ -447,6 +448,10 @@ def _main_worker(conn, gpu_count, interval_sec):
     _ps.cpu_percent(interval=None)
     prev_net = _ps.net_io_counters()
     last_mono = time.monotonic()
+    # Temperature changes slowly; sample at ~1/s by collecting every temp_every-th cycle.
+    temp_every = max(1, round(1.0 / (1.0 * interval_sec)))
+    cycle = 0
+    prev_temps: list[float] = [0.0] * gpu_count
     while True:
         now = time.time()
         mono = time.monotonic()
@@ -454,8 +459,9 @@ def _main_worker(conn, gpu_count, interval_sec):
         if dt <= 0:
             dt = interval_sec
         cpu = _ps.cpu_percent(interval=None)
+        collect_temp = cycle % temp_every == 0
         gpu_data = []
-        for h in handles:
+        for gi, h in enumerate(handles):
             proc_mem: dict[int, float] = {}
             for getter in (
                 _nvml.nvmlDeviceGetComputeRunningProcesses,
@@ -471,24 +477,26 @@ def _main_worker(conn, gpu_count, interval_sec):
                 util = _nvml.nvmlDeviceGetUtilizationRates(h).gpu
             except _nvml.NVMLError:
                 util = 0.0
-            try:
-                temp = float(
-                    _nvml.nvmlDeviceGetTemperature(h, _nvml.NVML_TEMPERATURE_GPU)
-                )
-            except _nvml.NVMLError:
-                temp = 0.0
-            gpu_data.append((proc_mem, util, temp))
+            if collect_temp:
+                try:
+                    prev_temps[gi] = float(
+                        _nvml.nvmlDeviceGetTemperature(h, _nvml.NVML_TEMPERATURE_GPU)
+                    )
+                except _nvml.NVMLError:
+                    pass
+            gpu_data.append((proc_mem, util, prev_temps[gi]))
         net = _ps.net_io_counters()
         sent_rate = (net.bytes_sent - prev_net.bytes_sent) / (1024 * 1024) / dt
         recv_rate = (net.bytes_recv - prev_net.bytes_recv) / (1024 * 1024) / dt
         prev_net = net
         last_mono = mono
         conn.send(("main", now, cpu, gpu_data, sent_rate, recv_rate))
+        cycle += 1
         time.sleep(interval_sec)
 
 
 def _disk_worker(conn, interval_sec):
-    """Subprocess: disk I/O per process (2/s)."""
+    """Subprocess: disk I/O per process (1/s)."""
     import psutil as _ps
 
     prev_proc_io: dict[int, int] = {}
@@ -527,19 +535,16 @@ class MetricsCollector:
         disk_interval_ms: int = 500,
         pcie_rate_hz: int = 10,
         top_n: int = 10,
-        fill_patterns: bool = False,
     ):
         self.lock = threading.Lock()
         maxlen_main = int(window_sec * 1000 / main_interval_ms)
         maxlen_pcie = window_sec * pcie_rate_hz
         maxlen_disk = int(window_sec * 1000 / disk_interval_ms)
         self.top_n = top_n
-        self.fill_patterns = fill_patterns
         # Main group: CPU + GPU mem/util/temp + network (5/s)
         self.ts_main: deque[float] = deque(maxlen=maxlen_main)
         self.counter_main: int = 0
         self.cpu_pct: deque[float] = deque(maxlen=maxlen_main)
-        self._gpu_color_map = SharedColorMap()
         self.proc_gpu_mem: list[ProcessTracker] = []
         self.gpu_util: list[deque[float]] = []
         self.net_sent_mbps: deque[float] = deque(maxlen=maxlen_main)
@@ -569,11 +574,7 @@ class MetricsCollector:
                 self.gpu_names.append(name)
                 mem = pynvml.nvmlDeviceGetMemoryInfo(handle)
                 self.gpu_mem_total_gib.append(mem.total / (1024**3))
-                self.proc_gpu_mem.append(
-                    ProcessTracker(
-                        maxlen_main, prune=False, shared_colors=self._gpu_color_map
-                    )
-                )
+                self.proc_gpu_mem.append(ProcessTracker(maxlen_main, prune=False))
                 self.gpu_util.append(deque(maxlen=maxlen_main))
                 self.gpu_pcie_tx.append(deque(maxlen=maxlen_pcie))
                 self.gpu_pcie_rx.append(deque(maxlen=maxlen_pcie))
@@ -589,6 +590,81 @@ class MetricsCollector:
                 self.has_pcie = True
             except pynvml.NVMLError:
                 self.has_pcie = False
+
+    def save_state(self):
+        """Persist all time-series data to disk so a restart doesn't lose history."""
+        with self.lock:
+            state = {
+                "ts_main": list(self.ts_main),
+                "counter_main": self.counter_main,
+                "cpu_pct": list(self.cpu_pct),
+                "net_sent_mbps": list(self.net_sent_mbps),
+                "net_recv_mbps": list(self.net_recv_mbps),
+                "ts_pcie": [list(d) for d in self.ts_pcie],
+                "counter_pcie": self.counter_pcie[:],
+                "gpu_pcie_tx": [list(d) for d in self.gpu_pcie_tx],
+                "gpu_pcie_rx": [list(d) for d in self.gpu_pcie_rx],
+                "ts_disk": list(self.ts_disk),
+                "counter_disk": self.counter_disk,
+                "gpu_util": [list(d) for d in self.gpu_util],
+                "gpu_temp": [list(d) for d in self.gpu_temp],
+                "proc_gpu_mem": [t.to_dict() for t in self.proc_gpu_mem],
+                "proc_disk_io": self.proc_disk_io.to_dict(),
+                "gpu_count": self.gpu_count,
+                "saved_at": time.time(),
+            }
+        CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        tmp = CACHE_FILE.with_suffix(".tmp")
+        tmp.write_text(json.dumps(state))
+        tmp.rename(CACHE_FILE)
+        print(f"[save] metrics saved to {CACHE_FILE}", flush=True)
+
+    def load_state(self):
+        """Restore time-series data from a previous run, if available."""
+        if not CACHE_FILE.exists():
+            return
+        try:
+            state = json.loads(CACHE_FILE.read_text())
+        except (json.JSONDecodeError, OSError) as e:
+            print(f"[load] failed to read cache: {e}", flush=True)
+            return
+        if state.get("gpu_count") != self.gpu_count:
+            print(
+                f"[load] GPU count mismatch (cached={state.get('gpu_count')}, "
+                f"current={self.gpu_count}), ignoring cache",
+                flush=True,
+            )
+            return
+        age = time.time() - state.get("saved_at", 0)
+        print(
+            f"[load] restoring metrics from {CACHE_FILE} (saved {age:.0f}s ago)",
+            flush=True,
+        )
+        with self.lock:
+            ml_main = self.ts_main.maxlen
+            ml_pcie = self.ts_pcie[0].maxlen if self.ts_pcie else 0
+            ml_disk = self.ts_disk.maxlen
+            self.ts_main = deque(state["ts_main"], maxlen=ml_main)
+            self.counter_main = state["counter_main"]
+            self.cpu_pct = deque(state["cpu_pct"], maxlen=ml_main)
+            self.net_sent_mbps = deque(state["net_sent_mbps"], maxlen=ml_main)
+            self.net_recv_mbps = deque(state["net_recv_mbps"], maxlen=ml_main)
+            for gi in range(self.gpu_count):
+                self.ts_pcie[gi] = deque(state["ts_pcie"][gi], maxlen=ml_pcie)
+                self.counter_pcie[gi] = state["counter_pcie"][gi]
+                self.gpu_pcie_tx[gi] = deque(state["gpu_pcie_tx"][gi], maxlen=ml_pcie)
+                self.gpu_pcie_rx[gi] = deque(state["gpu_pcie_rx"][gi], maxlen=ml_pcie)
+                self.gpu_util[gi] = deque(state["gpu_util"][gi], maxlen=ml_main)
+                self.gpu_temp[gi] = deque(state["gpu_temp"][gi], maxlen=ml_main)
+                self.proc_gpu_mem[gi].load_dict(state["proc_gpu_mem"][gi])
+            self.ts_disk = deque(state["ts_disk"], maxlen=ml_disk)
+            self.counter_disk = state["counter_disk"]
+            self.proc_disk_io.load_dict(state["proc_disk_io"])
+        print(
+            f"[load] restored {len(self.ts_main)} main samples, "
+            f"{len(self.ts_disk)} disk samples",
+            flush=True,
+        )
 
     def ingest_pcie(self, now: float, gpu_idx: int, tx_val: float, rx_val: float):
         """Store PCIe data for one GPU received from its worker process."""
@@ -737,6 +813,20 @@ class MetricsCollector:
             for di, (p, n, c, v) in enumerate(disk_io_full):
                 disk_io.append({"pid": p, "name": n, "color": c, "vals": disk_ds[di]})
 
+            # Build compact GPU summary like "[2x RTX 6000 Ada]"
+            gpu_summary = ""
+            if self.gpu_names:
+                from collections import Counter
+
+                counts = Counter(self.gpu_names)
+                parts = []
+                for name, cnt in counts.items():
+                    short = (
+                        name.replace("NVIDIA ", "").replace("Generation", "").strip()
+                    )
+                    parts.append(f"{cnt}x {short}" if cnt > 1 else short)
+                gpu_summary = "[" + ", ".join(parts) + "]"
+
             return {
                 "type": "init",
                 "counter_main": self.counter_main,
@@ -746,11 +836,11 @@ class MetricsCollector:
                 "ts_pcie": ts_pcie_per_gpu,
                 "ts_disk": ts_disk_ds,
                 "hostname": os.uname().nodename,
+                "gpu_summary": gpu_summary,
                 "gpu_count": self.gpu_count,
                 "gpu_names": self.gpu_names,
                 "gpu_mem_total_gib": self.gpu_mem_total_gib,
                 "has_pcie": self.has_pcie,
-                "fill_patterns": self.fill_patterns,
                 "gpu_mem": gpu_mem_per_gpu,
                 "gpu_util": ds_gpu_util,
                 "gpu_temp": ds_gpu_temp,
@@ -861,7 +951,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>GPU Monitor</title>
+<title>DynamoGPUMonitor</title>
 <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
 <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
 <style>
@@ -881,7 +971,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
 </head>
 <body>
 <div id="toolbar">
-  <h1>System Monitor</h1>
+  <h1>DynamoGPUMonitor</h1>
   <div>
     <button class="btn range-btn" data-min="1">1m</button>
     <button class="btn range-btn active" data-min="2">2m</button>
@@ -1087,8 +1177,10 @@ HTML_PAGE = r"""<!DOCTYPE html>
       Plotly.relayout(gd, upd).then(function() { syncing = false; });
     }
     if (msg.hostname) {
-      document.querySelector('#toolbar h1').textContent = 'System Monitor - ' + msg.hostname;
-      document.title = 'System Monitor - ' + msg.hostname;
+      const gpuTag = msg.gpu_summary ? ' ' + msg.gpu_summary : '';
+      const title = 'DynamoGPUMonitor - ' + msg.hostname + gpuTag;
+      document.querySelector('#toolbar h1').textContent = title;
+      document.title = title;
     }
     if (viewMinutes > 0) {
       document.getElementById('status').textContent = 'Live';
@@ -1106,9 +1198,14 @@ HTML_PAGE = r"""<!DOCTYPE html>
     if (Array.isArray(msg.counter_pcie)) cur_srv_pcie = msg.counter_pcie;
     cur_srv_disk = msg.counter_disk || cur_srv_disk;
 
-    const gpuKeysChanged = JSON.stringify(msg.gpu_mem_keys) !== JSON.stringify(config._last_gpu_keys);
-    const diskKeysChanged = JSON.stringify(msg.disk_keys) !== JSON.stringify(config._last_disk_keys);
-    if (gpuKeysChanged || diskKeysChanged) {
+    function sameKeySet(a, b) {
+      if (!a || !b || a.length !== b.length) return false;
+      const sa = JSON.stringify(a.map(x => Array.isArray(x) ? x.slice().sort() : x));
+      const sb = JSON.stringify(b.map(x => Array.isArray(x) ? x.slice().sort() : x));
+      return sa === sb;
+    }
+    if (!sameKeySet(msg.gpu_mem_keys, config._last_gpu_keys) ||
+        !sameKeySet([msg.disk_keys], [config._last_disk_keys])) {
       socket.emit('request_init');
       return;
     }
@@ -1262,10 +1359,8 @@ HTML_PAGE = r"""<!DOCTYPE html>
     const netYIdx = nRows + pcieYIdxPerGpu_mem.length + tempYIdxPerGpu.length + 1;
     const netY = 'y' + netYIdx;
     const diskData = msg.disk_io;
-    const diskPatterns = ['/', '\\', 'x', '+', '-', '|', '.', ''];
     for (let i = 0; i < diskData.length; i++) {
       const d = diskData[i];
-      const diskPatIdx = Math.abs(d.pid) % diskPatterns.length;
       traceMap['disk_' + d.pid] = traceCount++;
       const dTrace = {
         x: times_disk, y: d.vals, name: d.name, type: 'scatter', mode: 'lines',
@@ -1274,9 +1369,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
         xaxis: xax(diskRow), yaxis: yax(diskRow),
         legendgroup: 'disk_io', legendgrouptitle: {text: 'Disk I/O'}, legend: sysLegName,
       };
-      if (msg.fill_patterns) {
-        dTrace.fillpattern = {shape: diskPatterns[diskPatIdx], solidity: 0.15, size: 8, bgcolor: hexToRgba(d.color, 0.55), fgcolor: 'rgba(13,13,20,0.4)'};
-      }
+      
       traces.push(dTrace);
     }
     // Network I/O overlaid
@@ -1718,6 +1811,16 @@ def build_server(collector: MetricsCollector, args):
     def handle_view_minutes(vm):
         ui_state["view_minutes"] = int(vm)
 
+    # Push interval and thinning step per zoom level (view_minutes).
+    # Wider views push less often and thin more aggressively.
+    _PUSH_POLICY = {
+        1: (0.075, 1),
+        2: (0.100, 1),
+        5: (0.200, 2),
+        10: (0.500, 4),
+        15: (1.000, 8),
+    }
+
     def push_loop():
         """Background thread that pushes deltas to all clients."""
         last_main = 0
@@ -1725,14 +1828,7 @@ def build_server(collector: MetricsCollector, args):
         last_disk = 0
         while True:
             vm = ui_state.get("view_minutes", 2)
-            if vm <= 2:
-                push_sec = args.push_interval / 1000.0
-            elif vm <= 5:
-                push_sec = 0.5
-            elif vm <= 10:
-                push_sec = 1.0
-            else:
-                push_sec = 2.0
+            push_sec, step = _PUSH_POLICY.get(vm, (0.100, 1))
             time.sleep(push_sec)
             with collector.lock:
                 cm = collector.counter_main
@@ -1741,14 +1837,6 @@ def build_server(collector: MetricsCollector, args):
             if cm <= last_main and cp == last_pcie and cd <= last_disk:
                 continue
             try:
-                if vm <= 2:
-                    step = 1
-                elif vm <= 5:
-                    step = 4
-                elif vm <= 10:
-                    step = 8
-                else:
-                    step = 12
                 delta = collector.snapshot_delta(
                     last_main, last_pcie, last_disk, step=step
                 )
@@ -1776,7 +1864,7 @@ def main():
         f"PCIe collect : 10/s ({gpu_count} subprocess{'es' if gpu_count != 1 else ''})"
     )
     print(f"Disk collect : {args.disk_interval}ms (disk I/O per process)")
-    print(f"Push interval: {args.push_interval}ms")
+    print("Push interval: dynamic (75ms@1m .. 1000ms@15m)")
     print(
         f"Rolling window  : {args.window}s ({args.window // 60}m {args.window % 60}s)"
     )
@@ -1798,8 +1886,8 @@ def main():
         main_interval_ms=args.main_interval,
         disk_interval_ms=args.disk_interval,
         top_n=args.top_n,
-        fill_patterns=args.fill_patterns,
     )
+    collector.load_state()
 
     app, socketio, ui_state, push_loop = build_server(collector, args)
 
@@ -1853,6 +1941,15 @@ def main():
         w.start()
     threading.Thread(target=_poll_pipes, daemon=True).start()
     threading.Thread(target=push_loop, daemon=True).start()
+
+    def _shutdown(signum, _frame):
+        name = signal.Signals(signum).name
+        print(f"\n[{name}] saving metrics before exit...", flush=True)
+        collector.save_state()
+        raise SystemExit(0)
+
+    signal.signal(signal.SIGINT, _shutdown)
+    signal.signal(signal.SIGTERM, _shutdown)
 
     print(f"Open http://{args.host}:{args.port} in your browser")
     socketserver.TCPServer.allow_reuse_address = True
