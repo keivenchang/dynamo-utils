@@ -1127,7 +1127,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
     }
   }
 
-  const socket = io({transports: ['polling'], reconnection: true, reconnectionDelay: 500, reconnectionAttempts: Infinity, timeout: 60000});
+  const socket = io({transports: ['websocket', 'polling'], reconnection: true, reconnectionDelay: 500, reconnectionAttempts: Infinity, timeout: 60000});
 
   socket.on('connect', function() {
     document.getElementById('status').textContent = 'Connected. Waiting for data...';
@@ -1322,7 +1322,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
         traces.push({
           x: times_main, y: msg.gpu_util[gi], name: 'GPU ' + gi + ' Util', type: 'scatter',
           line: {color: uColor, width: 2}, fill: 'tozeroy',
-          fillcolor: hexToRgba(uColor, 0.25),
+          fillcolor: hexToRgba(uColor, 0.65),
           xaxis: xax(utilRow), yaxis: yax(utilRow),
           legendgroup: 'util_' + gi, legendgrouptitle: {text: 'GPU ' + gi + ' Util'}, legend: gpuLeg,
         });
