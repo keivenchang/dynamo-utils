@@ -8,7 +8,7 @@ Real-time GPU/CPU/Disk/Network monitor.
 Architecture (multiprocess, bypasses GIL):
   - 1 subprocess per GPU: PCIe TX/RX sampling at 10/s
   - 1 subprocess: CPU + GPU mem/util/temp + network at 5/s
-  - 1 subprocess: disk I/O per process at 2/s
+  - 1 subprocess: aggregate disk I/O at 1/s
   - Main process: poll pipes, push deltas via WebSocket
 
 Backend: Flask + flask-socketio. Frontend: Plotly.js + requestAnimationFrame.
@@ -17,8 +17,8 @@ Chart rows per GPU:
   1. GPU Memory by Process (GiB, stacked) + PCIe (GB/s, secondary y-axis)
   2. GPU Util (%) + Temperature (C, secondary y-axis)
 Then:
-  3. CPU Usage (%)
-  4. Disk I/O (MB/s, stacked) + Network (MB/s, secondary y-axis)
+  3. CPU Usage by Process Group (%, stacked top-5) + total CPU line
+  4. Disk I/O (MB/s, aggregate) + Network (MB/s, secondary y-axis)
 
 Usage:
     python3 gpu_monitor.py [--port 8051] [--host 0.0.0.0]
@@ -71,7 +71,6 @@ PROCESS_COLORS = [
     "#ff8a80",  # coral
 ]
 OTHER_COLOR = "#9e9e9e"
-DISK_SCAN_EVERY = 10
 CACHE_DIR = Path.home() / ".cache" / "gpu_monitor"
 CACHE_FILE = CACHE_DIR / "metrics.json"
 
@@ -116,27 +115,39 @@ def _resolve_process_name(pid: int) -> str:
 
         # VLLM EngineCore: walk parent chain for model name + launch script
         if proc_name == "VLLM::EngineCore" or "EngineCore" in full_cmd:
-            model, script = _vllm_context(proc)
+            model, script, test = _gpu_process_context(proc)
             parts = ["VLLM::EngineCore"]
             if model:
                 parts.append(model)
-            if script:
+            if test:
+                parts.append(test)
+            elif script:
                 parts.append(script)
             parts.append(f"PID={pid}")
             return ", ".join(parts)
 
-        # SGLang, TRT-LLM, or other GPU processes with custom names
-        if (
+        # SGLang, TRT-LLM, mpi4py, orted — walk ancestry for context
+        is_infra = (
             "sglang" in proc_name.lower()
             or "sglang" in full_cmd.lower()
             or "trtllm" in proc_name.lower()
             or "trtllm" in full_cmd.lower()
-        ):
-            model, script = _gpu_process_context(proc)
-            parts = [proc_name]
+            or "mpi4py" in full_cmd.lower()
+            or "orted" in proc_name.lower()
+        )
+        if is_infra:
+            model, script, test = _gpu_process_context(proc)
+            label = proc_name
+            if "mpi4py" in full_cmd.lower():
+                label = "TRT-LLM/MPI"
+            elif "orted" in proc_name.lower():
+                label = "TRT-LLM/orted"
+            parts = [label]
             if model:
                 parts.append(model)
-            if script:
+            if test:
+                parts.append(test)
+            elif script:
                 parts.append(script)
             parts.append(f"PID={pid}")
             return ", ".join(parts)
@@ -149,17 +160,24 @@ def _resolve_process_name(pid: int) -> str:
             if "node" in full_cmd:
                 return f"Docker/Cursor:{pid}"
 
-        # Python with dynamo module: extract module + model context
+        # Python with dynamo module: extract module + model + test context
         if cmdline and os.path.basename(cmdline[0]).startswith("python"):
             if len(cmdline) > 1 and "-m" in cmdline:
                 m_idx = cmdline.index("-m")
                 if m_idx + 1 < len(cmdline):
                     module = cmdline[m_idx + 1]
                     model = _extract_arg(cmdline, "--model")
+                    if not model:
+                        model = _extract_arg(cmdline, "--served-model-name")
                     short_model = os.path.basename(model) if model else ""
+                    _, _, test = _gpu_process_context(proc)
+                    parts = [module]
                     if short_model:
-                        return f"{module}, {short_model}, PID={pid}"
-                    return f"{module}, PID={pid}"
+                        parts.append(short_model)
+                    if test:
+                        parts.append(test)
+                    parts.append(f"PID={pid}")
+                    return ", ".join(parts)
             if len(cmdline) > 1:
                 script = os.path.basename(cmdline[1])
                 if len(script) > 25:
@@ -176,53 +194,39 @@ def _resolve_process_name(pid: int) -> str:
         return f"pid:{pid}"
 
 
-def _gpu_process_context(proc) -> tuple[str, str]:
-    """Walk parent chain of any GPU process to find model name and launch script."""
+def _gpu_process_context(proc) -> tuple[str, str, str]:
+    """Walk parent chain to find model name, launch script, and test name."""
     model = ""
     script = ""
+    test = ""
     try:
         for ancestor in proc.parents():
             acmd = ancestor.cmdline()
             if not acmd:
                 continue
             if not model:
-                m = _extract_arg(acmd, "--model")
-                if m:
-                    model = os.path.basename(m)
+                for flag in ("--model", "--model-path", "--served-model-name"):
+                    m = _extract_arg(acmd, flag)
+                    if m:
+                        model = os.path.basename(m)
+                        break
             if not script:
                 for arg in acmd:
                     if arg.endswith(".sh"):
                         script = os.path.basename(arg)
                         break
-            if model and script:
+            if not test:
+                full = " ".join(acmd)
+                if "pytest" in full or "py.test" in full:
+                    for arg in acmd:
+                        if "::" in arg and ".py" in arg:
+                            test = arg.split("::")[-1]
+                            break
+            if model and script and test:
                 break
     except (psutil.NoSuchProcess, psutil.AccessDenied):
         pass
-    return model, script
-
-
-def _vllm_context(proc) -> tuple[str, str]:
-    """Walk parent chain of a VLLM::EngineCore to find model name and launch script."""
-    model = ""
-    script = ""
-    try:
-        parent = proc.parent()
-        if parent:
-            pcmd = parent.cmdline()
-            m = _extract_arg(pcmd, "--model")
-            if m:
-                model = os.path.basename(m)
-            grandparent = parent.parent()
-            if grandparent:
-                gcmd = grandparent.cmdline()
-                if gcmd:
-                    for arg in gcmd:
-                        if arg.endswith(".sh"):
-                            script = os.path.basename(arg)
-                            break
-    except (psutil.NoSuchProcess, psutil.AccessDenied):
-        pass
-    return model, script
+    return model, script, test
 
 
 def _extract_arg(cmdline: list[str], flag: str) -> str:
@@ -439,13 +443,16 @@ def _pcie_worker(conn, gpu_idx):
 
 
 def _main_worker(conn, gpu_count, interval_sec):
-    """Subprocess: CPU + GPU mem/util + network at 5/s; temperature at 1/s."""
+    """Subprocess: CPU (overall + per-name groups) + GPU mem/util + network at 5/s; temperature at 1/s."""
     import psutil as _ps
     import pynvml as _nvml
 
     _nvml.nvmlInit()
     handles = [_nvml.nvmlDeviceGetHandleByIndex(i) for i in range(gpu_count)]
     _ps.cpu_percent(interval=None)
+    # Prime per-process cpu_percent so subsequent calls return real deltas
+    list(_ps.process_iter(["name", "cpu_percent"]))
+    ncpus = _ps.cpu_count() or 1
     prev_net = _ps.net_io_counters()
     last_mono = time.monotonic()
     # Temperature changes slowly; sample at ~1/s by collecting every temp_every-th cycle.
@@ -459,6 +466,18 @@ def _main_worker(conn, gpu_count, interval_sec):
         if dt <= 0:
             dt = interval_sec
         cpu = _ps.cpu_percent(interval=None)
+        # Per-process CPU grouped by name, normalised to total CPU capacity (0-100%)
+        cpu_by_name: dict[str, float] = {}
+        for p in _ps.process_iter(["name", "cpu_percent"]):
+            try:
+                name = p.info["name"] or "?"
+                pct = p.info["cpu_percent"] or 0.0
+                if pct > 0:
+                    cpu_by_name[name] = cpu_by_name.get(name, 0.0) + pct
+            except (_ps.NoSuchProcess, _ps.AccessDenied):
+                continue
+        for k in cpu_by_name:
+            cpu_by_name[k] /= ncpus
         collect_temp = cycle % temp_every == 0
         gpu_data = []
         for gi, h in enumerate(handles):
@@ -490,16 +509,16 @@ def _main_worker(conn, gpu_count, interval_sec):
         recv_rate = (net.bytes_recv - prev_net.bytes_recv) / (1024 * 1024) / dt
         prev_net = net
         last_mono = mono
-        conn.send(("main", now, cpu, gpu_data, sent_rate, recv_rate))
+        conn.send(("main", now, cpu, gpu_data, sent_rate, recv_rate, cpu_by_name))
         cycle += 1
         time.sleep(interval_sec)
 
 
 def _disk_worker(conn, interval_sec):
-    """Subprocess: disk I/O per process (1/s)."""
+    """Subprocess: aggregate disk I/O (1/s)."""
     import psutil as _ps
 
-    prev_proc_io: dict[int, int] = {}
+    prev = _ps.disk_io_counters()
     last_mono = time.monotonic()
     while True:
         now = time.time()
@@ -507,23 +526,12 @@ def _disk_worker(conn, interval_sec):
         dt = mono - last_mono
         if dt <= 0:
             dt = interval_sec
-        rates: dict[int, float] = {}
-        current_io: dict[int, int] = {}
-        for proc in _ps.process_iter(["pid"]):
-            pid = proc.info["pid"]
-            try:
-                io = proc.io_counters()
-                total = io.read_bytes + io.write_bytes
-                current_io[pid] = total
-                if pid in prev_proc_io:
-                    delta = total - prev_proc_io[pid]
-                    if delta > 0:
-                        rates[pid] = delta / (1024 * 1024) / dt
-            except (_ps.NoSuchProcess, _ps.AccessDenied, _ps.ZombieProcess):
-                continue
-        prev_proc_io = current_io
+        cur = _ps.disk_io_counters()
+        read_mbps = (cur.read_bytes - prev.read_bytes) / (1024 * 1024) / dt
+        write_mbps = (cur.write_bytes - prev.write_bytes) / (1024 * 1024) / dt
+        prev = cur
         last_mono = mono
-        conn.send(("disk", now, rates))
+        conn.send(("disk", now, read_mbps, write_mbps))
         time.sleep(interval_sec)
 
 
@@ -555,11 +563,16 @@ class MetricsCollector:
         self.gpu_pcie_tx: list[deque[float]] = []
         self.gpu_pcie_rx: list[deque[float]] = []
         self.has_pcie = False
-        # Disk group: disk I/O (2/s)
+        # CPU process groups (top-5 by name, same rate as main)
+        self.proc_cpu = ProcessTracker(maxlen_main, prune=True)
+        self._cpu_name_to_id: dict[str, int] = {}
+        self._cpu_next_id: int = 1
+        self._cpu_top_n: int = 5
+        # Disk group: aggregate disk I/O (1/s)
         self.ts_disk: deque[float] = deque(maxlen=maxlen_disk)
         self.counter_disk: int = 0
-        self.proc_disk_io = ProcessTracker(maxlen_disk, prune=True)
-        self._last_disk_rates: dict[int, float] = {}
+        self.disk_read_mbps: deque[float] = deque(maxlen=maxlen_disk)
+        self.disk_write_mbps: deque[float] = deque(maxlen=maxlen_disk)
         # GPU info
         self.gpu_count = 0
         self.gpu_names: list[str] = []
@@ -598,6 +611,9 @@ class MetricsCollector:
                 "ts_main": list(self.ts_main),
                 "counter_main": self.counter_main,
                 "cpu_pct": list(self.cpu_pct),
+                "proc_cpu": self.proc_cpu.to_dict(),
+                "_cpu_name_to_id": self._cpu_name_to_id,
+                "_cpu_next_id": self._cpu_next_id,
                 "net_sent_mbps": list(self.net_sent_mbps),
                 "net_recv_mbps": list(self.net_recv_mbps),
                 "ts_pcie": [list(d) for d in self.ts_pcie],
@@ -606,10 +622,11 @@ class MetricsCollector:
                 "gpu_pcie_rx": [list(d) for d in self.gpu_pcie_rx],
                 "ts_disk": list(self.ts_disk),
                 "counter_disk": self.counter_disk,
+                "disk_read_mbps": list(self.disk_read_mbps),
+                "disk_write_mbps": list(self.disk_write_mbps),
                 "gpu_util": [list(d) for d in self.gpu_util],
                 "gpu_temp": [list(d) for d in self.gpu_temp],
                 "proc_gpu_mem": [t.to_dict() for t in self.proc_gpu_mem],
-                "proc_disk_io": self.proc_disk_io.to_dict(),
                 "gpu_count": self.gpu_count,
                 "saved_at": time.time(),
             }
@@ -647,6 +664,10 @@ class MetricsCollector:
             self.ts_main = deque(state["ts_main"], maxlen=ml_main)
             self.counter_main = state["counter_main"]
             self.cpu_pct = deque(state["cpu_pct"], maxlen=ml_main)
+            if "proc_cpu" in state:
+                self.proc_cpu.load_dict(state["proc_cpu"])
+                self._cpu_name_to_id = state.get("_cpu_name_to_id", {})
+                self._cpu_next_id = state.get("_cpu_next_id", 1)
             self.net_sent_mbps = deque(state["net_sent_mbps"], maxlen=ml_main)
             self.net_recv_mbps = deque(state["net_recv_mbps"], maxlen=ml_main)
             for gi in range(self.gpu_count):
@@ -659,7 +680,9 @@ class MetricsCollector:
                 self.proc_gpu_mem[gi].load_dict(state["proc_gpu_mem"][gi])
             self.ts_disk = deque(state["ts_disk"], maxlen=ml_disk)
             self.counter_disk = state["counter_disk"]
-            self.proc_disk_io.load_dict(state["proc_disk_io"])
+            if "disk_read_mbps" in state:
+                self.disk_read_mbps = deque(state["disk_read_mbps"], maxlen=ml_disk)
+                self.disk_write_mbps = deque(state["disk_write_mbps"], maxlen=ml_disk)
         print(
             f"[load] restored {len(self.ts_main)} main samples, "
             f"{len(self.ts_disk)} disk samples",
@@ -674,6 +697,13 @@ class MetricsCollector:
             self.gpu_pcie_tx[gpu_idx].append(tx_val)
             self.gpu_pcie_rx[gpu_idx].append(rx_val)
 
+    def _cpu_name_id(self, name: str) -> int:
+        """Stable synthetic ID for a process-name group."""
+        if name not in self._cpu_name_to_id:
+            self._cpu_name_to_id[name] = self._cpu_next_id
+            self._cpu_next_id += 1
+        return self._cpu_name_to_id[name]
+
     def ingest_main(
         self,
         now: float,
@@ -681,16 +711,31 @@ class MetricsCollector:
         gpu_data: list[tuple[dict, float, float]],
         sent_rate: float,
         recv_rate: float,
+        cpu_by_name: dict[str, float] | None = None,
     ):
         """Store CPU + GPU mem/util/temp + network (main group, 5/s)."""
         gpu_names: list[dict[int, str]] = []
         for i, (gpu_proc_mem, _, _) in enumerate(gpu_data):
             new = self.proc_gpu_mem[i].new_pids(gpu_proc_mem)
             gpu_names.append({pid: _resolve_process_name(pid) for pid in new})
+        # Convert cpu_by_name (str->float) to synthetic-id->float for ProcessTracker
+        cpu_id_data: dict[int, float] = {}
+        cpu_id_names: dict[int, str] = {}
+        if cpu_by_name:
+            for name, pct in cpu_by_name.items():
+                sid = self._cpu_name_id(name)
+                cpu_id_data[sid] = pct
+                cpu_id_names[sid] = name
         with self.lock:
             self.ts_main.append(now)
             self.counter_main += 1
             self.cpu_pct.append(cpu)
+            self.proc_cpu.record(
+                cpu_id_data,
+                lambda sid: cpu_id_names.get(sid, f"pid:{sid}"),
+                now,
+                pre_resolved=cpu_id_names,
+            )
             for i, (gpu_proc_mem, util, temp) in enumerate(gpu_data):
                 self.proc_gpu_mem[i].record(
                     gpu_proc_mem,
@@ -710,24 +755,13 @@ class MetricsCollector:
                 alpha_net * recv_rate + (1 - alpha_net) * prev_recv
             )
 
-    def ingest_disk(self, now: float, disk_rates: dict):
-        """Store disk IO per process (disk group, 2/s)."""
-        alpha = 0.2
-        for pid, rate in disk_rates.items():
-            prev = self._last_disk_rates.get(pid, rate)
-            disk_rates[pid] = alpha * rate + (1 - alpha) * prev
-        disk_new = self.proc_disk_io.new_pids(disk_rates)
-        disk_names = {pid: _resolve_process_name(pid) for pid in disk_new}
+    def ingest_disk(self, now: float, read_mbps: float, write_mbps: float):
+        """Store aggregate disk I/O (1/s)."""
         with self.lock:
             self.ts_disk.append(now)
             self.counter_disk += 1
-            self._last_disk_rates = disk_rates
-            self.proc_disk_io.record(
-                self._last_disk_rates,
-                _resolve_process_name,
-                now,
-                pre_resolved=disk_names,
-            )
+            self.disk_read_mbps.append(read_mbps)
+            self.disk_write_mbps.append(write_mbps)
 
     @staticmethod
     def _downsample_init(times, arrays, max_recent=1000, max_total=1500):
@@ -751,8 +785,13 @@ class MetricsCollector:
     def snapshot_full(self) -> dict:
         """Return full state for initial browser load (downsampled for browser perf)."""
         with self.lock:
-            # --- Main group: CPU + GPU mem/util/temp + network ---
+            # --- Main group: CPU + CPU procs + GPU mem/util/temp + network ---
             main_vals = [list(self.cpu_pct)]
+            cpu_procs_full = self.proc_cpu.get_top_sorted(
+                self._cpu_top_n, sort_by="total"
+            )
+            for _, _, _, v in cpu_procs_full:
+                main_vals.append(v)
             gpu_mem_per_gpu_full = []
             for gi in range(self.gpu_count):
                 procs = self.proc_gpu_mem[gi].get_top_sorted(self.top_n)
@@ -769,6 +808,12 @@ class MetricsCollector:
             midx = 0
             ds_cpu = main_ds[midx]
             midx += 1
+            cpu_procs = []
+            for p, n, c, v in cpu_procs_full:
+                cpu_procs.append(
+                    {"id": p, "name": n, "color": c, "vals": main_ds[midx]}
+                )
+                midx += 1
             gpu_mem_per_gpu = []
             for gi in range(self.gpu_count):
                 ds_procs = []
@@ -805,13 +850,11 @@ class MetricsCollector:
                     ds_pcie_tx.append(vals_ds[0])
                     ds_pcie_rx.append(vals_ds[1])
 
-            # --- Disk group ---
-            disk_io_full = self.proc_disk_io.get_top_sorted(5, sort_by="total")
-            disk_vals = [v for _, _, _, v in disk_io_full]
+            # --- Disk group (aggregate) ---
+            disk_vals = [list(self.disk_read_mbps), list(self.disk_write_mbps)]
             ts_disk_ds, disk_ds = self._downsample_init(list(self.ts_disk), disk_vals)
-            disk_io = []
-            for di, (p, n, c, v) in enumerate(disk_io_full):
-                disk_io.append({"pid": p, "name": n, "color": c, "vals": disk_ds[di]})
+            ds_disk_read = disk_ds[0]
+            ds_disk_write = disk_ds[1]
 
             # Build compact GPU summary like "[2x RTX 6000 Ada]"
             gpu_summary = ""
@@ -847,9 +890,11 @@ class MetricsCollector:
                 "pcie_tx": ds_pcie_tx,
                 "pcie_rx": ds_pcie_rx,
                 "cpu": ds_cpu,
+                "cpu_procs": cpu_procs,
                 "net_sent": ds_net_sent,
                 "net_recv": ds_net_recv,
-                "disk_io": disk_io,
+                "disk_read": ds_disk_read,
+                "disk_write": ds_disk_write,
             }
 
     def snapshot_delta(
@@ -868,6 +913,17 @@ class MetricsCollector:
             sl_m = slice(main_idx, None, step)
             new_ts_main = list(self.ts_main)[sl_m]
             cpu = list(self.cpu_pct)[sl_m]
+            cpu_procs = self.proc_cpu.get_top_sorted(self._cpu_top_n, sort_by="total")
+            cpu_procs_delta = [
+                {
+                    "id": p,
+                    "name": n,
+                    "color": c,
+                    "vals": v[sl_m] if main_idx < len(v) else [],
+                }
+                for p, n, c, v in cpu_procs
+            ]
+            cpu_proc_keys = [p for p, _, _, _ in cpu_procs]
             gpu_mem_per_gpu = []
             gpu_mem_keys_per_gpu = []
             for gi in range(self.gpu_count):
@@ -905,13 +961,14 @@ class MetricsCollector:
                     pcie_tx.append(list(self.gpu_pcie_tx[i])[sl_p])
                     pcie_rx.append(list(self.gpu_pcie_rx[i])[sl_p])
 
-            # Disk group
+            # Disk group (aggregate)
             new_disk = self.counter_disk - since_disk
             disk_len = len(self.ts_disk)
             disk_idx = max(0, disk_len - new_disk) if new_disk > 0 else disk_len
             sl_d = slice(disk_idx, None, step)
             new_ts_disk = list(self.ts_disk)[sl_d]
-            disk_io = self.proc_disk_io.get_top_sorted(5, sort_by="total")
+            disk_read = list(self.disk_read_mbps)[sl_d]
+            disk_write = list(self.disk_write_mbps)[sl_d]
 
             return {
                 "type": "delta",
@@ -928,18 +985,12 @@ class MetricsCollector:
                 "pcie_tx": pcie_tx,
                 "pcie_rx": pcie_rx,
                 "cpu": cpu,
+                "cpu_procs": cpu_procs_delta,
+                "cpu_proc_keys": cpu_proc_keys,
                 "net_sent": net_sent,
                 "net_recv": net_recv,
-                "disk_io": [
-                    {
-                        "pid": p,
-                        "name": n,
-                        "color": c,
-                        "vals": v[sl_d] if disk_idx < len(v) else [],
-                    }
-                    for p, n, c, v in disk_io
-                ],
-                "disk_keys": [p for p, _, _, _ in disk_io],
+                "disk_read": disk_read,
+                "disk_write": disk_write,
             }
 
 
@@ -1025,6 +1076,15 @@ HTML_PAGE = r"""<!DOCTYPE html>
       // Main group
       if (tm.length > 0) {
         const times_m = tm.map(t => new Date(t * 1000));
+        // CPU process groups
+        for (let i = 0; i < (msg.cpu_procs || []).length; i++) {
+          const idx = traceMap['cpu_proc_' + msg.cpu_procs[i].id];
+          if (idx !== undefined) {
+            if (!mx[idx]) { mx[idx] = []; my[idx] = []; }
+            mx[idx].push(...times_m); my[idx].push(...msg.cpu_procs[i].vals);
+          }
+        }
+        // CPU total line
         const cpuIdx = traceMap['cpu'];
         if (cpuIdx !== undefined) {
           if (!mx[cpuIdx]) { mx[cpuIdx] = []; my[cpuIdx] = []; }
@@ -1079,14 +1139,16 @@ HTML_PAGE = r"""<!DOCTYPE html>
         }
       }
 
-      // Disk group
+      // Disk group (aggregate)
       if (td.length > 0) {
         const times_d = td.map(t => new Date(t * 1000));
-        for (let i = 0; i < (msg.disk_io || []).length; i++) {
-          const idx = traceMap['disk_' + msg.disk_io[i].pid];
-          if (idx !== undefined) {
-            if (!diskX[idx]) { diskX[idx] = []; diskY[idx] = []; }
-            diskX[idx].push(...times_d); diskY[idx].push(...msg.disk_io[i].vals);
+        const dtIdx = traceMap['disk_total'];
+        if (dtIdx !== undefined) {
+          if (!diskX[dtIdx]) { diskX[dtIdx] = []; diskY[dtIdx] = []; }
+          const dr = msg.disk_read || [], dw = msg.disk_write || [];
+          for (let k = 0; k < dr.length; k++) {
+            diskX[dtIdx].push(times_d[k]);
+            diskY[dtIdx].push(dr[k] + (dw[k] || 0));
           }
         }
       }
@@ -1205,7 +1267,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
       return sa === sb;
     }
     if (!sameKeySet(msg.gpu_mem_keys, config._last_gpu_keys) ||
-        !sameKeySet([msg.disk_keys], [config._last_disk_keys])) {
+        !sameKeySet([msg.cpu_proc_keys || []], [config._last_cpu_keys || []])) {
       socket.emit('request_init');
       return;
     }
@@ -1341,37 +1403,46 @@ HTML_PAGE = r"""<!DOCTYPE html>
       }
     }
 
-    // CPU row
+    // CPU row: overall line + stacked process groups
     row++;
     const cpuRow = row;
+    const cpuProcs = msg.cpu_procs || [];
+    // Stacked areas for process groups (bottom-to-top)
+    for (let i = cpuProcs.length - 1; i >= 0; i--) {
+      const cp = cpuProcs[i];
+      traceMap['cpu_proc_' + cp.id] = traceCount++;
+      traces.push({
+        x: times_main, y: cp.vals, name: cp.name, type: 'scatter', mode: 'none',
+        line: {width: 0, color: cp.color}, stackgroup: 'cpu_procs',
+        fillcolor: hexToRgba(cp.color, 0.55),
+        xaxis: xax(cpuRow), yaxis: yax(cpuRow),
+        legendgroup: 'cpu', legendgrouptitle: {text: 'CPU'}, legend: sysLegName,
+      });
+    }
+    // Overall CPU as thin dotted reference line
     traceMap['cpu'] = traceCount++;
     traces.push({
-      x: times_main, y: msg.cpu, name: 'CPU', type: 'scatter',
-      line: {color: '#ffcc00', width: 1}, fill: 'tozeroy',
-      fillcolor: hexToRgba('#ffcc00', 0.25),
+      x: times_main, y: msg.cpu, name: 'CPU total', type: 'scatter',
+      line: {color: '#ffcc00', width: 1.5, dash: 'dot'},
       xaxis: xax(cpuRow), yaxis: yax(cpuRow),
-      legendgroup: 'cpu', legendgrouptitle: {text: 'CPU'}, legend: sysLegName,
+      legendgroup: 'cpu', legend: sysLegName,
     });
 
-    // Disk I/O + Network I/O row (interleaved, network on secondary y-axis)
+    // Disk I/O + Network I/O row
     row++;
     const diskRow = row;
     const netYIdx = nRows + pcieYIdxPerGpu_mem.length + tempYIdxPerGpu.length + 1;
     const netY = 'y' + netYIdx;
-    const diskData = msg.disk_io;
-    for (let i = 0; i < diskData.length; i++) {
-      const d = diskData[i];
-      traceMap['disk_' + d.pid] = traceCount++;
-      const dTrace = {
-        x: times_disk, y: d.vals, name: d.name, type: 'scatter', mode: 'lines',
-        line: {width: 0.5, color: d.color, shape: 'spline', smoothing: 0.8}, stackgroup: 'disk_io',
-        fillcolor: hexToRgba(d.color, 0.55),
-        xaxis: xax(diskRow), yaxis: yax(diskRow),
-        legendgroup: 'disk_io', legendgrouptitle: {text: 'Disk I/O'}, legend: sysLegName,
-      };
-      
-      traces.push(dTrace);
-    }
+    // Combined disk I/O (read + write) as single filled area
+    const diskTotal = (msg.disk_read || []).map((v, i) => v + (msg.disk_write || [])[i]);
+    traceMap['disk_total'] = traceCount++;
+    traces.push({
+      x: times_disk, y: diskTotal, name: 'Disk I/O', type: 'scatter',
+      line: {color: '#ff9800', width: 1, shape: 'spline', smoothing: 0.8},
+      fill: 'tozeroy', fillcolor: hexToRgba('#ff9800', 0.35),
+      xaxis: xax(diskRow), yaxis: yax(diskRow),
+      legendgroup: 'disk_io', legendgrouptitle: {text: 'Disk I/O'}, legend: sysLegName,
+    });
     // Network I/O overlaid
     traceMap['net_sent'] = traceCount++;
     traces.push({
@@ -1388,9 +1459,9 @@ HTML_PAGE = r"""<!DOCTYPE html>
       legendgroup: 'net', legend: sysLegName,
     });
 
-    // Store keys for change detection (per-GPU arrays)
+    // Store keys for change detection
     config._last_gpu_keys = msg.gpu_mem.map(gm => gm.map(m => m.pid));
-    config._last_disk_keys = msg.disk_io.map(d => d.pid);
+    config._last_cpu_keys = (msg.cpu_procs || []).map(c => c.id);
 
     const bgColors = ['#101020', '#181830'];
     const rowLabels = [];
@@ -1535,7 +1606,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
       });
     }
 
-    // GPU total memory dashed line per GPU
+    // GPU total memory ceiling line per GPU
     if (hasGpu) {
       for (let gi = 0; gi < gpuCount; gi++) {
         const maxGib = msg.gpu_mem_total_gib[gi] || 1;
@@ -1544,7 +1615,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
         layout.shapes.push({
           type: 'line', x0: 0, x1: 1, y0: maxGib, y1: maxGib,
           xref: xr + ' domain', yref: yr,
-          line: {color: '#ff5252', width: 1, dash: 'dash'},
+          line: {color: '#ff5252', width: 2},
         });
         layout.annotations.push({
           text: maxGib.toFixed(1) + ' GiB', x: 1, y: maxGib,
@@ -1555,7 +1626,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
     }
 
     Plotly.newPlot(gd, traces, layout, {
-      displayModeBar: true, scrollZoom: true,
+      displayModeBar: true, scrollZoom: true, responsive: true,
       toImageButtonOptions: {format: 'png', filename: 'gpu_monitor', height: 1080, width: 1920, scale: 2},
     });
 
@@ -1859,11 +1930,13 @@ def main():
 
     main_sec = args.main_interval / 1000.0
     disk_sec = args.disk_interval / 1000.0
-    print(f"Main collect : {args.main_interval}ms (CPU + GPU mem/util/temp + network)")
+    print(
+        f"Main collect : {args.main_interval}ms (CPU + CPU procs + GPU mem/util/temp + network)"
+    )
     print(
         f"PCIe collect : 10/s ({gpu_count} subprocess{'es' if gpu_count != 1 else ''})"
     )
-    print(f"Disk collect : {args.disk_interval}ms (disk I/O per process)")
+    print(f"Disk collect : {args.disk_interval}ms (aggregate disk I/O)")
     print("Push interval: dynamic (75ms@1m .. 1000ms@15m)")
     print(
         f"Rolling window  : {args.window}s ({args.window // 60}m {args.window % 60}s)"
@@ -1933,9 +2006,11 @@ def main():
                 if tag == "pcie":
                     collector.ingest_pcie(msg[1], msg[2], msg[3], msg[4])
                 elif tag == "main":
-                    collector.ingest_main(msg[1], msg[2], msg[3], msg[4], msg[5])
+                    collector.ingest_main(
+                        msg[1], msg[2], msg[3], msg[4], msg[5], msg[6]
+                    )
                 elif tag == "disk":
-                    collector.ingest_disk(msg[1], msg[2])
+                    collector.ingest_disk(msg[1], msg[2], msg[3])
 
     for w in workers:
         w.start()
