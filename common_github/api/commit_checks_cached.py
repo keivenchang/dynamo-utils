@@ -300,7 +300,10 @@ class CommitChecksCached(CachedResourceBase[List[GHPRCheckRow]]):
                     pass
             return []
 
-        data = check_runs_resp.json() if check_runs_resp is not None else {}
+        try:
+            data = check_runs_resp.json() if check_runs_resp is not None else {}
+        except (ValueError, RuntimeError):
+            data = {}
         check_runs = data.get("check_runs") if isinstance(data, dict) else None
         if not isinstance(check_runs, list):
             check_runs = []
@@ -318,7 +321,10 @@ class CommitChecksCached(CachedResourceBase[List[GHPRCheckRow]]):
 
         statuses: List[Any] = []
         if status_resp is not None and int(getattr(status_resp, "status_code", 0) or 0) != 304:
-            statuses_data = status_resp.json() if status_resp is not None else {}
+            try:
+                statuses_data = status_resp.json() if status_resp is not None else {}
+            except (ValueError, RuntimeError):
+                statuses_data = {}
             statuses = statuses_data.get("statuses") if isinstance(statuses_data, dict) else []
             if not isinstance(statuses, list):
                 statuses = []
