@@ -329,28 +329,6 @@ class CommitChecksCached(CachedResourceBase[List[GHPRCheckRow]]):
             if not isinstance(statuses, list):
                 statuses = []
 
-        # Prefetch workflow metadata
-        run_ids_to_fetch: set[str] = set()
-        for cr in check_runs:
-            if not isinstance(cr, dict):
-                continue
-            url = str(cr.get("details_url") or cr.get("html_url") or "").strip()
-            rid = parse_actions_run_id_from_url(url)
-            if rid:
-                run_ids_to_fetch.add(rid)
-
-        workflow_info_cache: Dict[str, tuple[str, str]] = {}
-        for run_id in run_ids_to_fetch:
-            GITHUB_API_STATS.actions_run_prefetch_total += 1
-            run_data = self.api.get(f"/repos/{owner}/{repo}/actions/runs/{run_id}", timeout=5) or {}
-            if isinstance(run_data, dict):
-                workflow_info_cache[run_id] = (
-                    str(run_data.get("name", "") or "").strip(),
-                    str(run_data.get("event", "") or "").strip(),
-                )
-            else:
-                workflow_info_cache[run_id] = ("", "")
-
         # Build rows
         rows: List[GHPRCheckRow] = []
         seen: set[tuple[str, str]] = set()
@@ -402,7 +380,7 @@ class CommitChecksCached(CachedResourceBase[List[GHPRCheckRow]]):
 
             run_id = parse_actions_run_id_from_url(url)
             job_id = parse_actions_job_id_from_url(url)
-            workflow_name, event = workflow_info_cache.get(run_id, ("", "")) if run_id else ("", "")
+            workflow_name, event = "", ""
 
             has_timeout_annotation = False
             check_run_id = str(cr.get("id", "") or "").strip()
