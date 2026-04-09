@@ -66,6 +66,7 @@ install() {
 
 # Read ~/.aws/credentials and export into current shell environment.
 # Useful for tools that check env vars instead of the credentials file.
+# Inspired by: https://github.com/alec-flowers/dotfiles/blob/main/home-manager/functions/aws_login.sh
 export_creds_to_env() {
     local creds_file=~/.aws/credentials
     if [[ ! -r "$creds_file" ]]; then
@@ -87,6 +88,7 @@ export_creds_to_env() {
 # Full nvsec auth + AWS credential configuration flow.
 # Skips browser if nvsec session is still cached (checks via nvsec aws list).
 # Auto-detects SSH ($SSH_CONNECTION) and uses --no-browser.
+# Session check + SSH detection from: https://github.com/alec-flowers/dotfiles/blob/main/home-manager/functions/aws_login.sh
 # For manual SSH override: nvsec aws auth --no-browser
 #   (requires: ssh -L 53682:localhost:53682 user@host)
 # NOTE: The browser tab may show "You need to enable JavaScript to run this app."
