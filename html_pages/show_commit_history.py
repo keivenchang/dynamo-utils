@@ -148,7 +148,8 @@ def _parse_ecr_suffix(suffix: str) -> Tuple[str, str]:
 
 
 def _parse_report_dir_to_commit_image(sha_dir_name: str) -> Tuple[Optional[str], Optional[str]]:
-    """Parse report directory name to (commit_sha, image_sha_6) for report_path_by_commit_image lookup.
+    """DEPRECATING: Parse report directory name to (commit_sha, image_sha_6) for report_path_by_commit_image lookup.
+    Part of the local build_images.py report scanning pipeline.
 
     Supports: fd839b8d5.IMAGE.e04427 (commit.IMAGE.image_sha) and E04427.fd839b8d5 (image_sha.commit).
     Returns (commit_sha, image_sha_6_lower) or (None, None) if unparseable.
@@ -187,7 +188,8 @@ _is_required_check_name = is_required_check_name
 
 
 def _extract_error_snippet_worker(raw_log_path: str) -> str:
-    """Worker process entrypoint: extract snippet text for a single raw log file.
+    """DEPRECATING: Worker process entrypoint: extract snippet text for a single raw log file.
+    Part of the raw-log-based error snippet pipeline.
 
     Keep this function top-level so it is picklable for multiprocessing.
     Do not write caches in the worker; the parent merges results and persists.
@@ -227,8 +229,9 @@ class CommitHistoryGenerator:
         self.gitlab_fetch_skip = bool(gitlab_fetch_skip)
         self.parallel_workers = int(parallel_workers or 0)
         self.disable_snippet_cache_read = bool(disable_snippet_cache_read)
-        # Opt-in because downloading successful build-test raw logs can be expensive.
-        # When enabled, we cache successful build-test raw logs so we can parse pytest slowest tests.
+        # DEPRECATING: enable_success_build_test_logs downloads raw logs for successful build-test
+        # jobs to parse pytest slowest-test timings. Expensive and part of the raw log pipeline
+        # that is being phased out.
         self.enable_success_build_test_logs = bool(enable_success_build_test_logs)
         self.run_verifier_pass = bool(run_verifier_pass)
         self.logger = self._setup_logger()
@@ -252,7 +255,8 @@ class CommitHistoryGenerator:
         # raw logs can be materialized whenever they are needed.
 
     def _snippets_for_raw_hrefs(self, raw_hrefs: List[str], *, use_process_pool: bool = True) -> Dict[str, tuple[str, list[str]]]:
-        """Batch snippet extraction for raw log hrefs (optionally in multiple processes).
+        """DEPRECATING: Batch snippet extraction for raw log hrefs (optionally in multiple processes).
+        Part of the raw-log-based error snippet pipeline. See DEPRECATING note in _build_github_checks_tree_html.
 
         Args:
             raw_hrefs: list[str] of repo-relative paths (hrefs) to local raw log files, e.g.:
@@ -338,7 +342,8 @@ class CommitHistoryGenerator:
         return out
 
     def _snippet_from_cached_raw_log(self, raw_log_path: Path) -> tuple[str, list[str]]:
-        """Return an error snippet and categories for a raw log file, using the persistent cache when possible.
+        """DEPRECATING: Return an error snippet and categories for a raw log file, using the persistent cache when possible.
+        Part of the raw-log-based error snippet pipeline.
         
         Returns:
             (snippet_text, categories): snippet without "Categories:" prefix, and list of category strings
@@ -1453,7 +1458,11 @@ class CommitHistoryGenerator:
             for commit in commit_data:
                 commit['release_forkpoints'] = []
         
-        # Build log paths dictionary and status indicators
+        # DEPRECATING: Local build log scanning (log_paths, report_path_by_commit_image, build_status).
+        # These scan the local filesystem for build_images.py outputs (report.html, report.json)
+        # to show build status icons and link to local build reports. This is being replaced by
+        # GitHub Actions post-merge CI (post_merge_status) and AWS ECR image data, which don't
+        # require local build infrastructure.
         t_markers = time.monotonic()
         log_paths = {}  # Maps sha_short to list of (date, path) tuples
         report_path_by_commit_image = {}  # Maps (sha_short, image_sha_6) -> (date, path) for report.html when report.json exists
@@ -1613,11 +1622,10 @@ class CommitHistoryGenerator:
             st = str((build_status.get(sha_short) or {}).get("status", STATUS_UNKNOWN) or STATUS_UNKNOWN)
             commit["build_and_test_status_icon"] = _build_and_test_status_icon_html(status=st)
 
-        # Read dev registry images from BuildReport JSON files (produced by build_images.py).
-        # For each commit with build reports, look for the corresponding .json file
-        # alongside the .report.html and extract registry_images from it.
-        # Check all entries (newest first) and use the first one that has registry images,
-        # because reuse builds may lack registry_images while the original full build has them.
+        # DEPRECATING: GitLab Dev Registry images from local build_images.py BuildReport JSON files.
+        # This reads registry_images from report.json produced by build_images.py local builds.
+        # Being replaced by AWS ECR image data (ecr_images_by_sha) which is fetched from the
+        # ECR API cache and doesn't require local builds.
         gitlab_dev_images: Dict[str, List[Dict[str, Any]]] = {}
         for sha_short_key, log_entries in log_paths.items():
             if not log_entries:
@@ -2009,9 +2017,10 @@ class CommitHistoryGenerator:
 
                 raw_href = ""
                 raw_size = 0
-                # Fetch raw logs for:
-                # 1. Failed jobs (for error snippets)
-                # 2. Build-test jobs (for pytest timing extraction, regardless of success/failure)
+                # DEPRECATING: Raw log fetching and error snippet extraction.
+                # Downloads GitHub Actions job logs to local disk, extracts error snippets,
+                # and displays them inline in the CI tree. Expensive (API calls + disk I/O)
+                # and increasingly unnecessary as post-merge CI provides a cleaner status view.
                 is_build_test = job_name_wants_pytest_details(name)
                 cr_status_lc = str(cr.get("status", "") or "").lower()
                 should_fetch_raw_log = (

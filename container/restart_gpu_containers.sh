@@ -123,19 +123,18 @@ restart_container() {
     if [ "$DRY_RUN" = true ]; then
         log "[DRY RUN] Would restart container: $container"
         cmd docker restart "$container"
-        log "[DRY RUN] Would sleep 5 seconds"
-        log "[DRY RUN] Would verify GPU after restart"
     else
         log "Restarting container: $container"
         cmd docker restart "$container"
-        sleep 5
+    fi
+}
 
-        # Verify GPU after restart
-        if check_gpu_in_container "$container"; then
-            log "SUCCESS: Container $container restarted successfully"
-        else
-            log "WARNING: Container $container still has GPU issues after restart"
-        fi
+verify_container() {
+    local container=$1
+    if check_gpu_in_container "$container"; then
+        log "SUCCESS: Container $container restarted successfully"
+    else
+        log "WARNING: Container $container still has GPU issues after restart"
     fi
 }
 
@@ -154,8 +153,9 @@ fi
 
 log "Checking GPU status for containers..."
 
+# Phase 1: Check all containers and collect the ones needing restart
+failed_containers=()
 for container in $containers; do
-    # Skip containers we shouldn't monitor (deploy-*, etc.)
     if ! should_monitor_container "$container"; then
         if [ "$DRY_RUN" = true ]; then
             log "SKIP: $container - Not a monitored container type"
@@ -175,16 +175,40 @@ for container in $containers; do
             log "OK: $container - GPU healthy"
             ;;
         1)
-            # Not a GPU container, skip
             if [ "$DRY_RUN" = true ]; then
                 log "SKIP: $container - Not a GPU container"
             fi
             ;;
         2)
-            log "FAILED: $container - GPU error detected, restarting..."
-            restart_container "$container"
+            log "FAILED: $container - GPU error detected"
+            failed_containers+=("$container")
             ;;
     esac
 done
+
+# Phase 2: Restart all failed containers in parallel
+if [[ ${#failed_containers[@]} -gt 0 ]]; then
+    log "Restarting ${#failed_containers[@]} container(s) in parallel..."
+    pids=()
+    for container in "${failed_containers[@]}"; do
+        restart_container "$container" &
+        pids+=($!)
+    done
+
+    for pid in "${pids[@]}"; do
+        wait "$pid"
+    done
+
+    # Phase 3: Verify all restarted containers
+    if [ "$DRY_RUN" = false ]; then
+        sleep 5
+        log "Verifying GPU access after restart..."
+        for container in "${failed_containers[@]}"; do
+            verify_container "$container"
+        done
+    fi
+else
+    log "All containers healthy, no restarts needed"
+fi
 
 log "GPU monitoring complete"

@@ -64,9 +64,30 @@ install() {
     echo "Done. Run this script without --install to login."
 }
 
+# Read ~/.aws/credentials and export into current shell environment.
+# Useful for tools that check env vars instead of the credentials file.
+export_creds_to_env() {
+    local creds_file=~/.aws/credentials
+    if [[ ! -r "$creds_file" ]]; then
+        return
+    fi
+    local key value
+    while IFS='=' read -r key value; do
+        key=$(echo "$key" | xargs)
+        value=$(echo "$value" | xargs)
+        case "$key" in
+            aws_access_key_id)     export AWS_ACCESS_KEY_ID="$value" ;;
+            aws_secret_access_key) export AWS_SECRET_ACCESS_KEY="$value" ;;
+            aws_session_token)     export AWS_SESSION_TOKEN="$value" ;;
+        esac
+    done < "$creds_file"
+    echo "Exported: AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_SESSION_TOKEN"
+}
+
 # Full nvsec auth + AWS credential configuration flow.
-# Cursor handles port forwarding + browser opening automatically.
-# For raw SSH, use: nvsec aws auth --no-browser
+# Skips browser if nvsec session is still cached (checks via nvsec aws list).
+# Auto-detects SSH ($SSH_CONNECTION) and uses --no-browser.
+# For manual SSH override: nvsec aws auth --no-browser
 #   (requires: ssh -L 53682:localhost:53682 user@host)
 # NOTE: The browser tab may show "You need to enable JavaScript to run this app."
 #   after auth completes. This is harmless -- the CLI already got the token.
@@ -75,8 +96,14 @@ install() {
 authenticate_nvsec_and_aws() {
     source "$NVSEC_VENV/bin/activate"
 
-    echo "=== Authenticating (opens browser) ==="
-    nvsec aws auth
+    if nvsec aws list &>/dev/null; then
+        echo "=== nvsec session still valid, skipping browser auth ==="
+    else
+        echo "=== Authenticating (opens browser) ==="
+        local auth_opts=()
+        [[ -n "${SSH_CONNECTION:-}" ]] && auth_opts+=(--no-browser)
+        nvsec aws auth "${auth_opts[@]}"
+    fi
 
     echo ""
     echo "=== Available accounts/roles ==="
@@ -85,6 +112,10 @@ authenticate_nvsec_and_aws() {
     echo ""
     echo "=== Configuring CLI credentials (profile: default) ==="
     nvsec aws configure 0 --profile default
+
+    echo ""
+    echo "=== Exporting credentials to environment ==="
+    export_creds_to_env
 
     echo ""
     echo "=== Verifying credentials ==="
