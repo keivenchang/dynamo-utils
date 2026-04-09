@@ -155,9 +155,19 @@ def cleanup_repository(repo, retain_days, dry_run=True):
     if dry_run:
         print(f"  DRY RUN: No tags were deleted.", flush=True)
     else:
-        print(f"  Submitting bulk delete (older_than='{older_than_spec}') ...", flush=True)
-        repo.tags.delete_in_bulk(older_than=older_than_spec)
-        print(f"  Bulk delete request submitted (runs asynchronously on GitLab).", flush=True)
+        deleted = 0
+        failed = 0
+        print(f"  Deleting {len(to_delete)} tags individually ...", flush=True)
+        for i, (name, created_at) in enumerate(to_delete):
+            try:
+                repo.tags.delete(name)
+                deleted += 1
+            except gitlab.exceptions.GitlabDeleteError as e:
+                print(f"    FAILED: {name} ({e})", flush=True)
+                failed += 1
+            if (i + 1) % 10 == 0 or (i + 1) == len(to_delete):
+                print(f"    [{i + 1}/{len(to_delete)}] deleted={deleted} failed={failed}", flush=True)
+        print(f"  Done: deleted={deleted} failed={failed}", flush=True)
 
 
 def main():
