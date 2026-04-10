@@ -536,8 +536,6 @@ run_show_commit_history() {
         # Continue anyway - use whatever is currently checked out
     fi
 
-    # Note: --logs-dir defaults to ../dynamo_ci/logs when it exists (see show_commit_history.py)
-
     echo "$(date '+%Y-%m-%d %H:%M:%S') - Generating commit history dashboard (max_commits=$MAX_COMMITS)" >> "$LOG_FILE"
     log_line_ts "$COMMIT_HISTORY_LOG" "===== run_show_commit_history start (max_commits=$MAX_COMMITS output=$COMMIT_HISTORY_HTML) ====="
     if run_cmd_to_log_ts "$COMMIT_HISTORY_LOG" python3 "$SCRIPT_DIR/show_commit_history.py" --repo-path . --max-commits "$MAX_COMMITS" --output "$COMMIT_HISTORY_HTML" $OUTPUT_JSON_FLAG $SKIP_FLAG $MAX_GH_FLAG $PARALLEL_FLAG $SUCCESS_BUILD_TEST_FLAG $VERIFIER_FLAG $LOCK_FLAG; then

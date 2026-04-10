@@ -80,6 +80,7 @@ All optimizations are in `common_github.py`, so **all dashboard scripts benefit 
 
 ```
 dynamo-utils/
+├── auto_approve_tmux.py           # Auto-approve Cursor CLI prompts in tmux sessions
 ├── await_output.sh               # Run command, exit on sentinel string (replaces sleep+grep)
 ├── aws-ecr-setup.sh              # AWS ECR login/logout/list-images for NVIDIA container registry
 ├── backup.sh                     # Smart backup with versioned history
@@ -526,6 +527,39 @@ matching the date regex; never deletes today's directory.
 ---
 
 ## Developer Tools
+
+### `auto_approve_tmux.py`
+Auto-approve Cursor CLI permission prompts in one or more tmux sessions. Watches for
+"Do you want to proceed?", "Do you want to make this edit?", "Do you want to create?",
+"Do you want to overwrite?", etc. and sends Enter automatically. Blocks only genuinely
+dangerous commands (rm, rmdir, shred, mkfs, dd, etc.).
+
+```bash
+# Single session
+python3 auto_approve_tmux.py dynamo1
+
+# Multiple sessions (comma-separated)
+python3 auto_approve_tmux.py dynamo1,dynamo2
+
+# Wildcard — auto-detects new sessions matching the pattern
+python3 auto_approve_tmux.py "dynamo*"
+
+# Dry run (show what would be approved without pressing Enter)
+python3 auto_approve_tmux.py --dry-run "dynamo*"
+
+# Faster polling
+python3 auto_approve_tmux.py --interval 1 "dynamo*"
+
+# List available tmux sessions
+python3 auto_approve_tmux.py --list
+```
+
+**Features:**
+- **Denylist approach**: approves everything except dangerous commands (rm, rmdir, shred, mkfs, dd, fdisk, parted, wipefs, format)
+- **Dynamic session discovery**: wildcard patterns re-resolve each poll cycle, picking up new sessions automatically
+- **Adaptive polling**: starts at base interval (default 2s), ramps to 5s when idle, resets on activity
+- **Dedup**: won't spam Enter on the same prompt; collapses repeated log lines into `......`
+- **Full path resolution**: logs full file paths (from Write/Edit context) instead of just basenames
 
 ### `read_cursor_transcript.py`
 Search, list, and continue Cursor agent transcripts from previous sessions.
