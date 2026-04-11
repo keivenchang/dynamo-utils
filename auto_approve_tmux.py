@@ -214,13 +214,15 @@ _FILE_PROMPT_RE = re.compile(
 def detect_prompt(pane_text: str) -> str | None:
     """Detect which kind of permission prompt is visible.
 
-    Returns "bash" for command prompts, "file:<action>" for file prompts, or None.
+    Returns "bash", "file", "tool", or None.
     """
     if "Do you want to proceed" in pane_text:
         return "bash"
     m = _FILE_PROMPT_RE.search(pane_text)
     if m:
         return "file"
+    if "Do you want to allow" in pane_text:
+        return "tool"
     return None
 
 
@@ -376,10 +378,13 @@ def parse_args() -> argparse.Namespace:
 class SessionState:
     """Per-session tracking for dedup and counters."""
 
+    MAX_RETRIES = 3  # resend Enter if prompt persists after approval
+
     def __init__(self, target: str) -> None:
         self.target = target
         self.label = target.split(":")[0]  # short name for log output
         self.last_hash = ""
+        self.retry_count = 0
         self.approved = 0
         self.blocked = 0
 
@@ -530,6 +535,7 @@ def main() -> None:
             prompt_type = detect_prompt(pane_text)
 
             if prompt_type is None:
+                st.last_hash = ""  # reset so next prompt is always fresh
                 log_dedup(logging.DEBUG, f"[{st.label}] No prompt (approved={st.approved} blocked={st.blocked})")
                 continue
 
@@ -539,7 +545,15 @@ def main() -> None:
 
             current_hash = prompt_hash(pane_text)
             if current_hash == st.last_hash:
-                log_dedup(logging.DEBUG, f"[{st.label}] Same prompt still visible, waiting...")
+                st.retry_count += 1
+                if st.retry_count <= SessionState.MAX_RETRIES:
+                    log.info("[%s] Prompt still visible after Enter — retry %d/%d",
+                             st.label, st.retry_count, SessionState.MAX_RETRIES)
+                    if not args.dry_run:
+                        tmux_send_enter(st.target)
+                    time.sleep(1)
+                else:
+                    log_dedup(logging.DEBUG, f"[{st.label}] Same prompt persists after {SessionState.MAX_RETRIES} retries")
                 continue
 
             acted = True
@@ -559,6 +573,21 @@ def main() -> None:
                     log.info("[%s] APPROVE (%s): %s", st.label, action, desc)
                     tmux_send_enter(st.target)
                 st.last_hash = current_hash
+                st.retry_count = 0
+                st.approved += 1
+                time.sleep(3)
+
+            elif prompt_type == "tool":
+                # "Permission rule <Tool> requires confirmation" / "Do you want to allow Claude to <action>?"
+                match = re.search(r"Permission rule (\w+) requires confirmation", pane_text)
+                tool_name = match.group(1) if match else "tool"
+                if args.dry_run:
+                    log.info("[%s] WOULD APPROVE (tool): %s", st.label, tool_name)
+                else:
+                    log.info("[%s] APPROVE (tool): %s", st.label, tool_name)
+                    tmux_send_enter(st.target)
+                st.last_hash = current_hash
+                st.retry_count = 0
                 st.approved += 1
                 time.sleep(3)
 
@@ -582,12 +611,14 @@ def main() -> None:
                         log_dedup(logging.INFO, f"[{st.label}] APPROVE (no cmd extracted, defaulting yes)")
                         tmux_send_enter(st.target)
                     st.last_hash = current_hash
+                    st.retry_count = 0
                     st.approved += 1
                     time.sleep(3)
 
                 elif is_dangerous(cmd):
                     log.info("[%s] BLOCKED (dangerous): %s", st.label, cmd)
                     st.last_hash = current_hash
+                    st.retry_count = 0
                     st.blocked += 1
 
                 else:
@@ -597,6 +628,7 @@ def main() -> None:
                         log.info("[%s] APPROVE: %s", st.label, cmd)
                         tmux_send_enter(st.target)
                     st.last_hash = current_hash
+                    st.retry_count = 0
                     st.approved += 1
                     time.sleep(3)
 
