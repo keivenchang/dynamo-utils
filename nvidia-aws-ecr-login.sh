@@ -17,7 +17,7 @@ REGISTRY_ID=210086341041
 REGION=us-west-2
 REPO=ai-dynamo/dynamo
 NVSEC_VENV=~/nvsec-env
-ECR_CACHE_DIR=~/.cache/dynamo-utils/ecr
+ECR_CACHE_DIR=~/.cache/dynamo-utils/aws-ecr-registry-cache
 
 # Cursor's browser helper relies on VSCODE_IPC_HOOK_CLI to talk to the
 # Cursor server. Terminals opened long ago may have a stale socket.
@@ -232,12 +232,12 @@ case "${1:-}" in
     --logout)
         logout
         ;;
-    --list-images)
+    --list-images|--show-available-images)
         login
         echo ""
         list_tags
         ;;
-    --describe-images)
+    --describe-images|--list-available-images-to-cache)
         login
         echo ""
         describe_images
@@ -251,7 +251,7 @@ case "${1:-}" in
         docker_login
         ;;
     *)
-        echo "Usage: $0 [--login|--logout|--install|--list-images|--describe-images|--fast-list-images]"
+        echo "Usage: $0 [--login|--logout|--install|--show-available-images|--list-available-images-to-cache|--fast-list-images]"
         exit 1
         ;;
 esac

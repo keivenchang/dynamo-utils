@@ -1,0 +1,104 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AWS ECR — Dynamo Container Registry Access</title>
+<style>
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif; max-width: 860px; margin: 40px auto; padding: 0 20px; color: #24292f; line-height: 1.6; }
+  h1 { border-bottom: 1px solid #d0d7de; padding-bottom: 8px; }
+  h2 { margin-top: 32px; border-bottom: 1px solid #d0d7de; padding-bottom: 6px; }
+  h3 { margin-top: 24px; }
+  code { background: #f6f8fa; padding: 2px 6px; border-radius: 4px; font-family: SFMono-Regular, Consolas, 'Liberation Mono', Menlo, monospace; font-size: 13px; }
+  pre { background: #f6f8fa; border: 1px solid #d0d7de; border-radius: 6px; padding: 16px; overflow-x: auto; font-size: 13px; line-height: 1.5; position: relative; }
+  pre code { background: none; padding: 0; }
+  .copy-btn { position: absolute; top: 8px; right: 8px; padding: 4px 8px; font-size: 11px; background: #fff; border: 1px solid #d0d7de; border-radius: 4px; cursor: pointer; color: #57606a; }
+  .copy-btn:hover { background: #f3f4f6; border-color: #8c959f; }
+  .registry-box { border: 1px solid #d0d7de; border-radius: 8px; padding: 16px 20px; margin: 16px 0; background: #fff; }
+  .registry-box h3 { margin-top: 0; }
+  .badge-ecr { display: inline-block; background: #ff9900; color: #fff; padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: 600; }
+  a { color: #0969da; text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  table { border-collapse: collapse; margin: 12px 0; }
+  th, td { border: 1px solid #d0d7de; padding: 8px 12px; text-align: left; font-size: 13px; }
+  th { background: #f6f8fa; }
+</style>
+<script>
+function copyCode(btn) {
+  var pre = btn.parentElement;
+  var code = pre.querySelector('code');
+  navigator.clipboard.writeText(code.textContent.trim());
+  btn.textContent = 'Copied!';
+  setTimeout(function() { btn.textContent = 'Copy'; }, 1500);
+}
+</script>
+</head>
+<body>
+
+<h1><span class="badge-ecr">AWS ECR</span> Dynamo Container Registry Access</h1>
+
+<table>
+<tr><th>Registry</th><td><code>210086341041.dkr.ecr.us-west-2.amazonaws.com/ai-dynamo/dynamo</code></td></tr>
+<tr><th>Architectures</th><td>amd64, arm64</td></tr>
+<tr><th>Auth method</th><td>nvsec (<a href="https://nvidia.enterprise.slack.com/docs/T04SYRAP3/F0AHW69HC8P" target="_blank">nvsec authentication guide</a>)</td></tr>
+<tr><th>Also available via</th><td><a href="container_registry_auth_azure_acr.html">Azure ACR</a> (amd64 only, simpler auth)</td></tr>
+</table>
+
+<div class="registry-box">
+<h3>Prerequisites (one-time)</h3>
+<p>Install AWS CLI and nvsec. See <a href="https://nvidia.enterprise.slack.com/docs/T04SYRAP3/F0AHW69HC8P" target="_blank">nvsec authentication guide</a>.</p>
+<pre><code>pip install nvsec
+aws configure  # or use nvsec for SSO</code><button class="copy-btn" onclick="copyCode(this)">Copy</button></pre>
+
+<h3>Step 1: Login</h3>
+<pre><code># Authenticate to AWS via nvsec (opens browser if needed)
+nvsec login
+
+# Docker login to ECR (12-hour token)
+aws ecr get-login-password --region us-west-2 \
+  | docker login --username AWS --password-stdin \
+    210086341041.dkr.ecr.us-west-2.amazonaws.com</code><button class="copy-btn" onclick="copyCode(this)">Copy</button></pre>
+
+<h3>Step 2: List available images</h3>
+<pre><code># List tagged images
+aws ecr list-images \
+  --registry-id 210086341041 \
+  --repository-name ai-dynamo/dynamo \
+  --region us-west-2 \
+  --filter tagStatus=TAGGED \
+  --query 'imageIds[*].imageTag' \
+  --output table</code><button class="copy-btn" onclick="copyCode(this)">Copy</button></pre>
+
+<h3>Step 3: Pull an image</h3>
+<p>Image tags follow the pattern: <code>&lt;commit_sha&gt;-&lt;framework&gt;-&lt;type&gt;-cuda&lt;ver&gt;-&lt;arch&gt;</code></p>
+<pre><code># Pull a vLLM dev image (amd64, CUDA 12)
+ECR=210086341041.dkr.ecr.us-west-2.amazonaws.com/ai-dynamo/dynamo
+docker pull $ECR:&lt;commit_sha&gt;-vllm-dev-cuda12-amd64
+
+# Pull an SGLang runtime image (arm64, CUDA 13)
+docker pull $ECR:&lt;commit_sha&gt;-sglang-runtime-cuda13-arm64</code><button class="copy-btn" onclick="copyCode(this)">Copy</button></pre>
+
+<h3>Step 4: Pull + build local-dev</h3>
+<p>Use the <b>copy command</b> button in the <a href="../index.html">commit history dashboard</a> (ImageSHA256 dropdown) — it has the correct build script URL for your environment.</p>
+<p>The command pattern is:</p>
+<pre><code>(ECR=210086341041.dkr.ecr.us-west-2.amazonaws.com/ai-dynamo/dynamo:&lt;tag&gt; \
+ && docker pull $ECR \
+ && curl -sL &lt;build_localdev_from_dev.py URL&gt; | python3 - --skip-pull $ECR)</code></pre>
+</div>
+
+<h2>Tag format reference</h2>
+<table>
+<tr><th>Component</th><th>Values</th></tr>
+<tr><td>commit_sha</td><td>40-character git commit SHA</td></tr>
+<tr><td>framework</td><td><code>vllm</code>, <code>sglang</code>, <code>trtllm</code>, <code>dynamo</code>, <code>none</code></td></tr>
+<tr><td>type</td><td><code>dev</code>, <code>runtime</code>, <code>test</code>, <code>efa</code></td></tr>
+<tr><td>cuda</td><td><code>cuda12</code>, <code>cuda13</code> (maps to 12.9, 13.x)</td></tr>
+<tr><td>arch</td><td><code>amd64</code>, <code>arm64</code></td></tr>
+</table>
+
+<p style="color: #57606a; font-size: 12px; margin-top: 32px;">
+  See available images per commit on the <a href="../index.html">commit history dashboard</a> (expand ImageSHA256 dropdown).
+</p>
+
+</body>
+</html>

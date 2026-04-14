@@ -1,0 +1,112 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Azure ACR — Dynamo Container Registry Access</title>
+<style>
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif; max-width: 860px; margin: 40px auto; padding: 0 20px; color: #24292f; line-height: 1.6; }
+  h1 { border-bottom: 1px solid #d0d7de; padding-bottom: 8px; }
+  h2 { margin-top: 32px; border-bottom: 1px solid #d0d7de; padding-bottom: 6px; }
+  h3 { margin-top: 24px; }
+  code { background: #f6f8fa; padding: 2px 6px; border-radius: 4px; font-family: SFMono-Regular, Consolas, 'Liberation Mono', Menlo, monospace; font-size: 13px; }
+  pre { background: #f6f8fa; border: 1px solid #d0d7de; border-radius: 6px; padding: 16px; overflow-x: auto; font-size: 13px; line-height: 1.5; position: relative; }
+  pre code { background: none; padding: 0; }
+  .copy-btn { position: absolute; top: 8px; right: 8px; padding: 4px 8px; font-size: 11px; background: #fff; border: 1px solid #d0d7de; border-radius: 4px; cursor: pointer; color: #57606a; }
+  .copy-btn:hover { background: #f3f4f6; border-color: #8c959f; }
+  .registry-box { border: 1px solid #d0d7de; border-radius: 8px; padding: 16px 20px; margin: 16px 0; background: #fff; }
+  .registry-box h3 { margin-top: 0; }
+  .badge-acr { display: inline-block; background: #0078d4; color: #fff; padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: 600; }
+  a { color: #0969da; text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  table { border-collapse: collapse; margin: 12px 0; }
+  th, td { border: 1px solid #d0d7de; padding: 8px 12px; text-align: left; font-size: 13px; }
+  th { background: #f6f8fa; }
+</style>
+<script>
+function copyCode(btn) {
+  var pre = btn.parentElement;
+  var code = pre.querySelector('code');
+  navigator.clipboard.writeText(code.textContent.trim());
+  btn.textContent = 'Copied!';
+  setTimeout(function() { btn.textContent = 'Copy'; }, 1500);
+}
+</script>
+</head>
+<body>
+
+<h1><span class="badge-acr">Azure ACR</span> Dynamo Container Registry Access</h1>
+
+<table>
+<tr><th>Registry</th><td><code>dynamoci.azurecr.io/ai-dynamo/dynamo</code></td></tr>
+<tr><th>Architectures</th><td>amd64 only</td></tr>
+<tr><th>Auth method</th><td>az login (<a href="https://nvidia.slack.com/archives/C06850J381Y/p1776144196882859?thread_ts=1773943857.743579&cid=C06850J381Y" target="_blank">ACR authentication guide</a>, DL: access-azure-dynamo-engineer)</td></tr>
+<tr><th>Also available via</th><td><a href="container_registry_auth_aws_ecr.html">AWS ECR</a> (includes arm64)</td></tr>
+</table>
+
+<div class="registry-box">
+<h3>Prerequisites (one-time)</h3>
+<p>Install Azure CLI and get access. See <a href="https://nvidia.slack.com/archives/C06850J381Y/p1776144196882859?thread_ts=1773943857.743579&cid=C06850J381Y" target="_blank">ACR authentication guide</a> (DL: access-azure-dynamo-engineer).</p>
+<pre><code># Install Azure CLI
+curl -sL https://aka.ms/InstallAzureCLIDeb | sudo bash</code><button class="copy-btn" onclick="copyCode(this)">Copy</button></pre>
+
+<h3>Step 1: Login</h3>
+<pre><code># Login to Azure (opens browser)
+az login
+
+# Login to ACR (token valid for 8 hours)
+az acr login --name dynamoci</code><button class="copy-btn" onclick="copyCode(this)">Copy</button></pre>
+
+<h3>Step 2: List available images</h3>
+<pre><code># List latest tags
+az acr repository show-tags --name dynamoci \
+  --repository ai-dynamo/dynamo \
+  --orderby time_desc --top 20 --output table</code><button class="copy-btn" onclick="copyCode(this)">Copy</button></pre>
+
+<h3>Step 3: Pull an image</h3>
+<p>ACR tags follow the pattern: <code>&lt;commit_sha&gt;-&lt;framework&gt;-&lt;type&gt;-cuda&lt;ver&gt;</code> (no arch suffix — all amd64).</p>
+<pre><code># Pull a vLLM dev image (CUDA 12)
+docker pull dynamoci.azurecr.io/ai-dynamo/dynamo:&lt;commit_sha&gt;-vllm-dev-cuda12
+
+# Pull a TRT-LLM runtime image (CUDA 13)
+docker pull dynamoci.azurecr.io/ai-dynamo/dynamo:&lt;commit_sha&gt;-trtllm-runtime-cuda13
+
+# Pull an SGLang dev image (CUDA 13)
+docker pull dynamoci.azurecr.io/ai-dynamo/dynamo:&lt;commit_sha&gt;-sglang-dev-cuda13</code><button class="copy-btn" onclick="copyCode(this)">Copy</button></pre>
+
+<h3>Step 4: Pull + build local-dev</h3>
+<p>Use the <b>copy command</b> button in the <a href="../index.html">commit history dashboard</a> (ImageSHA256 dropdown) — it has the correct build script URL for your environment.</p>
+<p>The command pattern is:</p>
+<pre><code>(ACR=dynamoci.azurecr.io/ai-dynamo/dynamo:&lt;tag&gt; \
+ && docker pull $ACR \
+ && curl -sL &lt;build_localdev_from_dev.py URL&gt; | python3 - --skip-pull $ACR)</code></pre>
+</div>
+
+<h2>Kubernetes: Create imagePullSecret</h2>
+<p>ACR tokens are valid for 8 hours. For long-running workloads, you'll need to rotate.</p>
+<div class="registry-box">
+<pre><code>ACR_NAME=dynamoci
+ACR_REGISTRY=dynamoci.azurecr.io
+ACR_TOKEN=$(az acr login --name $ACR_NAME --expose-token --output tsv --query accessToken)
+kubectl create secret docker-registry acr-secret \
+  --docker-server=$ACR_REGISTRY \
+  --docker-username=00000000-0000-0000-0000-000000000000 \
+  --docker-password=$ACR_TOKEN \
+  --namespace &lt;your-namespace&gt;</code><button class="copy-btn" onclick="copyCode(this)">Copy</button></pre>
+</div>
+
+<h2>Tag format reference</h2>
+<table>
+<tr><th>Component</th><th>Values</th></tr>
+<tr><td>commit_sha</td><td>40-character git commit SHA</td></tr>
+<tr><td>framework</td><td><code>vllm</code>, <code>sglang</code>, <code>trtllm</code>, <code>dynamo</code>, <code>none</code></td></tr>
+<tr><td>type</td><td><code>dev</code>, <code>runtime</code>, <code>test</code>, <code>efa</code></td></tr>
+<tr><td>cuda</td><td><code>cuda12</code>, <code>cuda13</code> (maps to 12.9, 13.x)</td></tr>
+</table>
+
+<p style="color: #57606a; font-size: 12px; margin-top: 32px;">
+  See available images per commit on the <a href="../index.html">commit history dashboard</a> (expand ImageSHA256 dropdown).
+</p>
+
+</body>
+</html>

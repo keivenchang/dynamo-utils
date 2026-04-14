@@ -1044,6 +1044,7 @@ class CommitHistoryGenerator:
             "gitlab_images": template_context.get("gitlab_images") or {},
             "gitlab_dev_images": template_context.get("gitlab_dev_images") or {},
             "ecr_images": template_context.get("ecr_images") or {},
+            "acr_images": template_context.get("acr_images") or {},
             "docker_images": template_context.get("docker_images") or {},
             "build_status": template_context.get("build_status") or {},
             "log_paths": log_paths_json,
@@ -1734,7 +1735,7 @@ class CommitHistoryGenerator:
 
         # --- AWS ECR Registry Images ---
         ECR_REGISTRY = "210086341041.dkr.ecr.us-west-2.amazonaws.com/ai-dynamo/dynamo"
-        ECR_CACHE_FILE = Path.home() / ".cache" / "dynamo-utils" / "ecr" / "aws-ecr-ai-dynamo-dynamo-details.json"
+        ECR_CACHE_FILE = Path.home() / ".cache" / "dynamo-utils" / "aws-ecr-registry-cache" / "aws-ecr-ai-dynamo-dynamo-details.json"
         self.logger.info(f"ECR: cache file={ECR_CACHE_FILE}, exists={ECR_CACHE_FILE.exists()}, commit_data has {len(commit_data)} entries")
         ecr_images_by_sha: Dict[str, List[Dict[str, str]]] = {}
         if ECR_CACHE_FILE.exists():
@@ -1819,6 +1820,80 @@ class CommitHistoryGenerator:
                 self.logger.info(f"ECR cache: {len(ecr_images_by_sha)} commits with images (from {len(ecr_details)} details)")
             except (OSError, json.JSONDecodeError, ValueError) as e:
                 self.logger.warning(f"Failed to load ECR cache {ECR_CACHE_FILE}: {e}")
+
+        # --- Azure ACR Registry Images ---
+        ACR_REGISTRY = "dynamoci.azurecr.io/ai-dynamo/dynamo"
+        ACR_CACHE_FILE = Path.home() / ".cache" / "dynamo-utils" / "azure-acr-registry-cache" / "az-acr-ai-dynamo-dynamo-details.json"
+        self.logger.info(f"ACR: cache file={ACR_CACHE_FILE}, exists={ACR_CACHE_FILE.exists()}")
+        acr_images_by_sha: Dict[str, List[Dict[str, str]]] = {}
+        if ACR_CACHE_FILE.exists():
+            try:
+                acr_data = json.loads(ACR_CACHE_FILE.read_text())
+                acr_details = acr_data.get("imageDetails", []) if isinstance(acr_data, dict) else []
+                acr_by_sha: Dict[str, List[Dict]] = {}
+                for entry in acr_details:
+                    for tag in entry.get("imageTags", []):
+                        parts = tag.split("-", 1)
+                        if len(parts) == 2 and len(parts[0]) == 40:
+                            acr_by_sha.setdefault(parts[0], []).append({
+                                "tag": tag,
+                                "size_bytes": entry.get("imageSizeInBytes", 0),
+                                "pushed_at": entry.get("imagePushedAt", ""),
+                                "digest": entry.get("imageDigest", ""),
+                            })
+
+                for sha_full, detail_list in acr_by_sha.items():
+                    if sha_full not in commit_shas_set:
+                        continue
+                    _ACR_TYPE_ORDER = {"dev": 0, "runtime": 1}
+                    formatted_acr = []
+                    for detail in sorted(detail_list, key=lambda d: d["tag"]):
+                        tag = detail["tag"]
+                        suffix = tag[41:]
+                        full_image = f"{ACR_REGISTRY}:{tag}"
+                        pull_cmd = f"(ACR={full_image} && docker pull $ACR)"
+                        framework, image_type = _parse_ecr_suffix(suffix)
+                        arch = "amd64"
+                        local_dev_cmd = ""
+                        if framework in ("vllm", "sglang", "trtllm", "dynamo", "none"):
+                            local_dev_cmd = (
+                                f"(ACR={full_image}"
+                                f" && docker pull $ACR"
+                                f" && curl -sL {BUILD_LOCAL_DEV_SCRIPT_URL} | python3 - --skip-pull $ACR)"
+                            )
+                        pushed_at = detail["pushed_at"]
+                        created_display = ""
+                        if pushed_at:
+                            try:
+                                dt = datetime.fromisoformat(pushed_at.replace("Z", "+00:00") if pushed_at.endswith("Z") else pushed_at)
+                                created_display = dt.astimezone(ZoneInfo('America/Los_Angeles')).strftime('%Y-%m-%d %H:%M %Z')
+                            except (ValueError, TypeError):
+                                created_display = pushed_at[:19]
+                        tag_html = html.escape(tag)
+                        tag_html = re.sub(r'-local-dev-', '-<b>local-dev</b>-', tag_html)
+                        tag_html = re.sub(r'-dev-', '-<b>dev</b>-', tag_html)
+                        tag_html = re.sub(r'-amd64\b', r'-<b style="color:#76b900">amd64</b> [x86]', tag_html)
+                        formatted_acr.append({
+                            "tag": tag,
+                            "tag_html": tag_html,
+                            "suffix": suffix,
+                            "pull_cmd": pull_cmd,
+                            "full_image": full_image,
+                            "framework": framework,
+                            "image_type": image_type,
+                            "arch": arch,
+                            "local_dev_cmd": local_dev_cmd,
+                            "created_display": created_display,
+                            "digest": detail["digest"],
+                        })
+                    formatted_acr.sort(key=lambda x: (
+                        _ACR_TYPE_ORDER.get(x["image_type"], 99),
+                        x["tag"],
+                    ))
+                    acr_images_by_sha[sha_full] = formatted_acr
+                self.logger.info(f"ACR cache: {len(acr_images_by_sha)} commits with images (from {len(acr_details)} details)")
+            except (OSError, json.JSONDecodeError, ValueError) as e:
+                self.logger.warning(f"Failed to load ACR cache {ACR_CACHE_FILE}: {e}")
 
         # Generate timestamp (PT)
         generated_time = datetime.now(ZoneInfo('America/Los_Angeles')).strftime('%Y-%m-%d %H:%M:%S %Z')
@@ -2617,6 +2692,7 @@ class CommitHistoryGenerator:
             "docker_images": docker_images,
             "gitlab_dev_images": gitlab_dev_images,
             "ecr_images": ecr_images_by_sha,
+            "acr_images": acr_images_by_sha,
             "gitlab_images": gitlab_images,
             "gitlab_pipelines": gitlab_pipelines,
             "mr_pipelines": mr_pipelines,

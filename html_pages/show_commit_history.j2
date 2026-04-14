@@ -971,6 +971,8 @@ window.__dashboardOnReadyQueue.push(function() {
 {%- set gitlab_dev_imgs = gitlab_dev_images.get(sha_short, []) -%}
 {%- set ecr_imgs = ecr_images.get(sha_full, []) -%}
 {%- set has_ecr_images = ecr_imgs | length > 0 -%}
+{%- set acr_imgs = acr_images.get(sha_full, []) -%}
+{%- set has_acr_images = acr_imgs | length > 0 -%}
 {%- set has_gitlab = sha_full in gitlab_images and gitlab_images[sha_full] -%}
 {%- set gitlab_imgs = gitlab_images.get(sha_full, []) -%}
 {%- set composite_bg_color = commit.composite_bg_color -%}
@@ -991,7 +993,7 @@ window.__dashboardOnReadyQueue.push(function() {
 {%- set status_info = build_status.get(sha_short, {}) -%}
 {%- set status = status_info.get('status', 'unknown') -%}
 {%- set inherited = status_info.get('inherited', False) -%}
-{%- set has_composite_toggle = has_docker_images or has_gitlab_dev_images or has_ecr_images -%}
+{%- set has_composite_toggle = has_docker_images or has_gitlab_dev_images or has_ecr_images or has_acr_images -%}
 {# Expand/collapse triangle MUST be the first element in the cell (greyed out if nothing to expand). #}
 {%- if has_composite_toggle -%}
 <a href="#"
@@ -1423,7 +1425,7 @@ Framework: {{ img.framework }}">{{ display_tag }}</td>
 
 {# Docker images row (Image SHA dropdown) if any local or dev registry images exist #}
 {# Docker images row: shown when any of local docker / GitLab dev registry / AWS ECR images exist #}
-{% if has_docker_images or has_gitlab_dev_images or has_ecr_images %}
+{% if has_docker_images or has_gitlab_dev_images or has_ecr_images or has_acr_images %}
 {%- set images = docker_images.get(sha_short, []) -%}
 
 <tr class="docker-images-row" id="docker-row-{{ sha_short }}" style="display: none;">
@@ -1465,10 +1467,38 @@ Framework: {{ img.framework }}">{{ display_tag }}</td>
 </table>
 </div>
 {% endif %}
+{# Azure ACR Registry Images Section (listed first — simpler auth, amd64 only) #}
+{% if acr_imgs %}
+<div style="margin-bottom: 12px; padding: 8px; background-color: white; border: 1px solid #d0d7de; border-radius: 4px;">
+<div style="font-weight: 600; margin-bottom: 4px; font-size: 13px;">Azure ACR Registry Images: ({{ acr_imgs|length }}) <span style="font-weight: 400; font-size: 11px; color: #57606a;">Requires <a href="container_registry_auth_azure_acr.html" target="_blank" style="color: #0969da; text-decoration: none;">ACR authentication</a></span></div>
+<table style="border: none; background-color: white; border-collapse: collapse;">
+<thead>
+<tr>
+<th style="padding: 2px 4px; border: none; font-size: 11px;">Image Tag</th>
+<th style="padding: 2px 4px; border: none; font-size: 11px;">pull</th>
+<th style="padding: 2px 4px; border: none; font-size: 11px;">pull dev+build local-dev</th>
+<th style="padding: 2px 4px; border: none; font-size: 11px;">Framework</th>
+<th style="padding: 2px 4px; border: none; font-size: 11px;">Created (PDT)</th>
+</tr>
+</thead>
+<tbody>
+{% for img in acr_imgs %}
+<tr>
+<td style="font-family: monospace; font-size: 11px; padding: 1px 4px; border: none; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="{{ img.full_image }}">{{ img.tag_html | safe }}</td>
+<td style="font-size: 11px; padding: 1px 4px; border: none; white-space: nowrap;"><button data-clipboard-text="{{ img.pull_cmd }}" onclick="copyFromClipboardAttr(this)" style="padding: 1px 3px; font-size: 11px; background-color: transparent; color: #57606a; border: 1px solid #d0d7de; border-radius: 4px; cursor: pointer; display: inline-flex; align-items: center; vertical-align: middle; line-height: 1;" title="Click to copy: {{ img.pull_cmd }}" onmouseover="this.style.backgroundColor='#f3f4f6'; this.style.borderColor='#8c959f';" onmouseout="this.style.backgroundColor='transparent'; this.style.borderColor='#d0d7de';"><svg width="10" height="10" viewBox="0 0 16 16" fill="currentColor" style="display: inline-block;">{% include "copy_icon_paths.svg" %}</svg></button><span style="margin-left: 3px;">copy command</span></td>
+<td style="font-size: 11px; padding: 1px 4px; border: none; white-space: nowrap;">{% if img.image_type == "dev" and img.local_dev_cmd %}<button data-clipboard-text="{{ img.local_dev_cmd }}" onclick="copyFromClipboardAttr(this)" style="padding: 1px 3px; font-size: 11px; background-color: transparent; color: #57606a; border: 1px solid #d0d7de; border-radius: 4px; cursor: pointer; display: inline-flex; align-items: center; vertical-align: middle; line-height: 1;" title="Click to copy: pull dev + build local-dev" onmouseover="this.style.backgroundColor='#f3f4f6'; this.style.borderColor='#8c959f';" onmouseout="this.style.backgroundColor='transparent'; this.style.borderColor='#d0d7de';"><svg width="10" height="10" viewBox="0 0 16 16" fill="currentColor" style="display: inline-block;">{% include "copy_icon_paths.svg" %}</svg></button><span style="margin-left: 3px;">copy command</span>{% else %}<span style="color: #8c959f;">—</span>{% endif %}</td>
+<td style="font-size: 11px; padding: 1px 4px; border: none;">{{ img.framework }}</td>
+<td style="font-size: 11px; padding: 1px 4px; border: none;">{{ img.created_display }}</td>
+</tr>
+{% endfor %}
+</tbody>
+</table>
+</div>
+{% endif %}
 {# AWS ECR Registry Images Section #}
 {% if ecr_imgs %}
 <div style="margin-bottom: 12px; padding: 8px; background-color: white; border: 1px solid #d0d7de; border-radius: 4px;">
-<div style="font-weight: 600; margin-bottom: 4px; font-size: 13px;">AWS ECR Registry Images: ({{ ecr_imgs|length }}) <span style="font-weight: 400; font-size: 11px; color: #57606a;">Requires <a href="https://nvidia.enterprise.slack.com/docs/T04SYRAP3/F0AHW69HC8P" target="_blank" style="color: #0969da; text-decoration: none;">nvsec authentication</a></span></div>
+<div style="font-weight: 600; margin-bottom: 4px; font-size: 13px;">AWS ECR Registry Images: ({{ ecr_imgs|length }}) <span style="font-weight: 400; font-size: 11px; color: #57606a;">Requires <a href="container_registry_auth_aws_ecr.html" target="_blank" style="color: #0969da; text-decoration: none;">nvsec authentication</a></span></div>
 <table style="border: none; background-color: white; border-collapse: collapse;">
 <thead>
 <tr>
