@@ -83,7 +83,8 @@
         "source=${localEnv:HOME}/.gitconfig,target=/home/dynamo/.gitconfig,type=bind",
         "source=${localEnv:HOME}/.ssh,target=/home/dynamo/.ssh,type=bind,readonly",
         {# .claude and .cursor are at the ~/ level because there's already a .claude directory in the home directory #}
-        "source=${localEnv:HOME}/dynamo/.claude,target=/home/dynamo/.claude,type=bind",
+        "source=${localEnv:HOME}/.claude,target=/home/dynamo/.claude,type=bind",
+        "source=${localEnv:HOME}/dynamo/notes,target=/home/dynamo/notes,type=bind",
         "source=${localEnv:HOME}/dynamo/.cursor,target=/home/dynamo/.cursor,type=bind",
         {# .cursorrules are at the repo-level #}
         "source=${localEnv:HOME}/dynamo/.cursorrules,target=/workspace/.cursorrules,type=bind",
