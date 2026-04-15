@@ -84,6 +84,7 @@
         "source=${localEnv:HOME}/.ssh,target=/home/dynamo/.ssh,type=bind,readonly",
         {# .claude and .cursor are at the ~/ level because there's already a .claude directory in the home directory #}
         "source=${localEnv:HOME}/.claude,target=/home/dynamo/.claude,type=bind",
+        "source=${localEnv:HOME}/.claude.json,target=/home/dynamo/.claude.json,type=bind",
         "source=${localEnv:HOME}/dynamo/notes,target=/home/dynamo/notes,type=bind",
         "source=${localEnv:HOME}/dynamo/.cursor,target=/home/dynamo/.cursor,type=bind",
         {# .cursorrules are at the repo-level #}
