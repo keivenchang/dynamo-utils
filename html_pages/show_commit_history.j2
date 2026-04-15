@@ -1470,7 +1470,7 @@ Framework: {{ img.framework }}">{{ display_tag }}</td>
 {# Azure ACR Registry Images Section (listed first — simpler auth, amd64 only) #}
 {% if acr_imgs %}
 <div style="margin-bottom: 12px; padding: 8px; background-color: white; border: 1px solid #d0d7de; border-radius: 4px;">
-<div style="font-weight: 600; margin-bottom: 4px; font-size: 13px;">Azure ACR Registry Images: ({{ acr_imgs|length }}) <span style="font-weight: 400; font-size: 11px; color: #57606a;">Requires <a href="container_registry_auth_azure_acr.html" target="_blank" style="color: #0969da; text-decoration: none;">ACR authentication</a></span></div>
+<div style="font-weight: 600; margin-bottom: 4px; font-size: 13px;">Azure ACR Registry Images: ({{ acr_imgs|length }}) <span style="font-weight: 400; font-size: 11px; color: #57606a;">Requires <a href="container_registry_auth_azure_acr.html" target="_blank" style="color: #0969da; text-decoration: none;">Azure ACR authentication</a></span></div>
 <table style="border: none; background-color: white; border-collapse: collapse;">
 <thead>
 <tr>
@@ -1498,7 +1498,7 @@ Framework: {{ img.framework }}">{{ display_tag }}</td>
 {# AWS ECR Registry Images Section #}
 {% if ecr_imgs %}
 <div style="margin-bottom: 12px; padding: 8px; background-color: white; border: 1px solid #d0d7de; border-radius: 4px;">
-<div style="font-weight: 600; margin-bottom: 4px; font-size: 13px;">AWS ECR Registry Images: ({{ ecr_imgs|length }}) <span style="font-weight: 400; font-size: 11px; color: #57606a;">Requires <a href="container_registry_auth_aws_ecr.html" target="_blank" style="color: #0969da; text-decoration: none;">nvsec authentication</a></span></div>
+<div style="font-weight: 600; margin-bottom: 4px; font-size: 13px;">AWS ECR Registry Images: ({{ ecr_imgs|length }}) <span style="font-weight: 400; font-size: 11px; color: #57606a;">Requires <a href="container_registry_auth_aws_ecr.html" target="_blank" style="color: #0969da; text-decoration: none;">nvsec and AWS ECR authentication</a></span></div>
 <table style="border: none; background-color: white; border-collapse: collapse;">
 <thead>
 <tr>
