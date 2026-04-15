@@ -364,8 +364,8 @@ def parse_args() -> argparse.Namespace:
                         help="show what would be approved without sending keys")
     parser.add_argument("--verbose", action="store_true",
                         help="print every poll cycle")
-    parser.add_argument("--interval", type=float, default=2.0,
-                        help="poll interval in seconds (default: 2)")
+    parser.add_argument("--interval", type=float, default=0.5,
+                        help="base poll interval in seconds (default: 0.5)")
     parser.add_argument("--list", action="store_true",
                         help="list available tmux sessions and exit")
     return parser.parse_args()
@@ -489,10 +489,11 @@ def main() -> None:
     signal.signal(signal.SIGINT, on_exit)
     signal.signal(signal.SIGTERM, on_exit)
 
-    # Adaptive polling: start at base interval, ramp up when idle, reset on activity
+    # Adaptive polling: lerp from base to max over ramp_duration seconds of inactivity
     base_interval = args.interval
-    max_interval = max(5.0, base_interval)
-    current_interval = base_interval
+    max_interval = max(2.5, base_interval)
+    ramp_duration = 60.0  # seconds of inactivity before reaching max_interval
+    idle_since: float | None = None  # monotonic timestamp when idle streak started
 
     sys.stderr.write("=" * 72 + "\n")
     sys.stderr.write(" AUTO-APPROVE TMUX\n")
@@ -514,7 +515,7 @@ def main() -> None:
         log.info("Watching %d session(s): %s", len(states), target_names)
     if is_dynamic:
         log.info("Dynamic mode: will auto-detect new sessions matching '%s'", args.target)
-    log.info("Poll interval: %ss (ramps to %ss when idle)", base_interval, max_interval)
+    log.info("Poll interval: %ss (ramps to %ss over %ds idle)", base_interval, max_interval, int(ramp_duration))
     if args.dry_run:
         log.info("DRY RUN — will not send keys")
     log.info("Press Ctrl+C to stop")
@@ -633,11 +634,16 @@ def main() -> None:
                     time.sleep(3)
 
         if acted:
-            current_interval = base_interval
+            idle_since = None
+            time.sleep(base_interval)
         else:
-            current_interval = min(current_interval + base_interval, max_interval)
-
-        time.sleep(current_interval)
+            now = time.monotonic()
+            if idle_since is None:
+                idle_since = now
+            idle_secs = now - idle_since
+            t = min(idle_secs / ramp_duration, 1.0)  # 0..1 over ramp_duration
+            current_interval = base_interval + t * (max_interval - base_interval)
+            time.sleep(current_interval)
 
 
 if __name__ == "__main__":
