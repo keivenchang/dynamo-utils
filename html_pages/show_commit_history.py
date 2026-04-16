@@ -977,48 +977,58 @@ class CommitHistoryGenerator:
     def _build_json_output(self, template_context: Dict[str, Any]) -> Dict[str, Any]:
         """Build a JSON-serializable dict from the template context.
 
-        Strips HTML-only fields (pre-rendered tree HTML, icon HTML, style strings).
-        Converts non-serializable types (datetime, Path, tuple) to strings/lists.
+        Per-commit data (images, CI status, build status) is embedded inside each
+        commit entry rather than in separate top-level dicts. This makes each commit
+        self-contained: consumers can iterate commits without cross-referencing.
         """
-        # Serialize commits: convert datetime -> ISO string, strip pre-rendered HTML fragments.
+        # Lookup dicts keyed by sha_full or sha_short
+        ecr_images = template_context.get("ecr_images") or {}
+        acr_images = template_context.get("acr_images") or {}
+        docker_images = template_context.get("docker_images") or {}
+        gitlab_images = template_context.get("gitlab_images") or {}
+        gitlab_dev_images = template_context.get("gitlab_dev_images") or {}
+        github_actions_status = template_context.get("github_actions_status") or {}
+        post_merge_status = template_context.get("post_merge_status") or {}
+        gha_per_commit_stats = template_context.get("gha_per_commit_stats") or {}
+        build_status = template_context.get("build_status") or {}
+        gitlab_pipelines = template_context.get("gitlab_pipelines") or {}
+        mr_pipelines = template_context.get("mr_pipelines") or {}
+
         commits_json = []
         for c in template_context.get("commits", []):
+            sha_full = str(c.get("sha_full", "") or "")
+            sha_short = str(c.get("sha_short", "") or "")
+            pr_number = c.get("pr_number")
+
             row: Dict[str, Any] = {}
             for k, v in c.items():
                 if k in ("github_checks_tree_html", "gitlab_checks_tree_html", "post_merge_checks_tree_html", "build_and_test_status_icon"):
-                    continue  # HTML rendering artifacts — not useful in JSON
+                    continue
                 if hasattr(v, "isoformat"):
                     row[k] = v.isoformat()
                 else:
                     row[k] = v
+
+            # Embed per-commit data directly
+            row["ecr_images"] = ecr_images.get(sha_full, [])
+            row["acr_images"] = acr_images.get(sha_full, [])
+            row["docker_images"] = docker_images.get(sha_short, [])
+            row["gitlab_images"] = gitlab_images.get(sha_full, [])
+            row["gitlab_dev_images"] = gitlab_dev_images.get(sha_short, [])
+            row["github_actions_status"] = github_actions_status.get(sha_full)
+            row["post_merge_status"] = post_merge_status.get(sha_full)
+            row["gha_per_commit_stats"] = gha_per_commit_stats.get(sha_full)
+            row["build_status"] = build_status.get(sha_short)
+            row["gitlab_pipeline"] = gitlab_pipelines.get(sha_full)
+            row["mr_pipeline"] = mr_pipelines.get(pr_number) if pr_number else None
+
             commits_json.append(row)
 
-        # page_stats: list of 3-tuples -> list of dicts; strip html.* keys (rendering artifacts).
         page_stats_json = [
             {"key": k, "value": v, "description": d}
             for k, v, d in template_context.get("page_stats", [])
             if not str(k).startswith("html.")
         ]
-
-        # log_paths: dict of lists of (date, path) tuples -> dict of lists of dicts
-        log_paths_json = {
-            sha: [{"date": d, "path": str(p)} for d, p in paths]
-            for sha, paths in (template_context.get("log_paths") or {}).items()
-        }
-
-        # report_path_by_commit_image: dict of (date, path) tuples -> dict of dicts
-        report_path_json = {
-            k: {"date": d, "path": str(p)}
-            for k, (d, p) in (template_context.get("report_path_by_commit_image") or {}).items()
-        }
-
-        # HTML-only / rendering-only keys to exclude from JSON output
-        html_only_keys = {
-            "commits", "log_paths", "report_path_by_commit_image", "page_stats",
-            "pass_plus_style",
-        }
-        # Also exclude all ci_status_icon_context keys (they are HTML strings)
-        icon_keys = set(ci_status_icon_context().keys())
 
         result: Dict[str, Any] = {
             "meta": {
@@ -1035,20 +1045,6 @@ class CommitHistoryGenerator:
                 "grafana_pr_url_template": template_context.get("grafana_pr_url_template"),
             },
             "commits": commits_json,
-            "github_actions_status": template_context.get("github_actions_status") or {},
-            "post_merge_status": template_context.get("post_merge_status") or {},
-            "gha_per_commit_stats": template_context.get("gha_per_commit_stats") or {},
-            "gitlab_pipelines": template_context.get("gitlab_pipelines") or {},
-            "mr_pipelines": template_context.get("mr_pipelines") or {},
-            "pipeline_job_counts": template_context.get("pipeline_job_counts") or {},
-            "gitlab_images": template_context.get("gitlab_images") or {},
-            "gitlab_dev_images": template_context.get("gitlab_dev_images") or {},
-            "ecr_images": template_context.get("ecr_images") or {},
-            "acr_images": template_context.get("acr_images") or {},
-            "docker_images": template_context.get("docker_images") or {},
-            "build_status": template_context.get("build_status") or {},
-            "log_paths": log_paths_json,
-            "report_path_by_commit_image": report_path_json,
             "page_stats": page_stats_json,
         }
         return result
