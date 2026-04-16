@@ -294,11 +294,11 @@ class _CommitHistoryPerfStats:
     def reset(self):
         """Reset all statistics."""
         # Composite SHA operations
-        self.composite_sha_cache_hit = 0
-        self.composite_sha_cache_miss = 0
-        self.composite_sha_errors = 0
-        self.composite_sha_total_secs = 0.0
-        self.composite_sha_compute_secs = 0.0
+        self.image_sha_6_cache_hit = 0
+        self.image_sha_6_cache_miss = 0
+        self.image_sha_6_errors = 0
+        self.image_sha_6_total_secs = 0.0
+        self.image_sha_6_compute_secs = 0.0
 
         # Local build markers
         self.marker_composite_with_reports = 0

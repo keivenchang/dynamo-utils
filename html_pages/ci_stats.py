@@ -721,25 +721,25 @@ def build_page_stats(
     perf_stats = COMMIT_HISTORY_PERF_STATS
 
     # Composite SHA (commit-history-only, show real values when available)
-    if perf_stats.composite_sha_cache_hit > 0 or perf_stats.composite_sha_cache_miss > 0:
+    if perf_stats.image_sha_6_cache_hit > 0 or perf_stats.image_sha_6_cache_miss > 0:
         # Show disk cache size (from COMMIT_HISTORY_CACHE)
         commit_mem_count, commit_disk_count = COMMIT_HISTORY_CACHE.get_cache_sizes()
-        page_stats.append(("composite_sha.cache.mem", str(commit_mem_count), "Commit history cache entries (in memory)"))
-        page_stats.append(("composite_sha.cache.disk", str(commit_disk_count), "Commit history cache entries (on disk)"))
-        page_stats.append(("composite_sha.cache.hits", str(perf_stats.composite_sha_cache_hit), ""))
-        page_stats.append(("composite_sha.cache.misses", str(perf_stats.composite_sha_cache_miss), ""))
-        page_stats.append(("composite_sha.errors", str(perf_stats.composite_sha_errors), "Errors computing composite SHAs (commit history only)"))
-        page_stats.append(("composite_sha.total_secs", f"{perf_stats.composite_sha_total_secs:.2f}s", "Total time computing composite SHAs (commit history only)"))
-        page_stats.append(("composite_sha.compute_secs", f"{perf_stats.composite_sha_compute_secs:.2f}s", "Time spent in SHA computations (commit history only)"))
+        page_stats.append(("image_sha_6.cache.mem", str(commit_mem_count), "Commit history cache entries (in memory)"))
+        page_stats.append(("image_sha_6.cache.disk", str(commit_disk_count), "Commit history cache entries (on disk)"))
+        page_stats.append(("image_sha_6.cache.hits", str(perf_stats.image_sha_6_cache_hit), ""))
+        page_stats.append(("image_sha_6.cache.misses", str(perf_stats.image_sha_6_cache_miss), ""))
+        page_stats.append(("image_sha_6.errors", str(perf_stats.image_sha_6_errors), "Errors computing composite SHAs (commit history only)"))
+        page_stats.append(("image_sha_6.total_secs", f"{perf_stats.image_sha_6_total_secs:.2f}s", "Total time computing composite SHAs (commit history only)"))
+        page_stats.append(("image_sha_6.compute_secs", f"{perf_stats.image_sha_6_compute_secs:.2f}s", "Time spent in SHA computations (commit history only)"))
     else:
         commit_mem_count, commit_disk_count = COMMIT_HISTORY_CACHE.get_cache_sizes()
-        page_stats.append(("composite_sha.cache.mem", str(commit_mem_count), "Commit history cache entries (in memory)"))
-        page_stats.append(("composite_sha.cache.disk", str(commit_disk_count), "Commit history cache entries (on disk)"))
-        page_stats.append(("composite_sha.cache.hits", "(N/A)", ""))
-        page_stats.append(("composite_sha.cache.misses", "(N/A)", ""))
-        page_stats.append(("composite_sha.errors", "(N/A)", "Errors computing composite SHAs (commit history only)"))
-        page_stats.append(("composite_sha.total_secs", "(N/A)", "Total time computing composite SHAs (commit history only)"))
-        page_stats.append(("composite_sha.compute_secs", "(N/A)", "Time spent in SHA computations (commit history only)"))
+        page_stats.append(("image_sha_6.cache.mem", str(commit_mem_count), "Commit history cache entries (in memory)"))
+        page_stats.append(("image_sha_6.cache.disk", str(commit_disk_count), "Commit history cache entries (on disk)"))
+        page_stats.append(("image_sha_6.cache.hits", "(N/A)", ""))
+        page_stats.append(("image_sha_6.cache.misses", "(N/A)", ""))
+        page_stats.append(("image_sha_6.errors", "(N/A)", "Errors computing composite SHAs (commit history only)"))
+        page_stats.append(("image_sha_6.total_secs", "(N/A)", "Total time computing composite SHAs (commit history only)"))
+        page_stats.append(("image_sha_6.compute_secs", "(N/A)", "Time spent in SHA computations (commit history only)"))
 
     # Snippet cache (always show, tracked globally in SNIPPET_CACHE)
     snippet_stats = SNIPPET_CACHE.stats

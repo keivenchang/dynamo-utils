@@ -943,22 +943,22 @@ window.__dashboardOnReadyQueue.push(function() {
 </thead>
 <tbody>
 
-{# Build a mapping of composite_sha to color index (0-7) #}
+{# Build a mapping of image_sha_6 to color index (0-7) #}
 {# Group commits by their Image SHA and assign a color to each group #}
-{%- set composite_sha_to_color = {} -%}
-{%- set seen_composite_shas = [] -%}
+{%- set image_sha_6_to_color = {} -%}
+{%- set seen_image_sha_6s = [] -%}
 {%- for commit in commits -%}
-  {%- if commit.composite_sha not in composite_sha_to_color -%}
-    {%- set _ = seen_composite_shas.append(commit.composite_sha) -%}
-    {%- set color_index = (seen_composite_shas|length - 1) % 8 -%}
-    {%- set _ = composite_sha_to_color.update({commit.composite_sha: color_index}) -%}
+  {%- if commit.image_sha_6 not in image_sha_6_to_color -%}
+    {%- set _ = seen_image_sha_6s.append(commit.image_sha_6) -%}
+    {%- set color_index = (seen_image_sha_6s|length - 1) % 8 -%}
+    {%- set _ = image_sha_6_to_color.update({commit.image_sha_6: color_index}) -%}
   {%- endif -%}
 {%- endfor -%}
 
 {% for commit in commits %}
-{%- set sha_short = commit.sha_short -%}
+{%- set commit_sha_9 = commit.commit_sha_9 -%}
 {%- set sha_full = commit.sha_full -%}
-{%- set composite_sha = commit.composite_sha -%}
+{%- set image_sha_6 = commit.image_sha_6 -%}
 {%- set date_str = commit.date -%}
 {%- set author = commit.author -%}
 {%- set author_email = commit.author_email | default('') -%}
@@ -966,9 +966,9 @@ window.__dashboardOnReadyQueue.push(function() {
 {# TODO: Unhardcode ai-dynamo/dynamo - should be template variables (repo_owner/repo_name) #}
 {%- set commit_link = "https://github.com/ai-dynamo/dynamo/commit/" ~ sha_full -%}
 {%- set gitlab_commit_link = "https://gitlab-master.nvidia.com/dl/ai-dynamo/dynamo/-/commit/" ~ sha_full -%}
-{%- set has_docker_images = sha_short in docker_images and docker_images[sha_short] -%}
-{%- set has_gitlab_dev_images = sha_short in gitlab_dev_images and gitlab_dev_images[sha_short] -%}
-{%- set gitlab_dev_imgs = gitlab_dev_images.get(sha_short, []) -%}
+{%- set has_docker_images = commit_sha_9 in docker_images and docker_images[commit_sha_9] -%}
+{%- set has_gitlab_dev_images = commit_sha_9 in gitlab_dev_images and gitlab_dev_images[commit_sha_9] -%}
+{%- set gitlab_dev_imgs = gitlab_dev_images.get(commit_sha_9, []) -%}
 {%- set ecr_imgs = ecr_images.get(sha_full, []) -%}
 {%- set has_ecr_images = ecr_imgs | length > 0 -%}
 {%- set acr_imgs = acr_images.get(sha_full, []) -%}
@@ -980,7 +980,7 @@ window.__dashboardOnReadyQueue.push(function() {
 {%- set pr_number = commit.pr_number -%}
 {%- set mr_pipeline = mr_pipelines.get(pr_number) if pr_number else none -%}
 {%- set effective_pipeline = pipeline if pipeline else mr_pipeline -%}
-{%- set sha_color_class = "sha-color-" ~ composite_sha_to_color.get(composite_sha, 0) -%}
+{%- set sha_color_class = "sha-color-" ~ image_sha_6_to_color.get(image_sha_6, 0) -%}
 {%- set full_msg = commit.full_message -%}
 {%- set files_changed = commit.files_changed -%}
 {%- set insertions = commit.insertions -%}
@@ -989,16 +989,16 @@ window.__dashboardOnReadyQueue.push(function() {
 
 <tr>
 <td class="sha col-image_sha {{ sha_color_class }}" style="padding: 4px 2px;"><span class="col-body">
-{%- set log_paths_list = log_paths.get(sha_short, []) -%}
-{%- set status_info = build_status.get(sha_short, {}) -%}
+{%- set log_paths_list = log_paths.get(commit_sha_9, []) -%}
+{%- set status_info = build_status.get(commit_sha_9, {}) -%}
 {%- set status = status_info.get('status', 'unknown') -%}
 {%- set inherited = status_info.get('inherited', False) -%}
 {%- set has_composite_toggle = has_docker_images or has_gitlab_dev_images or has_ecr_images or has_acr_images -%}
 {# Expand/collapse triangle MUST be the first element in the cell (greyed out if nothing to expand). #}
 {%- if has_composite_toggle -%}
 <a href="#"
-   id="docker-toggle-{{ sha_short }}"
-   data-sha-short="{{ sha_short }}"
+   id="docker-toggle-{{ commit_sha_9 }}"
+   data-sha-short="{{ commit_sha_9 }}"
    class="triangle-toggle"
    onclick="toggleDockerImages(event, this); return false;"
    style="margin-right: 2px;"
@@ -1008,16 +1008,16 @@ window.__dashboardOnReadyQueue.push(function() {
 {%- endif -%}
 {# Local build status: ball icon (PASSED/FAILED) and link to report.html when report.json exists. #}
 {%- if log_paths_list -%}
-{%- set report_key = sha_short ~ '|' ~ (composite_sha[:6]|lower) -%}
+{%- set report_key = commit_sha_9 ~ '|' ~ (image_sha_6|lower) -%}
 {%- set report_entry = report_path_by_commit_image.get(report_key) -%}
 {%- set report_path = report_entry[1] if report_entry else log_paths_list[-1][1] -%}
 {%- set latest_date = report_entry[0] if report_entry else log_paths_list[-1][0] -%}
 {# DEPRECATED: Ball icon (pass/fail) from local build_images.py — commented out #}
-{%- set cds_label = composite_sha[:6]|upper -%}
+{%- set cds_label = image_sha_6|upper -%}
 {#- if commit.build_and_test_status_icon -%}{{ commit.build_and_test_status_icon|safe }}{%- endif -#}<a href="{{ report_path }}" target="_blank" class="image-sha-badge" title="{%- if inherited -%}Inherited: {%- endif -%}{%- if status == 'success' -%}All local builds passed{%- elif status == 'failed' -%}Some local builds failed{%- else -%}Build in progress / no local build status{%- endif -%} - Click to view build logs">{{ cds_label }}</a>{%- if has_gitlab_dev_images -%}<span style="display:inline-block;width:6px;height:6px;border-radius:50%;background:#d97706;margin-left:2px;vertical-align:middle;" title="GitLab Dev Registry images available"></span>{%- endif -%}
 {%- if log_paths_list|length > 1 -%}
-<a href="#" onclick="toggleBuildHistory(event, '{{ sha_short }}'); return false;" style="text-decoration: none; margin-left: 0; color: #656d76; font-size: 10px; vertical-align: middle;" title="Show build history ({{ log_paths_list|length }} builds)">{{ log_paths_list|length }}</a>
-<div id="build-history-{{ sha_short }}" style="display: none; position: absolute; background: #fff; border: 1px solid #d0d7de; border-radius: 6px; padding: 8px; margin-top: 4px; z-index: 1000; box-shadow: 0 8px 24px rgba(140, 149, 159, 0.2);">
+<a href="#" onclick="toggleBuildHistory(event, '{{ commit_sha_9 }}'); return false;" style="text-decoration: none; margin-left: 0; color: #656d76; font-size: 10px; vertical-align: middle;" title="Show build history ({{ log_paths_list|length }} builds)">{{ log_paths_list|length }}</a>
+<div id="build-history-{{ commit_sha_9 }}" style="display: none; position: absolute; background: #fff; border: 1px solid #d0d7de; border-radius: 6px; padding: 8px; margin-top: 4px; z-index: 1000; box-shadow: 0 8px 24px rgba(140, 149, 159, 0.2);">
   <div style="font-weight: 600; font-size: 12px; margin-bottom: 6px; color: #24292f;">Build History</div>
   {%- for date, path in log_paths_list|reverse -%}
   <div style="padding: 4px 0;">
@@ -1028,13 +1028,13 @@ window.__dashboardOnReadyQueue.push(function() {
 {%- endif -%}
 {%- else -%}
 {# No build logs: render Image SHA badge (not a link). #}
-{%- set cds_label = composite_sha[:6]|upper -%}
+{%- set cds_label = image_sha_6|upper -%}
 {# DEPRECATED: Ball icon from local build_images.py — commented out #}
 {#- if commit.build_and_test_status_icon -%}{{ commit.build_and_test_status_icon|safe }}{%- endif -#}
 {%- if has_composite_toggle -%}
 <a href="#"
    class="image-sha-badge"
-   onclick="toggleDockerImages(event, document.getElementById('docker-toggle-{{ sha_short }}')); return false;"
+   onclick="toggleDockerImages(event, document.getElementById('docker-toggle-{{ commit_sha_9 }}')); return false;"
    title="{%- if inherited -%}Inherited: {%- endif -%}{%- if status == 'success' -%}All local builds passed{%- elif status == 'failed' -%}Some local builds failed{%- else -%}Build in progress / no local build status{%- endif -%} - Click to show Docker images">{{ cds_label }}</a>{%- if has_gitlab_dev_images -%}<span style="display:inline-block;width:6px;height:6px;border-radius:50%;background:#d97706;margin-left:2px;vertical-align:middle;" title="GitLab Dev Registry images available"></span>{%- endif -%}
 {%- else -%}
 <span class="image-sha-badge" title="{%- if inherited -%}Inherited: {%- endif -%}{%- if status == 'success' -%}All local builds passed{%- elif status == 'failed' -%}Some local builds failed{%- else -%}Build in progress / no local build status{%- endif -%}">{{ cds_label }}</span>{%- if has_gitlab_dev_images -%}<span style="display:inline-block;width:6px;height:6px;border-radius:50%;background:#d97706;margin-left:2px;vertical-align:middle;" title="GitLab Dev Registry images available"></span>{%- endif -%}
@@ -1044,11 +1044,11 @@ window.__dashboardOnReadyQueue.push(function() {
 </td>
 <td class="sha" style="padding: 4px 0 4px 4px; padding-right: 2px;">
 <a href="#"
-   id="commit-info-toggle-{{ sha_short }}"
+   id="commit-info-toggle-{{ commit_sha_9 }}"
    class="triangle-toggle"
-   onclick="toggleCommitInfo(event, '{{ sha_short }}'); return false;"
+   onclick="toggleCommitInfo(event, '{{ commit_sha_9 }}'); return false;"
    style="margin-right: 4px;"
-   title="Show commit message and file changes">▶</a>{{ sha_short }}
+   title="Show commit message and file changes">▶</a>{{ commit_sha_9 }}
 </td>
 <td class="sha col-github" style="padding-left: 2px;"><span class="col-body">
 <span class="github-icons">
@@ -1072,9 +1072,9 @@ window.__dashboardOnReadyQueue.push(function() {
 {%- endif -%}
 {# GitHub section #}
 {%- if commit.github_checks_tree_html or commit.post_merge_checks_tree_html -%}<a href="#"
-   id="github-tree-toggle-{{ sha_short }}"
+   id="github-tree-toggle-{{ commit_sha_9 }}"
    class="triangle-toggle"
-   onclick="toggleCommitGitHubTree(event, '{{ sha_short }}'); return false;"
+   onclick="toggleCommitGitHubTree(event, '{{ commit_sha_9 }}'); return false;"
    title="Show GitHub checks tree">▶</a>{%- else -%}<span class="triangle-toggle disabled" title="No GitHub checks available">▶</span>{%- endif -%}<a href="https://github.com/ai-dynamo/dynamo/commit/{{ sha_full }}/checks" target="_blank" class="github-commit-link" style="text-decoration: none; color: #24292f; font-weight: 600;" title="{{ gha_title }}"><svg height="14" width="14" viewBox="0 0 16 16" fill="currentColor" style="display: inline-block; vertical-align: middle;"><path fill-rule="evenodd" clip-rule="evenodd" d="M8 0C3.58 0 0 3.58 0 8C0 11.54 2.29 14.53 5.47 15.59C5.87 15.66 6.02 15.42 6.02 15.21C6.02 15.02 6.01 14.39 6.01 13.72C4 14.09 3.48 13.23 3.32 12.78C3.23 12.55 2.84 11.84 2.5 11.65C2.22 11.5 1.82 11.13 2.49 11.12C3.12 11.11 3.57 11.7 3.72 11.94C4.44 13.15 5.59 12.81 6.05 12.6C6.12 12.08 6.33 11.73 6.56 11.53C4.78 11.33 2.92 10.64 2.92 7.58C2.92 6.71 3.23 5.99 3.74 5.43C3.66 5.23 3.38 4.41 3.82 3.31C3.82 3.31 4.49 3.1 6.02 4.13C6.66 3.95 7.34 3.86 8.02 3.86C8.7 3.86 9.38 3.95 10.02 4.13C11.55 3.09 12.22 3.31 12.22 3.31C12.66 4.41 12.38 5.23 12.3 5.43C12.81 5.99 13.12 6.7 13.12 7.58C13.12 10.65 11.25 11.33 9.47 11.53C9.76 11.78 10.01 12.26 10.01 13.01C10.01 14.08 10 14.94 10 15.21C10 15.42 10.15 15.67 10.55 15.59C13.71 14.53 16 11.53 16 8C16 3.58 12.42 0 8 0Z"></path></svg></a>
 {# Expandable per-commit checks tree (GitHub + GitLab) #}
 {# Per-commit GH checks status (split required vs optional failures, plus pending vs cancelled) #}
@@ -1155,9 +1155,9 @@ window.__dashboardOnReadyQueue.push(function() {
 <span class="gitlab-icons">{# keep icons adjacent; avoid whitespace nodes inside inline-flex #}
 {%- if commit.gitlab_checks_tree_html -%}
 <a href="#" 
-   id="gitlab-tree-toggle-{{ sha_short }}" 
+   id="gitlab-tree-toggle-{{ commit_sha_9 }}" 
    class="triangle-toggle{% if not effective_pipeline %} icon-muted{% endif %}" 
-   onclick="toggleCommitGitLabTree(event, '{{ sha_short }}'); return false;" 
+   onclick="toggleCommitGitLabTree(event, '{{ commit_sha_9 }}'); return false;" 
    style="margin-right: 4px;" 
    title="{% if effective_pipeline %}Show GitLab pipeline jobs tree{% else %}No pipeline found (tree is likely empty){% endif %}">▶</a>
 {%- else -%}
@@ -1311,19 +1311,19 @@ window.__dashboardOnReadyQueue.push(function() {
 </tr>
 
 {# Commit info dropdown row (message, files changed, stats) #}
-<tr class="commit-info-row" id="commit-info-row-{{ sha_short }}" style="display: none;">
+<tr class="commit-info-row" id="commit-info-row-{{ commit_sha_9 }}" style="display: none;">
 <td colspan="9" style="padding: 0; background-color: #f6f8fa;">
 <div style="padding: 8px 12px; border-top: 1px solid #d0d7de;">
   <div style="display: flex; align-items: center; justify-content: flex-start; margin-bottom: 6px;">
     <button type="button"
-            onclick="event.stopPropagation(); try { collapseCommitInfo('{{ sha_short }}'); } catch (e) {}"
+            onclick="event.stopPropagation(); try { collapseCommitInfo('{{ commit_sha_9 }}'); } catch (e) {}"
             style="padding: 0 6px; height: 18px; line-height: 16px; font-size: 14px; border: 1px solid #d0d7de; border-radius: 999px; background: #ffffff; color: #57606a; cursor: pointer;"
             title="Close commit info"><svg aria-hidden="true" viewBox="0 0 16 16" version="1.1" width="12" height="12" data-view-component="true" class="octicon octicon-x" fill="currentColor"><path fill-rule="evenodd" d="M3.72 3.72a.75.75 0 011.06 0L8 6.94l3.22-3.22a.75.75 0 111.06 1.06L9.06 8l3.22 3.22a.75.75 0 11-1.06 1.06L8 9.06l-3.22 3.22a.75.75 0 11-1.06-1.06L6.94 8 3.72 4.78a.75.75 0 010-1.06z"></path></svg></button>
   </div>
   <div style="margin: 0; padding: 0 14px;">
     <div style="margin: 8px 0 12px 0; padding: 8px; background-color: white; border: 1px solid #d0d7de; border-radius: 4px;">
       <div style="font-weight: 600; margin-bottom: 6px; font-size: 13px;">Commit Message:</div>
-      <div style="font-size: 12px; color: #57606a; margin-bottom: 6px;">Commit: <a href="{{ commit_link }}" target="_blank" rel="noopener noreferrer" style="color: #0969da; text-decoration: none;">{{ sha_short }}</a></div>
+      <div style="font-size: 12px; color: #57606a; margin-bottom: 6px;">Commit: <a href="{{ commit_link }}" target="_blank" rel="noopener noreferrer" style="color: #0969da; text-decoration: none;">{{ commit_sha_9 }}</a></div>
       <div style="font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace; font-size: 12px; color: #24292f; white-space: pre-wrap; margin-bottom: 8px;">{{ full_msg | safe }}</div>
       <div style="font-size: 12px; color: #57606a; margin-top: 6px;">
         <span style="color: #1a7f37; font-weight: 500;">+{{ insertions }}</span>
@@ -1348,12 +1348,12 @@ window.__dashboardOnReadyQueue.push(function() {
 
 {# GitHub checks tree row (hidden by default) — includes pre-merge + post-merge CI trees #}
 {%- if commit.github_checks_tree_html or commit.post_merge_checks_tree_html -%}
-<tr id="github-tree-row-{{ sha_short }}" style="display: none;">
+<tr id="github-tree-row-{{ commit_sha_9 }}" style="display: none;">
 <td colspan="9" style="padding: 0;">
 <div style="padding: 0; border-top: 0;">
           <div style="display: flex; align-items: center; justify-content: flex-start; padding: 6px 8px 0 8px;">
             <button type="button"
-                    onclick="event.stopPropagation(); try { collapseCommitGitHubTree('{{ sha_short }}'); } catch (e) {}"
+                    onclick="event.stopPropagation(); try { collapseCommitGitHubTree('{{ commit_sha_9 }}'); } catch (e) {}"
                     style="padding: 0 6px; height: 18px; line-height: 16px; font-size: 14px; border: 1px solid #d0d7de; border-radius: 999px; background: #ffffff; color: #57606a; cursor: pointer;"
                     title="Close GitHub checks"><svg aria-hidden="true" viewBox="0 0 16 16" version="1.1" width="12" height="12" data-view-component="true" class="octicon octicon-x" fill="currentColor"><path fill-rule="evenodd" d="M3.72 3.72a.75.75 0 011.06 0L8 6.94l3.22-3.22a.75.75 0 111.06 1.06L9.06 8l3.22 3.22a.75.75 0 11-1.06 1.06L8 9.06l-3.22 3.22a.75.75 0 11-1.06-1.06L6.94 8 3.72 4.78a.75.75 0 010-1.06z"></path></svg></button>
           </div>
@@ -1370,12 +1370,12 @@ window.__dashboardOnReadyQueue.push(function() {
 
 {# GitLab dropdown row (hidden by default): GitLab + commit details + registry info. #}
 {%- if commit.gitlab_checks_tree_html or has_gitlab -%}
-<tr id="gitlab-tree-row-{{ sha_short }}" style="display: none;">
+<tr id="gitlab-tree-row-{{ commit_sha_9 }}" style="display: none;">
 <td colspan="9" style="padding: 0;">
 <div style="padding: 0; border-top: 0;">
           <div style="display: flex; align-items: center; justify-content: flex-start; padding: 6px 8px 0 8px;">
             <button type="button"
-                    onclick="event.stopPropagation(); try { collapseCommitGitLabTree('{{ sha_short }}'); } catch (e) {}"
+                    onclick="event.stopPropagation(); try { collapseCommitGitLabTree('{{ commit_sha_9 }}'); } catch (e) {}"
                     style="padding: 0 6px; height: 18px; line-height: 16px; font-size: 14px; border: 1px solid #d0d7de; border-radius: 999px; background: #ffffff; color: #57606a; cursor: pointer;"
                     title="Close GitLab pipeline"><svg aria-hidden="true" viewBox="0 0 16 16" version="1.1" width="12" height="12" data-view-component="true" class="octicon octicon-x" fill="currentColor"><path fill-rule="evenodd" d="M3.72 3.72a.75.75 0 011.06 0L8 6.94l3.22-3.22a.75.75 0 111.06 1.06L9.06 8l3.22 3.22a.75.75 0 11-1.06 1.06L8 9.06l-3.22 3.22a.75.75 0 11-1.06-1.06L6.94 8 3.72 4.78a.75.75 0 010-1.06z"></path></svg></button>
           </div>
@@ -1426,14 +1426,14 @@ Framework: {{ img.framework }}">{{ display_tag }}</td>
 {# Docker images row (Image SHA dropdown) if any local or dev registry images exist #}
 {# Docker images row: shown when any of local docker / GitLab dev registry / AWS ECR images exist #}
 {% if has_docker_images or has_gitlab_dev_images or has_ecr_images or has_acr_images %}
-{%- set images = docker_images.get(sha_short, []) -%}
+{%- set images = docker_images.get(commit_sha_9, []) -%}
 
-<tr class="docker-images-row" id="docker-row-{{ sha_short }}" style="display: none;">
+<tr class="docker-images-row" id="docker-row-{{ commit_sha_9 }}" style="display: none;">
 <td colspan="9" style="padding: 0; background-color: #f6f8fa;">
 <div style="padding: 8px 12px; border-top: 1px solid #d0d7de;">
 <div style="display: flex; align-items: center; justify-content: flex-start; margin-bottom: 6px;">
   <button type="button"
-          onclick="event.stopPropagation(); try { collapseDockerImages('{{ sha_short }}'); } catch (e) {}"
+          onclick="event.stopPropagation(); try { collapseDockerImages('{{ commit_sha_9 }}'); } catch (e) {}"
           style="padding: 0 6px; height: 18px; line-height: 16px; font-size: 14px; border: 1px solid #d0d7de; border-radius: 999px; background: #ffffff; color: #57606a; cursor: pointer;"
           title="Close Docker images"><svg aria-hidden="true" viewBox="0 0 16 16" version="1.1" width="12" height="12" data-view-component="true" class="octicon octicon-x" fill="currentColor"><path fill-rule="evenodd" d="M3.72 3.72a.75.75 0 011.06 0L8 6.94l3.22-3.22a.75.75 0 111.06 1.06L9.06 8l3.22 3.22a.75.75 0 11-1.06 1.06L8 9.06l-3.22 3.22a.75.75 0 11-1.06-1.06L6.94 8 3.72 4.78a.75.75 0 010-1.06z"></path></svg></button>
 </div>

@@ -551,7 +551,7 @@ class CommitHistoryGenerator:
                 for i, commit in enumerate(commits):
                     if (i + 1) % 20 == 0 or (i + 1) == n_commits:
                         self.logger.info("[progress]   commits: %d/%d (%.0f%%)", i + 1, n_commits, 100 * (i + 1) / n_commits)
-                    sha_short = commit.hexsha[:9]
+                    commit_sha_9 = commit.hexsha[:9]
                     sha_full = commit.hexsha
                     t_sha_total = time.monotonic()
 
@@ -570,18 +570,18 @@ class CommitHistoryGenerator:
 
                     if cached_entry and isinstance(cached_entry, dict):
                         meta_stats["full_hit"] += 1
-                        COMMIT_HISTORY_PERF_STATS.composite_sha_cache_hit += 1
-                        composite_sha = cached_entry.get('composite_docker_sha')
-                        if not composite_sha:
+                        COMMIT_HISTORY_PERF_STATS.image_sha_6_cache_hit += 1
+                        image_sha_6 = cached_entry.get('composite_docker_sha')
+                        if not image_sha_6:
                             t_sha = time.monotonic()
                             try:
-                                composite_sha = repo_utils.generate_docker_image_sha_for_commit(commit.hexsha)
+                                image_sha_6 = repo_utils.generate_docker_image_sha_for_commit(commit.hexsha)
                             except Exception as e:
-                                composite_sha = "ERROR"
-                                self.logger.error(f"Backfill Image SHA failed for {sha_short}: {e}")
-                                COMMIT_HISTORY_PERF_STATS.composite_sha_errors += 1
-                            COMMIT_HISTORY_PERF_STATS.composite_sha_compute_secs += max(0.0, time.monotonic() - t_sha)
-                            cached_entry['composite_docker_sha'] = composite_sha
+                                image_sha_6 = "ERROR"
+                                self.logger.error(f"Backfill Image SHA failed for {commit_sha_9}: {e}")
+                                COMMIT_HISTORY_PERF_STATS.image_sha_6_errors += 1
+                            COMMIT_HISTORY_PERF_STATS.image_sha_6_compute_secs += max(0.0, time.monotonic() - t_sha)
+                            cached_entry['composite_docker_sha'] = image_sha_6
                             COMMIT_HISTORY_CACHE.put(sha_full, cached_entry)
                             cache_updated = True
                         date_str = cached_entry['date']
@@ -629,15 +629,15 @@ class CommitHistoryGenerator:
                             merge_date = pr_to_merge_date[pr_number]
 
                         meta_stats["miss"] += 1
-                        COMMIT_HISTORY_PERF_STATS.composite_sha_cache_miss += 1
+                        COMMIT_HISTORY_PERF_STATS.image_sha_6_cache_miss += 1
                         t_sha = time.monotonic()
                         try:
-                            composite_sha = repo_utils.generate_docker_image_sha_for_commit(commit.hexsha)
+                            image_sha_6 = repo_utils.generate_docker_image_sha_for_commit(commit.hexsha)
                         except Exception as e:
-                            composite_sha = "ERROR"
-                            self.logger.error(f"Failed to calculate Docker image SHA for {sha_short}: {e}")
-                            COMMIT_HISTORY_PERF_STATS.composite_sha_errors += 1
-                        COMMIT_HISTORY_PERF_STATS.composite_sha_compute_secs += max(0.0, time.monotonic() - t_sha)
+                            image_sha_6 = "ERROR"
+                            self.logger.error(f"Failed to calculate Docker image SHA for {commit_sha_9}: {e}")
+                            COMMIT_HISTORY_PERF_STATS.image_sha_6_errors += 1
+                        COMMIT_HISTORY_PERF_STATS.image_sha_6_compute_secs += max(0.0, time.monotonic() - t_sha)
 
                         stats = commit.stats.total
                         files_changed = stats['files']
@@ -647,7 +647,7 @@ class CommitHistoryGenerator:
                         changed_files = list(commit.stats.files.keys())
 
                         cache_entry = {
-                            'composite_docker_sha': composite_sha,
+                            'composite_docker_sha': image_sha_6,
                             'author': author_name,
                             'author_email': author_email,
                             'date': date_str,
@@ -665,16 +665,14 @@ class CommitHistoryGenerator:
                         cache_updated = True
 
                     # Total time spent obtaining composite SHA (hit + miss path).
-                    COMMIT_HISTORY_PERF_STATS.composite_sha_total_secs += max(0.0, time.monotonic() - t_sha_total)
+                    COMMIT_HISTORY_PERF_STATS.image_sha_6_total_secs += max(0.0, time.monotonic() - t_sha_total)
 
                     # Always include this commit in the HTML, regardless of cache hit/miss.
                     commit_data.append(
                         {
-                            "sha_short": sha_short,
-                            "commit_sha_9": sha_short,
+                            "commit_sha_9": commit_sha_9,
                             "sha_full": sha_full,
-                            "composite_sha": composite_sha,
-                            "image_sha_6": composite_sha[:6] if composite_sha else "",
+                            "image_sha_6": image_sha_6,
                             "date": date_str,
                             "date_epoch": date_epoch,
                             "merge_date": merge_date,
@@ -689,7 +687,7 @@ class CommitHistoryGenerator:
                             "changed_files": changed_files,
                         }
                     )
-                    self.logger.debug(f"Processed commit {i+1}/{len(commits)}: {sha_short}")
+                    self.logger.debug(f"Processed commit {i+1}/{len(commits)}: {commit_sha_9}")
 
                     sha_to_message_first_line[sha_full] = message_first_line
 
@@ -862,7 +860,7 @@ class CommitHistoryGenerator:
     def _build_gitlab_checks_tree_html(
         *,
         sha_full: str,
-        sha_short: str,
+        commit_sha_9: str,
         sha_to_pr_number: Optional[Dict[str, int]],
         gitlab_pipelines: Optional[Dict[str, dict]],
         mr_pipelines: Optional[Dict[int, Optional[dict]]],
@@ -927,7 +925,7 @@ class CommitHistoryGenerator:
                 )
                 children.append(
                     TreeNodeVM(
-                        node_key=f"gl:{sha_short}:{job_label}",
+                        node_key=f"gl:{commit_sha_9}:{job_label}",
                         label_html=(
                             f'{icon} <span style="font-family: SFMono-Regular, Consolas, Liberation Mono, Menlo, monospace; font-size: 12px;">'
                             f"{html.escape(job_label)}</span>{badge}"
@@ -981,7 +979,7 @@ class CommitHistoryGenerator:
         commit entry rather than in separate top-level dicts. This makes each commit
         self-contained: consumers can iterate commits without cross-referencing.
         """
-        # Lookup dicts keyed by sha_full or sha_short
+        # Lookup dicts keyed by sha_full or commit_sha_9
         ecr_images = template_context.get("ecr_images") or {}
         acr_images = template_context.get("acr_images") or {}
         docker_images = template_context.get("docker_images") or {}
@@ -997,12 +995,18 @@ class CommitHistoryGenerator:
         commits_json = []
         for c in template_context.get("commits", []):
             sha_full = str(c.get("sha_full", "") or "")
-            sha_short = str(c.get("sha_short", "") or "")
+            commit_sha_9 = str(c.get("commit_sha_9", "") or "")
             pr_number = c.get("pr_number")
 
+            # Keys that are HTML rendering artifacts or duplicates of other fields
+            _skip_keys = {
+                "github_checks_tree_html", "gitlab_checks_tree_html",
+                "post_merge_checks_tree_html", "build_and_test_status_icon",
+                "composite_bg_color", "composite_text_color",  # rendering-only
+            }
             row: Dict[str, Any] = {}
             for k, v in c.items():
-                if k in ("github_checks_tree_html", "gitlab_checks_tree_html", "post_merge_checks_tree_html", "build_and_test_status_icon"):
+                if k in _skip_keys:
                     continue
                 if hasattr(v, "isoformat"):
                     row[k] = v.isoformat()
@@ -1012,13 +1016,13 @@ class CommitHistoryGenerator:
             # Embed per-commit data directly
             row["ecr_images"] = ecr_images.get(sha_full, [])
             row["acr_images"] = acr_images.get(sha_full, [])
-            row["docker_images"] = docker_images.get(sha_short, [])
+            row["docker_images"] = docker_images.get(commit_sha_9, [])
             row["gitlab_images"] = gitlab_images.get(sha_full, [])
-            row["gitlab_dev_images"] = gitlab_dev_images.get(sha_short, [])
+            row["gitlab_dev_images"] = gitlab_dev_images.get(commit_sha_9, [])
             row["github_actions_status"] = github_actions_status.get(sha_full)
             row["post_merge_status"] = post_merge_status.get(sha_full)
             row["gha_per_commit_stats"] = gha_per_commit_stats.get(sha_full)
-            row["build_status"] = build_status.get(sha_short)
+            row["build_status"] = build_status.get(commit_sha_9)
             row["gitlab_pipeline"] = gitlab_pipelines.get(sha_full)
             row["mr_pipeline"] = mr_pipelines.get(pr_number) if pr_number else None
 
@@ -1064,7 +1068,7 @@ class CommitHistoryGenerator:
         """Generate HTML report for commit history with Docker image detection
 
         Args:
-            commit_data: List of commit dictionaries with sha_short, sha_full, composite_sha, date, author, message
+            commit_data: List of commit dictionaries with commit_sha_9, sha_full, image_sha_6, date, author, message
             logs_dir: Path to logs directory for build reports
             output_path: Path where the HTML file will be written (used for relative path calculation)
             sha_to_pr_number: Mapping full commit SHA -> PR number (if known)
@@ -1078,7 +1082,7 @@ class CommitHistoryGenerator:
         pr_to_merge_date = pr_to_merge_date or {}
 
         # Get local Docker images containing SHAs
-        docker_images = self._get_local_docker_images_by_sha([c['sha_short'] for c in commit_data])
+        docker_images = self._get_local_docker_images_by_sha([c['commit_sha_9'] for c in commit_data])
 
         # Get GitLab container registry images for commits (with caching)
         gitlab_images_raw = self._get_cached_gitlab_images_from_sha(commit_data)
@@ -1397,7 +1401,7 @@ class CommitHistoryGenerator:
         unique_cds: List[str] = []
         seen_cds: set[str] = set()
         for commit in (commit_data or []):
-            cds = str(commit.get("composite_sha", "") or "")
+            cds = str(commit.get("image_sha_6", "") or "")
             if cds and cds not in seen_cds:
                 unique_cds.append(cds)
                 seen_cds.add(cds)
@@ -1432,8 +1436,8 @@ class CommitHistoryGenerator:
             else:
                 commit['pr_number'] = sha_to_pr_number.get(commit.get("sha_full", ""))
 
-            composite_sha = str(commit.get("composite_sha", "") or "")
-            commit["cds_parity"] = int(cds_to_parity.get(composite_sha, 0))
+            image_sha_6 = str(commit.get("image_sha_6", "") or "")
+            commit["cds_parity"] = int(cds_to_parity.get(image_sha_6, 0))
             # Filled in later after local build status is computed.
             commit["composite_bg_color"] = "#e5e7eb"
             commit["composite_text_color"] = "#111827"
@@ -1461,39 +1465,39 @@ class CommitHistoryGenerator:
         # GitHub Actions post-merge CI (post_merge_status) and AWS ECR image data, which don't
         # require local build infrastructure.
         t_markers = time.monotonic()
-        log_paths = {}  # Maps sha_short to list of (date, path) tuples
-        report_path_by_commit_image = {}  # Maps (sha_short, image_sha_6) -> (date, path) for report.html when report.json exists
-        composite_to_status = {}  # Maps composite_sha to status (with priority: building > failed > success)
-        commit_to_status = {}  # Maps commit sha_short to its own build status
-        composite_to_commits = {}  # Maps composite_sha to list of commit SHAs
+        log_paths = {}  # Maps commit_sha_9 to list of (date, path) tuples
+        report_path_by_commit_image = {}  # Maps (commit_sha_9, image_sha_6) -> (date, path) for report.html when report.json exists
+        composite_to_status = {}  # Maps image_sha_6 to status (with priority: building > failed > success)
+        commit_to_status = {}  # Maps commit commit_sha_9 to its own build status
+        composite_to_commits = {}  # Maps image_sha_6 to list of commit SHAs
 
-        # First pass: Group commits by composite_sha to minimize glob searches
+        # First pass: Group commits by image_sha_6 to minimize glob searches
         for commit in commit_data:
-            sha_short = commit['sha_short']
-            composite_sha = commit['composite_sha']
+            commit_sha_9 = commit['commit_sha_9']
+            image_sha_6 = commit['image_sha_6']
 
             # Track which commits have this composite SHA
-            if composite_sha not in composite_to_commits:
-                composite_to_commits[composite_sha] = []
-            composite_to_commits[composite_sha].append(sha_short)
+            if image_sha_6 not in composite_to_commits:
+                composite_to_commits[image_sha_6] = []
+            composite_to_commits[image_sha_6].append(commit_sha_9)
 
-        # Second pass: Search for build logs (once per composite_sha to minimize filesystem scans)
-        # Many commits share the same composite_sha (Docker image), so we only need to search once per unique image
+        # Second pass: Search for build logs (once per image_sha_6 to minimize filesystem scans)
+        # Many commits share the same image_sha_6 (Docker image), so we only need to search once per unique image
         composite_searched = set()
 
         for commit in commit_data:
-            sha_short = commit['sha_short']
-            composite_sha = commit['composite_sha']
+            commit_sha_9 = commit['commit_sha_9']
+            image_sha_6 = commit['image_sha_6']
 
-            # Skip if we already searched for this composite_sha
-            if composite_sha in composite_searched:
+            # Skip if we already searched for this image_sha_6
+            if image_sha_6 in composite_searched:
                 continue
-            composite_searched.add(composite_sha)
+            composite_searched.add(image_sha_6)
 
-            # Search for build logs for ANY commit with this composite_sha
+            # Search for build logs for ANY commit with this image_sha_6
             # Build logs are keyed by individual commit SHA, not composite SHA
             matching_logs_for_composite = []
-            for commit_sha in composite_to_commits[composite_sha]:
+            for commit_sha in composite_to_commits[image_sha_6]:
                 search_pattern = str(logs_dir / "*" / f"*.{commit_sha}*" / "report.html")
                 search_pattern_legacy = str(logs_dir / "*" / f"{commit_sha}*" / "report.html")
                 logs_for_this_commit = glob.glob(search_pattern) + glob.glob(search_pattern_legacy)
@@ -1518,14 +1522,14 @@ class CommitHistoryGenerator:
                             if _commit and _image_6:
                                 report_path_by_commit_image[f"{_commit}|{_image_6}"] = (date_str, relative_path)
                     matching_logs_for_composite.extend(logs_for_this_commit)
-            # If any commit in this composite_sha has logs, determine status
+            # If any commit in this image_sha_6 has logs, determine status
             if matching_logs_for_composite:
                 COMMIT_HISTORY_PERF_STATS.marker_composite_with_reports += 1
 
                 # Read build status per-commit from each commit's own report.json.
                 # Each commit gets its own status (not inherited from the first found).
                 composite_status = STATUS_UNKNOWN
-                for commit_sha in composite_to_commits[composite_sha]:
+                for commit_sha in composite_to_commits[image_sha_6]:
                     if commit_sha not in log_paths:
                         continue
                     # Search all date dirs for this commit's report.json (use the most recent)
@@ -1554,34 +1558,34 @@ class CommitHistoryGenerator:
                         pass
 
                 # Composite status: SUCCESS if any commit passed, else FAILED if any failed
-                statuses = {commit_to_status.get(c) for c in composite_to_commits[composite_sha] if c in commit_to_status}
+                statuses = {commit_to_status.get(c) for c in composite_to_commits[image_sha_6] if c in commit_to_status}
                 if STATUS_BUILDING in statuses:
                     composite_status = STATUS_BUILDING
                 elif STATUS_SUCCESS in statuses:
                     composite_status = STATUS_SUCCESS
                 elif STATUS_FAILED in statuses:
                     composite_status = STATUS_FAILED
-                composite_to_status[composite_sha] = composite_status
+                composite_to_status[image_sha_6] = composite_status
             else:
                 COMMIT_HISTORY_PERF_STATS.marker_composite_without_reports += 1
                 # No report yet, status unknown
-                if composite_sha not in composite_to_status:
-                    composite_to_status[composite_sha] = STATUS_UNKNOWN
+                if image_sha_6 not in composite_to_status:
+                    composite_to_status[image_sha_6] = STATUS_UNKNOWN
 
         # Pass 2: Assign status to all commits
         # Only commits with their own build logs get a status icon.
         # No inheritance from other commits sharing the same Image SHA.
         build_status = {}
         for commit in commit_data:
-            sha_short = commit['sha_short']
+            commit_sha_9 = commit['commit_sha_9']
 
-            if sha_short in commit_to_status:
-                build_status[sha_short] = {
-                    'status': commit_to_status[sha_short],
+            if commit_sha_9 in commit_to_status:
+                build_status[commit_sha_9] = {
+                    'status': commit_to_status[commit_sha_9],
                     'inherited': False
                 }
             else:
-                build_status[sha_short] = {
+                build_status[commit_sha_9] = {
                     'status': STATUS_UNKNOWN,
                     'inherited': False
                 }
@@ -1615,8 +1619,8 @@ class CommitHistoryGenerator:
             return status_icon_html(status_norm="unknown", is_required=False, icon_px=7)
 
         for commit in commit_data:
-            sha_short = str(commit.get("sha_short", "") or "")
-            st = str((build_status.get(sha_short) or {}).get("status", STATUS_UNKNOWN) or STATUS_UNKNOWN)
+            commit_sha_9 = str(commit.get("commit_sha_9", "") or "")
+            st = str((build_status.get(commit_sha_9) or {}).get("status", STATUS_UNKNOWN) or STATUS_UNKNOWN)
             commit["build_and_test_status_icon"] = _build_and_test_status_icon_html(status=st)
 
         # DEPRECATING: GitLab Dev Registry images from local build_images.py BuildReport JSON files.
@@ -1624,7 +1628,7 @@ class CommitHistoryGenerator:
         # Being replaced by AWS ECR image data (ecr_images_by_sha) which is fetched from the
         # ECR API cache and doesn't require local builds.
         gitlab_dev_images: Dict[str, List[Dict[str, Any]]] = {}
-        for sha_short_key, log_entries in log_paths.items():
+        for commit_sha_9_key, log_entries in log_paths.items():
             if not log_entries:
                 continue
             output_dir = output_path.resolve().parent if output_path else Path(".")
@@ -1725,7 +1729,7 @@ class CommitHistoryGenerator:
                         "pull_dev_cmd": pull_dev_cmd,
                         "local_dev_cmd": local_dev_cmd,
                     })
-                gitlab_dev_images[sha_short_key] = formatted
+                gitlab_dev_images[commit_sha_9_key] = formatted
             except Exception as e:
                 self.logger.warning(f"Failed to read BuildReport JSON {json_abs}: {e}")
 
@@ -2310,20 +2314,20 @@ class CommitHistoryGenerator:
         def build_github_tree(commit_dict: dict) -> Tuple[str, str, str, float, dict]:
             """Build GitHub checks tree for a single commit (parallelizable worker)."""
             sha_full = str(commit_dict.get("sha_full", "") or "")
-            sha_short = str(commit_dict.get("sha_short", "") or "")
+            commit_sha_9 = str(commit_dict.get("commit_sha_9", "") or "")
             t0 = time.monotonic()
             timing_breakdown = {}
             try:
-                logger.debug(f"[build_github_tree] Starting for {sha_short} ({sha_full[:12]})")
+                logger.debug(f"[build_github_tree] Starting for {commit_sha_9} ({sha_full[:12]})")
                 tree_html, timing_breakdown = _build_github_checks_tree_html(
                     repo_path=self.repo_path,
                     sha_full=sha_full,
                     required_names=required_names  # Fetched once before parallel loop
                 )
                 if tree_html:
-                    logger.debug(f"[build_github_tree] SUCCESS for {sha_short}: Generated {len(tree_html)} chars of HTML")
+                    logger.debug(f"[build_github_tree] SUCCESS for {commit_sha_9}: Generated {len(tree_html)} chars of HTML")
                 else:
-                    logger.warning(f"[build_github_tree] EMPTY tree_html for {sha_short} ({sha_full[:12]}) - check_runs may be empty or render failed")
+                    logger.warning(f"[build_github_tree] EMPTY tree_html for {commit_sha_9} ({sha_full[:12]}) - check_runs may be empty or render failed")
             except (KeyError, ValueError, TypeError) as e:
                 # Best-effort: tree building is optional
                 logger.warning(f"[build_github_tree] EXCEPTION for {sha_full[:8]}: {type(e).__name__}: {e}")
@@ -2333,40 +2337,40 @@ class CommitHistoryGenerator:
                 logger.error(f"[build_github_tree] UNEXPECTED EXCEPTION for {sha_full[:8]}: {type(e).__name__}: {e}", exc_info=True)
                 tree_html = ""
             dt = max(0.0, time.monotonic() - t0)
-            return (sha_full, sha_short, tree_html, dt, timing_breakdown)
+            return (sha_full, commit_sha_9, tree_html, dt, timing_breakdown)
 
         def build_gitlab_tree(commit_dict: dict) -> Tuple[str, str, str, float]:
             """Build GitLab checks tree for a single commit (parallelizable worker)."""
             sha_full = str(commit_dict.get("sha_full", "") or "")
-            sha_short = str(commit_dict.get("sha_short", "") or "")
+            commit_sha_9 = str(commit_dict.get("commit_sha_9", "") or "")
             t0 = time.monotonic()
             tree_html = self._build_gitlab_checks_tree_html(
                 sha_full=sha_full,
-                sha_short=sha_short,
+                commit_sha_9=commit_sha_9,
                 sha_to_pr_number=sha_to_pr_number,
                 gitlab_pipelines=gitlab_pipelines,
                 mr_pipelines=mr_pipelines,
                 pipeline_job_counts=pipeline_job_counts,
             )
             dt = max(0.0, time.monotonic() - t0)
-            return (sha_full, sha_short, tree_html, dt)
+            return (sha_full, commit_sha_9, tree_html, dt)
 
         def build_post_merge_tree(commit_dict: dict) -> Tuple[str, str, str, float]:
             """Build post-merge CI tree for a single commit (parallelizable worker)."""
             sha_full = str(commit_dict.get("sha_full", "") or "")
-            sha_short = str(commit_dict.get("sha_short", "") or "")
+            commit_sha_9 = str(commit_dict.get("commit_sha_9", "") or "")
             t0 = time.monotonic()
             tree_html = ""
 
             pm_data = post_merge_status.get(sha_full)
             if not pm_data:
                 dt = max(0.0, time.monotonic() - t0)
-                return (sha_full, sha_short, "", dt)
+                return (sha_full, commit_sha_9, "", dt)
 
             pm_check_runs = pm_data.get("check_runs") or []
             if not pm_check_runs:
                 dt = max(0.0, time.monotonic() - t0)
-                return (sha_full, sha_short, "", dt)
+                return (sha_full, commit_sha_9, "", dt)
 
             ci_job_nodes: List[CIJobNode] = []
             for cr in pm_check_runs:
@@ -2419,7 +2423,7 @@ class CommitHistoryGenerator:
             )
             tree_html = render_tree_divs([root])
             dt = max(0.0, time.monotonic() - t0)
-            return (sha_full, sha_short, tree_html, dt)
+            return (sha_full, commit_sha_9, tree_html, dt)
 
         with render_t.phase("build_trees"):
             # OPTIMIZATION (2026-01-22): Ensure raw log directory exists ONCE before parallel loop
@@ -2499,10 +2503,10 @@ class CommitHistoryGenerator:
 
                 # Collect GitHub results
                 for future in concurrent.futures.as_completed(github_futures):
-                    sha_full, sha_short, tree_html, dt, timing_breakdown = future.result()
+                    sha_full, commit_sha_9, tree_html, dt, timing_breakdown = future.result()
                     github_results[sha_full] = (tree_html, dt)
                     build_github_s += dt
-                    slow_github.append((dt, sha_short or sha_full[:9]))
+                    slow_github.append((dt, commit_sha_9 or sha_full[:9]))
                     gh_done += 1
                     if gh_done % 20 == 0 or gh_done == n_trees:
                         logger.info("[progress]   GitHub trees: %d/%d (%.0f%%)", gh_done, n_trees, 100 * gh_done / n_trees)
@@ -2513,21 +2517,21 @@ class CommitHistoryGenerator:
                             timing_totals[key] += value
                     
                     if not tree_html:
-                        logger.warning(f"[collect_github_results] {sha_short} ({sha_full[:12]}): tree_html is EMPTY")
+                        logger.warning(f"[collect_github_results] {commit_sha_9} ({sha_full[:12]}): tree_html is EMPTY")
 
                 # Collect GitLab results
                 for future in concurrent.futures.as_completed(gitlab_futures):
-                    sha_full, sha_short, tree_html, dt = future.result()
+                    sha_full, commit_sha_9, tree_html, dt = future.result()
                     gitlab_results[sha_full] = (tree_html, dt)
                     build_gitlab_s += dt
-                    slow_gitlab.append((dt, sha_short or sha_full[:9]))
+                    slow_gitlab.append((dt, commit_sha_9 or sha_full[:9]))
                     gl_done += 1
                     if gl_done % 20 == 0 or gl_done == n_trees:
                         logger.info("[progress]   GitLab trees: %d/%d (%.0f%%)", gl_done, n_trees, 100 * gl_done / n_trees)
 
                 # Collect post-merge results
                 for future in concurrent.futures.as_completed(post_merge_futures):
-                    sha_full, sha_short, tree_html, dt = future.result()
+                    sha_full, commit_sha_9, tree_html, dt = future.result()
                     if tree_html:
                         post_merge_results[sha_full] = (tree_html, dt)
                     pm_tree_done += 1
@@ -2540,14 +2544,14 @@ class CommitHistoryGenerator:
             logger.debug(f"[attach_results] Attaching tree HTML to {len(commit_data)} commits. github_results has {len(github_results)} entries")
             for c in commit_data:
                 sha_full = str(c.get("sha_full", "") or "")
-                sha_short = str(c.get("sha_short", "") or "")
+                commit_sha_9 = str(c.get("commit_sha_9", "") or "")
                 if sha_full in github_results:
                     tree_html = github_results[sha_full][0]
                     c["github_checks_tree_html"] = tree_html
                     if not tree_html:
-                        logger.warning(f"[attach_results] {sha_short} ({sha_full[:12]}): Attaching EMPTY github_checks_tree_html")
+                        logger.warning(f"[attach_results] {commit_sha_9} ({sha_full[:12]}): Attaching EMPTY github_checks_tree_html")
                 else:
-                    logger.debug(f"[attach_results] {sha_short} ({sha_full[:12]}): NOT in github_results dict")
+                    logger.debug(f"[attach_results] {commit_sha_9} ({sha_full[:12]}): NOT in github_results dict")
                 if sha_full in gitlab_results:
                     c["gitlab_checks_tree_html"] = gitlab_results[sha_full][0]
                 if sha_full in post_merge_results:
