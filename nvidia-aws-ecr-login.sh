@@ -98,12 +98,16 @@ export_creds_to_env() {
 authenticate_nvsec_and_aws() {
     source "$NVSEC_VENV/bin/activate"
 
-    if nvsec aws list &>/dev/null; then
+    if timeout 10 nvsec aws list &>/dev/null; then
         echo "=== nvsec session still valid, skipping browser auth ==="
     else
         echo "=== Authenticating (opens browser) ==="
         local auth_opts=()
-        [[ -n "${SSH_CONNECTION:-}" ]] && auth_opts+=(--no-browser)
+        # Over SSH without a usable BROWSER helper, fall back to --no-browser
+        # (Cursor's remote extension sets BROWSER and handles port forwarding)
+        if [[ -n "${SSH_CONNECTION:-}" ]] && [[ -z "${BROWSER:-}" || ! -x "${BROWSER:-}" ]]; then
+            auth_opts+=(--no-browser)
+        fi
         nvsec aws auth "${auth_opts[@]}"
     fi
 
@@ -128,7 +132,8 @@ authenticate_nvsec_and_aws() {
 login() {
     source "$NVSEC_VENV/bin/activate"
 
-    if aws sts get-caller-identity --region "$REGION" &>/dev/null; then
+    # Timeout prevents hangs when expired SSO creds trigger interactive re-auth
+    if timeout 10 aws sts get-caller-identity --region "$REGION" &>/dev/null; then
         echo "=== AWS credentials still valid, skipping browser auth ==="
         aws sts get-caller-identity --region "$REGION" --output table
         return

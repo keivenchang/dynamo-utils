@@ -60,7 +60,7 @@
     "workspaceFolder": "/workspace",
     "workspaceMount": "source=${localWorkspaceFolder},target=/workspace,type=bind,consistency=cached",
     "userEnvProbe": "interactiveShell",
-    "postCreateCommand": "/bin/bash /workspace/.devcontainer/post-create.sh",
+    "postCreateCommand": "ln -sf ~/utils/pyrightconfig.json /workspace/pyrightconfig.json; /bin/bash /workspace/.devcontainer/post-create.sh",
     "containerEnv": {
         "CARGO_PROFILE_DEV_OPT_LEVEL": "0",
         "CARGO_BUILD_JOBS": "32",
@@ -73,6 +73,35 @@
         //"SSH_AUTH_SOCK": "${env:SSH_AUTH_SOCK}" // We mount /tmp which includes the socket
     },
     "mounts": [
+        {#
+            AI config mount map (Cursor + Claude Code)
+            ===========================================
+            Host                              Container
+            ~~~~                              ~~~~~~~~~
+            ~/.claude/                   ->   ~/.claude/            (AI skills, instructions)
+            ~/.claude.json               ->   ~/.claude.json
+            ~/.cursor/                   ->   ~/.cursor/            (IDE state, MCP, skills-cursor symlink)
+
+            ~/dynamo/.cursorrules        ->   /workspace/.cursorrules   (workspace-level rules)
+            ~/dynamo/.cursorignore       ->   /workspace/.cursorignore  (workspace-level ignores)
+
+            ~/dynamo/<repo>/             ->   /workspace/           (via workspaceMount; includes
+                                                                     repo .cursorrules, .cursorignore,
+                                                                     .cursor/rules/, .claude/skills/,
+                                                                     CLAUDE.md)
+
+            ~/dynamo/notes/              ->   ~/notes/              (persistent, read-write)
+            ~/dynamo/dynamo-utils.PROD/  ->   ~/utils/              (read-only)
+
+            pyrightconfig.json: symlinked from /workspace/ -> ~/utils/ in postCreateCommand
+            (file bind mounts can't overlay paths inside an existing directory mount)
+
+            ~ inside container = /home/dynamo/
+            ~/.cursor/skills-cursor must be a relative symlink (-> ../.claude/skills/)
+            so it resolves in both host and container namespaces.
+        #}
+
+        {# --- Shell / toolchain --- #}
         "source=dynamo-bashhistory,target=/home/dynamo/.commandhistory,type=volume",
         //"source=/tmp/,target=/tmp/,type=bind",
         "source=${localEnv:HOME}/.cache,target=/home/dynamo/.cache,type=bind",
@@ -82,15 +111,18 @@
         "source=${localEnv:HOME}/.bash_aliases,target=/home/dynamo/.bash_aliases,type=bind",
         "source=${localEnv:HOME}/.gitconfig,target=/home/dynamo/.gitconfig,type=bind",
         "source=${localEnv:HOME}/.ssh,target=/home/dynamo/.ssh,type=bind,readonly",
-        {# .claude and .cursor are at the ~/ level because there's already a .claude directory in the home directory #}
+
+        {# --- AI config: user-level (~/  ->  /home/dynamo/) --- #}
         "source=${localEnv:HOME}/.claude,target=/home/dynamo/.claude,type=bind",
         "source=${localEnv:HOME}/.claude.json,target=/home/dynamo/.claude.json,type=bind",
+        "source=${localEnv:HOME}/.cursor,target=/home/dynamo/.cursor,type=bind",
+
+        {# --- AI config: workspace-level (~/dynamo/  ->  /home/dynamo/) --- #}
+        "source=${localEnv:HOME}/dynamo/.cursorrules,target=/workspace/.cursorrules,type=bind,readonly",
+        "source=${localEnv:HOME}/dynamo/.cursorignore,target=/workspace/.cursorignore,type=bind,readonly",
+
+        {# --- Project data & tooling --- #}
         "source=${localEnv:HOME}/dynamo/notes,target=/home/dynamo/notes,type=bind",
-        "source=${localEnv:HOME}/dynamo/.cursor,target=/home/dynamo/.cursor,type=bind",
-        {# .cursorrules are at the repo-level #}
-        "source=${localEnv:HOME}/dynamo/.cursorrules,target=/workspace/.cursorrules,type=bind",
-        "source=${localEnv:HOME}/dynamo/.cursorignore,target=/workspace/.cursorignore,type=bind",
-        "source=${localEnv:HOME}/dynamo/dynamo-utils.PRODUCTION/,target=/utils,type=bind",
-        "source=${localEnv:HOME}/dynamo/dynamo-utils.PRODUCTION/pyrightconfig.json,target=/workspace/pyrightconfig.json,type=bind"
+        "source=${localEnv:HOME}/dynamo/dynamo-utils.PRODUCTION/,target=/home/dynamo/utils,type=bind,readonly"
     ]
 }
