@@ -985,7 +985,7 @@ class CommitHistoryGenerator:
         for c in template_context.get("commits", []):
             row: Dict[str, Any] = {}
             for k, v in c.items():
-                if k in ("github_checks_tree_html", "gitlab_checks_tree_html", "build_and_test_status_icon"):
+                if k in ("github_checks_tree_html", "gitlab_checks_tree_html", "post_merge_checks_tree_html", "build_and_test_status_icon"):
                     continue  # HTML rendering artifacts — not useful in JSON
                 if hasattr(v, "isoformat"):
                     row[k] = v.isoformat()
