@@ -75,11 +75,10 @@ docker pull dynamoci.azurecr.io/ai-dynamo/dynamo:&lt;commit_sha&gt;-trtllm-runti
 docker pull dynamoci.azurecr.io/ai-dynamo/dynamo:&lt;commit_sha&gt;-sglang-dev-cuda13</code><button class="copy-btn" onclick="copyCode(this)">Copy</button></pre>
 
 <h3>Step 4: Pull + build local-dev</h3>
-<p>Use the <b>copy command</b> button in the <a href="../index.html">commit history dashboard</a> (ImageSHA256 dropdown) — it has the correct build script URL for your environment.</p>
-<p>The command pattern is:</p>
 <pre><code>(ACR=dynamoci.azurecr.io/ai-dynamo/dynamo:&lt;tag&gt; \
  && docker pull $ACR \
- && curl -sL &lt;build_localdev_from_dev.py URL&gt; | python3 - --skip-pull $ACR)</code></pre>
+ && curl -sL http://speedoflight.nvidia.com/dynamo/dynamo-utils/container/build_localdev_from_dev.py \
+    | python3 - --skip-pull $ACR)</code><button class="copy-btn" onclick="copyCode(this)">Copy</button></pre>
 </div>
 
 <h2>Kubernetes: Create imagePullSecret</h2>

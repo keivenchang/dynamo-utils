@@ -79,11 +79,10 @@ docker pull $ECR:&lt;commit_sha&gt;-vllm-dev-cuda12-amd64
 docker pull $ECR:&lt;commit_sha&gt;-sglang-runtime-cuda13-arm64</code><button class="copy-btn" onclick="copyCode(this)">Copy</button></pre>
 
 <h3>Step 4: Pull + build local-dev</h3>
-<p>Use the <b>copy command</b> button in the <a href="../index.html">commit history dashboard</a> (ImageSHA256 dropdown) — it has the correct build script URL for your environment.</p>
-<p>The command pattern is:</p>
 <pre><code>(ECR=210086341041.dkr.ecr.us-west-2.amazonaws.com/ai-dynamo/dynamo:&lt;tag&gt; \
  && docker pull $ECR \
- && curl -sL &lt;build_localdev_from_dev.py URL&gt; | python3 - --skip-pull $ECR)</code></pre>
+ && curl -sL http://speedoflight.nvidia.com/dynamo/dynamo-utils/container/build_localdev_from_dev.py \
+    | python3 - --skip-pull $ECR)</code><button class="copy-btn" onclick="copyCode(this)">Copy</button></pre>
 </div>
 
 <h2>Tag format reference</h2>

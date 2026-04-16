@@ -179,8 +179,8 @@ def _parse_report_dir_to_commit_image(sha_dir_name: str) -> Tuple[Optional[str],
 GRAFANA_PR_URL_TEMPLATE = "https://grafana.nvidia.com/d/beyv28rcnhs74b/individual-job-details?orgId=283&var-branch=pull-request%2F{pr_number}&var-job=All&var-job_status=All&var-repo=All&var-commit=All&var-workflow=All&from=now-30d&to=now"
 
 # URL to container/build_localdev_from_dev.py (curl and pipe to python3 to create local-dev image).
-# Derived from this script's repo (dynamo-utils or dynamo-utils.dev) so the copy command matches where the dashboard runs from.
-BUILD_LOCAL_DEV_SCRIPT_URL = f"http://speedoflight.nvidia.com/dynamo/{_UTILS_DIR.name}/container/build_localdev_from_dev.py"
+# Uses the dynamo-utils symlink (-> dynamo-utils.PRODUCTION) so the URL is stable regardless of dev vs production.
+BUILD_LOCAL_DEV_SCRIPT_URL = "http://speedoflight.nvidia.com/dynamo/dynamo-utils/container/build_localdev_from_dev.py"
 
 
 _normalize_check_name = normalize_check_name
