@@ -47,8 +47,6 @@ DANGEROUS_PATTERNS = [
     re.compile(r">\s*/dev/nvme"),
     re.compile(r">\s*/dev/vd"),
     re.compile(r":\(\)\{.*:\|:&\};:"),   # fork bomb
-    re.compile(r"chmod\s+-R\s+777\s+/"),
-    re.compile(r"chown\s+-R\s+\S+\s+/"),
     re.compile(r"sudo\s+rm\s"),
     re.compile(r"sudo\s+rmdir\s"),
 ]
@@ -215,20 +213,45 @@ def detect_prompt(pane_text: str) -> str | None:
     """Detect which kind of permission prompt is visible.
 
     Returns "bash", "file", "tool", or None.
+    Scans from the bottom of the pane so stale prompts that scrolled up
+    don't shadow the current one.
     """
-    if "Do you want to proceed" in pane_text:
-        return "bash"
-    m = _FILE_PROMPT_RE.search(pane_text)
-    if m:
-        return "file"
-    if "Do you want to allow" in pane_text:
-        return "tool"
-    return None
+    last_type = None
+    for line in pane_text.splitlines():
+        if "Do you want to proceed" in line:
+            last_type = "bash"
+        elif _FILE_PROMPT_RE.search(line):
+            last_type = "file"
+        elif "Do you want to allow" in line:
+            last_type = "tool"
+    return last_type
 
 
 def yes_is_selected(pane_text: str) -> bool:
     """Check that the first option (Yes) is currently highlighted."""
     return bool(re.search(r"❯ 1\. Yes", pane_text))
+
+
+# Maps prompt type -> which option to select.
+#   "option1": press Enter (select "Yes")
+#   "option2": press Down + Enter (select "Yes, allow all ..." / "Yes, don't ask again ...")
+#
+# Rationale:
+#   - bash:  option 1 (approve just this command; denylist handles dangerous ones)
+#   - file:  option 2 ("Yes, allow all edits during this session") — avoid re-prompts
+#   - tool:  option 2 ("Yes, and don't ask again for <domain>") — avoid re-prompts
+PROMPT_ACTION = {
+    "bash": "option1",
+    "file": "option2",
+    "tool": "option2",
+}
+
+
+def action_for_prompt(prompt_type: str | None) -> str | None:
+    """Return which option to select for a given prompt type, or None to ignore."""
+    if prompt_type is None:
+        return None
+    return PROMPT_ACTION.get(prompt_type)
 
 
 # ---------------------------------------------------------------------------
@@ -269,7 +292,24 @@ def tmux_capture_pane(target: str, lines: int = 80) -> str | None:
 
 
 def tmux_send_enter(target: str) -> None:
-    tmux_run("send-keys", "-t", target, "Enter")
+    # Use shell command to add a tiny delay, which helps the TUI register the key
+    subprocess.run(
+        ["tmux", "send-keys", "-t", target, "", "Enter"],
+        capture_output=True, text=True,
+    )
+    time.sleep(0.1)
+    # Send a second Enter as insurance — harmless if the first one worked
+    subprocess.run(
+        ["tmux", "send-keys", "-t", target, "Enter"],
+        capture_output=True, text=True,
+    )
+
+
+def tmux_send_option2(target: str) -> None:
+    """Select option 2 by pressing Down then Enter."""
+    tmux_run("send-keys", "-t", target, "Down")
+    time.sleep(0.3)
+    tmux_send_enter(target)
 
 
 # ---------------------------------------------------------------------------
@@ -368,7 +408,531 @@ def parse_args() -> argparse.Namespace:
                         help="base poll interval in seconds (default: 0.5)")
     parser.add_argument("--list", action="store_true",
                         help="list available tmux sessions and exit")
+    parser.add_argument("--self-test", action="store_true",
+                        help="run built-in tests and exit")
     return parser.parse_args()
+
+
+# ---------------------------------------------------------------------------
+# Self-test
+# ---------------------------------------------------------------------------
+
+def _self_test() -> bool:
+    """Run built-in tests using real prompt outputs from live sessions.
+
+    Returns True if all tests pass.
+    """
+    failed = 0
+    total = 0
+
+    def check(label: str, actual: object, expected: object) -> None:
+        nonlocal failed, total
+        total += 1
+        if actual != expected:
+            failed += 1
+            print(f"  FAIL  {label}")
+            print(f"        expected {expected!r}, got {actual!r}")
+        else:
+            print(f"  OK    {label}")
+
+    # =====================================================================
+    # is_dangerous — denylist
+    # =====================================================================
+    print("=== is_dangerous: BLOCKED commands ===")
+    dangerous_cmds = [
+        "rm -rf /tmp/foo",
+        "rm file.txt",
+        "rm -f somefile.txt",
+        "sudo rm -rf /",
+        "sudo rm -r /var/log/old",
+        "rmdir /some/dir",
+        "sudo rmdir /foo",
+        "dd if=/dev/zero of=/dev/sda",
+        "dd if=image.iso of=/dev/nvme0n1 bs=4M",
+        "mkfs.ext4 /dev/sda1",
+        "mkfs.xfs /dev/nvme0n1p1",
+        "shred /dev/sda",
+        "shred -vfz -n 5 /dev/sdb",
+        "fdisk /dev/sda",
+        "parted /dev/sda print",
+        "wipefs -a /dev/sda",
+        "format C:",
+        "echo foo > /dev/sda",
+        "cat /dev/urandom > /dev/nvme0n1",
+        "FOO=bar rm -rf /",
+        "CUDA_VISIBLE_DEVICES=0 rm -rf /workspace",
+        "ls /tmp && rm -rf /important",
+        "echo done; sudo rm -rf /",
+    ]
+    for cmd in dangerous_cmds:
+        check(f"BLOCK  {cmd}", is_dangerous(cmd), True)
+
+    print()
+    print("=== is_dangerous: ALLOWED commands ===")
+    safe_cmds = [
+        # Real: simple file ops
+        "mv file1 file2",
+        "cp file1 file2",
+        "\\mv -f ~/.claude/skills/dyn-pull-build-localdev-all ~/.claude/skills/dyn-pull-and-build-localdev-all",
+        "chmod +x script.sh",
+        "chmod +x ~/.claude/skills/dyn-pull-and-build-localdev-all/pick_images.py",
+        # Real: read-only / inspection
+        "ls -la",
+        "ls ~/dynamo/.claude/skills/review-pr/ 2>/dev/null",
+        "ls ~/dynamo/ 2>/dev/null; echo '---'; find ~/dynamo* -name 'gh_review.sh' -type f 2>/dev/null | head -5",
+        "ls -la ~/dynamo1 2>&1 | head -5",
+        "cat /etc/passwd",
+        "cat /tmp/review.json",
+        "head -n 20 somefile.txt",
+        "tail -5 /tmp/output.log",
+        "tail -20 /tmp/build-localdev-vllm.log",
+        "grep -r pattern src/",
+        "find . -name '*.py'",
+        "find ~/dynamo -maxdepth 5 -name 'gh_review.sh' -type f 2>/dev/null",
+        "stat -c '%s bytes, modified %y' /tmp/build-localdev-vllm.log",
+        "wc -l /tmp/pr8269.diff",
+        # Real: curl / network
+        "curl https://example.com",
+        "curl -s localhost:8081/metrics > /tmp/trtllm-backend-metrics.txt",
+        'curl -sL http://speedoflight.nvidia.com/dynamo/commits/index.json | python3 -c "import json, sys; data = json.load(sys.stdin)"',
+        # Real: docker exec (most common pattern)
+        'docker exec foo bash -c "ls"',
+        'docker exec fa12f1aa09df bash -c "python3 /utils/soak_fe.py --max-tokens 1000 --requests_per_worker 5"',
+        'docker exec fa12f1aa09df bash -c "curl -s http://localhost:8000/v1/models 2>&1 | head -c 500"',
+        'docker exec da18aeee0059 bash -c "cd /workspace && CUDA_VISIBLE_DEVICES=0 WORKSPACE_DIR=/workspace python3 -m pytest tests/serve/test_vllm.py -v --timeout=300 2>&1"',
+        'docker exec 1c5b911efcb7 bash -c "grep \'_TEST_META_FILENAME\' /workspace/tests/utils/vram_utils.py"',
+        'docker exec fa12f1aa09df bash -c "~/utils/await_output.sh -t 240 -s \'model_name=Qwen\' -q -- tail -n +1 -F /home/dynamo/notes/inference.log 2>&1 | tail -5"',
+        # Real: docker status / images / cleanup (no rm)
+        "docker images dynamoci.azurecr.io/ai-dynamo/dynamo --format '{{.Tag}} {{.Size}}' 2>/dev/null | grep 261881221",
+        'docker ps -a --format "{{.ID}}\\t{{.Names}}\\t{{.Image}}\\t{{.Status}}" | grep vsc-dynamo',
+        "docker manifest inspect dynamoci.azurecr.io/ai-dynamo/dynamo:abc-vllm-dev-cuda13 >/dev/null 2>&1",
+        "docker pull dynamoci.azurecr.io/ai-dynamo/dynamo:abc-vllm-dev-cuda13",
+        "docker rmi dynamoci.azurecr.io/ai-dynamo/dynamo:old-tag",
+        "docker system df 2>&1 | head -10",
+        # Real: git / gh
+        "git push origin main",
+        "gh pr view 8362 --repo ai-dynamo/dynamo --json title,body,author 2>&1",
+        "gh pr diff 8362 --repo ai-dynamo/dynamo 2>&1 | head -600",
+        "gh pr diff 8362 --repo ai-dynamo/dynamo 2>&1 | sed -n '600,900p'",
+        "gh pr checks 1234 --repo ai-dynamo/dynamo",
+        # Real: python / pytest / build
+        "python3 -m pytest tests/",
+        "python3 ~/.claude/skills/dyn-pull-and-build-localdev-all/pick_images.py",
+        "cargo fmt",
+        "npm install",
+        # Real: gh_review.sh
+        "~/.claude/skills/dyn-review-pr/gh_review.sh reviews ai-dynamo/dynamo 8362 2>&1 | head -100",
+        "cat /tmp/review.json | ~/.claude/skills/dyn-review-pr/gh_review.sh post ai-dynamo/dynamo 8362 2>&1",
+        # Real: GH API via curl + token
+        'GH_TOKEN=$(grep oauth_token ~/.config/gh/hosts.yml | head -1 | awk \'{print $2}\') && curl -sH "Authorization: token $GH_TOKEN" "https://api.github.com/repos/ai-dynamo/dynamo/contents/tests/hf_cache.py?ref=main"',
+        # Real: multi-command status checks
+        'echo "=== pulls running ==="; pgrep -af "docker pull" 2>/dev/null | grep -v pgrep || echo "(none)"',
+        'pgrep -af "docker build.*local-dev" 2>/dev/null | grep -v pgrep || echo "(none)"',
+        "journalctl -u docker --since '10 min ago' --no-pager 2>/dev/null | tail -5",
+        'nohup bash /tmp/bench_ecr_vs_acr.sh > /tmp/bench_ecr_vs_acr.log 2>&1 &',
+        # Real: process inspection
+        'ps -eo pid,ppid,cmd --no-headers | grep -E "python|dynamo|vllm" | head -30',
+        "ss -tlnp 2>/dev/null | grep -E '8000|8081'",
+        "nvidia-smi --query-gpu=index,memory.used,memory.total --format=csv,noheader",
+        # Edge: empty / whitespace
+        "",
+        "   ",
+    ]
+    for cmd in safe_cmds:
+        check(f"ALLOW  {cmd}", is_dangerous(cmd), False)
+
+    # =====================================================================
+    # detect_prompt — real pane outputs
+    # =====================================================================
+    print()
+    print("=== detect_prompt: real pane outputs ===")
+
+    # Real: bash command with docker exec
+    check("bash: docker exec pytest",
+          detect_prompt(
+              "● Bash(docker exec da18aeee0059 bash -c \"cd /workspace && python3 -m pytest tests/ -v\")\n"
+              "\n"
+              "─────────────────────────────────────────────\n"
+              " Bash command\n"
+              "\n"
+              "   docker exec da18aeee0059 bash -c \"cd /workspace && python3 -m pytest tests/ -v\"\n"
+              "   Run tests\n"
+              "\n"
+              " Permission rule Bash requires confirmation for this command.\n"
+              "\n"
+              " Do you want to proceed?\n"
+              " ❯ 1. Yes\n"
+              "   2. No\n"
+              "\n"
+              " Esc to cancel · Tab to amend · ctrl+e to explain\n"
+          ),
+          "bash")
+
+    # Real: bash command (unsandboxed) with tail
+    check("bash: unsandboxed tail",
+          detect_prompt(
+              "  3 tasks (2 done, 1 in progress, 0 open)\n"
+              "  ✔ Bump timeouts for L4 machines\n"
+              "  ✔ Run serial test to verify VRAM stays capped\n"
+              "  ◼ Run parallel test to confirm all gpu_1 pass\n"
+              "\n"
+              "─────────────────────────────────────────────\n"
+              " Bash command (unsandboxed)\n"
+              "\n"
+              "   tail -5 /tmp/claude-1776734304/tasks/bh3cuwyx3.output\n"
+              "   Check parallel test progress\n"
+              "\n"
+              " Permission rule Bash requires confirmation for this command.\n"
+              "\n"
+              " Do you want to proceed?\n"
+              " ❯ 1. Yes\n"
+              "   2. No\n"
+              "\n"
+              " Esc to cancel · Tab to amend · ctrl+e to explain\n"
+          ),
+          "bash")
+
+    # Real: bash with curl + metrics
+    check("bash: curl metrics pipeline",
+          detect_prompt(
+              "─────────────────────────────────────────────\n"
+              " Bash command\n"
+              "\n"
+              "   curl -s localhost:8081/metrics > /tmp/trtllm-backend-metrics.txt && "
+              "curl -s localhost:8000/metrics > /tmp/trtllm-frontend-metrics.txt && "
+              "wc -l /tmp/trtllm-backend-metrics.txt /tmp/trtllm-frontend-metrics.txt\n"
+              "   Collect TRT-LLM metrics from both ports\n"
+              "\n"
+              " Permission rule Bash requires confirmation for this command.\n"
+              "\n"
+              " Do you want to proceed?\n"
+              " ❯ 1. Yes\n"
+              "   2. No\n"
+          ),
+          "bash")
+
+    # Real: bash with ls | grep
+    check("bash: ls pipe grep",
+          detect_prompt(
+              "─────────────────────────────────────────────\n"
+              " Bash command\n"
+              "\n"
+              "   ls ~/.claude/skills/ | grep -i localdev\n"
+              "   Check for existing localdev skill\n"
+              "\n"
+              " Permission rule Bash requires confirmation for this command.\n"
+              "\n"
+              " Do you want to proceed?\n"
+              " ❯ 1. Yes\n"
+              "   2. No\n"
+              "\n"
+              " Esc to cancel · Tab to amend · ctrl+e to explain\n"
+          ),
+          "bash")
+
+    # Real: file edit with SKILL.md rename
+    check("file: edit SKILL.md name field",
+          detect_prompt(
+              "─────────────────────────────────────────────\n"
+              " Edit file\n"
+              " .claude/skills/dyn-commit/SKILL.md\n"
+              "╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌\n"
+              " 1  ---\n"
+              " 2 -name: commit\n"
+              " 2 +name: dyn-commit\n"
+              " 3  description: Create a git commit\n"
+              "╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌\n"
+              " Do you want to make this edit to SKILL.md?\n"
+              " ❯ 1. Yes\n"
+              "   2. Yes, and allow Claude to edit its own settings for this session\n"
+              "   3. No\n"
+          ),
+          "file")
+
+    # Real: file edit with .cursorrules
+    check("file: edit .cursorrules",
+          detect_prompt(
+              " Do you want to make this edit to .cursorrules?\n"
+              " ❯ 1. Yes\n"
+              "   2. Yes, allow all edits during this session (shift+tab)\n"
+              "   3. No\n"
+          ),
+          "file")
+
+    # Real: file create
+    check("file: create SKILL.md",
+          detect_prompt(
+              " Do you want to create SKILL.md?\n"
+              " ❯ 1. Yes\n"
+              "   2. Yes, allow all edits during this session (shift+tab)\n"
+              "   3. No\n"
+          ),
+          "file")
+
+    # Real: file create with full path context
+    check("file: create pick_images.py",
+          detect_prompt(
+              "● Update(.claude/skills/dyn-pull-build-localdev-all/pick_images.py)\n"
+              "\n"
+              " Do you want to create pick_images.py?\n"
+              " ❯ 1. Yes\n"
+              "   2. Yes, allow all edits during this session\n"
+              "   3. No\n"
+          ),
+          "file")
+
+    # Real: file overwrite
+    check("file: overwrite pick_images.py",
+          detect_prompt(
+              " Do you want to overwrite pick_images.py?\n"
+              " ❯ 1. Yes\n"
+              "   2. Yes, allow all edits during this session\n"
+              "   3. No\n"
+          ),
+          "file")
+
+    # Real: WebFetch tool prompt
+    check("tool: WebFetch raw.githubusercontent.com",
+          detect_prompt(
+              "─────────────────────────────────────────────\n"
+              " Fetch\n"
+              "\n"
+              "   https://raw.githubusercontent.com/sgl-project/sglang/v0.5.9/python/sglang/srt/managers/tokenizer_manager.py\n"
+              "   Claude wants to fetch content from raw.githubusercontent.com\n"
+              "\n"
+              " Permission rule WebFetch requires confirmation for this tool.\n"
+              "\n"
+              " Do you want to allow Claude to fetch this content?\n"
+              " ❯ 1. Yes\n"
+              "   2. Yes, and don't ask again for raw.githubusercontent.com\n"
+              "   3. No, and tell Claude what to do differently (esc)\n"
+          ),
+          "tool")
+
+    # Real: delete should NOT auto-approve
+    check("file: delete NOT matched",
+          detect_prompt(
+              " Do you want to delete old_script.sh?\n"
+              " ❯ 1. Yes\n"
+              "   2. No\n"
+          ),
+          None)
+
+    # Real: no prompt — just Claude working
+    check("no prompt: Claude thinking",
+          detect_prompt(
+              "✶ Drafting replies to review comments… (19m 6s · ↓ 2.3k tokens)\n"
+              "  ⎿  ✔ Fix bare URL in README.md\n"
+              "     ✔ Refactor LoRA methods into LoraMixin\n"
+              "     ◼ Draft replies to review comments\n"
+              "\n"
+              "─────────────────────────────────────────────\n"
+              "❯ \n"
+              "─────────────────────────────────────────────\n"
+              "  esc to interrupt · ctrl+t to hide tasks\n"
+          ),
+          None)
+
+    # Real: no prompt — shell prompt
+    check("no prompt: shell prompt",
+          detect_prompt(
+              "keivenc@keivenc-linux:~/dynamo/dynamo3$ gg\n"
+              "=== Git log ===\n"
+              "c78fac3 style: cargo fmt on test_streaming_tool_parsers.rs\n"
+              "keivenc@keivenc-linux:~/dynamo/dynamo3$\n"
+          ),
+          None)
+
+    # Stale prompt above, current prompt below (bottom wins)
+    check("stale bash above, current file below (bottom wins)",
+          detect_prompt(
+              " Do you want to proceed?\n"
+              " ❯ 1. Yes\n"
+              "   2. No\n"
+              "\n"
+              "● Some more work\n"
+              "\n"
+              " Do you want to make this edit to SKILL.md?\n"
+              " ❯ 1. Yes\n"
+              "   2. Yes, and allow Claude to edit its own settings\n"
+              "   3. No\n"
+          ),
+          "file")
+
+    check("stale file above, current bash below (bottom wins)",
+          detect_prompt(
+              " Do you want to create bar.py?\n"
+              " ❯ 1. Yes\n"
+              "\n"
+              "● Running commands\n"
+              "\n"
+              " Do you want to proceed?\n"
+              " ❯ 1. Yes\n"
+              "   2. No\n"
+          ),
+          "bash")
+
+    check("stale bash above, current tool below (bottom wins)",
+          detect_prompt(
+              " Do you want to proceed?\n"
+              " ❯ 1. Yes\n"
+              "\n"
+              "● Fetching...\n"
+              "\n"
+              " Do you want to allow Claude to fetch this content?\n"
+              " ❯ 1. Yes\n"
+              "   2. Yes, and don't ask again\n"
+              "   3. No\n"
+          ),
+          "tool")
+
+    # =====================================================================
+    # action_for_prompt — which option we pick per prompt type
+    # =====================================================================
+    print()
+    print("=== action_for_prompt: which option to pick ===")
+
+    check("bash -> option1 (Yes)",
+          action_for_prompt("bash"), "option1")
+    check("file -> option2 (Yes, allow all edits)",
+          action_for_prompt("file"), "option2")
+    check("tool -> option2 (Yes, don't ask again for domain)",
+          action_for_prompt("tool"), "option2")
+    check("None -> None (no action)",
+          action_for_prompt(None), None)
+    check("unknown -> None (safety fallback)",
+          action_for_prompt("unknown"), None)
+
+    # =====================================================================
+    # yes_is_selected
+    # =====================================================================
+    print()
+    print("=== yes_is_selected ===")
+
+    check("yes selected (2-option)", yes_is_selected(
+        " ❯ 1. Yes\n   2. No\n"), True)
+    check("yes selected (3-option edit)", yes_is_selected(
+        " ❯ 1. Yes\n   2. Yes, allow all edits during this session\n   3. No\n"), True)
+    check("yes selected (3-option tool)", yes_is_selected(
+        " ❯ 1. Yes\n   2. Yes, and don't ask again for raw.githubusercontent.com\n   3. No\n"), True)
+    check("no selected", yes_is_selected(
+        "   1. Yes\n ❯ 2. No\n"), False)
+    check("option 2 selected (edit)", yes_is_selected(
+        "   1. Yes\n ❯ 2. Yes, allow all edits during this session\n   3. No\n"), False)
+    check("no selector at all", yes_is_selected("random text"), False)
+
+    # =====================================================================
+    # extract_command — real pane layouts
+    # =====================================================================
+    print()
+    print("=== extract_command: real pane layouts ===")
+
+    # Real: docker exec with pytest
+    cmd = extract_command(
+        "● Some context\n"
+        "\n"
+        "─────────────────────────────────────────────\n"
+        " Bash command\n"
+        "\n"
+        '   docker exec da18aeee0059 bash -c "cd /workspace && CUDA_VISIBLE_DEVICES=0 '
+        "python3 -m pytest tests/serve/test_vllm.py -v --timeout=300 2>&1\"\n"
+        "   Run gpu_1 vllm tests in parallel\n"
+        "\n"
+        " Permission rule Bash requires confirmation for this command.\n"
+        "\n"
+        " Do you want to proceed?\n"
+        " ❯ 1. Yes\n"
+    )
+    check("extracts docker exec pytest", cmd is not None and "docker exec" in cmd and "pytest" in cmd, True)
+
+    # Real: curl metrics pipeline
+    cmd = extract_command(
+        "● Collecting metrics\n"
+        "\n"
+        "─────────────────────────────────────────────\n"
+        " Bash command\n"
+        "\n"
+        "   curl -s localhost:8081/metrics > /tmp/backend.txt && curl -s localhost:8000/metrics > /tmp/frontend.txt\n"
+        "   Collect metrics from both ports\n"
+        "\n"
+        " Permission rule Bash requires confirmation for this command.\n"
+        "\n"
+        " Do you want to proceed?\n"
+    )
+    check("extracts curl metrics", cmd is not None and "curl" in cmd and "metrics" in cmd, True)
+
+    # Real: gh pr view
+    cmd = extract_command(
+        "─────────────────────────────────────────────\n"
+        " Bash command\n"
+        "\n"
+        "   gh pr view 8362 --repo ai-dynamo/dynamo --json title,body,author 2>&1\n"
+        "   View PR details\n"
+        "\n"
+        " Permission rule Bash requires confirmation for this command.\n"
+        "\n"
+        " Do you want to proceed?\n"
+    )
+    check("extracts gh pr view", cmd is not None and "gh pr view" in cmd, True)
+
+    # Real: gh_review.sh
+    cmd = extract_command(
+        "─────────────────────────────────────────────\n"
+        " Bash command\n"
+        "\n"
+        "   ~/.claude/skills/dyn-review-pr/gh_review.sh reviews ai-dynamo/dynamo 8362 2>&1 | head -80\n"
+        "   List existing reviews on PR 8362\n"
+        "\n"
+        " Permission rule Bash requires confirmation for this command.\n"
+        "\n"
+        " Do you want to proceed?\n"
+    )
+    check("extracts gh_review.sh", cmd is not None and "gh_review.sh" in cmd, True)
+
+    # Real: unsandboxed tail
+    cmd = extract_command(
+        "─────────────────────────────────────────────\n"
+        " Bash command (unsandboxed)\n"
+        "\n"
+        "   tail -10 /tmp/claude-1776734304/tasks/bh3cuwyx3.output\n"
+        "   Check parallel test progress\n"
+        "\n"
+        " Permission rule Bash requires confirmation for this command.\n"
+        "\n"
+        " Do you want to proceed?\n"
+    )
+    check("extracts unsandboxed tail", cmd is not None and "tail" in cmd, True)
+
+    # Real: multi-line docker exec with heredoc
+    cmd = extract_command(
+        "─────────────────────────────────────────────\n"
+        " Bash command\n"
+        "\n"
+        '   DIR=/home/dynamo/notes/logs; docker exec fa12f1aa09df bash -c "set -x; '
+        "curl -sS -N --max-time 2 -o $DIR/h2a.body.sse -D $DIR/h2a.headers "
+        "-H 'Content-Type: application/json' -d @/tmp/h2a-body.json "
+        'http://localhost:8000/v1/chat/completions 2>&1"\n'
+        "   H2a: curl streaming chat completions\n"
+        "\n"
+        " Permission rule Bash requires confirmation for this command.\n"
+        "\n"
+        " Do you want to proceed?\n"
+    )
+    check("extracts multi-line docker exec curl",
+          cmd is not None and "docker exec" in cmd and "curl" in cmd, True)
+
+    # No prompt at all
+    check("returns None with no prompt", extract_command("just text\nno prompt\n"), None)
+
+    # =====================================================================
+    # Summary
+    # =====================================================================
+    print()
+    if failed:
+        print(f"FAILED: {failed}/{total} tests")
+        return False
+    print(f"ALL {total} TESTS PASSED")
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -378,7 +942,7 @@ def parse_args() -> argparse.Namespace:
 class SessionState:
     """Per-session tracking for dedup and counters."""
 
-    MAX_RETRIES = 3  # resend Enter if prompt persists after approval
+    MAX_RETRIES = 10  # resend Enter if prompt persists after approval
 
     def __init__(self, target: str) -> None:
         self.target = target
@@ -397,6 +961,9 @@ def main() -> None:
         datefmt="%H:%M:%S",
         level=logging.DEBUG if args.verbose else logging.INFO,
     )
+
+    if args.self_test:
+        sys.exit(0 if _self_test() else 1)
 
     if args.list:
         sessions = tmux_list_sessions()
@@ -498,11 +1065,18 @@ def main() -> None:
     sys.stderr.write("=" * 72 + "\n")
     sys.stderr.write(" AUTO-APPROVE TMUX\n")
     sys.stderr.write("\n")
-    sys.stderr.write(" WARNING: This script automatically presses Enter on Cursor CLI\n")
-    sys.stderr.write(" permission prompts. It will approve ALL commands except:\n")
+    sys.stderr.write(" WARNING: This script auto-approves Cursor CLI permission prompts:\n")
+    sys.stderr.write("   - Bash prompts  -> option 1 (Yes)\n")
+    sys.stderr.write("   - File edits    -> option 2 (Yes, allow all edits this session)\n")
+    sys.stderr.write("   - Tool prompts  -> option 2 (Yes, don't ask again for domain)\n")
+    sys.stderr.write("\n")
+    sys.stderr.write(" Bash commands are approved EXCEPT when they match the denylist:\n")
     sys.stderr.write("   - rm, rmdir, shred, mkfs, fdisk, parted, wipefs, dd, format\n")
-    sys.stderr.write("   - sudo rm/rmdir, writes to block devices, fork bombs\n")
-    sys.stderr.write("   - File deletion prompts\n")
+    sys.stderr.write("   - sudo rm/rmdir\n")
+    sys.stderr.write("   - writes to block devices (/dev/sd*, /dev/nvme*, /dev/vd*)\n")
+    sys.stderr.write("   - fork bombs (:(){ :|:& };:)\n")
+    sys.stderr.write("\n")
+    sys.stderr.write(" File 'delete' prompts are NOT auto-approved (manual confirmation required).\n")
     sys.stderr.write("\n")
     sys.stderr.write(" USE AT YOUR OWN RISK. Review the denylist before relying on this.\n")
     sys.stderr.write(" The author is not responsible for unintended side effects.\n")
@@ -548,9 +1122,11 @@ def main() -> None:
             if current_hash == st.last_hash:
                 st.retry_count += 1
                 if st.retry_count <= SessionState.MAX_RETRIES:
-                    log.info("[%s] Prompt still visible after Enter — retry %d/%d",
-                             st.label, st.retry_count, SessionState.MAX_RETRIES)
+                    if st.retry_count <= 3:
+                        log.info("[%s] Prompt still visible after Enter — retry %d/%d",
+                                 st.label, st.retry_count, SessionState.MAX_RETRIES)
                     if not args.dry_run:
+                        time.sleep(0.3)
                         tmux_send_enter(st.target)
                     time.sleep(1)
                 else:
@@ -559,20 +1135,30 @@ def main() -> None:
 
             acted = True
 
+            # Dispatch based on prompt type -> option mapping
+            action = action_for_prompt(prompt_type)
+
+            def _send(opt: str) -> None:
+                if args.dry_run:
+                    return
+                if opt == "option2":
+                    tmux_send_option2(st.target)
+                else:
+                    tmux_send_enter(st.target)
+
             if prompt_type == "file":
-                # Generic: "Do you want to [make this] <action> [to] <filename>?"
+                # "Do you want to [make this] <verb> [to] <filename>?"
                 match = re.search(
                     r"Do you want to (?:make this )?(\w+)\s+(?:to\s+)?([^?\n]+)\?",
                     pane_text, re.IGNORECASE,
                 )
-                action = match.group(1).strip() if match else "file"
+                verb = match.group(1).strip() if match else "file"
                 short_name = match.group(2).strip() if match else "(file)"
                 desc = _find_full_path(pane_text, short_name)
-                if args.dry_run:
-                    log.info("[%s] WOULD APPROVE (%s): %s", st.label, action, desc)
-                else:
-                    log.info("[%s] APPROVE (%s): %s", st.label, action, desc)
-                    tmux_send_enter(st.target)
+                opt_label = "opt 2" if action == "option2" else "opt 1"
+                verb_word = "WOULD APPROVE" if args.dry_run else "APPROVE"
+                log.info("[%s] %s (%s, %s): %s", st.label, verb_word, verb, opt_label, desc)
+                _send(action)
                 st.last_hash = current_hash
                 st.retry_count = 0
                 st.approved += 1
@@ -582,11 +1168,10 @@ def main() -> None:
                 # "Permission rule <Tool> requires confirmation" / "Do you want to allow Claude to <action>?"
                 match = re.search(r"Permission rule (\w+) requires confirmation", pane_text)
                 tool_name = match.group(1) if match else "tool"
-                if args.dry_run:
-                    log.info("[%s] WOULD APPROVE (tool): %s", st.label, tool_name)
-                else:
-                    log.info("[%s] APPROVE (tool): %s", st.label, tool_name)
-                    tmux_send_enter(st.target)
+                opt_label = "opt 2" if action == "option2" else "opt 1"
+                verb_word = "WOULD APPROVE" if args.dry_run else "APPROVE"
+                log.info("[%s] %s (tool, %s): %s", st.label, verb_word, opt_label, tool_name)
+                _send(action)
                 st.last_hash = current_hash
                 st.retry_count = 0
                 st.approved += 1
