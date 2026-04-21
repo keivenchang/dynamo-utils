@@ -83,7 +83,7 @@ dynamo-utils/
 ├── auto_approve_tmux.py           # Auto-approve Cursor CLI prompts in tmux sessions
 ├── await_output.sh               # Run command, exit on sentinel string (replaces sleep+grep)
 ├── aws-ecr-setup.sh              # AWS ECR login/logout/list-images for NVIDIA container registry
-├── backup.sh                     # Smart backup with versioned history
+├── backup_all.sh                 # Official backup orchestrator with versioned history
 ├── check_pr_status.py            # Show detailed PR check status (required vs non-required)
 ├── clean_log.sh                  # Delete old YYYY-MM-DD/ log directories (default: >30 days)
 ├── clean_system.sh               # Orchestrate cleanup of old images, logs, VSC containers
@@ -363,23 +363,33 @@ python3 gitlab_pipeline_pr_map.py 40743226 https://gitlab-master.nvidia.com/dl/a
 ```
 
 
-### backup.sh
+### backup_all.sh
 
-**Overview**: Smart backup with versioned history using rsync.
+**Overview**: Official backup entry point with versioned history using rsync.
 
 #### Usage
 
 ```bash
-# Basic backup (required parameters)
-./backup.sh --input-path ~/dynamo --output-path /mnt/sda/keivenc/dynamo
+# Run all configured backups
+./backup_all.sh
+
+# Maintenance only: compress old history and remove old archives/directories
+./backup_all.sh --compress --remove-after-days 45
 
 # Show help
-./backup.sh --help
+./backup_all.sh --help
 ```
 
-**Parameters:**
-- `--input-path`: Source directory (required)
-- `--output-path`: Destination directory (required)
+**Configured targets:**
+- `~/dynamo` -> `/mnt/sda/keivenc.backup/nvidia`
+- `~/.config`
+- `~/.ssh`
+- `~/.claude`
+- `~/.cursor`
+- `~/.ngc`
+- selected single dotfiles copied into `/mnt/sda/keivenc.backup/dotfiles`
+
+`~/.cache/huggingface` is intentionally excluded because it is already symlinked to `/mnt/sda`.
 
 #### Features
 
@@ -401,8 +411,11 @@ python3 gitlab_pipeline_pr_map.py 40743226 https://gitlab-master.nvidia.com/dl/a
 #### Cron Setup
 
 ```bash
-# Backup every 6 minutes
-*/6 * * * * DYNAMO_HOME=$HOME/dynamo $HOME/dynamo/dynamo-utils.PRODUCTION/cron_log.sh backup $HOME/dynamo/dynamo-utils.PRODUCTION/backup.sh --input-path $HOME/dynamo --output-path /mnt/sda/keivenc/dynamo
+# Backup all configured targets every 6 minutes
+*/6 * * * * $UTILS/backup_all.sh >/dev/null 2>&1
+
+# Daily compression / retention
+0 2 * * * $UTILS/backup_all.sh --compress --remove-after-days 45 >/dev/null 2>&1
 ```
 
 ---
@@ -711,7 +724,7 @@ The typical workflow for setting up a development environment:
 4. **Container Development**: Use Dev Container for consistent environment
 5. **Port Conflicts**: Check port availability before running inference services
 6. **Caching**: Many scripts use `~/.cache/dynamo-utils/` for performance; see tool-specific docs for details.
-7. **Backups**: Use `backup.sh` with versioned history for important data
+7. **Backups**: Use `backup_all.sh` as the official backup entry point
 8. **API Usage**: Optimize API calls with caching and parallelization
 
 ---
