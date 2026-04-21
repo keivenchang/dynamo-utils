@@ -49,19 +49,31 @@ class Message:
 class Transcript:
     uuid: str
     path: Path
+    project: str
     messages: list[Message] = field(default_factory=list)
     mtime: float = 0.0
 
 
-def _find_transcripts_dir() -> Path | None:
-    """Find the agent-transcripts directory under ~/.cursor/projects/."""
+def _find_transcripts_dirs(project: str | None = None) -> list[Path]:
+    """Find agent-transcripts directories under ~/.cursor/projects/."""
     if not TRANSCRIPTS_ROOT.is_dir():
-        return None
-    for proj in TRANSCRIPTS_ROOT.iterdir():
+        return []
+
+    candidates: list[Path] = []
+    for proj in sorted(TRANSCRIPTS_ROOT.iterdir()):
         candidate = proj / "agent-transcripts"
         if candidate.is_dir():
-            return candidate
-    return None
+            candidates.append(candidate)
+
+    if project is None:
+        return candidates
+
+    matches = [
+        candidate
+        for candidate in candidates
+        if candidate.parent.name == project or candidate.parent.name.startswith(project)
+    ]
+    return matches
 
 
 def _load_transcript(tdir: Path, uuid: str) -> Transcript:
@@ -92,20 +104,22 @@ def _load_transcript(tdir: Path, uuid: str) -> Transcript:
     return Transcript(
         uuid=uuid,
         path=jsonl_path,
+        project=tdir.parent.name,
         messages=messages,
         mtime=jsonl_path.stat().st_mtime,
     )
 
 
-def _list_all(tdir: Path) -> list[Transcript]:
+def _list_all(tdirs: list[Path]) -> list[Transcript]:
     """Load all transcripts, sorted newest-first."""
     results: list[Transcript] = []
-    for entry in tdir.iterdir():
-        if not entry.is_dir() or entry.name == "subagents":
-            continue
-        jsonl = entry / f"{entry.name}.jsonl"
-        if jsonl.is_file():
-            results.append(_load_transcript(tdir, entry.name))
+    for tdir in tdirs:
+        for entry in tdir.iterdir():
+            if not entry.is_dir() or entry.name == "subagents":
+                continue
+            jsonl = entry / f"{entry.name}.jsonl"
+            if jsonl.is_file():
+                results.append(_load_transcript(tdir, entry.name))
     results.sort(key=lambda t: t.mtime, reverse=True)
     return results
 
@@ -176,14 +190,14 @@ def _recent_user_messages(t: Transcript, count: int = 3) -> list[str]:
 
 def _print_transcript_table(transcripts: list[Transcript]) -> None:
     """Print a table of transcripts with recent context lines."""
-    print(f"{'#':>3}  {'Date':16}  {'User':>4}  {'Asst':>4}  {'UUID':36}  {'Topic'}")
-    print("-" * 115)
+    print(f"{'#':>3}  {'Date':16}  {'User':>4}  {'Asst':>4}  {'Project':20}  {'UUID':36}  {'Topic'}")
+    print("-" * 137)
     for i, t in enumerate(transcripts):
         ts = datetime.fromtimestamp(t.mtime).strftime("%Y-%m-%d %H:%M")
         n_user = sum(1 for m in t.messages if m.role == "user")
         n_asst = sum(1 for m in t.messages if m.role == "assistant")
         topic = _first_user_query(t)
-        print(f"{i:3}  {ts}  {n_user:4}  {n_asst:4}  {t.uuid}  {_truncate(topic, 60)}")
+        print(f"{i:3}  {ts}  {n_user:4}  {n_asst:4}  {_truncate(t.project, 20):20}  {t.uuid}  {_truncate(topic, 60)}")
         recent = _recent_user_messages(t, count=3)
         for q in recent:
             print(f"       > {_truncate(q, 140)}")
@@ -193,8 +207,8 @@ def _print_transcript_table(transcripts: list[Transcript]) -> None:
         print()
 
 
-def cmd_list(tdir: Path, limit: int) -> None:
-    transcripts = _list_all(tdir)[:limit]
+def cmd_list(all_transcripts: list[Transcript], limit: int) -> None:
+    transcripts = all_transcripts[:limit]
     if not transcripts:
         print("No transcripts found.")
         return
@@ -206,10 +220,10 @@ def cmd_list(tdir: Path, limit: int) -> None:
 # Output: --search
 # ---------------------------------------------------------------------------
 
-def cmd_search(tdir: Path, keyword: str, limit: int) -> None:
+def cmd_search(all_transcripts: list[Transcript], keyword: str, limit: int) -> None:
     keyword_lower = keyword.lower()
     matches: list[Transcript] = []
-    for t in _list_all(tdir):
+    for t in all_transcripts:
         for m in t.messages:
             if keyword_lower in m.text.lower():
                 matches.append(t)
@@ -239,6 +253,7 @@ def cmd_show(t: Transcript, full: bool, tail: int | None) -> None:
 
     print("=" * 70)
     print(f"Transcript: {t.uuid}")
+    print(f"Project: {t.project}")
     print(f"Messages: {len(t.messages)}  |  User: {n_user}  |  Assistant: {n_asst}")
     print(f"Started with: {_truncate(title, 120)}")
     print("=" * 70)
@@ -283,6 +298,7 @@ def cmd_continue(t: Transcript, tail: int) -> None:
 
     print(f"# Continuing previous conversation\n")
     print(f"**Transcript:** {t.uuid}")
+    print(f"**Project:** {t.project}")
     print(f"**Messages:** {n_user} user, {n_asst} assistant {header_note}")
     print(f"**Topic:** {topic}")
     print(f"\n---\n## Conversation so far\n")
@@ -324,6 +340,7 @@ def cmd_json(t: Transcript, full: bool) -> None:
             break
     out = {
         "uuid": t.uuid,
+        "project": t.project,
         "total_messages": len(t.messages),
         "user_messages": user_msgs if full else user_msgs[-20:],
         "last_assistant": last_assistant if full else last_assistant[:2000],
@@ -336,8 +353,7 @@ def cmd_json(t: Transcript, full: bool) -> None:
 # Resolve target transcript
 # ---------------------------------------------------------------------------
 
-def _resolve_target(tdir: Path, args) -> Transcript:
-    all_transcripts = _list_all(tdir)
+def _resolve_target(all_transcripts: list[Transcript], args) -> Transcript:
     if not all_transcripts:
         print("No transcripts found.", file=sys.stderr)
         sys.exit(1)
@@ -354,6 +370,13 @@ def _resolve_target(tdir: Path, args) -> Transcript:
     if not matches:
         print(f"No transcript matching '{args.id}'", file=sys.stderr)
         sys.exit(1)
+    unique_ids = {t.uuid for t in matches}
+    if len(unique_ids) > 1:
+        print(f"Multiple transcripts match '{args.id}':", file=sys.stderr)
+        for t in matches[:10]:
+            print(f"  {t.uuid}  [{t.project}]  {_first_user_query(t)}", file=sys.stderr)
+        print("Use a longer UUID prefix or pass --project.", file=sys.stderr)
+        sys.exit(1)
     return matches[0]
 
 
@@ -368,10 +391,12 @@ def main() -> int:
         epilog="""
 Examples:
   %(prog)s --list                      List recent transcripts
+  %(prog)s --list --project home-keivenc-dynamo
   %(prog)s --latest                    Reader view of most recent transcript
   %(prog)s --latest --continue         Continuation prompt for most recent
   %(prog)s --latest --continue --tail 10
   %(prog)s --id 806f --full            Full transcript by UUID prefix
+  %(prog)s --id 459ac4ca --project home-keivenc-dynamo --continue
   %(prog)s --search "mlperf"           Find transcripts mentioning "mlperf"
   %(prog)s --latest --json             JSON output for scripting
   %(prog)s --latest --raw --tail 5     Raw interleaved messages
@@ -391,23 +416,35 @@ Examples:
     parser.add_argument("--full", action="store_true", help="Don't truncate messages")
     parser.add_argument("--tail", type=int, default=None, help="Last N messages (default: all for reader, 20 for --continue/--raw)")
     parser.add_argument("--limit", type=int, default=20, help="Number of transcripts to list/search (default: 20)")
+    parser.add_argument(
+        "--project",
+        metavar="NAME",
+        help="Restrict to a specific Cursor project name (prefix match OK)",
+    )
 
     args = parser.parse_args()
 
-    tdir = _find_transcripts_dir()
-    if tdir is None:
+    tdirs = _find_transcripts_dirs(project=args.project)
+    if not tdirs:
         print("ERROR: Could not find agent-transcripts directory.", file=sys.stderr)
+        return 1
+    all_transcripts = _list_all(tdirs)
+    if not all_transcripts:
+        if args.project:
+            print(f"ERROR: No transcripts found for project '{args.project}'.", file=sys.stderr)
+        else:
+            print("ERROR: No transcripts found.", file=sys.stderr)
         return 1
 
     if args.list:
-        cmd_list(tdir, limit=args.limit)
+        cmd_list(all_transcripts, limit=args.limit)
         return 0
 
     if args.search:
-        cmd_search(tdir, args.search, limit=args.limit)
+        cmd_search(all_transcripts, args.search, limit=args.limit)
         return 0
 
-    t = _resolve_target(tdir, args)
+    t = _resolve_target(all_transcripts, args)
     if not t.messages:
         print(f"Transcript {t.uuid} has no messages.", file=sys.stderr)
         return 1
