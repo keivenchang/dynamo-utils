@@ -43,17 +43,57 @@ DANGEROUS_COMMANDS = frozenset({
 })
 
 DANGEROUS_PATTERNS = [
+    # Redirection to block devices: `cmd > /dev/sd*`
     re.compile(r">\s*/dev/sd"),
     re.compile(r">\s*/dev/nvme"),
     re.compile(r">\s*/dev/vd"),
-    re.compile(r":\(\)\{.*:\|:&\};:"),   # fork bomb
+    # cp/mv/tee/cat writing *to* a block device as the destination path.
+    # Catches: `cp image.iso /dev/sda`, `mv x /dev/nvme0n1`, `tee /dev/sda`, etc.
+    # The token `/dev/sd*`, `/dev/nvme*`, `/dev/vd*` used as an argument is
+    # almost always a wipe-the-disk footgun.
+    re.compile(r"(?:^|\s)/dev/(?:sd[a-z]|nvme\d|vd[a-z])"),
+    # find ... -delete  (recursive deletion via find)
+    re.compile(r"\bfind\b[^|;&]*\s-delete\b"),
+    # Fork bomb
+    re.compile(r":\(\)\{.*:\|:&\};:"),
+    # Redundant with _DANGER_WORDS_RE but kept as explicit documentation
     re.compile(r"sudo\s+rm\s"),
     re.compile(r"sudo\s+rmdir\s"),
 ]
 
 
+# Characters that can legally precede a dangerous command token.
+# Covers: start of string, whitespace, shell operators (; & | && ||),
+# command substitution ($( `), and shell -c quoted wrappers (' ").
+# Any of these means the following word is being *executed*, not used as data.
+_DANGER_PREFIX = r"(?:^|[\s;&|`('\"$])"
+
+# Build a single regex that matches any dangerous command as an executable
+# token. We look at the *base name* by allowing an optional path prefix, and
+# for mkfs/fdisk-style tools we allow .<suffix> (mkfs.ext4, mkfs.xfs, ...).
+_DANGER_WORDS_RE = re.compile(
+    _DANGER_PREFIX
+    + r"(?:sudo\s+)?"                      # optional sudo wrapper
+    + r"(?:/\S*/)?"                        # optional path prefix (/usr/bin/)
+    + r"(?:" + "|".join(re.escape(c) for c in sorted(DANGEROUS_COMMANDS)) + r")"
+    + r"(?:\.[A-Za-z0-9_-]+)?"             # optional .ext suffix (mkfs.ext4)
+    + r"(?=[\s'\"`)]|$)"                   # followed by whitespace/quote/end
+)
+
+
 def is_dangerous(cmd_line: str) -> bool:
-    """Return True if cmd_line contains a dangerous command."""
+    """Return True if cmd_line contains a dangerous command, even when
+    nested inside bash -c / sh -c / docker exec / ssh / quoted strings.
+
+    Strategy: scan the whole command line for dangerous tokens preceded by
+    a shell boundary (whitespace, operator, opening quote, etc.). This is a
+    denylist that errs on the side of caution — if "rm" appears as an
+    executable-looking token anywhere in the line, we block.
+
+    Known false positives (acceptable): commands that have a filename
+    literal like "rm" (e.g. `echo "run rm"`) will be blocked. In practice
+    this is rare and safer than letting `bash -c 'rm -rf /'` slip through.
+    """
     cmd_line = cmd_line.strip()
     if not cmd_line:
         return False
@@ -62,29 +102,8 @@ def is_dangerous(cmd_line: str) -> bool:
         if pat.search(cmd_line):
             return True
 
-    # Split on shell operators to get individual command segments
-    segments = re.split(r"[|&;]+", cmd_line)
-    for segment in segments:
-        segment = segment.strip()
-        if not segment:
-            continue
-
-        # Skip leading env var assignments (FOO=bar cmd ...)
-        words = segment.split()
-        while words and re.match(r"^[A-Za-z_]\w*=", words[0]):
-            words = words[1:]
-        if not words:
-            continue
-
-        first = words[0]
-        if first == "sudo" and len(words) > 1:
-            first = words[1]
-
-        base = os.path.basename(first)
-
-        for dangerous in DANGEROUS_COMMANDS:
-            if base == dangerous or base.startswith(dangerous + "."):
-                return True
+    if _DANGER_WORDS_RE.search(cmd_line):
+        return True
 
     return False
 
@@ -463,6 +482,36 @@ def _self_test() -> bool:
         "CUDA_VISIBLE_DEVICES=0 rm -rf /workspace",
         "ls /tmp && rm -rf /important",
         "echo done; sudo rm -rf /",
+        # Nested inside shell -c / docker exec / ssh — MUST NOT slip through
+        "bash -c 'rm -rf /tmp/foo'",
+        "sh -c 'rm -rf /workspace'",
+        'bash -c "rm -rf /tmp"',
+        "bash -lc 'rm -rf /tmp'",
+        'docker exec abc bash -c "rm -rf /workspace"',
+        'docker exec abc sh -c "rm -rf /"',
+        "docker exec abc rm -rf /workspace",
+        "ssh user@host 'rm -rf /tmp/stuff'",
+        "FOO=bar bash -c 'rm -rf /tmp'",
+        'docker exec abc bash -c "cd /tmp && rm -rf build"',
+        # Path-prefixed dangerous commands
+        "/bin/rm -rf /tmp/foo",
+        "/usr/bin/rm file",
+        # Command substitution wrappers
+        "echo $(rm -rf /tmp)",
+        "echo `rm -rf /tmp`",
+        # find ... -delete
+        "find /tmp -name '*.log' -delete",
+        'ssh host "find /tmp -delete"',
+        # cp/mv/tee writing to block devices (not just `>` redirection)
+        "cp image.iso /dev/sda",
+        "mv foo /dev/nvme0n1",
+        "echo x | tee /dev/sda",
+        # xargs rm / find -exec rm — recursive deletion wrappers
+        'find /tmp -name "*.log" | xargs rm -f',
+        'find /tmp -name "*.tmp" -exec rm {} \\;',
+        # kubectl exec / docker run with dangerous payload
+        "kubectl exec pod -- rm -rf /workspace",
+        "docker run ubuntu rm -rf /",
     ]
     for cmd in dangerous_cmds:
         check(f"BLOCK  {cmd}", is_dangerous(cmd), True)
@@ -1070,10 +1119,13 @@ def main() -> None:
     sys.stderr.write("   - File edits    -> option 2 (Yes, allow all edits this session)\n")
     sys.stderr.write("   - Tool prompts  -> option 2 (Yes, don't ask again for domain)\n")
     sys.stderr.write("\n")
-    sys.stderr.write(" Bash commands are approved EXCEPT when they match the denylist:\n")
+    sys.stderr.write(" Bash commands are approved EXCEPT when they match the denylist\n")
+    sys.stderr.write(" (detection is nesting-aware: catches bash -c, docker exec, ssh,\n")
+    sys.stderr.write("  xargs, find -exec, kubectl exec, etc.):\n")
     sys.stderr.write("   - rm, rmdir, shred, mkfs, fdisk, parted, wipefs, dd, format\n")
     sys.stderr.write("   - sudo rm/rmdir\n")
-    sys.stderr.write("   - writes to block devices (/dev/sd*, /dev/nvme*, /dev/vd*)\n")
+    sys.stderr.write("   - find ... -delete\n")
+    sys.stderr.write("   - any reference to /dev/sd*, /dev/nvme*, /dev/vd*\n")
     sys.stderr.write("   - fork bombs (:(){ :|:& };:)\n")
     sys.stderr.write("\n")
     sys.stderr.write(" File 'delete' prompts are NOT auto-approved (manual confirmation required).\n")
