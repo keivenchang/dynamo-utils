@@ -332,42 +332,56 @@ def tmux_send_option2(target: str) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Target resolution (comma-separated, wildcards)
+# Target resolution (multiple args, comma-separated, wildcards)
 # ---------------------------------------------------------------------------
 
-def resolve_targets(spec: str) -> list[str]:
-    """Expand a target spec into a list of tmux targets.
+def _iter_target_parts(specs: list[str]) -> list[str]:
+    """Flatten argv target specs into individual target parts."""
+    parts: list[str] = []
+    for spec in specs:
+        for part in spec.split(","):
+            part = part.strip()
+            if part:
+                parts.append(part)
+    return parts
 
-    Supports:
-      - Single target:   "dynamo1"
-      - Comma-separated: "dynamo1,dynamo2"
-      - Wildcards:       "dynamo*"  (matched against session names via fnmatch)
-    """
-    all_sessions = tmux_session_names()
+
+def specs_have_wildcards(specs: list[str]) -> bool:
+    """Return True if any target spec includes a wildcard session name."""
+    for part in _iter_target_parts(specs):
+        session_part = part.split(":")[0]
+        if any(c in session_part for c in "*?[]"):
+            return True
+    return False
+
+
+def _resolve_targets_from_sessions(specs: list[str], all_sessions: list[str]) -> list[str]:
+    """Expand target specs into concrete tmux targets using known sessions."""
     targets: list[str] = []
     seen: set[str] = set()
 
-    for part in spec.split(","):
-        part = part.strip()
-        if not part:
-            continue
-
+    for part in _iter_target_parts(specs):
         session_part = part.split(":")[0]
 
         if any(c in session_part for c in "*?[]"):
-            # Wildcard — match against known session names
             for name in all_sessions:
-                if fnmatch.fnmatch(name, session_part) and name not in seen:
-                    # Preserve any :window.pane suffix from the spec
+                if fnmatch.fnmatch(name, session_part):
                     suffix = part[len(session_part):]
-                    targets.append(name + suffix)
-                    seen.add(name)
+                    expanded = name + suffix
+                    if expanded not in seen:
+                        targets.append(expanded)
+                        seen.add(expanded)
         else:
-            if session_part not in seen:
+            if part not in seen:
                 targets.append(part)
-                seen.add(session_part)
+                seen.add(part)
 
     return targets
+
+
+def resolve_targets(specs: list[str]) -> list[str]:
+    """Expand target specs into a list of tmux targets."""
+    return _resolve_targets_from_sessions(specs, tmux_session_names())
 
 
 # ---------------------------------------------------------------------------
@@ -406,7 +420,9 @@ def parse_args() -> argparse.Namespace:
         epilog=(
             "Target formats:\n"
             '  dynamo1                single session\n'
+            '  dynamo1 dynamo2        multiple positional targets\n'
             '  dynamo1,dynamo2        comma-separated\n'
+            '  dynamo1 "dynamo*"      mixed explicit + wildcard\n'
             '  "dynamo*"             wildcard (glob against session names)\n'
             '  dynamo1:0.1            specific window.pane\n'
             "\n"
@@ -417,8 +433,8 @@ def parse_args() -> argparse.Namespace:
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    parser.add_argument("target", nargs="?", default=None,
-                        help='tmux target(s): session, "s1,s2", or "pattern*"')
+    parser.add_argument("targets", nargs="*", default=[],
+                        help='tmux target(s): separate args, "s1,s2", or "pattern*"')
     parser.add_argument("--dry-run", action="store_true",
                         help="show what would be approved without sending keys")
     parser.add_argument("--verbose", action="store_true",
@@ -974,6 +990,42 @@ def _self_test() -> bool:
     check("returns None with no prompt", extract_command("just text\nno prompt\n"), None)
 
     # =====================================================================
+    # target resolution
+    # =====================================================================
+    print()
+    print("=== target resolution ===")
+
+    sessions = ["dynamo1", "dynamo2", "dynamo3", "misc"]
+    check("single target",
+          _resolve_targets_from_sessions(["dynamo1"], sessions),
+          ["dynamo1"])
+    check("multiple positional targets",
+          _resolve_targets_from_sessions(["dynamo1", "dynamo2"], sessions),
+          ["dynamo1", "dynamo2"])
+    check("comma-separated targets",
+          _resolve_targets_from_sessions(["dynamo1,dynamo2"], sessions),
+          ["dynamo1", "dynamo2"])
+    check("mixed positional + comma-separated",
+          _resolve_targets_from_sessions(["dynamo1", "dynamo2,dynamo3"], sessions),
+          ["dynamo1", "dynamo2", "dynamo3"])
+    check("wildcard target",
+          _resolve_targets_from_sessions(["dynamo*"], sessions),
+          ["dynamo1", "dynamo2", "dynamo3"])
+    check("mixed explicit + wildcard dedups exact duplicate",
+          _resolve_targets_from_sessions(["dynamo1", "dynamo*"], sessions),
+          ["dynamo1", "dynamo2", "dynamo3"])
+    check("wildcard preserves pane suffix",
+          _resolve_targets_from_sessions(["dynamo*:0.1"], sessions),
+          ["dynamo1:0.1", "dynamo2:0.1", "dynamo3:0.1"])
+    check("same session with two panes kept separately",
+          _resolve_targets_from_sessions(["dynamo1:0.0", "dynamo1:1.0"], sessions),
+          ["dynamo1:0.0", "dynamo1:1.0"])
+    check("wildcard detection false",
+          specs_have_wildcards(["dynamo1", "dynamo2:0.1"]), False)
+    check("wildcard detection true",
+          specs_have_wildcards(["dynamo1", "dyn*"]), True)
+
+    # =====================================================================
     # Summary
     # =====================================================================
     print()
@@ -1019,13 +1071,13 @@ def main() -> None:
         print(sessions or "No tmux sessions found.")
         sys.exit(0)
 
-    if args.target is None:
+    if not args.targets:
         print("No tmux target specified. Available sessions:")
         print()
         sessions = tmux_list_sessions()
         print(sessions or "  (none)")
         print()
-        print('Usage: auto_approve_tmux.py <target>  (e.g. dynamo1, "dynamo*", d1,d2)')
+        print('Usage: auto_approve_tmux.py <target> [<target> ...]  (e.g. dynamo1 dynamo2 "dynamo*" d1,d2)')
         print()
         print("To create/attach a named tmux session:")
         print("  tmux new-session -s mysession      # create new")
@@ -1034,15 +1086,16 @@ def main() -> None:
         sys.exit(1)
 
     # Check if the spec uses wildcards — if so, we'll re-resolve each cycle
-    is_dynamic = any(c in args.target for c in "*?[]")
+    target_display = " ".join(args.targets)
+    is_dynamic = specs_have_wildcards(args.targets)
 
     # Initial resolution
-    targets = resolve_targets(args.target)
+    targets = resolve_targets(args.targets)
     if not targets:
         if is_dynamic:
-            log.info("No sessions match '%s' yet — waiting for them to appear...", args.target)
+            log.info("No sessions match '%s' yet — waiting for them to appear...", target_display)
         else:
-            print(f"Error: no tmux sessions match '{args.target}'.")
+            print(f"Error: no tmux sessions match '{target_display}'.")
             print("Available sessions:")
             sessions = tmux_list_sessions()
             print(sessions or "  (none)")
@@ -1066,7 +1119,7 @@ def main() -> None:
 
     def refresh_targets() -> None:
         """Re-resolve dynamic targets, adding new sessions and removing gone ones."""
-        current_targets = resolve_targets(args.target)
+        current_targets = resolve_targets(args.targets)
         current_set = set(current_targets)
         existing_set = set(states.keys())
 
@@ -1140,7 +1193,7 @@ def main() -> None:
         target_names = ", ".join(s.label for s in states.values())
         log.info("Watching %d session(s): %s", len(states), target_names)
     if is_dynamic:
-        log.info("Dynamic mode: will auto-detect new sessions matching '%s'", args.target)
+        log.info("Dynamic mode: will auto-detect new sessions matching '%s'", target_display)
     log.info("Poll interval: %ss (ramps to %ss over %ds idle)", base_interval, max_interval, int(ramp_duration))
     if args.dry_run:
         log.info("DRY RUN — will not send keys")
