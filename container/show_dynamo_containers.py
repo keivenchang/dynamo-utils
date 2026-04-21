@@ -8,6 +8,7 @@ import argparse
 import json
 import re
 import subprocess
+import sys
 from pathlib import Path
 
 
@@ -82,6 +83,13 @@ def print_table(headers: list[str], rows: list[list[str]]) -> None:
 
 
 def main() -> None:
+    if Path("/.dockerenv").exists():
+        print(
+            "ERROR: This can only run on the host, not inside the container.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
     parser = argparse.ArgumentParser(
         description="Show running Dynamo devcontainers."
     )
