@@ -1235,7 +1235,13 @@ def main() -> None:
                         tmux_send_enter(st.target)
                     time.sleep(1)
                 else:
-                    log_dedup(logging.DEBUG, f"[{st.label}] Same prompt persists after {SessionState.MAX_RETRIES} retries")
+                    # Retries exhausted. Reset state so the next iteration
+                    # treats this prompt as fresh and re-fires Enter with a
+                    # full retry budget, instead of silently dedup-looping.
+                    log.warning("[%s] Same prompt persists after %d retries — resetting state and retrying",
+                                st.label, SessionState.MAX_RETRIES)
+                    st.last_hash = ""
+                    st.retry_count = 0
                 continue
 
             acted = True
