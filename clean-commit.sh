@@ -5,8 +5,9 @@
 # Scrub the current HEAD commit message:
 #   1. Remove lines starting with "Made-with:"
 #   2. Remove lines starting with "Co-Authored-By:" (or "Co-authored-by:")
-#   3. De-duplicate "Signed-off-by:" lines (keep first occurrence of each)
-#   4. Strip trailing blank lines
+#   3. Redact @nvidia.com email addresses from Signed-off-by lines
+#   4. De-duplicate "Signed-off-by:" lines (keep first occurrence of each)
+#   5. Strip trailing blank lines
 #
 # Usage: clean-commit.sh [--dry-run]
 
@@ -22,6 +23,9 @@ original=$(git log -1 --format="%B")
 cleaned=$(printf '%s\n' "$original" | awk '
     /^Made-with:/ { next }
     /^[Cc]o-[Aa]uthored-[Bb]y:/ { next }
+    /^Signed-off-by:/ {
+        gsub(/<[^>]*@nvidia\.com>/, "<>")
+    }
     /^Signed-off-by:/ {
         if ($0 in seen) next
         seen[$0] = 1
