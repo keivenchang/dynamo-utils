@@ -13,7 +13,9 @@
 #   5. Remove "Co-Authored-By:" (or "Co-authored-by:") lines that duplicate
 #      a Signed-off-by trailer (same name + email). Non-duplicate co-authors
 #      are preserved.
-#   6. Strip trailing blank lines
+#   6. Remove "Co-Authored-By:" lines whose email is @anthropic.com
+#      (Claude Code's auto-added trailer adds no review value).
+#   7. Strip trailing blank lines
 #
 # Usage:
 #   clean-commit.sh              # clean HEAD (amend)
@@ -80,11 +82,14 @@ clean_message() {
             lines[++n] = $0
         }
         END {
-            # Filter Co-authored-by lines that duplicate a Signed-off-by.
+            # Filter Co-authored-by lines:
+            #   - drop if they duplicate a Signed-off-by trailer
+            #   - drop if the email is @anthropic.com (Claude Code trailer)
             m = 0
             for (i = 1; i <= n; i++) {
                 if (lines[i] ~ /^[Cc]o-[Aa]uthored-[Bb]y:/) {
                     if (trailer_ident(lines[i]) in signoff_seen) continue
+                    if (lines[i] ~ /<[A-Za-z0-9._%+-]+@anthropic\.com>/) continue
                 }
                 out[++m] = lines[i]
             }
@@ -158,6 +163,24 @@ Co-authored-by: Someone Else <someone@example.com>" \
 
 Signed-off-by: Keiven Chang <keivenchang@users.noreply.github.com>
 Co-authored-by: Someone Else <someone@example.com>"
+
+    _check "drop claude co-author" \
+"fix: something
+
+Signed-off-by: Keiven Chang <keivenchang@users.noreply.github.com>
+Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>" \
+"fix: something
+
+Signed-off-by: Keiven Chang <keivenchang@users.noreply.github.com>"
+
+    _check "drop any @anthropic.com co-author" \
+"fix: something
+
+Signed-off-by: Keiven Chang <keivenchang@users.noreply.github.com>
+Co-authored-by: Claude Sonnet <claude@anthropic.com>" \
+"fix: something
+
+Signed-off-by: Keiven Chang <keivenchang@users.noreply.github.com>"
 
     _check "redact nvidia co-author, preserved when no matching signoff" \
 "fix: something
