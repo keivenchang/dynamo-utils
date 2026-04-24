@@ -161,11 +161,11 @@ def main() -> None:
     if devcontainers:
         print_table(
             ["Repo", "Backend", "User", "Container ID", "Container Name",
-             "Branch", "Git HEAD", "Dynamo SHA", "Host Path"],
+             "Git HEAD", "Dynamo SHA", "Host Path", "Branch"],
             [
                 [dc["repo"], dc["backend"], dc["user"],
                  dc["container_id"], dc["container_name"],
-                 dc["branch"], dc["sha"], dc["dynamo_sha"], dc["host_path"]]
+                 dc["sha"], dc["dynamo_sha"], dc["host_path"], dc["branch"]]
                 for dc in devcontainers
             ],
         )
