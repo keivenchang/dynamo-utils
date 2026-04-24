@@ -93,14 +93,17 @@ while [[ $# -gt 0 ]]; do
 done
 
 # Function to get images for a specific framework variant, sorted by creation time (newest first)
-# Generic pattern: dynamo:<IMAGE_SHA>.<sha>-<framework>-<anything>
-# Examples: dynamo:A1B2C3.98df1a2c5-vllm-dev-cuda12.9-amd64, dynamo:D4E5F6.ef2583a9d-sglang-local-dev-cuda12.9-amd64,
-#           dynamo:A1B2C3.d38954c75-none-dev-orig-cuda12.9-amd64
+# Matches both locally-built `dynamo:...` and ACR-pulled `dynamoci.azurecr.io/ai-dynamo/dynamo:...`.
+# Generic pattern: [dynamoci.azurecr.io/ai-dynamo/]dynamo:<sha>-<framework>-<anything>
+# Examples:
+#   dynamo:98df1a2c5-vllm-dev-cuda12.9-amd64-local-dev
+#   dynamo:ef2583a9d-sglang-local-dev-cuda12.9-amd64
+#   dynamoci.azurecr.io/ai-dynamo/dynamo:c8c99dd1d9-vllm-dev-cuda12
 # Excludes latest-* tags (those are always kept).
 get_variant_images() {
     local variant=$1
     docker images --format "{{.Repository}}:{{.Tag}} {{.ID}} {{.CreatedAt}}" \
-        | grep -E "^dynamo:[^ ]+-${variant}-" \
+        | grep -E "^(dynamoci\.azurecr\.io/ai-dynamo/)?dynamo:[^ ]+-${variant}-" \
         | grep -v ":latest-" \
         | sort -k3,4 -r
 }
@@ -290,7 +293,7 @@ remove_runtime_images() {
         case "$repo_tag" in *-dev-*|*-dev) continue ;; esac
         case "$repo_tag" in *-runtime*) ;; *) continue ;; esac
         targets+=("$repo_tag")
-    done < <(docker images --format "{{.Repository}}:{{.Tag}} {{.ID}}" | grep "^dynamo:")
+    done < <(docker images --format "{{.Repository}}:{{.Tag}} {{.ID}}" | grep -E "^(dynamoci\.azurecr\.io/ai-dynamo/)?dynamo:")
 
     # Sanity: must not remove any dev or local-dev (both or nothing)
     local bad=
