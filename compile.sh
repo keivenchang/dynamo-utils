@@ -303,8 +303,50 @@ cleanup_python() {
     fi
 }
 
+# Remove __pycache__ directories from the workspace, and prune any directories
+# left empty afterward. This clears Python bytecode cruft that can shadow real
+# packages as PEP-420 namespace packages (see memory: namespace_package_shadow_trap).
+# Scoped to the workspace; skips .git, target, node_modules, and venv trees.
+cleanup_pycache() {
+    [ -z "${WORKSPACE_DIR:-}" ] && return 0
+    [ ! -d "$WORKSPACE_DIR" ] && return 0
 
+    local pycache_count empty_count
+    pycache_count=$(find "$WORKSPACE_DIR" -type d -name __pycache__ \
+        -not -path '*/.git/*' \
+        -not -path '*/target/*' \
+        -not -path '*/node_modules/*' \
+        -not -path '*/.venv/*' 2>/dev/null | wc -l)
 
+    if [ "$pycache_count" -gt 0 ]; then
+        echo "Removing $pycache_count __pycache__ director(ies) under $WORKSPACE_DIR"
+        find "$WORKSPACE_DIR" -type d -name __pycache__ \
+            -not -path '*/.git/*' \
+            -not -path '*/target/*' \
+            -not -path '*/node_modules/*' \
+            -not -path '*/.venv/*' \
+            -exec rm -rf {} + 2>/dev/null || true
+    fi
+
+    # Prune dirs that are now empty — typically stale package dirs (e.g. tests/kvbm/
+    # whose only content was __pycache__) that would otherwise become empty
+    # PEP-420 namespace packages and shadow the real installed package.
+    empty_count=$(find "$WORKSPACE_DIR" -type d -empty \
+        -not -path '*/.git/*' \
+        -not -path '*/target/*' \
+        -not -path '*/node_modules/*' \
+        -not -path '*/.venv/*' 2>/dev/null | wc -l)
+
+    if [ "$empty_count" -gt 0 ]; then
+        echo "Pruning $empty_count empty director(ies) left behind"
+        find "$WORKSPACE_DIR" -type d -empty \
+            -not -path '*/.git/*' \
+            -not -path '*/target/*' \
+            -not -path '*/node_modules/*' \
+            -not -path '*/.venv/*' \
+            -delete 2>/dev/null || true
+    fi
+}
 
 
 
@@ -314,6 +356,7 @@ cleanup_python() {
 
 if [ "$PYTHON_CLEAN" = true ]; then
     cleanup_python
+    cleanup_pycache
 fi
 
 # ==============================================================================
@@ -398,6 +441,7 @@ if [ -n "$BUILD_TYPE" ]; then
     # ==============================================================================
     # Always clean existing Python packages before any operations
     cleanup_python
+    cleanup_pycache
 
     # ==============================================================================
     # COMPILATION CONFIGURATION
