@@ -1467,7 +1467,11 @@ Framework: {{ img.framework }}">{{ display_tag }}</td>
 </table>
 </div>
 {% endif %}
-{# Azure ACR Registry Images Section (listed first — simpler auth, amd64 only) #}
+{# Azure ACR Registry Images Section (listed first — simpler auth, amd64 only)
+   Note: No Size column. `az acr repository show-tags --detail` returns createdTime,
+   digest, and name, but NOT imageSizeInBytes. Getting size would require
+   `az acr manifest show-metadata` per digest (5000+ extra API calls per run), so we
+   skip it. AWS ECR's describe-images returns size for free, so ECR does show it. #}
 {% if acr_imgs %}
 <div style="margin-bottom: 12px; padding: 8px; background-color: white; border: 1px solid #d0d7de; border-radius: 4px;">
 <div style="font-weight: 600; margin-bottom: 4px; font-size: 13px;">Azure ACR Registry Images: ({{ acr_imgs|length }}) <span style="font-weight: 400; font-size: 11px; color: #57606a;">Requires <a href="container_registry_auth_azure_acr.html" target="_blank" style="color: #0969da; text-decoration: none;">Azure ACR authentication</a></span></div>

@@ -1822,6 +1822,11 @@ class CommitHistoryGenerator:
                 self.logger.warning(f"Failed to load ECR cache {ECR_CACHE_FILE}: {e}")
 
         # --- Azure ACR Registry Images ---
+        # NOTE: ACR images have no size_bytes. `az acr repository show-tags --detail`
+        # returns createdTime, digest, and name, but NOT imageSizeInBytes. Getting size
+        # would require `az acr manifest show-metadata` per digest (5000+ extra API calls
+        # per run), so we don't fetch it. The Size column is omitted from the ACR section
+        # in the template. AWS ECR's describe-images returns size for free.
         ACR_REGISTRY = "dynamoci.azurecr.io/ai-dynamo/dynamo"
         ACR_CACHE_FILE = Path.home() / ".cache" / "dynamo-utils" / "azure-acr-registry-cache" / "az-acr-ai-dynamo-dynamo-details.json"
         self.logger.info(f"ACR: cache file={ACR_CACHE_FILE}, exists={ACR_CACHE_FILE.exists()}")

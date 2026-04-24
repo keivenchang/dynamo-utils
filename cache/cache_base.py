@@ -13,8 +13,10 @@ Eliminates boilerplate code duplication across:
 
 from __future__ import annotations
 
+import atexit
 import json
 import os
+import random
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -59,6 +61,14 @@ class BaseDiskCache:
         self._dirty = False
         self._initial_disk_count: Optional[int] = None
         self.stats = BaseCacheStats()  # Track hits/misses/writes automatically
+        # Time-based flush throttling: after each flush, pick a new random deadline
+        # between _FLUSH_MIN_S and _FLUSH_MAX_S seconds in the future. Flushes before
+        # the deadline are skipped unless force=True.
+        self._last_flush_ts: float = 0.0
+        self._next_flush_at: float = 0.0
+        # Register atexit handler so throttled-skipped writes get flushed on clean exit.
+        # Best-effort: failures ignored (the next run will rebuild anything missing).
+        atexit.register(self._atexit_flush)
 
     def _lock_file_path(self) -> Path:
         """Path to lock file (next to cache file)."""
@@ -152,10 +162,28 @@ class BaseDiskCache:
         """Create empty cache structure. Subclasses can override."""
         return {"version": self._schema_version, "items": {}}
 
-    def _persist(self) -> None:
-        """Persist cache to disk with inter-process merge (best-effort)."""
+    # Time-based flush throttle window (seconds). After each successful flush,
+    # pick a random deadline in [_FLUSH_MIN_S, _FLUSH_MAX_S] for the next flush.
+    # Flushes before the deadline are skipped unless force=True.
+    _FLUSH_MIN_S: float = 1.0
+    _FLUSH_MAX_S: float = 10.0
+
+    def _persist(self, *, force: bool = False) -> None:
+        """Persist cache to disk with inter-process merge (best-effort).
+
+        For large caches (like actions_jobs.json at 400+ MB), writing on every
+        _set_item becomes disk-bound. We throttle disk writes to at most once
+        every _FLUSH_MIN_S to _FLUSH_MAX_S seconds (random per-cache interval),
+        while keeping the in-memory cache hot. Set force=True for explicit
+        flush() calls to guarantee persistence (called at end of runs).
+        """
         if not self._dirty:
             return
+
+        if not force:
+            now = time.time()
+            if now < self._next_flush_at:
+                return
 
         self._cache_file.parent.mkdir(parents=True, exist_ok=True)
         items = self._data.get("items") if isinstance(self._data, dict) else {}
@@ -195,13 +223,26 @@ class BaseDiskCache:
             # Update in-memory view to match what we wrote
             self._data = merged
             self._dirty = False
+            # Pick next random flush deadline
+            now = time.time()
+            self._last_flush_ts = now
+            self._next_flush_at = now + random.uniform(self._FLUSH_MIN_S, self._FLUSH_MAX_S)
         finally:
             self._release_disk_lock(lock_fh)
 
     def flush(self) -> None:
-        """Persist cache to disk."""
+        """Persist cache to disk (forced, bypasses throttle)."""
         with self._mu:
-            self._persist()
+            self._persist(force=True)
+
+    def _atexit_flush(self) -> None:
+        """Best-effort flush on interpreter shutdown. Silent on failure."""
+        try:
+            if self._dirty:
+                with self._mu:
+                    self._persist(force=True)
+        except Exception:
+            pass
 
     def get_cache_sizes(self) -> Tuple[int, int]:
         """Return (mem_count, disk_count) for cache entries.
