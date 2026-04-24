@@ -303,8 +303,23 @@ def tmux_has_session(session: str) -> bool:
     return tmux_run("has-session", "-t", session, check=False).returncode == 0
 
 
-def tmux_capture_pane(target: str, lines: int = 80) -> str | None:
-    result = tmux_run("capture-pane", "-t", target, "-p", "-S", f"-{lines}", check=False)
+def tmux_capture_pane(target: str, lines: int = 80, visible_only: bool = False) -> str | None:
+    """Capture the contents of a tmux pane.
+
+    When ``visible_only`` is True, capture ONLY the current visible screen
+    (no scrollback history). This is critical for detecting active prompts:
+    a dismissed prompt that has scrolled up still lives in scrollback and
+    would otherwise trick ``detect_prompt`` into thinking the prompt is
+    still on screen, causing the retry loop to fire on a ghost prompt.
+
+    Use visible_only=True for presence detection (detect_prompt, yes_is_selected,
+    prompt_hash). Use the default scrollback capture only when you need
+    context above the prompt (extract_command, _find_full_path).
+    """
+    if visible_only:
+        result = tmux_run("capture-pane", "-t", target, "-p", check=False)
+    else:
+        result = tmux_run("capture-pane", "-t", target, "-p", "-S", f"-{lines}", check=False)
     if result.returncode != 0:
         return None
     return result.stdout
@@ -1207,23 +1222,32 @@ def main() -> None:
         acted = False
 
         for st in list(states.values()):
-            pane_text = tmux_capture_pane(st.target)
-            if pane_text is None:
+            # Detection uses the VISIBLE pane only. Using scrollback here
+            # causes false-positive retries because a dismissed prompt that
+            # scrolled up still contains "Do you want to proceed" text.
+            visible_text = tmux_capture_pane(st.target, visible_only=True)
+            if visible_text is None:
                 log.warning("[%s] Failed to capture pane. Session still alive?", st.label)
                 continue
 
-            prompt_type = detect_prompt(pane_text)
+            prompt_type = detect_prompt(visible_text)
 
             if prompt_type is None:
                 st.last_hash = ""  # reset so next prompt is always fresh
                 log_dedup(logging.DEBUG, f"[{st.label}] No prompt (approved={st.approved} blocked={st.blocked})")
                 continue
 
-            if not yes_is_selected(pane_text):
+            if not yes_is_selected(visible_text):
                 log_dedup(logging.DEBUG, f"[{st.label}] Prompt found but 'Yes' not selected")
                 continue
 
-            current_hash = prompt_hash(pane_text)
+            # Prompt is genuinely on screen — now grab the scrollback capture
+            # to get enough context for command extraction / full-path lookup.
+            pane_text = tmux_capture_pane(st.target)
+            if pane_text is None:
+                pane_text = visible_text
+
+            current_hash = prompt_hash(visible_text)
             if current_hash == st.last_hash:
                 st.retry_count += 1
                 if st.retry_count <= SessionState.MAX_RETRIES:
