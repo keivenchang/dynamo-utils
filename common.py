@@ -662,14 +662,20 @@ class DynamoRepositoryUtils(BaseUtils):
                 nums.append(0)
             return (nums[0], nums[1], nums[2])
 
-        semver_branches = []
+        # Pick the latest N semver branches PLUS all non-semver-named release branches
+        # (e.g. release/deepseekv4, release/kimi-k2 — these don't fit the X.Y.Z pattern
+        # but are still important release lines). The `limit` only caps semver branches.
+        semver_branches: List[tuple] = []
+        nonsemver_branches: List[str] = []
         for br in branches:
             ver = parse_semver(br)
             if ver is None:
-                continue
-            semver_branches.append((ver, br))
+                nonsemver_branches.append(br)
+            else:
+                semver_branches.append((ver, br))
         semver_branches.sort(key=lambda x: x[0], reverse=True)
-        selected = [br for _, br in semver_branches[:limit]]
+        nonsemver_branches.sort()
+        selected = [br for _, br in semver_branches[:limit]] + nonsemver_branches
 
         fork_map: Dict[str, List[Dict[str, str]]] = {}
         for branch_ref in selected:
@@ -691,12 +697,24 @@ class DynamoRepositoryUtils(BaseUtils):
             if not mb:
                 continue
 
-            ver_tail = branch_ref.split("/")[-1].lstrip(".")
-            label = f"release/{ver_tail}" if ver_tail.startswith("v") else f"release/v{ver_tail}"
+            # Count commits on main since the fork point (how far main has moved past).
+            commits_past = 0
+            try:
+                count_out = (git_utils.repo.git.rev_list("--count", f"{mb}..{base_ref}") or "").strip()
+                commits_past = int(count_out) if count_out.isdigit() else 0
+            except git.exc.GitCommandError:
+                commits_past = 0
+
             branch_name = "/".join(branch_ref.split("/")[1:])  # drop "origin/"
+            label = branch_name  # e.g. "release/v0.8.0" or "release/deepseekv4"
             url = f"https://github.com/{github_owner}/{github_repo}/tree/{urllib.parse.quote(branch_name, safe='')}"
 
-            fork_map.setdefault(mb, []).append({"label": label, "url": url, "branch": branch_name})
+            fork_map.setdefault(mb, []).append({
+                "label": label,
+                "url": url,
+                "branch": branch_name,
+                "commits_past": str(commits_past),
+            })
 
         return fork_map
 

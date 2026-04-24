@@ -1302,7 +1302,7 @@ window.__dashboardOnReadyQueue.push(function() {
 {%- if commit.release_forkpoints -%}
 <div style="margin-top: 2px;">
 {%- for fp in commit.release_forkpoints -%}
-<a class="release-forkpoint" href="{{ fp.url }}" target="_blank" title="Fork-point for {{ fp.branch }}">{{ fp.label }}</a>
+<a class="release-forkpoint" href="{{ fp.url }}" target="_blank" title="Fork-point for {{ fp.branch }} ({{ fp.commits_past }} commits on main since this fork)">{{ fp.label }}{% if fp.commits_past %} (+{{ fp.commits_past }}){% endif %}</a>
 {%- endfor -%}
 </div>
 {%- endif -%}
