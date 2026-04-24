@@ -1,8 +1,12 @@
 #!/bin/bash
 
 # Docker Image Cleanup Script
-# Keeps :latest tags and top N images for vllm/sglang/trtllm variants
-# Removes older images to free up space
+# Keeps :latest-* tags and the newest N images per (variant × local-dev) bucket.
+# Any image whose repository is (anything/)?dynamo and whose tag starts with a
+# git-SHA-looking segment is a candidate. Registry prefix doesn't matter
+# (local builds, Azure ACR, AWS ECR, etc. all flow through the same logic),
+# and framework names (vllm / sglang / trtllm / dynamo-test / future) are
+# auto-detected from the tag rather than hardcoded.
 
 set -e
 
@@ -18,11 +22,14 @@ usage() {
     cat << EOF
 Usage: $0 [OPTIONS]
 
-Docker Image Cleanup Script for dynamo vllm/sglang/trtllm variants
+Docker Image Cleanup Script for dynamo:* images (all registries)
 
 This script will:
 - Keep all :latest-* tags (latest-vllm, latest-sglang, latest-trtllm, etc.)
-- Keep the top $RETAIN_COUNT most recent images per variant type (runtime, dev, local-dev)
+- Bucket every SHA-tagged dynamo:* image by its (variant, local-dev?) fingerprint
+  auto-extracted from the tag (e.g. vllm-dev-cuda12 vs sglang-dev-cuda13 vs
+  dynamo-test-cuda12-amd64), regardless of registry prefix
+- Keep the top $RETAIN_COUNT most recent images per bucket
 - Remove older images to free up disk space
 - Prune Docker build cache
 
@@ -92,86 +99,99 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# Function to get images for a specific framework variant, sorted by creation time (newest first)
-# Matches both locally-built `dynamo:...` and ACR-pulled `dynamoci.azurecr.io/ai-dynamo/dynamo:...`.
-# Generic pattern: [dynamoci.azurecr.io/ai-dynamo/]dynamo:<sha>-<framework>-<anything>
-# Examples:
-#   dynamo:98df1a2c5-vllm-dev-cuda12.9-amd64-local-dev
-#   dynamo:ef2583a9d-sglang-local-dev-cuda12.9-amd64
-#   dynamoci.azurecr.io/ai-dynamo/dynamo:c8c99dd1d9-vllm-dev-cuda12
-# Excludes latest-* tags (those are always kept).
-get_variant_images() {
-    local variant=$1
+# Enumerate every SHA-tagged dynamo image, newest first.
+#
+# Matches repos that are `dynamo` or end in `/dynamo` (any registry prefix) and
+# whose tag starts with a git-SHA-looking segment (7+ hex chars followed by `-`).
+# `latest-*` tags fall off implicitly since their first segment isn't hex.
+#
+# Covered shapes:
+#   dynamo:<sha>-<anything>                                       (local builds)
+#   dynamoci.azurecr.io/ai-dynamo/dynamo:<sha>-<anything>         (Azure ACR)
+#   210086341041.dkr.ecr.us-west-2.amazonaws.com/ai-dynamo/dynamo:<sha>-<anything> (AWS ECR)
+#   <any-registry>/…/dynamo:<sha>-<anything>                      (future)
+list_sha_tagged_dynamo_images() {
     docker images --format "{{.Repository}}:{{.Tag}} {{.ID}} {{.CreatedAt}}" \
-        | grep -E "^(dynamoci\.azurecr\.io/ai-dynamo/)?dynamo:[^ ]+-${variant}-" \
-        | grep -v ":latest-" \
+        | awk '{
+            n = index($1, ":")
+            if (n == 0) next
+            repo = substr($1, 1, n - 1)
+            tag  = substr($1, n + 1)
+            if (repo != "dynamo" && substr(repo, length(repo) - 6) != "/dynamo") next
+            if (tag !~ /^[0-9a-f]{7,}-/) next
+            print
+        }' \
         | sort -k3,4 -r
 }
 
-# Function to identify images to keep vs delete
-process_variant() {
-    local variant=$1
-    local variant_name=$2
-    
-    echo "Processing $variant_name images..."
-    
-    # Get all images for this variant
-    local images=$(get_variant_images "$variant")
-    
+# Compute a bucket key for a tag: "<variant_signature>|<local-dev|regular>"
+#   variant_signature = tag with leading `<sha>-` stripped and trailing `-local-dev` stripped
+bucket_key_for_tag() {
+    local tag=$1
+    local rest="${tag#*-}"   # drop <sha>-
+    if [[ "$rest" == *-local-dev ]]; then
+        echo "${rest%-local-dev}|local-dev"
+    else
+        echo "$rest|regular"
+    fi
+}
+
+# Enumerate all dynamo:<sha>-* images across every registry, group them by
+# (variant_signature × local-dev flag), and retain newest $RETAIN_COUNT per group.
+process_all_dynamo_images() {
+    echo "Processing all SHA-tagged dynamo images (any registry)..."
+
+    local images
+    images=$(list_sha_tagged_dynamo_images)
+
     if [ -z "$images" ]; then
-        echo "No $variant_name images found."
+        echo "No SHA-tagged dynamo images found."
         return
     fi
-    
-    echo "Found images (keeping newest $RETAIN_COUNT, marking older for deletion):"
-    
-    # Separate local-dev from regular images (match mid-tag or end-of-tag)
-    local local_dev_images=$(echo "$images" | grep -E ".*-local-dev[ -]" || true)
-    local regular_images=$(echo "$images" | grep -v -E ".*-local-dev[ -]" || true)
-    
-    # Process local-dev images
-    if [ -n "$local_dev_images" ]; then
-        echo "  -local-dev images:"
-        local keep_local_dev=$(echo "$local_dev_images" | head -n $RETAIN_COUNT)
-        local delete_local_dev=$(echo "$local_dev_images" | tail -n +$((RETAIN_COUNT + 1)))
-        
-        echo "$keep_local_dev" | while read -r line; do
-            local repo_tag=$(echo "$line" | awk '{print $1}')
-            echo "    $repo_tag"
-        done
-        
-        if [ -n "$delete_local_dev" ]; then
-            echo "$delete_local_dev" | while read -r line; do
-                local repo_tag=$(echo "$line" | awk '{print $1}')
-                local image_id=$(echo "$line" | awk '{print $2}')
-                echo "    D $repo_tag"
-                echo "$image_id" >> /tmp/images_to_delete_$$
-            done
+
+    declare -A bucket_lines=()
+    declare -A bucket_counts=()
+
+    local line repo_tag image_id tag key
+    while IFS= read -r line; do
+        [ -z "$line" ] && continue
+        repo_tag=$(echo "$line" | awk '{print $1}')
+        image_id=$(echo "$line" | awk '{print $2}')
+        tag="${repo_tag#*:}"
+        key=$(bucket_key_for_tag "$tag")
+        bucket_lines["$key"]+="${repo_tag} ${image_id}"$'\n'
+        bucket_counts["$key"]=$(( ${bucket_counts["$key"]:-0} + 1 ))
+    done <<< "$images"
+
+    local sorted_keys
+    sorted_keys=$(printf '%s\n' "${!bucket_lines[@]}" | sort)
+
+    local key variant_sig flag bucket_body keep delete
+    while IFS= read -r key; do
+        [ -z "$key" ] && continue
+        variant_sig="${key%|*}"
+        flag="${key##*|}"
+        echo "  bucket: ${variant_sig} [${flag}]  (found ${bucket_counts[$key]}, retaining ${RETAIN_COUNT})"
+
+        bucket_body="${bucket_lines[$key]}"
+        # Already newest-first; preserve order.
+        keep=$(printf '%s' "$bucket_body" | head -n "$RETAIN_COUNT")
+        delete=$(printf '%s' "$bucket_body" | tail -n +$((RETAIN_COUNT + 1)))
+
+        while IFS=' ' read -r kept_repo_tag _kept_id; do
+            [ -z "$kept_repo_tag" ] && continue
+            echo "    ${kept_repo_tag}"
+        done <<< "$keep"
+
+        if [ -n "$delete" ]; then
+            while IFS=' ' read -r del_repo_tag del_image_id; do
+                [ -z "$del_repo_tag" ] && continue
+                echo "    D ${del_repo_tag}"
+                echo "$del_image_id" >> /tmp/images_to_delete_$$
+            done <<< "$delete"
         fi
         echo
-    fi
-    
-    # Process regular images
-    if [ -n "$regular_images" ]; then
-        echo "  regular images:"
-        local keep_regular=$(echo "$regular_images" | head -n $RETAIN_COUNT)
-        local delete_regular=$(echo "$regular_images" | tail -n +$((RETAIN_COUNT + 1)))
-        
-        echo "$keep_regular" | while read -r line; do
-            local repo_tag=$(echo "$line" | awk '{print $1}')
-            echo "    $repo_tag"
-        done
-        
-        if [ -n "$delete_regular" ]; then
-            echo "$delete_regular" | while read -r line; do
-                local repo_tag=$(echo "$line" | awk '{print $1}')
-                local image_id=$(echo "$line" | awk '{print $2}')
-                echo "    D $repo_tag"
-                echo "$image_id" >> /tmp/images_to_delete_$$
-            done
-        fi
-        echo
-    fi
+    done <<< "$sorted_keys"
 }
 
 # Function to delete dangling <none> images
@@ -293,7 +313,13 @@ remove_runtime_images() {
         case "$repo_tag" in *-dev-*|*-dev) continue ;; esac
         case "$repo_tag" in *-runtime*) ;; *) continue ;; esac
         targets+=("$repo_tag")
-    done < <(docker images --format "{{.Repository}}:{{.Tag}} {{.ID}}" | grep -E "^(dynamoci\.azurecr\.io/ai-dynamo/)?dynamo:")
+    done < <(docker images --format "{{.Repository}}:{{.Tag}} {{.ID}}" | awk '{
+        n = index($1, ":")
+        if (n == 0) next
+        repo = substr($1, 1, n - 1)
+        if (repo != "dynamo" && substr(repo, length(repo) - 6) != "/dynamo") next
+        print
+    }')
 
     # Sanity: must not remove any dev or local-dev (both or nothing)
     local bad=
@@ -505,11 +531,8 @@ main() {
     # First, delete all <none> images
     delete_none_images
     
-    # Process each variant (including base "none" images)
-    process_variant "none" "Base (none)"
-    process_variant "vllm" "VLLM"
-    process_variant "sglang" "SGLang"
-    process_variant "trtllm" "TensorRT-LLM"
+    # Bucket and retain across every SHA-tagged dynamo image (all registries, all variants)
+    process_all_dynamo_images
     
     # Delete the identified images
     delete_images
