@@ -718,6 +718,110 @@ class DynamoRepositoryUtils(BaseUtils):
 
         return fork_map
 
+    def get_release_branch_cherry_picks(
+        self,
+        main_commit_shas: List[str],
+        base_ref: str = "origin/main",
+        release_ref_glob: str = "refs/remotes/origin/release/*",
+        github_owner: str = "ai-dynamo",
+        github_repo: str = "dynamo",
+    ) -> Dict[str, List[Dict[str, str]]]:
+        """
+        For each commit in main_commit_shas, find which release/* branches cherry-picked it.
+        Uses git patch-id (stable across cherry-picks) to detect equivalent commits.
+
+        Returns:
+          { "<main_sha>": [ {"branch": "release/deepseekv4", "branch_short": "deepseekv4",
+                              "pr_number": "8705", "branch_sha": "01002df76ae...",
+                              "url": "https://github.com/.../pull/8705"}, ... ] }
+        """
+        if not main_commit_shas:
+            return {}
+
+        git_utils = GitUtils(repo_path=self.repo_path, dry_run=self.dry_run, verbose=self.verbose)
+
+        try:
+            out = git_utils.repo.git.for_each_ref("--format=%(refname:short)", release_ref_glob)
+            branches = [b.strip() for b in out.splitlines() if b.strip()]
+        except git.exc.GitCommandError:
+            return {}
+        if not branches:
+            return {}
+
+        def _patch_id(sha: str) -> Optional[str]:
+            """Compute patch-id for a commit (stable across cherry-picks). Returns None on failure."""
+            try:
+                # `git show <sha> | git patch-id` -> "<patch-id> <commit-sha>\n"
+                show_out = git_utils.repo.git.show(sha)
+                proc = subprocess.run(
+                    ["git", "patch-id"],
+                    input=show_out,
+                    capture_output=True,
+                    text=True,
+                    cwd=str(self.repo_path),
+                    timeout=10,
+                )
+                line = (proc.stdout or "").strip()
+                if not line:
+                    return None
+                return line.split()[0]
+            except (subprocess.SubprocessError, OSError, git.exc.GitCommandError):
+                return None
+
+        # Pre-compute patch-ids for the visible main commit window (one per commit).
+        main_patch_ids: Dict[str, str] = {}  # patch_id -> main_sha
+        for sha in main_commit_shas:
+            pid = _patch_id(sha)
+            if pid:
+                main_patch_ids[pid] = sha
+
+        if not main_patch_ids:
+            return {}
+
+        # Regex to extract PR number from commit subject like "fix: foo (#8705)"
+        pr_re = re.compile(r"\(#(\d+)\)")
+
+        cherry_map: Dict[str, List[Dict[str, str]]] = {}
+
+        for branch_ref in branches:
+            branch_name = "/".join(branch_ref.split("/")[1:])  # drop "origin/"
+            branch_short = branch_name.split("/", 1)[1] if "/" in branch_name else branch_name
+
+            # Get commits on this branch but NOT on main (branch-only commits).
+            try:
+                branch_only_log = git_utils.repo.git.log(
+                    "--format=%H%x09%s",
+                    f"{base_ref}..{branch_ref}",
+                )
+            except git.exc.GitCommandError:
+                continue
+
+            for line in branch_only_log.splitlines():
+                if "\t" not in line:
+                    continue
+                branch_sha, subject = line.split("\t", 1)
+                pid = _patch_id(branch_sha)
+                if not pid:
+                    continue
+                main_sha = main_patch_ids.get(pid)
+                if not main_sha:
+                    continue
+                m = pr_re.search(subject)
+                pr_number = m.group(1) if m else ""
+                if pr_number:
+                    url = f"https://github.com/{github_owner}/{github_repo}/pull/{pr_number}"
+                else:
+                    url = f"https://github.com/{github_owner}/{github_repo}/commit/{branch_sha}"
+                cherry_map.setdefault(main_sha, []).append({
+                    "branch": branch_name,
+                    "branch_short": branch_short,
+                    "pr_number": pr_number,
+                    "branch_sha": branch_sha,
+                    "url": url,
+                })
+
+        return cherry_map
+
     def generate_docker_image_sha(self, full_hash: bool = False) -> str:
         """
         Generate Docker image SHA for the current HEAD commit.

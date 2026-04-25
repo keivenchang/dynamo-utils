@@ -1458,7 +1458,20 @@ class CommitHistoryGenerator:
             self.logger.warning(f"Failed to compute release fork points: {e}")
             for commit in commit_data:
                 commit['release_forkpoints'] = []
-        
+
+        # Detect cherry-picks: for each visible main commit, find which release/* branches
+        # have an equivalent commit (matched via git patch-id, stable across cherry-picks).
+        try:
+            cherry_map = repo_utils.get_release_branch_cherry_picks(
+                main_commit_shas=[c['sha_full'] for c in commit_data],
+            )
+            for commit in commit_data:
+                commit['cherry_picked_to'] = cherry_map.get(commit['sha_full'], [])
+        except Exception as e:
+            self.logger.warning(f"Failed to compute cherry-picks: {e}")
+            for commit in commit_data:
+                commit['cherry_picked_to'] = []
+
         # DEPRECATING: Local build log scanning (log_paths, report_path_by_commit_image, build_status).
         # These scan the local filesystem for build_images.py outputs (report.html, report.json)
         # to show build status icons and link to local build reports. This is being replaced by
