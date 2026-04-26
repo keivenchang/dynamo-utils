@@ -115,7 +115,7 @@ dynamo-utils/
 ├── container/                    # Docker build/test/cleanup tools (see container/README.md)
 ├── html_pages/                   # HTML dashboard generators (see html_pages/README.md)
 │   ├── gpu_monitor.py            # Real-time GPU/CPU/disk/network web dashboard (WebSocket + Plotly)
-│   └── start_gpu_monitor.sh      # Launcher wrapper for gpu_monitor.py
+│   └── gpu_monitor_start.sh      # Launcher wrapper for gpu_monitor.py
 └── reports/                      # Repository and CI analytics
     ├── analyze_repo.py           # Repository analysis
     ├── contributor_stats.py      # Contributor statistics
@@ -267,7 +267,7 @@ automatic top-N pruning.
 python3 html_pages/gpu_monitor.py --host 0.0.0.0 --port 9999
 
 # Or use the launcher wrapper
-html_pages/start_gpu_monitor.sh
+html_pages/gpu_monitor_start.sh
 ```
 
 **Options:**
