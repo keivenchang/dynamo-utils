@@ -1638,29 +1638,6 @@ def _build_html(payload: Dict[str, Any]) -> str:
       </div>
     </div>
 
-    <!-- Network top talkers: match same width ratio -->
-    <div class="grid" style="grid-template-columns: 3fr 2fr; margin-top: 16px;">
-      <div class="card chart">
-        <div class="hdr">
-          <div class="title">Network: top talkers (best-effort)</div>
-          <div class="hint">Uses monitor’s `--net-top` sampling (typically top-K only). Lines = (sent+recv) MiB/s.</div>
-        </div>
-        <div class="body">
-          <div id="net_graph" class="plot"></div>
-        </div>
-      </div>
-
-      <div class="card">
-        <div class="hdr">
-          <div class="title">Network offenders (aggregated)</div>
-          <div class="hint"><span class="pill">avg / max</span></div>
-        </div>
-        <div class="body" style="max-height: 560px; overflow:auto;">
-          <table class="table" id="net_table"></table>
-        </div>
-      </div>
-    </div>
-
     <!-- GitHub rate limit (recorded by resource_monitor.py into SQLite) -->
     <div class="grid" style="grid-template-columns: 3fr 2fr; margin-top: 16px;">
       <div class="card chart">
@@ -1973,33 +1950,6 @@ def _build_html(payload: Dict[str, Any]) -> str:
           <td class="mono">${{(r.avg_ms ?? 0).toFixed(1)}} ms</td>
           <td class="mono">${{(r.p95_ms ?? 0).toFixed(1)}} ms</td>
           <td class="mono">${{r.ok_n}}/${{r.n}}</td>
-        </tr>
-      `).join('')}}
-    `;
-  }}
-
-  function buildNetTable(rows) {{
-    const el = document.getElementById('net_table');
-    if (!rows || rows.length === 0) {{
-      el.innerHTML = `<tr><th>status</th></tr><tr><td class="muted">No net_process_samples in window (enable monitor with --net-top).</td></tr>`;
-      return;
-    }}
-    el.innerHTML = `
-      <tr>
-        <th>process</th>
-        <th>avg</th>
-        <th>max</th>
-        <th>rows</th>
-      </tr>
-      ${{rows.map(r => `
-        <tr>
-          <td>
-            <div class="mono">${{(r.proc||'').slice(0,40)}}</div>
-            <div class="small muted">${{(r.proc||'').slice(0,120)}}</div>
-          </td>
-          <td class="mono"><span class="badge warn">${{bpsToMiBps(r.avg_bps).toFixed(2)}}</span> MiB/s</td>
-          <td class="mono">${{bpsToMiBps(r.max_bps).toFixed(2)}} MiB/s</td>
-          <td class="mono">${{r.sample_rows}}</td>
         </tr>
       `).join('')}}
     `;
@@ -2885,33 +2835,6 @@ def _build_html(payload: Dict[str, Any]) -> str:
     return Plotly.newPlot('ping_graph', traces, layout, config).then(() => installHoverDelay('ping_graph'));
   }}
 
-  function renderNetGraph() {{
-    const n = PAYLOAD.net || {{}};
-    const procs = Object.keys(n);
-    const traces = [];
-    for (const p of procs) {{
-      const d = n[p];
-      const x = d.x || [];
-      const total = (d.total_bps || []).map(v => bpsToMiBps(v));
-      const sent = (d.sent_bps || []).map(v => bpsToMiBps(v));
-      const recv = (d.recv_bps || []).map(v => bpsToMiBps(v));
-      const text = total.map((_, i) => `sent=${{sent[i]?.toFixed(2)}} MiB/s<br>recv=${{recv[i]?.toFixed(2)}} MiB/s`);
-      traces.push({{
-        x,
-        y: total,
-        name: p,
-        mode: 'lines',
-        line: {{ width: 2 }},
-        text,
-        hovertemplate: '<b>%{{fullData.name}}</b><br>%{{x}}<br>total=%{{y:.2f}} MiB/s<br>%{{text}}<extra></extra>',
-      }});
-    }}
-    const layout = commonLayout('');
-    layout.yaxis = {{ title: 'MiB/s', rangemode: 'tozero', gridcolor: 'rgba(255,255,255,0.09)' }};
-    const config = {{ displayModeBar: true, responsive: true }};
-    return Plotly.newPlot('net_graph', traces, layout, config).then(() => installHoverDelay('net_graph'));
-  }}
-
   function renderDockerGraph() {{
     const d = PAYLOAD.docker || {{}};
     const meta = PAYLOAD.docker_meta || {{}};
@@ -3194,16 +3117,14 @@ def _build_html(payload: Dict[str, Any]) -> str:
   buildLeaderTable(PAYLOAD.cpu_leaderboard || []);
   buildDockerTable(PAYLOAD.docker_leaderboard || []);
   buildPingTable(PAYLOAD.ping_summary || []);
-  buildNetTable(PAYLOAD.net_leaderboard || []);
   const pSys = renderSystemGraph();
   const pGpu = renderGpuGraph();
   const pDocker = renderDockerGraph();
   const pPing = renderPingGraph();
-  const pNet = renderNetGraph();
   const pGh = renderGhRateLimitGraph();
   const pDisk = renderDiskUsage();
-  Promise.allSettled([pSys, pGpu, pDocker, pPing, pNet, pGh, pDisk]).then(() => {{
-    installTimeSync(['sys_graph', 'gpu_graph', 'docker_graph', 'ping_graph', 'net_graph', 'gh_rate_limit_graph', 'disk_usage_display']);
+  Promise.allSettled([pSys, pGpu, pDocker, pPing, pGh, pDisk]).then(() => {{
+    installTimeSync(['sys_graph', 'gpu_graph', 'docker_graph', 'ping_graph', 'gh_rate_limit_graph', 'disk_usage_display']);
   }});
   </script>
 </body>
