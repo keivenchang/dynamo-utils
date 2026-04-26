@@ -50,8 +50,10 @@ LOGGER = logging.getLogger("resource_monitor")
 # Enable via CLI: --net-top (defaults off).
 
 DEFAULT_PING_TARGETS: Tuple[str, ...] = (
-    "www.yahoo.com",
+    "www.cnn.com",
     "www.google.com",
+    "1.1.1.1",
+    "8.8.8.8",
     "10.110.41.1",
     "10.110.40.1",
 )
