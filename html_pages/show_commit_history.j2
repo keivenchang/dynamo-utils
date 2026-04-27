@@ -850,6 +850,17 @@ window.__dashboardOnReadyQueue.push(function() {
 
 {% block content %}
 
+<!-- Tip: agent skill alternative to using this page -->
+<div style="margin-bottom: 4px; padding: 8px 12px; background-color: #ddf4ff; border-left: 3px solid #0969da; font-size: 12px; line-height: 1.5;">
+  <strong>Tip:</strong> If you use Claude, Cursor, or Codex, install the
+  <a href="http://speedoflight.nvidia.com/dynamo/dynamo-utils/skills/dyn-pull-latest-image/SKILL.md"
+     style="color: #0969da; text-decoration: none; font-weight: 600;">dyn-pull-latest-image</a>
+  agent skill to find and pull the right Dynamo Docker image (dev or local-dev) for your
+  current branch &mdash; without using this dashboard. Source:
+  <a href="https://gitlab-master.nvidia.com/keivenc/ai-config/-/blob/master/claude/skills/dyn-pull-latest-image/SKILL.md"
+     style="color: #0969da; text-decoration: none;">gitlab-master.nvidia.com/keivenc/ai-config</a>.
+</div>
+
 <!-- Key/Help Section -->
 <!-- NOTE: Do NOT use `.container` here; `.container` has a border and looks "boxed".
      Match the branches dashboard legend style (no border/box). -->
