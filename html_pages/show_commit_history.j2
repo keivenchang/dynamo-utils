@@ -1319,7 +1319,7 @@ window.__dashboardOnReadyQueue.push(function() {
 {%- if commit.cherry_picked_to -%}
 <div style="margin-top: 2px;">
 {%- for cp in commit.cherry_picked_to -%}
-<a class="cherry-pick" href="{{ cp.url }}" target="_blank" title="Cherry-picked to {{ cp.branch }}{% if cp.pr_number %} as PR #{{ cp.pr_number }}{% endif %}" style="color: #57606a; text-decoration: none; margin-right: 6px;">&#127826;&#8594;{{ cp.branch }}{% if cp.pr_number %} #{{ cp.pr_number }}{% endif %}</a>
+<a class="cherry-pick" href="{{ cp.url }}" target="_blank" title="Cherry-picked to {{ cp.branch }}{% if cp.siblings %} (also on: {{ cp.siblings | join(', ') }}){% endif %}{% if cp.pr_number %} as PR #{{ cp.pr_number }}{% endif %}" style="color: #57606a; text-decoration: none; margin-right: 6px;">&#127826;&#8594;{{ cp.branch }}{% if cp.siblings %} ({{ cp.siblings | join(', ') }}){% endif %}{% if cp.pr_number %} #{{ cp.pr_number }}{% endif %}</a>
 {%- endfor -%}
 </div>
 {%- endif -%}

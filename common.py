@@ -725,10 +725,14 @@ class DynamoRepositoryUtils(BaseUtils):
         release_ref_glob: str = "refs/remotes/origin/release/*",
         github_owner: str = "ai-dynamo",
         github_repo: str = "dynamo",
-    ) -> Dict[str, List[Dict[str, str]]]:
+    ) -> Dict[str, List[Dict[str, Any]]]:
         """
         For each commit in main_commit_shas, find which release/* branches cherry-picked it.
         Uses git patch-id (stable across cherry-picks) to detect equivalent commits.
+
+        Multiple branches sharing the same commit (via branch ancestry, not independent
+        cherry-picks) are collapsed into one entry with a `siblings` list of the other
+        branch names.
 
         Returns:
           { "<main_sha>": [ {"branch": "release/deepseekv4", "branch_short": "deepseekv4",
@@ -820,7 +824,24 @@ class DynamoRepositoryUtils(BaseUtils):
                     "url": url,
                 })
 
-        return cherry_map
+        # Dedupe by branch_sha: when the SAME commit appears on multiple release
+        # branches (e.g. release/deepseekv4 plus its descendants release/1.1.0-dev.1-deepseekv4
+        # etc.), it's not really N independent cherry-picks — it's one commit
+        # shared via branch ancestry. Collapse into a single entry with a
+        # `siblings` list of the other branch names.
+        deduped: Dict[str, List[Dict[str, Any]]] = {}
+        for main_sha, picks in cherry_map.items():
+            by_sha: Dict[str, Dict[str, Any]] = {}
+            for p in picks:
+                bsha = p["branch_sha"]
+                if bsha not in by_sha:
+                    by_sha[bsha] = {**p, "siblings": []}
+                else:
+                    # Already have a primary; add this branch as sibling.
+                    by_sha[bsha]["siblings"].append(p["branch"])
+            deduped[main_sha] = list(by_sha.values())
+
+        return deduped
 
     def generate_docker_image_sha(self, full_hash: bool = False) -> str:
         """
