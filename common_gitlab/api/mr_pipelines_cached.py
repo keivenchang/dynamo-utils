@@ -99,7 +99,7 @@ class MRPipelinesCached(CachedResourceBase[Optional[Dict[str, Any]]]):
         pipelines = self.api.get(
             endpoint,
             params={"per_page": 1, "order_by": "id", "sort": "desc"},
-            timeout=10,
+            timeout=30,
             label=self.cache_name,
         )
         fetched_at = int(time.time())

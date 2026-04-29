@@ -109,7 +109,7 @@ class PipelineJobCountsCached(CachedResourceBase[Optional[Dict[str, int]]]):
     def fetch(self, **kwargs: Any) -> Tuple[Optional[Dict[str, int]], Dict[str, Any]]:
         pipeline_id = int(kwargs.get("pipeline_id") or 0)
         endpoint = f"/api/v4/projects/{self.project_id}/pipelines/{pipeline_id}/jobs"
-        jobs = self.api.get(endpoint, params={"per_page": 100}, timeout=10, label=self.cache_name)
+        jobs = self.api.get(endpoint, params={"per_page": 100}, timeout=30, label=self.cache_name)
         if isinstance(jobs, list) and jobs:
             return _counts_from_jobs(jobs), {"fetched_at": int(time.time())}
         return None, {"fetched_at": int(time.time())}
@@ -246,7 +246,7 @@ class PipelineJobDetailsCached(CachedResourceBase[Optional[Dict[str, Any]]]):
     def fetch(self, **kwargs: Any) -> Tuple[Optional[Dict[str, Any]], Dict[str, Any]]:
         pipeline_id = int(kwargs.get("pipeline_id") or 0)
         endpoint = f"/api/v4/projects/{self.project_id}/pipelines/{pipeline_id}/jobs"
-        jobs = self.api.get(endpoint, params={"per_page": 100}, timeout=10, label=CACHE_NAME_COUNTS)
+        jobs = self.api.get(endpoint, params={"per_page": 100}, timeout=30, label=CACHE_NAME_COUNTS)
         if not isinstance(jobs, list) or not jobs:
             return None, {"fetched_at": int(time.time())}
         counts = _counts_from_jobs(jobs)

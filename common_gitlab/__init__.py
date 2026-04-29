@@ -200,11 +200,17 @@ class GitLabAPIClient:
         self,
         endpoint: str,
         params: Optional[Dict[str, Any]] = None,
-        timeout: int = 10,
+        timeout: int = 30,
         *,
         label: Optional[str] = None,
     ) -> Optional[Any]:
-        """Make a GET request to the GitLab API and return JSON (dict/list) or raise."""
+        """Make a GET request to the GitLab API and return JSON (dict/list) or raise.
+
+        Default timeout is 30s. The GitLab Container Registry API
+        (/registry/repositories/<id>/tags) is known to be slow under load and
+        was previously timing out at 10s during transient slowness; 30s absorbs
+        most spikes without making real failures wait excessively.
+        """
         ep = str(endpoint or "")
         t0 = time.monotonic()
         status_code: Optional[int] = None

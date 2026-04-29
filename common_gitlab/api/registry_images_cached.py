@@ -191,7 +191,7 @@ class RegistryImagesCached(CachedResourceBase[List[Dict[str, Any]]]):
         # Determine total pages via page-1 headers (needs raw requests for headers).
         url = f"{self.api.base_url}{endpoint}"
         t0 = time.monotonic()
-        response = requests.get(url, headers=self.api.headers, params=params_page1, timeout=10)
+        response = requests.get(url, headers=self.api.headers, params=params_page1, timeout=30)
         dt_s = max(0.0, time.monotonic() - t0)
         self.api._rest_record(label=self.cache_name, endpoint=endpoint, status_code=int(response.status_code), dt_s=dt_s)
         response.raise_for_status()

@@ -94,7 +94,7 @@ class PipelineStatusCached(CachedResourceBase[Optional[Dict[str, Any]]]):
     def fetch(self, **kwargs: Any) -> Tuple[Optional[Dict[str, Any]], Dict[str, Any]]:
         sha = str(kwargs.get("sha") or "")
         endpoint = f"/api/v4/projects/{self.project_id}/pipelines"
-        pipelines = self.api.get(endpoint, params={"sha": sha, "per_page": 1}, timeout=10, label=self.cache_name)
+        pipelines = self.api.get(endpoint, params={"sha": sha, "per_page": 1}, timeout=30, label=self.cache_name)
         fetched_at = int(time.time())
         if isinstance(pipelines, list) and pipelines:
             p0 = pipelines[0]
