@@ -338,18 +338,28 @@ def open_pr(sha: str, branch: str, dry_run: bool) -> int:
         return pr
 
     subject, orig_pr, author = commit_subject_pr_author(sha)
+    intro = (
+        "Re-validating that a previous PR did not regress, by re-running "
+        "against a trivial placebo diff:"
+    )
     if orig_pr and author and subject:
-        first_line = (
-            f"Re-validating that prev PR #{orig_pr} by {author} \"{subject}\" "
-            f"did not regress, by re-running against a trivial placebo diff."
+        # Wrap the PR ref + subject in a fenced code block so GitHub doesn't
+        # auto-link `#NNNN` (which spams the original PR with cross-refs) and
+        # doesn't treat `(gh-NNNN)`-style refs as links.
+        ref_block = (
+            "```\n"
+            f"PR #{orig_pr} by {author}: {subject}\n"
+            "```"
         )
     else:
-        first_line = (
-            f"Re-validating commit {short_sha(sha)} by re-running against a "
-            f"trivial placebo diff."
+        ref_block = (
+            "```\n"
+            f"commit {short_sha(sha)}\n"
+            "```"
         )
     body = (
-        f"{first_line}\n\n"
+        f"{intro}\n\n"
+        f"{ref_block}\n\n"
         "Branch deleted on green; kept on failure for diagnosis.\n\n"
         "Drafts are skipped by CodeRabbit per repo `.coderabbit.yaml`."
     )
