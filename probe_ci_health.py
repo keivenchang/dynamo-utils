@@ -65,7 +65,7 @@ _PYTEST_FAILED_RE = re.compile(
     r"^(?:\d{4}-\d{2}-\d{2}T[\d:.]+Z\s+)?(?:\x1b\[[0-9;]*m)?(?:FAILED|ERROR)\s+(\S+::\S+)"
 )
 
-PROBE_BRANCH_PREFIX = "keivenchang/ci_health/"
+PROBE_BRANCH_PREFIX = "keivenchang/revalidate/"
 PROBE_FILES = [
     "components/src/dynamo/common/__init__.py",
     "lib/runtime/src/runtime.rs",
@@ -1551,10 +1551,10 @@ def _render_probe_page(sha: str, entry: dict) -> str:
 
     head = f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
-<title>Probe {short_sha(sha)} — ci-health</title>
+<title>Re-validate {short_sha(sha)}</title>
 {_HTML_STYLE}
 </head><body>
-<h1>Probe <code>{short_sha(sha)}</code></h1>
+<h1>Re-validate <code>{short_sha(sha)}</code></h1>
 <div class="meta">
   <span>Merged (PT): <code>{merge_dt}</code></span>
   <span>ImageSHA256: <code>{img}</code></span>
@@ -1641,6 +1641,11 @@ def _render_probe_page(sha: str, entry: dict) -> str:
         "<th>Skipped</th>"
         "</tr></thead><tbody>",
     ]
+    # Track previous attempt's verdict so attempts that re-ran ONLY optional
+    # jobs (no required activity) inherit the previous PASS/FAIL — the
+    # required jobs still hold their old conclusion via GitHub's job
+    # carry-over, the rerun just didn't re-touch them.
+    prev_verdict = "PENDING"
     for att_num in sorted(runs_per_att):
         these = runs_per_att[att_num]
         req_pass = req_fail = req_run = 0
@@ -1661,11 +1666,22 @@ def _render_probe_page(sha: str, entry: dict) -> str:
             elif conc in ("skipped", "cancelled", "neutral"):
                 n_skip += 1
         if req_fail > 0:
-            verdict_html = "<span class='pill pill-fail'>FAIL</span>"
-        elif req_run > 0 or (req_pass == 0 and req_fail == 0):
-            verdict_html = "<span class='pill pill-run'>PENDING</span>"
+            verdict = "FAIL"
+        elif req_run > 0:
+            verdict = "PENDING"
+        elif req_pass > 0:
+            verdict = "PASS"
         else:
+            # No required job in this attempt's runs → carry the prior verdict.
+            # If this is attempt 1 (no prior), keep PENDING.
+            verdict = prev_verdict if att_num > 1 else "PENDING"
+        prev_verdict = verdict
+        if verdict == "PASS":
             verdict_html = "<span class='pill pill-pass'>PASS</span>"
+        elif verdict == "FAIL":
+            verdict_html = "<span class='pill pill-fail'>FAIL</span>"
+        else:
+            verdict_html = "<span class='pill pill-run'>PENDING</span>"
 
         def _cell(n: int) -> str:
             cls = "num-zero" if n == 0 else "num-nz"
@@ -1837,10 +1853,10 @@ def _render_probe_index(db: dict, page_paths: dict[str, str]) -> str:
         )
     return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
-<title>ci-health probe index</title>
+<title>Re-validate index</title>
 {_HTML_STYLE}
 </head><body>
-<h1>ci-health probe index</h1>
+<h1>Re-validate index</h1>
 <div class="meta">
   Generated {now_iso()}. Sorted by merge date (newest first).
 </div>
