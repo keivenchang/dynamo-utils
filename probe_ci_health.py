@@ -205,6 +205,28 @@ def commit_date(sha: str) -> str | None:
     return proc.stdout.strip() or None
 
 
+def commit_subject_pr_author(sha: str) -> tuple[str, int | None, str]:
+    """Return (subject_without_pr_suffix, pr_number, author) for `sha`."""
+    proc = run(
+        ["git", "show", "-s", "--format=%s%x1f%an", sha],
+        cwd=CLONE_PATH,
+        check=False,
+    )
+    if proc.returncode != 0:
+        return ("", None, "")
+    raw = proc.stdout.strip()
+    if "\x1f" not in raw:
+        return (raw, None, "")
+    subject_full, author = raw.split("\x1f", 1)
+    pr: int | None = None
+    subject = subject_full
+    m = re.search(r"\s*\(#(\d+)\)\s*$", subject_full)
+    if m:
+        pr = int(m.group(1))
+        subject = subject_full[: m.start()].rstrip()
+    return (subject, pr, author)
+
+
 def image_sha256(commit_sha: str) -> str:
     """Compute the ImageSHA256 for a commit (SHA-256 of `git ls-tree -r container/`).
 
@@ -315,9 +337,19 @@ def open_pr(sha: str, branch: str, dry_run: bool) -> int:
         logger.info("existing PR #%s for %s; reusing", pr, branch)
         return pr
 
+    subject, orig_pr, author = commit_subject_pr_author(sha)
+    if orig_pr and author and subject:
+        first_line = (
+            f"Re-validating that prev PR #{orig_pr} by {author} \"{subject}\" "
+            f"did not regress, by re-running against a trivial placebo diff."
+        )
+    else:
+        first_line = (
+            f"Re-validating commit {short_sha(sha)} by re-running against a "
+            f"trivial placebo diff."
+        )
     body = (
-        "Auto-probe — ignore. Tracks CI health by re-running every merged main "
-        "SHA against a trivial placebo diff.\n\n"
+        f"{first_line}\n\n"
         "Branch deleted on green; kept on failure for diagnosis.\n\n"
         "Drafts are skipped by CodeRabbit per repo `.coderabbit.yaml`."
     )
@@ -330,7 +362,7 @@ def open_pr(sha: str, branch: str, dry_run: bool) -> int:
             REPO,
             "--draft",
             "--title",
-            f"chore(ci-health): probe {short_sha(sha)}",
+            f"chore(ci-health): re-validate {short_sha(sha)}",
             "--body",
             body,
             "--head",
@@ -1306,6 +1338,10 @@ _HTML_STYLE = """
   th { background: #f6f8fa; font-weight: 600; font-size: 12px; text-transform: uppercase;
        letter-spacing: 0.05em; color: #586069; }
   tr.fail td { background: #f5c6cb; }
+  /* Final attempt of the job failed → unrecovered regression. Darker red. */
+  tr.fail-final td { background: #ea868f; }
+  /* Earlier failure that the job later recovered from. Lighter red. */
+  tr.fail-flake td { background: #fbe4e6; }
   tr.pass td { background: #c3e6cb; }
   tr.run  td { background: #b8daff; }
   tr.skip td { background: #f0f0f0; color: #6a737d; }
@@ -1347,7 +1383,10 @@ _HTML_STYLE = """
                 text-align: center; color: #586069; font-size: 14px; }
   tr.snippet-row { display: none; }
   tr.snippet-row.show { display: table-row; }
-  tr.snippet-row > td { background: #f5c6cb; padding: 4px 14px 8px 14px; }
+  tr.snippet-row > td { padding: 4px 14px 8px 14px; }
+  tr.snippet-row.fail-final > td { background: #ea868f; }
+  tr.snippet-row.fail-flake > td { background: #fbe4e6; }
+  tr.snippet-row > td { background: #f5c6cb; }
   pre.snip { background: #0d1117; color: #e6edf3; font-size: 11px;
              padding: 10px 12px; border-radius: 4px; overflow-x: auto;
              margin: 4px 0 0 0; max-height: 320px; overflow-y: auto;
@@ -1515,10 +1554,19 @@ def _render_probe_page(sha: str, entry: dict) -> str:
             flat_rows.append((name, att_num, j))
     flat_rows.sort(key=lambda x: (x[0], x[1]))
 
+    # Per job: which attempt # is the LAST run? Only that row renders dark
+    # if it's a failure (= unrecovered final). Earlier failure rows of the
+    # same job render light ("recovered or eclipsed by a later attempt").
+    job_last_attempt: dict[str, int] = {}
+    for name, runs in job_runs.items():
+        if runs:
+            job_last_attempt[name] = runs[-1][0]
+
     for name, att_num, j in flat_rows:
         conc = _job_conclusion(j)
         if conc in ("failure", "timed_out"):
-            row_class = "fail"
+            is_last = att_num == job_last_attempt.get(name)
+            row_class = "fail-final" if is_last else "fail-flake"
             status_html = f"<span class='status-x' title='{conc}'>✗</span>"
         elif conc == "success":
             row_class = "pass"
@@ -1580,7 +1628,7 @@ def _render_probe_page(sha: str, entry: dict) -> str:
                         f"</span>"
                     )
                     snippet_rows_inline.append(
-                        f"<tr id='{sid}' class='snippet-row'><td colspan='6'>"
+                        f"<tr id='{sid}' class='snippet-row {row_class}'><td colspan='6'>"
                         f"<pre class='snip'>{snippet_html}</pre>"
                         f"</td></tr>"
                     )
