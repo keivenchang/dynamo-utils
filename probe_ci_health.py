@@ -1013,6 +1013,16 @@ _LIVE_DURATION_JS = """
   tick();
   setInterval(tick, 1000);
 })();
+function toggleSnip(ev, id) {
+  var row = document.getElementById(id);
+  if (row) row.classList.toggle('show');
+  var tgt = ev.currentTarget || ev.target;
+  if (tgt) {
+    var tri = tgt.querySelector('.triangle-toggle');
+    if (tri) tri.classList.toggle('expanded');
+  }
+  ev.stopPropagation();
+}
 </script>
 """
 
@@ -1320,9 +1330,21 @@ _HTML_STYLE = """
   td.started-cell, td.duration-cell, td.status-cell, td.attempt-cell { white-space: nowrap; }
   .attempt-summary { margin: 12px 0 4px 0; }
   .attempt-summary .pill { margin-right: 6px; }
-  .snip-toggle { color: #0366d6; cursor: pointer; font-size: 12px;
-                 user-select: none; display: inline-block; margin-top: 4px; }
-  .snip-toggle::before { content: "▶ "; font-size: 10px; color: #586069; }
+  .snip-toggle { cursor: pointer; user-select: none; display: inline-block;
+                 margin-left: 6px; vertical-align: middle; }
+  .triangle-toggle { display: inline-block; transition: transform 300ms ease;
+                     transform-origin: center; color: #586069; font-size: 14px;
+                     margin-right: 4px; }
+  .triangle-toggle.expanded { transform: rotate(90deg); }
+  .status-x { display: inline-block; width: 14px; height: 14px; line-height: 14px;
+              text-align: center; background: #d73a49; color: #fff;
+              border-radius: 50%; font-weight: 700; font-size: 10px;
+              font-family: "SF Mono", Consolas, monospace; }
+  .status-check { display: inline-block; width: 14px; height: 14px; line-height: 14px;
+                  text-align: center; background: #28a745; color: #fff;
+                  border-radius: 50%; font-weight: 700; font-size: 10px; }
+  .status-dot { display: inline-block; width: 14px; height: 14px; line-height: 14px;
+                text-align: center; color: #586069; font-size: 14px; }
   tr.snippet-row { display: none; }
   tr.snippet-row.show { display: table-row; }
   tr.snippet-row > td { background: #f5c6cb; padding: 4px 14px 8px 14px; }
@@ -1478,7 +1500,7 @@ def _render_probe_page(sha: str, entry: dict) -> str:
     sec = [
         "<h2>Jobs (one row per attempt-run; failed first)</h2>",
         "<table><thead><tr>"
-        "<th>Status</th>"
+        "<th></th>"
         "<th>Job</th>"
         "<th>Attempt</th>"
         "<th>Started (PT)</th>"
@@ -1487,41 +1509,29 @@ def _render_probe_page(sha: str, entry: dict) -> str:
         "</tr></thead><tbody>",
     ]
 
-    status_rank = {
-        "failure": 0, "timed_out": 0,
-        "running": 1, "queued": 1, "pending": 1,
-        "success": 2,
-        "skipped": 3, "cancelled": 3, "neutral": 3,
-    }
-    # Rank per JOB (not per run): if a job ever failed, all its rows
-    # — including a later success — sit in the failed group, grouped together.
-    job_group_rank: dict[str, int] = {}
-    for name, runs in job_runs.items():
-        if any(_job_conclusion(j) in ("failure", "timed_out") for _, j in runs):
-            job_group_rank[name] = 0
-        else:
-            latest_conc = _job_conclusion(runs[-1][1]) if runs else ""
-            job_group_rank[name] = status_rank.get(latest_conc, 9)
-
-    flat_rows: list[tuple[int, str, int, dict]] = []
+    flat_rows: list[tuple[str, int, dict]] = []
     for name, runs in job_runs.items():
         for att_num, j in runs:
-            flat_rows.append((job_group_rank[name], name, att_num, j))
-    # Failed-group first; within group, by job name; within job, attempt # asc.
-    flat_rows.sort(key=lambda x: (x[0], x[1], x[2]))
+            flat_rows.append((name, att_num, j))
+    flat_rows.sort(key=lambda x: (x[0], x[1]))
 
-    for _rank, name, att_num, j in flat_rows:
+    for name, att_num, j in flat_rows:
         conc = _job_conclusion(j)
         if conc in ("failure", "timed_out"):
-            row_class, status_text = "fail", "FAILED"
+            row_class = "fail"
+            status_html = f"<span class='status-x' title='{conc}'>✗</span>"
         elif conc == "success":
-            row_class, status_text = "pass", "PASSED"
+            row_class = "pass"
+            status_html = "<span class='status-check' title='success'>✓</span>"
         elif conc in ("running", "queued", "pending"):
-            row_class, status_text = "run", conc
+            row_class = "run"
+            status_html = f"<span class='status-dot' title='{conc}'>⏳</span>"
         elif conc in ("skipped", "cancelled", "neutral"):
-            row_class, status_text = "skip", conc
+            row_class = "skip"
+            status_html = f"<span class='status-dot' title='{conc}'>⊘</span>"
         else:
-            row_class, status_text = "", (conc or "?")
+            row_class = ""
+            status_html = f"<span class='status-dot' title='{conc or "?"}'>?</span>"
 
         started_pt = "—"
         s = j.get("started_at") if isinstance(j, dict) else None
@@ -1564,8 +1574,10 @@ def _render_probe_page(sha: str, entry: dict) -> str:
                     snippet_html = render_snippet_html(snippet)
                     snippet_toggle_html = (
                         f" <span class='snip-toggle' "
-                        f"onclick=\"document.getElementById('{sid}').classList.toggle('show')\">"
-                        f"show snippet ({len(snippet)} chars)</span>"
+                        f"onclick=\"toggleSnip(event, '{sid}')\" "
+                        f"title='show failure snippet ({len(snippet)} chars)'>"
+                        f"<span class='triangle-toggle'>▶</span>"
+                        f"</span>"
                     )
                     snippet_rows_inline.append(
                         f"<tr id='{sid}' class='snippet-row'><td colspan='6'>"
@@ -1577,10 +1589,10 @@ def _render_probe_page(sha: str, entry: dict) -> str:
 
         sec.append(
             f"<tr class='{row_class}'>"
-            f"<td class='status-cell'>{status_text}</td>"
+            f"<td class='status-cell'>{status_html}</td>"
             f"<td class='job-name'>{name_html}{snippet_toggle_html}</td>"
             f"<td class='attempt-cell'>{att_num}</td>"
-            f"<td class='started-cell'><code>{started_pt}</code></td>"
+            f"<td class='started-cell'>{started_pt}</td>"
             f"<td class='duration-cell'>{duration}</td>"
             f"<td>{detail_html}</td>"
             f"</tr>"
