@@ -298,7 +298,7 @@ def push_probe(sha: str, dry_run: bool) -> tuple[str, str | None]:
             continue
         prefix = "# " if rel.endswith(".py") else "// "
         with f.open("a") as fh:
-            fh.write(f"\n{prefix}ci-health probe {short_sha(sha)} {ts}\n")
+            fh.write(f"\n{prefix}revalidate {short_sha(sha)} {ts}\n")
     run(["git", "add", "--", *PROBE_FILES], cwd=CLONE_PATH)
     env = {**os.environ, "GIT_SSH_COMMAND": "ssh -o BatchMode=yes"}
     run(
@@ -308,7 +308,7 @@ def push_probe(sha: str, dry_run: bool) -> tuple[str, str | None]:
             "--signoff",
             "--no-verify",
             "-m",
-            f"ci-health: probe {short_sha(sha)}",
+            f"test(validate): revalidate {short_sha(sha)}",
         ],
         cwd=CLONE_PATH,
         env=env,
@@ -372,7 +372,11 @@ def open_pr(sha: str, branch: str, dry_run: bool) -> int:
             REPO,
             "--draft",
             "--title",
-            f"chore(ci-health): re-validate {short_sha(sha)}",
+            (
+                f"test(validate): revalidate {short_sha(sha)} PR #{orig_pr}"
+                if orig_pr
+                else f"test(validate): revalidate {short_sha(sha)}"
+            ),
             "--body",
             body,
             "--head",
