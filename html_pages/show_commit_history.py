@@ -2705,6 +2705,59 @@ class CommitHistoryGenerator:
 
         t0_tpl = time.monotonic()
         self.logger.info(f"ECR DEBUG: passing ecr_images_by_sha with {len(ecr_images_by_sha)} entries to template, first keys: {list(ecr_images_by_sha.keys())[:3]}")
+
+        # Load ci-health probe status (best-effort) — populates the Probe column.
+        probe_status_by_sha: Dict[str, Dict[str, Any]] = {}
+        try:
+            ci_health_path = Path.home() / ".cache" / "dynamo-utils" / "ci-health.json"
+            if ci_health_path.exists():
+                from zoneinfo import ZoneInfo as _ZI
+                _PT = _ZI("America/Los_Angeles")
+                with ci_health_path.open() as _f:
+                    _ci_db = json.load(_f)
+                for _sha_full, _e in _ci_db.items():
+                    if _sha_full == "_meta" or not isinstance(_e, dict):
+                        continue
+                    _md = _e.get("merge_date") or ""
+                    try:
+                        _date_str = datetime.fromisoformat(_md).astimezone(_PT).strftime("%Y-%m-%d")
+                    except Exception:
+                        _date_str = "unknown"
+                    _state = _e.get("state", "?")
+                    if _state in ("passed", "cleaned"):
+                        _disp, _cls = "PASSED", "probe-pass"
+                    elif _state == "failed":
+                        _disp, _cls = "FAILED", "probe-fail"
+                    elif _state == "discovered":
+                        _disp, _cls = "queued", "probe-progress"
+                    else:
+                        _disp, _cls = _state, "probe-progress"
+                    _attempts = _e.get("attempts") or []
+                    _counts = "—"
+                    if _attempts:
+                        _jobs = _attempts[-1].get("jobs") or {}
+                        def _con(v):
+                            return v.get("conclusion") if isinstance(v, dict) else v
+                        _p = sum(1 for v in _jobs.values() if _con(v) == "success")
+                        _fc = sum(1 for v in _jobs.values() if _con(v) in ("failure", "timed_out"))
+                        _r = sum(1 for v in _jobs.values() if _con(v) in ("running", "queued", "pending"))
+                        _s = sum(1 for v in _jobs.values() if _con(v) in ("skipped", "cancelled", "neutral"))
+                        _parts = [f"{_p} pass", f"{_fc} fail", f"{_r} running"]
+                        if _s:
+                            _parts.append(f"{_s} skipped")
+                        _counts = ", ".join(_parts)
+                    probe_status_by_sha[_sha_full] = {
+                        "state": _disp,
+                        "state_class": _cls,
+                        "attempts": f"{len(_attempts)}/3",
+                        "counts": _counts,
+                        "pr": _e.get("pr"),
+                        "page_path": f"logs/{_date_str}/CI-{_sha_full[:11]}.html",
+                    }
+                self.logger.info(f"ci-health: loaded probe status for {len(probe_status_by_sha)} SHAs")
+        except Exception as _e:
+            self.logger.warning(f"ci-health probe load failed: {_e}")
+
         template_context: Dict[str, Any] = {
             "commits": commit_data,
             "docker_images": docker_images,
@@ -2720,6 +2773,7 @@ class CommitHistoryGenerator:
             "build_status": build_status,
             "github_actions_status": github_actions_status,
             "post_merge_status": post_merge_status,
+            "probe_status": probe_status_by_sha,
             "generated_time": generated_time,
             "job_started_time": job_started_time,
             "job_elapsed_str": f"{int(elapsed_s // 60)} minutes" if elapsed_s is not None else "",
