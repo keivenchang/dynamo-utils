@@ -2750,6 +2750,7 @@ class CommitHistoryGenerator:
                         "state": _disp,
                         "state_class": _cls,
                         "attempts": f"{len(_attempts)}/3",
+                        "attempts_n": len(_attempts),
                         "counts": _counts,
                         "pr": _e.get("pr"),
                         "page_path": f"logs/{_date_str}/CI-{_sha_full[:11]}.html",

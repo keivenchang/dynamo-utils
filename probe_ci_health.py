@@ -981,17 +981,22 @@ def cycle(
             entry["state"] = "in_progress"
             continue
 
-        # all workflows terminal — finalize this attempt + classify
+        # all workflows terminal — finalize this attempt + classify.
+        # Verdict is mandatory-only: only failures of REQUIRED_CHECKS jobs
+        # count. Optional failures (e.g. lychee) are visible but don't gate.
         att["completed_at"] = now_iso()
 
-        any_failed = any(
-            r.get("conclusion") in ("failure", "timed_out") for r in latest.values()
-        )
+        required_failed = [n for n in att["failed_jobs"] if n in REQUIRED_CHECKS]
+        any_optional_failed = bool(set(att["failed_jobs"]) - REQUIRED_CHECKS)
         sha_max_attempts = entry.get("max_attempts", max_attempts)
-        if not any_failed:
+        if not required_failed:
             entry["state"] = "passed"
             entry["verdict"] = "good"
-            logger.info("PASSED %s on attempt %d", short_sha(sha), current_attempt)
+            opt_note = " (optional failures present, ignored)" if any_optional_failed else ""
+            logger.info(
+                "PASSED %s on attempt %d%s",
+                short_sha(sha), current_attempt, opt_note,
+            )
         elif current_attempt < sha_max_attempts:
             for r in latest.values():
                 if r.get("conclusion") in ("failure", "timed_out"):
@@ -1001,19 +1006,21 @@ def cycle(
                         logger.error("rerun-failed-jobs %s: %s", r["id"], e)
             entry["state"] = "in_progress"
             logger.info(
-                "RETRY %s attempt %d → %d (cap=%d)",
+                "RETRY %s attempt %d → %d (cap=%d) required_failed=%s",
                 short_sha(sha), current_attempt, current_attempt + 1, sha_max_attempts,
+                required_failed,
             )
         else:
+            # Intersect ONLY required failures across all attempts.
             stuck: set[str] | None = None
             for a in attempts:
-                f = set(a.get("failed_jobs", []))
+                f = {n for n in a.get("failed_jobs", []) if n in REQUIRED_CHECKS}
                 stuck = f if stuck is None else stuck & f
             entry["stuck_jobs"] = sorted(stuck or [])
             entry["state"] = "failed"
             entry["verdict"] = "bad"
             logger.info(
-                "FAILED %s after %d attempts; stuck=%s",
+                "FAILED %s after %d attempts; required_stuck=%s",
                 short_sha(sha),
                 sha_max_attempts,
                 entry["stuck_jobs"],
@@ -1742,8 +1749,6 @@ def _render_probe_page(sha: str, entry: dict) -> str:
         )
         if name in REQUIRED_CHECKS:
             name_html += " <span class='req-badge' title='required for merge'>required</span>"
-        else:
-            name_html += " <span class='opt-badge' title='optional, does not gate merge'>opt</span>"
 
         detail_parts: list[str] = []
         snippet_toggle_html = ""
