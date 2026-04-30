@@ -73,6 +73,63 @@ PROBE_FILES = [
 
 DEFAULT_PARALLELISM = 4
 DEFAULT_MAX_ATTEMPTS = 3
+
+# Required status checks on `main` (from repo rulesets, integration_id 15368).
+# Everything else (runtime tests, docker builds, …) is optional but rolls up
+# into the status-check aggregators. Refresh via:
+#   gh api repos/ai-dynamo/dynamo/rules/branches/main
+# Status icons matching show_commit_history Legend & Key
+# (see html_pages/ci_status_icons.py — kept inline here so this script
+# stays a single file).
+_ICON_GREEN = "#2da44e"
+_ICON_RED = "#c83a3a"
+_ICON_GREY = "#8c959f"
+
+ICON_REQ_PASS = (
+    f'<span class="legend-icon" style="color:{_ICON_GREEN};" title="required passed">'
+    '<svg aria-hidden="true" viewBox="0 0 16 16" width="14" height="14" '
+    'class="octicon octicon-check-circle-fill" fill="currentColor">'
+    '<path fill-rule="evenodd" d="M8 16A8 8 0 108 0a8 8 0 000 16zm3.78-9.78a.75.75 0 00-1.06-1.06L7 9.94 5.28 8.22a.75.75 0 10-1.06 1.06l2 2a.75.75 0 001.06 0l4-4z"/>'
+    "</svg></span>"
+)
+ICON_OPT_PASS = (
+    f'<span class="legend-icon" style="color:{_ICON_GREEN};" title="optional passed">'
+    '<svg aria-hidden="true" viewBox="0 0 16 16" width="14" height="14" '
+    'class="octicon octicon-check" fill="currentColor">'
+    '<path fill-rule="evenodd" d="M13.78 4.22a.75.75 0 00-1.06 0L6.75 10.19 3.28 6.72a.75.75 0 10-1.06 1.06l4 4a.75.75 0 001.06 0l7.5-7.5a.75.75 0 000-1.06z"/>'
+    "</svg></span>"
+)
+ICON_REQ_FAIL = (
+    f'<span class="legend-icon" style="color:{_ICON_RED};" title="required failed">'
+    '<svg aria-hidden="true" viewBox="0 0 16 16" width="14" height="14" '
+    'class="octicon octicon-x-circle-fill" fill="currentColor">'
+    '<circle cx="8" cy="8" r="8" fill="currentColor"/>'
+    '<path d="M4.5 4.5l7 7m-7 0l7-7" stroke="#fff" stroke-width="2" stroke-linecap="round"/>'
+    "</svg></span>"
+)
+ICON_OPT_FAIL = (
+    f'<span class="legend-icon" style="color:{_ICON_RED};" title="optional failed">'
+    '<svg aria-hidden="true" viewBox="0 0 16 16" width="14" height="14" '
+    'class="octicon octicon-x" fill="currentColor">'
+    '<path fill-rule="evenodd" d="M3.72 3.72a.75.75 0 011.06 0L8 6.94l3.22-3.22a.75.75 0 111.06 1.06L9.06 8l3.22 3.22a.75.75 0 11-1.06 1.06L8 9.06l-3.22 3.22a.75.75 0 11-1.06-1.06L6.94 8 3.72 4.78a.75.75 0 010-1.06z"/>'
+    "</svg></span>"
+)
+ICON_RUN = (
+    f'<span class="legend-icon" style="color:{_ICON_GREY};" title="in progress">'
+    '<svg aria-hidden="true" viewBox="0 0 16 16" width="14" height="14" '
+    'class="octicon octicon-clock" fill="currentColor">'
+    '<path d="M8 1C4.1 1 1 4.1 1 8s3.1 7 7 7 7-3.1 7-7-3.1-7-7-7zm0 12c-2.8 0-5-2.2-5-5s2.2-5 5-5 5 2.2 5 5-2.2 5-5 5z"/>'
+    '<path d="M8 4v5l3 2"/></svg></span>'
+)
+
+REQUIRED_CHECKS = frozenset({
+    "copyright-checks",
+    "DCO",
+    "backend-status-check",
+    "dynamo-status-check",
+    "pre-merge-status-check",
+    "deploy-status-check",
+})
 DEFAULT_STALLED_AFTER_HOURS = 3
 
 logger = logging.getLogger("probe_ci_health")
@@ -203,6 +260,21 @@ def commit_date(sha: str) -> str | None:
     if proc.returncode != 0:
         return None
     return proc.stdout.strip() or None
+
+
+def fetch_pr_title_body(pr: int) -> tuple[str, str]:
+    """Return (title, body) for PR `pr`, or ('', '') on failure."""
+    proc = run(
+        ["gh", "api", f"repos/{REPO}/pulls/{pr}", "--jq", ".title + \"\\u001f\" + (.body // \"\")"],
+        check=False,
+    )
+    if proc.returncode != 0:
+        return ("", "")
+    raw = proc.stdout.rstrip("\n")
+    if "\x1f" not in raw:
+        return (raw, "")
+    title, body = raw.split("\x1f", 1)
+    return (title, body)
 
 
 def commit_subject_pr_author(sha: str) -> tuple[str, int | None, str]:
@@ -338,25 +410,28 @@ def open_pr(sha: str, branch: str, dry_run: bool) -> int:
         return pr
 
     subject, orig_pr, author = commit_subject_pr_author(sha)
-    intro = (
-        "Re-validating that a previous PR did not regress, by re-running "
-        "against a trivial placebo diff:"
-    )
-    if orig_pr and author and subject:
-        # Wrap the PR ref + subject in a fenced code block so GitHub doesn't
-        # auto-link `#NNNN` (which spams the original PR with cross-refs) and
-        # doesn't treat `(gh-NNNN)`-style refs as links.
-        ref_block = (
-            "```\n"
-            f"PR #{orig_pr} by {author}: {subject}\n"
-            "```"
+    if orig_pr and author:
+        intro = (
+            f"Re-validating that PR #{orig_pr} by {author} did not regress, "
+            f"by re-running against a trivial placebo diff:"
+        )
+    elif orig_pr:
+        intro = (
+            f"Re-validating that PR #{orig_pr} did not regress, by re-running "
+            f"against a trivial placebo diff:"
         )
     else:
-        ref_block = (
-            "```\n"
-            f"commit {short_sha(sha)}\n"
-            "```"
+        intro = (
+            "Re-validating that a previous PR did not regress, by re-running "
+            "against a trivial placebo diff:"
         )
+    # Fenced block carries just the original PR's title (no body), so the
+    # `(gh-NNNN)` / `#NNNN` references inside it don't render as links.
+    orig_title = ""
+    if orig_pr:
+        orig_title, _ = fetch_pr_title_body(orig_pr)
+    title_line = orig_title or subject or f"commit {short_sha(sha)}"
+    ref_block = f"```\n{title_line}\n```"
     body = (
         f"{intro}\n\n"
         f"{ref_block}\n\n"
@@ -373,9 +448,9 @@ def open_pr(sha: str, branch: str, dry_run: bool) -> int:
             "--draft",
             "--title",
             (
-                f"test(validate): revalidate {short_sha(sha)} PR #{orig_pr}"
+                f"test(revalidate): {title_line} #{orig_pr}"
                 if orig_pr
-                else f"test(validate): revalidate {short_sha(sha)}"
+                else f"test(revalidate): {short_sha(sha)}"
             ),
             "--body",
             body,
@@ -1386,6 +1461,20 @@ _HTML_STYLE = """
                      transform-origin: center; color: #586069; font-size: 14px;
                      margin-right: 4px; }
   .triangle-toggle.expanded { transform: rotate(90deg); }
+  .legend-icon { display: inline-flex; vertical-align: text-bottom; margin: 0 1px; }
+  table.attempt-table { width: auto; min-width: 540px; }
+  table.attempt-table th, table.attempt-table td { text-align: center; white-space: nowrap; }
+  table.attempt-table td.num-zero { color: #959da5; font-variant-numeric: tabular-nums; }
+  table.attempt-table td.num-nz   { color: #24292e; font-variant-numeric: tabular-nums; font-weight: 600; }
+  table.attempt-table td:first-child, table.attempt-table th:first-child { text-align: left; }
+  .req-badge { display: inline-block; padding: 0 5px; margin-left: 6px;
+               border-radius: 3px; font-size: 10px; font-weight: 600;
+               background: #d73a49; color: #fff; vertical-align: middle;
+               letter-spacing: 0.04em; text-transform: uppercase; }
+  .opt-badge { display: inline-block; padding: 0 5px; margin-left: 6px;
+               border-radius: 3px; font-size: 10px; font-weight: 600;
+               background: #e1e4e8; color: #586069; vertical-align: middle;
+               letter-spacing: 0.04em; text-transform: uppercase; }
   .status-x { display: inline-block; width: 14px; height: 14px; line-height: 14px;
               text-align: center; background: #d73a49; color: #fff;
               border-radius: 50%; font-weight: 700; font-size: 10px;
@@ -1523,29 +1612,69 @@ def _render_probe_page(sha: str, entry: dict) -> str:
             runs.append((att_num, j))
 
     # 2. Per-attempt overview now reflects what ACTUALLY ran in each attempt
-    # (i.e., new physical runs, not carried-over status).
-    runs_per_att: dict[int, list[dict]] = {}
-    for runs in job_runs.values():
+    # (new physical runs, not carried-over status), split into mandatory
+    # (REQUIRED_CHECKS) vs optional. Verdict is *mandatory-only*: if any
+    # required check failed → FAIL; else if all required checks succeeded
+    # → PASS; else → PENDING.
+    runs_per_att: dict[int, list[tuple[str, dict]]] = {}
+    for name, runs in job_runs.items():
         for att_num, j in runs:
-            runs_per_att.setdefault(att_num, []).append(j)
+            runs_per_att.setdefault(att_num, []).append((name, j))
 
-    summary_lines = ["<h2>Attempts overview <small style='color:#586069;font-weight:400'>(what actually ran each attempt)</small></h2>",
-                     "<div class='attempt-summary'>"]
+    summary_lines = [
+        "<h2>Attempts overview <small style='color:#586069;font-weight:400'>(verdict = mandatory-only)</small></h2>",
+        "<table class='attempt-table'><thead><tr>"
+        "<th>Attempt</th>"
+        "<th>Verdict</th>"
+        f"<th title='required passed'>Req {ICON_REQ_PASS}</th>"
+        f"<th title='required failed'>Req {ICON_REQ_FAIL}</th>"
+        f"<th title='optional passed'>Opt {ICON_OPT_PASS}</th>"
+        f"<th title='optional failed'>Opt {ICON_OPT_FAIL}</th>"
+        f"<th title='in progress'>Run {ICON_RUN}</th>"
+        "<th>Skipped</th>"
+        "</tr></thead><tbody>",
+    ]
     for att_num in sorted(runs_per_att):
         these = runs_per_att[att_num]
-        n_pass = sum(1 for j in these if _job_conclusion(j) == "success")
-        n_fail = sum(1 for j in these if _job_conclusion(j) in ("failure", "timed_out"))
-        n_run = sum(1 for j in these if _job_conclusion(j) in ("running", "queued", "pending"))
-        n_skip = sum(1 for j in these if _job_conclusion(j) in ("skipped", "cancelled", "neutral"))
+        req_pass = req_fail = req_run = 0
+        opt_pass = opt_fail = opt_run = 0
+        n_skip = 0
+        for nm, j in these:
+            conc = _job_conclusion(j)
+            is_req = nm in REQUIRED_CHECKS
+            if conc == "success":
+                if is_req: req_pass += 1
+                else: opt_pass += 1
+            elif conc in ("failure", "timed_out"):
+                if is_req: req_fail += 1
+                else: opt_fail += 1
+            elif conc in ("running", "queued", "pending"):
+                if is_req: req_run += 1
+                else: opt_run += 1
+            elif conc in ("skipped", "cancelled", "neutral"):
+                n_skip += 1
+        if req_fail > 0:
+            verdict_html = "<span class='pill pill-fail'>FAIL</span>"
+        elif req_run > 0 or (req_pass == 0 and req_fail == 0):
+            verdict_html = "<span class='pill pill-run'>PENDING</span>"
+        else:
+            verdict_html = "<span class='pill pill-pass'>PASS</span>"
+
+        def _cell(n: int) -> str:
+            cls = "num-zero" if n == 0 else "num-nz"
+            return f"<td class='{cls}'>{n}</td>"
+
         summary_lines.append(
-            f"<div><strong>Attempt {att_num}:</strong> "
-            f"<span class='pill pill-pass'>{n_pass} pass</span> "
-            f"<span class='pill pill-fail'>{n_fail} fail</span> "
-            f"<span class='pill pill-run'>{n_run} run</span>"
-            + (f" <span style='color:#959da5;font-size:11px'>({n_skip} skipped)</span>" if n_skip else "")
-            + "</div>"
+            f"<tr>"
+            f"<td><strong>{att_num}</strong></td>"
+            f"<td>{verdict_html}</td>"
+            f"{_cell(req_pass)}{_cell(req_fail)}"
+            f"{_cell(opt_pass)}{_cell(opt_fail)}"
+            f"{_cell(req_run + opt_run)}"
+            f"{_cell(n_skip)}"
+            f"</tr>"
         )
-    summary_lines.append("</div>")
+    summary_lines.append("</tbody></table>")
     sections.append("\n".join(summary_lines))
 
     # Flat: one row per (job, attempt-run). No more per-job grouping or
@@ -1578,16 +1707,19 @@ def _render_probe_page(sha: str, entry: dict) -> str:
 
     for name, att_num, j in flat_rows:
         conc = _job_conclusion(j)
+        is_req = name in REQUIRED_CHECKS
         if conc in ("failure", "timed_out"):
             is_last = att_num == job_last_attempt.get(name)
             row_class = "fail-final" if is_last else "fail-flake"
-            status_html = f"<span class='status-x' title='{conc}'>✗</span>"
+            # Filled circle-X for required, small x for optional. Matches
+            # show_commit_history Legend & Key.
+            status_html = ICON_REQ_FAIL if is_req else ICON_OPT_FAIL
         elif conc == "success":
             row_class = "pass"
-            status_html = "<span class='status-check' title='success'>✓</span>"
+            status_html = ICON_REQ_PASS if is_req else ICON_OPT_PASS
         elif conc in ("running", "queued", "pending"):
             row_class = "run"
-            status_html = f"<span class='status-dot' title='{conc}'>⏳</span>"
+            status_html = ICON_RUN
         elif conc in ("skipped", "cancelled", "neutral"):
             row_class = "skip"
             status_html = f"<span class='status-dot' title='{conc}'>⊘</span>"
@@ -1608,6 +1740,10 @@ def _render_probe_page(sha: str, entry: dict) -> str:
             f"<a href='{url}' target='_blank' rel='noopener noreferrer'>{_html_escape(name)}</a>"
             if url else _html_escape(name)
         )
+        if name in REQUIRED_CHECKS:
+            name_html += " <span class='req-badge' title='required for merge'>required</span>"
+        else:
+            name_html += " <span class='opt-badge' title='optional, does not gate merge'>opt</span>"
 
         detail_parts: list[str] = []
         snippet_toggle_html = ""
