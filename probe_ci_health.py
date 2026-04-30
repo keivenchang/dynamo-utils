@@ -343,6 +343,34 @@ def open_pr(sha: str, branch: str, dry_run: bool) -> int:
     return int(url.rsplit("/", 1)[-1])
 
 
+def remove_auto_reviewers(pr: int, dry_run: bool) -> None:
+    """Strip any reviewers GitHub auto-added (CODEOWNERS, labelers, team rules).
+    Probe PRs are noise; we don't want them pinging humans."""
+    if dry_run or pr <= 0:
+        return
+    try:
+        data = gh_api(f"repos/{REPO}/pulls/{pr}/requested_reviewers") or {}
+        users = [u["login"] for u in data.get("users", [])]
+        teams = [t["slug"] for t in data.get("teams", [])]
+        if not users and not teams:
+            return
+        cmd = [
+            "gh", "api", f"repos/{REPO}/pulls/{pr}/requested_reviewers",
+            "--method", "DELETE",
+        ]
+        for u in users:
+            cmd += ["-f", f"reviewers[]={u}"]
+        for t in teams:
+            cmd += ["-f", f"team_reviewers[]={t}"]
+        run(cmd, check=False)
+        logger.info(
+            "removed %d auto-reviewer(s) + %d team(s) from PR #%s: users=%s teams=%s",
+            len(users), len(teams), pr, users, teams,
+        )
+    except Exception as e:
+        logger.warning("remove_auto_reviewers PR #%s: %s", pr, e)
+
+
 def workflow_runs_for_sha(sha: str) -> list[dict]:
     data = gh_api(f"repos/{REPO}/actions/runs?head_sha={sha}&per_page=50")
     return (data or {}).get("workflow_runs", [])
@@ -681,6 +709,7 @@ def cycle(
             try:
                 branch, probe_head = push_probe(sha, dry_run=dry_run)
                 pr = open_pr(sha, branch, dry_run=dry_run)
+                remove_auto_reviewers(pr, dry_run=dry_run)
             except subprocess.CalledProcessError as e:
                 logger.error(
                     "push/open failed for %s: %s",
@@ -837,11 +866,12 @@ def cycle(
         any_failed = any(
             r.get("conclusion") in ("failure", "timed_out") for r in latest.values()
         )
+        sha_max_attempts = entry.get("max_attempts", max_attempts)
         if not any_failed:
             entry["state"] = "passed"
             entry["verdict"] = "good"
             logger.info("PASSED %s on attempt %d", short_sha(sha), current_attempt)
-        elif current_attempt < max_attempts:
+        elif current_attempt < sha_max_attempts:
             for r in latest.values():
                 if r.get("conclusion") in ("failure", "timed_out"):
                     try:
@@ -850,7 +880,8 @@ def cycle(
                         logger.error("rerun-failed-jobs %s: %s", r["id"], e)
             entry["state"] = "in_progress"
             logger.info(
-                "RETRY %s attempt %d → %d", short_sha(sha), current_attempt, current_attempt + 1
+                "RETRY %s attempt %d → %d (cap=%d)",
+                short_sha(sha), current_attempt, current_attempt + 1, sha_max_attempts,
             )
         else:
             stuck: set[str] | None = None
@@ -863,7 +894,7 @@ def cycle(
             logger.info(
                 "FAILED %s after %d attempts; stuck=%s",
                 short_sha(sha),
-                max_attempts,
+                sha_max_attempts,
                 entry["stuck_jobs"],
             )
 
@@ -1089,7 +1120,7 @@ def cmd_status() -> None:
                 short_sha(sha),
                 _short_merge_date(e.get("merge_date")),
                 _display_state(e),
-                f"{n_att}/3",
+                f"{n_att}/{e.get('max_attempts', DEFAULT_MAX_ATTEMPTS)}",
                 _live_counts(e),
                 _pr_url(e.get("pr")),
             )
@@ -1114,7 +1145,7 @@ def cmd_report(csv_path: str | None = None) -> None:
             fmt.format(
                 short_sha(sha),
                 _display_state(e),
-                f"{n_att}/3",
+                f"{n_att}/{e.get('max_attempts', DEFAULT_MAX_ATTEMPTS)}",
                 _pr_url(e.get("pr")),
                 stuck,
             )
@@ -1280,6 +1311,15 @@ _HTML_STYLE = """
   details[open] > summary { border-bottom: 1px solid #eaecef; border-radius: 6px 6px 0 0; }
   details > .details-body { padding: 0 14px 12px 14px; }
   .cat-list { font-size: 11px; color: #586069; font-family: "SF Mono", Consolas, monospace; }
+  .attempt-badge { display: inline-block; padding: 1px 7px; margin: 0 4px 2px 0;
+                   border-radius: 10px; font-size: 11px; font-weight: 600;
+                   white-space: nowrap;
+                   font-variant-numeric: tabular-nums; font-family: "SF Mono", Consolas, monospace; }
+  td.attempts-cell { white-space: nowrap; min-width: 180px; }
+  td.cat-cell { white-space: nowrap; min-width: 200px; }
+  td.started-cell, td.duration-cell, td.status-cell, td.attempt-cell { white-space: nowrap; }
+  .attempt-summary { margin: 12px 0 4px 0; }
+  .attempt-summary .pill { margin-right: 6px; }
   .snip-toggle { color: #0366d6; cursor: pointer; font-size: 12px;
                  user-select: none; display: inline-block; margin-top: 4px; }
   .snip-toggle::before { content: "▶ "; font-size: 10px; color: #586069; }
@@ -1291,7 +1331,7 @@ _HTML_STYLE = """
              margin: 4px 0 0 0; max-height: 320px; overflow-y: auto;
              white-space: pre-wrap; word-break: break-word;
              font-family: "SF Mono", Consolas, monospace; line-height: 1.45; }
-  .job-name { font-family: "SF Mono", Consolas, monospace; font-size: 12px; }
+  .job-name { font-family: "SF Mono", Consolas, monospace; font-size: 12px; white-space: nowrap; }
   .test-list { margin: 4px 0 0 16px; padding: 0; font-size: 12px;
                color: #586069; font-family: "SF Mono", Consolas, monospace; }
   .test-list li { margin: 2px 0; }
@@ -1348,7 +1388,7 @@ def _render_probe_page(sha: str, entry: dict) -> str:
   <span>Merged (PT): <code>{merge_dt}</code></span>
   <span>ImageSHA256: <code>{img}</code></span>
   <span>State: <span class="{sclass}">{state_disp}</span></span>
-  <span>Attempts: <code>{n_att}/3</code></span>
+  <span>Attempts: <code>{n_att}/{entry.get('max_attempts', DEFAULT_MAX_ATTEMPTS)}</code></span>
 </div>
 <div class="meta">
   <span><a href="{commit_url}" target="_blank" rel="noopener noreferrer">commit on GitHub</a></span>
@@ -1378,102 +1418,176 @@ def _render_probe_page(sha: str, entry: dict) -> str:
 </div>
 """
 
-    # Per-attempt sections — collapsible <details>, default closed
+    # ------- View: group by JOB, with attempt history badges -------
     sections = []
     attempts_all = entry.get("attempts", [])
-    snip_uid = [0]  # mutable counter for unique snippet-row IDs
-    for idx, a in enumerate(attempts_all):
-        attempt = a.get("attempt", "?")
-        jobs = a.get("jobs", {})
-        n_pass = sum(1 for v in jobs.values() if _job_conclusion(v) == "success")
-        n_fail = len(a.get("failed_jobs", []))
-        n_run = sum(
-            1 for v in jobs.values() if _job_conclusion(v) in ("running", "queued", "pending")
-        )
-        sec = [
-            f"<details open>",
-            f"<summary>Attempt {attempt} "
+    snip_uid = [0]
+
+    # 1. Build job-history dedup'd by *physical* run.
+    # GitHub's rerun-failed-jobs creates new job IDs in each attempt's view,
+    # but for unchanged (carried-over) jobs those new IDs point at the same
+    # physical run with the same timestamps. Dedup on (started_at, completed_at)
+    # — two entries with identical timestamps for the same job name ARE the
+    # same physical run, regardless of GitHub's per-attempt ID.
+    job_runs: dict[str, list[tuple[int, dict]]] = {}
+    for a in attempts_all:
+        att_num = a.get("attempt", 0)
+        for name, j in a.get("jobs", {}).items():
+            runs = job_runs.setdefault(name, [])
+            if not isinstance(j, dict):
+                runs.append((att_num, j))
+                continue
+            sig = (j.get("started_at"), j.get("completed_at"))
+            existing = {
+                (r[1].get("started_at"), r[1].get("completed_at"))
+                for r in runs if isinstance(r[1], dict)
+            }
+            # If both ends are None (no timing yet), treat as unique per attempt.
+            if sig != (None, None) and sig in existing:
+                continue  # same physical run — skip dup
+            runs.append((att_num, j))
+
+    # 2. Per-attempt overview now reflects what ACTUALLY ran in each attempt
+    # (i.e., new physical runs, not carried-over status).
+    runs_per_att: dict[int, list[dict]] = {}
+    for runs in job_runs.values():
+        for att_num, j in runs:
+            runs_per_att.setdefault(att_num, []).append(j)
+
+    summary_lines = ["<h2>Attempts overview <small style='color:#586069;font-weight:400'>(what actually ran each attempt)</small></h2>",
+                     "<div class='attempt-summary'>"]
+    for att_num in sorted(runs_per_att):
+        these = runs_per_att[att_num]
+        n_pass = sum(1 for j in these if _job_conclusion(j) == "success")
+        n_fail = sum(1 for j in these if _job_conclusion(j) in ("failure", "timed_out"))
+        n_run = sum(1 for j in these if _job_conclusion(j) in ("running", "queued", "pending"))
+        n_skip = sum(1 for j in these if _job_conclusion(j) in ("skipped", "cancelled", "neutral"))
+        summary_lines.append(
+            f"<div><strong>Attempt {att_num}:</strong> "
             f"<span class='pill pill-pass'>{n_pass} pass</span> "
             f"<span class='pill pill-fail'>{n_fail} fail</span> "
-            f"<span class='pill pill-run'>{n_run} run</span></summary>",
-            f"<div class='details-body'>",
-        ]
-        sec.append("<table><thead><tr><th>Status</th><th>Job</th><th>Started (PT)</th><th>Duration</th><th>Failure Detail</th></tr></thead><tbody>")
-        failed_tests = a.get("failed_tests") or {}
-        # Sort priority: failures first, then running, then passes, then skipped (least interesting).
-        # Within each tier: alphabetical by job name.
-        order = {
-            "failure": 0, "timed_out": 0,
-            "running": 1, "queued": 1, "pending": 1,
-            "success": 2,
-            "skipped": 3, "cancelled": 3, "neutral": 3,
-        }
-        for name in sorted(jobs, key=lambda n: (order.get(_job_conclusion(jobs[n]), 2), n)):
-            v = jobs[name]
-            conclusion = _job_conclusion(v)
-            url = _job_url(v)
-            if conclusion in ("failure", "timed_out"):
-                row_class = "fail"
-            elif conclusion == "success":
-                row_class = "pass"
-            elif conclusion in ("running", "queued", "pending"):
-                row_class = "run"
-            elif conclusion in ("skipped", "cancelled", "neutral"):
-                row_class = "skip"
-            else:
-                row_class = ""
-            tests = failed_tests.get(name, [])
-            tests_html = ""
-            if tests:
-                items = "".join(f"<li>{_html_escape(t)}</li>" for t in tests[:50])
-                more = f"<li>… +{len(tests) - 50} more</li>" if len(tests) > 50 else ""
-                tests_html = f"<ul class='test-list'>{items}{more}</ul>"
-            name_html = (
-                f"<a href='{url}' target='_blank' rel='noopener noreferrer'>{_html_escape(name)}</a>"
-                if url else _html_escape(name)
-            )
-            started, duration = _job_timing(v, conclusion)
-            log_info = (a.get("log_meta") or {}).get(name, {})
-            cats = log_info.get("categories") or []
-            snippet = log_info.get("snippet") or ""
-            # Merged Failure Detail cell: categories, failed tests, snippet link
-            parts = []
-            if cats:
-                parts.append(
-                    f"<div class='cat-list'>{_html_escape(', '.join(cats))}</div>"
-                )
-            if tests_html:
-                parts.append(tests_html)
-            snippet_row_html = ""
-            if snippet:
-                snip_uid[0] += 1
-                sid = f"snip-{idx}-{snip_uid[0]}"
-                snippet_html = render_snippet_html(snippet)
-                parts.append(
-                    f"<div><span class='snip-toggle' "
-                    f"onclick=\"document.getElementById('{sid}').classList.toggle('show')\">"
-                    f"show snippet ({len(snippet)} chars)</span></div>"
-                )
-                snippet_row_html = (
-                    f"<tr id='{sid}' class='snippet-row'><td colspan='5'>"
-                    f"<pre class='snip'>{snippet_html}</pre>"
-                    f"</td></tr>"
-                )
-            cell_body = "".join(parts) or '<span style="color:#959da5">—</span>'
-            sec.append(
-                f"<tr class='{row_class}'>"
-                f"<td>{conclusion}</td>"
-                f"<td class='job-name'>{name_html}</td>"
-                f"<td style='font-variant-numeric: tabular-nums; color:#586069;'>{started}</td>"
-                f"<td style='font-variant-numeric: tabular-nums; color:#586069;'>{duration}</td>"
-                f"<td>{cell_body}</td>"
-                f"</tr>"
-            )
-            if snippet_row_html:
-                sec.append(snippet_row_html)
-        sec.append("</tbody></table>")
-        sec.append("</div></details>")
-        sections.append("\n".join(sec))
+            f"<span class='pill pill-run'>{n_run} run</span>"
+            + (f" <span style='color:#959da5;font-size:11px'>({n_skip} skipped)</span>" if n_skip else "")
+            + "</div>"
+        )
+    summary_lines.append("</div>")
+    sections.append("\n".join(summary_lines))
+
+    # Flat: one row per (job, attempt-run). No more per-job grouping or
+    # per-attempt badges — if a job ran 3 times, it's 3 rows.
+    sec = [
+        "<h2>Jobs (one row per attempt-run; failed first)</h2>",
+        "<table><thead><tr>"
+        "<th>Status</th>"
+        "<th>Job</th>"
+        "<th>Attempt</th>"
+        "<th>Started (PT)</th>"
+        "<th>Duration</th>"
+        "<th>Failure Detail</th>"
+        "</tr></thead><tbody>",
+    ]
+
+    status_rank = {
+        "failure": 0, "timed_out": 0,
+        "running": 1, "queued": 1, "pending": 1,
+        "success": 2,
+        "skipped": 3, "cancelled": 3, "neutral": 3,
+    }
+    # Rank per JOB (not per run): if a job ever failed, all its rows
+    # — including a later success — sit in the failed group, grouped together.
+    job_group_rank: dict[str, int] = {}
+    for name, runs in job_runs.items():
+        if any(_job_conclusion(j) in ("failure", "timed_out") for _, j in runs):
+            job_group_rank[name] = 0
+        else:
+            latest_conc = _job_conclusion(runs[-1][1]) if runs else ""
+            job_group_rank[name] = status_rank.get(latest_conc, 9)
+
+    flat_rows: list[tuple[int, str, int, dict]] = []
+    for name, runs in job_runs.items():
+        for att_num, j in runs:
+            flat_rows.append((job_group_rank[name], name, att_num, j))
+    # Failed-group first; within group, by job name; within job, attempt # asc.
+    flat_rows.sort(key=lambda x: (x[0], x[1], x[2]))
+
+    for _rank, name, att_num, j in flat_rows:
+        conc = _job_conclusion(j)
+        if conc in ("failure", "timed_out"):
+            row_class, status_text = "fail", "FAILED"
+        elif conc == "success":
+            row_class, status_text = "pass", "PASSED"
+        elif conc in ("running", "queued", "pending"):
+            row_class, status_text = "run", conc
+        elif conc in ("skipped", "cancelled", "neutral"):
+            row_class, status_text = "skip", conc
+        else:
+            row_class, status_text = "", (conc or "?")
+
+        started_pt = "—"
+        s = j.get("started_at") if isinstance(j, dict) else None
+        if s:
+            dt = _to_pt(s)
+            if dt:
+                started_pt = dt.strftime("%Y-%m-%d %H:%M:%S")
+        _short_started, duration = _job_timing(j, conc)
+
+        url = _job_url(j)
+        name_html = (
+            f"<a href='{url}' target='_blank' rel='noopener noreferrer'>{_html_escape(name)}</a>"
+            if url else _html_escape(name)
+        )
+
+        detail_parts: list[str] = []
+        snippet_toggle_html = ""
+        snippet_rows_inline: list[str] = []
+        if conc in ("failure", "timed_out"):
+            for a in attempts_all:
+                if a.get("attempt") != att_num:
+                    continue
+                log_info = (a.get("log_meta") or {}).get(name, {})
+                cats = log_info.get("categories") or []
+                snippet = log_info.get("snippet") or ""
+                tests = (a.get("failed_tests") or {}).get(name, [])
+                if cats:
+                    detail_parts.append(
+                        f"<div class='cat-list'>{_html_escape(', '.join(cats))}</div>"
+                    )
+                if tests:
+                    items = "".join(f"<li>{_html_escape(t)}</li>" for t in tests[:50])
+                    more = (
+                        f"<li>… +{len(tests) - 50} more</li>" if len(tests) > 50 else ""
+                    )
+                    detail_parts.append(f"<ul class='test-list'>{items}{more}</ul>")
+                if snippet:
+                    snip_uid[0] += 1
+                    sid = f"snip-job-{snip_uid[0]}"
+                    snippet_html = render_snippet_html(snippet)
+                    snippet_toggle_html = (
+                        f" <span class='snip-toggle' "
+                        f"onclick=\"document.getElementById('{sid}').classList.toggle('show')\">"
+                        f"show snippet ({len(snippet)} chars)</span>"
+                    )
+                    snippet_rows_inline.append(
+                        f"<tr id='{sid}' class='snippet-row'><td colspan='6'>"
+                        f"<pre class='snip'>{snippet_html}</pre>"
+                        f"</td></tr>"
+                    )
+                break
+        detail_html = "".join(detail_parts) or '<span style="color:#959da5">—</span>'
+
+        sec.append(
+            f"<tr class='{row_class}'>"
+            f"<td class='status-cell'>{status_text}</td>"
+            f"<td class='job-name'>{name_html}{snippet_toggle_html}</td>"
+            f"<td class='attempt-cell'>{att_num}</td>"
+            f"<td class='started-cell'><code>{started_pt}</code></td>"
+            f"<td class='duration-cell'>{duration}</td>"
+            f"<td>{detail_html}</td>"
+            f"</tr>"
+        )
+        sec.extend(snippet_rows_inline)
+    sec.append("</tbody></table>")
+    sections.append("\n".join(sec))
 
     if not sections:
         sections.append("<p><em>No attempts recorded yet.</em></p>")
@@ -1500,7 +1614,7 @@ def _render_probe_index(db: dict, page_paths: dict[str, str]) -> str:
             f"<td><code>{e.get('image_sha256') or '?'}</code></td>"
             f"<td>{_short_merge_date(e.get('merge_date'))}</td>"
             f"<td><span class='{sclass}'>{state_disp}</span></td>"
-            f"<td>{len(e.get('attempts', []))}/3</td>"
+            f"<td>{len(e.get('attempts', []))}/{e.get('max_attempts', DEFAULT_MAX_ATTEMPTS)}</td>"
             f"<td>{_descriptive_counts(e)}</td>"
             f"<td>{pr_link}</td>"
             f"<td><a href='{link}' target='_blank' rel='noopener noreferrer'>detail</a></td>"
@@ -1558,6 +1672,58 @@ def cmd_render_html(output_root: Path | None = None) -> None:
     print(f"wrote {n_pages} per-SHA pages + {index_path}")
 
 
+def cmd_retry(sha_or_prefix: str, new_max_attempts: int) -> None:
+    """Bump per-SHA max_attempts; if currently FAILED, flip to in_progress
+    and trigger another `rerun-failed-jobs` to actually start attempt N+1."""
+    db = load_db()
+    matches = [
+        k
+        for k in db
+        if k != "_meta" and (k == sha_or_prefix or k.startswith(sha_or_prefix))
+    ]
+    if not matches:
+        print(f"no entry matching {sha_or_prefix}")
+        return
+    if len(matches) > 1:
+        print(f"ambiguous: {[short_sha(k) for k in matches]}")
+        return
+    sha = matches[0]
+    entry = db[sha]
+    if entry.get("state") == "cleaned":
+        print(f"{short_sha(sha)} is PASSED + cleaned — PR closed, branch deleted, can't retry")
+        return
+    cur_max = entry.get("max_attempts", DEFAULT_MAX_ATTEMPTS)
+    if new_max_attempts <= cur_max:
+        print(f"max_attempts {new_max_attempts} ≤ current {cur_max} — no change")
+        return
+    entry["max_attempts"] = new_max_attempts
+    print(f"{short_sha(sha)}: max_attempts {cur_max} → {new_max_attempts}")
+
+    # If FAILED (terminal): flip back + actively kick a rerun on each failed workflow.
+    if entry.get("state") == "failed":
+        attempts = entry.get("attempts", [])
+        if attempts:
+            last = attempts[-1]
+            for wf_name, run_id in (last.get("workflow_runs") or {}).items():
+                try:
+                    rerun_failed_jobs(run_id, dry_run=False)
+                    print(f"  triggered rerun-failed-jobs on {wf_name} (run {run_id})")
+                except Exception as e:
+                    logger.warning("rerun-failed-jobs %s: %s", run_id, e)
+        entry.pop("verdict", None)
+        entry.pop("stuck_jobs", None)
+        entry["state"] = "in_progress"
+        print(f"  flipped state: failed → in_progress")
+    else:
+        print(f"  state unchanged ({entry['state']}); next cycle will use new cap")
+    save_db_atomic(db)
+    # Re-render HTML so the dashboard reflects the new cap immediately.
+    try:
+        cmd_render_html()
+    except Exception as e:
+        logger.warning("auto-render-html after retry failed: %s", e)
+
+
 def cmd_reset(sha_or_prefix: str) -> None:
     db = load_db()
     matches = [
@@ -1608,6 +1774,15 @@ def main() -> None:
         default=str(Path.home() / "dynamo" / "commits" / "logs"),
         help="root dir for per-SHA pages + index.html",
     )
+    p_retry = sub.add_parser(
+        "retry",
+        help="bump per-SHA max_attempts and (if FAILED) trigger another rerun",
+    )
+    p_retry.add_argument("sha", help="SHA or prefix")
+    p_retry.add_argument(
+        "--max-attempts", type=int, required=True,
+        help="new per-SHA max_attempts cap (must be > current)",
+    )
     pre = sub.add_parser("reset")
     pre.add_argument("sha")
 
@@ -1644,6 +1819,8 @@ def main() -> None:
         cmd_report(csv_path=args.csv)
     elif args.cmd == "render-html":
         cmd_render_html(output_root=Path(args.output_root))
+    elif args.cmd == "retry":
+        cmd_retry(args.sha, args.max_attempts)
     elif args.cmd == "reset":
         cmd_reset(args.sha)
 
