@@ -1474,6 +1474,8 @@ _HTML_STYLE = """
   td.attempts-cell { white-space: nowrap; min-width: 180px; }
   td.cat-cell { white-space: nowrap; min-width: 200px; }
   td.started-cell, td.duration-cell, td.status-cell, td.attempt-cell { white-space: nowrap; }
+  td.duration-outlier { font-weight: 700; }
+  td.duration-over-1h { color: #d73a49; }
   .attempt-summary { margin: 12px 0 4px 0; }
   .attempt-summary .pill { margin-right: 6px; }
   .snip-toggle { cursor: pointer; user-select: none; display: inline-block;
@@ -1579,13 +1581,13 @@ def _render_probe_page(sha: str, entry: dict) -> str:
 </head><body>
 <h1>Re-validate {f'<a href="{pr_url}" target="_blank" rel="noopener noreferrer">PR #{pr}</a>' if pr else short_sha(sha)}</h1>
 <div class="meta">
+  <span><a href="{commit_url}" target="_blank" rel="noopener noreferrer">{short_sha(sha)}</a> on GitHub{orig_pr_html}{title_html}{author_html}</span>
+</div>
+<div class="meta">
   <span>Merged (PT): <code>{merge_dt}</code></span>
   <span>ImageSHA256: <code>{img}</code></span>
   <span>State: <span class="{sclass}">{state_disp}</span></span>
   <span>Attempts: <code>{n_att}/{entry.get('max_attempts', DEFAULT_MAX_ATTEMPTS)}</code></span>
-</div>
-<div class="meta">
-  <span><a href="{commit_url}" target="_blank" rel="noopener noreferrer">{short_sha(sha)}</a> on GitHub{orig_pr_html}{title_html}{author_html}</span>
 </div>
 """
     # If overall PASSED but earlier attempts had failures → flake banner.
@@ -1808,20 +1810,49 @@ def _render_probe_page(sha: str, entry: dict) -> str:
         if runs:
             job_last_attempt[name] = runs[-1][0]
 
-    # 5 longest (job, attempt) pairs by wall-clock duration → mark with ⏱.
+    # Outlier (job, attempt) pairs by wall-clock duration → mark with ⏱.
+    # Includes still-running jobs (use "now" as end). Tukey fence:
+    # duration > Q3 + 1.5*IQR. Only flags jobs that are *meaningfully*
+    # slower than the rest; if everything is roughly the same speed,
+    # no clock is shown.
     _durations: list[tuple[float, str, int]] = []
+    _now_utc = datetime.now(timezone.utc)
     for _name, _att_num, _j in flat_rows:
         if not isinstance(_j, dict):
             continue
-        _s = _j.get("started_at"); _c = _j.get("completed_at")
-        if not (_s and _c):
+        _s = _j.get("started_at")
+        if not _s:
             continue
+        _c = _j.get("completed_at")
         try:
-            _secs = (datetime.fromisoformat(_c) - datetime.fromisoformat(_s)).total_seconds()
+            _t0 = datetime.fromisoformat(_s)
+            _t1 = datetime.fromisoformat(_c) if _c else _now_utc
+            _secs = (_t1 - _t0).total_seconds()
         except Exception:
             continue
         _durations.append((_secs, _name, _att_num))
-    longest_keys = {(n, a) for _, n, a in sorted(_durations, reverse=True)[:5]}
+
+    # Outlier rule: a job is flagged only if its duration is >2× the next
+    # slowest job. Walk top-down: as long as durs[i] > 2 * durs[i+1] AND
+    # > 60s (don't bother with tiny jobs), keep marking. Stop on the first
+    # gap that's ≤2× — everything below clusters with the rest.
+    longest_keys: set[tuple[str, int]] = set()
+    if len(_durations) >= 2:
+        ranked = sorted(_durations, reverse=True)  # by duration desc
+        for i in range(len(ranked) - 1):
+            d_i, n_i, a_i = ranked[i]
+            d_next, _, _ = ranked[i + 1]
+            if d_i < 60.0:
+                break
+            if d_i > 2 * max(d_next, 1.0):
+                longest_keys.add((n_i, a_i))
+            else:
+                break
+
+    # Anything over 1h gets a red Duration cell, regardless of outlier status.
+    over_1h_keys: set[tuple[str, int]] = {
+        (n, a) for d, n, a in _durations if d >= 3600.0
+    }
 
     for name, att_num, j in flat_rows:
         conc = _job_conclusion(j)
@@ -1907,7 +1938,10 @@ def _render_probe_page(sha: str, entry: dict) -> str:
             f"<td class='job-name'>{name_html}{snippet_toggle_html}</td>"
             f"<td class='attempt-cell'>{att_num}</td>"
             f"<td class='started-cell'>{started_pt}</td>"
-            f"<td class='duration-cell'>{'⏱ ' if (name, att_num) in longest_keys else ''}{duration}</td>"
+            f"<td class='duration-cell"
+            f"{' duration-outlier' if (name, att_num) in longest_keys else ''}"
+            f"{' duration-over-1h' if (name, att_num) in over_1h_keys else ''}"
+            f"'>{duration}{' ⏱' if (name, att_num) in longest_keys else ''}</td>"
             f"<td>{detail_html}</td>"
             f"</tr>"
         )
