@@ -1560,10 +1560,10 @@ def _render_probe_page(sha: str, entry: dict) -> str:
 
     head = f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
-<title>Re-validate {short_sha(sha)}</title>
+<title>Re-validate PR{f" #{pr}" if pr else f" {short_sha(sha)}"}</title>
 {_HTML_STYLE}
 </head><body>
-<h1>Re-validate <code>{short_sha(sha)}</code></h1>
+<h1>Re-validate {f'<a href="{pr_url}" target="_blank" rel="noopener noreferrer">PR #{pr}</a>' if pr else short_sha(sha)}</h1>
 <div class="meta">
   <span>Merged (PT): <code>{merge_dt}</code></span>
   <span>ImageSHA256: <code>{img}</code></span>
@@ -1572,7 +1572,6 @@ def _render_probe_page(sha: str, entry: dict) -> str:
 </div>
 <div class="meta">
   <span><a href="{commit_url}" target="_blank" rel="noopener noreferrer">{short_sha(sha)}</a> on GitHub{orig_pr_html}{title_html}{author_html}</span>
-  <span style="margin-left: 16px;">probe: <a href="{pr_url}" target="_blank" rel="noopener noreferrer">PR{f" #{pr}" if pr else ""}</a></span>
 </div>
 """
     # If overall PASSED but earlier attempts had failures → flake banner.
@@ -1648,6 +1647,7 @@ def _render_probe_page(sha: str, entry: dict) -> str:
         f"<th title='optional failed'>Opt {ICON_OPT_FAIL}</th>"
         f"<th title='in progress'>Run {ICON_RUN}</th>"
         "<th>Skipped</th>"
+        "<th title='wall-clock: earliest job start → latest job end in this attempt'>Duration</th>"
         "</tr></thead><tbody>",
     ]
     # Track previous attempt's verdict so attempts that re-ran ONLY optional
@@ -1655,8 +1655,22 @@ def _render_probe_page(sha: str, entry: dict) -> str:
     # required jobs still hold their old conclusion via GitHub's job
     # carry-over, the rerun just didn't re-touch them.
     prev_verdict = "PENDING"
+    total_secs = 0
     for att_num in sorted(runs_per_att):
         these = runs_per_att[att_num]
+        # Wall-clock duration for this attempt: earliest job start → latest job end.
+        starts = [j.get("started_at") for _, j in these if isinstance(j, dict) and j.get("started_at")]
+        ends = [j.get("completed_at") for _, j in these if isinstance(j, dict) and j.get("completed_at")]
+        att_dur_str = "—"
+        if starts and ends:
+            try:
+                _t0 = datetime.fromisoformat(min(starts))
+                _t1 = datetime.fromisoformat(max(ends))
+                _secs = max(0, int((_t1 - _t0).total_seconds()))
+                total_secs += _secs
+                att_dur_str = _fmt_duration(_secs)
+            except Exception:
+                pass
         req_pass = req_fail = req_run = 0
         opt_pass = opt_fail = opt_run = 0
         n_skip = 0
@@ -1704,7 +1718,15 @@ def _render_probe_page(sha: str, entry: dict) -> str:
             f"{_cell(opt_pass)}{_cell(opt_fail)}"
             f"{_cell(req_run + opt_run)}"
             f"{_cell(n_skip)}"
+            f"<td style='font-variant-numeric: tabular-nums;'>{att_dur_str}</td>"
             f"</tr>"
+        )
+    if total_secs > 0:
+        summary_lines.append(
+            "<tr style='border-top: 2px solid #d0d7de; font-weight:600;'>"
+            "<td colspan='8' style='text-align:right; color:#586069;'>Total CI time</td>"
+            f"<td style='font-variant-numeric: tabular-nums;'>{_fmt_duration(total_secs)}</td>"
+            "</tr>"
         )
     summary_lines.append("</tbody></table>")
     sections.append("\n".join(summary_lines))
