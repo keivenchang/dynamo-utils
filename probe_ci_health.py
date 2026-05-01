@@ -763,6 +763,8 @@ def cycle(
     stalled_after_hours: int,
     dry_run: bool,
     drain: bool = False,
+    backfill_past: int = 0,
+    backfill_max_attempts: int = 5,
 ) -> None:
     db = load_db()
     meta = db.setdefault("_meta", {})
@@ -881,6 +883,46 @@ def cycle(
                 pr,
                 short_sha(probe_head or ""),
             )
+
+        # ---- 2b. backfill: when we've caught up to HEAD (no new discovered
+        # SHAs left) and parallelism budget remains, retry past failed SHAs
+        # newest-first up to backfill_max_attempts. Useful when CI is stable
+        # enough that there's idle worker capacity — instead of letting it
+        # sit, re-validate flaky failures from earlier in the day/week.
+        if backfill_past > 0 and not dry_run:
+            new_in_flight = sum(
+                1
+                for k, v in db.items()
+                if k != "_meta"
+                and isinstance(v, dict)
+                and v.get("state") in ("launched", "in_progress")
+            )
+            remaining = max(0, parallelism - new_in_flight)
+            if remaining > 0:
+                # Past N SHAs by merge_date desc. Filter to failed-with-headroom.
+                ranked = sorted(
+                    (
+                        (k, v) for k, v in db.items()
+                        if k != "_meta" and isinstance(v, dict)
+                        and v.get("merge_date")
+                    ),
+                    key=lambda kv: kv[1].get("merge_date") or "",
+                    reverse=True,
+                )[:backfill_past]
+                candidates = [
+                    (k, v) for k, v in ranked
+                    if v.get("state") == "failed"
+                    and len(v.get("attempts") or []) < backfill_max_attempts
+                ]
+                logger.info(
+                    "backfill: past=%d candidates=%d remaining_budget=%d max_attempts=%d",
+                    backfill_past, len(candidates), remaining, backfill_max_attempts,
+                )
+                for sha, entry in candidates[:remaining]:
+                    _retry_failed_entry(
+                        entry, sha, backfill_max_attempts,
+                        dry_run=dry_run, log_prefix="backfill ",
+                    )
 
     # ---- 3. collect / advance launched + in_progress ----
     for sha, entry in list(db.items()):
@@ -2237,6 +2279,42 @@ def cmd_render_html(output_root: Path | None = None) -> None:
     print(f"wrote {n_pages} per-SHA pages + {index_path}")
 
 
+def _retry_failed_entry(
+    entry: dict, sha: str, new_max_attempts: int, *, dry_run: bool = False, log_prefix: str = ""
+) -> tuple[bool, bool]:
+    """Bump max_attempts and (if failed) flip back to in_progress with reruns.
+
+    Shared core for `cmd_retry` and the backfill path inside `cycle()`.
+
+    Returns (changed_max, flipped_state).
+    """
+    if entry.get("state") == "cleaned":
+        return False, False
+    cur_max = entry.get("max_attempts") or DEFAULT_MAX_ATTEMPTS
+    if new_max_attempts <= cur_max:
+        return False, False
+    entry["max_attempts"] = new_max_attempts
+    logger.info(
+        "%s%s: max_attempts %d → %d",
+        log_prefix, short_sha(sha), cur_max, new_max_attempts,
+    )
+    if entry.get("state") != "failed":
+        return True, False
+    attempts = entry.get("attempts", [])
+    if attempts:
+        last = attempts[-1]
+        for wf_name, run_id in (last.get("workflow_runs") or {}).items():
+            try:
+                rerun_failed_jobs(run_id, dry_run=dry_run)
+            except Exception as e:
+                logger.warning("rerun-failed-jobs %s: %s", run_id, e)
+    entry.pop("verdict", None)
+    entry.pop("stuck_jobs", None)
+    entry["state"] = "in_progress"
+    logger.info("%s%s: failed → in_progress", log_prefix, short_sha(sha))
+    return True, True
+
+
 def cmd_retry(sha_or_prefix: str, new_max_attempts: int) -> None:
     """Bump per-SHA max_attempts; if currently FAILED, flip to in_progress
     and trigger another `rerun-failed-jobs` to actually start attempt N+1."""
@@ -2257,29 +2335,16 @@ def cmd_retry(sha_or_prefix: str, new_max_attempts: int) -> None:
     if entry.get("state") == "cleaned":
         print(f"{short_sha(sha)} is PASSED + cleaned — PR closed, branch deleted, can't retry")
         return
-    cur_max = entry.get("max_attempts", DEFAULT_MAX_ATTEMPTS)
+    cur_max = entry.get("max_attempts") or DEFAULT_MAX_ATTEMPTS
     if new_max_attempts <= cur_max:
         print(f"max_attempts {new_max_attempts} ≤ current {cur_max} — no change")
         return
-    entry["max_attempts"] = new_max_attempts
-    print(f"{short_sha(sha)}: max_attempts {cur_max} → {new_max_attempts}")
-
-    # If FAILED (terminal): flip back + actively kick a rerun on each failed workflow.
-    if entry.get("state") == "failed":
-        attempts = entry.get("attempts", [])
-        if attempts:
-            last = attempts[-1]
-            for wf_name, run_id in (last.get("workflow_runs") or {}).items():
-                try:
-                    rerun_failed_jobs(run_id, dry_run=False)
-                    print(f"  triggered rerun-failed-jobs on {wf_name} (run {run_id})")
-                except Exception as e:
-                    logger.warning("rerun-failed-jobs %s: %s", run_id, e)
-        entry.pop("verdict", None)
-        entry.pop("stuck_jobs", None)
-        entry["state"] = "in_progress"
+    changed, flipped = _retry_failed_entry(entry, sha, new_max_attempts, dry_run=False)
+    if changed:
+        print(f"{short_sha(sha)}: max_attempts {cur_max} → {new_max_attempts}")
+    if flipped:
         print(f"  flipped state: failed → in_progress")
-    else:
+    elif changed:
         print(f"  state unchanged ({entry['state']}); next cycle will use new cap")
     save_db_atomic(db)
     # Re-render HTML so the dashboard reflects the new cap immediately.
@@ -2319,6 +2384,23 @@ def main() -> None:
     pr.add_argument("--max-attempts", type=int, default=DEFAULT_MAX_ATTEMPTS)
     pr.add_argument(
         "--stalled-after-hours", type=int, default=DEFAULT_STALLED_AFTER_HOURS
+    )
+    pr.add_argument(
+        "--backfill-past",
+        type=int,
+        default=0,
+        help=(
+            "After launching from `discovered`, if parallelism budget remains, "
+            "retry the past N (sorted by merge_date desc) failed SHAs up to "
+            "--backfill-max-attempts. 0 disables. Useful when CI is stable: "
+            "use idle worker slots to re-validate older flakes."
+        ),
+    )
+    pr.add_argument(
+        "--backfill-max-attempts",
+        type=int,
+        default=5,
+        help="Per-SHA attempt cap when backfilling (default: 5).",
     )
     pr.add_argument(
         "--dry-run", "--dryrun", dest="dry_run", action="store_true"
@@ -2374,6 +2456,8 @@ def main() -> None:
                     stalled_after_hours=args.stalled_after_hours,
                     dry_run=args.dry_run,
                     drain=args.drain,
+                    backfill_past=args.backfill_past,
+                    backfill_max_attempts=args.backfill_max_attempts,
                 )
         except RuntimeError as e:
             logger.warning("%s", e)
