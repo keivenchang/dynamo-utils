@@ -1137,6 +1137,20 @@ _LIVE_DURATION_JS = """
       if (isNaN(t)) return;
       el.textContent = fmt(Math.floor((now - t) / 1000));
     });
+    document.querySelectorAll(".live-duration-total").forEach(function(el) {
+      var fixed = parseInt(el.getAttribute("data-fixed") || "0", 10) || 0;
+      var liveAttr = el.getAttribute("data-live") || "";
+      var liveSecs = 0;
+      if (liveAttr) {
+        liveAttr.split(",").forEach(function(s) {
+          if (!s) return;
+          var t = Date.parse(s);
+          if (isNaN(t)) return;
+          liveSecs += Math.floor((now - t) / 1000);
+        });
+      }
+      el.textContent = fmt(fixed + liveSecs);
+    });
   }
   tick();
   setInterval(tick, 1000);
@@ -1655,20 +1669,36 @@ def _render_probe_page(sha: str, entry: dict) -> str:
     # required jobs still hold their old conclusion via GitHub's job
     # carry-over, the rerun just didn't re-touch them.
     prev_verdict = "PENDING"
-    total_secs = 0
+    fixed_total_secs = 0
+    live_starts: list[str] = []  # iso-8601 starts of attempts still running
     for att_num in sorted(runs_per_att):
         these = runs_per_att[att_num]
-        # Wall-clock duration for this attempt: earliest job start → latest job end.
+        # Wall-clock duration for this attempt: earliest job start → latest end
+        # if all jobs completed, else live (now - earliest start) and ticking.
+        running_jobs = any(
+            isinstance(j, dict) and _job_conclusion(j) in ("running", "queued", "pending")
+            for _, j in these
+        )
         starts = [j.get("started_at") for _, j in these if isinstance(j, dict) and j.get("started_at")]
         ends = [j.get("completed_at") for _, j in these if isinstance(j, dict) and j.get("completed_at")]
         att_dur_str = "—"
-        if starts and ends:
+        if starts:
             try:
-                _t0 = datetime.fromisoformat(min(starts))
-                _t1 = datetime.fromisoformat(max(ends))
-                _secs = max(0, int((_t1 - _t0).total_seconds()))
-                total_secs += _secs
-                att_dur_str = _fmt_duration(_secs)
+                t0_iso = min(starts)
+                _t0 = datetime.fromisoformat(t0_iso)
+                if running_jobs:
+                    now = datetime.now(timezone.utc)
+                    _secs = max(0, int((now - _t0).total_seconds()))
+                    live_starts.append(t0_iso)
+                    att_dur_str = (
+                        f"<span class='live-duration' data-started='{t0_iso}'>"
+                        f"{_fmt_duration(_secs)}</span>"
+                    )
+                elif ends:
+                    _t1 = datetime.fromisoformat(max(ends))
+                    _secs = max(0, int((_t1 - _t0).total_seconds()))
+                    fixed_total_secs += _secs
+                    att_dur_str = _fmt_duration(_secs)
             except Exception:
                 pass
         req_pass = req_fail = req_run = 0
@@ -1721,11 +1751,30 @@ def _render_probe_page(sha: str, entry: dict) -> str:
             f"<td style='font-variant-numeric: tabular-nums;'>{att_dur_str}</td>"
             f"</tr>"
         )
-    if total_secs > 0:
+    if fixed_total_secs > 0 or live_starts:
+        # Total = fixed completed time + live (now - earliest live start) summed.
+        if live_starts:
+            try:
+                now = datetime.now(timezone.utc)
+                live_secs_initial = sum(
+                    max(0, int((now - datetime.fromisoformat(s)).total_seconds()))
+                    for s in live_starts
+                )
+            except Exception:
+                live_secs_initial = 0
+            total_init = fixed_total_secs + live_secs_initial
+            live_starts_attr = ",".join(live_starts)
+            total_html = (
+                f"<span class='live-duration-total' "
+                f"data-fixed='{fixed_total_secs}' data-live='{live_starts_attr}'>"
+                f"{_fmt_duration(total_init)}</span>"
+            )
+        else:
+            total_html = _fmt_duration(fixed_total_secs)
         summary_lines.append(
             "<tr style='border-top: 2px solid #d0d7de; font-weight:600;'>"
             "<td colspan='8' style='text-align:right; color:#586069;'>Total CI time</td>"
-            f"<td style='font-variant-numeric: tabular-nums;'>{_fmt_duration(total_secs)}</td>"
+            f"<td style='font-variant-numeric: tabular-nums;'>{total_html}</td>"
             "</tr>"
         )
     summary_lines.append("</tbody></table>")
