@@ -1673,11 +1673,30 @@ def _render_probe_page(sha: str, entry: dict) -> str:
     prev_verdict = "PENDING"
     fixed_total_secs = 0
     live_starts: list[str] = []  # iso-8601 starts of attempts still running
-    for att_num in sorted(runs_per_att):
+    # Only the highest-numbered attempt is "currently live"; older attempts are
+    # frozen by definition. Probe writes attempts[current_attempt-1] only and
+    # `get_run_jobs` uses `filter=latest`, so an old attempt's job state may be
+    # stale (e.g. a job cancelled-during-rerun still appears as "running").
+    # Treat older attempts as fixed: prefer max(end), else use the next
+    # attempt's earliest start as a proxy end.
+    latest_att_num = max(runs_per_att) if runs_per_att else None
+    next_att_start_iso_by_att: dict[int, str] = {}
+    sorted_atts = sorted(runs_per_att)
+    for i, att_num in enumerate(sorted_atts[:-1]):
+        nxt = runs_per_att[sorted_atts[i + 1]]
+        nxt_starts = [
+            j.get("started_at") for _, j in nxt
+            if isinstance(j, dict) and j.get("started_at")
+        ]
+        if nxt_starts:
+            next_att_start_iso_by_att[att_num] = min(nxt_starts)
+    for att_num in sorted_atts:
         these = runs_per_att[att_num]
+        is_latest = att_num == latest_att_num
         # Wall-clock duration for this attempt: earliest job start → latest end
         # if all jobs completed, else live (now - earliest start) and ticking.
-        running_jobs = any(
+        # Only the latest attempt may live-tick; older attempts are frozen.
+        running_jobs = is_latest and any(
             isinstance(j, dict) and _job_conclusion(j) in ("running", "queued", "pending")
             for _, j in these
         )
@@ -1696,11 +1715,16 @@ def _render_probe_page(sha: str, entry: dict) -> str:
                         f"<span class='live-duration' data-started='{t0_iso}'>"
                         f"{_fmt_duration(_secs)}</span>"
                     )
-                elif ends:
-                    _t1 = datetime.fromisoformat(max(ends))
-                    _secs = max(0, int((_t1 - _t0).total_seconds()))
-                    fixed_total_secs += _secs
-                    att_dur_str = _fmt_duration(_secs)
+                else:
+                    end_iso = max(ends) if ends else None
+                    proxy = next_att_start_iso_by_att.get(att_num)
+                    if proxy and (not end_iso or proxy > end_iso):
+                        end_iso = proxy
+                    if end_iso:
+                        _t1 = datetime.fromisoformat(end_iso)
+                        _secs = max(0, int((_t1 - _t0).total_seconds()))
+                        fixed_total_secs += _secs
+                        att_dur_str = _fmt_duration(_secs)
             except Exception:
                 pass
         req_pass = req_fail = req_run = 0
@@ -1709,6 +1733,12 @@ def _render_probe_page(sha: str, entry: dict) -> str:
         for nm, j in these:
             conc = _job_conclusion(j)
             is_req = nm in REQUIRED_CHECKS
+            # Older attempts can have stale "running" jobs in the DB (probe
+            # only refreshes the latest attempt). Treat those as cancelled
+            # for verdict + counts — when attempt N+1 spun up, attempt N's
+            # running jobs were effectively abandoned.
+            if conc in ("running", "queued", "pending") and not is_latest:
+                conc = "cancelled"
             if conc == "success":
                 if is_req: req_pass += 1
                 else: opt_pass += 1
@@ -1722,7 +1752,11 @@ def _render_probe_page(sha: str, entry: dict) -> str:
                 n_skip += 1
         if req_fail > 0:
             verdict = "FAIL"
-        elif req_run > 0:
+        elif req_run + opt_run > 0:
+            # Any running job (required OR optional) keeps the attempt PENDING.
+            # We only call PASS when every job in this attempt is terminal —
+            # otherwise users see "PASS" next to a non-zero Run count, which
+            # is confusing (a job that's still building hasn't passed yet).
             verdict = "PENDING"
         elif req_pass > 0:
             verdict = "PASS"

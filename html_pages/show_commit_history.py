@@ -2733,30 +2733,98 @@ class CommitHistoryGenerator:
                     else:
                         _disp, _cls = _state, "probe-progress"
                     _attempts = _e.get("attempts") or []
-                    # Total elapsed: earliest job started → latest job completed
-                    # across all attempts. Used as a wall-clock summary.
-                    _elapsed_str = ""
-                    _starts: list[str] = []
-                    _ends: list[str] = []
-                    for _a in _attempts:
-                        for _v in (_a.get("jobs") or {}).values():
-                            if isinstance(_v, dict):
-                                _s = _v.get("started_at"); _c = _v.get("completed_at")
-                                if _s: _starts.append(_s)
-                                if _c: _ends.append(_c)
-                    if _starts and _ends:
+                    # Total CI time: sum of per-attempt durations (earliest job
+                    # start → latest job end within each attempt). For attempts
+                    # still running, contribute (now - earliest start) and let
+                    # the page's JS ticker keep updating it. Mirrors the logic
+                    # in probe_ci_health.py for the per-SHA "Total CI time",
+                    # including the dedup of carried-over physical runs:
+                    # GitHub's rerun-failed-jobs reissues unchanged jobs into a
+                    # new attempt with the SAME (started_at, completed_at). We
+                    # treat (job_name, started_at, completed_at) as the unique
+                    # physical-run key, so a carry-over only counts once and
+                    # attempt-N's "earliest start" is the actual rerun start.
+                    _job_runs_by_att: dict[int, list] = {}
+                    _seen_phys: dict[str, set] = {}
+                    for _ai, _a in enumerate(_attempts):
+                        _att_num = _a.get("attempt", _ai + 1)
+                        _jobs_a = _a.get("jobs") or {}
+                        for _name, _v in _jobs_a.items():
+                            if not isinstance(_v, dict):
+                                _job_runs_by_att.setdefault(_att_num, []).append(_v)
+                                continue
+                            _sig = (_v.get("started_at"), _v.get("completed_at"))
+                            if _sig != (None, None) and _sig in _seen_phys.setdefault(_name, set()):
+                                continue
+                            if _sig != (None, None):
+                                _seen_phys[_name].add(_sig)
+                            _job_runs_by_att.setdefault(_att_num, []).append(_v)
+
+                    # Only the latest attempt may live-tick; older attempts
+                    # are frozen (probe DB doesn't refresh non-current attempts'
+                    # job state, so a "running" job in attempt N<latest is stale).
+                    # For older attempts: prefer max(end), else use the next
+                    # attempt's earliest start as a proxy end.
+                    _fixed_secs = 0
+                    _live_starts: list[str] = []
+                    _sorted_atts = sorted(_job_runs_by_att)
+                    _latest_att = _sorted_atts[-1] if _sorted_atts else None
+                    _next_start_iso_by_att: dict[int, str] = {}
+                    for _i, _an in enumerate(_sorted_atts[:-1]):
+                        _nxt = _job_runs_by_att[_sorted_atts[_i + 1]]
+                        _nxt_starts = [
+                            _v.get("started_at") for _v in _nxt
+                            if isinstance(_v, dict) and _v.get("started_at")
+                        ]
+                        if _nxt_starts:
+                            _next_start_iso_by_att[_an] = min(_nxt_starts)
+                    for _att_num in _sorted_atts:
+                        _these = _job_runs_by_att[_att_num]
+                        _is_latest = _att_num == _latest_att
+                        _running = _is_latest and any(
+                            isinstance(_v, dict) and _v.get("conclusion") in ("running", "queued", "pending")
+                            for _v in _these
+                        )
+                        _starts_a = [_v.get("started_at") for _v in _these if isinstance(_v, dict) and _v.get("started_at")]
+                        _ends_a = [_v.get("completed_at") for _v in _these if isinstance(_v, dict) and _v.get("completed_at")]
+                        if not _starts_a:
+                            continue
                         try:
-                            _t0 = datetime.fromisoformat(min(_starts))
-                            _t1 = datetime.fromisoformat(max(_ends))
-                            _secs = int((_t1 - _t0).total_seconds())
-                            if _secs >= 3600:
-                                _elapsed_str = f"{_secs // 3600}h{(_secs % 3600) // 60:02d}m"
-                            elif _secs >= 60:
-                                _elapsed_str = f"{_secs // 60}m{_secs % 60:02d}s"
+                            _t0_iso = min(_starts_a)
+                            if _running:
+                                _live_starts.append(_t0_iso)
                             else:
-                                _elapsed_str = f"{_secs}s"
+                                _end_iso = max(_ends_a) if _ends_a else None
+                                _proxy = _next_start_iso_by_att.get(_att_num)
+                                if _proxy and (not _end_iso or _proxy > _end_iso):
+                                    _end_iso = _proxy
+                                if _end_iso:
+                                    _t0_a = datetime.fromisoformat(_t0_iso)
+                                    _t1_a = datetime.fromisoformat(_end_iso)
+                                    _fixed_secs += max(0, int((_t1_a - _t0_a).total_seconds()))
                         except Exception:
                             pass
+
+                    def _fmt_total(_secs: int) -> str:
+                        if _secs >= 3600:
+                            return f"{_secs // 3600}h{(_secs % 3600) // 60:02d}m"
+                        if _secs >= 60:
+                            return f"{_secs // 60}m{_secs % 60:02d}s"
+                        return f"{_secs}s"
+
+                    _elapsed_str = ""
+                    if _live_starts:
+                        try:
+                            _now = datetime.now(timezone.utc)
+                            _live_secs_init = sum(
+                                max(0, int((_now - datetime.fromisoformat(_s)).total_seconds()))
+                                for _s in _live_starts
+                            )
+                        except Exception:
+                            _live_secs_init = 0
+                        _elapsed_str = _fmt_total(_fixed_secs + _live_secs_init)
+                    elif _fixed_secs > 0:
+                        _elapsed_str = _fmt_total(_fixed_secs)
                     _counts = "—"
                     if _attempts:
                         _jobs = _attempts[-1].get("jobs") or {}
@@ -2777,6 +2845,8 @@ class CommitHistoryGenerator:
                         "attempts_n": len(_attempts),
                         "counts": _counts,
                         "elapsed": _elapsed_str,
+                        "fixed_secs": _fixed_secs,
+                        "live_starts": ",".join(_live_starts),
                         "pr": _e.get("pr"),
                         "page_path": f"logs/{_date_str}/CI-{_sha_full[:11]}.html",
                     }

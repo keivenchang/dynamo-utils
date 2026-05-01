@@ -842,6 +842,37 @@ window.__dashboardOnReadyQueue.push(function() {
 });
 
 // copyToClipboard / copyFromClipboardAttr are provided by common_dashboard.j2
+
+// Live ticker for the Re-Validate column. Mirrors the per-SHA page's
+// `live-duration-total` span: text = data-fixed + sum(now - each data-live ISO).
+(function() {
+    function _ldPad(n) { return n < 10 ? '0' + n : '' + n; }
+    function _ldFmt(secs) {
+        if (secs < 0) return '—';
+        if (secs >= 3600) return Math.floor(secs / 3600) + 'h' + _ldPad(Math.floor((secs % 3600) / 60)) + 'm';
+        if (secs >= 60) return Math.floor(secs / 60) + 'm' + _ldPad(secs % 60) + 's';
+        return secs + 's';
+    }
+    function _ldTick() {
+        var now = Date.now();
+        document.querySelectorAll('.live-duration-total').forEach(function(el) {
+            var fixed = parseInt(el.getAttribute('data-fixed') || '0', 10) || 0;
+            var liveAttr = el.getAttribute('data-live') || '';
+            var liveSecs = 0;
+            if (liveAttr) {
+                liveAttr.split(',').forEach(function(s) {
+                    if (!s) return;
+                    var t = Date.parse(s);
+                    if (isNaN(t)) return;
+                    liveSecs += Math.floor((now - t) / 1000);
+                });
+            }
+            el.textContent = _ldFmt(fixed + liveSecs);
+        });
+    }
+    _ldTick();
+    window.setInterval(_ldTick, 1000);
+})();
 </script>
 {% endblock %}
 
@@ -927,6 +958,24 @@ window.__dashboardOnReadyQueue.push(function() {
 
 <div class="container">
 {# Default UX: collapse GitLab Status + Grafana columns on first load (users can re-enable via checkbox / URL state / localStorage). #}
+{#
+  ============================================================================
+  STOP — READ THIS BEFORE ADDING / REMOVING A <th> IN THE commits-table HEADER
+  ============================================================================
+  Current column count: 10
+  Columns (left → right): image_sha, Commit SHA, probe (Re-validate), github,
+                          gitlab, grafana, date, author, email, message.
+
+  Every expansion <tr> below this <thead> uses `<td colspan="N">` to span the
+  whole row. If you change the column count and forget to update the colspans,
+  the expanded panels (Commit info / GitHub checks / GitLab+registry / Docker
+  images — Azure ACR + AWS ECR + GitLab dev sub-sections) will stop short and
+  the layout will look broken (e.g. expansion ends at Email instead of Message).
+
+  When you add/remove a <th> here, also update ALL `colspan="N"` occurrences
+  in this file — search for `colspan=` and bump every one of them in lock-step.
+  ============================================================================
+#}
 <table id="commits-table" class="hide-col-gitlab hide-col-grafana hide-col-email hide-col-probe">
 <thead>
 <tr>
@@ -1076,7 +1125,7 @@ window.__dashboardOnReadyQueue.push(function() {
 {%- set _bg, _fg = '#fde0c2', '#9a4400' -%}
 {%- endif -%}
 <a href="{{ probe.page_path }}" target="_blank" rel="noopener noreferrer" style="text-decoration: none; color: inherit;" title="ci-health probe: {{ probe.state }} • attempt {{ probe.attempts }} • {{ probe.counts }}{% if probe.pr %} • PR #{{ probe.pr }}{% endif %}">
-<span style="display: inline-block; padding: 1px 8px; border-radius: 10px; font-size: 11px; font-weight: 600; background: {{ _bg }}; color: {{ _fg }};">{{ probe.state }}</span>{%- if probe.elapsed %} <span style="font-size: 11px; color: #586069; font-variant-numeric: tabular-nums;" title="total elapsed (start of first job → end of last job)">{{ probe.elapsed }}</span>{%- endif -%}{%- if probe.attempts_n and probe.attempts_n > 1 %} <span style="display: inline-block; width: 14px; height: 14px; line-height: 14px; text-align: center; background: #eaeef2; color: #586069; border-radius: 50%; font-size: 9px; font-variant-numeric: tabular-nums; vertical-align: middle;" title="{{ probe.attempts_n }} attempts">{{ probe.attempts_n }}</span>{%- endif -%}
+<span style="display: inline-block; padding: 1px 8px; border-radius: 10px; font-size: 11px; font-weight: 600; background: {{ _bg }}; color: {{ _fg }};">{{ probe.state }}</span>{%- if probe.elapsed %}{% if probe.live_starts %} <span class="live-duration-total" data-fixed="{{ probe.fixed_secs }}" data-live="{{ probe.live_starts }}" style="font-size: 11px; color: #586069; font-variant-numeric: tabular-nums;" title="total CI time (sum of attempt durations; live for in-progress)">{{ probe.elapsed }}</span>{% else %} <span style="font-size: 11px; color: #586069; font-variant-numeric: tabular-nums;" title="total CI time (sum of attempt durations)">{{ probe.elapsed }}</span>{% endif %}{%- endif -%}{%- if probe.attempts_n and probe.attempts_n > 1 %} <span style="display: inline-block; width: 14px; height: 14px; line-height: 14px; text-align: center; background: #eaeef2; color: #586069; border-radius: 50%; font-size: 9px; font-variant-numeric: tabular-nums; vertical-align: middle;" title="{{ probe.attempts_n }} attempts">{{ probe.attempts_n }}</span>{%- endif -%}
 </a>
 {%- else -%}
 <span style="color: #d0d7de;">—</span>
@@ -1351,7 +1400,7 @@ window.__dashboardOnReadyQueue.push(function() {
 
 {# Commit info dropdown row (message, files changed, stats) #}
 <tr class="commit-info-row" id="commit-info-row-{{ commit_sha_9 }}" style="display: none;">
-<td colspan="9" style="padding: 0; background-color: #f6f8fa;">
+<td colspan="10" style="padding: 0; background-color: #f6f8fa;">
 <div style="padding: 8px 12px; border-top: 1px solid #d0d7de;">
   <div style="display: flex; align-items: center; justify-content: flex-start; margin-bottom: 6px;">
     <button type="button"
@@ -1388,7 +1437,7 @@ window.__dashboardOnReadyQueue.push(function() {
 {# GitHub checks tree row (hidden by default) — includes pre-merge + post-merge CI trees #}
 {%- if commit.github_checks_tree_html or commit.post_merge_checks_tree_html -%}
 <tr id="github-tree-row-{{ commit_sha_9 }}" style="display: none;">
-<td colspan="9" style="padding: 0;">
+<td colspan="10" style="padding: 0;">
 <div style="padding: 0; border-top: 0;">
           <div style="display: flex; align-items: center; justify-content: flex-start; padding: 6px 8px 0 8px;">
             <button type="button"
@@ -1410,7 +1459,7 @@ window.__dashboardOnReadyQueue.push(function() {
 {# GitLab dropdown row (hidden by default): GitLab + commit details + registry info. #}
 {%- if commit.gitlab_checks_tree_html or has_gitlab -%}
 <tr id="gitlab-tree-row-{{ commit_sha_9 }}" style="display: none;">
-<td colspan="9" style="padding: 0;">
+<td colspan="10" style="padding: 0;">
 <div style="padding: 0; border-top: 0;">
           <div style="display: flex; align-items: center; justify-content: flex-start; padding: 6px 8px 0 8px;">
             <button type="button"
@@ -1468,7 +1517,7 @@ Framework: {{ img.framework }}">{{ display_tag }}</td>
 {%- set images = docker_images.get(commit_sha_9, []) -%}
 
 <tr class="docker-images-row" id="docker-row-{{ commit_sha_9 }}" style="display: none;">
-<td colspan="9" style="padding: 0; background-color: #f6f8fa;">
+<td colspan="10" style="padding: 0; background-color: #f6f8fa;">
 <div style="padding: 8px 12px; border-top: 1px solid #d0d7de;">
 <div style="display: flex; align-items: center; justify-content: flex-start; margin-bottom: 6px;">
   <button type="button"
