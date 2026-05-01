@@ -2733,6 +2733,30 @@ class CommitHistoryGenerator:
                     else:
                         _disp, _cls = _state, "probe-progress"
                     _attempts = _e.get("attempts") or []
+                    # Total elapsed: earliest job started → latest job completed
+                    # across all attempts. Used as a wall-clock summary.
+                    _elapsed_str = ""
+                    _starts: list[str] = []
+                    _ends: list[str] = []
+                    for _a in _attempts:
+                        for _v in (_a.get("jobs") or {}).values():
+                            if isinstance(_v, dict):
+                                _s = _v.get("started_at"); _c = _v.get("completed_at")
+                                if _s: _starts.append(_s)
+                                if _c: _ends.append(_c)
+                    if _starts and _ends:
+                        try:
+                            _t0 = datetime.fromisoformat(min(_starts))
+                            _t1 = datetime.fromisoformat(max(_ends))
+                            _secs = int((_t1 - _t0).total_seconds())
+                            if _secs >= 3600:
+                                _elapsed_str = f"{_secs // 3600}h{(_secs % 3600) // 60:02d}m"
+                            elif _secs >= 60:
+                                _elapsed_str = f"{_secs // 60}m{_secs % 60:02d}s"
+                            else:
+                                _elapsed_str = f"{_secs}s"
+                        except Exception:
+                            pass
                     _counts = "—"
                     if _attempts:
                         _jobs = _attempts[-1].get("jobs") or {}
@@ -2752,6 +2776,7 @@ class CommitHistoryGenerator:
                         "attempts": f"{len(_attempts)}/3",
                         "attempts_n": len(_attempts),
                         "counts": _counts,
+                        "elapsed": _elapsed_str,
                         "pr": _e.get("pr"),
                         "page_path": f"logs/{_date_str}/CI-{_sha_full[:11]}.html",
                     }

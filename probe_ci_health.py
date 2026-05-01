@@ -1548,6 +1548,15 @@ def _render_probe_page(sha: str, entry: dict) -> str:
     img = entry.get("image_sha256") or "?"
     merge_dt = _short_merge_date(entry.get("merge_date"))
     n_att = len(entry.get("attempts", []))
+    subj, orig_pr, author = commit_subject_pr_author(sha)
+    subj_esc = _html_escape(subj) if subj else ""
+    author_esc = _html_escape(author) if author else ""
+    orig_pr_html = (
+        f', PR <a href="https://github.com/{REPO}/pull/{orig_pr}" target="_blank" rel="noopener noreferrer">#{orig_pr}</a>'
+        if orig_pr else ""
+    )
+    title_html = f' &ldquo;{subj_esc}&rdquo;' if subj_esc else ""
+    author_html = f' by {author_esc}' if author_esc else ""
 
     head = f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
@@ -1562,8 +1571,8 @@ def _render_probe_page(sha: str, entry: dict) -> str:
   <span>Attempts: <code>{n_att}/{entry.get('max_attempts', DEFAULT_MAX_ATTEMPTS)}</code></span>
 </div>
 <div class="meta">
-  <span><a href="{commit_url}" target="_blank" rel="noopener noreferrer">commit on GitHub</a></span>
-  <span><a href="{pr_url}" target="_blank" rel="noopener noreferrer">probe PR{f" #{pr}" if pr else ""}</a></span>
+  <span><a href="{commit_url}" target="_blank" rel="noopener noreferrer">{short_sha(sha)}</a> on GitHub{orig_pr_html}{title_html}{author_html}</span>
+  <span style="margin-left: 16px;">probe: <a href="{pr_url}" target="_blank" rel="noopener noreferrer">PR{f" #{pr}" if pr else ""}</a></span>
 </div>
 """
     # If overall PASSED but earlier attempts had failures → flake banner.
@@ -1728,6 +1737,21 @@ def _render_probe_page(sha: str, entry: dict) -> str:
         if runs:
             job_last_attempt[name] = runs[-1][0]
 
+    # 5 longest (job, attempt) pairs by wall-clock duration → mark with ⏱.
+    _durations: list[tuple[float, str, int]] = []
+    for _name, _att_num, _j in flat_rows:
+        if not isinstance(_j, dict):
+            continue
+        _s = _j.get("started_at"); _c = _j.get("completed_at")
+        if not (_s and _c):
+            continue
+        try:
+            _secs = (datetime.fromisoformat(_c) - datetime.fromisoformat(_s)).total_seconds()
+        except Exception:
+            continue
+        _durations.append((_secs, _name, _att_num))
+    longest_keys = {(n, a) for _, n, a in sorted(_durations, reverse=True)[:5]}
+
     for name, att_num, j in flat_rows:
         conc = _job_conclusion(j)
         is_req = name in REQUIRED_CHECKS
@@ -1812,7 +1836,7 @@ def _render_probe_page(sha: str, entry: dict) -> str:
             f"<td class='job-name'>{name_html}{snippet_toggle_html}</td>"
             f"<td class='attempt-cell'>{att_num}</td>"
             f"<td class='started-cell'>{started_pt}</td>"
-            f"<td class='duration-cell'>{duration}</td>"
+            f"<td class='duration-cell'>{'⏱ ' if (name, att_num) in longest_keys else ''}{duration}</td>"
             f"<td>{detail_html}</td>"
             f"</tr>"
         )
