@@ -74,6 +74,12 @@ PROBE_FILES = [
 DEFAULT_PARALLELISM = 4
 DEFAULT_MAX_ATTEMPTS = 3
 
+# A job that's been running this long is treated as stuck — the parent
+# workflow gets cancelled and (if attempts remain) the retry path spawns
+# the next attempt. Multi-arch arm64 builders occasionally hang past their
+# normal 1-2h envelope; 4h is well beyond that without being aggressive.
+STUCK_ATTEMPT_HOURS = 4
+
 # Required status checks on `main` (from repo rulesets, integration_id 15368).
 # Everything else (runtime tests, docker builds, …) is optional but rolls up
 # into the status-check aggregators. Refresh via:
@@ -509,6 +515,13 @@ def rerun_failed_jobs(run_id: int, dry_run: bool) -> None:
     gh_api(f"repos/{REPO}/actions/runs/{run_id}/rerun-failed-jobs", method="POST")
 
 
+def cancel_run(run_id: int, dry_run: bool) -> None:
+    if dry_run:
+        logger.info("[dry-run] would cancel run_id=%s", run_id)
+        return
+    gh_api(f"repos/{REPO}/actions/runs/{run_id}/cancel", method="POST")
+
+
 def _build_status_comment(entry: dict) -> str:
     """Build a Markdown summary of probe attempts for posting on PR close."""
     verdict = entry.get("verdict", "?")
@@ -924,6 +937,9 @@ def cycle(
         # readers handle both via _job_conclusion().
         all_jobs: dict[str, dict] = {}
         all_job_meta: list[tuple[str, int, str]] = []  # (name, id, conclusion)
+        # Local-only map: job_name → workflow_run_id. Used to find the parent
+        # run for a stuck job below; not persisted to the DB schema.
+        job_to_run_id: dict[str, int] = {}
         for r in latest.values():
             for j in get_run_jobs(r["id"]):
                 if j.get("status") != "completed":
@@ -938,12 +954,58 @@ def cycle(
                     "completed_at": j.get("completed_at"),
                 }
                 all_job_meta.append((j["name"], int(j.get("id") or 0), conclusion))
+                job_to_run_id[j["name"]] = r["id"]
         att["jobs"] = all_jobs
         att["failed_jobs"] = sorted(
             n
             for n, m in all_jobs.items()
             if m["conclusion"] in ("failure", "timed_out")
         )
+
+        # Stuck-attempt cancellation: if any job in this attempt has been
+        # running > STUCK_ATTEMPT_HOURS, cancel its parent workflow. The
+        # next cycle will see conclusion=cancelled and the retry path will
+        # fire (rerun-failed-jobs reissues cancelled jobs in attempt N+1).
+        # We mark the attempt with `cancelled_for_stuck` so the finalizer
+        # forces a retry even if no required job ends up failing — without
+        # that flag, an attempt that only had an optional multi-arch hang
+        # could be classified as PASSED with the build never having run.
+        sha_max_attempts = entry.get("max_attempts", max_attempts)
+        if current_attempt < sha_max_attempts:
+            now_dt = datetime.now(timezone.utc)
+            threshold = STUCK_ATTEMPT_HOURS * 3600
+            stuck_run_ids: set[int] = set()
+            for name, m in all_jobs.items():
+                if m.get("conclusion") != "running":
+                    continue
+                s = m.get("started_at")
+                if not s:
+                    continue
+                try:
+                    age = (
+                        now_dt - datetime.fromisoformat(s.replace("Z", "+00:00"))
+                    ).total_seconds()
+                except Exception:
+                    continue
+                if age > threshold:
+                    rid = job_to_run_id.get(name)
+                    if rid is not None and rid not in stuck_run_ids:
+                        stuck_run_ids.add(rid)
+                        logger.warning(
+                            "STUCK %s job '%s' running %dh%02dm — cancelling run %s",
+                            short_sha(sha),
+                            name,
+                            int(age // 3600),
+                            int((age % 3600) // 60),
+                            rid,
+                        )
+            for run_id in stuck_run_ids:
+                try:
+                    cancel_run(run_id, dry_run=dry_run)
+                except Exception as e:
+                    logger.error("cancel run %s: %s", run_id, e)
+            if stuck_run_ids:
+                att["cancelled_for_stuck"] = True
 
         # Drill into logs for failed jobs and pull pytest test IDs.
         # Skip only if we already have a non-empty result (lets regex fixes
@@ -988,8 +1050,12 @@ def cycle(
 
         required_failed = [n for n in att["failed_jobs"] if n in REQUIRED_CHECKS]
         any_optional_failed = bool(set(att["failed_jobs"]) - REQUIRED_CHECKS)
-        sha_max_attempts = entry.get("max_attempts", max_attempts)
-        if not required_failed:
+        # sha_max_attempts already computed above for the stuck-cancel block.
+        # An attempt we cancelled because a job ran past STUCK_ATTEMPT_HOURS
+        # must NOT be classified as PASSED here — even if every required job
+        # happened to have finished before the cancel. Force the retry path.
+        force_retry = bool(att.get("cancelled_for_stuck"))
+        if not required_failed and not force_retry:
             entry["state"] = "passed"
             entry["verdict"] = "good"
             opt_note = " (optional failures present, ignored)" if any_optional_failed else ""
