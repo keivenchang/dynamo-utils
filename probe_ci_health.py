@@ -2253,6 +2253,138 @@ def _probe_filename(sha: str) -> str:
     return f"CI-{short_sha(sha)}.html"
 
 
+def _render_aggregate_report(
+    db: dict,
+    page_paths: dict[str, str],
+    max_commits: int = 100,
+    top_n: int = 5,
+) -> str:
+    """Cross-SHA aggregate report. Walks the most recent `max_commits` probed
+    SHAs and counts:
+      - failure categories (from log_meta[*].categories) — "failing reasons"
+      - pytest failed_tests entries — "failing tests"
+    Output: top_n of each, with the SHAs that contributed each occurrence
+    linked to the per-SHA page so the user can drill in."""
+    from collections import Counter
+
+    sorted_shas = list(_sha_entries_sorted(db))[:max_commits]
+
+    # name → counter, with parallel SHA contribution map for drill-down.
+    cat_count: Counter[str] = Counter()
+    cat_shas: dict[str, list[str]] = {}
+    test_count: Counter[str] = Counter()
+    test_shas: dict[str, list[str]] = {}
+
+    n_attempts = 0
+    n_failed_jobs = 0
+    n_with_failures = 0
+    for sha, e in sorted_shas:
+        sha_had_failure = False
+        for a in e.get("attempts") or []:
+            n_attempts += 1
+            for _job_name, info in (a.get("log_meta") or {}).items():
+                for c in (info.get("categories") or []):
+                    if not c:
+                        continue
+                    cat_count[c] += 1
+                    cat_shas.setdefault(c, []).append(sha)
+                    sha_had_failure = True
+            for _job_name, tests in (a.get("failed_tests") or {}).items():
+                for t in tests:
+                    if not t:
+                        continue
+                    test_count[t] += 1
+                    test_shas.setdefault(t, []).append(sha)
+                    sha_had_failure = True
+            n_failed_jobs += len(a.get("failed_jobs") or [])
+        if sha_had_failure:
+            n_with_failures += 1
+
+    def _sha_link(sha: str) -> str:
+        link = page_paths.get(sha, "#")
+        return (
+            f"<a href='{link}' target='_blank' rel='noopener noreferrer'>"
+            f"<code>{short_sha(sha)}</code></a>"
+        )
+
+    def _shas_html(shas: list[str], limit: int = 8) -> str:
+        # Dedup while preserving order (most-recent first since input is desc).
+        seen, ordered = set(), []
+        for s in shas:
+            if s in seen:
+                continue
+            seen.add(s)
+            ordered.append(s)
+        head = " ".join(_sha_link(s) for s in ordered[:limit])
+        more = f" <span class='muted'>+{len(ordered) - limit} more</span>" if len(ordered) > limit else ""
+        return head + more
+
+    cat_rows = []
+    for rank, (cat, n) in enumerate(cat_count.most_common(top_n), 1):
+        cat_rows.append(
+            f"<tr>"
+            f"<td><strong>{rank}</strong></td>"
+            f"<td class='num-nz'>{n}</td>"
+            f"<td><code>{_html_escape(cat)}</code></td>"
+            f"<td>{_shas_html(cat_shas.get(cat, []))}</td>"
+            f"</tr>"
+        )
+    if not cat_rows:
+        cat_rows.append(
+            "<tr><td colspan='4' style='color:#586069;text-align:center;padding:8px;'>"
+            "No categorized failures in the last "
+            f"{len(sorted_shas)} commit(s)."
+            "</td></tr>"
+        )
+
+    test_rows = []
+    for rank, (test, n) in enumerate(test_count.most_common(top_n), 1):
+        test_rows.append(
+            f"<tr>"
+            f"<td><strong>{rank}</strong></td>"
+            f"<td class='num-nz'>{n}</td>"
+            f"<td><code>{_html_escape(test)}</code></td>"
+            f"<td>{_shas_html(test_shas.get(test, []))}</td>"
+            f"</tr>"
+        )
+    if not test_rows:
+        test_rows.append(
+            "<tr><td colspan='4' style='color:#586069;text-align:center;padding:8px;'>"
+            "No pytest failures in the last "
+            f"{len(sorted_shas)} commit(s)."
+            "</td></tr>"
+        )
+
+    return f"""<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<title>Re-validate report</title>
+{_HTML_STYLE}
+</head><body>
+<h1>Re-validate report</h1>
+<div class="meta">
+  Generated {now_iso()}. Aggregated across the {len(sorted_shas)} most-recent
+  probed commit(s); {n_attempts} attempt(s) total, {n_with_failures} commit(s)
+  with at least one failure ({n_failed_jobs} failed job-run(s)).
+  <a href="index.html" style="color:#0969da;">← back to per-SHA index</a>
+</div>
+
+<h2>Top {top_n} failing reasons <small style='color:#586069;font-weight:400'>(category occurrences across all attempts)</small></h2>
+<table class="attempt-table">
+<thead><tr><th>Rank</th><th>Count</th><th>Category</th><th>Affected commits (newest first)</th></tr></thead>
+<tbody>
+{''.join(cat_rows)}
+</tbody></table>
+
+<h2>Top {top_n} failing tests <small style='color:#586069;font-weight:400'>(pytest test-id occurrences)</small></h2>
+<table class="attempt-table">
+<thead><tr><th>Rank</th><th>Count</th><th>Test</th><th>Affected commits (newest first)</th></tr></thead>
+<tbody>
+{''.join(test_rows)}
+</tbody></table>
+</body></html>
+"""
+
+
 def cmd_render_html(output_root: Path | None = None) -> None:
     """Render per-SHA detail pages + index under output_root."""
     if output_root is None:
@@ -2276,7 +2408,9 @@ def cmd_render_html(output_root: Path | None = None) -> None:
             old.unlink()
     index_path = output_root / "index.html"
     index_path.write_text(_render_probe_index(db, page_paths))
-    print(f"wrote {n_pages} per-SHA pages + {index_path}")
+    report_path = output_root / "re-validate.html"
+    report_path.write_text(_render_aggregate_report(db, page_paths))
+    print(f"wrote {n_pages} per-SHA pages + {index_path} + {report_path}")
 
 
 def _retry_failed_entry(
