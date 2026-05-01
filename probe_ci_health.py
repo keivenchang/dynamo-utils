@@ -1836,18 +1836,29 @@ def _render_probe_page(sha: str, entry: dict) -> str:
     # slowest job. Walk top-down: as long as durs[i] > 2 * durs[i+1] AND
     # > 60s (don't bother with tiny jobs), keep marking. Stop on the first
     # gap that's ≤2× — everything below clusters with the rest.
+    # Outlier rule: find the biggest *ratio gap* between consecutive
+    # sorted durations. Mark everything above that gap if the ratio is
+    # > 2× and the marked entries are ≥ 60s. This handles tied/clustered
+    # outliers (e.g. 4 jobs all stuck at 228m together): they all sit
+    # above the gap to the next-fastest job, so all 4 get flagged.
     longest_keys: set[tuple[str, int]] = set()
     if len(_durations) >= 2:
-        ranked = sorted(_durations, reverse=True)  # by duration desc
+        ranked = sorted(_durations, reverse=True)  # desc by duration
+        best_gap_idx = -1
+        best_ratio = 0.0
         for i in range(len(ranked) - 1):
-            d_i, n_i, a_i = ranked[i]
+            d_i, _, _ = ranked[i]
             d_next, _, _ = ranked[i + 1]
             if d_i < 60.0:
                 break
-            if d_i > 2 * max(d_next, 1.0):
-                longest_keys.add((n_i, a_i))
-            else:
-                break
+            ratio = d_i / max(d_next, 1.0)
+            if ratio > best_ratio:
+                best_ratio = ratio
+                best_gap_idx = i
+        if best_gap_idx >= 0 and best_ratio > 2.0:
+            for d_i, n_i, a_i in ranked[: best_gap_idx + 1]:
+                if d_i >= 60.0:
+                    longest_keys.add((n_i, a_i))
 
     # Anything over 1h gets a red Duration cell, regardless of outlier status.
     over_1h_keys: set[tuple[str, int]] = {
