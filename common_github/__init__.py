@@ -1542,7 +1542,7 @@ class GitHubAPIClient:
         self,
         url: str,
         *,
-        timeout: int = 10,
+        timeout: int = 30,
         allow_redirects: bool = True,
         stream: bool = False,
         params: Optional[Dict[str, Any]] = None,
@@ -1601,7 +1601,33 @@ class GitHubAPIClient:
             headers['If-None-Match'] = etag
 
         t0_req = time.monotonic()
-        resp = requests.get(url, headers=headers, params=params, timeout=timeout, allow_redirects=allow_redirects, stream=stream)
+        # Retry transient timeouts and connection errors. GitHub's REST API
+        # has bimodal latency: usually <1s, but ~p99 spikes past 10s. A
+        # single failure aborts whole regens (commit-history, probe), and
+        # the cron's 30-min cycle leaves the index visibly stale until the
+        # next cron tick. Three tries with exponential backoff covers the
+        # transient case; persistent outages still surface to the caller.
+        _last_exc = None
+        for _try_idx in range(3):
+            try:
+                resp = requests.get(
+                    url, headers=headers, params=params, timeout=timeout,
+                    allow_redirects=allow_redirects, stream=stream,
+                )
+                _last_exc = None
+                break
+            except (requests.exceptions.ReadTimeout, requests.exceptions.ConnectionError) as _e:
+                _last_exc = _e
+                if _try_idx == 2:
+                    break
+                _sleep = 2.0 * (2 ** _try_idx)
+                self.logger.warning(
+                    "GH REST %s [%s] %s — retrying in %.1fs (try %d/3)",
+                    type(_e).__name__, label, url, _sleep, _try_idx + 2,
+                )
+                time.sleep(_sleep)
+        if _last_exc is not None:
+            raise _last_exc
         dt = max(0.0, time.monotonic() - t0_req)
         GITHUB_API_STATS.rest_time_total_s += float(dt)
         GITHUB_API_STATS.rest_time_by_label_s[label] = float(GITHUB_API_STATS.rest_time_by_label_s.get(label, 0.0)) + float(dt)
