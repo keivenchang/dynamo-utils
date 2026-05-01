@@ -998,8 +998,13 @@ def cycle(
                 short_sha(sha), current_attempt, opt_note,
             )
         elif current_attempt < sha_max_attempts:
+            # Also rerun "cancelled" workflows: when a required job (e.g.
+            # backend-status-check) fails, GitHub often cascade-cancels the
+            # parent workflow, so its conclusion is "cancelled" rather than
+            # "failure". Without this branch the retry trigger silently
+            # skips the workflow and we get stuck in `in_progress` forever.
             for r in latest.values():
-                if r.get("conclusion") in ("failure", "timed_out"):
+                if r.get("conclusion") in ("failure", "timed_out", "cancelled"):
                     try:
                         rerun_failed_jobs(r["id"], dry_run=dry_run)
                     except Exception as e:
@@ -1844,11 +1849,26 @@ def _render_probe_page(sha: str, entry: dict) -> str:
         if runs:
             job_last_attempt[name] = runs[-1][0]
 
+    # For stale-running jobs (att N has conclusion=running but a later att N+1
+    # exists for the same job), use att N+1's started_at as a proxy end. The
+    # job was effectively abandoned when the next attempt spun up; that gives
+    # us a frozen duration instead of a forever-ticking "now - start_at".
+    next_att_start_for_job: dict[tuple[str, int], str] = {}
+    for _name, _runs in job_runs.items():
+        for _i, (_an, _) in enumerate(_runs[:-1]):
+            _nxt_j = _runs[_i + 1][1]
+            _nxt_s = _nxt_j.get("started_at") if isinstance(_nxt_j, dict) else None
+            if _nxt_s:
+                next_att_start_for_job[(_name, _an)] = _nxt_s
+
     # Outlier (job, attempt) pairs by wall-clock duration → mark with ⏱.
-    # Includes still-running jobs (use "now" as end). Tukey fence:
-    # duration > Q3 + 1.5*IQR. Only flags jobs that are *meaningfully*
-    # slower than the rest; if everything is roughly the same speed,
-    # no clock is shown.
+    # Genuinely-running jobs use "now" as end. Stale-running rows (older
+    # attempts of a job that was rerun) are excluded from outlier
+    # consideration entirely — their duration is artificial (start until
+    # external cancel/supersede), not a fair signal of "slow build".
+    # Tukey fence: duration > Q3 + 1.5*IQR. Only flags jobs that are
+    # *meaningfully* slower than the rest; if everything is roughly the
+    # same speed, no clock is shown.
     _durations: list[tuple[float, str, int]] = []
     _now_utc = datetime.now(timezone.utc)
     for _name, _att_num, _j in flat_rows:
@@ -1858,6 +1878,9 @@ def _render_probe_page(sha: str, entry: dict) -> str:
         if not _s:
             continue
         _c = _j.get("completed_at")
+        # Skip stale-running rows from outlier/over-1h detection.
+        if not _c and (_name, _att_num) in next_att_start_for_job:
+            continue
         try:
             _t0 = datetime.fromisoformat(_s)
             _t1 = datetime.fromisoformat(_c) if _c else _now_utc
@@ -1902,6 +1925,21 @@ def _render_probe_page(sha: str, entry: dict) -> str:
     for name, att_num, j in flat_rows:
         conc = _job_conclusion(j)
         is_req = name in REQUIRED_CHECKS
+        # Stale-running guard: probe DB only refreshes the latest attempt's
+        # job state. If this job has a later attempt-row in the table, this
+        # earlier row's "running" conclusion is stale — the job was either
+        # cancelled by the rerun or simply superseded. Treat as cancelled,
+        # and inject a proxy completed_at (next attempt's started_at) so the
+        # duration cell shows a frozen value rather than the misleading "—"
+        # that _job_timing would otherwise produce for cancelled-no-end.
+        if (
+            conc in ("running", "queued", "pending")
+            and att_num < job_last_attempt.get(name, att_num)
+        ):
+            conc = "cancelled"
+            _proxy_end = next_att_start_for_job.get((name, att_num))
+            if _proxy_end and isinstance(j, dict) and not j.get("completed_at"):
+                j = {**j, "completed_at": _proxy_end}
         if conc in ("failure", "timed_out"):
             is_last = att_num == job_last_attempt.get(name)
             row_class = "fail-final" if is_last else "fail-flake"
