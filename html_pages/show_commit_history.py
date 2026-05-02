@@ -2806,11 +2806,15 @@ class CommitHistoryGenerator:
                             pass
 
                     def _fmt_total(_secs: int) -> str:
-                        if _secs >= 3600:
-                            return f"{_secs // 3600}h{(_secs % 3600) // 60:02d}m"
-                        if _secs >= 60:
+                        # Match probe_ci_health._fmt_duration: Ns / MmSSs / HhMm / DdHhMm.
+                        if _secs < 60:
+                            return f"{_secs}s"
+                        if _secs < 3600:
                             return f"{_secs // 60}m{_secs % 60:02d}s"
-                        return f"{_secs}s"
+                        if _secs < 86400:
+                            return f"{_secs // 3600}h{(_secs % 3600) // 60}m"
+                        _days, _rem = divmod(_secs, 86400)
+                        return f"{_days}d{_rem // 3600}h{(_rem % 3600) // 60}m"
 
                     _elapsed_str = ""
                     if _live_starts:

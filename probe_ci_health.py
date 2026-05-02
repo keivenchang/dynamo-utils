@@ -1244,11 +1244,22 @@ def _job_url(j) -> str | None:
 
 
 def _fmt_duration(secs: int) -> str:
+    """Compact human-readable duration: Ns / MmSSs / HhMm / DdHhMm.
+
+    Single-digit minor components stay unpadded ('4h3m', '1d4h5m') except for
+    the seconds in MmSSs which we keep zero-padded so 5m09s and 5m59s line up
+    visually in stacked tables. Examples: 45s, 5m31s, 5m09s, 4h3m, 1d4h5m.
+    """
     if secs < 0:
         return "—"
-    if secs >= 60:
+    if secs < 60:
+        return f"{secs}s"
+    if secs < 3600:
         return f"{secs // 60}m{secs % 60:02d}s"
-    return f"{secs}s"
+    if secs < 86400:
+        return f"{secs // 3600}h{(secs % 3600) // 60}m"
+    days, rem = divmod(secs, 86400)
+    return f"{days}d{rem // 3600}h{(rem % 3600) // 60}m"
 
 
 def _job_timing(j, conclusion: str = "") -> tuple[str, str]:
@@ -1294,8 +1305,20 @@ _LIVE_DURATION_JS = """
   function pad(n) { return n < 10 ? "0" + n : "" + n; }
   function fmt(secs) {
     if (secs < 0) return "—";
-    if (secs >= 60) return Math.floor(secs / 60) + "m" + pad(secs % 60) + "s";
-    return secs + "s";
+    if (secs < 60) return secs + "s";
+    if (secs < 3600) return Math.floor(secs / 60) + "m" + pad(secs % 60) + "s";
+    if (secs < 86400) return Math.floor(secs / 3600) + "h" + Math.floor((secs % 3600) / 60) + "m";
+    var days = Math.floor(secs / 86400);
+    var rem = secs % 86400;
+    return days + "d" + Math.floor(rem / 3600) + "h" + Math.floor((rem % 3600) / 60) + "m";
+  }
+  function _setOver90m(el, secs) {
+    // Toggle the red-class on the cell that contains this live span (and on
+    // the span itself in case CSS targets it directly). >90m == > 5400s.
+    var over = secs > 5400;
+    el.classList.toggle("duration-over-90m", over);
+    var td = el.closest("td");
+    if (td) td.classList.toggle("duration-over-90m", over);
   }
   function tick() {
     var now = Date.now();
@@ -1304,7 +1327,9 @@ _LIVE_DURATION_JS = """
       if (!s) return;
       var t = Date.parse(s);
       if (isNaN(t)) return;
-      el.textContent = fmt(Math.floor((now - t) / 1000));
+      var secs = Math.floor((now - t) / 1000);
+      el.textContent = fmt(secs);
+      _setOver90m(el, secs);
     });
     document.querySelectorAll(".live-duration-total").forEach(function(el) {
       var fixed = parseInt(el.getAttribute("data-fixed") || "0", 10) || 0;
@@ -1318,7 +1343,9 @@ _LIVE_DURATION_JS = """
           liveSecs += Math.floor((now - t) / 1000);
         });
       }
-      el.textContent = fmt(fixed + liveSecs);
+      var total = fixed + liveSecs;
+      el.textContent = fmt(total);
+      _setOver90m(el, total);
     });
   }
   tick();
@@ -1644,7 +1671,11 @@ _HTML_STYLE = """
   td.cat-cell { white-space: nowrap; min-width: 200px; }
   td.started-cell, td.duration-cell, td.status-cell, td.attempt-cell { white-space: nowrap; }
   td.duration-outlier { font-weight: 700; }
-  td.duration-over-1h { color: #d73a49; }
+  /* Anything > 90 min is unusually slow — red on the per-SHA pages only
+     (per-job row Duration cell, attempt-overview Duration column, Total CI
+     time). JS tickers toggle the class as the clock crosses 5400s. The
+     commit-history index.html keeps its own (unrelated) styling. */
+  .duration-over-90m, td.duration-over-90m { color: #d73a49; }
   .attempt-summary { margin: 12px 0 4px 0; }
   .attempt-summary .pill { margin-right: 6px; }
   .snip-toggle { cursor: pointer; user-select: none; display: inline-block;
@@ -1872,6 +1903,8 @@ def _render_probe_page(sha: str, entry: dict) -> str:
         starts = [j.get("started_at") for _, j in these if isinstance(j, dict) and j.get("started_at")]
         ends = [j.get("completed_at") for _, j in these if isinstance(j, dict) and j.get("completed_at")]
         att_dur_str = "—"
+        att_dur_secs = 0  # used for the >90m red-class decision (frozen rows)
+        att_is_live = False
         if starts:
             try:
                 t0_iso = min(starts)
@@ -1879,6 +1912,8 @@ def _render_probe_page(sha: str, entry: dict) -> str:
                 if running_jobs:
                     now = datetime.now(timezone.utc)
                     _secs = max(0, int((now - _t0).total_seconds()))
+                    att_dur_secs = _secs
+                    att_is_live = True
                     live_starts.append(t0_iso)
                     att_dur_str = (
                         f"<span class='live-duration' data-started='{t0_iso}'>"
@@ -1892,6 +1927,7 @@ def _render_probe_page(sha: str, entry: dict) -> str:
                     if end_iso:
                         _t1 = datetime.fromisoformat(end_iso)
                         _secs = max(0, int((_t1 - _t0).total_seconds()))
+                        att_dur_secs = _secs
                         fixed_total_secs += _secs
                         att_dur_str = _fmt_duration(_secs)
             except Exception:
@@ -1945,6 +1981,8 @@ def _render_probe_page(sha: str, entry: dict) -> str:
             cls = "num-zero" if n == 0 else "num-nz"
             return f"<td class='{cls}'>{n}</td>"
 
+        # Red the Duration cell when frozen value > 90m. Live rows let JS toggle.
+        _att_dur_cls = " duration-over-90m" if (not att_is_live and att_dur_secs > 5400) else ""
         summary_lines.append(
             f"<tr>"
             f"<td><strong>{att_num}</strong></td>"
@@ -1953,11 +1991,12 @@ def _render_probe_page(sha: str, entry: dict) -> str:
             f"{_cell(opt_pass)}{_cell(opt_fail)}"
             f"{_cell(req_run + opt_run)}"
             f"{_cell(n_skip)}"
-            f"<td style='font-variant-numeric: tabular-nums;'>{att_dur_str}</td>"
+            f"<td class='att-dur-cell{_att_dur_cls}' style='font-variant-numeric: tabular-nums;'>{att_dur_str}</td>"
             f"</tr>"
         )
     if fixed_total_secs > 0 or live_starts:
         # Total = fixed completed time + live (now - earliest live start) summed.
+        total_is_live = bool(live_starts)
         if live_starts:
             try:
                 now = datetime.now(timezone.utc)
@@ -1975,11 +2014,14 @@ def _render_probe_page(sha: str, entry: dict) -> str:
                 f"{_fmt_duration(total_init)}</span>"
             )
         else:
+            total_init = fixed_total_secs
             total_html = _fmt_duration(fixed_total_secs)
+        # Red when frozen total > 90m. Live cells let JS toggle.
+        _total_cls = " duration-over-90m" if (not total_is_live and total_init > 5400) else ""
         summary_lines.append(
             "<tr style='border-top: 2px solid #d0d7de; font-weight:600;'>"
             "<td colspan='8' style='text-align:right; color:#586069;'>Total CI time</td>"
-            f"<td style='font-variant-numeric: tabular-nums;'>{total_html}</td>"
+            f"<td class='total-ci-cell{_total_cls}' style='font-variant-numeric: tabular-nums;'>{total_html}</td>"
             "</tr>"
         )
     summary_lines.append("</tbody></table>")
@@ -2082,8 +2124,8 @@ def _render_probe_page(sha: str, entry: dict) -> str:
                     longest_keys.add((n_i, a_i))
 
     # Anything over 1h gets a red Duration cell, regardless of outlier status.
-    over_1h_keys: set[tuple[str, int]] = {
-        (n, a) for d, n, a in _durations if d >= 3600.0
+    over_90m_keys: set[tuple[str, int]] = {
+        (n, a) for d, n, a in _durations if d >= 5400.0
     }
 
     for name, att_num, j in flat_rows:
@@ -2187,7 +2229,7 @@ def _render_probe_page(sha: str, entry: dict) -> str:
             f"<td class='started-cell'>{started_pt}</td>"
             f"<td class='duration-cell"
             f"{' duration-outlier' if (name, att_num) in longest_keys else ''}"
-            f"{' duration-over-1h' if (name, att_num) in over_1h_keys else ''}"
+            f"{' duration-over-90m' if (name, att_num) in over_90m_keys else ''}"
             f"'>{duration}{' ⏱' if (name, att_num) in longest_keys else ''}</td>"
             f"<td>{detail_html}</td>"
             f"</tr>"
@@ -2257,7 +2299,8 @@ def _render_aggregate_report(
     db: dict,
     page_paths: dict[str, str],
     max_commits: int = 100,
-    top_n: int = 5,
+    top_reasons: int = 5,
+    top_tests: int = 20,
 ) -> str:
     """Cross-SHA aggregate report. Walks the most recent `max_commits` probed
     SHAs and counts:
@@ -2269,11 +2312,14 @@ def _render_aggregate_report(
 
     sorted_shas = list(_sha_entries_sorted(db))[:max_commits]
 
-    # name → counter, with parallel SHA contribution map for drill-down.
+    # name → counter, with parallel (sha, job_url) contribution map for
+    # drill-down. The link target is the job's GitHub Actions URL (when
+    # available) so the user lands directly on the failing job's logs.
+    # cat -> [(sha, job_url, job_name, job_id)]
     cat_count: Counter[str] = Counter()
-    cat_shas: dict[str, list[str]] = {}
+    cat_jobs: dict[str, list[tuple[str, str | None, str, int | None]]] = {}
     test_count: Counter[str] = Counter()
-    test_shas: dict[str, list[str]] = {}
+    test_jobs: dict[str, list[tuple[str, str | None, str, int | None]]] = {}
 
     n_attempts = 0
     n_failed_jobs = 0
@@ -2282,51 +2328,66 @@ def _render_aggregate_report(
         sha_had_failure = False
         for a in e.get("attempts") or []:
             n_attempts += 1
-            for _job_name, info in (a.get("log_meta") or {}).items():
+            jobs_dict = a.get("jobs") or {}
+            for job_name, info in (a.get("log_meta") or {}).items():
+                jd = jobs_dict.get(job_name) if isinstance(jobs_dict.get(job_name), dict) else None
+                job_url = jd.get("url") if jd else None
+                job_id = jd.get("id") if jd else None
                 for c in (info.get("categories") or []):
                     if not c:
                         continue
                     cat_count[c] += 1
-                    cat_shas.setdefault(c, []).append(sha)
+                    cat_jobs.setdefault(c, []).append((sha, job_url, job_name, job_id))
                     sha_had_failure = True
-            for _job_name, tests in (a.get("failed_tests") or {}).items():
+            for job_name, tests in (a.get("failed_tests") or {}).items():
+                jd = jobs_dict.get(job_name) if isinstance(jobs_dict.get(job_name), dict) else None
+                job_url = jd.get("url") if jd else None
+                job_id = jd.get("id") if jd else None
                 for t in tests:
                     if not t:
                         continue
                     test_count[t] += 1
-                    test_shas.setdefault(t, []).append(sha)
+                    test_jobs.setdefault(t, []).append((sha, job_url, job_name, job_id))
                     sha_had_failure = True
             n_failed_jobs += len(a.get("failed_jobs") or [])
         if sha_had_failure:
             n_with_failures += 1
 
-    def _sha_link(sha: str) -> str:
-        link = page_paths.get(sha, "#")
+    def _job_link(sha: str, url: str | None, job_name: str, job_id: int | None) -> str:
+        target = url or page_paths.get(sha, "#")
+        # Use the GitHub job id when available — that's the "real" job number
+        # from /actions/runs/<run_id>/job/<job_id>. Falls back to short SHA.
+        label = f"job#{job_id}" if job_id else f"job@{short_sha(sha)}"
         return (
-            f"<a href='{link}' target='_blank' rel='noopener noreferrer'>"
-            f"<code>{short_sha(sha)}</code></a>"
+            f"<a href='{_html_escape(target)}' target='_blank' rel='noopener noreferrer' "
+            f"title='{_html_escape(job_name)} ({short_sha(sha)})'>"
+            f"{label}</a>"
         )
 
-    def _shas_html(shas: list[str], limit: int = 8) -> str:
-        # Dedup while preserving order (most-recent first since input is desc).
+    def _jobs_html(rows: list[tuple[str, str | None, str, int | None]], limit: int = 10) -> str:
+        # Dedup on (sha, job_url) preserving order (input is most-recent-first).
         seen, ordered = set(), []
-        for s in shas:
-            if s in seen:
+        for sha, url, name, jid in rows:
+            key = (sha, url)
+            if key in seen:
                 continue
-            seen.add(s)
-            ordered.append(s)
-        head = " ".join(_sha_link(s) for s in ordered[:limit])
-        more = f" <span class='muted'>+{len(ordered) - limit} more</span>" if len(ordered) > limit else ""
+            seen.add(key)
+            ordered.append((sha, url, name, jid))
+        head = ", ".join(_job_link(s, u, n, j) for s, u, n, j in ordered[:limit])
+        more = f", <span class='muted'>+{len(ordered) - limit} more</span>" if len(ordered) > limit else ""
         return head + more
 
+    total_cat_occurrences = sum(cat_count.values())
+    total_test_occurrences = sum(test_count.values())
+
     cat_rows = []
-    for rank, (cat, n) in enumerate(cat_count.most_common(top_n), 1):
+    for rank, (cat, n) in enumerate(cat_count.most_common(top_reasons), 1):
         cat_rows.append(
             f"<tr>"
             f"<td><strong>{rank}</strong></td>"
-            f"<td class='num-nz'>{n}</td>"
+            f"<td class='num-nz'>{n} / {total_cat_occurrences}</td>"
             f"<td><code>{_html_escape(cat)}</code></td>"
-            f"<td>{_shas_html(cat_shas.get(cat, []))}</td>"
+            f"<td>{_jobs_html(cat_jobs.get(cat, []))}</td>"
             f"</tr>"
         )
     if not cat_rows:
@@ -2338,13 +2399,13 @@ def _render_aggregate_report(
         )
 
     test_rows = []
-    for rank, (test, n) in enumerate(test_count.most_common(top_n), 1):
+    for rank, (test, n) in enumerate(test_count.most_common(top_tests), 1):
         test_rows.append(
             f"<tr>"
             f"<td><strong>{rank}</strong></td>"
-            f"<td class='num-nz'>{n}</td>"
+            f"<td class='num-nz'>{n} / {total_test_occurrences}</td>"
             f"<td><code>{_html_escape(test)}</code></td>"
-            f"<td>{_shas_html(test_shas.get(test, []))}</td>"
+            f"<td>{_jobs_html(test_jobs.get(test, []))}</td>"
             f"</tr>"
         )
     if not test_rows:
@@ -2359,7 +2420,28 @@ def _render_aggregate_report(
 <html lang="en"><head><meta charset="utf-8">
 <title>Re-validate report</title>
 {_HTML_STYLE}
-</head><body>
+<style>
+  /* Report-only: extra left/right indent so the report sits inset from the
+     viewport edge — visually distinct from the data-dense per-SHA pages. */
+  body.report-body {{ padding-left: 80px; padding-right: 48px; }}
+  /* attempt-table defaults all cells to text-align:center; in this report
+     col 3 (Category/Test) and col 4 (Affected jobs) read better left-aligned.
+     Category stays single-line; Test wraps for long pytest IDs; Affected
+     jobs stays single-line (job#<id>, …). */
+  body.report-body table.attempt-table th:nth-child(3),
+  body.report-body table.attempt-table td:nth-child(3) {{
+    text-align: left;
+  }}
+  body.report-body table.attempt-table th:nth-child(4),
+  body.report-body table.attempt-table td:nth-child(4) {{
+    text-align: left;
+    white-space: nowrap;
+  }}
+  body.report-body table.report-table-tests td:nth-child(3) {{
+    white-space: normal;
+  }}
+</style>
+</head><body class="report-body">
 <h1>Re-validate report</h1>
 <div class="meta">
   Generated {now_iso()}. Aggregated across the {len(sorted_shas)} most-recent
@@ -2368,16 +2450,16 @@ def _render_aggregate_report(
   <a href="index.html" style="color:#0969da;">← back to per-SHA index</a>
 </div>
 
-<h2>Top {top_n} failing reasons <small style='color:#586069;font-weight:400'>(category occurrences across all attempts)</small></h2>
+<h2>Top {top_reasons} failing reasons <small style='color:#586069;font-weight:400'>(category occurrences across all attempts; count / total)</small></h2>
 <table class="attempt-table">
-<thead><tr><th>Rank</th><th>Count</th><th>Category</th><th>Affected commits (newest first)</th></tr></thead>
+<thead><tr><th>Rank</th><th>Count / Total</th><th>Category</th><th>Affected jobs (newest first; click to open job log)</th></tr></thead>
 <tbody>
 {''.join(cat_rows)}
 </tbody></table>
 
-<h2>Top {top_n} failing tests <small style='color:#586069;font-weight:400'>(pytest test-id occurrences)</small></h2>
-<table class="attempt-table">
-<thead><tr><th>Rank</th><th>Count</th><th>Test</th><th>Affected commits (newest first)</th></tr></thead>
+<h2>Top {top_tests} failing tests <small style='color:#586069;font-weight:400'>(pytest test-id occurrences; count / total)</small></h2>
+<table class="attempt-table report-table-tests">
+<thead><tr><th>Rank</th><th>Count / Total</th><th>Test</th><th>Affected jobs (newest first; click to open job log)</th></tr></thead>
 <tbody>
 {''.join(test_rows)}
 </tbody></table>
