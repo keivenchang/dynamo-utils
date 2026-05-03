@@ -1861,7 +1861,7 @@ def _render_probe_page(sha: str, entry: dict) -> str:
         f"<th title='required failed'>Req {ICON_REQ_FAIL}</th>"
         f"<th title='optional passed'>Opt {ICON_OPT_PASS}</th>"
         f"<th title='optional failed'>Opt {ICON_OPT_FAIL}</th>"
-        f"<th title='in progress'>Run {ICON_RUN}</th>"
+        f"<th title='in progress' style='background:#cce5ff;color:#004085;'>RUNNING {ICON_RUN}</th>"
         "<th>Skipped</th>"
         "<th title='wall-clock: earliest job start → latest job end in this attempt'>Duration</th>"
         "</tr></thead><tbody>",
@@ -2146,20 +2146,26 @@ def _render_probe_page(sha: str, entry: dict) -> str:
             _proxy_end = next_att_start_for_job.get((name, att_num))
             if _proxy_end and isinstance(j, dict) and not j.get("completed_at"):
                 j = {**j, "completed_at": _proxy_end}
+        # Row coloring rule:
+        # - Pending/running rows are ALWAYS blue (matches the RUNNING column
+        #   header) so the eye is drawn to in-flight work regardless of
+        #   whether the job has been retried.
+        # - For terminal rows: plain by default. Only when a job has multiple
+        #   runs AND this is its last run do we colour a failure red. Single-
+        #   run jobs and earlier (eclipsed) runs of a retried job stay plain.
+        is_last = att_num == job_last_attempt.get(name)
+        has_multi_runs = len(job_runs.get(name, [])) > 1
         if conc in ("failure", "timed_out"):
-            is_last = att_num == job_last_attempt.get(name)
-            row_class = "fail-final" if is_last else "fail-flake"
-            # Filled circle-X for required, small x for optional. Matches
-            # show_commit_history Legend & Key.
+            row_class = "fail-final" if (has_multi_runs and is_last) else ""
             status_html = ICON_REQ_FAIL if is_req else ICON_OPT_FAIL
         elif conc == "success":
-            row_class = "pass"
+            row_class = ""
             status_html = ICON_REQ_PASS if is_req else ICON_OPT_PASS
         elif conc in ("running", "queued", "pending"):
             row_class = "run"
             status_html = ICON_RUN
         elif conc in ("skipped", "cancelled", "neutral"):
-            row_class = "skip"
+            row_class = ""
             status_html = f"<span class='status-dot' title='{conc}'>⊘</span>"
         else:
             row_class = ""
