@@ -12,7 +12,7 @@ PURPOSE:
 
 HOW IT WORKS:
   1. Reads devcontainer.json.j2 Jinja2 template
-  2. Scans for directories matching 'dynamo*' pattern in parent directory
+  2. Scans for directories matching 'dynamo[0-9]+' pattern in parent directory
   3. Generates framework-specific devcontainer configs (VLLM, SGLANG, TRTLLM)
   4. Customizes each config with directory-specific names and tokens
   5. Tracks changes via MD5 hashes to avoid unnecessary syncs
@@ -97,12 +97,14 @@ class DevContainerSync:
             self.temp_sha_file.write_text(hash_value)
     
     def find_target_directories(self):
-        """Find all dynamo* directories to sync."""
+        """Find all numbered Dynamo directories (dynamoN) to sync."""
         directories = []
         
-        # Find all matching directories
+        # Find matching directories with exact `dynamo[number]` naming.
+        # For example: dynamo1, dynamo2, ...
+        pattern = re.compile(rf"^{re.escape(self.dest_prefix)}\d+$")
         for item in self.dest_pattern.glob(f"{self.dest_prefix}*"):
-            if item.is_dir() and item != self.script_dir:
+            if item.is_dir() and pattern.match(item.name) and item != self.script_dir:
                 directories.append(item)
         
         return sorted(directories)
@@ -251,7 +253,7 @@ class DevContainerSync:
         target_dirs = self.find_target_directories()
         
         if not target_dirs:
-            self.log(f"No directories found matching {self.dest_pattern}/{self.dest_prefix}*")
+            self.log(f"No directories found matching {self.dest_pattern}/{self.dest_prefix}[0-9]+")
             return 0
         
         # Skip the source directory
