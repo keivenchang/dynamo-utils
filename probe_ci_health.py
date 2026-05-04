@@ -1890,6 +1890,7 @@ def _render_probe_page(sha: str, entry: dict) -> str:
         ]
         if nxt_starts:
             next_att_start_iso_by_att[att_num] = min(nxt_starts)
+    _attempt_rows: list[tuple] = []
     for att_num in sorted_atts:
         these = runs_per_att[att_num]
         is_latest = att_num == latest_att_num
@@ -1983,15 +1984,45 @@ def _render_probe_page(sha: str, entry: dict) -> str:
 
         # Red the Duration cell when frozen value > 90m. Live rows let JS toggle.
         _att_dur_cls = " duration-over-90m" if (not att_is_live and att_dur_secs > 5400) else ""
+        # Defer row emission so we can post-decide a progressive-red gradient
+        # if the LAST attempt ends up FAIL: each row gets a slightly redder
+        # background, attempt 1 nearly white, the final attempt fail-red.
+        _attempt_rows.append((att_num, verdict, verdict_html, req_pass, req_fail,
+                              opt_pass, opt_fail, req_run + opt_run, n_skip,
+                              _att_dur_cls, att_dur_str))
+
+    # If the final attempt ended in FAIL, render the attempt rows with a
+    # progressive-red gradient so the eye reads "this got worse with each
+    # retry": attempt 1 nearly white, the last (failed) attempt fail-red.
+    # Otherwise render plain.
+    _last_verdict = _attempt_rows[-1][1] if _attempt_rows else None
+    _N = len(_attempt_rows)
+    _grad_active = (_last_verdict == "FAIL")
+    # Endpoints: very-light pink (~white-pink hint) → fail-final red.
+    _grad_light = (0xfe, 0xf2, 0xf3)
+    _grad_dark = (0xea, 0x86, 0x8f)
+    def _row_style(_idx: int) -> str:
+        if not _grad_active:
+            return ""
+        _t = _idx / max(1, _N - 1)  # 0..1 across attempts
+        _r = int(_grad_light[0] + _t * (_grad_dark[0] - _grad_light[0]))
+        _g = int(_grad_light[1] + _t * (_grad_dark[1] - _grad_light[1]))
+        _b = int(_grad_light[2] + _t * (_grad_dark[2] - _grad_light[2]))
+        return f" style='background:#{_r:02x}{_g:02x}{_b:02x};'"
+    def _cell_static(n: int) -> str:
+        cls = "num-zero" if n == 0 else "num-nz"
+        return f"<td class='{cls}'>{n}</td>"
+    for _idx, (att_num, _verdict, verdict_html, rp, rf, op, of, run_n, sk,
+              dur_cls, dur_str) in enumerate(_attempt_rows):
         summary_lines.append(
-            f"<tr>"
+            f"<tr{_row_style(_idx)}>"
             f"<td><strong>{att_num}</strong></td>"
             f"<td>{verdict_html}</td>"
-            f"{_cell(req_pass)}{_cell(req_fail)}"
-            f"{_cell(opt_pass)}{_cell(opt_fail)}"
-            f"{_cell(req_run + opt_run)}"
-            f"{_cell(n_skip)}"
-            f"<td class='att-dur-cell{_att_dur_cls}' style='font-variant-numeric: tabular-nums;'>{att_dur_str}</td>"
+            f"{_cell_static(rp)}{_cell_static(rf)}"
+            f"{_cell_static(op)}{_cell_static(of)}"
+            f"{_cell_static(run_n)}"
+            f"{_cell_static(sk)}"
+            f"<td class='att-dur-cell{dur_cls}' style='font-variant-numeric: tabular-nums;'>{dur_str}</td>"
             f"</tr>"
         )
     if fixed_total_secs > 0 or live_starts:
@@ -2128,6 +2159,33 @@ def _render_probe_page(sha: str, entry: dict) -> str:
         (n, a) for d, n, a in _durations if d >= 5400.0
     }
 
+    # Per-job progressive-red gradient: when a job has multiple runs AND
+    # its last run is a failure/timed_out, paint every (job, attempt) row
+    # for that job along a gradient from very-light pink (first attempt)
+    # to fail-final red (last attempt). Mirrors the Attempts-overview
+    # gradient, scoped per-job. Stale-running attempts are NOT counted as
+    # the "last" — they're treated as cancelled.
+    _job_grad_stop: dict[tuple[str, int], str] = {}
+    _grad_light = (0xfe, 0xf2, 0xf3)
+    _grad_dark = (0xea, 0x86, 0x8f)
+    for _name, _runs in job_runs.items():
+        if len(_runs) < 2:
+            continue
+        # Resolve the LAST run's effective conclusion using the same stale
+        # guard the per-row loop applies, so an old stuck "running" attempt
+        # does not count as the failing terminal state.
+        _last_att, _last_j = _runs[-1]
+        _last_conc = _job_conclusion(_last_j)
+        if _last_conc not in ("failure", "timed_out"):
+            continue
+        _N = len(_runs)
+        for _idx, (_an, _) in enumerate(_runs):
+            _t = _idx / max(1, _N - 1)
+            _r = int(_grad_light[0] + _t * (_grad_dark[0] - _grad_light[0]))
+            _g = int(_grad_light[1] + _t * (_grad_dark[1] - _grad_light[1]))
+            _b = int(_grad_light[2] + _t * (_grad_dark[2] - _grad_light[2]))
+            _job_grad_stop[(_name, _an)] = f"#{_r:02x}{_g:02x}{_b:02x}"
+
     for name, att_num, j in flat_rows:
         conc = _job_conclusion(j)
         is_req = name in REQUIRED_CHECKS
@@ -2219,16 +2277,33 @@ def _render_probe_page(sha: str, entry: dict) -> str:
                         f"<span class='triangle-toggle'>▶</span>"
                         f"</span>"
                     )
+                    _snip_grad = _job_grad_stop.get((name, att_num))
+                    _snip_attrs = (
+                        f" style='background:{_snip_grad};'"
+                        if _snip_grad else ""
+                    )
+                    _snip_class = "" if _snip_grad and row_class == "fail-final" else row_class
                     snippet_rows_inline.append(
-                        f"<tr id='{sid}' class='snippet-row {row_class}'><td colspan='6'>"
+                        f"<tr id='{sid}' class='snippet-row {_snip_class}'{_snip_attrs}><td colspan='6'>"
                         f"<pre class='snip'>{snippet_html}</pre>"
                         f"</td></tr>"
                     )
                 break
         detail_html = "".join(detail_parts) or '<span style="color:#959da5">—</span>'
 
+        # Per-job progressive-red gradient overrides the row class background
+        # for jobs that were retried and ultimately failed.
+        _grad_bg = _job_grad_stop.get((name, att_num))
+        _row_attrs = (
+            f" style='background:{_grad_bg};'"
+            if _grad_bg else ""
+        )
+        # When a gradient is active we drop the row-class background (which
+        # would otherwise paint the cells solid red on the last row); we
+        # still keep the class for any non-bg styling.
+        _effective_class = "" if _grad_bg and row_class == "fail-final" else row_class
         sec.append(
-            f"<tr class='{row_class}'>"
+            f"<tr class='{_effective_class}'{_row_attrs}>"
             f"<td class='status-cell'>{status_html}</td>"
             f"<td class='job-name'>{name_html}{snippet_toggle_html}</td>"
             f"<td class='attempt-cell'>{att_num}</td>"

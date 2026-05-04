@@ -1130,7 +1130,7 @@ window.__dashboardOnReadyQueue.push(function() {
 {%- endif -%}
 <a href="{{ probe.page_path }}" target="_blank" rel="noopener noreferrer" style="text-decoration: none; color: inherit;" title="ci-health probe: {{ probe.state }} • attempt {{ probe.attempts }} • {{ probe.counts }}{% if probe.pr %} • PR #{{ probe.pr }}{% endif %}">
 <span style="display: inline-block; padding: 1px 8px; border-radius: 10px; font-size: 11px; font-weight: 600; background: {{ _bg }}; color: {{ _fg }};">{{ probe.state }}</span>{%- if probe.elapsed %}{% if probe.live_starts %} <span class="live-duration-total" data-fixed="{{ probe.fixed_secs }}" data-live="{{ probe.live_starts }}" style="font-size: 11px; color: #586069; font-variant-numeric: tabular-nums;" title="total CI time (sum of attempt durations; live for in-progress)">{{ probe.elapsed }}</span>{% else %} <span style="font-size: 11px; color: #586069; font-variant-numeric: tabular-nums;" title="total CI time (sum of attempt durations)">{{ probe.elapsed }}</span>{% endif %}{%- endif -%}{%- if probe.attempts_n and probe.attempts_n > 1 -%}
-{%- if probe.attempts_n > 3 and probe.state_class == 'probe-fail' -%}
+{%- if probe.attempts_n > 3 -%}
 {%- set _circle_bg, _circle_fg = '#f8d7da', '#721c24' -%}
 {%- else -%}
 {%- set _circle_bg, _circle_fg = '#eaeef2', '#586069' -%}
