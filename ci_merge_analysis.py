@@ -40,6 +40,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 from revalidate_pr import (  # noqa: E402
     REPO,
+    _render_probe_page,
     _to_pt,
     extract_pytest_failures,
     fetch_job_log,
@@ -598,96 +599,140 @@ def _render_jobs_table(jobs: list[dict], is_final_attempt: bool) -> str:
     return "<table>" + "".join(rows) + "</table>"
 
 
-def _render_premerge_page(sha: str, entry: dict) -> str:
-    short = short_sha(sha)
-    pr = entry.get("pr")
-    atts = entry.get("attempts") or []
-    n_pushes = entry.get("n_workflow_runs", 0)
-    n_atts = entry.get("n_attempts", len(atts))
-    # final attempt = the LAST attempt in the list (chronologically last push,
-    # last run_attempt within it). Used to color which failures matter.
-    final_idx = len(atts) - 1
-    parts = [
-        "<!DOCTYPE html>",
-        f"<html><head><meta charset='utf-8'><title>Pre-merge {short}</title>",
-        _HTML_STYLE,
-        "</head><body>",
-        f"<h1>Pre-merge for <code>{short}</code> &middot; PR <a href='https://github.com/{REPO}/pull/{pr}' target='_blank'>#{pr}</a></h1>",
-        "<div class='meta'>",
-        f"<span>SHA: <code><a href='https://github.com/{REPO}/commit/{sha}' target='_blank'>{sha}</a></code></span>",
-        f"<span>Pushes: {n_pushes}</span>",
-        f"<span>Total attempts: {n_atts}</span>",
-        "</div>",
-    ]
+def _to_probe_attempt(my_attempt: dict, attempt_num: int) -> dict:
+    """Convert a ci_merge_analysis attempt to revalidate's attempt shape.
+
+    revalidate's per-SHA renderer expects:
+      - jobs: dict[name -> {id, conclusion, started_at, completed_at, ...}]
+      - failed_jobs: list[name] (used by the flake-banner counter)
+      - failed_tests: dict[name -> [test_id, ...]]
+      - log_meta: dict[name -> {categories, snippet}]
+      - started_at / completed_at at attempt level
+
+    Our cache stores jobs as a list and failed_tests inline on each job, so
+    rebuild the dict-shaped structures here.
+    """
+    jobs_list = my_attempt.get("jobs") or []
+    jobs_dict: dict[str, dict] = {}
+    failed_tests: dict[str, list[str]] = {}
+    failed_jobs: list[str] = []
+    for j in jobs_list:
+        name = j.get("name")
+        if not name:
+            continue
+        jobs_dict[name] = {
+            "id": j.get("id"),
+            "url": j.get("url"),
+            "conclusion": j.get("conclusion"),
+            "status": j.get("status"),
+            "started_at": j.get("started_at"),
+            "completed_at": j.get("completed_at"),
+        }
+        if j.get("failed_tests"):
+            failed_tests[name] = list(j["failed_tests"])
+        if j.get("conclusion") in JOB_FAILED_CONCLUSIONS:
+            failed_jobs.append(name)
+    return {
+        "attempt": attempt_num,
+        "started_at": my_attempt.get("created_at"),
+        "completed_at": my_attempt.get("updated_at"),
+        "jobs": jobs_dict,
+        "failed_tests": failed_tests,
+        "failed_jobs": failed_jobs,
+        "log_meta": {},
+        # carried through for completeness; revalidate doesn't read these
+        "run_id": my_attempt.get("run_id"),
+        "run_attempt_n": my_attempt.get("run_attempt"),
+        "head_sha": my_attempt.get("head_sha"),
+        "html_url": my_attempt.get("html_url"),
+    }
+
+
+def _derive_probe_state(atts: list[dict]) -> tuple[str, str | None]:
+    """(state, verdict) compatible with revalidate's _display_state/_state_class."""
     if not atts:
-        parts.append("<p><em>No pre-merge attempts captured.</em></p>")
-    for i, a in enumerate(atts):
-        is_final = (i == final_idx)
-        c = a.get("conclusion") or "(eclipsed)"
-        head = (a.get("head_sha") or "")[:11]
-        ts = (a.get("created_at") or "")[:19]
-        n_jobs = len(a.get("jobs") or [])
-        n_failed = sum(1 for j in (a.get("jobs") or []) if j.get("conclusion") in JOB_FAILED_CONCLUSIONS)
-        n_tests = sum(len(j.get("failed_tests") or []) for j in (a.get("jobs") or []))
-        run_id = a.get("run_id")
-        run_attempt = a.get("run_attempt")
-        url = a.get("html_url") or f"https://github.com/{REPO}/actions/runs/{run_id}/attempts/{run_attempt}"
-        # Open the final attempt + any failure by default
-        open_attr = " open" if is_final or c in ("failure", "timed_out") else ""
-        parts.append(f"<details{open_attr}>")
-        parts.append(
-            f"<summary>Attempt {i+1} &middot; {_verdict_pill(c)} "
-            f"&middot; head <code>{_esc(head)}</code> "
-            f"&middot; run <a href='{_esc(url)}' target='_blank'>{run_id}/{run_attempt}</a> "
-            f"&middot; {_esc(ts)} "
-            f"&middot; {n_failed}/{n_jobs} jobs failed, {n_tests} tests</summary>"
-        )
-        parts.append("<div class='body'>")
-        parts.append(_render_jobs_table(a.get("jobs") or [], is_final))
-        parts.append("</div></details>")
-    parts.append("</body></html>")
-    return "\n".join(parts)
+        return ("discovered", None)
+    last = atts[-1]
+    last_failed = bool(last.get("failed_jobs"))
+    last_concl_ok = not last_failed
+    if last_concl_ok:
+        return ("passed", "passed")
+    return ("failed", "failed")
+
+
+def _render_premerge_page(sha: str, entry: dict) -> str:
+    """Transform our pre-merge entry to revalidate's shape and reuse its renderer."""
+    atts = entry.get("attempts") or []
+    probe_atts = [_to_probe_attempt(a, i + 1) for i, a in enumerate(atts)]
+    state, verdict = _derive_probe_state(probe_atts)
+    last_ca = atts[-1].get("created_at") if atts else None
+    probe_entry = {
+        "pr": entry.get("pr"),
+        "branch": f"pull-request/{entry.get('pr')}" if entry.get("pr") else None,
+        "merge_date": last_ca,
+        "image_sha256": "?",
+        "attempts": probe_atts,
+        "max_attempts": max(len(probe_atts), 1),
+        "state": state,
+        "verdict": verdict,
+        "stuck_jobs": [],
+    }
+    html = _render_probe_page(sha, probe_entry)
+    # Re-label "Re-validate" -> "Pre-merge" everywhere.
+    html = html.replace("Re-validate", "Pre-merge")
+    return html
 
 
 def _render_postmerge_page(sha: str, entry: dict) -> str:
-    short = short_sha(sha)
-    conc = entry.get("conclusion")
+    """Post-merge has one logical attempt. Reuse revalidate's renderer with a
+    single-attempt entry. Note: our post-merge cache stores only FAILED jobs;
+    passing jobs are not in the data, so the per-job grid will only show the
+    failures (which is fine — they're what we care about)."""
     failed_jobs = entry.get("failed_jobs") or []
-    n_tests = sum(len(j.get("failed_tests") or []) for j in failed_jobs)
-    run_id = entry.get("run_id")
-    run_attempt = entry.get("run_attempt") or 1
-    run_url = entry.get("html_url") or "#"
-    created = (entry.get("created_at") or "")[:19]
-    parts = [
-        "<!DOCTYPE html>",
-        f"<html><head><meta charset='utf-8'><title>Post-merge {short}</title>",
-        _HTML_STYLE,
-        "</head><body>",
-        f"<h1>Post-merge for <code>{short}</code></h1>",
-        "<div class='meta'>",
-        f"<span>SHA: <code><a href='https://github.com/{REPO}/commit/{sha}' target='_blank'>{sha}</a></code></span>",
-        f"<span>Run: <a href='{_esc(run_url)}' target='_blank'>{run_id}</a> (attempt {run_attempt})</span>",
-        f"<span class='{_verdict_class(conc)}'>{_esc(conc)}</span>",
-        f"<span>Started: {_esc(created)}</span>",
-        "</div>",
-    ]
-    # Single attempt always — wrap as one details block for consistency with pre-merge.
-    parts.append("<details open>")
-    parts.append(
-        f"<summary>Attempt 1 &middot; {_verdict_pill(conc)} "
-        f"&middot; run <a href='{_esc(run_url)}' target='_blank'>{run_id}/{run_attempt}</a> "
-        f"&middot; {_esc(created)} "
-        f"&middot; {len(failed_jobs)} failed jobs, {n_tests} tests</summary>"
-    )
-    parts.append("<div class='body'>")
-    if not failed_jobs and conc == "success":
-        parts.append("<p>All jobs passed.</p>")
-    else:
-        # Post-merge cache only stores FAILED jobs; passes aren't recorded.
-        parts.append(_render_jobs_table(failed_jobs, is_final_attempt=True))
-    parts.append("</div></details>")
-    parts.append("</body></html>")
-    return "\n".join(parts)
+    jobs_dict: dict[str, dict] = {}
+    failed_tests: dict[str, list[str]] = {}
+    for j in failed_jobs:
+        name = j.get("name")
+        if not name:
+            continue
+        jobs_dict[name] = {
+            "id": j.get("id"),
+            "url": j.get("url"),
+            "conclusion": j.get("conclusion"),
+            "status": j.get("status"),
+            "started_at": j.get("started_at"),
+            "completed_at": j.get("completed_at"),
+        }
+        if j.get("failed_tests"):
+            failed_tests[name] = list(j["failed_tests"])
+    probe_atts = [{
+        "attempt": 1,
+        "started_at": entry.get("created_at"),
+        "completed_at": entry.get("updated_at"),
+        "jobs": jobs_dict,
+        "failed_tests": failed_tests,
+        "failed_jobs": [j.get("name") for j in failed_jobs if j.get("name")],
+        "log_meta": {},
+        "run_id": entry.get("run_id"),
+        "run_attempt_n": entry.get("run_attempt"),
+        "html_url": entry.get("html_url"),
+    }]
+    conc = entry.get("conclusion")
+    state = "passed" if conc == "success" else "failed"
+    probe_entry = {
+        "pr": None,
+        "branch": "main",
+        "merge_date": entry.get("created_at"),
+        "image_sha256": "?",
+        "attempts": probe_atts,
+        "max_attempts": 1,
+        "state": state,
+        "verdict": state,
+        "stuck_jobs": [],
+    }
+    html = _render_probe_page(sha, probe_entry)
+    html = html.replace("Re-validate", "Post-merge")
+    return html
 
 
 def _render_summary(kind: str, entries_by_sha: dict, page_paths: dict) -> str:
