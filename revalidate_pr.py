@@ -1099,7 +1099,11 @@ def cycle(
                     jid,
                     conclusion,
                 )
-            if name not in log_meta:
+            # Re-classify when there are no cached categories yet. The comment
+            # at the top of this loop promises "regex fixes re-run against the
+            # cached log on the next cycle for free" — that requires gating on
+            # empty categories, not on the bare presence of the log_meta key.
+            if not (log_meta.get(name) or {}).get("categories"):
                 cats, snippet = classify_log(log_path)
                 log_meta[name] = {"categories": cats, "snippet": snippet}
                 if cats or snippet:
