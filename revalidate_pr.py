@@ -439,13 +439,11 @@ def open_pr(sha: str, branch: str, dry_run: bool) -> int:
     title_line = orig_title or subject or f"commit {short_sha(sha)}"
     ref_block = f"```\n{title_line}\n```"
     body = (
-        "> ## ⚠️ DO NOT MERGE THIS PR!\n"
-        "> This is an automated CI re-validation probe — placebo diff only, "
-        "never intended to land. The branch is auto-deleted on green; "
-        "kept on failure for diagnosis.\n\n"
+        "Hey — this is just a re-validation run, I'm checking if "
+        "anything broke in CI. Please don't merge. I'll delete this PR "
+        "if it turns green.\n\n"
         f"{intro}\n\n"
         f"{ref_block}\n\n"
-        "Branch deleted on green; kept on failure for diagnosis.\n\n"
         "Drafts are skipped by CodeRabbit per repo `.coderabbit.yaml`."
     )
     proc = run(
