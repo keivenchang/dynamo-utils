@@ -2858,6 +2858,42 @@ class CommitHistoryGenerator:
         except Exception as _e:
             self.logger.warning(f"ci-health probe load failed: {_e}")
 
+        # Local post-merge cache (ci_postmerge_analysis.py) — populates the new
+        # "Post-merge" column.  Cache is keyed by full SHA; entry holds the
+        # `Post-Merge CI Pipeline` run conclusion + per-failed-job test list.
+        local_postmerge_status_by_sha: Dict[str, Dict[str, Any]] = {}
+        try:
+            from zoneinfo import ZoneInfo as _ZI_pm
+            _PT_pm = _ZI_pm("America/Los_Angeles")
+            _pm_path = Path.home() / ".cache" / "dynamo-utils" / "post-merge.json"
+            if _pm_path.exists():
+                with _pm_path.open() as _f:
+                    _pm_db = json.load(_f)
+                for _sha_full, _e in _pm_db.items():
+                    if not isinstance(_e, dict):
+                        continue
+                    _failed_jobs = _e.get("failed_jobs") or []
+                    _failed_tests_n = sum(len(j.get("failed_tests") or []) for j in _failed_jobs)
+                    _ca = _e.get("created_at") or ""
+                    try:
+                        _date_str = datetime.fromisoformat(_ca).astimezone(_PT_pm).strftime("%Y-%m-%d")
+                    except Exception:
+                        _date_str = "unknown"
+                    local_postmerge_status_by_sha[_sha_full] = {
+                        "conclusion": _e.get("conclusion") or "unknown",
+                        "status": _e.get("status") or "unknown",
+                        "run_id": _e.get("run_id"),
+                        "html_url": _e.get("html_url"),
+                        "failed_jobs_n": len(_failed_jobs),
+                        "failed_tests_n": _failed_tests_n,
+                        "page_path": f"logs/{_date_str}/post_merge-{_sha_full[:11]}.html",
+                    }
+                self.logger.info(
+                    f"local post-merge cache: loaded for {len(local_postmerge_status_by_sha)} SHAs"
+                )
+        except Exception as _e:
+            self.logger.warning(f"local post-merge cache load failed: {_e}")
+
         template_context: Dict[str, Any] = {
             "commits": commit_data,
             "docker_images": docker_images,
@@ -2873,6 +2909,7 @@ class CommitHistoryGenerator:
             "build_status": build_status,
             "github_actions_status": github_actions_status,
             "post_merge_status": post_merge_status,
+            "local_postmerge_status": local_postmerge_status_by_sha,
             "probe_status": probe_status_by_sha,
             "generated_time": generated_time,
             "job_started_time": job_started_time,
