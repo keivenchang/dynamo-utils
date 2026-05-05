@@ -1395,8 +1395,9 @@ def categorize_error_log_lines(lines: Sequence[str]) -> List[str]:
         if DOCKER_IMAGE_NOT_FOUND_RE.search(t):
             add("docker-image-error")
 
-        # OOM / kill
-        if re.search(r"\bout\s+of\s+memory\b|\boom\b|killed\s+process", t):
+        # OOM / kill — single source of truth in regexes.CAT_OOM_RE so we don't
+        # drift between the snippet path and the full-log path.
+        if CAT_OOM_RE.search(t):
             add("oom")
         
         # Disk space exhausted

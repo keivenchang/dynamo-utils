@@ -113,9 +113,10 @@
         "source=${localEnv:HOME}/.ssh,target=/home/dynamo/.ssh,type=bind,readonly",
 
         {# --- AI config: user-level (~/  ->  /home/dynamo/) --- #}
+        "source=${localEnv:HOME}/.cursor,target=/home/dynamo/.cursor,type=bind",
         "source=${localEnv:HOME}/.claude,target=/home/dynamo/.claude,type=bind",
         "source=${localEnv:HOME}/.claude.json,target=/home/dynamo/.claude.json,type=bind",
-        "source=${localEnv:HOME}/.cursor,target=/home/dynamo/.cursor,type=bind",
+        "source=${localEnv:HOME}/ai-config/,target=/home/dynamo/ai-config/,type=bind",
 
         {# --- AI config: workspace-level (~/dynamo/  ->  /home/dynamo/) --- #}
         "source=${localEnv:HOME}/dynamo/.cursorrules,target=/workspace/.cursorrules,type=bind",

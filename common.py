@@ -326,7 +326,8 @@ class DockerImageInfo:
 
     def is_dynamo_image(self) -> bool:
         """Check if this is a dynamo image."""
-        return self.repository in ["dynamo", "dynamo-base"]
+        repo_name = self.repository.rsplit("/", 1)[-1]
+        return repo_name in ["dynamo", "dynamo-base"]
 
     def is_dynamo_framework_image(self) -> bool:
         """Check if this is a dynamo framework image."""
@@ -1127,11 +1128,12 @@ class DockerUtils(BaseUtils):
 
         # Strip repo prefix: "dynamo:tag" or "dynamo-base:tag" -> "tag"
         # TODO: remove dynamo-base support after Q3 2026
-        if image_name.startswith("dynamo-base:"):
-            tag = image_name[len("dynamo-base:"):]
-        elif image_name.startswith("dynamo:"):
-            tag = image_name[len("dynamo:"):]
-        else:
+        if ":" not in image_name:
+            return None
+
+        repository, tag = image_name.rsplit(":", 1)
+        repo_name = repository.rsplit("/", 1)[-1]
+        if repo_name not in {"dynamo", "dynamo-base"}:
             return None
 
         # Split tag into segments: e.g. "EBC003.56b448a60-sglang-dev-cuda12.9-amd64"
@@ -1155,29 +1157,22 @@ class DockerUtils(BaseUtils):
 
         version_part = "-".join(parts[:fw_idx])
 
-        # After framework, try to find target by scanning forward from fw_idx+1.
-        # New format: target immediately follows framework (before cuda/arch).
-        # Legacy format: target is at the end (after cuda).
+        # After framework, find the target. Prefer the most specific target
+        # anywhere after the framework so generated tags like
+        # "<sha>-vllm-dev-cuda13-local-dev" are still recognized as local-dev.
         remaining = parts[fw_idx + 1:]
         target = ""
-
-        # Forward scan: try longest multi-segment targets first from the start
-        # e.g. remaining = ["local", "dev", "cuda12.9", "amd64"] -> "local-dev"
-        # e.g. remaining = ["dev", "orig", "cuda12.9", "amd64"] -> "dev-orig"
-        for length in range(min(len(remaining), 2), 0, -1):
-            candidate = "-".join(remaining[:length])
-            if candidate in known_targets:
+        target_priority = ["local-dev", "dev-orig", "runtime", "dev"]
+        found_targets = set()
+        for start in range(len(remaining)):
+            for length in range(min(len(remaining) - start, 2), 0, -1):
+                candidate = "-".join(remaining[start:start + length])
+                if candidate in known_targets:
+                    found_targets.add(candidate)
+        for candidate in target_priority:
+            if candidate in found_targets:
                 target = candidate
                 break
-
-        # Fallback: legacy format where target is at the end
-        # TODO: remove after 2026-04-20
-        if not target:
-            for length in range(min(len(remaining), 2), 0, -1):
-                candidate = "-".join(remaining[-length:])
-                if candidate in known_targets:
-                    target = candidate
-                    break
 
         return DynamoImageInfo(
             version=version_part,

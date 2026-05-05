@@ -264,7 +264,39 @@ CAT_NETWORK_PORT_CONFLICT_ERROR_RE: Pattern[str] = re.compile(
     re.IGNORECASE,
 )
 
-CAT_OOM_RE: Pattern[str] = re.compile(r"\b(out of memory|CUDA out of memory|Killed process|oom)\b", re.IGNORECASE)
+# OOM detection — only definitive signals.
+#
+# Matches:
+#   - "out of memory" / "CUDA out of memory" — explicit user-facing message
+#   - "OutOfMemoryError" / "MemoryError" — Python / PyTorch exception class
+#   - "Killed process" — kernel oom-killer log entry
+#   - "invoked oom-killer" / "oom-kill:" — kernel oom-killer log lines
+#   - "Memory cgroup out of memory" — cgroup OOM trip
+#   - "exit code 137" / "exit code: 137" / "exit code -9" / "exitcode=-9"
+#     — process killed by SIGKILL via shell or Python; in CI context this nearly
+#     always indicates OOM (the kernel SIGKILLs runaway memory consumers).
+#
+# Why we removed bare `\boom\b`: sglang prints the hint
+#     "If exit code is -9 (SIGKILL), a common cause is the OS OOM killer"
+# even when the actual exit code was -15 (SIGTERM, NOT OOM). Matching `\boom\b`
+# on that hint produced ~13% false-positive rate over a 68-job sample (jobs
+# 73994812788, 73994812797, 74005274272, 74006657135, 74017527228, 74017527231,
+# 74017538501, 74017538526, 74017551470 — investigation 2026-05-02). The new
+# pattern requires a numeric exit code, an exception class name, or a kernel
+# log line — all of which the hint message lacks.
+CAT_OOM_RE: Pattern[str] = re.compile(
+    r"(?:"
+    r"out\s+of\s+memory"
+    r"|OutOfMemoryError"
+    r"|MemoryError"
+    r"|Killed\s+process"
+    r"|invoked\s+oom-killer"
+    r"|oom-kill:"
+    r"|Memory\s+cgroup\s+out\s+of\s+memory"
+    r"|(?:exit\s+code|exited\s+with\s+code|exitcode)\s*[:=]?\s*(?:-9|137)\b"
+    r")",
+    re.IGNORECASE,
+)
 
 CAT_PYTEST_DETECT_RE: Pattern[str] = re.compile(
     r"(?:"

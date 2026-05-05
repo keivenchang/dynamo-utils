@@ -114,6 +114,13 @@ class DockerImageRetagger(BaseUtils):
                 total_attempted += 1
                 
         self.logger.info(f"\n=== Summary ===")
+        if total_attempted == 0:
+            if sha:
+                self.logger.error(f"No retaggable local-dev images found for SHA '{sha}'")
+            else:
+                self.logger.error("No retaggable local-dev images found")
+            return False
+
         self.logger.info(f"Successfully retagged: {total_success}/{total_attempted} images")
         
         return total_success == total_attempted

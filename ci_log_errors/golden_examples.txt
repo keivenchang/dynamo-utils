@@ -92,6 +92,12 @@ Infra / system:
 - 57877945085.log => exit-127-cmd-not-found
 - 57521050554.log => exit-139-sigsegv, !huggingface-auth-error
 - 58412373114.log => oom
+- 74029747128.log => oom  # torch.OutOfMemoryError: CUDA out of memory + "Main server process died with exit code 137" (sglang Multi-GPU cuda12.9 attempt 1)
+- 74029747106.log => oom  # "Main server process died with exit code 137" (sglang Multi-GPU cuda13.0 attempt 1)
+- 74032519336.log => oom  # "Main server process died with exit code -9" (sglang Multi-GPU cuda12.9 attempt 2)
+- 73994812788.log => !oom  # sglang prints "If exit code is -9 (SIGKILL), a common cause is the OS OOM killer" hint even when actual exit was -15 (SIGTERM, NOT OOM) — bare \boom\b would false-positive here
+- 74017527228.log => !oom  # same hint-only false positive
+- 74017551470.log => !oom  # same hint-only false positive
 - 65951572099.log => github-action-unavailable  # "Failed to resolve action download info"
 
 Category frequency summary:

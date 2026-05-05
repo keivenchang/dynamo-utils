@@ -307,9 +307,12 @@ Examples:
         output_tag = args.output_tag
     elif ":" in dev_image:
         name, tag = dev_image.rsplit(":", 1)
-        # If tag already ends with -dev, replace with -local-dev; otherwise append
+        # Keep generated tags in the canonical order:
+        # <sha>-<framework>-local-dev-<cuda>, not <sha>-<framework>-dev-<cuda>-local-dev.
         short_name = name.rsplit("/", 1)[-1] if "/" in name else name
-        if tag.endswith("-dev"):
+        if "-dev-" in tag:
+            output_tag = f"{short_name}:{tag.replace('-dev-', '-local-dev-', 1)}"
+        elif tag.endswith("-dev"):
             output_tag = f"{short_name}:{tag[:-4]}-local-dev"
         else:
             output_tag = f"{short_name}:{tag}-local-dev"
