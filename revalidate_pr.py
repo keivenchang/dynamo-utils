@@ -2228,13 +2228,21 @@ def _render_probe_page(sha: str, entry: dict) -> str:
         # - Pending/running rows are ALWAYS blue (matches the RUNNING column
         #   header) so the eye is drawn to in-flight work regardless of
         #   whether the job has been retried.
-        # - For terminal rows: plain by default. Only when a job has multiple
-        #   runs AND this is its last run do we colour a failure red. Single-
-        #   run jobs and earlier (eclipsed) runs of a retried job stay plain.
+        # - For terminal rows: plain by default. Failures get coloured red
+        #   when they actually matter — i.e. a *required-check* failure on
+        #   its only attempt is red (it gates merge), and the last run of a
+        #   multi-run failure is red (the retry didn't fix it). Earlier
+        #   eclipsed runs of a retried job, and single-run optional
+        #   failures, stay plain so the eye is drawn to the gating ones.
         is_last = att_num == job_last_attempt.get(name)
         has_multi_runs = len(job_runs.get(name, [])) > 1
         if conc in ("failure", "timed_out"):
-            row_class = "fail-final" if (has_multi_runs and is_last) else ""
+            if has_multi_runs and is_last:
+                row_class = "fail-final"
+            elif not has_multi_runs and is_req:
+                row_class = "fail-final"
+            else:
+                row_class = ""
             status_html = ICON_REQ_FAIL if is_req else ICON_OPT_FAIL
         elif conc == "success":
             row_class = ""
