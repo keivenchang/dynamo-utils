@@ -764,7 +764,7 @@ def cycle(
     dry_run: bool,
     drain: bool = False,
     backfill_past: int = 0,
-    backfill_max_attempts: int = 5,
+    backfill_max_attempts: int = 4,
 ) -> None:
     db = load_db()
     meta = db.setdefault("_meta", {})
@@ -884,12 +884,28 @@ def cycle(
                 short_sha(probe_head or ""),
             )
 
-        # ---- 2b. backfill: when we've caught up to HEAD (no new discovered
-        # SHAs left) and parallelism budget remains, retry past failed SHAs
-        # newest-first up to backfill_max_attempts. Useful when CI is stable
-        # enough that there's idle worker capacity — instead of letting it
-        # sit, re-validate flaky failures from earlier in the day/week.
+        # ---- 2b. backfill: only when every newer SHA has finished at least
+        # attempt 1. The rule: if anything in the DB is in `discovered` or
+        # `launched`, OR any in_progress SHA has zero recorded attempts,
+        # there is "newer" work that should get attempt 1 first; skip
+        # backfill this cycle. Otherwise, if parallelism budget remains,
+        # retry past failed SHAs newest-first up to backfill_max_attempts.
         if backfill_past > 0 and not dry_run:
+            pending_first_attempt = any(
+                isinstance(v, dict)
+                and (
+                    v.get("state") in ("discovered", "launched")
+                    or (
+                        v.get("state") == "in_progress"
+                        and len(v.get("attempts") or []) < 1
+                    )
+                )
+                for k, v in db.items() if k != "_meta"
+            )
+            if pending_first_attempt:
+                logger.info(
+                    "backfill: skipped — newer SHAs still on attempt 1"
+                )
             new_in_flight = sum(
                 1
                 for k, v in db.items()
@@ -898,7 +914,7 @@ def cycle(
                 and v.get("state") in ("launched", "in_progress")
             )
             remaining = max(0, parallelism - new_in_flight)
-            if remaining > 0:
+            if remaining > 0 and not pending_first_attempt:
                 # Past N SHAs by merge_date desc. Filter to failed-with-headroom.
                 ranked = sorted(
                     (
@@ -2696,8 +2712,8 @@ def main() -> None:
     pr.add_argument(
         "--backfill-max-attempts",
         type=int,
-        default=5,
-        help="Per-SHA attempt cap when backfilling (default: 5).",
+        default=4,
+        help="Per-SHA attempt cap when backfilling (default: 4).",
     )
     pr.add_argument(
         "--dry-run", "--dryrun", dest="dry_run", action="store_true"
