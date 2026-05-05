@@ -768,7 +768,7 @@ def cycle(
     dry_run: bool,
     drain: bool = False,
     backfill_past: int = 0,
-    backfill_max_attempts: int = 4,
+    backfill_max_attempts: int = 3,
 ) -> None:
     db = load_db()
     meta = db.setdefault("_meta", {})
@@ -2716,8 +2716,8 @@ def main() -> None:
     pr.add_argument(
         "--backfill-max-attempts",
         type=int,
-        default=4,
-        help="Per-SHA attempt cap when backfilling (default: 4).",
+        default=3,
+        help="Per-SHA attempt cap when backfilling (default: 3).",
     )
     pr.add_argument(
         "--dry-run", "--dryrun", dest="dry_run", action="store_true"
