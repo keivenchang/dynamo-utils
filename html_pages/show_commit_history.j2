@@ -848,7 +848,7 @@ window.__dashboardOnReadyQueue.push(function() {
 (function() {
     function _ldPad(n) { return n < 10 ? '0' + n : '' + n; }
     function _ldFmt(secs) {
-        // Match probe_ci_health _fmt_duration: Ns / MmSSs / HhMm / DdHhMm.
+        // Match revalidate_pr _fmt_duration: Ns / MmSSs / HhMm / DdHhMm.
         if (secs < 0) return '—';
         if (secs < 60) return secs + 's';
         if (secs < 3600) return Math.floor(secs / 60) + 'm' + _ldPad(secs % 60) + 's';

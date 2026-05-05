@@ -2737,7 +2737,7 @@ class CommitHistoryGenerator:
                     # start → latest job end within each attempt). For attempts
                     # still running, contribute (now - earliest start) and let
                     # the page's JS ticker keep updating it. Mirrors the logic
-                    # in probe_ci_health.py for the per-SHA "Total CI time",
+                    # in revalidate_pr.py for the per-SHA "Total CI time",
                     # including the dedup of carried-over physical runs:
                     # GitHub's rerun-failed-jobs reissues unchanged jobs into a
                     # new attempt with the SAME (started_at, completed_at). We
@@ -2806,7 +2806,7 @@ class CommitHistoryGenerator:
                             pass
 
                     def _fmt_total(_secs: int) -> str:
-                        # Match probe_ci_health._fmt_duration: Ns / MmSSs / HhMm / DdHhMm.
+                        # Match revalidate_pr._fmt_duration: Ns / MmSSs / HhMm / DdHhMm.
                         if _secs < 60:
                             return f"{_secs}s"
                         if _secs < 3600:

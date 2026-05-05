@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """
-probe_ci_health.py — probe CI health by pushing per-SHA placebo PRs.
+revalidate_pr.py — probe CI health by pushing per-SHA placebo PRs.
 
 For every commit merged to main since --starting-sha, push a tiny placebo
 diff on a per-SHA branch and open a Draft PR. Watch CI; on failure, retry
@@ -138,7 +138,7 @@ REQUIRED_CHECKS = frozenset({
 })
 DEFAULT_STALLED_AFTER_HOURS = 3
 
-logger = logging.getLogger("probe_ci_health")
+logger = logging.getLogger("revalidate_pr")
 
 
 # ---------- helpers ----------
@@ -439,6 +439,10 @@ def open_pr(sha: str, branch: str, dry_run: bool) -> int:
     title_line = orig_title or subject or f"commit {short_sha(sha)}"
     ref_block = f"```\n{title_line}\n```"
     body = (
+        "> ## ⚠️ DO NOT MERGE THIS PR!\n"
+        "> This is an automated CI re-validation probe — placebo diff only, "
+        "never intended to land. The branch is auto-deleted on green; "
+        "kept on failure for diagnosis.\n\n"
         f"{intro}\n\n"
         f"{ref_block}\n\n"
         "Branch deleted on green; kept on failure for diagnosis.\n\n"
@@ -2687,7 +2691,7 @@ def cmd_reset(sha_or_prefix: str) -> None:
 
 
 def main() -> None:
-    p = argparse.ArgumentParser(prog="probe_ci_health")
+    p = argparse.ArgumentParser(prog="revalidate_pr")
     p.add_argument("-v", "--verbose", action="count", default=0)
     sub = p.add_subparsers(dest="cmd", required=True)
 
