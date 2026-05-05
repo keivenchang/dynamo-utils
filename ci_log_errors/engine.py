@@ -35,6 +35,7 @@ from .regexes import (
     CAT_BACKEND_RESULT_FAILURE_RE,
     CAT_BROKEN_LINKS_RE,
     CAT_BUILD_STATUS_CHECK_ERROR_RE,
+    CAT_CANCELLED_RE,
     CAT_CI_FILTER_UNCOVERED_RE,
     CAT_CI_STATUS_CHECK_ERROR_RE,
     CAT_COPYRIGHT_HEADER_ERROR_RE,
@@ -1344,6 +1345,13 @@ def categorize_error_log_lines(lines: Sequence[str]) -> List[str]:
         elif CAT_CI_STATUS_CHECK_ERROR_RE.search(text_clean):
             add("ci-status-check-error")
 
+        # Workflow / job cancellation. Two log signatures (see CAT_CANCELLED_RE):
+        # GHA step-level "##[error]The operation was canceled." and JSON
+        # aggregator blocks where upstream jobs report "result": "cancelled".
+        # Run on text_clean so timestamp/ANSI prefixes don't break the match.
+        if CAT_CANCELLED_RE.search(text_clean):
+            add("cancelled")
+
         # Auth token expired (mirror repo curl 401)
         if "token is expired" in t or ("curl" in t and "401" in t and "invalid_token" in t):
             add("auth-token-expired")
@@ -1415,6 +1423,14 @@ def categorize_error_log_lines(lines: Sequence[str]) -> List[str]:
         # Remove it when a more specific category already covers the same signal.
         if "ci-status-check-error" in cats:
             if "backend-failure" in cats or "deploy-test-status-check" in cats or "build-status-check-error" in cats:
+                cats.remove("ci-status-check-error")
+
+        # Suppression: when a cancellation is the underlying cause and there is
+        # no real "result": "failure" in the JSON-deps block, the status-check
+        # aggregator's exit-1 is just propagating the cancellation. Drop the
+        # generic ci-status-check-error so the row is tagged correctly.
+        if "cancelled" in cats and "ci-status-check-error" in cats:
+            if not CAT_CI_STATUS_CHECK_ERROR_RE.search(text_clean):
                 cats.remove("ci-status-check-error")
     except Exception:  # THIS IS A HORRIBLE ANTI-PATTERN, FIX IT
         return cats

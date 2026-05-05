@@ -63,6 +63,22 @@ CAT_CI_STATUS_CHECK_ERROR_RE: Pattern[str] = re.compile(
     re.IGNORECASE,
 )
 
+# Cancellation: workflow / job / runner was cancelled, either directly or as
+# an upstream-cancelled dependency surfaced by a status-check aggregator.
+# Two signatures:
+#   1. GitHub Actions step-level marker:
+#        ##[error]The operation was canceled.
+#        ##[error]The runner has received a shutdown signal
+#   2. Status-check aggregator JSON block where the upstream result is
+#      cancelled (e.g. backend-status-check sees {"result": "cancelled"}).
+CAT_CANCELLED_RE: Pattern[str] = re.compile(
+    r"(?:"
+    r"##\[error\]\s*(?:The\s+operation\s+was\s+canceled|The\s+runner\s+has\s+received\s+a\s+shutdown\s+signal)"
+    r"|\"result\"\s*:\s*\"cancelled\""
+    r")",
+    re.IGNORECASE,
+)
+
 CAT_CI_FILTER_UNCOVERED_RE: Pattern[str] = re.compile(
     r"(?:"
     r"\bnot\s+covered\s+by\s+any\s+ci\s+filter\b"
@@ -364,6 +380,7 @@ CAT_RULES: List[Tuple[str, Pattern[str]]] = [
     ("exit-127-cmd-not-found", CAT_EXIT_CODE_127_RE),
     ("timeout-exit-124", CAT_EXIT_CODE_124_RE),
     ("github-action-unavailable", CAT_GITHUB_ACTION_UNAVAILABLE_RE),
+    ("cancelled", CAT_CANCELLED_RE),
     ("ci-status-check-error", CAT_CI_STATUS_CHECK_ERROR_RE),
 ]
 
