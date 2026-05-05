@@ -147,8 +147,11 @@ CAT_ETCD_ERROR_RE: Pattern[str] = re.compile(
     r"|\bcheck\s+etcd\s+server\s+status\b"
     # Require error-adjacent words, but exclude file paths (etcd/error.rs, etcd/lease.rs).
     # Negative lookbehind for `/` prevents matching path components.
-    r"|(?<!/)\betcd\b(?!/)[^\n]{0,80}\b(?:failed|error|unavailable|connection\s+refused|timed?\s*out)\b"
-    r"|(?<!/)\blease\b(?!/)[^\n]{0,80}\b(?:failed|error|expired|revoked|not\s+found)\b"
+    # Word list includes lease-specific verbs (expired/revoked/not_found) so an etcd-anchored
+    # match still catches `etcd lease expired`, etc. Buildkit/containerd also have a "lease"
+    # primitive (`lease does not exist: not found`), so we deliberately do NOT have a bare
+    # `\blease\b` branch — that would misclassify buildx infra failures as etcd errors.
+    r"|(?<!/)\betcd\b(?!/)[^\n]{0,80}\b(?:failed|error|unavailable|connection\s+refused|timed?\s*out|expired|revoked|not\s+found)\b"
     r")"
 )
 
