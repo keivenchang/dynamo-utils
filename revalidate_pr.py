@@ -443,8 +443,7 @@ def open_pr(sha: str, branch: str, dry_run: bool) -> int:
         "anything broke in CI. Please don't merge. I'll delete this PR "
         "if it turns green.\n\n"
         f"{intro}\n\n"
-        f"{ref_block}\n\n"
-        "Drafts are skipped by CodeRabbit per repo `.coderabbit.yaml`."
+        f"{ref_block}"
     )
     proc = run(
         [
