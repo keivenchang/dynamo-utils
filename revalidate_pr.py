@@ -71,7 +71,7 @@ PROBE_FILES = [
     "lib/runtime/src/runtime.rs",
 ]
 
-DEFAULT_PARALLELISM = 4
+DEFAULT_PARALLELISM = 3
 DEFAULT_MAX_ATTEMPTS = 3
 
 # A job that's been running this long is treated as stuck — the parent
