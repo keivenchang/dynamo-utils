@@ -84,7 +84,7 @@ def list_failed_jobs(run_id: int) -> list[dict]:
 
 
 def main() -> int:
-    p = argparse.ArgumentParser(prog="postmerge_failures")
+    p = argparse.ArgumentParser(prog="ci_postmerge_analysis")
     p.add_argument("target", help="PR number or commit SHA")
     p.add_argument(
         "--json",
