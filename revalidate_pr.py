@@ -72,13 +72,13 @@ PROBE_FILES = [
 ]
 
 DEFAULT_PARALLELISM = 3
-DEFAULT_MAX_ATTEMPTS = 3
+DEFAULT_MAX_ATTEMPTS = 1
 
 # A job that's been running this long is treated as stuck — the parent
 # workflow gets cancelled and (if attempts remain) the retry path spawns
 # the next attempt. Multi-arch arm64 builders occasionally hang past their
 # normal 1-2h envelope; 4h is well beyond that without being aggressive.
-STUCK_ATTEMPT_HOURS = 4
+STUCK_ATTEMPT_HOURS = 3
 
 # Required status checks on `main` (from repo rulesets, integration_id 15368).
 # Everything else (runtime tests, docker builds, …) is optional but rolls up
