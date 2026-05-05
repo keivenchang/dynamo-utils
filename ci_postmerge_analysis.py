@@ -17,6 +17,7 @@ consistent with the re-validation flow.
 from __future__ import annotations
 
 import argparse
+import html
 import json
 import os
 import sys
@@ -26,6 +27,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 from revalidate_pr import (  # noqa: E402
     REPO,
+    _to_pt,
     extract_pytest_failures,
     fetch_job_log,
     gh_api,
@@ -252,13 +254,201 @@ def cmd_backfill(args: argparse.Namespace) -> int:
 
 
 # ---------------------------------------------------------------------------
-# CLI: render-html (Phase 3 placeholder)
+# CLI: render-html
 # ---------------------------------------------------------------------------
 
 
+_HTML_STYLE = """<style>
+  body { font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+         margin: 0; padding: 24px; background: #fafbfc; color: #24292e; max-width: 1400px; }
+  h1 { font-size: 20px; margin: 0 0 4px 0; }
+  h2 { font-size: 16px; margin: 24px 0 8px 0; padding-bottom: 4px; border-bottom: 1px solid #e1e4e8; }
+  .meta { color: #586069; font-size: 13px; margin-bottom: 16px; }
+  .meta span { margin-right: 16px; }
+  code { background: #f6f8fa; padding: 2px 6px; border-radius: 3px; font-size: 12px;
+         font-family: "SF Mono", Consolas, monospace; }
+  a { color: #0366d6; text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  a[target="_blank"]::after { content: " ↗"; font-size: 0.85em; color: #959da5; }
+  .verdict-good { color: #28a745; font-weight: 600; }
+  .verdict-bad  { color: #d73a49; font-weight: 600; }
+  .verdict-other { color: #bf6c00; font-weight: 600; }
+  .pill { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 12px;
+          font-weight: 500; }
+  .pill-fail { background: #f8d7da; color: #721c24; }
+  table { border-collapse: collapse; margin: 8px 0 16px 0; font-size: 13px; width: 100%; }
+  th, td { text-align: left; padding: 6px 10px; border-bottom: 1px solid #eaecef; vertical-align: top; }
+  th { background: #f6f8fa; font-weight: 600; font-size: 12px; text-transform: uppercase;
+       letter-spacing: 0.05em; color: #586069; }
+  tr.fail-final td { background: #ea868f; }
+  tr.pass td { background: #c3e6cb; }
+  details { background: #fff; border: 1px solid #d0d7de; border-radius: 6px;
+            margin: 8px 0; padding: 0; }
+  details > summary { cursor: pointer; padding: 10px 14px; font-weight: 600;
+                      list-style: none; user-select: none; }
+  details > summary::-webkit-details-marker { display: none; }
+  details > summary::before { content: "▶ "; color: #586069; font-size: 11px;
+                              display: inline-block; transition: transform 0.1s; }
+  details[open] > summary::before { transform: rotate(90deg); }
+  details > .details-body { padding: 0 14px 12px 14px; }
+  ul.tests { margin: 6px 0 0 0; padding-left: 20px; }
+  ul.tests li { font-family: "SF Mono", Consolas, monospace; font-size: 12px;
+                color: #d73a49; padding: 2px 0; }
+</style>"""
+
+
+def _esc(s: str | None) -> str:
+    return html.escape(s or "", quote=True)
+
+
+def _verdict_class(conclusion: str | None) -> str:
+    if conclusion == "success":
+        return "verdict-good"
+    if conclusion in ("failure", "timed_out"):
+        return "verdict-bad"
+    return "verdict-other"
+
+
+def _filename_for(sha: str) -> str:
+    return f"post_merge-{short_sha(sha)}.html"
+
+
+def _date_dir_for(entry: dict) -> str:
+    """Group per-SHA pages by the post-merge run's start date in PT."""
+    dt = _to_pt(entry.get("created_at"))
+    return dt.strftime("%Y-%m-%d") if dt else "unknown"
+
+
+def _render_per_sha_page(sha: str, entry: dict) -> str:
+    failed_jobs = entry.get("failed_jobs") or []
+    n_tests = sum(len(j.get("failed_tests") or []) for j in failed_jobs)
+    conc = entry.get("conclusion")
+    vclass = _verdict_class(conc)
+    run_url = entry.get("html_url") or "#"
+    run_id = entry.get("run_id")
+    created_pt = _to_pt(entry.get("created_at"))
+    created_str = created_pt.strftime("%Y-%m-%d %H:%M:%S %Z") if created_pt else "—"
+    sha_short = short_sha(sha)
+    parts: list[str] = [
+        "<!DOCTYPE html>",
+        f"<html><head><meta charset='utf-8'><title>Post-merge {sha_short}</title>",
+        _HTML_STYLE,
+        "</head><body>",
+        f"<h1>Post-merge run for <code>{sha_short}</code></h1>",
+        "<div class='meta'>",
+        f"<span>SHA: <code><a href='https://github.com/{REPO}/commit/{sha}' target='_blank'>{sha}</a></code></span>",
+        f"<span>Run: <a href='{_esc(run_url)}' target='_blank'>#{run_id}</a></span>",
+        f"<span class='{vclass}'>{_esc(conc or 'pending')}</span>",
+        f"<span>Started: {_esc(created_str)}</span>",
+        "</div>",
+    ]
+    if not failed_jobs:
+        if conc == "success":
+            parts.append("<p>All jobs passed.</p>")
+        else:
+            parts.append(
+                f"<p>No failed jobs recorded "
+                f"(run conclusion was <code>{_esc(conc or 'unknown')}</code>).</p>"
+            )
+    else:
+        parts.append(
+            f"<h2>Failed jobs ({len(failed_jobs)}) "
+            f"&middot; {n_tests} pytest test{'s' if n_tests != 1 else ''}</h2>"
+        )
+        for j in failed_jobs:
+            parts.append("<details open>")
+            parts.append(
+                f"<summary>{_esc(j['name'])} "
+                f"<span class='pill pill-fail'>{_esc(j.get('conclusion'))}</span></summary>"
+            )
+            parts.append("<div class='details-body'>")
+            parts.append(
+                f"<p><a href='{_esc(j.get('url') or '#')}' target='_blank'>"
+                f"view job log on GitHub</a></p>"
+            )
+            tests = j.get("failed_tests") or []
+            if tests:
+                parts.append("<ul class='tests'>")
+                for t in tests:
+                    parts.append(f"<li>{_esc(t)}</li>")
+                parts.append("</ul>")
+            else:
+                parts.append(
+                    "<p><em>No pytest test IDs extracted "
+                    "(build/setup failure or non-pytest job).</em></p>"
+                )
+            parts.append("</div></details>")
+    parts.append("</body></html>")
+    return "\n".join(parts)
+
+
+def _render_summary_index(db: dict, page_paths: dict[str, str]) -> str:
+    # Sort newest first by created_at
+    far_past = datetime.min.replace(tzinfo=timezone.utc)
+    items = sorted(
+        db.items(),
+        key=lambda kv: (_to_pt(kv[1].get("created_at")) or far_past, kv[0]),
+        reverse=True,
+    )
+    rows: list[str] = []
+    for sha, entry in items:
+        conc = entry.get("conclusion")
+        vclass = _verdict_class(conc)
+        n_failed = len(entry.get("failed_jobs") or [])
+        n_tests = sum(len(j.get("failed_tests") or []) for j in (entry.get("failed_jobs") or []))
+        created_pt = _to_pt(entry.get("created_at"))
+        date_str = created_pt.strftime("%Y-%m-%d %H:%M") if created_pt else "—"
+        sha_short = short_sha(sha)
+        link = page_paths.get(sha, "#")
+        run_url = entry.get("html_url") or "#"
+        row_class = "fail-final" if conc in ("failure", "timed_out") else ("pass" if conc == "success" else "")
+        rows.append(
+            f"<tr class='{row_class}'>"
+            f"<td>{_esc(date_str)}</td>"
+            f"<td><a href='{_esc(link)}'><code>{sha_short}</code></a></td>"
+            f"<td><span class='{vclass}'>{_esc(conc or '?')}</span></td>"
+            f"<td>{n_failed}</td>"
+            f"<td>{n_tests}</td>"
+            f"<td><a href='{_esc(run_url)}' target='_blank'>GH Actions</a></td>"
+            f"</tr>"
+        )
+    return "\n".join([
+        "<!DOCTYPE html>",
+        "<html><head><meta charset='utf-8'><title>Post-merge summary</title>",
+        _HTML_STYLE,
+        "</head><body>",
+        "<h1>Post-merge runs &mdash; main branch</h1>",
+        f"<div class='meta'><span>{len(items)} cached SHA(s)</span></div>",
+        "<table>",
+        "<thead><tr>"
+        "<th>Run started (PT)</th><th>SHA</th><th>Verdict</th>"
+        "<th># failed jobs</th><th># failed tests</th><th>Run</th>"
+        "</tr></thead>",
+        "<tbody>",
+        *rows,
+        "</tbody></table>",
+        "</body></html>",
+    ])
+
+
 def cmd_render_html(args: argparse.Namespace) -> int:
-    print("render-html: not yet implemented (Phase 3)", file=sys.stderr)
-    return 1
+    output_root = Path(args.output_root)
+    db = load_db()
+    output_root.mkdir(parents=True, exist_ok=True)
+    page_paths: dict[str, str] = {}
+    n_pages = 0
+    for sha, entry in db.items():
+        date_str = _date_dir_for(entry)
+        date_dir = output_root / date_str
+        date_dir.mkdir(parents=True, exist_ok=True)
+        out_path = date_dir / _filename_for(sha)
+        out_path.write_text(_render_per_sha_page(sha, entry))
+        page_paths[sha] = f"{date_str}/{_filename_for(sha)}"
+        n_pages += 1
+    summary_path = output_root / "post_merge.html"
+    summary_path.write_text(_render_summary_index(db, page_paths))
+    print(f"wrote {n_pages} per-SHA pages + {summary_path}")
+    return 0
 
 
 # ---------------------------------------------------------------------------
@@ -281,7 +471,12 @@ def main() -> int:
     p_back.add_argument("--refresh", action="store_true", help="re-fetch even when cached")
     p_back.set_defaults(func=cmd_backfill)
 
-    p_rh = sub.add_parser("render-html", help="render per-SHA + summary HTML (Phase 3)")
+    p_rh = sub.add_parser("render-html", help="render per-SHA + summary HTML")
+    p_rh.add_argument(
+        "--output-root",
+        default=str(Path.home() / "dynamo" / "commits" / "logs"),
+        help="output directory (default: ~/dynamo/commits/logs)",
+    )
     p_rh.set_defaults(func=cmd_render_html)
 
     args = p.parse_args()
