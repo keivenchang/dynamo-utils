@@ -101,7 +101,14 @@ def resolve_sha(arg: str) -> str:
         return sha.lower()
     if len(arg) < 7 or not all(c in "0123456789abcdef" for c in arg.lower()):
         raise SystemExit(f"argument {arg!r}: not a PR number or hex SHA")
-    return arg.lower()
+    s = arg.lower()
+    if len(s) == 40:
+        return s
+    # Expand short prefix -> full SHA so cache keys are always 40-char.
+    commit = gh_api(f"repos/{REPO}/commits/{s}")
+    if commit and commit.get("sha"):
+        return commit["sha"].lower()
+    raise SystemExit(f"could not expand SHA prefix {s!r} to a full SHA")
 
 
 def pr_for_sha(sha: str) -> int | None:

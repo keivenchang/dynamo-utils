@@ -2886,13 +2886,61 @@ class CommitHistoryGenerator:
                         "html_url": _e.get("html_url"),
                         "failed_jobs_n": len(_failed_jobs),
                         "failed_tests_n": _failed_tests_n,
-                        "page_path": f"logs/{_date_str}/post_merge-{_sha_full[:11]}.html",
+                        "page_path": f"logs/{_date_str}/{_sha_full[:11]}-postmerge.html",
                     }
                 self.logger.info(
                     f"local post-merge cache: loaded for {len(local_postmerge_status_by_sha)} SHAs"
                 )
         except Exception as _e:
             self.logger.warning(f"local post-merge cache load failed: {_e}")
+
+        # Local pre-merge cache (ci_merge_analysis.py) — populates the new
+        # "Pre-merge" column. Aggregates across all attempts: final-attempt
+        # verdict, total failed jobs/tests, and attempt count for the badge.
+        local_premerge_status_by_sha: Dict[str, Dict[str, Any]] = {}
+        try:
+            from zoneinfo import ZoneInfo as _ZI_prm
+            _PT_prm = _ZI_prm("America/Los_Angeles")
+            _prm_path = Path.home() / ".cache" / "dynamo-utils" / "pre-merge.json"
+            if _prm_path.exists():
+                with _prm_path.open() as _f:
+                    _prm_db = json.load(_f)
+                _JOB_FAIL = {"failure", "timed_out", "cancelled"}
+                for _sha_full, _e in _prm_db.items():
+                    if not isinstance(_e, dict):
+                        continue
+                    _atts = _e.get("attempts") or []
+                    if not _atts:
+                        continue
+                    _last = _atts[-1]
+                    _final_concl = _last.get("conclusion") or "unknown"
+                    _failed_jobs_n = sum(
+                        sum(1 for j in (a.get("jobs") or []) if j.get("conclusion") in _JOB_FAIL)
+                        for a in _atts
+                    )
+                    _failed_tests_n = sum(
+                        sum(len(j.get("failed_tests") or []) for j in (a.get("jobs") or []))
+                        for a in _atts
+                    )
+                    _ca = _last.get("created_at") or ""
+                    try:
+                        _date_str = datetime.fromisoformat(_ca).astimezone(_PT_prm).strftime("%Y-%m-%d")
+                    except Exception:
+                        _date_str = "unknown"
+                    local_premerge_status_by_sha[_sha_full] = {
+                        "pr": _e.get("pr"),
+                        "conclusion": _final_concl,
+                        "n_attempts": len(_atts),
+                        "n_workflow_runs": _e.get("n_workflow_runs", 0),
+                        "failed_jobs_n": _failed_jobs_n,
+                        "failed_tests_n": _failed_tests_n,
+                        "page_path": f"logs/{_date_str}/{_sha_full[:11]}-premerge.html",
+                    }
+                self.logger.info(
+                    f"local pre-merge cache: loaded for {len(local_premerge_status_by_sha)} SHAs"
+                )
+        except Exception as _e:
+            self.logger.warning(f"local pre-merge cache load failed: {_e}")
 
         template_context: Dict[str, Any] = {
             "commits": commit_data,
@@ -2909,6 +2957,7 @@ class CommitHistoryGenerator:
             "build_status": build_status,
             "github_actions_status": github_actions_status,
             "post_merge_status": post_merge_status,
+            "local_premerge_status": local_premerge_status_by_sha,
             "local_postmerge_status": local_postmerge_status_by_sha,
             "probe_status": probe_status_by_sha,
             "generated_time": generated_time,
