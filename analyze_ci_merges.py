@@ -364,9 +364,11 @@ def _print_premerge(entry: dict) -> None:
         n_tests = sum(len(j.get("failed_tests") or []) for j in (a.get("jobs") or []))
         head = (a.get("head_sha") or "")[:9]
         c = a.get("conclusion") or "(eclipsed)"
+        _dt = _to_pt(a.get("created_at"))
+        _ts = _dt.strftime("%Y-%m-%d %H:%M:%S %Z") if _dt else "—"
         print(
             f"  att {i:2d}: run={a.get('run_id')}/{a.get('run_attempt')}  "
-            f"head={head}  {(a.get('created_at') or '')[:19]}  "
+            f"head={head}  {_ts}  "
             f"verdict={c:<22}  {n_failed}/{n_jobs} jobs failed, {n_tests} tests"
         )
 
@@ -781,7 +783,7 @@ def _render_summary(kind: str, entries_by_sha: dict, page_paths: dict) -> str:
         else:
             _ca = _e.get("created_at")
         _dt = _to_pt(_ca)
-        _ts = _dt.strftime("%Y-%m-%d %H:%M:%S") if _dt else "—"
+        _ts = _dt.strftime("%Y-%m-%d %H:%M:%S %Z") if _dt else "—"
         _pr = _e.get("pr") or _orig_pr
         sha_meta[_sha] = {
             "subj": _subj,
@@ -930,24 +932,51 @@ def _render_summary(kind: str, entries_by_sha: dict, page_paths: dict) -> str:
     # '.' (gray) = SHA has no jobs data at all (not yet fetched).
     items_old_first = list(reversed(items))
 
-    def _did_test_fail_in(
-        sha: str, e: dict, test_id: str
-    ) -> tuple[bool, bool, str | None]:
-        """Return (any_jobs, test_failed, first_failed_job_url).
-        any_jobs=False means the SHA has no job data at all (skipped/unknown)."""
-        any_jobs = False
+    # Map test_id → set of job names that have ever hosted this test (i.e. it
+    # failed in those jobs at some point in the cached window). Used to
+    # distinguish "test ran and passed" from "the host-job was cancelled /
+    # didn't run, so we don't actually know if the test passed".
+    test_host_jobs: dict[str, set[str]] = {}
+    for sha, e in items:
         if kind == "pre-merge":
             for a in e.get("attempts") or []:
                 for j in a.get("jobs") or []:
-                    any_jobs = True
-                    if test_id in (j.get("failed_tests") or []):
-                        return (True, True, j.get("url"))
+                    name = j.get("name") or ""
+                    for t in j.get("failed_tests") or []:
+                        if t and name:
+                            test_host_jobs.setdefault(t, set()).add(name)
         else:
             for j in e.get("jobs") or e.get("failed_jobs") or []:
-                any_jobs = True
+                name = j.get("name") or ""
+                for t in j.get("failed_tests") or []:
+                    if t and name:
+                        test_host_jobs.setdefault(t, set()).add(name)
+
+    def _did_test_fail_in(
+        sha: str, e: dict, test_id: str
+    ) -> tuple[bool, bool, str | None]:
+        """Return (test_observed, test_failed, first_failed_job_url).
+        test_observed=False means this test's host-job didn't actually complete
+        successfully on this SHA — could be cancelled, missing, or just no
+        data — so we paint gray ("no signal") instead of green."""
+        host_jobs = test_host_jobs.get(test_id, set())
+        observed = False
+        if kind == "pre-merge":
+            for a in e.get("attempts") or []:
+                for j in a.get("jobs") or []:
+                    name = j.get("name") or ""
+                    if test_id in (j.get("failed_tests") or []):
+                        return (True, True, j.get("url"))
+                    if name in host_jobs and j.get("conclusion") == "success":
+                        observed = True
+        else:
+            for j in e.get("jobs") or e.get("failed_jobs") or []:
+                name = j.get("name") or ""
                 if test_id in (j.get("failed_tests") or []):
                     return (True, True, j.get("url"))
-        return (any_jobs, False, None)
+                if name in host_jobs and j.get("conclusion") == "success":
+                    observed = True
+        return (observed, False, None)
 
     def _hb_tooltip(sha: str, status_text: str) -> str:
         """Compose a tooltip with PR, author, timestamp, status."""
@@ -969,15 +998,16 @@ def _render_summary(kind: str, entries_by_sha: dict, page_paths: dict) -> str:
     def _history_bar(test_id: str) -> str:
         cells: list[str] = []
         for sha, e in items_old_first:
-            any_jobs, failed, fail_url = _did_test_fail_in(sha, e, test_id)
+            observed, failed, fail_url = _did_test_fail_in(sha, e, test_id)
             base = (
                 "display:inline-block; width:9px; height:11px; "
                 "vertical-align:middle; margin-right:1px;"
             )
-            if not any_jobs:
+            if not observed and not failed:
+                _tip = _hb_tooltip(sha, "test did not run (host job cancelled or missing)")
                 cells.append(
                     f"<span class='hb-cell' style='{base} background:#d0d7de;' "
-                    f"title='{_hb_tooltip(sha, 'no data')}'></span>"
+                    f"title='{_tip}'></span>"
                 )
             elif failed:
                 inner = (

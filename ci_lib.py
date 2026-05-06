@@ -540,11 +540,11 @@ def _to_pt(iso: str | None) -> datetime | None:
 
 
 def _short_merge_date(iso: str | None) -> str:
-    """'YYYY-MM-DD HH:MM:SS' in Pacific Time."""
+    """'YYYY-MM-DD HH:MM:SS PDT|PST' in Pacific Time."""
     dt = _to_pt(iso)
     if dt is None:
         return "?"
-    return dt.strftime("%Y-%m-%d %H:%M:%S")
+    return dt.strftime("%Y-%m-%d %H:%M:%S %Z")
 
 
 def _html_escape(s: str) -> str:
@@ -1223,7 +1223,7 @@ def render_ci_attempts_page(
             continue
         ca = a.get("started_at")
         dt = _to_pt(ca) if ca else None
-        _att_started[n] = dt.strftime("%Y-%m-%d %H:%M:%S") if dt else "—"
+        _att_started[n] = dt.strftime("%Y-%m-%d %H:%M:%S %Z") if dt else "—"
 
     def _started_str(att_num: int) -> str:
         return _att_started.get(att_num, "—")
@@ -1471,7 +1471,7 @@ def render_ci_attempts_page(
         if s:
             dt = _to_pt(s)
             if dt:
-                started_pt = dt.strftime("%Y-%m-%d %H:%M:%S")
+                started_pt = dt.strftime("%Y-%m-%d %H:%M:%S %Z")
         _short_started, duration = _job_timing(j, conc)
 
         url = _job_url(j)
