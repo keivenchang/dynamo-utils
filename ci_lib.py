@@ -1614,53 +1614,103 @@ def render_ci_attempts_page(
             default=0,
         )
 
+        def _hosts_in_run(test_id: str, run_n: int) -> list[tuple[dict, str, str]]:
+            """Return list of (job, jname, status) for all host jobs of the test
+            in run N. status ∈ {"failed", "passed", "other"}."""
+            host = test_host_jobs.get(test_id, set())
+            att = next(
+                (a for a in attempts_all if a.get("attempt") == run_n), None
+            )
+            if not att:
+                return []
+            jd = att.get("jobs") or {}
+            failed_tests_in_att = att.get("failed_tests") or {}
+            out: list[tuple[dict, str, str]] = []
+            for jname, j in jd.items():
+                if jname not in host or not isinstance(j, dict):
+                    continue
+                if test_id in (failed_tests_in_att.get(jname) or []):
+                    out.append((j, jname, "failed"))
+                elif j.get("conclusion") == "success":
+                    out.append((j, jname, "passed"))
+                else:
+                    out.append((j, jname, "other"))
+            return out
+
         def _per_run_bar(test_id: str, info: dict) -> str:
             cells: list[str] = []
-            base = (
-                "display:inline-block; width:9px; height:11px; "
-                "vertical-align:middle; margin-right:1px;"
+            run_w = 9
+            base_cell = (
+                f"display:inline-block; width:{run_w}px; height:11px; "
+                "vertical-align:middle;"
             )
-            host = test_host_jobs.get(test_id, set())
             for n in range(1, max_att + 1):
-                # Find this run's attempt entry.
-                att = next(
-                    (a for a in attempts_all if a.get("attempt") == n), None
-                )
-                failed = n in info["runs"]
-                fail_url = info["run_to_url"].get(n) if failed else None
-                pass_url: str | None = None
-                if att and not failed:
-                    jd = att.get("jobs") or {}
-                    for jname, j in jd.items():
-                        if jname in host and isinstance(j, dict) and j.get("conclusion") == "success":
-                            pass_url = j.get("url")
-                            break
-                if failed:
-                    inner = (
-                        f"<span class='hb-cell' style='{base} background:#c83a3a;' "
-                        f"title='Run #{n}: FAILED — click to open job log'></span>"
+                hosts = _hosts_in_run(test_id, n)
+                if not hosts:
+                    _gray_tip = f"Run #{n}: did not run (host job cancelled or missing)"
+                    cells.append(
+                        f"<span class='hb-cell' style='{base_cell} margin-right:1px; background:#d0d7de;' "
+                        f"title='{_html_escape(_gray_tip)}'></span>"
                     )
-                    if fail_url:
-                        cells.append(
-                            f"<a class='hb-link' href='{_html_escape(fail_url)}' "
-                            f"target='_blank' rel='noopener noreferrer'>{inner}</a>"
+                    continue
+                # Roll up to a single cell color: red if any failed, green if
+                # any passed, else gray. Hover reveals one link per host job.
+                statuses = {s for _, _, s in hosts}
+                if "failed" in statuses:
+                    bg = "#c83a3a"
+                elif "passed" in statuses:
+                    bg = "#2da44e"
+                else:
+                    bg = "#d0d7de"
+                # Build the popover menu: one row per host job.
+                menu_items: list[str] = []
+                for j, jname, status in hosts:
+                    jid = j.get("id")
+                    jurl = j.get("url")
+                    label_color = (
+                        "#c83a3a" if status == "failed"
+                        else ("#2da44e" if status == "passed" else "#586069")
+                    )
+                    label_text = (
+                        "FAILED" if status == "failed"
+                        else ("passed" if status == "passed" else (j.get("conclusion") or "unknown"))
+                    )
+                    line = (
+                        f"<span style='display:inline-block;width:8px;height:8px;"
+                        f"border-radius:2px;background:{bg};margin-right:6px;"
+                        f"vertical-align:middle;'></span>"
+                        f"<span style='color:{label_color};font-weight:600;'>{label_text}</span>"
+                        f" <span style='color:#586069;'>job#{jid or '?'}</span>"
+                        f" <span>{_html_escape(jname)}</span>"
+                    )
+                    if jurl:
+                        menu_items.append(
+                            f"<a class='hb-pop-item' href='{_html_escape(jurl)}' "
+                            f"target='_blank' rel='noopener noreferrer'>{line}</a>"
                         )
                     else:
-                        cells.append(inner)
-                elif pass_url:
-                    inner = (
-                        f"<span class='hb-cell' style='{base} background:#2da44e;' "
-                        f"title='Run #{n}: passed — click to open job log'></span>"
-                    )
-                    cells.append(
-                        f"<a class='hb-link' href='{_html_escape(pass_url)}' "
-                        f"target='_blank' rel='noopener noreferrer'>{inner}</a>"
-                    )
-                else:
-                    cells.append(
-                        f"<span class='hb-cell' style='{base} background:#d0d7de;' "
-                        f"title='Run #{n}: did not run (host job cancelled or missing)'></span>"
-                    )
+                        menu_items.append(f"<span class='hb-pop-item'>{line}</span>")
+                menu_html = (
+                    f"<span class='hb-pop-menu'>"
+                    f"<span class='hb-pop-head'>Run #{n} &mdash; {len(hosts)} host job(s)</span>"
+                    + "".join(menu_items)
+                    + "</span>"
+                )
+                tip = f"Run #{n}: hover to see {len(hosts)} host job(s)"
+                # Show the host-job count (e.g. "2") inside the cell when > 1.
+                count_label = (
+                    f"<span style='font-size:8px;color:#fff;font-weight:700;"
+                    f"line-height:11px;text-align:center;display:block;'>{len(hosts)}</span>"
+                    if len(hosts) > 1 else ""
+                )
+                cell_inner = (
+                    f"<span class='hb-cell' style='{base_cell} background:{bg};' "
+                    f"title='{_html_escape(tip)}'>{count_label}</span>"
+                )
+                cells.append(
+                    f"<span class='hb-pop' style='display:inline-block;position:relative;"
+                    f"margin-right:1px;line-height:0;'>{cell_inner}{menu_html}</span>"
+                )
             return (
                 "<span style='display:inline-block;white-space:nowrap;"
                 "font-family:\"SF Mono\",Consolas,monospace;font-size:10px;'>"
@@ -1679,8 +1729,28 @@ def render_ci_attempts_page(
         tally_html = (
             f"<h2>Failing tests <small style='color:#586069;font-weight:400'>"
             f"({n_unique} unique • {n_total} occurrences across runs)</small></h2>"
-            "<style>a.hb-link { text-decoration: none; } "
-            "a.hb-link[target=\"_blank\"]::after { content: none; }</style>"
+            "<style>"
+            "a.hb-link { text-decoration: none; } "
+            "a.hb-link[target=\"_blank\"]::after { content: none; } "
+            ".hb-pop-menu { visibility: hidden; opacity: 0; "
+            "transition: visibility 0s linear 500ms, opacity 150ms ease 350ms; "
+            "position: absolute; top: 11px; left: 0; "
+            "z-index: 1000; background: #fff; border: 1px solid #d0d7de; "
+            "border-radius: 4px; box-shadow: 0 4px 8px rgba(0,0,0,0.12); "
+            "padding: 6px 8px; line-height: 1.5; font-size: 12px; "
+            "font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; "
+            "min-width: 280px; white-space: nowrap; } "
+            ".hb-pop:hover .hb-pop-menu, .hb-pop-menu:hover { "
+            "visibility: visible; opacity: 1; "
+            "transition: visibility 0s linear 0s, opacity 100ms ease 0s; } "
+            ".hb-pop-menu .hb-pop-head { display: block; color: #586069; "
+            "font-size: 11px; padding-bottom: 4px; border-bottom: 1px solid #eaecef; "
+            "margin-bottom: 4px; } "
+            ".hb-pop-menu .hb-pop-item { display: block; padding: 2px 4px; "
+            "color: #24292e; text-decoration: none; border-radius: 3px; } "
+            ".hb-pop-menu a.hb-pop-item:hover { background: #f6f8fa; } "
+            ".hb-pop-menu a.hb-pop-item[target=\"_blank\"]::after { content: \" \\2197\"; color: #959da5; }"
+            "</style>"
             "<table class='attempt-table'>"
             "<thead><tr><th>Rank</th><th>Count / Total</th>"
             "<th style='text-align:left;'>Test</th>"
