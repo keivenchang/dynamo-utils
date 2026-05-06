@@ -13,11 +13,14 @@
 #   - if maintenance flags are provided with no explicit --backup, skip rsync
 #   - perform only compression / uncompression / retention cleanup
 #
-# Usage (cron — normal backups):
+# Usage (cron — normal backups, every 6 minutes):
 #   */6 * * * * $DYNAMO_HOME/dynamo-utils.dev/backup_all.sh >/dev/null 2>&1
 #
-# Usage (cron — maintenance):
-#   0 2 * * * $DYNAMO_HOME/dynamo-utils.dev/backup_all.sh --compress --remove-after-days 45 >/dev/null 2>&1
+# Usage (cron — every 6 hours, adds editor/agent state):
+#   0 */6 * * * $DYNAMO_HOME/dynamo-utils.dev/backup_all.sh --backup --include-6h >/dev/null 2>&1
+#
+# Usage (cron — daily maintenance + slow-changing/large targets):
+#   0 2 * * * $DYNAMO_HOME/dynamo-utils.dev/backup_all.sh --backup --include-6h --include-daily --compress --remove-after-days 45 >/dev/null 2>&1
 
 set -euo pipefail
 
@@ -41,17 +44,44 @@ COMPRESS=false
 UNCOMPRESS=false
 REMOVE_AFTER_DAYS=""
 DRY_RUN=false
+INCLUDE_6H=false
+INCLUDE_DAILY=false
 FAILED_TARGETS=()
 
 # Format: source_path|dest_relative_path
 TARGETS=(
-    "${DYNAMO_HOME}|nvidia"
+    "${DYNAMO_HOME}|dynamo"
     "$HOME/.config|.config"
     "$HOME/.ssh|.ssh"
+    "$HOME/.ngc|.ngc"
+    "$HOME/.aws|.aws"
+    "$HOME/.azure|.azure"
+    "$HOME/.kube|.kube"
+    "$HOME/.cisco|.cisco"
+    "$HOME/ai-config|ai-config"
+    # NOT ~/.cache/huggingface — it is already symlinked to /mnt/sda
+)
+
+# 6-hour targets: editor/agent state and corp credentials that change a few
+# times a day. Backed up only when --include-6h is set (run from a 0 */6 * * *
+# cron entry).
+TARGETS_6H=(
     "$HOME/.claude|.claude"
     "$HOME/.cursor|.cursor"
-    "$HOME/.ngc|.ngc"
-    # NOT ~/.cache/huggingface — it is already symlinked to /mnt/sda
+    "$HOME/.tsh|.tsh"
+    "$HOME/.nebius|.nebius"
+    "$HOME/.slack|.slack"
+    "$HOME/nvsec-env|nvsec-env"
+)
+
+# Daily-only targets: large or slowly-changing data where a 24h-resolution
+# snapshot is sufficient. Backed up only when --include-daily is set
+# (run from the daily 0 2 * * * cron entry, not the 6-min one).
+TARGETS_DAILY=(
+    "$HOME/.gnupg|.gnupg"
+    "$HOME/.docker|.docker"
+    "$HOME/.cache/dynamo-utils|.cache/dynamo-utils"
+    "$HOME/.local/share|.local/share"
 )
 
 # Single files copied separately after directory backups.
@@ -61,6 +91,7 @@ SINGLE_FILES=(
     "$HOME/.bash_profile"
     "$HOME/.profile"
     "$HOME/.zshrc"
+    "$HOME/.claude.json"
 )
 
 show_usage() {
@@ -75,6 +106,12 @@ If maintenance flags are provided and --backup is NOT specified:
 
 OPTIONS:
   --backup                    Force backup mode, even with maintenance flags
+  --include-6h                Also back up TARGETS_6H (editor/agent state and
+                              corp credentials, e.g. ~/.claude, ~/.cursor,
+                              ~/.tsh). Intended for an every-6-hour cron entry.
+  --include-daily             Also back up TARGETS_DAILY (slow-changing/large data,
+                              e.g. ~/.cache/dynamo-utils, ~/.local/share). Intended
+                              for the once-a-day cron entry only.
   --compress                  Compress old backup history directories by date
   --uncompress                Uncompress all backup history archives
   --remove-after-days <N>     Remove backup history older than N days
@@ -84,7 +121,8 @@ OPTIONS:
 EXAMPLES:
   backup_all.sh
   backup_all.sh --compress --remove-after-days 45
-  backup_all.sh --backup --compress --remove-after-days 45
+  backup_all.sh --backup --include-6h
+  backup_all.sh --backup --include-6h --include-daily --compress --remove-after-days 45
   backup_all.sh --uncompress --dry-run
 EOF
 }
@@ -118,6 +156,14 @@ while [[ $# -gt 0 ]]; do
             ;;
         --dry-run|--dryrun)
             DRY_RUN=true
+            shift
+            ;;
+        --include-6h)
+            INCLUDE_6H=true
+            shift
+            ;;
+        --include-daily)
+            INCLUDE_DAILY=true
             shift
             ;;
         -h|--help)
@@ -327,6 +373,61 @@ copy_single_files() {
     done
 }
 
+# Back up system-level configuration so a /home rebuild can restore the box quickly:
+# firewall, boot params, mount table, custom systemd units, sudo policies, network,
+# and the user crontab (root-owned in /var/spool/cron/crontabs/).
+# Requires NOPASSWD sudo; gracefully no-op otherwise.
+run_system_backup() {
+    local sys_dest="$BACKUP_ROOT/system"
+
+    local sys_paths=(
+        /etc/ufw
+        /etc/nginx
+        /etc/default/grub
+        /etc/default/grub.d
+        /etc/systemd/system
+        /etc/fstab
+        /etc/crypttab
+        /etc/netplan
+        /etc/sudoers.d
+        /etc/hosts
+        /etc/hostname
+        /var/spool/cron/crontabs/keivenc
+    )
+
+    if [[ "$DRY_RUN" == true ]]; then
+        echo "[DRY RUN] Would back up system files to: $sys_dest"
+        for p in "${sys_paths[@]}"; do
+            echo "[DRY RUN]   $p"
+        done
+        return 0
+    fi
+
+    if ! sudo -n true 2>/dev/null; then
+        echo "WARN: sudo -n unavailable; skipping system-files backup" >&2
+        echo "$(date '+%Y-%m-%d %H:%M:%S') - WARN: sudo -n unavailable; skipping system-files backup" >> "$LOG_FILE"
+        return 0
+    fi
+
+    mkdir -p "$sys_dest"
+    chmod 700 "$sys_dest"
+
+    echo "Starting system-files backup -> $sys_dest"
+    echo "$(date '+%Y-%m-%d %H:%M:%S') - Starting system-files backup" >> "$LOG_FILE"
+
+    # -aR keeps absolute paths under $sys_dest (e.g. $sys_dest/etc/ufw/...).
+    # --delete keeps the backup in sync; scoped to each source tree under -R.
+    local rc=0
+    sudo -n rsync -aR --delete "${sys_paths[@]}" "$sys_dest/" 2>&1 | tee -a "$LOG_FILE" || rc=${PIPESTATUS[0]}
+
+    if [[ "$rc" -eq 0 || "$rc" -eq 23 ]]; then
+        echo "$(date '+%Y-%m-%d %H:%M:%S') - System-files backup complete (rc=$rc)" >> "$LOG_FILE"
+    else
+        echo "$(date '+%Y-%m-%d %H:%M:%S') - WARN: System-files backup rc=$rc" >> "$LOG_FILE"
+        FAILED_TARGETS+=("system")
+    fi
+}
+
 compress_history() {
     echo "Compressing old backup history directories by date..."
     echo "$(date '+%Y-%m-%d %H:%M:%S') - Starting compression of old backups" >> "$LOG_FILE"
@@ -499,7 +600,20 @@ if [[ "$DO_BACKUP" == true ]]; then
         run_backup_target "${entry%%|*}" "${entry##*|}"
     done
 
+    if [[ "$INCLUDE_6H" == true ]]; then
+        for entry in "${TARGETS_6H[@]}"; do
+            run_backup_target "${entry%%|*}" "${entry##*|}"
+        done
+    fi
+
+    if [[ "$INCLUDE_DAILY" == true ]]; then
+        for entry in "${TARGETS_DAILY[@]}"; do
+            run_backup_target "${entry%%|*}" "${entry##*|}"
+        done
+    fi
+
     copy_single_files
+    run_system_backup
 fi
 
 if [[ "$COMPRESS" == true ]]; then
