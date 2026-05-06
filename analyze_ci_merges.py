@@ -954,29 +954,34 @@ def _render_summary(kind: str, entries_by_sha: dict, page_paths: dict) -> str:
 
     def _did_test_fail_in(
         sha: str, e: dict, test_id: str
-    ) -> tuple[bool, bool, str | None]:
-        """Return (test_observed, test_failed, first_failed_job_url).
+    ) -> tuple[bool, bool, str | None, str | None]:
+        """Return (test_observed, test_failed, fail_url, pass_url).
         test_observed=False means this test's host-job didn't actually complete
         successfully on this SHA — could be cancelled, missing, or just no
         data — so we paint gray ("no signal") instead of green."""
         host_jobs = test_host_jobs.get(test_id, set())
         observed = False
+        pass_url: str | None = None
         if kind == "pre-merge":
             for a in e.get("attempts") or []:
                 for j in a.get("jobs") or []:
                     name = j.get("name") or ""
                     if test_id in (j.get("failed_tests") or []):
-                        return (True, True, j.get("url"))
+                        return (True, True, j.get("url"), None)
                     if name in host_jobs and j.get("conclusion") == "success":
                         observed = True
+                        if pass_url is None:
+                            pass_url = j.get("url")
         else:
             for j in e.get("jobs") or e.get("failed_jobs") or []:
                 name = j.get("name") or ""
                 if test_id in (j.get("failed_tests") or []):
-                    return (True, True, j.get("url"))
+                    return (True, True, j.get("url"), None)
                 if name in host_jobs and j.get("conclusion") == "success":
                     observed = True
-        return (observed, False, None)
+                    if pass_url is None:
+                        pass_url = j.get("url")
+        return (observed, False, None, pass_url)
 
     def _hb_tooltip(sha: str, status_text: str) -> str:
         """Compose a tooltip with PR, author, timestamp, status."""
@@ -998,7 +1003,7 @@ def _render_summary(kind: str, entries_by_sha: dict, page_paths: dict) -> str:
     def _history_bar(test_id: str) -> str:
         cells: list[str] = []
         for sha, e in items_old_first:
-            observed, failed, fail_url = _did_test_fail_in(sha, e, test_id)
+            observed, failed, fail_url, pass_url = _did_test_fail_in(sha, e, test_id)
             base = (
                 "display:inline-block; width:9px; height:11px; "
                 "vertical-align:middle; margin-right:1px;"
@@ -1022,10 +1027,17 @@ def _render_summary(kind: str, entries_by_sha: dict, page_paths: dict) -> str:
                 else:
                     cells.append(inner)
             else:
-                cells.append(
+                inner = (
                     f"<span class='hb-cell' style='{base} background:#2da44e;' "
-                    f"title='{_hb_tooltip(sha, 'passed')}'></span>"
+                    f"title='{_hb_tooltip(sha, 'passed — click to open job log')}'></span>"
                 )
+                if pass_url:
+                    cells.append(
+                        f"<a class='hb-link' href='{_html_escape(pass_url)}' "
+                        f"target='_blank' rel='noopener noreferrer'>{inner}</a>"
+                    )
+                else:
+                    cells.append(inner)
         return (
             "<span style='display:inline-block;white-space:nowrap;"
             "font-family:\"SF Mono\",Consolas,monospace;font-size:10px;'>"
@@ -1038,21 +1050,13 @@ def _render_summary(kind: str, entries_by_sha: dict, page_paths: dict) -> str:
         test_rows.append(
             f"<tr><td><strong>{rank}</strong></td>"
             f"<td class='num-nz'>{n} / {total_test_occurrences}</td>"
-            f"<td><code>{_html_escape(test_id)}</code></td></tr>"
-        )
-        # History row directly below: bars (oldest left → newest right),
-        # followed by a label. Each red cell links to the failing job log.
-        test_rows.append(
-            f"<tr style='background:#fafbfc;'><td></td><td></td>"
-            f"<td style='padding-top:0; padding-bottom:6px; "
-            f"color:#586069; font-size:11px;'>"
-            f"{_history_bar(test_id)}"
-            f" <span style='color:#586069;font-size:10px;'>most recent PR &#10145;</span>"
-            f"</td></tr>"
+            f"<td><code>{_html_escape(test_id)}</code></td>"
+            f"<td style='white-space:nowrap;'>{_history_bar(test_id)}</td>"
+            f"</tr>"
         )
     if not test_rows:
         test_rows.append(
-            "<tr><td colspan='3' style='color:#586069;text-align:center;padding:8px;'>"
+            "<tr><td colspan='4' style='color:#586069;text-align:center;padding:8px;'>"
             f"No pytest failures across the {len(items)} cached commit(s)."
             "</td></tr>"
         )
@@ -1089,7 +1093,10 @@ def _render_summary(kind: str, entries_by_sha: dict, page_paths: dict) -> str:
         f"(pytest test-id occurrences across all cached commits; count / total)</small></h2>",
         "<table class='attempt-table report-table-tests'>",
         "<thead><tr><th>Rank</th><th>Count / Total</th>"
-        "<th>Test &mdash; <small style='font-weight:400;color:#586069;'>red cell in history bar links to the failing job log</small></th></tr></thead>",
+        "<th>Test</th>"
+        "<th title='per-cell: PR / SHA / author / time / status — colored cells link to the job log'>"
+        "PR history &mdash; <small style='font-weight:400;color:#586069;'>oldest &#8594; newest</small>"
+        "</th></tr></thead>",
         "<tbody>",
         *test_rows,
         "</tbody></table>",

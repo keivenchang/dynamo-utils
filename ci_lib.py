@@ -1579,6 +1579,9 @@ def render_ci_attempts_page(
     # Failing-test tally: list every failing pytest test-id seen across all
     # attempts/runs on this SHA, ordered by occurrence count desc.
     test_tally: dict[str, dict] = {}
+    # test_id -> set of job names that have hosted this test (failed in them
+    # at some point). Used to distinguish "ran and passed" from "didn't run".
+    test_host_jobs: dict[str, set[str]] = {}
     for a in attempts_all:
         run_n = a.get("attempt")
         jobs_dict = a.get("jobs") or {}
@@ -1588,50 +1591,102 @@ def render_ci_attempts_page(
             for t in tests or []:
                 row = test_tally.setdefault(
                     t,
-                    {"count": 0, "jobs": set(), "runs": set(), "run_to_url": {}},
+                    {"count": 0, "runs": set(), "run_to_url": {}},
                 )
                 row["count"] += 1
-                row["jobs"].add(job_name)
                 if run_n is not None:
                     row["runs"].add(run_n)
-                    # Track first job_url seen per run for the linkable "#N" cell.
                     row["run_to_url"].setdefault(run_n, job_url)
+                test_host_jobs.setdefault(t, set()).add(job_name)
+
     if test_tally:
         ranked = sorted(
             test_tally.items(),
             key=lambda kv: (-kv[1]["count"], kv[0]),
         )
-        rows: list[str] = []
-        for rank, (test_id, info) in enumerate(ranked, 1):
-            jobs_disp = _html_escape(", ".join(sorted(info["jobs"])))
-            run_links: list[str] = []
-            for n in sorted(info["runs"]):
-                url = info["run_to_url"].get(n)
-                if url:
-                    run_links.append(
-                        f"<a href='{_html_escape(url)}' target='_blank' "
-                        f"rel='noopener noreferrer'>#{n}</a>"
-                    )
-                else:
-                    run_links.append(f"#{n}")
-            runs_disp = ", ".join(run_links) if run_links else "—"
-            rows.append(
-                f"<tr><td>{rank}</td>"
-                f"<td style='font-variant-numeric:tabular-nums; text-align:right;'>{info['count']}</td>"
-                f"<td style='text-align:left;'><code>{_html_escape(test_id)}</code></td>"
-                f"<td style='color:#586069; text-align:left;'>{jobs_disp}</td>"
-                f"<td style='color:#586069; text-align:left;'>{runs_disp}</td></tr>"
-            )
         n_unique = len(ranked)
         n_total = sum(info["count"] for _, info in ranked)
+
+        # Per-run history bar, one cell per run (oldest left → newest right).
+        # red = failed, green = host-job ran and passed, gray = didn't run.
+        max_att = max(
+            (a.get("attempt") for a in attempts_all if a.get("attempt") is not None),
+            default=0,
+        )
+
+        def _per_run_bar(test_id: str, info: dict) -> str:
+            cells: list[str] = []
+            base = (
+                "display:inline-block; width:9px; height:11px; "
+                "vertical-align:middle; margin-right:1px;"
+            )
+            host = test_host_jobs.get(test_id, set())
+            for n in range(1, max_att + 1):
+                # Find this run's attempt entry.
+                att = next(
+                    (a for a in attempts_all if a.get("attempt") == n), None
+                )
+                failed = n in info["runs"]
+                fail_url = info["run_to_url"].get(n) if failed else None
+                pass_url: str | None = None
+                if att and not failed:
+                    jd = att.get("jobs") or {}
+                    for jname, j in jd.items():
+                        if jname in host and isinstance(j, dict) and j.get("conclusion") == "success":
+                            pass_url = j.get("url")
+                            break
+                if failed:
+                    inner = (
+                        f"<span class='hb-cell' style='{base} background:#c83a3a;' "
+                        f"title='Run #{n}: FAILED — click to open job log'></span>"
+                    )
+                    if fail_url:
+                        cells.append(
+                            f"<a class='hb-link' href='{_html_escape(fail_url)}' "
+                            f"target='_blank' rel='noopener noreferrer'>{inner}</a>"
+                        )
+                    else:
+                        cells.append(inner)
+                elif pass_url:
+                    inner = (
+                        f"<span class='hb-cell' style='{base} background:#2da44e;' "
+                        f"title='Run #{n}: passed — click to open job log'></span>"
+                    )
+                    cells.append(
+                        f"<a class='hb-link' href='{_html_escape(pass_url)}' "
+                        f"target='_blank' rel='noopener noreferrer'>{inner}</a>"
+                    )
+                else:
+                    cells.append(
+                        f"<span class='hb-cell' style='{base} background:#d0d7de;' "
+                        f"title='Run #{n}: did not run (host job cancelled or missing)'></span>"
+                    )
+            return (
+                "<span style='display:inline-block;white-space:nowrap;"
+                "font-family:\"SF Mono\",Consolas,monospace;font-size:10px;'>"
+                + "".join(cells)
+                + "</span>"
+            )
+
+        rows: list[str] = []
+        for rank, (test_id, info) in enumerate(ranked, 1):
+            rows.append(
+                f"<tr><td>{rank}</td>"
+                f"<td style='font-variant-numeric:tabular-nums; text-align:right;'>{info['count']} / {n_total}</td>"
+                f"<td style='text-align:left;'><code>{_html_escape(test_id)}</code></td>"
+                f"<td style='white-space:nowrap;'>{_per_run_bar(test_id, info)}</td></tr>"
+            )
         tally_html = (
             f"<h2>Failing tests <small style='color:#586069;font-weight:400'>"
             f"({n_unique} unique • {n_total} occurrences across runs)</small></h2>"
+            "<style>a.hb-link { text-decoration: none; } "
+            "a.hb-link[target=\"_blank\"]::after { content: none; }</style>"
             "<table class='attempt-table'>"
-            "<thead><tr><th>Rank</th><th>Count</th>"
+            "<thead><tr><th>Rank</th><th>Count / Total</th>"
             "<th style='text-align:left;'>Test</th>"
-            "<th style='text-align:left;'>Affected jobs</th>"
-            "<th style='text-align:left;'>Runs</th></tr></thead>"
+            "<th title='one cell per run (oldest left → newest right): red=failed, green=passed, gray=did not run; click colored cells to open the job log'>"
+            "Run history &mdash; <small style='font-weight:400;color:#586069;'>oldest &#8594; newest</small></th>"
+            "</tr></thead>"
             f"<tbody>{''.join(rows)}</tbody></table>"
         )
         # Surface failing tests at the top of the page (above Runs overview).
