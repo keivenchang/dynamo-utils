@@ -738,7 +738,6 @@ def _render_jobs_pivoted_html(
     header_row1 = (
         ["<th>Job</th>"]
         + [f"<th>Run #{n}</th>" for n in range(1, max_att + 1)]
-        + ["<th>Last failed (detail)</th>"]
     )
     header_row2 = (
         ["<th></th>"]
@@ -746,7 +745,6 @@ def _render_jobs_pivoted_html(
             f"<th style='font-weight:400; padding-top:2px;'>{_verdict_pill(n)}</th>"
             for n in range(1, max_att + 1)
         ]
-        + ["<th></th>"]
     )
 
     rows_html: list[str] = []
@@ -773,12 +771,14 @@ def _render_jobs_pivoted_html(
         if is_req:
             name_html += " <span class='req-badge' title='required for merge'>required</span>"
 
-        cells = [f"<td class='job-name'>{name_html}</td>"]
+        # Run cells are built first; the Job cell (with optional expand
+        # toggle) is prepended once we know whether the row has details.
+        run_cells: list[str] = []
 
         for n in range(1, max_att + 1):
             j = runs_by_att.get(n)
             if j is None:
-                cells.append(
+                run_cells.append(
                     "<td class='attempt-pivot-cell' style='color:#d0d7de; text-align:center;'>—</td>"
                 )
                 continue
@@ -818,11 +818,13 @@ def _render_jobs_pivoted_html(
                     f"style='text-decoration:none; color:inherit;' "
                     f"title='run {n}: {conc}'>{inner}</a>"
                 )
-            cells.append(
+            run_cells.append(
                 f"<td class='attempt-pivot-cell' style='white-space:nowrap;'{cell_style}>{inner}</td>"
             )
 
-        # Last failed (highest-numbered attempt with failure) detail.
+        # Find the last (highest-numbered) attempt with a failure for this job.
+        # Its details (test list + snippet) get a triangle toggle next to the
+        # job name itself.
         last_failed_att = None
         for n in range(max_att, 0, -1):
             j = runs_by_att.get(n)
@@ -832,7 +834,7 @@ def _render_jobs_pivoted_html(
                 last_failed_att = n
                 break
 
-        detail_html = '<span style="color:#959da5">—</span>'
+        toggle_html = ""
         detail_expand_row = ""
         if last_failed_att is not None:
             for a in attempts_all:
@@ -842,42 +844,28 @@ def _render_jobs_pivoted_html(
                 cats = log_info.get("categories") or []
                 snippet = log_info.get("snippet") or ""
                 tests = (a.get("failed_tests") or {}).get(name, [])
-                header_html = (
-                    f"<span class='cat-list' style='font-weight:600; color:#586069;'>"
-                    f"last failed: run #{last_failed_att}</span>"
-                )
-                has_body = bool(cats or tests or snippet)
-                if not has_body:
-                    detail_html = header_html
+                if not (cats or tests or snippet):
                     break
-
                 snip_uid[0] += 1
                 sid = f"snip-pivot-{snip_uid[0]}"
-
-                summary_bits: list[str] = []
+                bits: list[str] = []
                 if tests:
                     n_tests = len(tests)
-                    summary_bits.append(
-                        f"{n_tests} failed test{'s' if n_tests != 1 else ''}"
-                    )
+                    bits.append(f"{n_tests} failed test{'s' if n_tests != 1 else ''}")
                 if cats:
-                    summary_bits.append(
-                        f"{len(cats)} categor"
-                        f"{'ies' if len(cats) != 1 else 'y'}"
-                    )
+                    bits.append(f"{len(cats)} categor{'ies' if len(cats) != 1 else 'y'}")
                 if snippet:
-                    summary_bits.append(f"snippet ({len(snippet)} chars)")
-                summary_text = _html_escape(" • ".join(summary_bits))
-
-                detail_html = (
-                    f"{header_html} "
-                    f"<span class='snip-toggle' "
+                    bits.append(f"snippet ({len(snippet)} chars)")
+                summary_text = _html_escape(" • ".join(bits))
+                toggle_html = (
+                    f" <span class='snip-toggle' "
                     f"onclick=\"toggleSnip(event, '{sid}')\" "
-                    f"title='show details'>"
-                    f"<span class='triangle-toggle'>▶</span> "
-                    f"{summary_text}</span>"
+                    f"title='last failed: run #{last_failed_att} — click to expand'>"
+                    f"<span class='triangle-toggle'>▶</span>"
+                    f"</span>"
+                    f" <span style='color:#586069; font-size:11px;'>"
+                    f"last failed: run #{last_failed_att} ({summary_text})</span>"
                 )
-
                 body_parts: list[str] = []
                 if cats:
                     body_parts.append(
@@ -898,8 +886,7 @@ def _render_jobs_pivoted_html(
                     body_parts.append(
                         f"<pre class='snip'>{render_snippet_html(snippet)}</pre>"
                     )
-
-                col_span = max_att + 2  # Job + N runs + Last failed
+                col_span = max_att + 1  # Job + N runs
                 detail_expand_row = (
                     f"<tr id='{sid}' class='snippet-row'>"
                     f"<td colspan='{col_span}'>{''.join(body_parts)}</td>"
@@ -907,8 +894,8 @@ def _render_jobs_pivoted_html(
                 )
                 break
 
-        cells.append(f"<td style='white-space:nowrap;'>{detail_html}</td>")
-        rows_html.append(f"<tr>{''.join(cells)}</tr>")
+        job_cell = f"<td class='job-name'>{name_html}{toggle_html}</td>"
+        rows_html.append(f"<tr>{job_cell}{''.join(run_cells)}</tr>")
         if detail_expand_row:
             rows_html.append(detail_expand_row)
 
@@ -927,15 +914,17 @@ def _render_jobs_pivoted_html(
 def render_ci_attempts_page(
     sha: str,
     entry: dict,
-    kind: str = "Re-validate",
-    jobs_layout: str = "flat",
+    kind: str = "Pre-merge",
     att_verdict_override: dict | None = None,
 ) -> str:
     """Per-SHA CI attempts detail page.
 
-    kind drives the page title/H1 ("Pre-merge" / "Post-merge" / "Re-validate" / ...).
-    jobs_layout: "flat" = one row per (job, attempt-run); "pivoted" = one row per
-    unique job with attempts as columns.
+    kind drives the page title/H1 ("Pre-merge" / "Post-merge" / ...).
+    Jobs are rendered as a pivoted table: one row per unique job, runs as
+    columns (with a hover popup that lists every host job per run).
+    att_verdict_override: optional {run_n: "PASS"|"FAIL"|"PENDING"} that
+    overrides the mandatory-only verdict computation (used by post-merge,
+    where there's no required/optional distinction).
     """
     pr = entry.get("pr")
     pr_url = _pr_url(pr) if pr else "-"
@@ -1287,19 +1276,8 @@ def render_ci_attempts_page(
     summary_lines.append("</tbody></table>")
     sections.append("\n".join(summary_lines))
 
-    # Flat: one row per (job, attempt-run). No more per-job grouping or
-    # per-attempt badges — if a job ran 3 times, it's 3 rows.
-    sec = [
-        "<h2>Jobs (one row per run; failed first)</h2>",
-        "<table><thead><tr>"
-        "<th></th>"
-        "<th>Job</th>"
-        "<th>Run</th>"
-        "<th>Started (PT)</th>"
-        "<th>Duration</th>"
-        "<th>Failure Detail</th>"
-        "</tr></thead><tbody>",
-    ]
+    # Compute shared locals consumed by _render_jobs_pivoted_html below.
+    # (job_last_attempt, next_att_start_for_job, longest_keys, _job_grad_stop)
 
     flat_rows: list[tuple[str, int, dict]] = []
     for name, runs in job_runs.items():
@@ -1383,11 +1361,6 @@ def render_ci_attempts_page(
                 if d_i >= 60.0:
                     longest_keys.add((n_i, a_i))
 
-    # Anything over 1h gets a red Duration cell, regardless of outlier status.
-    over_90m_keys: set[tuple[str, int]] = {
-        (n, a) for d, n, a in _durations if d >= 5400.0
-    }
-
     # Per-job progressive-red gradient: when a job has multiple runs AND
     # its last run is a failure/timed_out, paint every (job, attempt) row
     # for that job along a gradient from very-light pink (first attempt)
@@ -1415,166 +1388,23 @@ def render_ci_attempts_page(
             _b = int(_grad_light[2] + _t * (_grad_dark[2] - _grad_light[2]))
             _job_grad_stop[(_name, _an)] = f"#{_r:02x}{_g:02x}{_b:02x}"
 
-    for name, att_num, j in flat_rows:
-        conc = _job_conclusion(j)
-        is_req = name in REQUIRED_CHECKS
-        # Stale-running guard: probe DB only refreshes the latest attempt's
-        # job state. If this job has a later attempt-row in the table, this
-        # earlier row's "running" conclusion is stale — the job was either
-        # cancelled by the rerun or simply superseded. Treat as cancelled,
-        # and inject a proxy completed_at (next attempt's started_at) so the
-        # duration cell shows a frozen value rather than the misleading "—"
-        # that _job_timing would otherwise produce for cancelled-no-end.
-        if (
-            conc in ("running", "queued", "pending")
-            and att_num < job_last_attempt.get(name, att_num)
-        ):
-            conc = "cancelled"
-            _proxy_end = next_att_start_for_job.get((name, att_num))
-            if _proxy_end and isinstance(j, dict) and not j.get("completed_at"):
-                j = {**j, "completed_at": _proxy_end}
-        # Row coloring rule:
-        # - Pending/running rows are ALWAYS blue (matches the RUNNING column
-        #   header) so the eye is drawn to in-flight work regardless of
-        #   whether the job has been retried.
-        # - For terminal rows: plain by default. Failures get coloured red
-        #   when they actually matter — i.e. a *required-check* failure on
-        #   its only attempt is red (it gates merge), and the last run of a
-        #   multi-run failure is red (the retry didn't fix it). Earlier
-        #   eclipsed runs of a retried job, and single-run optional
-        #   failures, stay plain so the eye is drawn to the gating ones.
-        is_last = att_num == job_last_attempt.get(name)
-        has_multi_runs = len(job_runs.get(name, [])) > 1
-        if conc in ("failure", "timed_out"):
-            if has_multi_runs and is_last:
-                row_class = "fail-final"
-            elif not has_multi_runs and is_req:
-                row_class = "fail-final"
-            else:
-                row_class = ""
-            status_html = ICON_REQ_FAIL if is_req else ICON_OPT_FAIL
-        elif conc == "success":
-            row_class = ""
-            status_html = ICON_REQ_PASS if is_req else ICON_OPT_PASS
-        elif conc in ("running", "queued", "pending"):
-            row_class = "run"
-            status_html = ICON_RUN
-        elif conc in ("skipped", "cancelled", "neutral"):
-            row_class = ""
-            status_html = f"<span class='status-dot' title='{conc}'>⊘</span>"
-        else:
-            row_class = ""
-            status_html = f"<span class='status-dot' title='{conc or "?"}'>?</span>"
+    # Build the pivoted Jobs section directly (no more flat layout).
+    att_verdict_map = {row[0]: row[1] for row in _attempt_rows}
+    if att_verdict_override:
+        att_verdict_map.update(att_verdict_override)
+    pivoted = _render_jobs_pivoted_html(
+        attempts_all,
+        job_runs,
+        longest_keys,
+        _job_grad_stop,
+        next_att_start_for_job,
+        job_last_attempt,
+        snip_uid,
+        att_verdict_map=att_verdict_map,
+    )
+    if pivoted:
+        sections.append(pivoted)
 
-        started_pt = "—"
-        s = j.get("started_at") if isinstance(j, dict) else None
-        if s:
-            dt = _to_pt(s)
-            if dt:
-                started_pt = dt.strftime("%Y-%m-%d %H:%M:%S %Z")
-        _short_started, duration = _job_timing(j, conc)
-
-        url = _job_url(j)
-        name_html = (
-            f"<a href='{url}' target='_blank' rel='noopener noreferrer'>{_html_escape(name)}</a>"
-            if url else _html_escape(name)
-        )
-        if name in REQUIRED_CHECKS:
-            name_html += " <span class='req-badge' title='required for merge'>required</span>"
-
-        detail_parts: list[str] = []
-        snippet_toggle_html = ""
-        snippet_rows_inline: list[str] = []
-        if conc in ("failure", "timed_out"):
-            for a in attempts_all:
-                if a.get("attempt") != att_num:
-                    continue
-                log_info = (a.get("log_meta") or {}).get(name, {})
-                cats = log_info.get("categories") or []
-                snippet = log_info.get("snippet") or ""
-                tests = (a.get("failed_tests") or {}).get(name, [])
-                if cats:
-                    detail_parts.append(
-                        f"<div class='cat-list'>{_html_escape(', '.join(cats))}</div>"
-                    )
-                if tests:
-                    items = "".join(f"<li>{_html_escape(t)}</li>" for t in tests[:50])
-                    more = (
-                        f"<li>… +{len(tests) - 50} more</li>" if len(tests) > 50 else ""
-                    )
-                    detail_parts.append(f"<ul class='test-list'>{items}{more}</ul>")
-                if snippet:
-                    snip_uid[0] += 1
-                    sid = f"snip-job-{snip_uid[0]}"
-                    snippet_html = render_snippet_html(snippet)
-                    snippet_toggle_html = (
-                        f" <span class='snip-toggle' "
-                        f"onclick=\"toggleSnip(event, '{sid}')\" "
-                        f"title='show failure snippet ({len(snippet)} chars)'>"
-                        f"<span class='triangle-toggle'>▶</span>"
-                        f"</span>"
-                    )
-                    _snip_grad = _job_grad_stop.get((name, att_num))
-                    _snip_attrs = (
-                        f" style='background:{_snip_grad};'"
-                        if _snip_grad else ""
-                    )
-                    _snip_class = "" if _snip_grad and row_class == "fail-final" else row_class
-                    snippet_rows_inline.append(
-                        f"<tr id='{sid}' class='snippet-row {_snip_class}'{_snip_attrs}><td colspan='6'>"
-                        f"<pre class='snip'>{snippet_html}</pre>"
-                        f"</td></tr>"
-                    )
-                break
-        detail_html = "".join(detail_parts) or '<span style="color:#959da5">—</span>'
-
-        # Per-job progressive-red gradient overrides the row class background
-        # for jobs that were retried and ultimately failed.
-        _grad_bg = _job_grad_stop.get((name, att_num))
-        _row_attrs = (
-            f" style='background:{_grad_bg};'"
-            if _grad_bg else ""
-        )
-        # When a gradient is active we drop the row-class background (which
-        # would otherwise paint the cells solid red on the last row); we
-        # still keep the class for any non-bg styling.
-        _effective_class = "" if _grad_bg and row_class == "fail-final" else row_class
-        sec.append(
-            f"<tr class='{_effective_class}'{_row_attrs}>"
-            f"<td class='status-cell'>{status_html}</td>"
-            f"<td class='job-name'>{name_html}{snippet_toggle_html}</td>"
-            f"<td class='attempt-cell'>{att_num}</td>"
-            f"<td class='started-cell'>{started_pt}</td>"
-            f"<td class='duration-cell"
-            f"{' duration-outlier' if (name, att_num) in longest_keys else ''}"
-            f"{' duration-over-90m' if (name, att_num) in over_90m_keys else ''}"
-            f"'>{duration}{' ⏱' if (name, att_num) in longest_keys else ''}</td>"
-            f"<td>{detail_html}</td>"
-            f"</tr>"
-        )
-        sec.extend(snippet_rows_inline)
-    sec.append("</tbody></table>")
-    sections.append("\n".join(sec))
-
-    # Pivoted layout: replace the flat Jobs section we just appended with the
-    # pivoted variant. Reuses already-computed locals (job_runs, longest_keys,
-    # gradient/proxy maps, snip_uid) so we don't recompute.
-    if jobs_layout == "pivoted":
-        att_verdict_map = {row[0]: row[1] for row in _attempt_rows}
-        if att_verdict_override:
-            att_verdict_map.update(att_verdict_override)
-        pivoted = _render_jobs_pivoted_html(
-            attempts_all,
-            job_runs,
-            longest_keys,
-            _job_grad_stop,
-            next_att_start_for_job,
-            job_last_attempt,
-            snip_uid,
-            att_verdict_map=att_verdict_map,
-        )
-        if pivoted:
-            sections[-1] = pivoted
 
     # Failing-test tally: list every failing pytest test-id seen across all
     # attempts/runs on this SHA, ordered by occurrence count desc.
@@ -1721,10 +1551,10 @@ def render_ci_attempts_page(
         rows: list[str] = []
         for rank, (test_id, info) in enumerate(ranked, 1):
             rows.append(
-                f"<tr><td>{rank}</td>"
-                f"<td style='font-variant-numeric:tabular-nums; text-align:right;'>{info['count']} / {n_total}</td>"
+                f"<tr><td style='text-align:left;'>{rank}</td>"
+                f"<td style='text-align:left; font-variant-numeric:tabular-nums;'>{info['count']} / {n_total}</td>"
                 f"<td style='text-align:left;'><code>{_html_escape(test_id)}</code></td>"
-                f"<td style='white-space:nowrap;'>{_per_run_bar(test_id, info)}</td></tr>"
+                f"<td style='text-align:left; white-space:nowrap;'>{_per_run_bar(test_id, info)}</td></tr>"
             )
         tally_html = (
             f"<h2>Failing tests <small style='color:#586069;font-weight:400'>"
@@ -1752,9 +1582,11 @@ def render_ci_attempts_page(
             ".hb-pop-menu a.hb-pop-item[target=\"_blank\"]::after { content: \" \\2197\"; color: #959da5; }"
             "</style>"
             "<table class='attempt-table'>"
-            "<thead><tr><th>Rank</th><th>Count / Total</th>"
+            "<thead><tr>"
+            "<th style='text-align:left;'>Rank</th>"
+            "<th style='text-align:left;'>Count / Total</th>"
             "<th style='text-align:left;'>Test</th>"
-            "<th title='one cell per run (oldest left → newest right): red=failed, green=passed, gray=did not run; click colored cells to open the job log'>"
+            "<th style='text-align:left;' title='one cell per run (oldest left → newest right): red=failed, green=passed, gray=did not run; click colored cells to open the job log'>"
             "Run history &mdash; <small style='font-weight:400;color:#586069;'>oldest &#8594; newest</small></th>"
             "</tr></thead>"
             f"<tbody>{''.join(rows)}</tbody></table>"

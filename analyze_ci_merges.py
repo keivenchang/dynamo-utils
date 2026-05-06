@@ -697,7 +697,7 @@ def _render_premerge_page(sha: str, entry: dict) -> str:
         "stuck_jobs": [],
     }
     return render_ci_attempts_page(
-        sha, probe_entry, kind="Pre-merge", jobs_layout="pivoted",
+        sha, probe_entry, kind="Pre-merge",
     )
 
 
@@ -756,7 +756,7 @@ def _render_postmerge_page(sha: str, entry: dict) -> str:
     # the run's overall conclusion.
     override = {1: "PASS" if conc == "success" else "FAIL"}
     return render_ci_attempts_page(
-        sha, probe_entry, kind="Post-merge", jobs_layout="pivoted",
+        sha, probe_entry, kind="Post-merge",
         att_verdict_override=override,
     )
 
