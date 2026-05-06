@@ -1046,7 +1046,7 @@ def render_ci_attempts_page(
         f"<th title='in progress' style='background:#cce5ff;color:#004085;'>RUNNING {ICON_RUN}</th>"
         "<th>Skipped</th>"
         "<th title='wall-clock: earliest job start → latest job end in this run'>Duration</th>"
-        "<th title='who triggered this run (initial CI for run #1; re-run clicker for runs > 1)'>Re-run triggered by</th>"
+        "<th style='text-align:left;' title='who triggered this run (initial CI for run #1; re-run clicker for runs > 1)'>Run / Re-run triggered by</th>"
         "</tr></thead><tbody>",
     ]
     # Track previous attempt's verdict so attempts that re-ran ONLY optional
@@ -1211,9 +1211,12 @@ def render_ci_attempts_page(
               dur_cls, dur_str) in enumerate(_attempt_rows):
         _login = _att_trig.get(att_num)
         if _login:
+            _is_bot = _login == "copy-pr-bot[bot]"
+            _wrap_open = "" if _is_bot else "<strong>"
+            _wrap_close = "" if _is_bot else "</strong>"
             _trig_html = (
-                f"<a href='https://github.com/{_login}' target='_blank' "
-                f"rel='noopener noreferrer'>{_html_escape(_login)}</a>"
+                f"{_wrap_open}<a href='https://github.com/{_login}' target='_blank' "
+                f"rel='noopener noreferrer'>{_html_escape(_login)}</a>{_wrap_close}"
             )
         else:
             _trig_html = "<span style='color:#959da5'>—</span>"
@@ -1226,7 +1229,7 @@ def render_ci_attempts_page(
             f"{_cell_static(run_n)}"
             f"{_cell_static(sk)}"
             f"<td class='att-dur-cell{dur_cls}' style='font-variant-numeric: tabular-nums;'>{dur_str}</td>"
-            f"<td style='font-size:12px;'>{_trig_html}</td>"
+            f"<td style='text-align:left;'>{_trig_html}</td>"
             f"</tr>"
         )
     if fixed_total_secs > 0 or live_starts:

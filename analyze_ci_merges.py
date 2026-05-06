@@ -1104,9 +1104,6 @@ def _acquire_single_instance_lock() -> object | None:
 
 
 def main() -> int:
-    # Single-instance guard. Held for the lifetime of the process.
-    _lock = _acquire_single_instance_lock()  # noqa: F841
-
     p = argparse.ArgumentParser(prog="analyze_ci_merges")
     sub = p.add_subparsers(dest="cmd", required=True)
 
@@ -1134,6 +1131,12 @@ def main() -> int:
     p_rh.set_defaults(func=cmd_render_html)
 
     args = p.parse_args()
+    # Backfill is the only long-running write operation; gate it behind a
+    # single-instance flock so cron + manual runs don't overlap. Other
+    # subcommands (lookup, render-html) are short / read-only and can run
+    # concurrently with a backfill in flight.
+    if args.cmd == "backfill":
+        _lock = _acquire_single_instance_lock()  # noqa: F841
     return args.func(args)
 
 

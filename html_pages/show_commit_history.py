@@ -2937,10 +2937,18 @@ class CommitHistoryGenerator:
                     # final attempt hasn't completed yet.
                     if (_last.get("status") or "") != "completed":
                         _final_concl = "in_progress"
+                    # Re-runs = attempts NOT triggered by the initial CI bot.
+                    # The first attempt is normally copy-pr-bot[bot]; anything
+                    # else is a human-initiated re-run.
+                    _n_reruns = sum(
+                        1 for a in _atts
+                        if a.get("triggering_actor") and a.get("triggering_actor") != "copy-pr-bot[bot]"
+                    )
                     local_premerge_status_by_sha[_sha_full] = {
                         "pr": _e.get("pr"),
                         "conclusion": _final_concl,
                         "n_attempts": len(_atts),
+                        "n_reruns": _n_reruns,
                         "n_workflow_runs": _e.get("n_workflow_runs", 0),
                         "failed_jobs_n": _failed_jobs_n,
                         "failed_tests_n": _failed_tests_n,
