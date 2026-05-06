@@ -955,19 +955,26 @@ def render_ci_attempts_page(
     title_html = f' &ldquo;{subj_esc}&rdquo;' if subj_esc else ""
     author_html = f' by {author_esc}' if author_esc else ""
 
-    _title_suffix = f"PR #{pr}" if pr else short_sha(sha)
+    # Use entry.pr (pre-merge) when present; otherwise fall back to the PR
+    # number parsed from the commit subject (post-merge), so post-merge titles
+    # show "PR #N Post-merge Jobs and Runs Summary" too.
+    _title_pr = pr or orig_pr
+    _title_prefix = f"PR #{_title_pr}" if _title_pr else short_sha(sha)
+    _h1_pr_link = (
+        f'<a href="{_pr_url(_title_pr)}" target="_blank" rel="noopener noreferrer">PR #{_title_pr}</a>'
+        if _title_pr else short_sha(sha)
+    )
     head = f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
-<title>{kind} {_title_suffix}</title>
+<title>{_title_prefix} {kind} Jobs and Runs Summary</title>
 {_HTML_STYLE}
 </head><body>
-<h1>{kind} {f'<a href="{pr_url}" target="_blank" rel="noopener noreferrer">PR #{pr}</a>' if pr else short_sha(sha)}</h1>
+<h1>{_h1_pr_link} {kind} Jobs and Runs Summary</h1>
 <div class="meta">
   <span><a href="{commit_url}" target="_blank" rel="noopener noreferrer">{short_sha(sha)}</a> on GitHub{orig_pr_html}{title_html}{author_html}</span>
 </div>
 <div class="meta">
   <span>Merged (PT): <code>{merge_dt}</code></span>
-  <span>ImageSHA256: <code>{img}</code></span>
   <span>State: <span class="{sclass}">{state_disp}</span></span>
   <span>Runs: <code>{n_att}/{entry.get('max_attempts', DEFAULT_MAX_ATTEMPTS)}</code></span>
 </div>
@@ -1045,6 +1052,7 @@ def render_ci_attempts_page(
         f"<th title='optional failed'>Opt {ICON_OPT_FAIL}</th>"
         f"<th title='in progress' style='background:#cce5ff;color:#004085;'>RUNNING {ICON_RUN}</th>"
         "<th>Skipped</th>"
+        "<th>Started (PT)</th>"
         "<th title='wall-clock: earliest job start → latest job end in this run'>Duration</th>"
         "<th style='text-align:left;' title='who triggered this run (initial CI for run #1; re-run clicker for runs > 1)'>Run / Re-run triggered by</th>"
         "</tr></thead><tbody>",
@@ -1207,6 +1215,18 @@ def render_ci_attempts_page(
         a.get("attempt"): a.get("triggering_actor")
         for a in attempts_all if a.get("attempt") is not None
     }
+    # Map attempt# → started_at (PT-formatted) for the Started column.
+    _att_started: dict[int, str] = {}
+    for a in attempts_all:
+        n = a.get("attempt")
+        if n is None:
+            continue
+        ca = a.get("started_at")
+        dt = _to_pt(ca) if ca else None
+        _att_started[n] = dt.strftime("%Y-%m-%d %H:%M:%S") if dt else "—"
+
+    def _started_str(att_num: int) -> str:
+        return _att_started.get(att_num, "—")
     for _idx, (att_num, _verdict, verdict_html, rp, rf, op, of, run_n, sk,
               dur_cls, dur_str) in enumerate(_attempt_rows):
         _login = _att_trig.get(att_num)
@@ -1228,6 +1248,7 @@ def render_ci_attempts_page(
             f"{_cell_static(op)}{_cell_static(of)}"
             f"{_cell_static(run_n)}"
             f"{_cell_static(sk)}"
+            f"<td style='font-variant-numeric: tabular-nums;'>{_started_str(att_num)}</td>"
             f"<td class='att-dur-cell{dur_cls}' style='font-variant-numeric: tabular-nums;'>{dur_str}</td>"
             f"<td style='text-align:left;'>{_trig_html}</td>"
             f"</tr>"
@@ -1258,7 +1279,7 @@ def render_ci_attempts_page(
         _total_cls = " duration-over-90m" if (not total_is_live and total_init > 5400) else ""
         summary_lines.append(
             "<tr style='border-top: 2px solid #d0d7de; font-weight:600;'>"
-            "<td colspan='8' style='text-align:right; color:#586069;'>Total CI time</td>"
+            "<td colspan='9' style='text-align:right; color:#586069;'>Total CI time</td>"
             f"<td class='total-ci-cell{_total_cls}' style='font-variant-numeric: tabular-nums;'>{total_html}</td>"
             "<td></td>"
             "</tr>"

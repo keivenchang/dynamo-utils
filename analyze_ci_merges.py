@@ -771,11 +771,32 @@ def _render_summary(kind: str, entries_by_sha: dict, page_paths: dict) -> str:
         sort_key = lambda kv: (_to_pt(kv[1].get("created_at")) or far_past, kv[0])
     items = sorted(entries_by_sha.items(), key=sort_key, reverse=True)
 
+    # Per-SHA metadata for both the index rows and the history-bar tooltips.
+    sha_meta: dict[str, dict] = {}
+    for _sha, _e in items:
+        _subj, _orig_pr, _author = commit_subject_pr_author(_sha)
+        if kind == "pre-merge":
+            _atts = _e.get("attempts") or []
+            _ca = (_atts[-1].get("created_at") if _atts else None)
+        else:
+            _ca = _e.get("created_at")
+        _dt = _to_pt(_ca)
+        _ts = _dt.strftime("%Y-%m-%d %H:%M:%S") if _dt else "—"
+        _pr = _e.get("pr") or _orig_pr
+        sha_meta[_sha] = {
+            "subj": _subj,
+            "author": _author,
+            "ts": _ts,
+            "pr": _pr,
+        }
+
     rows = []
     for sha, e in items:
         link = page_paths.get(sha, "#")
         s = short_sha(sha)
-        subj, _orig_pr, author = commit_subject_pr_author(sha)
+        _meta = sha_meta.get(sha) or {}
+        subj = _meta.get("subj") or ""
+        author = _meta.get("author") or ""
         subj_esc = _html_escape(subj) if subj else ""
         author_esc = _html_escape(author) if author else "—"
         if kind == "pre-merge":
@@ -928,40 +949,56 @@ def _render_summary(kind: str, entries_by_sha: dict, page_paths: dict) -> str:
                     return (True, True, j.get("url"))
         return (any_jobs, False, None)
 
+    def _hb_tooltip(sha: str, status_text: str) -> str:
+        """Compose a tooltip with PR, author, timestamp, status."""
+        m = sha_meta.get(sha) or {}
+        bits: list[str] = []
+        pr = m.get("pr")
+        if pr:
+            bits.append(f"PR #{pr}")
+        bits.append(short_sha(sha))
+        author = m.get("author")
+        if author:
+            bits.append(author)
+        ts = m.get("ts")
+        if ts and ts != "—":
+            bits.append(ts)
+        bits.append(status_text)
+        return _html_escape(" • ".join(bits))
+
     def _history_bar(test_id: str) -> str:
         cells: list[str] = []
         for sha, e in items_old_first:
             any_jobs, failed, fail_url = _did_test_fail_in(sha, e, test_id)
-            short = short_sha(sha)
             base = (
-                "display:inline-block; width:10px; height:12px; "
-                "vertical-align:middle; border-radius:2px; margin-right:1px;"
+                "display:inline-block; width:9px; height:11px; "
+                "vertical-align:middle; margin-right:1px;"
             )
             if not any_jobs:
                 cells.append(
                     f"<span class='hb-cell' style='{base} background:#d0d7de;' "
-                    f"title='{short}: no data'></span>"
+                    f"title='{_hb_tooltip(sha, 'no data')}'></span>"
                 )
             elif failed:
                 inner = (
                     f"<span class='hb-cell' style='{base} background:#c83a3a;' "
-                    f"title='{short}: FAILED — click to open job log'></span>"
+                    f"title='{_hb_tooltip(sha, 'FAILED — click to open job log')}'></span>"
                 )
                 if fail_url:
                     cells.append(
-                        f"<a href='{_html_escape(fail_url)}' target='_blank' "
-                        f"rel='noopener noreferrer'>{inner}</a>"
+                        f"<a class='hb-link' href='{_html_escape(fail_url)}' "
+                        f"target='_blank' rel='noopener noreferrer'>{inner}</a>"
                     )
                 else:
                     cells.append(inner)
             else:
                 cells.append(
                     f"<span class='hb-cell' style='{base} background:#2da44e;' "
-                    f"title='{short}: passed'></span>"
+                    f"title='{_hb_tooltip(sha, 'passed')}'></span>"
                 )
         return (
-            "<span style='font-family:\"SF Mono\",Consolas,monospace;font-size:12px;"
-            "letter-spacing:1px;'>"
+            "<span style='display:inline-block;white-space:nowrap;"
+            "font-family:\"SF Mono\",Consolas,monospace;font-size:10px;'>"
             + "".join(cells)
             + "</span>"
         )
@@ -980,7 +1017,7 @@ def _render_summary(kind: str, entries_by_sha: dict, page_paths: dict) -> str:
             f"<td style='padding-top:0; padding-bottom:6px; "
             f"color:#586069; font-size:11px;'>"
             f"{_history_bar(test_id)}"
-            f" <span style='color:#586069;'>most recent SHA &#10145;</span>"
+            f" <span style='color:#586069;font-size:10px;'>most recent PR &#10145;</span>"
             f"</td></tr>"
         )
     if not test_rows:
@@ -1000,6 +1037,9 @@ def _render_summary(kind: str, entries_by_sha: dict, page_paths: dict) -> str:
     text-align: left; white-space: nowrap;
   }
   body.report-body table.report-table-tests td:nth-child(3) { white-space: normal; }
+  /* History-bar links: no arrow, no underline, cells stay flush. */
+  body.report-body a.hb-link { text-decoration: none; }
+  body.report-body a.hb-link[target="_blank"]::after { content: none; }
 </style>
 """
 
@@ -1009,7 +1049,7 @@ def _render_summary(kind: str, entries_by_sha: dict, page_paths: dict) -> str:
         _HTML_STYLE,
         body_style,
         "</head><body class='report-body'>",
-        f"<h1>{kind} report &mdash; main branch</h1>",
+        f"<h1>Last {len(items)} {kind.capitalize()} Report &mdash; main branch</h1>",
         f"<div class='meta'>"
         f"Aggregated across {len(items)} cached commit(s); "
         f"{n_attempts} run(s) total, {n_with_failures} commit(s) with at least "
@@ -1047,11 +1087,24 @@ def cmd_render_html(args: argparse.Namespace) -> int:
 
     do_pre, do_post = _resolve_flags(args.premerge, args.postmerge)
     n_pre = n_post = 0
+    cap = max(1, int(args.past))
+
+    far_past = datetime.min.replace(tzinfo=timezone.utc)
 
     if do_pre:
         db = _load_db(PRE_MERGE_DB)
+        # Most-recent first by last attempt's created_at; cap at args.past.
+        sorted_pre = sorted(
+            db.items(),
+            key=lambda kv: (
+                _to_pt((kv[1].get("attempts") or [{}])[-1].get("created_at")) or far_past,
+                kv[0],
+            ),
+            reverse=True,
+        )[:cap]
+        kept_pre = dict(sorted_pre)
         page_paths: dict[str, str] = {}
-        for sha, e in db.items():
+        for sha, e in kept_pre.items():
             atts = e.get("attempts") or []
             last_ca = atts[-1].get("created_at") if atts else None
             date_str = _date_dir_for(last_ca)
@@ -1062,13 +1115,19 @@ def cmd_render_html(args: argparse.Namespace) -> int:
             page_paths[sha] = f"{date_str}/{fname}"
             n_pre += 1
         (output_root / "pre_merge.html").write_text(
-            _render_summary("pre-merge", db, page_paths)
+            _render_summary("pre-merge", kept_pre, page_paths)
         )
 
     if do_post:
         db = _load_db(POST_MERGE_DB)
+        sorted_post = sorted(
+            db.items(),
+            key=lambda kv: (_to_pt(kv[1].get("created_at")) or far_past, kv[0]),
+            reverse=True,
+        )[:cap]
+        kept_post = dict(sorted_post)
         page_paths = {}
-        for sha, e in db.items():
+        for sha, e in kept_post.items():
             date_str = _date_dir_for(e.get("created_at"))
             ddir = output_root / date_str
             ddir.mkdir(parents=True, exist_ok=True)
@@ -1077,7 +1136,7 @@ def cmd_render_html(args: argparse.Namespace) -> int:
             page_paths[sha] = f"{date_str}/{fname}"
             n_post += 1
         (output_root / "post_merge.html").write_text(
-            _render_summary("post-merge", db, page_paths)
+            _render_summary("post-merge", kept_post, page_paths)
         )
 
     print(
@@ -1132,6 +1191,10 @@ def main() -> int:
     p_rh = sub.add_parser("render-html", help="render per-SHA + summary HTML")
     p_rh.add_argument("--premerge", action="store_true", help="render pre-merge")
     p_rh.add_argument("--postmerge", action="store_true", help="render post-merge")
+    p_rh.add_argument(
+        "--past", type=int, default=100,
+        help="cap aggregate report + per-SHA pages at the N most-recent SHAs",
+    )
     p_rh.add_argument(
         "--output-root",
         default=str(Path.home() / "dynamo" / "commits" / "logs"),
