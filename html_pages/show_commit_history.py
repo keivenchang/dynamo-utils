@@ -2879,9 +2879,15 @@ class CommitHistoryGenerator:
                         _date_str = datetime.fromisoformat(_ca).astimezone(_PT_pm).strftime("%Y-%m-%d")
                     except Exception:
                         _date_str = "unknown"
+                    _conc = _e.get("conclusion")
+                    _status = _e.get("status") or "unknown"
+                    # Surface in-progress runs as a sentinel "in_progress"
+                    # conclusion so the dashboard can paint a "running" pill.
+                    if _conc is None and _status != "completed":
+                        _conc = "in_progress"
                     local_postmerge_status_by_sha[_sha_full] = {
-                        "conclusion": _e.get("conclusion") or "unknown",
-                        "status": _e.get("status") or "unknown",
+                        "conclusion": _conc or "unknown",
+                        "status": _status,
                         "run_id": _e.get("run_id"),
                         "html_url": _e.get("html_url"),
                         "failed_jobs_n": len(_failed_jobs),
@@ -2927,6 +2933,10 @@ class CommitHistoryGenerator:
                         _date_str = datetime.fromisoformat(_ca).astimezone(_PT_prm).strftime("%Y-%m-%d")
                     except Exception:
                         _date_str = "unknown"
+                    # Surface in-progress as sentinel conclusion when the
+                    # final attempt hasn't completed yet.
+                    if (_last.get("status") or "") != "completed":
+                        _final_concl = "in_progress"
                     local_premerge_status_by_sha[_sha_full] = {
                         "pr": _e.get("pr"),
                         "conclusion": _final_concl,

@@ -38,13 +38,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
-from revalidate_pr import (  # noqa: E402
+from ci_lib import (  # noqa: E402
     REPO,
-    _render_probe_page,
     _to_pt,
     extract_pytest_failures,
     fetch_job_log,
     gh_api,
+    render_ci_attempts_page,
     short_sha,
 )
 
@@ -196,15 +196,20 @@ def _job_record(j: dict, with_test_extraction: bool = True) -> dict:
 
 def _premerge_attempt(run: dict, attempt: int) -> dict:
     jobs = _list_attempt_jobs(run["id"], attempt)
+    # Per-attempt metadata (incl. triggering_actor — who clicked Re-run for
+    # attempt > 1; original CI trigger for attempt 1).
+    att_meta = gh_api(f"repos/{REPO}/actions/runs/{run['id']}/attempts/{attempt}") or {}
+    ta = att_meta.get("triggering_actor") or {}
     return {
         "run_id": run["id"],
         "head_sha": run.get("head_sha"),
         "run_attempt": attempt,
         "html_url": run.get("html_url"),
-        "status": run.get("status"),
+        "status": att_meta.get("status") or run.get("status"),
         "conclusion": run.get("conclusion") if attempt == run.get("run_attempt") else None,
-        "created_at": run.get("created_at"),
-        "updated_at": run.get("updated_at"),
+        "created_at": att_meta.get("created_at") or run.get("created_at"),
+        "updated_at": att_meta.get("updated_at") or run.get("updated_at"),
+        "triggering_actor": ta.get("login"),
         "jobs": [_job_record(j) for j in jobs],
     }
 
@@ -274,8 +279,15 @@ def fetch_postmerge(sha: str) -> dict | None:
     run = _find_postmerge_run(sha)
     if run is None:
         return None
-    jobs = _list_run_jobs(run["id"])
-    failed_jobs = [_job_record(j) for j in jobs if j.get("conclusion") in JOB_FAILED_CONCLUSIONS]
+    jobs_raw = _list_run_jobs(run["id"])
+    # Store ALL jobs (passing + failing). Test-extraction is gated on failure
+    # to keep cache size bounded.
+    all_jobs = [
+        _job_record(j, with_test_extraction=j.get("conclusion") in JOB_FAILED_CONCLUSIONS)
+        for j in jobs_raw
+    ]
+    failed_jobs = [j for j in all_jobs if j.get("conclusion") in JOB_FAILED_CONCLUSIONS]
+    ta = run.get("triggering_actor") or {}
     return {
         "sha": sha,
         "run_id": run["id"],
@@ -285,7 +297,9 @@ def fetch_postmerge(sha: str) -> dict | None:
         "run_attempt": run.get("run_attempt") or 1,
         "created_at": run.get("created_at"),
         "updated_at": run.get("updated_at"),
-        "failed_jobs": failed_jobs,
+        "triggering_actor": ta.get("login"),
+        "jobs": all_jobs,
+        "failed_jobs": failed_jobs,  # kept for backward compat
         "fetched_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
     }
 
@@ -311,9 +325,8 @@ def get_premerge(sha: str, *, refresh: bool = False) -> dict | None:
     if pr_num is None:
         return None
     fresh = fetch_premerge(sha, pr_num)
-    if is_premerge_terminal(fresh):
-        db[sha] = fresh
-        _save_db_atomic(PRE_MERGE_DB, db)
+    db[sha] = fresh
+    _save_db_atomic(PRE_MERGE_DB, db)
     return fresh
 
 
@@ -324,12 +337,12 @@ def get_postmerge(sha: str, *, refresh: bool = False) -> dict | None:
         return cached
     fresh = fetch_postmerge(sha)
     if fresh is None:
-        return cached
-    if is_postmerge_terminal(fresh):
-        db[sha] = fresh
-        _save_db_atomic(POST_MERGE_DB, db)
+        if cached:
+            return cached
+        return None
+    db[sha] = fresh
+    _save_db_atomic(POST_MERGE_DB, db)
     return fresh
-
 
 # ---------------------------------------------------------------------------
 # CLI: lookup
@@ -411,12 +424,15 @@ def _backfill_premerge(commits: list[dict], refresh: bool) -> None:
             no_pr += 1
             continue
         entry = fetch_premerge(sha, int(m.group(1)))
+        # Persist regardless of terminal state — in-progress entries surface
+        # in the dashboard as "running" pills.
+        db[sha] = entry
+        # Flush after each entry so a crash mid-loop doesn't lose all work.
+        _save_db_atomic(PRE_MERGE_DB, db)
         if is_premerge_terminal(entry):
-            db[sha] = entry
             refreshed += 1
         else:
             pending += 1
-    _save_db_atomic(PRE_MERGE_DB, db)
     print(
         f"  pre-merge:  refreshed={refreshed}  cached-skip={skipped}  "
         f"in-progress={pending}  no-pr={no_pr}"
@@ -436,12 +452,12 @@ def _backfill_postmerge(commits: list[dict], refresh: bool) -> None:
         if entry is None:
             no_run += 1
             continue
+        db[sha] = entry
+        _save_db_atomic(POST_MERGE_DB, db)
         if is_postmerge_terminal(entry):
-            db[sha] = entry
             refreshed += 1
         else:
             pending += 1
-    _save_db_atomic(POST_MERGE_DB, db)
     print(
         f"  post-merge: refreshed={refreshed}  cached-skip={skipped}  "
         f"in-progress={pending}  no-run={no_run}"
@@ -640,6 +656,7 @@ def _to_probe_attempt(my_attempt: dict, attempt_num: int) -> dict:
         "failed_tests": failed_tests,
         "failed_jobs": failed_jobs,
         "log_meta": {},
+        "triggering_actor": my_attempt.get("triggering_actor"),
         # carried through for completeness; revalidate doesn't read these
         "run_id": my_attempt.get("run_id"),
         "run_attempt_n": my_attempt.get("run_attempt"),
@@ -677,21 +694,21 @@ def _render_premerge_page(sha: str, entry: dict) -> str:
         "verdict": verdict,
         "stuck_jobs": [],
     }
-    html = _render_probe_page(sha, probe_entry)
-    # Re-label "Re-validate" -> "Pre-merge" everywhere.
-    html = html.replace("Re-validate", "Pre-merge")
-    return html
+    return render_ci_attempts_page(
+        sha, probe_entry, kind="Pre-merge", jobs_layout="pivoted",
+    )
 
 
 def _render_postmerge_page(sha: str, entry: dict) -> str:
     """Post-merge has one logical attempt. Reuse revalidate's renderer with a
-    single-attempt entry. Note: our post-merge cache stores only FAILED jobs;
-    passing jobs are not in the data, so the per-job grid will only show the
-    failures (which is fine — they're what we care about)."""
-    failed_jobs = entry.get("failed_jobs") or []
+    single-attempt entry."""
+    # Prefer 'jobs' (all jobs); fall back to 'failed_jobs' for older cache
+    # entries that pre-date the schema change.
+    src_jobs = entry.get("jobs") or entry.get("failed_jobs") or []
     jobs_dict: dict[str, dict] = {}
     failed_tests: dict[str, list[str]] = {}
-    for j in failed_jobs:
+    failed_job_names: list[str] = []
+    for j in src_jobs:
         name = j.get("name")
         if not name:
             continue
@@ -705,14 +722,17 @@ def _render_postmerge_page(sha: str, entry: dict) -> str:
         }
         if j.get("failed_tests"):
             failed_tests[name] = list(j["failed_tests"])
+        if j.get("conclusion") in JOB_FAILED_CONCLUSIONS:
+            failed_job_names.append(name)
     probe_atts = [{
         "attempt": 1,
         "started_at": entry.get("created_at"),
         "completed_at": entry.get("updated_at"),
         "jobs": jobs_dict,
         "failed_tests": failed_tests,
-        "failed_jobs": [j.get("name") for j in failed_jobs if j.get("name")],
+        "failed_jobs": failed_job_names,
         "log_meta": {},
+        "triggering_actor": entry.get("triggering_actor"),
         "run_id": entry.get("run_id"),
         "run_attempt_n": entry.get("run_attempt"),
         "html_url": entry.get("html_url"),
@@ -730,13 +750,18 @@ def _render_postmerge_page(sha: str, entry: dict) -> str:
         "verdict": state,
         "stuck_jobs": [],
     }
-    html = _render_probe_page(sha, probe_entry)
-    html = html.replace("Re-validate", "Post-merge")
-    return html
+    # Post-merge has no required-checks subset; verdict comes straight from
+    # the run's overall conclusion.
+    override = {1: "PASS" if conc == "success" else "FAIL"}
+    return render_ci_attempts_page(
+        sha, probe_entry, kind="Post-merge", jobs_layout="pivoted",
+        att_verdict_override=override,
+    )
 
 
 def _render_summary(kind: str, entries_by_sha: dict, page_paths: dict) -> str:
     # kind: "pre-merge" or "post-merge"
+    from ci_lib import _HTML_STYLE, _html_escape, commit_subject_pr_author
     far_past = datetime.min.replace(tzinfo=timezone.utc)
     if kind == "pre-merge":
         sort_key = lambda kv: (
@@ -750,6 +775,9 @@ def _render_summary(kind: str, entries_by_sha: dict, page_paths: dict) -> str:
     for sha, e in items:
         link = page_paths.get(sha, "#")
         s = short_sha(sha)
+        subj, _orig_pr, author = commit_subject_pr_author(sha)
+        subj_esc = _html_escape(subj) if subj else ""
+        author_esc = _html_escape(author) if author else "—"
         if kind == "pre-merge":
             atts = e.get("attempts") or []
             n_atts = len(atts)
@@ -763,12 +791,15 @@ def _render_summary(kind: str, entries_by_sha: dict, page_paths: dict) -> str:
                 sum(len(j.get("failed_tests") or []) for j in (a.get("jobs") or []))
                 for a in atts
             )
-            ts = (last.get("created_at") or "")[:19]
+            _dt_pt = _to_pt(last.get("created_at"))
+            ts = _dt_pt.strftime("%Y-%m-%d %H:%M:%S") if _dt_pt else "—"
             pr = e.get("pr")
             rows.append(
-                f"<tr><td>{_esc(ts)}</td>"
+                f"<tr style='white-space:nowrap;'><td>{_esc(ts)}</td>"
                 f"<td><a href='{_esc(link)}'><code>{s}</code></a></td>"
                 f"<td>PR <a href='https://github.com/{REPO}/pull/{pr}' target='_blank'>#{pr}</a></td>"
+                f"<td style='text-align:left; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:600px;' title='{subj_esc}'>{subj_esc}</td>"
+                f"<td style='text-align:left; white-space:nowrap;'>{author_esc}</td>"
                 f"<td>{n_atts}</td>"
                 f"<td>{_verdict_pill(conc)}</td>"
                 f"<td>{n_failed_total}</td>"
@@ -780,10 +811,13 @@ def _render_summary(kind: str, entries_by_sha: dict, page_paths: dict) -> str:
             failed_jobs = e.get("failed_jobs") or []
             n_failed = len(failed_jobs)
             n_tests = sum(len(j.get("failed_tests") or []) for j in failed_jobs)
-            ts = (e.get("created_at") or "")[:19]
+            _dt_pt = _to_pt(e.get("created_at"))
+            ts = _dt_pt.strftime("%Y-%m-%d %H:%M:%S") if _dt_pt else "—"
             rows.append(
-                f"<tr><td>{_esc(ts)}</td>"
+                f"<tr style='white-space:nowrap;'><td>{_esc(ts)}</td>"
                 f"<td><a href='{_esc(link)}'><code>{s}</code></a></td>"
+                f"<td style='text-align:left; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:600px;' title='{subj_esc}'>{subj_esc}</td>"
+                f"<td style='text-align:left; white-space:nowrap;'>{author_esc}</td>"
                 f"<td>{_verdict_pill(conc)}</td>"
                 f"<td>{n_failed}</td>"
                 f"<td>{n_tests}</td>"
@@ -791,24 +825,201 @@ def _render_summary(kind: str, entries_by_sha: dict, page_paths: dict) -> str:
             )
 
     if kind == "pre-merge":
-        thead = ("<thead><tr><th>Last attempt (UTC)</th><th>SHA</th><th>PR</th>"
+        thead = ("<thead><tr><th>Last attempt (PT)</th><th>SHA</th><th>PR</th>"
+                 "<th style='text-align:left;'>Title</th>"
+                 "<th style='text-align:left;'>Author</th>"
                  "<th># attempts</th><th>Final verdict</th>"
                  "<th>Failed jobs (Σ)</th><th>Failed tests (Σ)</th></tr></thead>")
     else:
-        thead = ("<thead><tr><th>Run started (UTC)</th><th>SHA</th>"
+        thead = ("<thead><tr><th>Run started (PT)</th><th>SHA</th>"
+                 "<th style='text-align:left;'>Title</th>"
+                 "<th style='text-align:left;'>Author</th>"
                  "<th>Verdict</th><th># failed jobs</th><th># failed tests</th></tr></thead>")
+
+    # Aggregate failing-tests tally — newest-first within each test row so the
+    # most-recent occurrences surface as the first job links (drill-down).
+    test_count: dict[str, int] = {}
+    test_jobs: dict[str, list[tuple[str, str | None, str, int | None]]] = {}
+    n_attempts = 0
+    n_failed_jobs = 0
+    n_with_failures = 0
+    for sha, e in items:
+        sha_had_failure = False
+        if kind == "pre-merge":
+            for a in e.get("attempts") or []:
+                n_attempts += 1
+                for j in a.get("jobs") or []:
+                    jname = j.get("name") or ""
+                    jurl = j.get("url")
+                    jid = j.get("id")
+                    if j.get("conclusion") in JOB_FAILED_CONCLUSIONS:
+                        n_failed_jobs += 1
+                        sha_had_failure = True
+                    for t in j.get("failed_tests") or []:
+                        if not t:
+                            continue
+                        test_count[t] = test_count.get(t, 0) + 1
+                        test_jobs.setdefault(t, []).append((sha, jurl, jname, jid))
+        else:
+            n_attempts += 1
+            src = e.get("jobs") or e.get("failed_jobs") or []
+            for j in src:
+                jname = j.get("name") or ""
+                jurl = j.get("url")
+                jid = j.get("id")
+                if j.get("conclusion") in JOB_FAILED_CONCLUSIONS:
+                    n_failed_jobs += 1
+                    sha_had_failure = True
+                for t in j.get("failed_tests") or []:
+                    if not t:
+                        continue
+                    test_count[t] = test_count.get(t, 0) + 1
+                    test_jobs.setdefault(t, []).append((sha, jurl, jname, jid))
+        if sha_had_failure:
+            n_with_failures += 1
+
+    def _job_link(sha: str, url: str | None, jname: str, jid: int | None) -> str:
+        target = url or page_paths.get(sha, "#")
+        label = f"job#{jid}" if jid else f"job@{short_sha(sha)}"
+        return (
+            f"<a href='{_html_escape(target)}' target='_blank' rel='noopener noreferrer' "
+            f"title='{_html_escape(jname)} ({short_sha(sha)})'>{label}</a>"
+        )
+
+    def _jobs_html(occurrences: list, limit: int = 10) -> str:
+        seen, ordered = set(), []
+        for sha, url, jname, jid in occurrences:
+            key = (sha, url)
+            if key in seen:
+                continue
+            seen.add(key)
+            ordered.append((sha, url, jname, jid))
+        head = ", ".join(_job_link(s, u, n, j) for s, u, n, j in ordered[:limit])
+        more = (
+            f", <span class='muted'>+{len(ordered) - limit} more</span>"
+            if len(ordered) > limit else ""
+        )
+        return head + more
+
+    ranked = sorted(test_count.items(), key=lambda kv: (-kv[1], kv[0]))
+    total_test_occurrences = sum(test_count.values())
+
+    # History bar: per-test, oldest→newest across cached commits.
+    # 'g' (green) = test did not fail in this SHA, 'r' (red) = failed,
+    # '.' (gray) = SHA has no jobs data at all (not yet fetched).
+    items_old_first = list(reversed(items))
+
+    def _did_test_fail_in(sha: str, e: dict, test_id: str) -> tuple[bool, bool]:
+        """Return (any_jobs, test_failed). any_jobs=False means the SHA has no
+        job data at all (treat as skipped/unknown)."""
+        any_jobs = False
+        if kind == "pre-merge":
+            for a in e.get("attempts") or []:
+                for j in a.get("jobs") or []:
+                    any_jobs = True
+                    if test_id in (j.get("failed_tests") or []):
+                        return (True, True)
+        else:
+            for j in e.get("jobs") or e.get("failed_jobs") or []:
+                any_jobs = True
+                if test_id in (j.get("failed_tests") or []):
+                    return (True, True)
+        return (any_jobs, False)
+
+    def _history_bar(test_id: str) -> str:
+        cells: list[str] = []
+        for sha, e in items_old_first:
+            any_jobs, failed = _did_test_fail_in(sha, e, test_id)
+            short = short_sha(sha)
+            base = (
+                "display:inline-block; width:10px; height:12px; "
+                "vertical-align:middle; border-radius:2px; margin-right:1px;"
+            )
+            if not any_jobs:
+                cells.append(
+                    f"<span class='hb-cell' style='{base} background:#d0d7de;' "
+                    f"title='{short}: no data'></span>"
+                )
+            elif failed:
+                cells.append(
+                    f"<span class='hb-cell' style='{base} background:#c83a3a;' "
+                    f"title='{short}: FAILED'></span>"
+                )
+            else:
+                cells.append(
+                    f"<span class='hb-cell' style='{base} background:#2da44e;' "
+                    f"title='{short}: passed'></span>"
+                )
+        return (
+            "<span style='font-family:\"SF Mono\",Consolas,monospace;font-size:12px;"
+            "letter-spacing:1px;'>"
+            + "".join(cells)
+            + "</span>"
+        )
+
+    test_rows: list[str] = []
+    for rank, (test_id, n) in enumerate(ranked, 1):
+        test_rows.append(
+            f"<tr><td><strong>{rank}</strong></td>"
+            f"<td class='num-nz'>{n} / {total_test_occurrences}</td>"
+            f"<td><code>{_html_escape(test_id)}</code></td>"
+            f"<td>{_jobs_html(test_jobs.get(test_id, []))}</td></tr>"
+        )
+        # History row directly below: bars (oldest left → newest right),
+        # followed by a label. Spans the Test + Affected jobs columns.
+        test_rows.append(
+            f"<tr style='background:#fafbfc;'><td></td><td></td>"
+            f"<td colspan='2' style='padding-top:0; padding-bottom:6px; "
+            f"color:#586069; font-size:11px;'>"
+            f"{_history_bar(test_id)}"
+            f" <span style='color:#586069;'>most recent SHA &#10145;</span>"
+            f"</td></tr>"
+        )
+    if not test_rows:
+        test_rows.append(
+            "<tr><td colspan='4' style='color:#586069;text-align:center;padding:8px;'>"
+            f"No pytest failures across the {len(items)} cached commit(s)."
+            "</td></tr>"
+        )
+
+    body_style = """
+<style>
+  body.report-body { padding-left: 80px; padding-right: 48px; }
+  body.report-body table.attempt-table th:nth-child(3),
+  body.report-body table.attempt-table td:nth-child(3) { text-align: left; }
+  body.report-body table.attempt-table th:nth-child(4),
+  body.report-body table.attempt-table td:nth-child(4) {
+    text-align: left; white-space: nowrap;
+  }
+  body.report-body table.report-table-tests td:nth-child(3) { white-space: normal; }
+</style>
+"""
 
     return "\n".join([
         "<!DOCTYPE html>",
-        f"<html><head><meta charset='utf-8'><title>{kind} summary</title>",
+        f"<html><head><meta charset='utf-8'><title>{kind} report</title>",
         _HTML_STYLE,
-        "</head><body>",
-        f"<h1>{kind} runs &mdash; main branch</h1>",
-        f"<div class='meta'><span>{len(items)} cached SHA(s)</span></div>",
+        body_style,
+        "</head><body class='report-body'>",
+        f"<h1>{kind} report &mdash; main branch</h1>",
+        f"<div class='meta'>"
+        f"Aggregated across {len(items)} cached commit(s); "
+        f"{n_attempts} run(s) total, {n_with_failures} commit(s) with at least "
+        f"one failure ({n_failed_jobs} failed job-run(s))."
+        f"</div>",
+        "<h2>Per-SHA index</h2>",
         "<table>",
         thead,
         "<tbody>",
         *rows,
+        "</tbody></table>",
+        f"<h2>Failing tests <small style='color:#586069;font-weight:400'>"
+        f"(pytest test-id occurrences across all cached commits; count / total)</small></h2>",
+        "<table class='attempt-table report-table-tests'>",
+        "<thead><tr><th>Rank</th><th>Count / Total</th><th>Test</th>"
+        "<th>Affected jobs (newest first; click to open job log)</th></tr></thead>",
+        "<tbody>",
+        *test_rows,
         "</tbody></table>",
         "</body></html>",
     ])
@@ -868,8 +1079,35 @@ def cmd_render_html(args: argparse.Namespace) -> int:
     return 0
 
 
+_LOCK_PATH = Path.home() / ".cache" / "dynamo-utils" / "analyze_ci_merges.lock"
+
+
+def _acquire_single_instance_lock() -> object | None:
+    """Non-blocking flock on _LOCK_PATH. Returns the open fd to keep the lock
+    held for the rest of the process; returns None and exits cleanly if another
+    instance is already running."""
+    import fcntl
+    _LOCK_PATH.parent.mkdir(parents=True, exist_ok=True)
+    f = open(_LOCK_PATH, "w")
+    try:
+        fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        f.close()
+        print(
+            f"analyze_ci_merges: another instance is running (lock held at {_LOCK_PATH}); exiting.",
+            file=sys.stderr,
+        )
+        sys.exit(0)
+    f.write(f"{os.getpid()}\n")
+    f.flush()
+    return f
+
+
 def main() -> int:
-    p = argparse.ArgumentParser(prog="ci_merge_analysis")
+    # Single-instance guard. Held for the lifetime of the process.
+    _lock = _acquire_single_instance_lock()  # noqa: F841
+
+    p = argparse.ArgumentParser(prog="analyze_ci_merges")
     sub = p.add_subparsers(dest="cmd", required=True)
 
     p_l = sub.add_parser("lookup", help="show CI data for one SHA")
