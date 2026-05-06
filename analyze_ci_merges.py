@@ -1007,12 +1007,6 @@ def _render_summary(kind: str, entries_by_sha: dict, page_paths: dict) -> str:
         f"{n_attempts} run(s) total, {n_with_failures} commit(s) with at least "
         f"one failure ({n_failed_jobs} failed job-run(s))."
         f"</div>",
-        "<h2>Per-SHA index</h2>",
-        "<table>",
-        thead,
-        "<tbody>",
-        *rows,
-        "</tbody></table>",
         f"<h2>Failing tests <small style='color:#586069;font-weight:400'>"
         f"(pytest test-id occurrences across all cached commits; count / total)</small></h2>",
         "<table class='attempt-table report-table-tests'>",
@@ -1020,6 +1014,12 @@ def _render_summary(kind: str, entries_by_sha: dict, page_paths: dict) -> str:
         "<th>Affected jobs (newest first; click to open job log)</th></tr></thead>",
         "<tbody>",
         *test_rows,
+        "</tbody></table>",
+        "<h2>Per-SHA index</h2>",
+        "<table>",
+        thead,
+        "<tbody>",
+        *rows,
         "</tbody></table>",
         "</body></html>",
     ])

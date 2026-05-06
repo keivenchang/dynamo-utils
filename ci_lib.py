@@ -1560,13 +1560,21 @@ def render_ci_attempts_page(
     test_tally: dict[str, dict] = {}
     for a in attempts_all:
         run_n = a.get("attempt")
+        jobs_dict = a.get("jobs") or {}
         for job_name, tests in (a.get("failed_tests") or {}).items():
+            j = jobs_dict.get(job_name) if isinstance(jobs_dict.get(job_name), dict) else None
+            job_url = j.get("url") if j else None
             for t in tests or []:
-                row = test_tally.setdefault(t, {"count": 0, "jobs": set(), "runs": set()})
+                row = test_tally.setdefault(
+                    t,
+                    {"count": 0, "jobs": set(), "runs": set(), "run_to_url": {}},
+                )
                 row["count"] += 1
                 row["jobs"].add(job_name)
                 if run_n is not None:
                     row["runs"].add(run_n)
+                    # Track first job_url seen per run for the linkable "#N" cell.
+                    row["run_to_url"].setdefault(run_n, job_url)
     if test_tally:
         ranked = sorted(
             test_tally.items(),
@@ -1575,13 +1583,23 @@ def render_ci_attempts_page(
         rows: list[str] = []
         for rank, (test_id, info) in enumerate(ranked, 1):
             jobs_disp = _html_escape(", ".join(sorted(info["jobs"])))
-            runs_disp = ", ".join(f"#{n}" for n in sorted(info["runs"]))
+            run_links: list[str] = []
+            for n in sorted(info["runs"]):
+                url = info["run_to_url"].get(n)
+                if url:
+                    run_links.append(
+                        f"<a href='{_html_escape(url)}' target='_blank' "
+                        f"rel='noopener noreferrer'>#{n}</a>"
+                    )
+                else:
+                    run_links.append(f"#{n}")
+            runs_disp = ", ".join(run_links) if run_links else "—"
             rows.append(
                 f"<tr><td>{rank}</td>"
                 f"<td style='font-variant-numeric:tabular-nums; text-align:right;'>{info['count']}</td>"
                 f"<td style='text-align:left;'><code>{_html_escape(test_id)}</code></td>"
                 f"<td style='color:#586069; text-align:left;'>{jobs_disp}</td>"
-                f"<td style='color:#586069; text-align:left;'>{runs_disp or '—'}</td></tr>"
+                f"<td style='color:#586069; text-align:left;'>{runs_disp}</td></tr>"
             )
         n_unique = len(ranked)
         n_total = sum(info["count"] for _, info in ranked)
