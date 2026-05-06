@@ -47,21 +47,17 @@ from zoneinfo import ZoneInfo
 PT = ZoneInfo("America/Los_Angeles")  # PST/PDT, handles DST automatically
 
 REPO = "ai-dynamo/dynamo"
-REPO_URL = "git@github.com:ai-dynamo/dynamo.git"
-DB_PATH = Path.home() / ".cache" / "dynamo-utils" / "ci-health.json"
 RAW_LOG_DIR = Path(
     os.environ.get("DYNAMO_UTILS_CACHE_DIR")
     or str(Path.home() / ".cache" / "dynamo-utils")
 ) / "raw-log-text"
-WORK_DIR = Path("/tmp/ci_health")
 # Prefer the dashboard's commit checkout (kept up-to-date by update_html_pages.sh)
 # over revalidate's stale /tmp clone.
 _DEFAULT_CLONES = [
     Path.home() / "dynamo" / "commits",
-    WORK_DIR / "repo",
+    Path("/tmp/ci_health/repo"),
 ]
 CLONE_PATH = next((p for p in _DEFAULT_CLONES if (p / ".git").exists()), _DEFAULT_CLONES[0])
-LOCK_PATH = WORK_DIR / "launch.pid"
 
 # Match either:
 #   FAILED tests/foo/test_bar.py::TestClass::test_method[params] - reason   (assertion fail)
@@ -70,21 +66,6 @@ LOCK_PATH = WORK_DIR / "launch.pid"
 _PYTEST_FAILED_RE = re.compile(
     r"^(?:\d{4}-\d{2}-\d{2}T[\d:.]+Z\s+)?(?:\x1b\[[0-9;]*m)?(?:FAILED|ERROR)\s+(\S+::\S+)"
 )
-
-PROBE_BRANCH_PREFIX = "keivenchang/revalidate/"
-PROBE_FILES = [
-    "components/src/dynamo/common/__init__.py",
-    "lib/runtime/src/runtime.rs",
-]
-
-DEFAULT_PARALLELISM = 3
-DEFAULT_MAX_ATTEMPTS = 1
-
-# A job that's been running this long is treated as stuck — the parent
-# workflow gets cancelled and (if attempts remain) the retry path spawns
-# the next attempt. Multi-arch arm64 builders occasionally hang past their
-# normal 1-2h envelope; 4h is well beyond that without being aggressive.
-STUCK_ATTEMPT_HOURS = 3
 
 # Required status checks on `main` (from repo rulesets, integration_id 15368).
 # Everything else (runtime tests, docker builds, …) is optional but rolls up
@@ -142,9 +123,12 @@ REQUIRED_CHECKS = frozenset({
     "pre-merge-status-check",
     "deploy-status-check",
 })
-DEFAULT_STALLED_AFTER_HOURS = 3
 
-logger = logging.getLogger("revalidate_pr")
+# DEFAULT_MAX_ATTEMPTS: legacy fallback used in the per-SHA "Runs: N/M" header.
+# Plumbed through entry["max_attempts"] when present; otherwise defaults to 1.
+DEFAULT_MAX_ATTEMPTS = 1
+
+logger = logging.getLogger("ci_lib")
 
 
 # ---------- helpers ----------
@@ -553,6 +537,128 @@ def _html_escape(s: str) -> str:
         .replace("<", "&lt;")
         .replace(">", "&gt;")
         .replace('"', "&quot;")
+    )
+
+
+# ---------------------------------------------------------------------------
+# History bar primitives — shared between the per-SHA Run-history and the
+# aggregate-report PR-history. Each "cell" represents a single run or SHA;
+# the bar is a horizontal sequence of cells (oldest left → newest right).
+# ---------------------------------------------------------------------------
+
+_HB_BG = {
+    "failed": "#c83a3a",
+    "passed": "#2da44e",
+    "other": "#d0d7de",
+    "missing": "#d0d7de",
+}
+
+# CSS for both bars + popup. Inject once per page that uses the bar.
+HB_CSS = (
+    "<style>"
+    "a.hb-link { text-decoration: none; } "
+    "a.hb-link[target=\"_blank\"]::after { content: none; } "
+    ".hb-pop-menu { visibility: hidden; opacity: 0; "
+    "transition: visibility 0s linear 500ms, opacity 150ms ease 350ms; "
+    "position: absolute; top: 11px; left: 0; z-index: 1000; background: #fff; "
+    "border: 1px solid #d0d7de; border-radius: 4px; "
+    "box-shadow: 0 4px 8px rgba(0,0,0,0.12); padding: 6px 8px; line-height: 1.5; "
+    "font-size: 12px; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; "
+    "min-width: 280px; white-space: nowrap; } "
+    ".hb-pop:hover .hb-pop-menu, .hb-pop-menu:hover { "
+    "visibility: visible; opacity: 1; "
+    "transition: visibility 0s linear 0s, opacity 100ms ease 0s; } "
+    ".hb-pop-menu .hb-pop-head { display: block; color: #586069; font-size: 11px; "
+    "padding-bottom: 4px; border-bottom: 1px solid #eaecef; margin-bottom: 4px; } "
+    ".hb-pop-menu .hb-pop-item { display: block; padding: 2px 4px; color: #24292e; "
+    "text-decoration: none; border-radius: 3px; } "
+    ".hb-pop-menu a.hb-pop-item:hover { background: #f6f8fa; } "
+    ".hb-pop-menu a.hb-pop-item[target=\"_blank\"]::after { content: \" \\2197\"; color: #959da5; }"
+    "</style>"
+)
+
+
+def hb_popup_menu(head: str, items: list[dict]) -> str:
+    """items: each dict has status, label_text, sublabels, url."""
+    rows = []
+    for it in items:
+        bg = _HB_BG.get(it.get("status", "other"), "#d0d7de")
+        label_color = (
+            "#c83a3a" if it.get("status") == "failed"
+            else ("#2da44e" if it.get("status") == "passed" else "#586069")
+        )
+        line = (
+            f"<span style='display:inline-block;width:8px;height:8px;"
+            f"border-radius:2px;background:{bg};margin-right:6px;"
+            f"vertical-align:middle;'></span>"
+            f"<span style='color:{label_color};font-weight:600;'>{_html_escape(it.get('label_text', ''))}</span>"
+        )
+        for sub in it.get("sublabels") or []:
+            line += f" <span style='color:#586069;'>{_html_escape(sub)}</span>"
+        url = it.get("url")
+        if url:
+            rows.append(
+                f"<a class='hb-pop-item' href='{_html_escape(url)}' "
+                f"target='_blank' rel='noopener noreferrer'>{line}</a>"
+            )
+        else:
+            rows.append(f"<span class='hb-pop-item'>{line}</span>")
+    return (
+        f"<span class='hb-pop-menu'>"
+        f"<span class='hb-pop-head'>{_html_escape(head)}</span>"
+        + "".join(rows)
+        + "</span>"
+    )
+
+
+def hb_cell(
+    *,
+    status: str,                       # 'failed'|'passed'|'other'|'missing'
+    title: str,                        # plain-text tooltip (will be escaped)
+    href: str | None = None,
+    count_in_cell: int | None = None,  # show inside cell when > 1
+    popup_html: str = "",              # output of hb_popup_menu, optional
+    width: int = 9,
+    height: int = 11,
+) -> str:
+    bg = _HB_BG.get(status, "#d0d7de")
+    base = (
+        f"display:inline-block; width:{width}px; height:{height}px; "
+        "vertical-align:middle;"
+    )
+    count_label = (
+        f"<span style='font-size:8px;color:#fff;font-weight:700;"
+        f"line-height:{height}px;text-align:center;display:block;'>{count_in_cell}</span>"
+        if count_in_cell and count_in_cell > 1 else ""
+    )
+    cell_inner = (
+        f"<span class='hb-cell' style='{base} background:{bg};' "
+        f"title='{_html_escape(title)}'>{count_label}</span>"
+    )
+    # Hover-popup wrapper (preferred for multi-host cells).
+    if popup_html:
+        return (
+            f"<span class='hb-pop' style='display:inline-block;position:relative;"
+            f"margin-right:1px;line-height:0;'>{cell_inner}{popup_html}</span>"
+        )
+    # Single-link wrapper.
+    if href:
+        return (
+            f"<a class='hb-link' href='{_html_escape(href)}' "
+            f"target='_blank' rel='noopener noreferrer'>"
+            + cell_inner.replace(base, base + " margin-right:1px;")
+            + "</a>"
+        )
+    # Plain cell with margin.
+    return cell_inner.replace(base, base + " margin-right:1px;")
+
+
+def hb_bar(cells: list[str], font_size: int = 10) -> str:
+    return (
+        f"<span style='display:inline-block;white-space:nowrap;"
+        f"font-family:\"SF Mono\",Consolas,monospace;font-size:{font_size}px;'>"
+        + "".join(cells)
+        + "</span>"
     )
 
 
@@ -1469,84 +1575,43 @@ def render_ci_attempts_page(
 
         def _per_run_bar(test_id: str, info: dict) -> str:
             cells: list[str] = []
-            run_w = 9
-            base_cell = (
-                f"display:inline-block; width:{run_w}px; height:11px; "
-                "vertical-align:middle;"
-            )
             for n in range(1, max_att + 1):
                 hosts = _hosts_in_run(test_id, n)
                 if not hosts:
-                    _gray_tip = f"Run #{n}: did not run (host job cancelled or missing)"
-                    cells.append(
-                        f"<span class='hb-cell' style='{base_cell} margin-right:1px; background:#d0d7de;' "
-                        f"title='{_html_escape(_gray_tip)}'></span>"
-                    )
+                    cells.append(hb_cell(
+                        status="missing",
+                        title=f"Run #{n}: did not run (host job cancelled or missing)",
+                    ))
                     continue
-                # Roll up to a single cell color: red if any failed, green if
-                # any passed, else gray. Hover reveals one link per host job.
                 statuses = {s for _, _, s in hosts}
-                if "failed" in statuses:
-                    bg = "#c83a3a"
-                elif "passed" in statuses:
-                    bg = "#2da44e"
-                else:
-                    bg = "#d0d7de"
-                # Build the popover menu: one row per host job.
-                menu_items: list[str] = []
-                for j, jname, status in hosts:
+                cell_status = (
+                    "failed" if "failed" in statuses
+                    else "passed" if "passed" in statuses
+                    else "other"
+                )
+                items = []
+                for j, jname, s in hosts:
+                    label = (
+                        "FAILED" if s == "failed"
+                        else "passed" if s == "passed"
+                        else (j.get("conclusion") or "unknown")
+                    )
                     jid = j.get("id")
-                    jurl = j.get("url")
-                    label_color = (
-                        "#c83a3a" if status == "failed"
-                        else ("#2da44e" if status == "passed" else "#586069")
-                    )
-                    label_text = (
-                        "FAILED" if status == "failed"
-                        else ("passed" if status == "passed" else (j.get("conclusion") or "unknown"))
-                    )
-                    line = (
-                        f"<span style='display:inline-block;width:8px;height:8px;"
-                        f"border-radius:2px;background:{bg};margin-right:6px;"
-                        f"vertical-align:middle;'></span>"
-                        f"<span style='color:{label_color};font-weight:600;'>{label_text}</span>"
-                        f" <span style='color:#586069;'>job#{jid or '?'}</span>"
-                        f" <span>{_html_escape(jname)}</span>"
-                    )
-                    if jurl:
-                        menu_items.append(
-                            f"<a class='hb-pop-item' href='{_html_escape(jurl)}' "
-                            f"target='_blank' rel='noopener noreferrer'>{line}</a>"
-                        )
-                    else:
-                        menu_items.append(f"<span class='hb-pop-item'>{line}</span>")
-                menu_html = (
-                    f"<span class='hb-pop-menu'>"
-                    f"<span class='hb-pop-head'>Run #{n} &mdash; {len(hosts)} host job(s)</span>"
-                    + "".join(menu_items)
-                    + "</span>"
-                )
-                tip = f"Run #{n}: hover to see {len(hosts)} host job(s)"
-                # Show the host-job count (e.g. "2") inside the cell when > 1.
-                count_label = (
-                    f"<span style='font-size:8px;color:#fff;font-weight:700;"
-                    f"line-height:11px;text-align:center;display:block;'>{len(hosts)}</span>"
-                    if len(hosts) > 1 else ""
-                )
-                cell_inner = (
-                    f"<span class='hb-cell' style='{base_cell} background:{bg};' "
-                    f"title='{_html_escape(tip)}'>{count_label}</span>"
-                )
-                cells.append(
-                    f"<span class='hb-pop' style='display:inline-block;position:relative;"
-                    f"margin-right:1px;line-height:0;'>{cell_inner}{menu_html}</span>"
-                )
-            return (
-                "<span style='display:inline-block;white-space:nowrap;"
-                "font-family:\"SF Mono\",Consolas,monospace;font-size:10px;'>"
-                + "".join(cells)
-                + "</span>"
-            )
+                    items.append({
+                        "status": s,
+                        "label_text": label,
+                        "sublabels": [f"job#{jid or '?'}", jname],
+                        "url": j.get("url"),
+                    })
+                cells.append(hb_cell(
+                    status=cell_status,
+                    title=f"Run #{n}: hover to see {len(hosts)} host job(s)",
+                    count_in_cell=len(hosts),
+                    popup_html=hb_popup_menu(
+                        f"Run #{n} — {len(hosts)} host job(s)", items,
+                    ),
+                ))
+            return hb_bar(cells)
 
         rows: list[str] = []
         for rank, (test_id, info) in enumerate(ranked, 1):
@@ -1559,29 +1624,8 @@ def render_ci_attempts_page(
         tally_html = (
             f"<h2>Failing tests <small style='color:#586069;font-weight:400'>"
             f"({n_unique} unique • {n_total} occurrences across runs)</small></h2>"
-            "<style>"
-            "a.hb-link { text-decoration: none; } "
-            "a.hb-link[target=\"_blank\"]::after { content: none; } "
-            ".hb-pop-menu { visibility: hidden; opacity: 0; "
-            "transition: visibility 0s linear 500ms, opacity 150ms ease 350ms; "
-            "position: absolute; top: 11px; left: 0; "
-            "z-index: 1000; background: #fff; border: 1px solid #d0d7de; "
-            "border-radius: 4px; box-shadow: 0 4px 8px rgba(0,0,0,0.12); "
-            "padding: 6px 8px; line-height: 1.5; font-size: 12px; "
-            "font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; "
-            "min-width: 280px; white-space: nowrap; } "
-            ".hb-pop:hover .hb-pop-menu, .hb-pop-menu:hover { "
-            "visibility: visible; opacity: 1; "
-            "transition: visibility 0s linear 0s, opacity 100ms ease 0s; } "
-            ".hb-pop-menu .hb-pop-head { display: block; color: #586069; "
-            "font-size: 11px; padding-bottom: 4px; border-bottom: 1px solid #eaecef; "
-            "margin-bottom: 4px; } "
-            ".hb-pop-menu .hb-pop-item { display: block; padding: 2px 4px; "
-            "color: #24292e; text-decoration: none; border-radius: 3px; } "
-            ".hb-pop-menu a.hb-pop-item:hover { background: #f6f8fa; } "
-            ".hb-pop-menu a.hb-pop-item[target=\"_blank\"]::after { content: \" \\2197\"; color: #959da5; }"
-            "</style>"
-            "<table class='attempt-table'>"
+            + HB_CSS
+            + "<table class='attempt-table'>"
             "<thead><tr>"
             "<th style='text-align:left;'>Rank</th>"
             "<th style='text-align:left;'>Count / Total</th>"

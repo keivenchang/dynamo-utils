@@ -39,11 +39,14 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 from ci_lib import (  # noqa: E402
+    HB_CSS,
     REPO,
     _to_pt,
     extract_pytest_failures,
     fetch_job_log,
     gh_api,
+    hb_bar,
+    hb_cell,
     render_ci_attempts_page,
     short_sha,
 )
@@ -984,7 +987,7 @@ def _render_summary(kind: str, entries_by_sha: dict, page_paths: dict) -> str:
         return (observed, False, None, pass_url)
 
     def _hb_tooltip(sha: str, status_text: str) -> str:
-        """Compose a tooltip with PR, author, timestamp, status."""
+        """Compose tooltip text (unescaped — hb_cell escapes)."""
         m = sha_meta.get(sha) or {}
         bits: list[str] = []
         pr = m.get("pr")
@@ -998,52 +1001,30 @@ def _render_summary(kind: str, entries_by_sha: dict, page_paths: dict) -> str:
         if ts and ts != "—":
             bits.append(ts)
         bits.append(status_text)
-        return _html_escape(" • ".join(bits))
+        return " • ".join(bits)
 
     def _history_bar(test_id: str) -> str:
         cells: list[str] = []
         for sha, e in items_old_first:
             observed, failed, fail_url, pass_url = _did_test_fail_in(sha, e, test_id)
-            base = (
-                "display:inline-block; width:9px; height:11px; "
-                "vertical-align:middle; margin-right:1px;"
-            )
-            if not observed and not failed:
-                _tip = _hb_tooltip(sha, "test did not run (host job cancelled or missing)")
-                cells.append(
-                    f"<span class='hb-cell' style='{base} background:#d0d7de;' "
-                    f"title='{_tip}'></span>"
-                )
-            elif failed:
-                inner = (
-                    f"<span class='hb-cell' style='{base} background:#c83a3a;' "
-                    f"title='{_hb_tooltip(sha, 'FAILED — click to open job log')}'></span>"
-                )
-                if fail_url:
-                    cells.append(
-                        f"<a class='hb-link' href='{_html_escape(fail_url)}' "
-                        f"target='_blank' rel='noopener noreferrer'>{inner}</a>"
-                    )
-                else:
-                    cells.append(inner)
+            if failed:
+                cells.append(hb_cell(
+                    status="failed",
+                    title=_hb_tooltip(sha, "FAILED — click to open job log"),
+                    href=fail_url,
+                ))
+            elif observed:
+                cells.append(hb_cell(
+                    status="passed",
+                    title=_hb_tooltip(sha, "passed — click to open job log"),
+                    href=pass_url,
+                ))
             else:
-                inner = (
-                    f"<span class='hb-cell' style='{base} background:#2da44e;' "
-                    f"title='{_hb_tooltip(sha, 'passed — click to open job log')}'></span>"
-                )
-                if pass_url:
-                    cells.append(
-                        f"<a class='hb-link' href='{_html_escape(pass_url)}' "
-                        f"target='_blank' rel='noopener noreferrer'>{inner}</a>"
-                    )
-                else:
-                    cells.append(inner)
-        return (
-            "<span style='display:inline-block;white-space:nowrap;"
-            "font-family:\"SF Mono\",Consolas,monospace;font-size:10px;'>"
-            + "".join(cells)
-            + "</span>"
-        )
+                cells.append(hb_cell(
+                    status="missing",
+                    title=_hb_tooltip(sha, "test did not run (host job cancelled or missing)"),
+                ))
+        return hb_bar(cells)
 
     test_rows: list[str] = []
     for rank, (test_id, n) in enumerate(ranked, 1):
@@ -1071,9 +1052,6 @@ def _render_summary(kind: str, entries_by_sha: dict, page_paths: dict) -> str:
     text-align: left; white-space: nowrap;
   }
   body.report-body table.report-table-tests td:nth-child(3) { white-space: normal; }
-  /* History-bar links: no arrow, no underline, cells stay flush. */
-  body.report-body a.hb-link { text-decoration: none; }
-  body.report-body a.hb-link[target="_blank"]::after { content: none; }
 </style>
 """
 
@@ -1082,6 +1060,7 @@ def _render_summary(kind: str, entries_by_sha: dict, page_paths: dict) -> str:
         f"<html><head><meta charset='utf-8'><title>{kind} report</title>",
         _HTML_STYLE,
         body_style,
+        HB_CSS,
         "</head><body class='report-body'>",
         f"<h1>Last {len(items)} {kind.capitalize()} Report &mdash; main branch</h1>",
         f"<div class='meta'>"
