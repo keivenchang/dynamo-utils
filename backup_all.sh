@@ -69,7 +69,6 @@ TARGETS_6H=(
     "$HOME/.claude|.claude"
     "$HOME/.cursor|.cursor"
     "$HOME/.tsh|.tsh"
-    "$HOME/.nebius|.nebius"
     "$HOME/.slack|.slack"
     "$HOME/nvsec-env|nvsec-env"
 )
