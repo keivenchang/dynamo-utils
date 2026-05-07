@@ -97,6 +97,10 @@ def main() -> None:
         "--infra", action="store_true",
         help="Also show infrastructure services (docker-compose).",
     )
+    parser.add_argument(
+        "--show-container-name", action="store_true",
+        help="Show the Docker container name column.",
+    )
     args = parser.parse_args()
 
     ids = get_container_ids()
@@ -159,16 +163,22 @@ def main() -> None:
     infra_services.sort(key=lambda x: x["service"])
 
     if devcontainers:
-        print_table(
-            ["Repo", "Backend", "User", "Container ID", "Container Name",
-             "Git HEAD", "Dynamo SHA", "Host Path", "Branch"],
-            [
-                [dc["repo"], dc["backend"], dc["user"],
-                 dc["container_id"], dc["container_name"],
-                 dc["sha"], dc["dynamo_sha"], dc["host_path"], dc["branch"]]
-                for dc in devcontainers
-            ],
-        )
+        headers = ["Repo", "Backend", "User", "Container ID"]
+        if args.show_container_name:
+            headers.append("Container Name")
+        headers.extend(["Git HEAD", "Dynamo SHA", "Host Path", "Branch"])
+
+        rows = []
+        for dc in devcontainers:
+            row = [dc["repo"], dc["backend"], dc["user"], dc["container_id"]]
+            if args.show_container_name:
+                row.append(dc["container_name"])
+            row.extend([
+                dc["sha"], dc["dynamo_sha"], dc["host_path"], dc["branch"]
+            ])
+            rows.append(row)
+
+        print_table(headers, rows)
 
     if infra_services:
         if devcontainers:
