@@ -154,6 +154,12 @@ self_test() {
     run_case "timeout" 2 \
         -t 2 -s "NEVERMATCH" -l "$log" -q -- bash -c 'while true; do echo tick; sleep 0.5; done'
 
+    # --- Timeout with idle stream (regression: blocked read) ---
+    # Without per-read timeout, a silent stream blocks `read` forever and
+    # the overall --timeout never fires. Repro: idle `tail -f /dev/null`.
+    run_case "timeout with idle stream" 2 \
+        -t 2 -s "NEVERMATCH" -l "$log" -q -- tail -f /dev/null
+
     # --- Command exits before sentinel (exit 3) ---
     run_case "cmd exits, no sentinel" 3 \
         -t 5 -s "NEVERMATCH" -l "$log" -q -- echo "wrong output"
@@ -371,39 +377,56 @@ if [[ -n "$WATCH_PID" ]]; then
     WATCHER_PID=$!
 fi
 
-# Read from the FIFO line by line
-while IFS= read -r line; do
-    # Append to log file
-    echo "$line" >> "$LOG_FILE"
+# Read from the FIFO line by line.
+#
+# Use `read -t 1` (1-second per-read timeout) so the overall --timeout check
+# runs even when the watched command stops producing output. Without this,
+# a quiet `tail -F` (file written-to once then idle) leaves `read` blocked
+# forever and the timeout below never fires -- the script outlives its
+# --timeout indefinitely.
+#
+# Open the FIFO on FD 3 once so we don't reopen it per iteration.
+exec 3< "$FIFO"
+while true; do
+    line=""
+    read_rc=0
+    IFS= read -r -t 1 -u 3 line || read_rc=$?
 
-    # Stream to terminal unless quiet
-    if [[ "$QUIET" = false ]]; then
-        echo "$line"
-    fi
-
-    # Check for sentinel match (fixed-string grep, quiet mode)
-    if [[ "$HAS_SENTINELS" = true ]]; then
-        if echo "$line" | grep -qFf "$PATTERN_FILE"; then
-            ELAPSED=$(( $(date +%s) - START_TIME ))
-            # Figure out which sentinel matched for the message
-            MATCHED=""
-            for s in "${SENTINELS[@]}"; do
-                if echo "$line" | grep -qF "$s"; then
-                    MATCHED="$s"
-                    break
-                fi
-            done
-            echo "---" >&2
-            echo "await_output: sentinel '$MATCHED' found after ${ELAPSED}s" >&2
-            # Kill the background command (it may be a long-running server)
-            kill "$CMD_PID" 2>/dev/null || true
-            wait "$CMD_PID" 2>/dev/null || true
-            CMD_PID=""
-            exit 0
+    if [[ "$read_rc" -eq 0 ]]; then
+        # Got a line: log, stream, sentinel-check.
+        echo "$line" >> "$LOG_FILE"
+        if [[ "$QUIET" = false ]]; then
+            echo "$line"
         fi
+        if [[ "$HAS_SENTINELS" = true ]]; then
+            if echo "$line" | grep -qFf "$PATTERN_FILE"; then
+                ELAPSED=$(( $(date +%s) - START_TIME ))
+                MATCHED=""
+                for s in "${SENTINELS[@]}"; do
+                    if echo "$line" | grep -qF "$s"; then
+                        MATCHED="$s"
+                        break
+                    fi
+                done
+                echo "---" >&2
+                echo "await_output: sentinel '$MATCHED' found after ${ELAPSED}s" >&2
+                kill "$CMD_PID" 2>/dev/null || true
+                wait "$CMD_PID" 2>/dev/null || true
+                CMD_PID=""
+                exec 3<&-
+                exit 0
+            fi
+        fi
+    elif [[ "$read_rc" -gt 128 ]]; then
+        # rc > 128 means `read -t` hit its 1s timeout (no new line). Loop.
+        :
+    else
+        # rc 1 (or any other non-timeout failure) means EOF: writer closed
+        # the FIFO. Drop out and let the post-loop logic figure out why.
+        break
     fi
 
-    # Check timeout
+    # Always check overall timeout, regardless of whether a line arrived.
     NOW=$(date +%s)
     ELAPSED=$(( NOW - START_TIME ))
     if [[ "$ELAPSED" -ge "$TIMEOUT" ]]; then
@@ -413,9 +436,11 @@ while IFS= read -r line; do
         kill "$CMD_PID" 2>/dev/null || true
         wait "$CMD_PID" 2>/dev/null || true
         CMD_PID=""
+        exec 3<&-
         exit 2
     fi
-done < "$FIFO"
+done
+exec 3<&-
 
 # The read loop ended -- the command (or PID watcher) closed the FIFO.
 # Capture exit code without letting set -e abort on non-zero (e.g. SIGTERM=143).
