@@ -195,7 +195,46 @@ suffix = f"{framework}-{image_type}-{cuda}"   # e.g. "vllm-dev-cuda13"
 # Edge cases: frontend / operator / snapshot have no -<type>-<cuda>; suffix == framework
 ```
 
-Pull the candidate tag list (newest first) and filter:
+> **⚠ Pagination caveat — read before doing list-and-filter.** The
+> `ai-dynamo/dynamo` repo has thousands of tags. Both `aws ecr
+> describe-images --max-items N` and `az acr manifest list-metadata
+> --top N` **silently truncate** at the cap and return only the newest
+> N. If the SHA you care about isn't in the newest window, list-and-filter
+> will report "image not found" even when the image exists. **List-and-filter
+> is for "latest" / nearest-older fallback only — never for "does this
+> exact tag exist?" questions.** When you have a specific SHA, jump to
+> Step 2a (direct lookup); only fall through to list-and-filter for the
+> "latest" path or after Step 2a misses and you need nearest-older.
+
+#### Step 2a: Direct lookup when target SHA is known (preferred)
+
+If the user supplied a SHA (or you computed one from `git rev-parse HEAD`),
+construct the expected tag(s) and look them up directly. This bypasses
+pagination entirely.
+
+```bash
+# ECR — direct, no pagination
+SHA=ea1850f94a46f76f66f0906369224010b74cf727
+aws ecr batch-get-image --repository-name ai-dynamo/dynamo --region us-west-2 \
+    --image-ids \
+        imageTag=$SHA-sglang-dev-cuda12 \
+        imageTag=$SHA-sglang-dev-cuda13 \
+        imageTag=$SHA-trtllm-dev-cuda13 \
+        imageTag=$SHA-vllm-dev-cuda13 \
+    --query 'images[].imageId.imageTag' --output text | tr '\t' '\n'
+# Returns only the tags that actually exist. Missing tags = absent
+# from the registry, period — not pagination loss.
+
+# ACR — direct, no pagination
+az acr repository show --name dynamoci \
+    --image ai-dynamo/dynamo:$SHA-sglang-dev-cuda12 --output json 2>/dev/null \
+  || echo "tag does not exist in ACR"
+```
+
+If a tag is missing here, it really doesn't exist. Don't fall back to
+list-and-filter for the same SHA expecting different results.
+
+#### Step 2b: List-and-filter for "latest" / fallback only
 
 ```bash
 # ACR — prefer this
@@ -214,22 +253,33 @@ above; same shape after parsing.)
 
 Each result row has at least one tag of the form `<sha40>-<suffix>`.
 
+If you need the listing window to cover more history (e.g., for the
+nearest-older fallback in Step 3), bump `--top` / `--max-items`
+progressively (200 → 1000 → 5000) — but remember: even 5000 isn't a
+guarantee on a busy repo. Direct lookup remains the source of truth
+for "does this tag exist?"
+
 ### Step 3: Resolve the target SHA against the candidates
 
 If `sha_target == latest` → take the first row (already newest-first).
 
 If `sha_target == <sha>` (from `git rev-parse HEAD` or user-supplied):
 
-1. **Exact-SHA hit** — find a row whose tag starts with the full `<sha>`.
-   Done.
+1. **Exact-SHA hit** — use Step 2a's direct lookup. If the tag comes
+   back, you're done. Do **not** fall back to list-and-filter on the same
+   SHA hoping pagination wasn't to blame: direct lookup is authoritative.
 2. **Same `digest`** — if (1) misses, look up the digest of any tag at
    `<sha>` (any framework/type — the digest depends on `container/` state,
    not framework wiring; in practice we check the same suffix). If a
    different-SHA row in the candidate list has the same digest, use it.
    Note to user: "different commit, byte-identical image".
 3. **Nearest older with image** — walk `git log --format=%H` from the
-   target SHA backwards, intersect with the candidate SHA set, take the
-   first hit. Report the commit-distance offset.
+   target SHA backwards, batch-get-image those candidates directly until
+   one hits, take the first one. Report the commit-distance offset.
+   (Listing-and-filter via Step 2b is a faster way to build a candidate
+   SHA set if the nearest hit is within the listing window — but cross-check
+   with direct lookup if the SHA you settle on is far from `time_desc`'s
+   newest end.)
 
 Always tell the user which case fired. Don't silently substitute.
 
