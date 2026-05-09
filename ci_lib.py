@@ -628,7 +628,9 @@ def hb_cell(
     )
     count_label = (
         f"<span style='font-size:8px;color:#fff;font-weight:700;"
-        f"line-height:{height}px;text-align:center;display:block;'>{count_in_cell}</span>"
+        f"line-height:{height}px;text-align:center;display:block;'>"
+        f"{'+' if count_in_cell > 9 else count_in_cell}"
+        f"</span>"
         if count_in_cell and count_in_cell > 1 else ""
     )
     cell_inner = (

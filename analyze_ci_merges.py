@@ -957,21 +957,27 @@ def _render_summary(kind: str, entries_by_sha: dict, page_paths: dict) -> str:
 
     def _did_test_fail_in(
         sha: str, e: dict, test_id: str
-    ) -> tuple[bool, bool, str | None, str | None]:
-        """Return (test_observed, test_failed, fail_url, pass_url).
+    ) -> tuple[bool, bool, str | None, str | None, int]:
+        """Return (test_observed, test_failed, fail_url, pass_url, fail_count).
         test_observed=False means this test's host-job didn't actually complete
         successfully on this SHA — could be cancelled, missing, or just no
-        data — so we paint gray ("no signal") instead of green."""
+        data — so we paint gray ("no signal") instead of green.
+        fail_count sums every job-occurrence of this test_id in failed_tests
+        across all retry attempts, so a flake that failed in 3 retries shows 3."""
         host_jobs = test_host_jobs.get(test_id, set())
         observed = False
         pass_url: str | None = None
+        fail_url: str | None = None
+        fail_count = 0
         if kind == "pre-merge":
             for a in e.get("attempts") or []:
                 for j in a.get("jobs") or []:
                     name = j.get("name") or ""
                     if test_id in (j.get("failed_tests") or []):
-                        return (True, True, j.get("url"), None)
-                    if name in host_jobs and j.get("conclusion") == "success":
+                        fail_count += 1
+                        if fail_url is None:
+                            fail_url = j.get("url")
+                    elif name in host_jobs and j.get("conclusion") == "success":
                         observed = True
                         if pass_url is None:
                             pass_url = j.get("url")
@@ -979,12 +985,16 @@ def _render_summary(kind: str, entries_by_sha: dict, page_paths: dict) -> str:
             for j in e.get("jobs") or e.get("failed_jobs") or []:
                 name = j.get("name") or ""
                 if test_id in (j.get("failed_tests") or []):
-                    return (True, True, j.get("url"), None)
-                if name in host_jobs and j.get("conclusion") == "success":
+                    fail_count += 1
+                    if fail_url is None:
+                        fail_url = j.get("url")
+                elif name in host_jobs and j.get("conclusion") == "success":
                     observed = True
                     if pass_url is None:
                         pass_url = j.get("url")
-        return (observed, False, None, pass_url)
+        if fail_count > 0:
+            return (True, True, fail_url, None, fail_count)
+        return (observed, False, None, pass_url, 0)
 
     def _hb_tooltip(sha: str, status_text: str) -> str:
         """Compose tooltip text (unescaped — hb_cell escapes)."""
@@ -1006,12 +1016,17 @@ def _render_summary(kind: str, entries_by_sha: dict, page_paths: dict) -> str:
     def _history_bar(test_id: str) -> str:
         cells: list[str] = []
         for sha, e in items_old_first:
-            observed, failed, fail_url, pass_url = _did_test_fail_in(sha, e, test_id)
+            observed, failed, fail_url, pass_url, fail_count = _did_test_fail_in(sha, e, test_id)
             if failed:
+                fail_label = (
+                    f"FAILED ({fail_count}×) — click to open job log"
+                    if fail_count > 1 else "FAILED — click to open job log"
+                )
                 cells.append(hb_cell(
                     status="failed",
-                    title=_hb_tooltip(sha, "FAILED — click to open job log"),
+                    title=_hb_tooltip(sha, fail_label),
                     href=fail_url,
+                    count_in_cell=fail_count if fail_count > 1 else None,
                 ))
             elif observed:
                 cells.append(hb_cell(
