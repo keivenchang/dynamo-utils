@@ -247,6 +247,38 @@ if [ -z "$NIXL_SDK_LIB" ] && [ "${ALLOW_MISSING_NIXL_SDK:-0}" != "1" ]; then
     exit 0
 fi
 
+# Auto-recover from a 0-byte lib_core.so. This happens when a previous compile
+# attempt failed mid-link (e.g. sglang container hit -lnixl link error before
+# the NIXL SDK check existed, or a parallel build in a sibling container
+# clobbered the file). Cargo's incremental fingerprint says "fresh" so it
+# skips rebuild, but maturin then fails parsing the empty file as ELF.
+# Targeted cargo clean of the bindings crate + remove the corrupt hardlinks
+# forces a clean rebuild without nuking the whole target/.
+if [ -n "$WORKSPACE_DIR" ]; then
+    _CORRUPT_SO=""
+    for _candidate in "$WORKSPACE_DIR/target/maturin/lib_core.so" "${CARGO_TARGET_DIR:-$WORKSPACE_DIR/target}/maturin/lib_core.so"; do
+        if [ -f "$_candidate" ] && [ ! -s "$_candidate" ]; then
+            _CORRUPT_SO="$_candidate"
+            break
+        fi
+    done
+    if [ -n "$_CORRUPT_SO" ]; then
+        echo "INFO: Detected 0-byte $_CORRUPT_SO from a prior failed compile."
+        echo "      Auto-recovering: cargo clean -p dynamo-py3 + remove stale hardlinks."
+        ( cd "$WORKSPACE_DIR" && cargo clean -p dynamo-py3 --manifest-path lib/bindings/python/Cargo.toml 2>&1 | tail -2 )
+        rm -f "$WORKSPACE_DIR/target/maturin/lib_core.so" \
+              "$WORKSPACE_DIR/target/debug/lib_core.so" \
+              "$WORKSPACE_DIR/target/debug/deps/lib_core.so" \
+              "$WORKSPACE_DIR/target/debug/deps/lib_core-"*.so 2>/dev/null
+        if [ -n "${CARGO_TARGET_DIR:-}" ] && [ "$CARGO_TARGET_DIR" != "$WORKSPACE_DIR/target" ]; then
+            rm -f "$CARGO_TARGET_DIR/maturin/lib_core.so" \
+                  "$CARGO_TARGET_DIR/debug/lib_core.so" \
+                  "$CARGO_TARGET_DIR/debug/deps/lib_core.so" \
+                  "$CARGO_TARGET_DIR/debug/deps/lib_core-"*.so 2>/dev/null
+        fi
+    fi
+fi
+
 # ==============================================================================
 # FUNCTION DEFINITIONS
 # ==============================================================================
