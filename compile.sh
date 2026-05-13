@@ -198,10 +198,53 @@ fi
 # Set up CARGO_TARGET_DIR early so it's available for all operations
 
 if [ -n "$WORKSPACE_DIR" ]; then
-    # Use cargo target directory for wheels (follows Rust conventions)
-    CARGO_TARGET_DIR=$(cargo metadata --format-version=1 --no-deps 2>/dev/null | jq -r '.target_directory' 2>/dev/null || echo "$WORKSPACE_DIR/target")
+    # Per-backend target/ to prevent vllm + sglang containers sharing /workspace
+    # from stomping each other's lib_core.so (zero-byte truncation observed
+    # when two backends compile in parallel — see follow-up to #9320).
+    # DYNAMO_BACKEND is detected from the framework label baked into the dev
+    # image; falls back to "default" if absent.
+    BACKEND_SUFFIX="${DYNAMO_BACKEND:-${DYNAMO_FRAMEWORK:-}}"
+    if [ -z "$BACKEND_SUFFIX" ] && [ -f /etc/dynamo-backend ]; then
+        BACKEND_SUFFIX=$(cat /etc/dynamo-backend 2>/dev/null)
+    fi
+    if [ -n "$BACKEND_SUFFIX" ]; then
+        export CARGO_TARGET_DIR="$WORKSPACE_DIR/target-$BACKEND_SUFFIX"
+    else
+        # Use cargo target directory for wheels (follows Rust conventions)
+        CARGO_TARGET_DIR=$(cargo metadata --format-version=1 --no-deps 2>/dev/null | jq -r '.target_directory' 2>/dev/null || echo "$WORKSPACE_DIR/target")
+        export CARGO_TARGET_DIR
+    fi
 else
     CARGO_TARGET_DIR=""
+fi
+
+# NIXL SDK presence check — sglang dev image deliberately ships without the
+# NIXL C++ SDK (see #9320 revert of #9216). Without the SDK, cargo build of
+# nixl-sys fails with `rust-lld: unable to find library -lnixl{,_build,_common}`.
+# Detect the missing SDK and bail cleanly instead of producing a corrupt .so
+# (failed maturin truncates lib_core.so to 0 bytes, poisoning any parallel
+# container sharing /workspace/target).
+NIXL_SDK_LIB=""
+for candidate in /opt/nvidia/nvda_nixl/lib64/libnixl.so /opt/nvidia/nvda_nixl/lib/libnixl.so /opt/nvidia/nvda_nixl/lib/x86_64-linux-gnu/libnixl.so; do
+    if [ -f "$candidate" ]; then
+        NIXL_SDK_LIB="$candidate"
+        break
+    fi
+done
+if [ -z "$NIXL_SDK_LIB" ] && [ "${ALLOW_MISSING_NIXL_SDK:-0}" != "1" ]; then
+    echo "================================================================="
+    echo "WARN: NIXL C++ SDK not found under /opt/nvidia/nvda_nixl/"
+    echo "      This is normal for the sglang dev image (per PR #9320:"
+    echo "      sglang runtime uses upstream's own nixl-cu* python wheel,"
+    echo "      not Dynamo's nixl-sys binding)."
+    echo ""
+    echo "      cargo build will fail with 'unable to find library -lnixl'."
+    echo "      Skipping the build cleanly to avoid corrupting target/."
+    echo ""
+    echo "      Override with ALLOW_MISSING_NIXL_SDK=1 if you really want to try."
+    echo "      Real fix: feature-gate nixl-sys in lib/memory/Cargo.toml."
+    echo "================================================================="
+    exit 0
 fi
 
 # ==============================================================================
