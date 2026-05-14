@@ -546,6 +546,27 @@ run_show_commit_history() {
         echo "See log for details: $COMMIT_HISTORY_LOG" >&2
         exit 1
     fi
+
+    # Parser-parity chart piggyback. Cheap (~1s reading YAML fixtures),
+    # so run unconditionally on every commit-history refresh. Lives at the
+    # same repo path the script is cwd'd to ($DYNAMO_REPO), so the HTML's
+    # relative <a href="fixtures/..."> links resolve when opened in a browser.
+    # Fail soft: if the generator script is missing or breaks, log and continue.
+    PARITY_GEN="$DYNAMO_REPO/tests/parity/parser/generate_parity_chart.py"
+    PARITY_HTML="$DYNAMO_REPO/tests/parity/parser/index.html"
+    if [ -f "$PARITY_GEN" ]; then
+        PARITY_TMP="$(mktemp -p "$DYNAMO_REPO/tests/parity/parser" .parity-XXXX.html)"
+        if python3 "$PARITY_GEN" --html > "$PARITY_TMP" 2>>"$COMMIT_HISTORY_LOG"; then
+            chmod 644 "$PARITY_TMP"
+            \mv -f "$PARITY_TMP" "$PARITY_HTML"
+            echo "$(date '+%Y-%m-%d %H:%M:%S') - Updated $PARITY_HTML" >> "$LOG_FILE"
+        else
+            rm -f "$PARITY_TMP"
+            echo "$(date '+%Y-%m-%d %H:%M:%S') - WARNING: parser-parity chart regen failed (see $COMMIT_HISTORY_LOG)" >> "$LOG_FILE"
+        fi
+    else
+        echo "$(date '+%Y-%m-%d %H:%M:%S') - SKIP: $PARITY_GEN not present (older main)" >> "$LOG_FILE"
+    fi
 }
 
 if [ "$RUN_SHOW_REMOTE_BRANCHES" = true ]; then
