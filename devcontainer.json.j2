@@ -124,6 +124,19 @@
 
         {# --- Project data & tooling --- #}
         "source=${localEnv:HOME}/dynamo/notes,target=/home/dynamo/notes,type=bind",
-        "source=${localEnv:HOME}/dynamo/dynamo-utils.PRODUCTION/,target=/home/dynamo/utils,type=bind,readonly"
+        "source=${localEnv:HOME}/dynamo/dynamo-utils.PRODUCTION/,target=/home/dynamo/utils,type=bind,readonly",
+
+        {#
+            Per-engine cargo target dir, overlaid at /workspace/target.
+            /workspace is bind-mounted from the host repo and shared across
+            all engine devcontainers; without this overlay, vllm/trtllm
+            builds bake `-lnixl` link directives into nixl-sys's build script
+            cache, which then poisons sglang (which has no NIXL SDK but does
+            have nixl-sys stub fallback that never gets a chance to re-run).
+            Each engine container sees a clean /workspace/target backed by
+            host's ./target/.{engine}/ — isolated per engine, still on host
+            for inspection/sharing across same-engine containers.
+        #}
+        "source=${localWorkspaceFolder}/target/.{{ framework }},target=/workspace/target,type=bind"
     ]
 }
