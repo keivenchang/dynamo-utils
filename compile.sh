@@ -218,12 +218,30 @@ else
     CARGO_TARGET_DIR=""
 fi
 
-# NIXL SDK presence check — sglang dev image deliberately ships without the
-# NIXL C++ SDK (see #9320 revert of #9216). Without the SDK, cargo build of
-# nixl-sys fails with `rust-lld: unable to find library -lnixl{,_build,_common}`.
-# Detect the missing SDK and bail cleanly instead of producing a corrupt .so
-# (failed maturin truncates lib_core.so to 0 bytes, poisoning any parallel
-# container sharing /workspace/target).
+# SGLang short-circuit. SGLang does not use KVBM / NIXL (README backend
+# matrix marks KVBM as 🚧 for SGLang). The sglang dev image deliberately
+# ships without the NIXL C++ SDK (per PR #9320 revert of #9216) — only the
+# upstream nixl-cu* python wheel is present for runtime use.
+#
+# However, the Rust workspace cannot currently be built without the NIXL
+# SDK in any container: lib/memory/Cargo.toml has `nixl-sys` as an
+# unconditional dep, and lib/llm → lib/memory → nixl-sys is on the build
+# path for dynamo-py3. So cargo build fails with
+# `rust-lld: unable to find library -lnixl{,_build,_common}`, leaving a
+# 0-byte lib_core.so that poisons any sibling container sharing
+# /workspace/target.
+#
+# Until lib/memory's nixl-sys dep gets feature-gated upstream, skip the
+# Rust build cleanly in sglang containers. Detection prefers explicit
+# signals (DYNAMO_BACKEND / SGLANG_IMAGE_TAG) and falls back to "no NIXL
+# SDK on disk" for containers where the env vars weren't set.
+IS_SGLANG=0
+if [ "${DYNAMO_BACKEND:-}" = "sglang" ] || [ "${DYNAMO_FRAMEWORK:-}" = "sglang" ]; then
+    IS_SGLANG=1
+elif [ -n "${SGLANG_IMAGE_TAG:-}${SGLANG_BUILD_COMMIT:-}" ]; then
+    IS_SGLANG=1
+fi
+
 NIXL_SDK_LIB=""
 for candidate in /opt/nvidia/nvda_nixl/lib64/libnixl.so /opt/nvidia/nvda_nixl/lib/libnixl.so /opt/nvidia/nvda_nixl/lib/x86_64-linux-gnu/libnixl.so; do
     if [ -f "$candidate" ]; then
@@ -231,18 +249,32 @@ for candidate in /opt/nvidia/nvda_nixl/lib64/libnixl.so /opt/nvidia/nvda_nixl/li
         break
     fi
 done
+
+if [ "$IS_SGLANG" = "1" ] && [ "${ALLOW_MISSING_NIXL_SDK:-0}" != "1" ]; then
+    echo "================================================================="
+    echo "SGLang container detected — skipping Rust workspace build."
+    echo ""
+    echo "      SGLang does not use Dynamo's KVBM / NIXL bindings (README"
+    echo "      backend matrix: KVBM = 🚧 for SGLang). Runtime uses the"
+    echo "      upstream sglang nixl-cu* python wheel only."
+    echo ""
+    echo "      Rust build is currently blocked workspace-wide because"
+    echo "      lib/memory/Cargo.toml has an unconditional nixl-sys dep."
+    echo "      Real fix: feature-gate nixl-sys in lib/memory/Cargo.toml."
+    echo ""
+    echo "      Override with ALLOW_MISSING_NIXL_SDK=1 if you really want to try."
+    echo "================================================================="
+    exit 0
+fi
+
 if [ -z "$NIXL_SDK_LIB" ] && [ "${ALLOW_MISSING_NIXL_SDK:-0}" != "1" ]; then
     echo "================================================================="
     echo "WARN: NIXL C++ SDK not found under /opt/nvidia/nvda_nixl/"
-    echo "      This is normal for the sglang dev image (per PR #9320:"
-    echo "      sglang runtime uses upstream's own nixl-cu* python wheel,"
-    echo "      not Dynamo's nixl-sys binding)."
-    echo ""
-    echo "      cargo build will fail with 'unable to find library -lnixl'."
-    echo "      Skipping the build cleanly to avoid corrupting target/."
+    echo "      cargo build will fail with 'unable to find library -lnixl'"
+    echo "      (lib/memory has unconditional nixl-sys dep)."
+    echo "      Skipping cleanly to avoid corrupting target/."
     echo ""
     echo "      Override with ALLOW_MISSING_NIXL_SDK=1 if you really want to try."
-    echo "      Real fix: feature-gate nixl-sys in lib/memory/Cargo.toml."
     echo "================================================================="
     exit 0
 fi
