@@ -7,10 +7,20 @@ Watches one or more tmux panes for permission prompts and sends Enter to
 approve them.  Blocks only genuinely dangerous commands (rm, rmdir, etc.).
 Everything else is approved automatically.
 
+Supports both Claude Code and Codex CLI prompts:
+
+  Claude:                              Codex:
+    Do you want to proceed?              Would you like to run the following command?
+    ❯ 1. Yes                             › 1. Yes, proceed (y)
+      2. No                                2. Yes, and don't ask again ... (p)
+                                           3. No, and tell Codex ... (esc)
+
 Detected prompt patterns:
-  1. "Do you want to proceed?"       (bash command confirmation)
-  2. "Do you want to make this edit"  (file edit confirmation)
-  3. "Do you want to create"          (file create confirmation)
+  1. "Do you want to proceed?"                     (Claude bash)
+  2. "Would you like to run the following command" (Codex bash)
+  3. "Do you want to make this edit"               (Claude file edit)
+  4. "Do you want to create"                       (Claude file create)
+  5. "Do you want to allow"                        (Claude tool, e.g. WebFetch)
 
 Usage:
   ./auto_approve_tmux.py dynamo1                  # single session
@@ -18,6 +28,8 @@ Usage:
   ./auto_approve_tmux.py "dynamo*"                # wildcard (glob)
   ./auto_approve_tmux.py dynamo1:0.1              # specific pane
   ./auto_approve_tmux.py --dry-run dynamo1
+  ./auto_approve_tmux.py --dry-run --once dynamo1  # debug one prompt and exit
+  ./auto_approve_tmux.py --once dynamo1            # approve one prompt and exit
   ./auto_approve_tmux.py --list
 """
 
@@ -130,15 +142,48 @@ _CMD_CHARS = re.compile(r"[/|&;$=(>`~]|--|\s-[a-zA-Z]")
 
 
 def extract_command(pane_text: str) -> str | None:
-    """Extract the pending command from pane text above a permission prompt.
+    """Extract the pending command from pane text around a permission prompt.
 
-    Walks backward from the trigger line ("Permission rule" / "Do you want to")
-    to the nearest separator bar (────) or bullet (●), then collects lines that
-    look like shell commands.
+    Two layouts are supported:
+
+    Claude:
+        Bash command
+            <command lines>           <- here
+            <description>
+        Permission rule Bash requires confirmation for this command.
+        Do you want to proceed?
+        ❯ 1. Yes
+
+    Codex:
+        Would you like to run the following command?
+        Reason: <reason>
+        $ <command line>              <- here
+        › 1. Yes, proceed (y)
+
+    For Claude we walk *backwards* from the trigger to the nearest separator.
+    For Codex we look for the "$ " line *between* the question and the
+    selector (it's below, not above).
     """
     lines = pane_text.splitlines()
 
-    # Find trigger line index
+    # --- Codex: command is on a "$ ..." line below the question.
+    for i, line in enumerate(lines):
+        if "Would you like to run the following command" in line:
+            for j in range(i + 1, min(i + 12, len(lines))):
+                stripped = lines[j].lstrip()
+                # Codex prefixes the command with "$ " (after some leading
+                # whitespace from the box layout).
+                if stripped.startswith("$ "):
+                    cmd = stripped[2:].strip()
+                    return cmd or None
+                # Stop searching once we hit the selector — the command
+                # should have appeared by then.
+                if _YES_SELECTOR_RE.search(lines[j]):
+                    break
+            # No "$ " line found; fall through to the Claude path in case
+            # this was a stale Codex header above a Claude prompt below.
+
+    # --- Claude: walk backward from the trigger line to a separator/bullet.
     trigger_idx = None
     for i, line in enumerate(lines):
         if "Permission rule" in line or "Do you want to proceed" in line or "Do you want to make this edit" in line:
@@ -231,24 +276,46 @@ _FILE_PROMPT_RE = re.compile(
 def detect_prompt(pane_text: str) -> str | None:
     """Detect which kind of permission prompt is visible.
 
-    Returns "bash", "file", "tool", or None.
-    Scans from the bottom of the pane so stale prompts that scrolled up
-    don't shadow the current one.
+    Returns "bash" (Claude or Codex bash command), "file" (Claude file edit),
+    "tool" (Claude tool, e.g. WebFetch), or None.
+
+    Scans every line and keeps the LAST match so stale prompts that have
+    scrolled up don't shadow the current one (the bottom-most match wins).
+
+    Codex prompts contain a free-form "Reason:" line written by the model,
+    and that prose can include phrases like "Do you want to allow ..." which
+    would otherwise be mis-classified as a Claude tool prompt. To prevent
+    that, once we see the Codex header we suppress tool-prompt detection
+    inside the next ~20 lines (the Codex prompt body).
     """
     last_type = None
-    for line in pane_text.splitlines():
+    codex_body_until = -1  # line index up to which we ignore "Do you want to allow"
+    for i, line in enumerate(pane_text.splitlines()):
         if "Do you want to proceed" in line:
             last_type = "bash"
+        elif "Would you like to run the following command" in line:
+            # Codex bash command prompt — same intent as Claude's "proceed".
+            last_type = "bash"
+            codex_body_until = i + 20
         elif _FILE_PROMPT_RE.search(line):
             last_type = "file"
-        elif "Do you want to allow" in line:
+        elif "Do you want to allow" in line and i > codex_body_until:
             last_type = "tool"
     return last_type
 
 
+# Selector glyphs for the highlighted option:
+#   ❯  - Claude Code (U+276F HEAVY RIGHT-POINTING ANGLE QUOTATION MARK ORNAMENT)
+#   ›  - Codex CLI   (U+203A SINGLE RIGHT-POINTING ANGLE QUOTATION MARK)
+_YES_SELECTOR_RE = re.compile(r"[❯›]\s*1\.\s*Yes")
+
+
 def yes_is_selected(pane_text: str) -> bool:
-    """Check that the first option (Yes) is currently highlighted."""
-    return bool(re.search(r"❯ 1\. Yes", pane_text))
+    """Check that the first option (Yes) is currently highlighted.
+
+    Works for both Claude (❯) and Codex (›) selectors.
+    """
+    return bool(_YES_SELECTOR_RE.search(pane_text))
 
 
 # Maps prompt type -> which option to select.
@@ -271,6 +338,29 @@ def action_for_prompt(prompt_type: str | None) -> str | None:
     if prompt_type is None:
         return None
     return PROMPT_ACTION.get(prompt_type)
+
+
+_CODEX_OPTION2_PREFIX_RE = re.compile(
+    r"^\s*2\.\s+Yes, and don't ask again for commands that start with `([^`]+)`",
+    re.MULTILINE,
+)
+_CODEX_GENERIC_OPTION2_PREFIXES = frozenset({
+    "gh api",
+})
+
+
+def action_for_bash_prompt(pane_text: str) -> str:
+    """Return the option to pick for a bash prompt.
+
+    Claude bash prompts only have "Yes" / "No", so option 1 is the default.
+    Codex has an option 2 for "don't ask again for commands that start with X".
+    That is useful only when X is generic enough to recur (for now: ``gh api``).
+    Exact command prefixes with PR numbers are intentionally left at option 1.
+    """
+    match = _CODEX_OPTION2_PREFIX_RE.search(pane_text)
+    if match and match.group(1).strip() in _CODEX_GENERIC_OPTION2_PREFIXES:
+        return "option2"
+    return "option1"
 
 
 # ---------------------------------------------------------------------------
@@ -404,23 +494,17 @@ def resolve_targets(specs: list[str]) -> list[str]:
 # ---------------------------------------------------------------------------
 
 def prompt_hash(pane_text: str) -> str:
-    """Hash the lines around the Yes selector to deduplicate repeated polls."""
-    context_lines: list[str] = []
-    for line in pane_text.splitlines():
-        if "❯ 1. Yes" in line:
-            context_lines.append(line)
-        elif context_lines:
-            context_lines.append(line)
-            if len(context_lines) >= 3:
-                break
-    # Also include a few lines before
+    """Hash the lines around the Yes selector to deduplicate repeated polls.
+
+    Matches both the Claude (❯) and Codex (›) selector glyphs.
+    """
     all_lines = pane_text.splitlines()
+    context_lines: list[str] = []
     for i, line in enumerate(all_lines):
-        if "❯ 1. Yes" in line:
+        if _YES_SELECTOR_RE.search(line):
             start = max(0, i - 5)
             context_lines = all_lines[start : i + 3]
             break
-
     blob = "\n".join(context_lines).encode()
     return hashlib.md5(blob).hexdigest()
 
@@ -458,6 +542,8 @@ def parse_args() -> argparse.Namespace:
                         help="base poll interval in seconds (default: 0.5)")
     parser.add_argument("--list", action="store_true",
                         help="list available tmux sessions and exit")
+    parser.add_argument("--once", action="store_true",
+                        help="process one visible prompt, then exit (useful with --dry-run)")
     parser.add_argument("--self-test", action="store_true",
                         help="run built-in tests and exit")
     return parser.parse_args()
@@ -771,6 +857,40 @@ def _self_test() -> bool:
           ),
           "file")
 
+    # Real: Codex bash prompt — "Would you like to run the following command?"
+    codex_pane = (
+        "◦ Running gh api repos/ai-dynamo/dynamo/pulls/9579/comments\n"
+        "\n"
+        "  Would you like to run the following command?\n"
+        "\n"
+        "  Reason: Do you want to allow GitHub network access so I can fetch PR #9579 status?\n"
+        "\n"
+        "  $ ~/ai-config/claude/bin/dyn_gh_ops.py pr-status --pr 9579\n"
+        "\n"
+        "› 1. Yes, proceed (y)\n"
+        "  2. Yes, and don't ask again for commands that start with `'~/ai-config/claude/bin/dyn_gh_ops.py' pr-status --pr 9579` (p)\n"
+        "  3. No, and tell Codex what to do differently (esc)\n"
+        "\n"
+        "  Press enter to confirm or esc to cancel\n"
+    )
+    check("codex bash: Would you like to run", detect_prompt(codex_pane), "bash")
+    check("codex bash: › selector recognized", yes_is_selected(codex_pane), True)
+
+    # Codex: simpler one without leading bullet
+    codex_simple = (
+        "  Would you like to run the following command?\n"
+        "\n"
+        "  $ git status\n"
+        "\n"
+        "› 1. Yes, proceed (y)\n"
+        "  2. No\n"
+    )
+    check("codex bash: simple git status", detect_prompt(codex_simple), "bash")
+
+    # Codex: › selector but no Yes -> not selected (defensive)
+    check("codex: no selected hides yes",
+          yes_is_selected("  1. Yes, proceed (y)\n› 2. No\n"), False)
+
     # Real: WebFetch tool prompt
     check("tool: WebFetch raw.githubusercontent.com",
           detect_prompt(
@@ -882,6 +1002,26 @@ def _self_test() -> bool:
           action_for_prompt(None), None)
     check("unknown -> None (safety fallback)",
           action_for_prompt("unknown"), None)
+    check("codex bash exact PR prefix -> option1",
+          action_for_bash_prompt(
+              "  Would you like to run the following command?\n"
+              "  $ ~/ai-config/claude/bin/dyn_gh_ops.py pr-status --pr 9579\n"
+              "› 1. Yes, proceed (y)\n"
+              "  2. Yes, and don't ask again for commands that start with "
+              "`'~/ai-config/claude/bin/dyn_gh_ops.py' pr-status --pr 9579` (p)\n"
+          ),
+          "option1")
+    check("codex bash generic gh api prefix -> option2",
+          action_for_bash_prompt(
+              "  Would you like to run the following command?\n"
+              "  $ gh api repos/ai-dynamo/dynamo/pulls/9579/comments\n"
+              "› 1. Yes, proceed (y)\n"
+              "  2. Yes, and don't ask again for commands that start with `gh api` (p)\n"
+          ),
+          "option2")
+    check("claude bash no option2 prefix -> option1",
+          action_for_bash_prompt(" Do you want to proceed?\n ❯ 1. Yes\n   2. No\n"),
+          "option1")
 
     # =====================================================================
     # yes_is_selected
@@ -1000,6 +1140,38 @@ def _self_test() -> bool:
     )
     check("extracts multi-line docker exec curl",
           cmd is not None and "docker exec" in cmd and "curl" in cmd, True)
+
+    # Codex: command on "$ " line below the question
+    cmd = extract_command(
+        "  Would you like to run the following command?\n"
+        "\n"
+        "  Reason: Do you want to allow GitHub network access so I can fetch PR #9579 status?\n"
+        "\n"
+        "  $ ~/ai-config/claude/bin/dyn_gh_ops.py pr-status --pr 9579\n"
+        "\n"
+        "› 1. Yes, proceed (y)\n"
+    )
+    check("codex: extracts dyn_gh_ops.py pr-status",
+          cmd, "~/ai-config/claude/bin/dyn_gh_ops.py pr-status --pr 9579")
+
+    cmd = extract_command(
+        "  Would you like to run the following command?\n"
+        "\n"
+        "  $ git status\n"
+        "\n"
+        "› 1. Yes, proceed (y)\n"
+    )
+    check("codex: extracts plain git status", cmd, "git status")
+
+    cmd = extract_command(
+        "  Would you like to run the following command?\n"
+        "\n"
+        "  $ docker exec foo bash -c \"ls -la /workspace\"\n"
+        "\n"
+        "› 1. Yes, proceed (y)\n"
+    )
+    check("codex: extracts docker exec",
+          cmd, 'docker exec foo bash -c "ls -la /workspace"')
 
     # No prompt at all
     check("returns None with no prompt", extract_command("just text\nno prompt\n"), None)
@@ -1173,6 +1345,14 @@ def main() -> None:
     signal.signal(signal.SIGINT, on_exit)
     signal.signal(signal.SIGTERM, on_exit)
 
+    def should_exit_once(st: SessionState, outcome: str) -> bool:
+        """Return True when --once has processed its first prompt."""
+        if not args.once:
+            return False
+        log.info("ONCE complete after %s on %s (%d approved, %d blocked)",
+                 outcome, st.label, st.approved, st.blocked)
+        return True
+
     # Adaptive polling: lerp from base to max over ramp_duration seconds of inactivity
     base_interval = args.interval
     max_interval = max(2.5, base_interval)
@@ -1182,8 +1362,8 @@ def main() -> None:
     sys.stderr.write("=" * 72 + "\n")
     sys.stderr.write(" AUTO-APPROVE TMUX\n")
     sys.stderr.write("\n")
-    sys.stderr.write(" WARNING: This script auto-approves Cursor CLI permission prompts:\n")
-    sys.stderr.write("   - Bash prompts  -> option 1 (Yes)\n")
+    sys.stderr.write(" WARNING: This script auto-approves agent CLI prompts (Claude + Codex):\n")
+    sys.stderr.write("   - Bash prompts  -> option 1 (Yes / Yes, proceed)\n")
     sys.stderr.write("   - File edits    -> option 2 (Yes, allow all edits this session)\n")
     sys.stderr.write("   - Tool prompts  -> option 2 (Yes, don't ask again for domain)\n")
     sys.stderr.write("\n")
@@ -1212,6 +1392,8 @@ def main() -> None:
     log.info("Poll interval: %ss (ramps to %ss over %ds idle)", base_interval, max_interval, int(ramp_duration))
     if args.dry_run:
         log.info("DRY RUN — will not send keys")
+    if args.once:
+        log.info("ONCE — will exit after processing the first visible prompt")
     log.info("Press Ctrl+C to stop")
     print()
 
@@ -1270,8 +1452,13 @@ def main() -> None:
 
             acted = True
 
-            # Dispatch based on prompt type -> option mapping
-            action = action_for_prompt(prompt_type)
+            # Dispatch based on prompt type -> option mapping. Bash defaults
+            # to option 1, except for Codex prompts whose option-2 prefix is
+            # generic enough to be useful across future commands (e.g. gh api).
+            if prompt_type == "bash":
+                action = action_for_bash_prompt(visible_text)
+            else:
+                action = action_for_prompt(prompt_type)
 
             def _send(opt: str) -> None:
                 if args.dry_run:
@@ -1297,6 +1484,8 @@ def main() -> None:
                 st.last_hash = current_hash
                 st.retry_count = 0
                 st.approved += 1
+                if should_exit_once(st, "file approval"):
+                    return
                 time.sleep(3)
 
             elif prompt_type == "tool":
@@ -1310,16 +1499,19 @@ def main() -> None:
                 st.last_hash = current_hash
                 st.retry_count = 0
                 st.approved += 1
+                if should_exit_once(st, "tool approval"):
+                    return
                 time.sleep(3)
 
             else:  # bash prompt
                 cmd = extract_command(pane_text)
 
                 if cmd is None:
+                    opt_label = "opt 2" if action == "option2" else "opt 1"
                     if last_log_msg != f"[{st.label}] APPROVE (no cmd extracted, defaulting yes)":
                         pane_lines = pane_text.splitlines()
                         for i, line in enumerate(pane_lines):
-                            if "Do you want to proceed" in line:
+                            if "Do you want to proceed" in line or "Would you like to run the following command" in line:
                                 start = max(0, i - 10)
                                 context = pane_lines[start : i + 1]
                                 log.warning("[%s] Could not extract command. Context:", st.label)
@@ -1327,13 +1519,15 @@ def main() -> None:
                                     print(f"  | {ctx}")
                                 break
                     if args.dry_run:
-                        log_dedup(logging.INFO, f"[{st.label}] WOULD APPROVE (no cmd extracted)")
+                        log_dedup(logging.INFO, f"[{st.label}] WOULD APPROVE (no cmd extracted, {opt_label})")
                     else:
-                        log_dedup(logging.INFO, f"[{st.label}] APPROVE (no cmd extracted, defaulting yes)")
-                        tmux_send_enter(st.target)
+                        log_dedup(logging.INFO, f"[{st.label}] APPROVE (no cmd extracted, {opt_label})")
+                        _send(action)
                     st.last_hash = current_hash
                     st.retry_count = 0
                     st.approved += 1
+                    if should_exit_once(st, "bash approval without command extraction"):
+                        return
                     time.sleep(3)
 
                 elif is_dangerous(cmd):
@@ -1341,16 +1535,21 @@ def main() -> None:
                     st.last_hash = current_hash
                     st.retry_count = 0
                     st.blocked += 1
+                    if should_exit_once(st, "dangerous-command block"):
+                        return
 
                 else:
+                    opt_label = "opt 2" if action == "option2" else "opt 1"
                     if args.dry_run:
-                        log.info("[%s] WOULD APPROVE: %s", st.label, cmd)
+                        log.info("[%s] WOULD APPROVE (%s): %s", st.label, opt_label, cmd)
                     else:
-                        log.info("[%s] APPROVE: %s", st.label, cmd)
-                        tmux_send_enter(st.target)
+                        log.info("[%s] APPROVE (%s): %s", st.label, opt_label, cmd)
+                        _send(action)
                     st.last_hash = current_hash
                     st.retry_count = 0
                     st.approved += 1
+                    if should_exit_once(st, "bash approval"):
+                        return
                     time.sleep(3)
 
         if acted:
