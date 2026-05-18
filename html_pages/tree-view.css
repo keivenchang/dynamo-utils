@@ -5,7 +5,7 @@
     --spacing: 1.3rem;
     --radius: 8px;
     font-size: 14px;
-    color: #24292f;
+    color: var(--text);
     line-height: var(--spacing);
     list-style: none;
     padding-left: 0;
@@ -26,7 +26,7 @@
 }
 
 .tree ul li {
-    border-left: 2px solid #ddd;
+    border-left: 2px solid var(--border);
 }
 
 .tree ul li:last-child {
@@ -41,7 +41,7 @@
     left: -2px;
     width: calc(var(--spacing) + 2px);
     height: calc(var(--spacing) - 2px);
-    border: solid #ddd;
+    border: solid var(--border);
     border-width: 0 0 2px 2px;
 }
 
@@ -63,7 +63,7 @@
 }
 
 .tree summary:focus-visible {
-    outline: 1px dotted #000;
+    outline: 1px dotted var(--text);
 }
 
 /* Base circle positioning - applies to both gray (li::after) and blue (summary::before) circles.
@@ -83,18 +83,18 @@
 
 .tree summary::before {
     z-index: 1;
-    background: #e6f3ff;  /* Very light blue for collapsed triangle (▶) */
+    background: var(--toggle-bg);
     display: flex;
     align-items: center;
     justify-content: center;
-    color: #0969da;  /* Darker blue triangle icon */
+    color: var(--toggle-text);
     font-size: 12px;  /* Bigger triangle icon */
     content: '▶';
 }
 
 .tree details[open] > summary::before {
-    background: #0969da;  /* Darker blue for expanded triangle (▼) */
-    color: white;  /* White triangle icon on darker background */
+    background: var(--toggle-bg-open);
+    color: var(--text-inverse);
     content: '▼';
 }
 
@@ -107,9 +107,9 @@
     height: 16px !important;
     padding: 0 !important;
     border-radius: 50% !important;
-    background: #e6f3ff;  /* Very light blue for collapsed */
+    background: var(--toggle-bg);
     cursor: pointer;
-    color: #0969da;  /* Darker blue icon */
+    color: var(--toggle-text);
     font-size: 12px;  /* Bigger triangle icon */
     font-weight: 500;
     user-select: none;
@@ -118,13 +118,13 @@
 }
 
 .triangle-toggle.expanded {
-    background: #0969da;  /* Darker blue for expanded */
-    color: white;  /* White icon on darker background */
+    background: var(--toggle-bg-open);
+    color: var(--text-inverse);
 }
 
 .triangle-toggle.disabled {
-    background: #f6f8fa;  /* Very light gray circle for disabled/placeholder triangle */
-    color: #d0d7de;  /* Muted gray triangle icon */
+    background: var(--toggle-bg-disabled);
+    color: var(--toggle-disabled-text);
     cursor: default;  /* Not clickable */
     pointer-events: none;
 }
@@ -164,7 +164,7 @@ summary.summary-with-toggle .summary-right {
 }
 
 details[open] > summary.summary-with-toggle .triangle-toggle.summary-toggle {
-    background: #0969da;
-    color: #ffffff;
+    background: var(--toggle-bg-open);
+    color: var(--text-inverse);
     transform: rotate(90deg); /* ▶ -> ▼ effect without swapping glyph */
 }

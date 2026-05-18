@@ -41,6 +41,9 @@ sys.path.insert(0, str(Path(__file__).parent))
 from ci_lib import (  # noqa: E402
     HB_CSS,
     REPO,
+    THEME_BOOTSTRAP_SCRIPT,
+    THEME_CONTROL_HTML,
+    THEME_RUNTIME_SCRIPT,
     _to_pt,
     extract_pytest_failures,
     fetch_job_log,
@@ -1073,11 +1076,12 @@ def _render_summary(kind: str, entries_by_sha: dict, page_paths: dict) -> str:
     return "\n".join([
         "<!DOCTYPE html>",
         f"<html><head><meta charset='utf-8'><title>{kind} report</title>",
+        THEME_BOOTSTRAP_SCRIPT,
         _HTML_STYLE,
         body_style,
         HB_CSS,
         "</head><body class='report-body'>",
-        f"<h1>Last {len(items)} {kind.capitalize()} Report &mdash; main branch</h1>",
+        f"<h1><span>Last {len(items)} {kind.capitalize()} Report &mdash; main branch</span>{THEME_CONTROL_HTML}</h1>",
         f"<div class='meta'>"
         f"Aggregated across {len(items)} cached commit(s); "
         f"{n_attempts} run(s) total, {n_with_failures} commit(s) with at least "
@@ -1100,6 +1104,7 @@ def _render_summary(kind: str, entries_by_sha: dict, page_paths: dict) -> str:
         "<tbody>",
         *rows,
         "</tbody></table>",
+        THEME_RUNTIME_SCRIPT,
         "</body></html>",
     ])
 

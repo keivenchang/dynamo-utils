@@ -141,7 +141,7 @@ def github_api_stats_rows(
     try:
         if after0_core.get("reset") is not None:
             reset_epoch = int(after0_core.get("reset"))
-            reset_pt = datetime.fromtimestamp(reset_epoch).astimezone().strftime("%Y-%m-%d %H:%M:%S %Z")
+            reset_pt = datetime.fromtimestamp(reset_epoch).astimezone().strftime("%Y-%m-%d %H:%M:%S PT")
     except (ValueError, TypeError, OSError):
         reset_pt = None
 

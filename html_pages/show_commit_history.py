@@ -430,7 +430,7 @@ class CommitHistoryGenerator:
             Exit code (0 for success, 1 for failure)
         """
         generation_t0 = time.monotonic()
-        job_started_time = datetime.now(ZoneInfo('America/Los_Angeles')).strftime('%Y-%m-%d %H:%M:%S %Z')
+        job_started_time = datetime.now(ZoneInfo('America/Los_Angeles')).strftime('%Y-%m-%d %H:%M:%S PT')
         phase_t = PhaseTimer()
 
         # Initialize repo utils for this operation
@@ -1800,7 +1800,7 @@ class CommitHistoryGenerator:
                         if pushed_at:
                             try:
                                 dt = datetime.fromisoformat(pushed_at)
-                                created_display = dt.astimezone(ZoneInfo('America/Los_Angeles')).strftime('%Y-%m-%d %H:%M %Z')
+                                created_display = dt.astimezone(ZoneInfo('America/Los_Angeles')).strftime('%Y-%m-%d %H:%M PT')
                             except (ValueError, TypeError):
                                 created_display = pushed_at[:19]
                         else:
@@ -1884,7 +1884,7 @@ class CommitHistoryGenerator:
                         if pushed_at:
                             try:
                                 dt = datetime.fromisoformat(pushed_at.replace("Z", "+00:00") if pushed_at.endswith("Z") else pushed_at)
-                                created_display = dt.astimezone(ZoneInfo('America/Los_Angeles')).strftime('%Y-%m-%d %H:%M %Z')
+                                created_display = dt.astimezone(ZoneInfo('America/Los_Angeles')).strftime('%Y-%m-%d %H:%M PT')
                             except (ValueError, TypeError):
                                 created_display = pushed_at[:19]
                         tag_html = html.escape(tag)
@@ -1914,7 +1914,7 @@ class CommitHistoryGenerator:
                 self.logger.warning(f"Failed to load ACR cache {ACR_CACHE_FILE}: {e}")
 
         # Generate timestamp (PT)
-        generated_time = datetime.now(ZoneInfo('America/Los_Angeles')).strftime('%Y-%m-%d %H:%M:%S %Z')
+        generated_time = datetime.now(ZoneInfo('America/Los_Angeles')).strftime('%Y-%m-%d %H:%M:%S PT')
         
         # Merge pre-merge + post-merge check-runs for combined status computation.
         combined_actions_status: Dict[str, Dict[str, Any]] = {}
@@ -3227,7 +3227,7 @@ class CommitHistoryGenerator:
                     tag = parts[0]
                     image_id = parts[1]
                     size = parts[2]
-                    # Parse created timestamp: "2025-10-18 09:27:29 -0700 PDT"
+                    # Parse created timestamp: "2025-10-18 09:27:29 -0700 PT"
                     # Extract date and time (first two parts)
                     created_parts = parts[3].split() if parts[3] else []
                     if len(created_parts) >= 2:

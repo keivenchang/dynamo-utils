@@ -5,19 +5,177 @@
   <meta charset="UTF-8">
   <title>{% block title %}{% endblock %}</title>
   {% block favicon %}{% endblock %}
+  <script>
+    (function() {
+      var cookieName = 'dynamo-dashboard-theme';
+      var mode = 'auto';
+      try {
+        String(document.cookie || '').split(';').forEach(function(cookie) {
+          var parts = cookie.trim().split('=');
+          if (decodeURIComponent(parts[0] || '') === cookieName) {
+            mode = decodeURIComponent(parts.slice(1).join('=') || '') || 'auto';
+          }
+        });
+      } catch (e) {}
+      function resolvedTheme(value) {
+        if (value === 'light' || value === 'dark') return value;
+        try {
+          return window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+        } catch (e) {
+          return 'light';
+        }
+      }
+      document.documentElement.setAttribute('data-theme-mode', mode);
+      document.documentElement.setAttribute('data-theme', resolvedTheme(mode));
+    })();
+  </script>
   <style>
+    :root {
+      color-scheme: light dark;
+      --bg: #f6f8fa;
+      --surface: #ffffff;
+      --surface-muted: #f6f8fa;
+      --surface-raised: rgba(255, 255, 255, 0.96);
+      --border: #d0d7de;
+      --border-muted: #d8dee4;
+      --text: #24292f;
+      --text-inverse: #ffffff;
+      --muted: #57606a;
+      --link: #0969da;
+      --link-hover: #0550ae;
+      --success: #2da44e;
+      --success-border: #1f7a37;
+      --danger: #cf222e;
+      --danger-bg: #c83a3a;
+      --danger-border: #a83232;
+      --warning: #bf8700;
+      --warning-bg: #ffc107;
+      --warning-border: #e0a800;
+      --neutral: #8c959f;
+      --neutral-border: #6e7781;
+      --code-bg: #eff1f3;
+      --callout-bg: #ddf4ff;
+      --callout-border: #0969da;
+      --tooltip-bg: #24292f;
+      --tooltip-text: #ffffff;
+      --shadow: rgba(140, 149, 159, 0.2);
+      --brand-header: #76b900;
+      --brand-header-meta: #a8e6a3;
+      --brand-header-chip: rgba(0, 0, 0, 0.16);
+      --toggle-bg: #e6f3ff;
+      --toggle-bg-open: #0969da;
+      --toggle-bg-disabled: #f6f8fa;
+      --toggle-text: #0969da;
+      --toggle-disabled-text: #d0d7de;
+      --sha-bg-0: #fff9c4;
+      --sha-bg-1: #f3e5f5;
+      --sha-bg-2: #c8e6c9;
+      --sha-bg-3: #ffe0b2;
+      --sha-bg-4: #e3f2fd;
+      --sha-bg-5: #b2ebf2;
+      --sha-bg-6: #dcedc8;
+      --sha-bg-7: #e1bee7;
+    }
+    html[data-theme="dark"] {
+      color-scheme: dark;
+      --bg: #0d1117;
+      --surface: #161b22;
+      --surface-muted: #21262d;
+      --surface-raised: rgba(22, 27, 34, 0.96);
+      --border: #30363d;
+      --border-muted: #30363d;
+      --text: #e6edf3;
+      --text-inverse: #ffffff;
+      --muted: #8b949e;
+      --link: #58a6ff;
+      --link-hover: #79c0ff;
+      --success: #3fb950;
+      --success-border: #238636;
+      --danger: #ff7b72;
+      --danger-bg: #da3633;
+      --danger-border: #f85149;
+      --warning: #d29922;
+      --warning-bg: #9e6a03;
+      --warning-border: #d29922;
+      --neutral: #8b949e;
+      --neutral-border: #6e7681;
+      --code-bg: #21262d;
+      --callout-bg: #0d2d4d;
+      --callout-border: #58a6ff;
+      --tooltip-bg: #21262d;
+      --tooltip-text: #e6edf3;
+      --shadow: rgba(1, 4, 9, 0.55);
+      --brand-header: #5f9600;
+      --brand-header-meta: #d8f7d2;
+      --brand-header-chip: rgba(0, 0, 0, 0.28);
+      --toggle-bg: #0d2d4d;
+      --toggle-bg-open: #1f6feb;
+      --toggle-bg-disabled: #21262d;
+      --toggle-text: #58a6ff;
+      --toggle-disabled-text: #6e7681;
+      --sha-bg-0: #3a330a;
+      --sha-bg-1: #351f3d;
+      --sha-bg-2: #17351f;
+      --sha-bg-3: #3a2608;
+      --sha-bg-4: #102f4a;
+      --sha-bg-5: #10383d;
+      --sha-bg-6: #26370f;
+      --sha-bg-7: #2f2545;
+    }
+    /* Bridge remaining legacy inline styles emitted by dashboard fragments. */
+    html[data-theme="dark"] [style*="background-color: white"],
+    html[data-theme="dark"] [style*="background-color: #ffffff"],
+    html[data-theme="dark"] [style*="background: #fff"],
+    html[data-theme="dark"] [style*="background: #ffffff"] {
+      background: var(--surface) !important;
+      background-color: var(--surface) !important;
+    }
+    html[data-theme="dark"] [style*="background-color: #f6f8fa"],
+    html[data-theme="dark"] [style*="background-color: #f8f9fa"],
+    html[data-theme="dark"] [style*="background: #ddf4ff"],
+    html[data-theme="dark"] [style*="background-color: #ddf4ff"],
+    html[data-theme="dark"] [style*="background: #f6f8fa"],
+    html[data-theme="dark"] [style*="background: #f8f9fa"],
+    html[data-theme="dark"] [style*="background: #eff1f3"] {
+      background: var(--surface-muted) !important;
+      background-color: var(--surface-muted) !important;
+    }
+    html[data-theme="dark"] [style*="border: 1px solid #d0d7de"],
+    html[data-theme="dark"] [style*="border-color:#d0d7de"],
+    html[data-theme="dark"] [style*="borderColor='#d0d7de'"] {
+      border-color: var(--border) !important;
+    }
+    html[data-theme="dark"] [style*="color: #24292f"],
+    html[data-theme="dark"] [style*="color: #1f2328"],
+    html[data-theme="dark"] [style*="color:#24292f"] {
+      color: var(--text) !important;
+      fill: var(--text) !important;
+    }
+    html[data-theme="dark"] [style*="color: #57606a"],
+    html[data-theme="dark"] [style*="color: #656d76"],
+    html[data-theme="dark"] [style*="color: #586069"],
+    html[data-theme="dark"] [style*="color:#57606a"] {
+      color: var(--muted) !important;
+    }
+    html[data-theme="dark"] [style*="color: #0969da"],
+    html[data-theme="dark"] [style*="color:#0969da"] {
+      color: var(--link) !important;
+    }
     body {
       font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif;
       margin: 10px;
       line-height: 1.3;
-      background-color: #f6f8fa;
+      background-color: var(--bg);
       font-size: 13px;
-      color: #24292f;
+      color: var(--text);
+    }
+    a {
+      color: var(--link);
     }
     .header {
       /* NVIDIA brand green (keep readable white text/links on top). */
-      background-color: #76b900;
-      color: white;
+      background-color: var(--brand-header);
+      color: var(--text-inverse);
       padding: 10px 15px;
       border-radius: 4px;
       /* Keep pages visually tight: legend/content should sit close to the header. */
@@ -35,15 +193,18 @@
       font-size: 18px;
       display: flex;
       align-items: baseline;
-      justify-content: space-between;
+      justify-content: flex-start;
       gap: 12px;
+      flex-wrap: wrap;
     }
     .header .header-meta {
       font-size: 12px;
       font-weight: 500;
       opacity: 0.95;
       white-space: nowrap;
-      color: #a8e6a3;  /* Light green to blend with NVIDIA green header */
+      color: var(--brand-header-meta);
+      margin-left: auto;
+      order: 30;
     }
 
     /* Subtitle text in the header (keep high contrast against NVIDIA green). */
@@ -62,18 +223,56 @@
       padding: 1px 8px;
       border-radius: 999px;
       /* Subtle chip: enough contrast on NVIDIA green without looking “loud”. */
-      background: rgba(0, 0, 0, 0.16);
-      color: #a8e6a3;  /* Light green to match header-meta */
+      background: var(--brand-header-chip);
+      color: var(--brand-header-meta);
       font-weight: 600;
       font-size: 12px;
       line-height: 1.3;
       white-space: nowrap;
     }
+    .theme-switcher {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      padding: 2px;
+      border-radius: 999px;
+      background: var(--brand-header-chip);
+      color: var(--text-inverse);
+      font-size: 11px;
+      width: max-content;
+      order: 20;
+      flex: 0 0 auto;
+    }
+    .theme-switcher .theme-label {
+      padding: 2px 6px;
+      color: var(--brand-header-meta);
+      font-weight: 600;
+    }
+    .theme-switcher button {
+      border: 0;
+      border-radius: 999px;
+      padding: 2px 8px;
+      background: transparent;
+      color: var(--text-inverse);
+      font: inherit;
+      cursor: pointer;
+    }
+    .theme-switcher button[aria-pressed="true"] {
+      background: var(--surface-raised);
+      color: var(--text);
+      font-weight: 700;
+    }
+    .theme-switcher button:hover {
+      background: rgba(255, 255, 255, 0.22);
+    }
+    .theme-switcher button[aria-pressed="true"]:hover {
+      background: var(--surface);
+    }
 
     .footer {
       margin-top: 12px;
       padding: 10px 0;
-      color: #24292f;
+      color: var(--text);
     }
     .footer details summary {
       cursor: pointer;
@@ -81,17 +280,17 @@
       /* Make "Legend & Help" less conspicuous per UX request. */
       font-weight: 600;
       font-size: 12px;
-      color: #57606a;
+      color: var(--muted);
     }
     .footer details summary::marker,
     .footer details summary::-webkit-details-marker {
       display: none !important;
     }
     .footer details summary:hover {
-      color: #0969da;
+      color: var(--link);
     }
     .footer details {
-      color: #57606a;
+      color: var(--muted);
       font-size: 12px;
     }
 
@@ -101,14 +300,14 @@
       user-select: none;
       font-weight: 600;
       font-size: 12px;
-      color: #57606a;
+      color: var(--muted);
     }
     .legend details summary::marker,
     .legend details summary::-webkit-details-marker {
       display: none !important;
     }
     .legend details {
-      color: #57606a;
+      color: var(--muted);
       font-size: 12px;
     }
     .stats-table {
@@ -119,45 +318,45 @@
     }
     .stats-table td {
       padding: 6px 8px;
-      border-top: 1px solid #d8dee4;
+      border-top: 1px solid var(--border-muted);
       vertical-align: top;
     }
     .stats-table td.k {
       width: 220px;
-      color: #57606a;
+      color: var(--muted);
       font-weight: 600;
       white-space: nowrap;
     }
     .stats-table td.v {
-      color: #24292f;
+      color: var(--text);
       font-family: ui-monospace, SFMono-Regular, SF Mono, Menlo, Consolas, Liberation Mono, monospace;
       word-break: break-word;
     }
     /* Highlight API call counters (e.g. github.*.calls) in blue. */
     .stats-table td.v.call-text {
-      color: #0969da;
+      color: var(--link);
       font-weight: 600;
     }
     /* Highlight cache hits (>0) in green. */
     .stats-table td.v.hit-text {
-      color: #2da44e;
+      color: var(--success);
       font-weight: 600;
     }
     .stats-table td.v.warn-text {
-      color: #cf222e;
+      color: var(--danger);
       font-weight: 600;
     }
     .stats-table td.desc {
-      color: #57606a;
+      color: var(--muted);
       font-size: 12px;
       padding-left: 12px;
     }
     .stats-table td.section {
       padding: 10px 8px 6px 8px;
-      color: #24292f;
+      color: var(--text);
       font-weight: 700;
-      background: #f6f8fa;
-      border-top: 1px solid #d8dee4;
+      background: var(--surface-muted);
+      border-top: 1px solid var(--border-muted);
     }
     .stats-pre {
       margin: 0;
@@ -179,8 +378,8 @@
     .gh-status-tooltip .tooltiptext {
       visibility: hidden;
       max-width: calc(100vw - 40px);
-      background-color: #24292f;
-      color: #ffffff;
+      background-color: var(--tooltip-bg);
+      color: var(--tooltip-text);
       text-align: left;
       border-radius: 6px;
       padding: 8px 12px;
@@ -206,7 +405,7 @@
       margin-left: -5px;
       border-width: 5px;
       border-style: solid;
-      border-color: #24292f transparent transparent transparent;
+      border-color: var(--tooltip-bg) transparent transparent transparent;
     }
     .gh-status-tooltip:hover .tooltiptext {
       visibility: visible;
@@ -223,9 +422,9 @@
       z-index: 9999;
       padding: 8px 12px;
       border-radius: 8px;
-      border: 1px solid #d0d7de;
-      background: rgba(255, 255, 255, 0.96);
-      color: #24292f;
+      border: 1px solid var(--border);
+      background: var(--surface-raised);
+      color: var(--text);
       box-shadow: 0 4px 12px rgba(0,0,0,0.12);
       font-size: 12px;
       display: none;
@@ -239,9 +438,9 @@
       white-space: nowrap;
     }
     .auto-refresh-banner button {
-      border: 1px solid #d0d7de;
-      background: #f6f8fa;
-      color: #24292f;
+      border: 1px solid var(--border);
+      background: var(--surface-muted);
+      color: var(--text);
       border-radius: 8px;
       padding: 4px 10px;
       cursor: pointer;
@@ -250,7 +449,7 @@
       white-space: nowrap;
     }
     .auto-refresh-banner button:hover {
-      background: #eef1f4;
+      background: var(--code-bg);
     }
 
     {# Shared tree/triangle styling lives in one place. #}
@@ -261,7 +460,13 @@
 </head>
 <body>
   <div class="header">
-    <h1>{%- block header_title -%}{%- endblock -%}</h1>
+    <h1>{%- block header_title -%}{%- endblock -%}
+    <span class="theme-switcher" role="group" aria-label="Dashboard theme">
+      <span class="theme-label">Theme</span>
+      <button type="button" data-theme-choice="auto" aria-pressed="false">Auto</button>
+      <button type="button" data-theme-choice="light" aria-pressed="false">Light</button>
+      <button type="button" data-theme-choice="dark" aria-pressed="false">Dark</button>
+    </span></h1>
     {%- block header_subtitle -%}{%- endblock -%}
   </div>{%- block content -%}{%- endblock -%}
 
@@ -308,18 +513,18 @@
         {% endfor %}
       </table>
       {% if ns.api_calls_text and ns.api_calls_text|trim %}
-      <div style="margin-top: 1em; padding: 0.5em; background-color: #f8f9fa; border-left: 3px solid #0a3069;">
+      <div style="margin-top: 1em; padding: 0.5em; background-color: var(--surface-muted); border-left: 3px solid var(--callout-border);">
         <strong>API Calls (ordered):</strong>
         <pre class="stats-pre" style="margin-top: 0.5em;">{{ ns.api_calls_text }}</pre>
       </div>
       {% endif %}
-      <p style="margin-top: 1em; padding: 0.5em; background-color: #f8f9fa; border-left: 3px solid #007bff;">
+      <p style="margin-top: 1em; padding: 0.5em; background-color: var(--surface-muted); border-left: 3px solid var(--callout-border);">
         <strong>Note on Timing:</strong> The dashboard uses ThreadPoolExecutor with up to 32 parallel workers.
         Metrics marked as "accumulated thread time" represent the SUM of all parallel thread execution times.
         Metrics marked as "wall-clock time" represent actual elapsed time.
         Because multiple threads run simultaneously, accumulated thread time can exceed wall-clock time. This is normal and indicates good parallelization.
       </p>
-      <p style="margin-top: 0.8em; padding: 0.5em; background-color: #f8f9fa; border-left: 3px solid #6f42c1;">
+      <p style="margin-top: 0.8em; padding: 0.5em; background-color: var(--surface-muted); border-left: 3px solid var(--neutral-border);">
         <strong>Note on Cache TTLs (cache.*):</strong>
         Some cache entries use a tiered TTL based on PR age (now - PR.updated_at):
         <span style="font-family: ui-monospace, SFMono-Regular, SF Mono, Menlo, Consolas, Liberation Mono, monospace;">
@@ -333,6 +538,70 @@
   {% endif %}
 
   <script>
+  // Dashboard theme state (shared)
+  (function() {
+    var cookieName = 'dynamo-dashboard-theme';
+    var media = null;
+    try {
+      media = window.matchMedia ? window.matchMedia('(prefers-color-scheme: dark)') : null;
+    } catch (e) {}
+
+    function resolvedTheme(value) {
+      if (value === 'light' || value === 'dark') return value;
+      return media && media.matches ? 'dark' : 'light';
+    }
+
+    function currentMode() {
+      try {
+        var found = 'auto';
+        String(document.cookie || '').split(';').forEach(function(cookie) {
+          var parts = cookie.trim().split('=');
+          if (decodeURIComponent(parts[0] || '') === cookieName) {
+            found = decodeURIComponent(parts.slice(1).join('=') || '') || 'auto';
+          }
+        });
+        return found;
+      } catch (e) {}
+      return 'auto';
+    }
+
+    function rememberMode(mode) {
+      try {
+        document.cookie = cookieName + '=' + encodeURIComponent(mode) + '; Max-Age=31536000; Path=/; SameSite=Lax';
+      } catch (e) {}
+    }
+
+    function applyTheme(mode) {
+      if (mode !== 'light' && mode !== 'dark') mode = 'auto';
+      document.documentElement.setAttribute('data-theme-mode', mode);
+      document.documentElement.setAttribute('data-theme', resolvedTheme(mode));
+      document.querySelectorAll('[data-theme-choice]').forEach(function(btn) {
+        btn.setAttribute('aria-pressed', String(btn.getAttribute('data-theme-choice') === mode));
+      });
+    }
+
+    document.addEventListener('DOMContentLoaded', function() {
+      applyTheme(currentMode());
+      document.querySelectorAll('[data-theme-choice]').forEach(function(btn) {
+        btn.addEventListener('click', function() {
+          var mode = btn.getAttribute('data-theme-choice') || 'auto';
+          rememberMode(mode);
+          applyTheme(mode);
+        });
+      });
+    });
+
+    if (media) {
+      var onChange = function() {
+        if ((document.documentElement.getAttribute('data-theme-mode') || 'auto') === 'auto') {
+          applyTheme('auto');
+        }
+      };
+      try { media.addEventListener('change', onChange); }
+      catch (e) { try { media.addListener(onChange); } catch (ignored) {} }
+    }
+  })();
+
   // Position tooltips dynamically (static; shared)
   document.addEventListener('DOMContentLoaded', function() {
     var tooltips = document.querySelectorAll('.gh-status-tooltip');
@@ -417,7 +686,25 @@
     var el = document.getElementById('page-age');
     if (!el) return;
     const timeStr = '{{ generated_time | default("") }}';
-    const timeStrFixed = timeStr.replace(' PST', '-08:00').replace(' PDT', '-07:00');
+    function pacificOffsetForDate(year, month, day) {
+      // PT is UTC-7 during daylight saving time and UTC-8 otherwise.
+      function nthSunday(y, m, n) {
+        const first = new Date(Date.UTC(y, m - 1, 1));
+        const firstSunday = 1 + ((7 - first.getUTCDay()) % 7);
+        return firstSunday + 7 * (n - 1);
+      }
+      const dstStartDay = nthSunday(year, 3, 2);
+      const dstEndDay = nthSunday(year, 11, 1);
+      const afterStart = month > 3 || (month === 3 && day >= dstStartDay);
+      const beforeEnd = month < 11 || (month === 11 && day < dstEndDay);
+      return afterStart && beforeEnd ? '-07:00' : '-08:00';
+    }
+    function normalizeDashboardTime(s) {
+      const m = s.match(/^(\d{4})-(\d{2})-(\d{2}) (\d{2}:\d{2}:\d{2}) PT$/);
+      if (!m) return s;
+      return `${m[1]}-${m[2]}-${m[3]}T${m[4]}${pacificOffsetForDate(Number(m[1]), Number(m[2]), Number(m[3]))}`;
+    }
+    const timeStrFixed = normalizeDashboardTime(timeStr);
     const generatedTime = new Date(timeStrFixed);
 
     function updatePageAge() {

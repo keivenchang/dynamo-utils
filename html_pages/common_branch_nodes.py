@@ -1222,13 +1222,13 @@ def generate_html(
     Returns:
         HTML string
     """
-    # Get current time in both UTC and PDT
+    # Get current time in both UTC and Pacific time.
     now_utc = datetime.now(ZoneInfo('UTC'))
     now_pdt = datetime.now(ZoneInfo('America/Los_Angeles'))
     
     # Format timestamps
     utc_str = now_utc.strftime('%Y-%m-%d %H:%M:%S UTC')
-    pdt_str = now_pdt.strftime('%Y-%m-%d %H:%M:%S %Z')
+    pdt_str = now_pdt.strftime('%Y-%m-%d %H:%M:%S PT')
     
     # Render the tree if not provided
     if tree_html_override is None:

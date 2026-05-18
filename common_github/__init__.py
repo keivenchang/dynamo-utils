@@ -1769,7 +1769,7 @@ class GitHubAPIClient:
                             reset_pt = (
                                 datetime.fromtimestamp(int(reset_epoch), tz=timezone.utc)
                                 .astimezone(ZoneInfo("America/Los_Angeles"))
-                                .strftime("%Y-%m-%d %H:%M:%S %Z")
+                                .strftime("%Y-%m-%d %H:%M:%S PT")
                             )
                         except (ValueError, TypeError):
                             reset_pt = reset_local
@@ -2782,8 +2782,8 @@ class GitHubAPIClient:
                 "remaining": 1234,
                 "limit": 5000,
                 "reset_epoch": 1766947200,
-                "reset_local": "2025-12-28 14:00:00 PST",
-                "reset_pt": "2025-12-28 14:00:00 PST",
+                "reset_local": "2025-12-28 14:00:00 PT",
+                "reset_pt": "2025-12-28 14:00:00 PT",
                 "seconds_until_reset": 1234,
               }
             or None if not available.
@@ -2839,7 +2839,7 @@ class GitHubAPIClient:
             reset_pt = (
                 datetime.fromtimestamp(int(reset_epoch), tz=timezone.utc)
                 .astimezone(ZoneInfo("America/Los_Angeles"))
-                .strftime("%Y-%m-%d %H:%M:%S %Z")
+                .strftime("%Y-%m-%d %H:%M:%S PT")
             )
         except (ValueError, TypeError):
             reset_pt = reset_local
@@ -5333,7 +5333,7 @@ class GitHubAPIClient:
                         merged_at = pr_data['merged_at']
                         dt_utc = datetime.fromisoformat(merged_at.replace('Z', '+00:00'))
 
-                        # Convert to Pacific time (PST/PDT)
+                        # Convert to Pacific time.
                         dt_pacific = dt_utc.astimezone(ZoneInfo('America/Los_Angeles'))
                         merge_date = dt_pacific.strftime('%Y-%m-%d %H:%M:%S')
 
@@ -5361,7 +5361,7 @@ class GitHubAPIClient:
                                 merged_at = pr_details['merged_at']
                                 dt_utc = datetime.fromisoformat(merged_at.replace('Z', '+00:00'))
 
-                                # Convert to Pacific time (PST/PDT)
+                                # Convert to Pacific time.
                                 dt_pacific = dt_utc.astimezone(ZoneInfo('America/Los_Angeles'))
                                 merge_date = dt_pacific.strftime('%Y-%m-%d %H:%M:%S')
                                 return (pr_num, merge_date)
@@ -5400,7 +5400,7 @@ class GitHubAPIClient:
                             merged_at = pr_details['merged_at']
                             dt_utc = datetime.fromisoformat(merged_at.replace('Z', '+00:00'))
 
-                            # Convert to Pacific time (PST/PDT)
+                            # Convert to Pacific time.
                             dt_pacific = dt_utc.astimezone(ZoneInfo('America/Los_Angeles'))
                             merge_date = dt_pacific.strftime('%Y-%m-%d %H:%M:%S')
                             return (pr_num, merge_date)

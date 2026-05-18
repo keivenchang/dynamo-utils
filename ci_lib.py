@@ -44,7 +44,7 @@ from pathlib import Path
 from typing import Any, Iterable
 from zoneinfo import ZoneInfo
 
-PT = ZoneInfo("America/Los_Angeles")  # PST/PDT, handles DST automatically
+PT = ZoneInfo("America/Los_Angeles")
 
 REPO = "ai-dynamo/dynamo"
 RAW_LOG_DIR = Path(
@@ -514,7 +514,7 @@ def _pr_url(pr: int | None) -> str:
 
 
 def _to_pt(iso: str | None) -> datetime | None:
-    """Parse an ISO-8601 string and convert to Pacific Time (PST/PDT)."""
+    """Parse an ISO-8601 string and convert to Pacific time."""
     if not iso:
         return None
     try:
@@ -524,11 +524,11 @@ def _to_pt(iso: str | None) -> datetime | None:
 
 
 def _short_merge_date(iso: str | None) -> str:
-    """'YYYY-MM-DD HH:MM:SS PDT|PST' in Pacific Time."""
+    """'YYYY-MM-DD HH:MM:SS PT' in Pacific time."""
     dt = _to_pt(iso)
     if dt is None:
         return "?"
-    return dt.strftime("%Y-%m-%d %H:%M:%S %Z")
+    return dt.strftime("%Y-%m-%d %H:%M:%S PT")
 
 
 def _html_escape(s: str) -> str:
@@ -664,6 +664,106 @@ def hb_bar(cells: list[str], font_size: int = 10) -> str:
     )
 
 
+THEME_BOOTSTRAP_SCRIPT = """<script>
+  (function() {
+    var cookieName = 'dynamo-dashboard-theme';
+    var mode = 'auto';
+    try {
+      String(document.cookie || '').split(';').forEach(function(cookie) {
+        var parts = cookie.trim().split('=');
+        if (decodeURIComponent(parts[0] || '') === cookieName) {
+          mode = decodeURIComponent(parts.slice(1).join('=') || '') || 'auto';
+        }
+      });
+    } catch (e) {}
+    function resolvedTheme(value) {
+      if (value === 'light' || value === 'dark') return value;
+      try {
+        return window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+      } catch (e) {
+        return 'light';
+      }
+    }
+    document.documentElement.setAttribute('data-theme-mode', mode);
+    document.documentElement.setAttribute('data-theme', resolvedTheme(mode));
+  })();
+</script>"""
+
+
+THEME_CONTROL_HTML = """<span class="theme-switcher" role="group" aria-label="Dashboard theme">
+  <span class="theme-label">Theme</span>
+  <button type="button" data-theme-choice="auto" aria-pressed="false">Auto</button>
+  <button type="button" data-theme-choice="light" aria-pressed="false">Light</button>
+  <button type="button" data-theme-choice="dark" aria-pressed="false">Dark</button>
+</span>"""
+
+
+THEME_RUNTIME_SCRIPT = """<script>
+  (function() {
+    var cookieName = 'dynamo-dashboard-theme';
+    var media = null;
+    try {
+      media = window.matchMedia ? window.matchMedia('(prefers-color-scheme: dark)') : null;
+    } catch (e) {}
+
+    function resolvedTheme(value) {
+      if (value === 'light' || value === 'dark') return value;
+      return media && media.matches ? 'dark' : 'light';
+    }
+
+    function currentMode() {
+      try {
+        var found = 'auto';
+        String(document.cookie || '').split(';').forEach(function(cookie) {
+          var parts = cookie.trim().split('=');
+          if (decodeURIComponent(parts[0] || '') === cookieName) {
+            found = decodeURIComponent(parts.slice(1).join('=') || '') || 'auto';
+          }
+        });
+        return found;
+      } catch (e) {}
+      return 'auto';
+    }
+
+    function rememberMode(mode) {
+      try {
+        document.cookie = cookieName + '=' + encodeURIComponent(mode) + '; Max-Age=31536000; Path=/; SameSite=Lax';
+      } catch (e) {}
+    }
+
+    function applyTheme(mode) {
+      if (mode !== 'light' && mode !== 'dark') mode = 'auto';
+      document.documentElement.setAttribute('data-theme-mode', mode);
+      document.documentElement.setAttribute('data-theme', resolvedTheme(mode));
+      document.querySelectorAll('[data-theme-choice]').forEach(function(btn) {
+        btn.setAttribute('aria-pressed', String(btn.getAttribute('data-theme-choice') === mode));
+      });
+    }
+
+    document.addEventListener('DOMContentLoaded', function() {
+      applyTheme(currentMode());
+      document.querySelectorAll('[data-theme-choice]').forEach(function(btn) {
+        btn.addEventListener('click', function() {
+          var mode = btn.getAttribute('data-theme-choice') || 'auto';
+          rememberMode(mode);
+          applyTheme(mode);
+        });
+      });
+    });
+
+    if (media) {
+      var onChange = function() {
+        if ((document.documentElement.getAttribute('data-theme-mode') || 'auto') === 'auto') {
+          applyTheme('auto');
+        }
+      };
+      try { media.addEventListener('change', onChange); }
+      catch (e) { try { media.addListener(onChange); } catch (ignored) {} }
+    }
+  })();
+</script>"""
+
+
 _HTML_STYLE = """
 <style>
   body { font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
@@ -775,6 +875,160 @@ _HTML_STYLE = """
                         letter-spacing: 0.05em; }
   .summary-box .value { font-size: 22px; font-weight: 600; margin-top: 4px; }
   .index-table tr:hover td { background: #f6f8fa; }
+  :root {
+    color-scheme: light dark;
+    --bg: #fafbfc;
+    --surface: #fff;
+    --surface-muted: #f6f8fa;
+    --border: #d0d7de;
+    --border-muted: #eaecef;
+    --text: #24292e;
+    --text-inverse: #fff;
+    --muted: #586069;
+    --link: #0366d6;
+    --success: #28a745;
+    --danger: #d73a49;
+    --warning: #bf6c00;
+    --success-bg: #c3e6cb;
+    --success-chip-bg: #d4edda;
+    --success-chip-text: #155724;
+    --danger-bg: #f5c6cb;
+    --danger-final-bg: #ea868f;
+    --danger-flake-bg: #fbe4e6;
+    --danger-chip-bg: #f8d7da;
+    --danger-chip-text: #721c24;
+    --run-bg: #b8daff;
+    --run-chip-bg: #cce5ff;
+    --run-chip-text: #004085;
+    --skip-bg: #f0f0f0;
+    --skip-chip-bg: #eaeef2;
+    --sha-zero: #959da5;
+    --theme-chip-bg: rgba(36, 41, 46, 0.08);
+  }
+  html[data-theme="dark"] {
+    color-scheme: dark;
+    --bg: #0d1117;
+    --surface: #161b22;
+    --surface-muted: #21262d;
+    --border: #30363d;
+    --border-muted: #30363d;
+    --text: #e6edf3;
+    --text-inverse: #fff;
+    --muted: #8b949e;
+    --link: #58a6ff;
+    --success: #3fb950;
+    --danger: #ff7b72;
+    --warning: #d29922;
+    --success-bg: #17351f;
+    --success-chip-bg: #17351f;
+    --success-chip-text: #7ee787;
+    --danger-bg: #4a1f24;
+    --danger-final-bg: #7d2f38;
+    --danger-flake-bg: #3d2027;
+    --danger-chip-bg: #4a1f24;
+    --danger-chip-text: #ffb3ad;
+    --run-bg: #0d2d4d;
+    --run-chip-bg: #0d2d4d;
+    --run-chip-text: #79c0ff;
+    --skip-bg: #21262d;
+    --skip-chip-bg: #21262d;
+    --sha-zero: #6e7681;
+    --theme-chip-bg: rgba(139, 148, 158, 0.18);
+  }
+  h1 { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; }
+  .theme-switcher {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    margin-left: auto;
+    padding: 2px;
+    border-radius: 999px;
+    background: var(--theme-chip-bg);
+    color: var(--text);
+    font-size: 11px;
+    font-weight: 400;
+  }
+  .theme-switcher .theme-label {
+    padding: 2px 6px;
+    color: var(--muted);
+    font-weight: 600;
+  }
+  .theme-switcher button {
+    border: 0;
+    border-radius: 999px;
+    padding: 2px 8px;
+    background: transparent;
+    color: var(--text);
+    font: inherit;
+    cursor: pointer;
+  }
+  .theme-switcher button[aria-pressed="true"] {
+    background: var(--surface);
+    color: var(--text);
+    font-weight: 700;
+    box-shadow: inset 0 0 0 1px var(--border);
+  }
+  .theme-switcher button:hover { background: var(--surface-muted); }
+  html[data-theme="dark"] body { background: var(--bg); color: var(--text); }
+  html[data-theme="dark"] h2 { border-bottom-color: var(--border); }
+  html[data-theme="dark"] .meta,
+  html[data-theme="dark"] .cat-list,
+  html[data-theme="dark"] .triangle-toggle,
+  html[data-theme="dark"] .test-list,
+  html[data-theme="dark"] .summary-box .label { color: var(--muted); }
+  html[data-theme="dark"] a { color: var(--link); }
+  html[data-theme="dark"] code,
+  html[data-theme="dark"] .meta code { background: var(--surface-muted); color: var(--text); }
+  html[data-theme="dark"] th {
+    background: var(--surface-muted);
+    color: var(--muted);
+  }
+  html[data-theme="dark"] th,
+  html[data-theme="dark"] td { border-bottom-color: var(--border-muted); }
+  html[data-theme="dark"] details,
+  html[data-theme="dark"] .summary-box {
+    background: var(--surface);
+    border-color: var(--border);
+  }
+  html[data-theme="dark"] details > summary:hover,
+  html[data-theme="dark"] .index-table tr:hover td { background: var(--surface-muted); }
+  html[data-theme="dark"] details[open] > summary { border-bottom-color: var(--border-muted); }
+  html[data-theme="dark"] .v-good,
+  html[data-theme="dark"] .verdict-good { color: var(--success); }
+  html[data-theme="dark"] .v-bad,
+  html[data-theme="dark"] .verdict-bad,
+  html[data-theme="dark"] .duration-over-90m,
+  html[data-theme="dark"] td.duration-over-90m,
+  html[data-theme="dark"] ul.tests { color: var(--danger); }
+  html[data-theme="dark"] .v-other,
+  html[data-theme="dark"] .verdict-pending { color: var(--warning); }
+  html[data-theme="dark"] .pill-pass { background: var(--success-chip-bg); color: var(--success-chip-text); }
+  html[data-theme="dark"] .pill-fail { background: var(--danger-chip-bg); color: var(--danger-chip-text); }
+  html[data-theme="dark"] .pill-run { background: var(--run-chip-bg); color: var(--run-chip-text); }
+  html[data-theme="dark"] .pill-skip { background: var(--skip-chip-bg); color: var(--muted); }
+  html[data-theme="dark"] tr.fail td,
+  html[data-theme="dark"] tr.snippet-row > td { background: var(--danger-bg); }
+  html[data-theme="dark"] tr.fail-final td,
+  html[data-theme="dark"] tr.snippet-row.fail-final > td { background: var(--danger-final-bg); }
+  html[data-theme="dark"] tr.fail-flake td,
+  html[data-theme="dark"] tr.fail-eclipsed td,
+  html[data-theme="dark"] tr.snippet-row.fail-flake > td { background: var(--danger-flake-bg); }
+  html[data-theme="dark"] tr.pass td { background: var(--success-bg); }
+  html[data-theme="dark"] tr.run td { background: var(--run-bg); }
+  html[data-theme="dark"] tr.skip td { background: var(--skip-bg); color: var(--muted); }
+  html[data-theme="dark"] table.attempt-table td.num-zero { color: var(--sha-zero); }
+  html[data-theme="dark"] table.attempt-table td.num-nz { color: var(--text); }
+  html[data-theme="dark"] [style*="color:#586069"],
+  html[data-theme="dark"] [style*="color: #586069"] { color: var(--muted) !important; }
+  html[data-theme="dark"] [style*="background:#fff8c5"] {
+    background: #3a330a !important;
+    border-color: #d29922 !important;
+  }
+  html[data-theme="dark"] [style*="background:#cce5ff"],
+  html[data-theme="dark"] [style*="background: #cce5ff"] {
+    background: var(--run-chip-bg) !important;
+    color: var(--run-chip-text) !important;
+  }
 </style>
 """
 
@@ -1064,9 +1318,10 @@ def render_ci_attempts_page(
     head = f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <title>{_title_prefix} {kind} Jobs and Runs Summary</title>
+{THEME_BOOTSTRAP_SCRIPT}
 {_HTML_STYLE}
 </head><body>
-<h1>{_h1_pr_link} {kind} Jobs and Runs Summary</h1>
+<h1><span>{_h1_pr_link} {kind} Jobs and Runs Summary</span>{THEME_CONTROL_HTML}</h1>
 <div class="meta">
   <span><a href="{commit_url}" target="_blank" rel="noopener noreferrer">{short_sha(sha)}</a> on GitHub{orig_pr_html}{title_html}{author_html}</span>
 </div>
@@ -1320,7 +1575,7 @@ def render_ci_attempts_page(
             continue
         ca = a.get("started_at")
         dt = _to_pt(ca) if ca else None
-        _att_started[n] = dt.strftime("%Y-%m-%d %H:%M:%S %Z") if dt else "—"
+        _att_started[n] = dt.strftime("%Y-%m-%d %H:%M:%S PT") if dt else "—"
 
     def _started_str(att_num: int) -> str:
         return _att_started.get(att_num, "—")
@@ -1643,7 +1898,7 @@ def render_ci_attempts_page(
     if not sections:
         sections.append("<p><em>No attempts recorded yet.</em></p>")
 
-    foot = _LIVE_DURATION_JS + "</body></html>"
+    foot = _LIVE_DURATION_JS + THEME_RUNTIME_SCRIPT + "</body></html>"
     return head + summary + "\n".join(sections) + foot
 
 

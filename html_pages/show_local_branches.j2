@@ -11,8 +11,8 @@
     .header a:hover { text-decoration: underline; }
     .timestamp { margin: 5px 0 0 0; opacity: 0.9; font-size: 12px; }
     pre {
-      background-color: #ffffff;
-      border: 1px solid #d0d7de;
+      background-color: var(--surface);
+      border: 1px solid var(--border);
       border-radius: 4px;
       padding: 12px;
       /* Avoid nested scrollbars when expanding triangles; let the page scroll instead. */
@@ -25,7 +25,7 @@
       line-height: 1;
       margin: 0;
     }
-    a { color: #0969da; text-decoration: none; }
+    a { color: var(--link); text-decoration: none; }
     a:hover { text-decoration: underline; }
     .repo-name { font-weight: bold; margin-top: 10px; }
     .current { font-weight: bold; }
@@ -44,18 +44,18 @@
     }
     .merged-tag {
       /* Gray for merged branches */
-      background-color: #6e7781;
-      color: #ffffff;
-      border: 1px solid #57606a;
+      background-color: var(--neutral-border);
+      color: var(--text-inverse);
+      border: 1px solid var(--neutral);
     }
     /* "Closed" tag should be reverse black/white. */
     .closed-branch { 
-      background-color: #24292f; 
-      color: #ffffff; 
-      border: 1px solid #1c1f23;
+      background-color: var(--text);
+      color: var(--bg);
+      border: 1px solid var(--border);
     }
     .indent { margin-left: 20px; }
-    .error { color: #c83a3a; }
+    .error { color: var(--danger-bg); }
 
     /* Add spacing between repository sections */
     .repo-node {
@@ -72,18 +72,18 @@
       font-size: 10px;
       font-weight: 600;
       line-height: 1.1;
-      color: #ffffff;
+      color: var(--text-inverse);
       /* Keep the content as authored by the generator (no forced uppercase). */
       text-transform: none;
       letter-spacing: normal;
       border: 1px solid transparent;
       user-select: none;
     }
-    .status-success { background-color: #2da44e; border-color: #1f7a37; }
-    .status-failed { background-color: #c83a3a; border-color: #a83232; }
-    .status-warning { background-color: #8c959f; border-color: #6e7781; }
-    .status-building { background-color: #ffc107; border-color: #e0a800; } /* RUNNING */
-    .status-unknown { background-color: #8c959f; border-color: #6e7781; }
+    .status-success { background-color: var(--success); border-color: var(--success-border); }
+    .status-failed { background-color: var(--danger-bg); border-color: var(--danger-border); }
+    .status-warning { background-color: var(--neutral); border-color: var(--neutral-border); }
+    .status-building { background-color: var(--warning-bg); border-color: var(--warning-border); }
+    .status-unknown { background-color: var(--neutral); border-color: var(--neutral-border); }
 {% endblock %}
 
 {% block header_title %}
@@ -93,13 +93,13 @@
 {%- block header_subtitle -%}{%- endblock -%}
 {%- block content %}
 <!-- Legend/Help Section (keep consistent with commit history) -->
-  <div class="container legend" style="margin-bottom: 0px; padding: 12px; background-color: #f6f8fa;">
+  <div class="container legend" style="margin-bottom: 0px; padding: 12px; background-color: var(--surface-muted);">
     <details data-url-state="1" data-url-key="legend">
-      {{ summary_with_toggle('Legend &amp; Help', right_html='<button type="button" onclick="event.preventDefault(); event.stopPropagation(); try { DashboardUrlState.resetView({reload: false}); } catch (e) {}" style="padding: 2px 8px; font-size: 11px; line-height: 1.2; background: transparent; color: #57606a; border: 1px solid #d0d7de; border-radius: 999px; cursor: pointer;" title="Reset view (clears URL params and restores defaults)">Reset view</button>') }}
+      {{ summary_with_toggle('Legend &amp; Help', right_html='<button type="button" onclick="event.preventDefault(); event.stopPropagation(); try { DashboardUrlState.resetView({reload: false}); } catch (e) {}" style="padding: 2px 8px; font-size: 11px; line-height: 1.2; background: transparent; color: var(--muted); border: 1px solid var(--border); border-radius: 999px; cursor: pointer;" title="Reset view (clears URL params and restores defaults)">Reset view</button>') }}
       <div class="details-body">
       <div style="margin-top: 10px; font-size: 12px; line-height: 1.55;">
         <div style="margin-bottom: 12px;">
-          <div style="font-weight: 600; margin-bottom: 6px; color: #24292f;">CI Status Symbols:</div>
+          <div style="font-weight: 600; margin-bottom: 6px; color: var(--text);">CI Status Symbols:</div>
           <ul style="margin: 4px 0; padding-left: 20px;">
             <li>{{ success_required_icon_html|safe }} / {{ success_icon_html|safe }} - Passed (required/optional)</li>
             <li>{{ failure_required_icon_html|safe }} / {{ failure_optional_icon_html|safe }} - Failed (required/optional)</li>
@@ -107,20 +107,20 @@
             <li>{{ pending_icon_html|safe }} - Pending</li>
             <li>{{ cancelled_icon_html|safe }} - Canceled</li>
             <li>{{ skipped_icon_html|safe }} - Skipped</li>
-            <li><span style="display: inline-flex; align-items: center; justify-content: center; width: 12px; height: 12px; color: #8c959f; font-size: 12px; font-weight: 900;">◇</span> - Expected check (not yet returned by API)</li>
+            <li><span style="display: inline-flex; align-items: center; justify-content: center; width: 12px; height: 12px; color: var(--neutral); font-size: 12px; font-weight: 900;">◇</span> - Expected check (not yet returned by API)</li>
           </ul>
         </div>
 
         <div style="margin-bottom: 12px;">
-          <div style="font-weight: 600; margin-bottom: 6px; color: #24292f;">Badges:</div>
+          <div style="font-weight: 600; margin-bottom: 6px; color: var(--text);">Badges:</div>
           <ul style="margin: 4px 0; padding-left: 20px;">
-            <li><span style="color: #c83a3a; font-weight: 700;">[REQUIRED]</span> - This check must pass for PR to be merged</li>
-            <li><span style="color: #57606a; font-weight: 400;">[may be REQUIRED]</span> - Known required check not marked as required by API (cache/timing issue)</li>
+            <li><span style="color: var(--danger-bg); font-weight: 700;">[REQUIRED]</span> - This check must pass for PR to be merged</li>
+            <li><span style="color: var(--muted); font-weight: 400;">[may be REQUIRED]</span> - Known required check not marked as required by API (cache/timing issue)</li>
           </ul>
         </div>
 
         <div style="margin-bottom: 12px;">
-          <div style="font-weight: 600; margin-bottom: 6px; color: #24292f;">Job Steps:</div>
+          <div style="font-weight: 600; margin-bottom: 6px; color: var(--text);">Job Steps:</div>
           <ul style="margin: 4px 0; padding-left: 20px;">
             <li><strong>Build and Test - dynamo</strong> shows phase breakdown (Build Image, Rust checks, pytest...)</li>
             <li><strong>Long-running jobs</strong> (≥10 min) show steps with duration ≥30s</li>
@@ -129,7 +129,7 @@
         </div>
 
         <div style="margin-bottom: 6px;">
-          <div style="font-weight: 600; margin-bottom: 6px; color: #24292f;">Links:</div>
+          <div style="font-weight: 600; margin-bottom: 6px; color: var(--text);">Links:</div>
           <ul style="margin: 4px 0; padding-left: 20px;">
             <li><strong>[log]</strong> - GitHub Actions job page</li>
             <li><strong>[cached raw log]</strong> - Locally cached log for snippets</li>
@@ -149,7 +149,7 @@
       }
     </style>
     <div class="container" style="margin-bottom: 6px; padding: 4px 0;">
-      <span style="color: #57606a; font-size: 12px; font-weight: 600; margin-right: 8px;">Sort:</span>
+      <span style="color: var(--muted); font-size: 12px; font-weight: 600; margin-right: 8px;">Sort:</span>
       <label style="margin-right: 12px; cursor: pointer; user-select: none;">
         <input type="radio" name="tree-sort" value="modified" style="vertical-align: middle; margin-right: 4px;">
         <span style="vertical-align: middle;">latest modified</span>
@@ -239,7 +239,7 @@
     {# Make IDs unique in the alternate tree by adding 'alt_' prefix to avoid ID conflicts. #}
     {% set _tree_alt_unique = _tree_alt.replace('details[', 'details[id^="alt_').replace('data-snippet-key="', 'data-snippet-key="alt_') %}
     <div class="container" style="margin-bottom: 6px; padding: 4px 0;">
-      <span style="color: #57606a; font-size: 12px; font-weight: 600; margin-right: 8px;">Sort:</span>
+      <span style="color: var(--muted); font-size: 12px; font-weight: 600; margin-right: 8px;">Sort:</span>
       <label style="margin-right: 12px; cursor: pointer; user-select: none;">
         <input type="radio" name="tree-sort" value="latest" style="vertical-align: middle; margin-right: 4px;">
         <span style="vertical-align: middle;">latest</span>
