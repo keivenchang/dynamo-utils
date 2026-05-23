@@ -954,6 +954,17 @@ class TmuxWebtermApp:
             return {"session": session, "error": error}, HTTPStatus.INTERNAL_SERVER_ERROR
         return {"session": session, "ok": True}, HTTPStatus.OK
 
+    def tmux_scroll(self, session: str, direction: str, lines: int) -> None:
+        if session not in self.sessions or direction not in {"up", "down"}:
+            return
+        bounded_lines = str(max(1, min(lines, 80)))
+        if direction == "up":
+            tmux(["copy-mode", "-eu", "-t", session], timeout=1.0)
+            command = "scroll-up"
+        else:
+            command = "scroll-down"
+        tmux(["send-keys", "-t", session, "-X", "-N", bounded_lines, command], timeout=1.0)
+
     def ensure_session(self, session: str) -> tuple[dict[str, Any], HTTPStatus]:
         if session not in self.sessions or not re.fullmatch(r"dynamo[1-6]", session):
             return {"error": f"unknown session: {session}"}, HTTPStatus.NOT_FOUND
@@ -1411,7 +1422,7 @@ def html_page(sessions: list[str]) -> str:
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Conductor tmux webterm</title>
+<title>Conductor - AI webterm</title>
 <link rel="stylesheet" href="/static/xterm.css">
 <script src="/static/xterm.js"></script>
 <style>
@@ -1460,7 +1471,18 @@ body {{
 .session-buttons {{
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 6px;
+}}
+.session-buttons.drag-over {{
+  outline: 1px dashed #f5c542;
+  outline-offset: 3px;
+}}
+.session-button {{
+  white-space: nowrap;
+}}
+.session-button.dragging {{
+  opacity: 0.55;
 }}
 .session-button.active {{
   color: var(--text);
@@ -1532,12 +1554,67 @@ button:disabled:hover {{ border-color: var(--line); }}
   grid-template-columns: repeat(2, minmax(360px, 1fr));
   gap: 8px;
 }}
-.grid.single {{
+.grid.full {{
   grid-template-columns: minmax(360px, 1fr);
+}}
+.panel-pool {{
+  display: none;
+}}
+.layout-column {{
+  min-width: 0;
+  min-height: 0;
+  display: grid;
+  grid-template-rows: minmax(0, 1fr);
+  gap: 8px;
+}}
+.layout-column.split {{
+  grid-template-rows: repeat(2, minmax(0, 1fr));
+}}
+.layout-column.hidden {{
+  display: none;
+}}
+.layout-column.drag-over {{
+  outline: 1px dashed #f5c542;
+  outline-offset: -3px;
+  border-radius: 8px;
+}}
+.drop-slot {{
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  border: 1px dashed transparent;
+  border-radius: 8px;
+}}
+.drop-slot.empty {{
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--muted);
+  background: #111722;
+  border-color: #3e495a;
+}}
+.drop-slot.drag-over {{
+  border-color: #f5c542;
+  background: #1a2230;
+}}
+.drop-slot.drag-replace {{
+  box-shadow: inset 0 0 0 2px rgba(245, 197, 66, 0.75);
+}}
+.drop-slot.drag-stack-top {{
+  border-top-color: #f5c542;
+  border-top-width: 3px;
+}}
+.drop-slot.drag-stack-bottom {{
+  border-bottom-color: #f5c542;
+  border-bottom-width: 3px;
+}}
+.drop-label {{
+  font: 12px/1.3 ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
 }}
 .panel {{
   min-width: 0;
   min-height: 0;
+  height: 100%;
   border: 1px solid var(--line);
   border-radius: 8px;
   background: var(--panel);
@@ -1548,18 +1625,21 @@ button:disabled:hover {{ border-color: var(--line); }}
 .panel.expanded {{
   position: fixed;
   z-index: 30;
-  inset: 8px;
+  inset: 62px 8px 8px 8px;
   border-radius: 8px;
 }}
 .panel-head {{
   min-height: 60px;
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-columns: auto minmax(0, 1fr);
   align-items: center;
   gap: 8px;
   padding: 8px 10px;
   border-bottom: 1px solid var(--line);
   background: var(--panel2);
+}}
+.panel-copy {{
+  min-width: 0;
 }}
 .panel-title {{
   font-weight: 700;
@@ -1578,6 +1658,37 @@ button:disabled:hover {{ border-color: var(--line); }}
   align-items: center;
   gap: 6px;
 }}
+.traffic-controls {{
+  gap: 7px;
+}}
+.traffic-light {{
+  width: 13px;
+  min-width: 13px;
+  height: 13px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.25);
+}}
+.traffic-light.close {{
+  background: #ff5f57;
+}}
+.traffic-light.zoom {{
+  background: #28c840;
+}}
+.traffic-light:hover {{
+  filter: brightness(1.15);
+}}
+.traffic-light.close::before {{
+  content: "";
+}}
+.traffic-light.close:hover::before {{
+  content: "x";
+  display: block;
+  color: #5b1515;
+  font: 10px/13px ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  text-align: center;
+}}
 .tabs {{
   display: flex;
   align-items: center;
@@ -1585,16 +1696,40 @@ button:disabled:hover {{ border-color: var(--line); }}
   padding: 6px 8px;
   border-bottom: 1px solid var(--line);
   background: #111722;
+  overflow-x: auto;
 }}
 .tab {{
   border-radius: 5px;
   padding: 5px 10px;
   color: var(--muted);
   background: transparent;
+  white-space: nowrap;
 }}
 .window-step {{
   min-width: 30px;
   padding: 5px 8px;
+}}
+.quick-switch {{
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex: 0 0 auto;
+  margin-left: auto;
+  padding-left: 6px;
+  border-left: 1px solid var(--line);
+}}
+.quick-switch-button {{
+  min-width: 24px;
+  padding: 5px 6px;
+  color: var(--muted);
+  background: transparent;
+}}
+.quick-switch-button.active {{
+  color: #181100;
+  background: #f5c542;
+  border-color: #ffe58a;
+  font-weight: 700;
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.22), 0 0 0 1px rgba(245, 197, 66, 0.35);
 }}
 .tab.active {{
   color: var(--text);
@@ -1756,16 +1891,17 @@ button:disabled:hover {{ border-color: var(--line); }}
 <body>
 <header class="topbar">
   <div>
-    <div class="title">Conductor tmux webterm</div>
-    <div class="sub">Interactive tmux clients for Dynamo sessions. Default binding is local-only.</div>
+    <div class="title">Conductor - AI webterm</div>
+    <div class="sub">Interactive tmux clients for sessions 1-6. Default binding is local-only.</div>
   </div>
-  <div id="sessionButtons" class="session-buttons" aria-label="Dynamo sessions"></div>
+  <div id="sessionButtons" class="session-buttons" aria-label="Sessions"></div>
   <div class="actions">
     <button id="refreshMeta">Refresh state</button>
     <span id="status" class="sub">starting</span>
   </div>
 </header>
 <main id="grid" class="grid"></main>
+<div id="panelPool" class="panel-pool" aria-hidden="true"></div>
 <section id="modal" class="modal">
   <div class="modal-head">
     <div id="modalTitle">Transcript</div>
@@ -1776,28 +1912,35 @@ button:disabled:hover {{ border-color: var(--line); }}
 <script>
 const sessions = {sessions_json};
 const grid = document.getElementById('grid');
+const panelPool = document.getElementById('panelPool');
 const sessionButtons = document.getElementById('sessionButtons');
 const statusEl = document.getElementById('status');
 const terminals = new Map();
+const panelNodes = new Map();
 const resizeObservers = new Map();
 const transcriptStreams = new Map();
 const summaryStreams = new Map();
 const autoApproveStates = new Map();
-const terminalFocus = new Set();
 const transcriptPreviewMessages = 200;
-let activeSessions = initialActiveSessions();
+const remoteResizeDelayMs = 220;
+const layoutStorageKey = 'conductor.layoutSlots.v1';
+const layoutSlotKeys = ['leftTop', 'rightTop', 'leftBottom', 'rightBottom'];
+let layoutSlots = initialLayoutSlots();
+let activeSessions = sessionsFromLayout();
 let transcriptMeta = {{}};
+let focusedTerminal = null;
+let dragSession = null;
+let dragSourceSlot = null;
 
 function setFocusedTerminal(session) {{
-  terminalFocus.clear();
-  terminalFocus.add(session);
+  focusedTerminal = session;
   for (const activeSession of activeSessions) updateTypingIndicator(activeSession);
 }}
 
 function clearFocusedTerminal(session) {{
-  if (!terminalFocus.has(session)) return;
-  terminalFocus.delete(session);
-  updateTypingIndicator(session);
+  if (focusedTerminal !== session) return;
+  focusedTerminal = null;
+  for (const activeSession of activeSessions) updateTypingIndicator(activeSession);
 }}
 
 function esc(value) {{
@@ -1815,7 +1958,38 @@ function stripTerminalQueryResponses(data) {{
     .replace(/\\x1bP[>|!][^\\x1b]*(?:\\x1b\\\\|\\x9c)/g, '');
 }}
 
-function initialActiveSessions() {{
+function emptyLayoutSlots() {{
+  return {{leftTop: null, leftBottom: null, rightTop: null, rightBottom: null}};
+}}
+
+function normalizeLayoutSlots(value) {{
+  const next = emptyLayoutSlots();
+  const seen = new Set();
+  if (!value || typeof value !== 'object') return next;
+  for (const slot of layoutSlotKeys) {{
+    const session = value[slot];
+    if (sessions.includes(session) && !seen.has(session)) {{
+      next[slot] = session;
+      seen.add(session);
+    }}
+  }}
+  return next;
+}}
+
+function layoutFromSessionList(values) {{
+  const next = emptyLayoutSlots();
+  const slots = ['leftTop', 'rightTop', 'leftBottom', 'rightBottom'];
+  let index = 0;
+  for (const session of values) {{
+    if (sessions.includes(session) && !Object.values(next).includes(session) && index < slots.length) {{
+      next[slots[index]] = session;
+      index += 1;
+    }}
+  }}
+  return next;
+}}
+
+function initialLayoutSlots() {{
   const params = new URLSearchParams(location.search);
   const raw = params.get('sessions') || params.get('active') || '';
   const selected = [];
@@ -1824,13 +1998,52 @@ function initialActiveSessions() {{
     if (!value) continue;
     const session = value.startsWith('dynamo') ? value : `dynamo${{value}}`;
     if (sessions.includes(session) && !selected.includes(session)) selected.push(session);
-    if (selected.length >= 2) break;
+    if (selected.length >= layoutSlotKeys.length) break;
   }}
-  if (selected.length) {{
-    selected.sort((left, right) => sessionNumber(left) - sessionNumber(right));
-    return selected;
+  if (selected.length) return layoutFromSessionList(selected);
+  try {{
+    const stored = JSON.parse(localStorage.getItem(layoutStorageKey) || 'null');
+    const normalized = normalizeLayoutSlots(stored);
+    if (sessionsFromSlots(normalized).length) return normalized;
+  }} catch (_) {{}}
+  return layoutFromSessionList(sessions.slice(0, 2));
+}}
+
+function sessionsFromSlots(slots) {{
+  const result = [];
+  for (const slot of layoutSlotKeys) {{
+    const session = slots[slot];
+    if (session && !result.includes(session)) result.push(session);
   }}
-  return sessions.slice(0, 2);
+  return result;
+}}
+
+function sessionsFromLayout() {{
+  return sessionsFromSlots(layoutSlots);
+}}
+
+function saveLayoutSlots() {{
+  try {{
+    localStorage.setItem(layoutStorageKey, JSON.stringify(layoutSlots));
+  }} catch (_) {{}}
+}}
+
+function applyLayoutSlots(nextSlots, options = {{}}) {{
+  const previousActive = activeSessions.slice();
+  layoutSlots = normalizeLayoutSlots(nextSlots);
+  activeSessions = sessionsFromLayout();
+  saveLayoutSlots();
+  updateActiveSessionParam();
+  renderSessionButtons();
+  renderPanels(previousActive);
+  for (const session of activeSessions) ensureTerminalRunning(session);
+  refreshTranscripts();
+  renderAutoApproveButtons();
+  if (options.focusSession && activeSessions.includes(options.focusSession)) {{
+    setTimeout(() => focusPanel(options.focusSession), 80);
+  }} else {{
+    updateStatus();
+  }}
 }}
 
 function updateActiveSessionParam() {{
@@ -1847,21 +2060,158 @@ function updateActiveSessionParam() {{
 
 function renderSessionButtons() {{
   sessionButtons.innerHTML = '';
+  sessionButtons.ondragover = event => {{
+    const payload = dragPayload(event);
+    if (!payload?.session || !activeSessions.includes(payload.session)) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = 'move';
+    sessionButtons.classList.add('drag-over');
+  }};
+  sessionButtons.ondragleave = event => {{
+    if (!sessionButtons.contains(event.relatedTarget)) sessionButtons.classList.remove('drag-over');
+  }};
+  sessionButtons.ondrop = event => {{
+    const payload = dragPayload(event);
+    sessionButtons.classList.remove('drag-over');
+    if (!payload?.session) return;
+    event.preventDefault();
+    event.stopPropagation();
+    removeSessionFromLayout(payload.session);
+  }};
   for (const session of sessions) {{
     const active = activeSessions.includes(session);
-    const disabled = !active && activeSessions.length >= 2;
     const auto = autoApproveStates.get(session)?.enabled === true;
     const agentKind = sessionAgentKind(session);
     const button = document.createElement('button');
     button.className = `session-button ${{active ? 'active' : ''}} ${{auto ? 'auto' : ''}}`;
-    button.innerHTML = `${{session.replace('dynamo', '')}}${{agentIcon(agentKind)}}`;
-    button.disabled = disabled;
+    button.draggable = true;
+    button.innerHTML = `${{esc(sessionLabel(session))}}${{agentIcon(agentKind)}}`;
     const autoText = auto ? '; AUTO on' : '';
     const agentText = agentKind ? `; ${{agentName(agentKind)}}` : '';
-    button.title = disabled ? `${{session}} disabled; unselect one session first${{agentText}}${{autoText}}` : `${{session}}${{active ? ' is shown' : ''}}${{agentText}}${{autoText}}`;
+    button.title = `${{sessionLabel(session)}}${{active ? ' is shown; drag to tray to remove' : '; drag into left or right'}}${{agentText}}${{autoText}}`;
     button.addEventListener('click', () => selectSession(session));
+    button.addEventListener('dragstart', event => startSessionDrag(event, session, null));
+    button.addEventListener('dragend', endSessionDrag);
     sessionButtons.appendChild(button);
   }}
+}}
+
+function dragPayload(event) {{
+  const raw = event.dataTransfer?.getData('application/x-conductor-session')
+    || event.dataTransfer?.getData('text/plain')
+    || '';
+  if (!raw && dragSession) return {{session: dragSession, sourceSlot: dragSourceSlot}};
+  if (!raw) return null;
+  try {{
+    const parsed = JSON.parse(raw);
+    return sessions.includes(parsed.session) ? parsed : null;
+  }} catch (_) {{
+    return sessions.includes(raw) ? {{session: raw, sourceSlot: null}} : null;
+  }}
+}}
+
+function startSessionDrag(event, session, sourceSlot = null) {{
+  dragSession = session;
+  dragSourceSlot = sourceSlot;
+  const payload = JSON.stringify({{session, sourceSlot}});
+  event.dataTransfer.effectAllowed = 'move';
+  event.dataTransfer.setData('application/x-conductor-session', payload);
+  event.dataTransfer.setData('text/plain', session);
+  event.currentTarget?.classList.add('dragging');
+}}
+
+function endSessionDrag(event) {{
+  dragSession = null;
+  dragSourceSlot = null;
+  event.currentTarget?.classList.remove('dragging');
+  sessionButtons.classList.remove('drag-over');
+  grid.querySelectorAll('.drag-over,.drag-replace,.drag-stack-top,.drag-stack-bottom').forEach(node => node.classList.remove('drag-over', 'drag-replace', 'drag-stack-top', 'drag-stack-bottom'));
+}}
+
+function removeSessionFromLayout(session) {{
+  const next = {{...layoutSlots}};
+  for (const slot of layoutSlotKeys) {{
+    if (next[slot] === session) next[slot] = null;
+  }}
+  applyLayoutSlots(next, {{message: `${{session}} removed`}});
+}}
+
+function firstEmptySlot() {{
+  return layoutSlotKeys.find(slot => !layoutSlots[slot]) || 'leftTop';
+}}
+
+async function moveSessionToSlot(session, targetSlot, sourceSlot = null, mode = 'stack') {{
+  if (!sessions.includes(session) || !layoutSlotKeys.includes(targetSlot)) return;
+  const ensured = await ensureSession(session);
+  if (!ensured) return;
+  const next = {{...layoutSlots}};
+  const targetSession = next[targetSlot];
+  const currentSlot = slotForSession(session);
+  if (currentSlot === targetSlot) {{
+    focusPanel(session);
+    return;
+  }}
+  if (mode === 'swap' && sourceSlot && targetSession && targetSession !== session) {{
+    next[sourceSlot] = targetSession;
+    next[targetSlot] = session;
+    applyLayoutSlots(next, {{focusSession: session}});
+    return;
+  }}
+  if (mode === 'stack' && targetSession && targetSession !== session) {{
+    const alternate = alternateSlot(targetSlot);
+    for (const slot of layoutSlotKeys) {{
+      if (next[slot] === session) next[slot] = null;
+    }}
+    if (alternate && !next[alternate]) {{
+      next[alternate] = targetSession;
+      next[targetSlot] = session;
+      applyLayoutSlots(next, {{focusSession: session}});
+      return;
+    }}
+    if (currentSlot) {{
+      next[currentSlot] = targetSession;
+      next[targetSlot] = session;
+      applyLayoutSlots(next, {{focusSession: session}});
+      return;
+    }}
+  }}
+  if (mode !== 'replace' && mode !== 'stack' && currentSlot && targetSession && targetSession !== session) {{
+    next[currentSlot] = targetSession;
+    next[targetSlot] = session;
+    applyLayoutSlots(next, {{focusSession: session}});
+    return;
+  }}
+  for (const slot of layoutSlotKeys) {{
+    if (next[slot] === session) next[slot] = null;
+  }}
+  next[targetSlot] = session;
+  applyLayoutSlots(next, {{focusSession: session}});
+}}
+
+function alternateSlot(slot) {{
+  if (slot === 'leftTop') return 'leftBottom';
+  if (slot === 'leftBottom') return 'leftTop';
+  if (slot === 'rightTop') return 'rightBottom';
+  if (slot === 'rightBottom') return 'rightTop';
+  return null;
+}}
+
+async function selectSession(session) {{
+  if (activeSessions.includes(session)) {{
+    removeSessionFromLayout(session);
+    return;
+  }}
+  await moveSessionToSlot(session, firstEmptySlot(), null);
+}}
+
+async function quickSwitchSession(fromSession, toSession) {{
+  if (!sessions.includes(fromSession) || !sessions.includes(toSession)) return;
+  if (fromSession === toSession) {{
+    removeSessionFromLayout(fromSession);
+    return;
+  }}
+  const slot = slotForSession(fromSession);
+  await moveSessionToSlot(toSession, slot || firstEmptySlot(), null, 'replace');
 }}
 
 function sessionAgentKind(session) {{
@@ -1893,42 +2243,14 @@ function agentName(kind) {{
   return kind === 'codex' ? 'Codex' : kind === 'claude' ? 'Claude' : '';
 }}
 
-async function selectSession(session) {{
-  if (activeSessions.includes(session)) {{
-    activeSessions = activeSessions.filter(item => item !== session);
-    renderSessionButtons();
-    renderPanels();
-    refreshAll();
-    for (const item of activeSessions) startTerminal(item);
-    updateActiveSessionParam();
-    statusEl.textContent = activeSessions.length ? `${{session}} hidden` : 'no session selected';
-    return;
-  }}
-  if (activeSessions.length >= 2) {{
-    statusEl.textContent = 'unselect one session first';
-    renderSessionButtons();
-    return;
-  }}
-  statusEl.textContent = `checking ${{session}}...`;
-  const ensured = await ensureSession(session);
-  if (!ensured) return;
-  activeSessions.push(session);
-  sortActiveSessions();
-  updateActiveSessionParam();
-  renderSessionButtons();
-  renderPanels();
-  refreshAll();
-  for (const item of activeSessions) startTerminal(item);
-  focusPanel(session);
-}}
-
-function sortActiveSessions() {{
-  activeSessions.sort((left, right) => sessionNumber(left) - sessionNumber(right));
-}}
-
 function sessionNumber(session) {{
   const match = String(session).match(/(\\d+)$/);
   return match ? Number(match[1]) : Number.MAX_SAFE_INTEGER;
+}}
+
+function sessionLabel(session) {{
+  const value = sessionNumber(session);
+  return Number.isFinite(value) && value !== Number.MAX_SAFE_INTEGER ? String(value) : String(session);
 }}
 
 async function ensureSession(session) {{
@@ -1940,8 +2262,8 @@ async function ensureSession(session) {{
       return false;
     }}
     statusEl.innerHTML = payload.created
-      ? `<span class="ok">created ${{esc(session)}} with Claude</span>`
-      : `<span class="ok">${{esc(session)}} ready</span>`;
+      ? `<span class="ok">created ${{esc(sessionLabel(session))}} with Claude</span>`
+      : `<span class="ok">${{esc(sessionLabel(session))}} ready</span>`;
     return true;
   }} catch (error) {{
     statusEl.innerHTML = `<span class="err">session check failed: ${{esc(error)}}</span>`;
@@ -1961,11 +2283,26 @@ function fitTerminal(session) {{
   if (!item || !item.term || !item.container) return;
   if (!terminalIsVisible(session, item.container)) return;
   const size = estimateTerminalSize(item.container, item.term);
+  const changed = item.term.cols !== size.cols || item.term.rows !== size.rows;
   item.term.resize(size.cols, size.rows);
-  if (item.socket.readyState === WebSocket.OPEN) {{
-    item.socket.send(JSON.stringify({{type: 'resize', cols: item.term.cols, rows: item.term.rows}}));
-  }}
+  if (changed) scheduleRemoteResize(session);
   refreshTerminal(session);
+}}
+
+function sendRemoteResize(session) {{
+  const item = terminals.get(session);
+  if (!item?.term || item?.socket?.readyState !== WebSocket.OPEN) return;
+  item.socket.send(JSON.stringify({{type: 'resize', cols: item.term.cols, rows: item.term.rows}}));
+}}
+
+function scheduleRemoteResize(session, delay = remoteResizeDelayMs) {{
+  const item = terminals.get(session);
+  if (!item) return;
+  if (item.resizeTimer) clearTimeout(item.resizeTimer);
+  item.resizeTimer = setTimeout(() => {{
+    item.resizeTimer = null;
+    sendRemoteResize(session);
+  }}, delay);
 }}
 
 function refreshTerminal(session) {{
@@ -2000,9 +2337,47 @@ function observeTerminalResize(session, container) {{
   resizeObservers.set(session, observer);
 }}
 
+function enableTerminalScroll(session, term, container) {{
+  container.addEventListener('wheel', event => {{
+    if (event.deltaY === 0) return;
+    event.preventDefault();
+    event.stopPropagation();
+    let lines = event.deltaY;
+    if (event.deltaMode === WheelEvent.DOM_DELTA_PIXEL) {{
+      lines = event.deltaY / 40;
+    }} else if (event.deltaMode === WheelEvent.DOM_DELTA_PAGE) {{
+      lines = event.deltaY * Math.max(1, term.rows);
+    }}
+    const direction = Math.sign(lines);
+    const amount = Math.max(1, Math.ceil(Math.abs(lines)));
+    const item = terminals.get(session);
+    if (item?.socket?.readyState === WebSocket.OPEN) {{
+      queueTmuxScroll(item, direction * amount);
+      return;
+    }}
+    term.scrollLines(direction * amount);
+  }}, {{capture: true, passive: false}});
+}}
+
+function queueTmuxScroll(item, signedLines) {{
+  item.pendingScrollLines = (item.pendingScrollLines || 0) + signedLines;
+  if (item.scrollTimer) return;
+  item.scrollTimer = setTimeout(() => {{
+    item.scrollTimer = null;
+    const signed = item.pendingScrollLines || 0;
+    item.pendingScrollLines = 0;
+    if (!signed || item.socket.readyState !== WebSocket.OPEN) return;
+    const direction = signed < 0 ? 'up' : 'down';
+    const lines = Math.max(1, Math.min(80, Math.ceil(Math.abs(signed))));
+    item.socket.send(JSON.stringify({{type: 'tmux-scroll', direction, lines}}));
+  }}, 30);
+}}
+
 function closeTerminalItem(session, item) {{
   item.manualClose = true;
   if (item.reconnectTimer) clearTimeout(item.reconnectTimer);
+  if (item.resizeTimer) clearTimeout(item.resizeTimer);
+  if (item.scrollTimer) clearTimeout(item.scrollTimer);
   const observer = resizeObservers.get(session);
   if (observer) {{
     observer.disconnect();
@@ -2017,7 +2392,7 @@ function scheduleTerminalReconnect(session, item) {{
   const delay = Math.min(8000, 1000 * 2 ** item.reconnectAttempt);
   item.reconnectAttempt += 1;
   if (item.reconnectTimer) clearTimeout(item.reconnectTimer);
-  statusEl.innerHTML = `<span class="err">${{esc(session)}} disconnected; reconnecting in ${{Math.round(delay / 1000)}}s</span>`;
+  statusEl.innerHTML = `<span class="err">${{esc(sessionLabel(session))}} disconnected; reconnecting in ${{Math.round(delay / 1000)}}s</span>`;
   item.reconnectTimer = setTimeout(() => {{
     if (item.manualClose || terminals.get(session) !== item || !activeSessions.includes(session)) return;
     startTerminal(session);
@@ -2050,24 +2425,179 @@ function estimateTerminalSize(container, term = null) {{
   }};
 }}
 
-function renderPanels() {{
-  closeAllStreams();
-  closeAllTerminals();
-  grid.classList.toggle('single', activeSessions.length === 1);
+function sideSlotKeys(side) {{
+  return side === 'left' ? ['leftTop', 'leftBottom'] : ['rightTop', 'rightBottom'];
+}}
+
+function slotSide(slot) {{
+  return slot.startsWith('left') ? 'left' : 'right';
+}}
+
+function occupiedSlotsForSide(side) {{
+  return sideSlotKeys(side).filter(slot => layoutSlots[slot]);
+}}
+
+function slotForSession(session) {{
+  return layoutSlotKeys.find(slot => layoutSlots[slot] === session) || null;
+}}
+
+function slotForDropEvent(event) {{
+  const rect = grid.getBoundingClientRect();
+  const side = event.clientX < rect.left + rect.width / 2 ? 'left' : 'right';
+  return slotForSideDrop(side, event);
+}}
+
+function dropIntentForEvent(event) {{
+  const slotNode = event.target.closest('.drop-slot');
+  if (!slotNode) return {{slot: slotForDropEvent(event), mode: 'stack'}};
+  const slot = slotNode.dataset.slot;
+  if (!layoutSlots[slot]) return {{slot, mode: 'replace'}};
+  const rect = slotNode.getBoundingClientRect();
+  const ratio = (event.clientY - rect.top) / Math.max(1, rect.height);
+  if (ratio < 0.28) return {{slot: sideSlotKeys(slotSide(slot))[0], mode: 'stack', zone: 'top'}};
+  if (ratio > 0.72) return {{slot: sideSlotKeys(slotSide(slot))[1], mode: 'stack', zone: 'bottom'}};
+  return {{slot, mode: 'replace', zone: 'middle'}};
+}}
+
+function slotForSideDrop(side, event) {{
+  const [topSlot, bottomSlot] = sideSlotKeys(side);
+  const topSession = layoutSlots[topSlot];
+  const bottomSession = layoutSlots[bottomSlot];
+  if (!topSession && !bottomSession) return topSlot;
+  const column = document.querySelector(`[data-side="${{side}}"]`);
+  const rect = column?.getBoundingClientRect() || grid.getBoundingClientRect();
+  const topHalf = event.clientY < rect.top + rect.height / 2;
+  if (topSession && bottomSession) return topHalf ? topSlot : bottomSlot;
+  if (topSession && !bottomSession) return topHalf ? topSlot : bottomSlot;
+  if (!topSession && bottomSession) return topHalf ? topSlot : bottomSlot;
+  return topSlot;
+}}
+
+function dropSessionAtEvent(event) {{
+  const payload = dragPayload(event);
+  if (!payload?.session) return;
+  event.preventDefault();
+  event.stopPropagation();
+  grid.querySelectorAll('.drag-over').forEach(node => node.classList.remove('drag-over'));
+  grid.querySelectorAll('.drag-replace,.drag-stack-top,.drag-stack-bottom').forEach(node => node.classList.remove('drag-replace', 'drag-stack-top', 'drag-stack-bottom'));
+  const intent = dropIntentForEvent(event);
+  const mode = payload.sourceSlot && intent.zone === 'middle' ? 'swap' : intent.mode;
+  moveSessionToSlot(payload.session, intent.slot, payload.sourceSlot || null, mode);
+}}
+
+function handleDropDragOver(event) {{
+  const payload = dragPayload(event);
+  if (!payload?.session) return;
+  event.preventDefault();
+  event.stopPropagation();
+  event.dataTransfer.dropEffect = 'move';
+  grid.querySelectorAll('.drag-over,.drag-replace,.drag-stack-top,.drag-stack-bottom').forEach(node => node.classList.remove('drag-over', 'drag-replace', 'drag-stack-top', 'drag-stack-bottom'));
+  const column = event.target.closest('[data-side]');
+  const slot = event.target.closest('.drop-slot');
+  column?.classList.add('drag-over');
+  slot?.classList.add('drag-over');
+  if (slot) {{
+    const intent = dropIntentForEvent(event);
+    if (intent.mode === 'replace') {{
+      slot.classList.add('drag-replace');
+    }} else if (intent.zone === 'top') {{
+      slot.classList.add('drag-stack-top');
+    }} else if (intent.zone === 'bottom') {{
+      slot.classList.add('drag-stack-bottom');
+    }}
+  }}
+}}
+
+function handleDropDragLeave(event) {{
+  const current = event.currentTarget;
+  if (current?.contains(event.relatedTarget)) return;
+  current?.classList.remove('drag-over', 'drag-replace', 'drag-stack-top', 'drag-stack-bottom');
+}}
+
+function renderPanels(previousActive = []) {{
+  movePanelsToPool();
+  grid.className = 'grid';
   grid.innerHTML = '';
-  for (const session of activeSessions) {{
-    const panel = document.createElement('article');
-    panel.className = 'panel';
-    panel.id = `panel-${{session}}`;
-    panel.innerHTML = `
+  grid.appendChild(renderLayoutColumn('left'));
+  grid.appendChild(renderLayoutColumn('right'));
+
+  bindDropTargets();
+  syncPanelVisibility(previousActive);
+  renderAutoApproveButtons();
+}}
+
+function movePanelsToPool() {{
+  for (const session of sessions) {{
+    const panel = getOrCreatePanel(session);
+    panel.classList.remove('expanded');
+    panel.dataset.slot = '';
+    panelPool.appendChild(panel);
+  }}
+}}
+
+function bindDropTargets() {{
+  grid.ondragover = handleDropDragOver;
+  grid.ondragleave = handleDropDragLeave;
+  grid.ondrop = dropSessionAtEvent;
+  grid.querySelectorAll('[data-side], [data-slot]').forEach(node => {{
+    node.addEventListener('dragover', handleDropDragOver);
+    node.addEventListener('dragleave', handleDropDragLeave);
+    node.addEventListener('drop', dropSessionAtEvent);
+  }});
+}}
+
+function renderLayoutColumn(side) {{
+  const column = document.createElement('section');
+  const occupied = occupiedSlotsForSide(side);
+  column.className = `layout-column ${{occupied.length > 1 ? 'split' : ''}}`;
+  column.dataset.side = side;
+  if (occupied.length === 0) {{
+    column.appendChild(renderDropSlot(sideSlotKeys(side)[0], null, `Drop ${{side}}`));
+    return column;
+  }}
+  for (const slot of occupied) {{
+    column.appendChild(renderDropSlot(slot, layoutSlots[slot], `Drop ${{slotLabel(slot)}}`));
+  }}
+  return column;
+}}
+
+function renderDropSlot(slot, session, label) {{
+  const node = document.createElement('section');
+  node.className = `drop-slot ${{session ? '' : 'empty'}}`;
+  node.dataset.slot = slot;
+  node.dataset.side = slotSide(slot);
+  if (!session) {{
+    node.innerHTML = `<div class="drop-label">${{esc(label)}}</div>`;
+    return node;
+  }}
+  const panel = getOrCreatePanel(session);
+  updatePanelSlot(panel, session, slot);
+  node.appendChild(panel);
+  return node;
+}}
+
+function getOrCreatePanel(session) {{
+  let panel = panelNodes.get(session);
+  if (panel) return panel;
+  panel = createPanel(session);
+  panelNodes.set(session, panel);
+  panelPool.appendChild(panel);
+  return panel;
+}}
+
+function createPanel(session) {{
+  const panel = document.createElement('article');
+  panel.className = 'panel';
+  panel.id = `panel-${{session}}`;
+  panel.innerHTML = `
       <div class="panel-head">
-        <div>
-          <div class="panel-title">tmux session "${{esc(session)}}"</div>
-          <div id="meta-${{session}}" class="meta">finding transcript...</div>
+        <div class="panel-buttons traffic-controls">
+          <button class="traffic-light close" data-remove="${{esc(session)}}" title="hide this session" aria-label="Hide ${{esc(sessionLabel(session))}}"></button>
+          <button class="traffic-light zoom" data-expand="${{esc(session)}}" title="expand" aria-label="Expand ${{esc(sessionLabel(session))}}"></button>
         </div>
-        <div class="panel-buttons">
-          <button data-context="${{esc(session)}}">Context</button>
-          <button data-expand="${{esc(session)}}">Expand</button>
+        <div class="panel-copy">
+          <div class="panel-title">${{esc(sessionLabel(session))}}</div>
+          <div id="meta-${{session}}" class="meta">finding transcript...</div>
         </div>
       </div>
       <div class="tabs" role="tablist">
@@ -2077,6 +2607,7 @@ function renderPanels() {{
         <button class="tab window-step" data-window-dir="next" data-window-session="${{esc(session)}}" title="next tmux window">&gt;</button>
         <button class="tab" data-tab="${{esc(session)}}" data-tab-name="transcript">Transcript</button>
         <button class="tab" data-tab="${{esc(session)}}" data-tab-name="summary">AI summary</button>
+        ${{quickSwitchButtonsHtml(session)}}
       </div>
       <div id="terminal-pane-${{session}}" class="tab-pane active">
         <div id="term-${{session}}" class="terminal"></div>
@@ -2093,44 +2624,86 @@ function renderPanels() {{
           <pre id="summary-${{session}}" class="summary-preview">click AI summary to generate a Codex summary of the last hour</pre>
         </div>
       </div>`;
-    grid.appendChild(panel);
-  }}
+  const head = panel.querySelector('.panel-head');
+  head.draggable = true;
+  head.dataset.dragSession = session;
+  head.title = 'Drag to another slot or back to the top tray';
+  bindPanelControls(panel, session);
+  return panel;
+}}
 
-  grid.querySelectorAll('[data-tab]').forEach(button => {{
-    button.addEventListener('click', () => {{
-      activateTab(button.dataset.tab, button.dataset.tabName);
-    }});
+function quickSwitchButtonsHtml(currentSession) {{
+  const buttons = sessions.map(session => {{
+    const active = session === currentSession ? ' active' : '';
+    return `<button class="quick-switch-button${{active}}" data-quick-session="${{esc(session)}}" title="show ${{esc(sessionLabel(session))}} here">${{sessionLabel(session)}}</button>`;
+  }}).join('');
+  return `<span class="quick-switch" role="group" aria-label="quick session switch">${{buttons}}</span>`;
+}}
+
+function bindPanelControls(panel, session) {{
+  const head = panel.querySelector('.panel-head');
+  head.addEventListener('dragstart', event => startSessionDrag(event, session, head.dataset.dragSlot || null));
+  head.addEventListener('dragend', endSessionDrag);
+  panel.querySelector('[data-remove]')?.addEventListener('click', () => removeSessionFromLayout(session));
+  panel.querySelectorAll('[data-tab]').forEach(button => {{
+    button.addEventListener('click', () => activateTab(button.dataset.tab, button.dataset.tabName));
   }});
-  grid.querySelectorAll('[data-window-dir]').forEach(button => {{
+  panel.querySelectorAll('[data-window-dir]').forEach(button => {{
     button.addEventListener('click', () => {{
       const key = button.dataset.windowDir === 'prev' ? 'p' : 'n';
       const label = button.dataset.windowDir === 'prev' ? 'previous window' : 'next window';
       tmuxWindow(button.dataset.windowSession, key, label);
     }});
   }});
+  panel.querySelector('[data-expand]')?.addEventListener('click', buttonEvent => {{
+    const button = buttonEvent.currentTarget;
+    const expanded = panel.classList.toggle('expanded');
+    button.title = expanded ? 'collapse' : 'expand';
+    button.setAttribute('aria-label', `${{expanded ? 'Collapse' : 'Expand'}} ${{sessionLabel(session)}}`);
+    if (!button.classList.contains('traffic-light')) button.textContent = expanded ? 'Collapse' : 'Expand';
+    scheduleFit(session);
+  }});
+  panel.querySelector('[data-context]')?.addEventListener('click', () => showContext(session));
+  panel.querySelector('[data-auto-session]')?.addEventListener('click', () => toggleAutoApprove(session));
+  panel.querySelectorAll('[data-quick-session]').forEach(button => {{
+    button.addEventListener('click', () => quickSwitchSession(session, button.dataset.quickSession));
+  }});
+}}
 
-  grid.querySelectorAll('[data-expand]').forEach(button => {{
-    button.addEventListener('click', () => {{
-      const session = button.dataset.expand;
-      const panel = document.getElementById(`panel-${{session}}`);
-      const expanded = panel.classList.toggle('expanded');
-      button.textContent = expanded ? 'Collapse' : 'Expand';
-      scheduleFit(session);
-    }});
-  }});
-  grid.querySelectorAll('[data-context]').forEach(button => {{
-    button.addEventListener('click', () => showContext(button.dataset.context));
-  }});
-  grid.querySelectorAll('[data-auto-session]').forEach(button => {{
-    button.addEventListener('click', () => toggleAutoApprove(button.dataset.autoSession));
-  }});
-  renderAutoApproveButtons();
+function updatePanelSlot(panel, session, slot) {{
+  panel.dataset.slot = slot;
+  const head = panel.querySelector('.panel-head');
+  if (head) head.dataset.dragSlot = slot;
+}}
+
+function syncPanelVisibility(previousActive = []) {{
+  const visible = new Set(activeSessions);
+  for (const session of sessions) {{
+    if (!visible.has(session)) {{
+      stopTranscriptStream(session);
+      stopSummaryStream(session);
+      if (focusedTerminal === session) focusedTerminal = null;
+    }}
+    updateTypingIndicator(session);
+  }}
+  for (const session of activeSessions) {{
+    const pane = document.getElementById(`terminal-pane-${{session}}`);
+    if (pane?.classList.contains('active')) scheduleFit(session);
+  }}
+}}
+
+function slotLabel(slot) {{
+  return slot
+    .replace('left', 'left ')
+    .replace('right', 'right ')
+    .replace('Top', 'top')
+    .replace('Bottom', 'bottom');
 }}
 
 function closeAllTerminals() {{
   for (const observer of resizeObservers.values()) observer.disconnect();
   resizeObservers.clear();
-  terminalFocus.clear();
+  focusedTerminal = null;
   for (const [session, item] of terminals.entries()) {{
     closeTerminalItem(session, item);
   }}
@@ -2167,14 +2740,26 @@ function activateTab(session, name) {{
 function tmuxWindow(session, key, label) {{
   const item = terminals.get(session);
   if (!item || item.socket.readyState !== WebSocket.OPEN) {{
-    statusEl.innerHTML = `<span class="err">${{esc(session)}} terminal is not connected</span>`;
+    statusEl.innerHTML = `<span class="err">${{esc(sessionLabel(session))}} terminal is not connected</span>`;
     return;
   }}
   fitTerminal(session);
   item.socket.send(JSON.stringify({{type: 'input', data: String.fromCharCode(2) + key}}));
-  statusEl.innerHTML = `<span class="ok">${{esc(label)}}: ${{esc(session)}}</span>`;
+  statusEl.innerHTML = `<span class="ok">${{esc(label)}}: ${{esc(sessionLabel(session))}}</span>`;
   scheduleFit(session);
   setTimeout(() => terminals.get(session)?.term?.focus(), 75);
+}}
+
+async function ensureTerminalRunning(session) {{
+  const item = terminals.get(session);
+  if (item && item.socket.readyState !== WebSocket.CLOSING && item.socket.readyState !== WebSocket.CLOSED) return;
+  const ensured = await ensureSession(session);
+  if (!ensured) {{
+    const container = document.getElementById(`term-${{session}}`);
+    if (container) container.innerHTML = `<pre class="terminal-error">Session ${{esc(sessionLabel(session))}} is not available. Click or drag it again to retry.</pre>`;
+    return;
+  }}
+  startTerminal(session);
 }}
 
 function startTerminal(session) {{
@@ -2214,16 +2799,18 @@ function startTerminal(session) {{
   term.open(container);
   const socket = new WebSocket(wsUrl(session));
   socket.binaryType = 'arraybuffer';
-  const item = {{term, socket, container, manualClose: false, reconnectAttempt, reconnectTimer: null}};
+  const item = {{term, socket, container, manualClose: false, reconnectAttempt, reconnectTimer: null, resizeTimer: null, scrollTimer: null, pendingScrollLines: 0}};
   terminals.set(session, item);
+  enableTerminalScroll(session, term, container);
   observeTerminalResize(session, container);
 
   socket.onopen = () => {{
     item.reconnectAttempt = 0;
-    scheduleFit(session);
-    term.focus();
+    if (terminalIsVisible(session, container)) {{
+      scheduleFit(session);
+      scheduleRemoteResize(session, 50);
+    }}
     updateTypingIndicator(session);
-    refreshAll();
     updateStatus();
   }};
   socket.onmessage = event => {{
@@ -2270,7 +2857,7 @@ function updateTypingIndicator(session) {{
   const pane = document.getElementById(`terminal-pane-${{session}}`);
   const ready = Boolean(
     item?.socket?.readyState === WebSocket.OPEN
-    && terminalFocus.has(session)
+    && focusedTerminal === session
     && pane?.classList.contains('active')
   );
   container?.classList.toggle('typing-ready', ready);
@@ -2282,8 +2869,9 @@ function updateStatus() {{
     return;
   }}
   let open = 0;
-  for (const item of terminals.values()) {{
-    if (item.socket.readyState === WebSocket.OPEN) open += 1;
+  for (const session of activeSessions) {{
+    const item = terminals.get(session);
+    if (item?.socket?.readyState === WebSocket.OPEN) open += 1;
   }}
   statusEl.innerHTML = open === activeSessions.length ? '<span class="ok">all connected</span>' : `${{open}}/${{activeSessions.length}} connected`;
 }}
@@ -2305,8 +2893,8 @@ async function setAutoApprove(session, enabled) {{
     renderSessionButtons();
     renderAutoApproveButton(session, payload);
     statusEl.innerHTML = payload.enabled
-      ? `<span class="err">AUTO on: ${{esc(session)}}</span>`
-      : `<span class="ok">AUTO off: ${{esc(session)}}</span>`;
+      ? `<span class="err">AUTO on: ${{esc(sessionLabel(session))}}</span>`
+      : `<span class="ok">AUTO off: ${{esc(sessionLabel(session))}}</span>`;
   }} catch (error) {{
     statusEl.innerHTML = `<span class="err">AUTO request failed: ${{esc(error)}}</span>`;
   }}
@@ -2352,8 +2940,8 @@ function renderAutoApproveButton(session, payload) {{
   button.textContent = enabled ? 'AUTO' : 'AUTO';
   const action = payload?.last_action ? `; ${{payload.last_action}}` : '';
   button.title = enabled
-    ? `AUTO on for ${{session}}${{action}}`
-    : `AUTO off for ${{session}}`;
+    ? `AUTO on for ${{sessionLabel(session)}}${{action}}`
+    : `AUTO off for ${{sessionLabel(session)}}`;
 }}
 
 function startSummaryStream(session) {{
@@ -2481,7 +3069,7 @@ function startTranscriptStream(session, options = {{}}) {{
     stopTranscriptStream(session);
     const pane = document.getElementById(`transcript-pane-${{session}}`);
     if (pane?.classList.contains('active')) {{
-      statusEl.innerHTML = `<span class="err">${{esc(session)}} transcript stream disconnected</span>`;
+      statusEl.innerHTML = `<span class="err">${{esc(sessionLabel(session))}} transcript stream disconnected</span>`;
       setTimeout(() => {{
         if (document.getElementById(`transcript-pane-${{session}}`)?.classList.contains('active')) {{
           startTranscriptStream(session, {{scrollBottom: false}});
@@ -2565,10 +3153,10 @@ async function boot() {{
   await loadAutoStatuses();
   renderSessionButtons();
   renderPanels();
+  await Promise.all(sessions.map(session => ensureTerminalRunning(session)));
   refreshTranscripts();
   renderAutoApproveButtons();
   setInterval(refreshAutoStatuses, 3000);
-  for (const session of activeSessions) startTerminal(session);
 }}
 
 function refreshVisibleTranscripts() {{
@@ -2585,7 +3173,7 @@ async function showContext(session) {{
   const modal = document.getElementById('modal');
   const title = document.getElementById('modalTitle');
   const body = document.getElementById('modalBody');
-  title.textContent = `${{session}} transcript tail`;
+  title.textContent = `${{sessionLabel(session)}} transcript tail`;
   body.textContent = 'loading...';
   modal.classList.add('open');
   const response = await fetch(`/api/context?session=${{encodeURIComponent(session)}}&messages=${{transcriptPreviewMessages}}`);
@@ -3030,7 +3618,7 @@ class Handler(BaseHTTPRequestHandler):
     def bridge_tmux(self, session: str) -> None:
         initial_rows, initial_cols, pending_payloads = self.read_initial_ws_payloads()
         master_fd, slave_fd = pty.openpty()
-        set_pty_size(master_fd, initial_rows, initial_cols)
+        set_pty_size(slave_fd, initial_rows, initial_cols)
         env = os.environ.copy()
         env["TERM"] = "xterm-256color"
         process = subprocess.Popen(
@@ -3042,11 +3630,10 @@ class Handler(BaseHTTPRequestHandler):
             env=env,
             start_new_session=True,
         )
-        os.close(slave_fd)
 
         try:
             for payload in pending_payloads:
-                self.handle_ws_payload(master_fd, payload)
+                self.handle_ws_payload(session, master_fd, slave_fd, process, payload)
             while process.poll() is None:
                 readable, _, _ = select.select([master_fd, self.connection], [], [], 0.1)
                 if master_fd in readable:
@@ -3063,12 +3650,16 @@ class Handler(BaseHTTPRequestHandler):
                         continue
                     if opcode not in {1, 2}:
                         continue
-                    self.handle_ws_payload(master_fd, payload)
+                    self.handle_ws_payload(session, master_fd, slave_fd, process, payload)
         except (BrokenPipeError, ConnectionError, ConnectionResetError, OSError):
             pass
         finally:
             try:
                 os.close(master_fd)
+            except OSError:
+                pass
+            try:
+                os.close(slave_fd)
             except OSError:
                 pass
             if process.poll() is None:
@@ -3112,7 +3703,7 @@ class Handler(BaseHTTPRequestHandler):
             break
         return rows, cols, pending_payloads
 
-    def handle_ws_payload(self, master_fd: int, payload: bytes) -> None:
+    def handle_ws_payload(self, session: str, master_fd: int, resize_fd: int, process: subprocess.Popen[Any], payload: bytes) -> None:
         try:
             message = json.loads(payload.decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError):
@@ -3129,7 +3720,16 @@ class Handler(BaseHTTPRequestHandler):
             cols = message.get("cols")
             rows = message.get("rows")
             if isinstance(cols, int) and isinstance(rows, int):
-                set_pty_size(master_fd, rows, cols)
+                set_pty_size(resize_fd, rows, cols)
+                try:
+                    os.killpg(process.pid, signal.SIGWINCH)
+                except OSError:
+                    pass
+        elif msg_type == "tmux-scroll":
+            direction = message.get("direction")
+            lines = message.get("lines")
+            if isinstance(direction, str) and isinstance(lines, int):
+                self.server.app.tmux_scroll(session, direction, lines)
 
 
 class TmuxWebtermHTTPServer(ThreadingHTTPServer):
@@ -3180,7 +3780,7 @@ def main() -> int:
 
     server = TmuxWebtermHTTPServer((args.host, args.port), app)
     url_host = "localhost" if args.host in {"0.0.0.0", "::"} else args.host
-    print(f"Serving Conductor tmux webterm on http://{url_host}:{args.port}/ for {', '.join(sessions)}")
+    print(f"Serving Conductor - AI webterm on http://{url_host}:{args.port}/ for {', '.join(sessions)}")
     restored_auto = app.restore_auto_approve()
     if restored_auto:
         print(f"Restored AUTO for {', '.join(restored_auto)}")

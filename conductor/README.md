@@ -1,21 +1,15 @@
-# Conductor tmux tools
+# Conductor
 
-Browser tools for watching and attaching to Dynamo tmux sessions.
+Browser tools for watching, driving, and summarizing Dynamo tmux sessions.
 
-## Interactive web terminals
+## Conductor - AI webterm
 
-`tmux_webterm.py` is the first interactive slice:
-
-- Two side-by-side tmux terminals by default: `dynamo1` and `dynamo2`.
-- Expand/collapse controls for each terminal.
-- PTY-backed WebSocket bridge to `tmux attach-session`.
-- Transcript discovery for the Claude/Codex process attached to each tmux pane.
-- Local-only binding by default.
+`conductor.py` serves the interactive Conductor UI. It attaches browser xterm.js terminals to the local `dynamo1` through `dynamo6` tmux sessions and adds agent-aware controls around them.
 
 Run:
 
 ```bash
-python3 ~/dynamo/dynamo-utils.dev/conductor/tmux_webterm.py
+python3 ~/dynamo/dynamo-utils.dev/conductor/conductor.py
 ```
 
 Then open:
@@ -27,22 +21,72 @@ http://localhost:9998/
 To expose it beyond localhost:
 
 ```bash
-python3 ~/dynamo/dynamo-utils.dev/conductor/tmux_webterm.py --host 0.0.0.0 --port 9998
+python3 ~/dynamo/dynamo-utils.dev/conductor/conductor.py --host 0.0.0.0 --port 9998
+```
+
+For a background development server, run it with `nohup`:
+
+```bash
+cd ~/dynamo/dynamo-utils.dev
+setsid nohup env TERM=xterm-256color PYTHONUNBUFFERED=1 python3 conductor/conductor.py --host 0.0.0.0 > /tmp/conductor.log 2>&1 < /dev/null &
 ```
 
 Auth defaults to `dynamo` / `conductor`. Override it with `CONDUCTOR_AUTH_USER` and `CONDUCTOR_AUTH_PASSWORD`, or put `{"user": "...", "password": "..."}` in `~/.config/conductor/auth.json`.
 
+## Webterm features
+
+- The page title is `Conductor - AI webterm`.
+- The top tray displays sessions as `1` through `6`; internally these map to tmux sessions `dynamo1` through `dynamo6`.
+- The visible workspace has left and right sides. Each side can show one full-height pane or two stacked panes, for up to four visible panes total.
+- All six session panels are created once at page boot. Hidden sessions live in an off-screen panel pool instead of being destroyed, so drag/drop and quick switching do not restart unchanged terminals.
+- The layout is stored in browser `localStorage` under `conductor.layoutSlots.v1`, so it survives browser reloads and Conductor server restarts for the same browser/profile/origin.
+- AUTO state is stored server-side in `~/.config/conductor/state.json`, so it survives page reloads and server restarts.
+- The red mac-style circle hides a pane. The green circle expands or collapses a pane.
+- Drag a top-tray session or a pane header into a visible slot. Dropping a pane in the middle of another pane swaps them. Dropping near the top or bottom stacks into that side when a slot is available.
+- Each pane tab row has `AUTO`, previous/next tmux-window controls, `Terminal`, `Transcript`, `AI summary`, and a right-aligned `1 2 3 4 5 6` quick switch for replacing that pane with another session. Clicking the lit number hides that pane.
+- The terminal border turns yellow only for the pane that is currently focused and ready for typing.
+- Browser resize fits xterm immediately, but the tmux resize message is debounced so tmux is resized after the browser resize settles.
+- Mouse wheel scrolling in a terminal sends tmux copy-mode scroll commands instead of scrolling the AI input area.
+
+## How the webterm works
+
+The server is a dependency-light Python `ThreadingHTTPServer`. It serves one HTML page, local xterm.js assets, JSON APIs, Server-Sent Events streams, and a WebSocket endpoint.
+
+For each terminal connection, the browser opens `/ws?session=dynamoN`. The server creates a PTY, runs `tmux attach-session -t dynamoN` on the PTY slave, reads terminal bytes from the PTY master, and sends those bytes to xterm.js as WebSocket binary frames.
+
+Browser input is sent as JSON messages over the same WebSocket. Normal keyboard data becomes `{"type": "input", "data": "..."}`. Resize messages become `{"type": "resize", "cols": ..., "rows": ...}`. Scroll messages become `{"type": "tmux-scroll", "direction": "up|down", "lines": ...}`.
+
+Resizing is handled on the PTY slave file descriptor, then the server sends `SIGWINCH` to the tmux attach process group. The browser sends resize updates only after a debounce, except for an initial fast resize during WebSocket startup.
+
+The browser creates panel DOM nodes for every configured session at boot, ensures the backing tmux sessions exist, and starts terminal connections for all of them. Visible layout changes move existing panel nodes into slot containers. Hidden panels move back to `#panelPool`. This keeps xterm instances and WebSocket connections alive while changing layout.
+
+Transcript metadata comes from tmux pane discovery plus local process-tree inspection. Conductor looks for Claude or Codex processes in the selected tmux pane, finds their transcript/session metadata, and exposes it in the pane header, transcript tab, and API responses.
+
+The transcript tab uses Server-Sent Events from `/api/context-stream`. The AI summary tab uses `/api/summary-stream`, which builds a scoped prompt from the selected session's recent transcript and streams a Codex-generated summary back to the browser. Summary model settings can be overridden with `CONDUCTOR_SUMMARY_MODEL`, `CONDUCTOR_SUMMARY_EFFORT`, and `CONDUCTOR_SUMMARY_SERVICE_TIER`.
+
+AUTO uses `auto_approve_tmux.py` workers behind `/api/auto-approve`. The browser polls AUTO status every few seconds and reflects the active state in both the top tray and pane tab.
+
+## Webterm API
+
+- `GET /api/transcripts` returns pane, process, and transcript-path metadata.
+- `GET /api/tmux?session=dynamo1&lines=90` returns a tmux capture-pane snapshot.
+- `GET /api/transcript?session=dynamo1&lines=120` returns the transcript tail for one session.
+- `GET /api/context?session=dynamo1&messages=40` returns a compact, message-oriented transcript tail.
+- `GET /api/context-items?session=dynamo1&messages=40` returns structured transcript items.
+- `GET /api/context-stream?session=dynamo1&messages=200` streams structured transcript items with Server-Sent Events.
+- `GET /api/summary-stream?session=dynamo1&lookback=3600` streams a Codex-generated summary with Server-Sent Events.
+- `GET /api/auto-approve` returns AUTO status for all sessions.
+- `GET /api/auto-approve?session=dynamo1` returns AUTO status for one session.
+- `POST /api/ensure-session?session=dynamo1` creates a missing `dynamoN` tmux session in `~/dynamo/dynamoN` when possible.
+- `POST /api/auto-approve?session=dynamo1&enabled=1` enables or disables AUTO for a session.
+- `POST /api/tmux-next?session=dynamo1` moves the session to the next tmux window.
+- `GET /ws?session=dynamo1` attaches a browser terminal to tmux.
+
 Inspect the transcript mapping without starting the server:
 
 ```bash
-python3 ~/dynamo/dynamo-utils.dev/conductor/tmux_webterm.py --print-transcripts
+python3 ~/dynamo/dynamo-utils.dev/conductor/conductor.py --print-transcripts
 ```
-
-AI-facing endpoints:
-
-- `GET /api/transcripts` returns pane, process, and transcript-path metadata.
-- `GET /api/transcript?session=dynamo1&lines=120` returns the transcript tail for one session.
-- `GET /api/context?session=dynamo1&messages=40` returns a compact, message-oriented transcript tail.
 
 ## Read-only wall
 
@@ -53,6 +97,8 @@ AI-facing endpoints:
 - `tmux capture-pane` as the terminal source.
 - Existing `container/show_dynamo_containers.py` as optional container metadata.
 - JSON endpoints that can feed a future AI summarizer without scraping the browser.
+
+Run:
 
 ```bash
 python3 ~/dynamo/dynamo-utils.dev/conductor/tmux_wall.py --host 0.0.0.0 --port 8765
@@ -78,10 +124,10 @@ To override:
 python3 ~/dynamo/dynamo-utils.dev/conductor/tmux_wall.py --targets dynamo1:0.0,dynamo2:0.0,dynamo3:1.0,dynamo4:0.0 --slots 6
 ```
 
-## AI-facing endpoints
+## Wall API
 
 - `GET /api/snapshot` returns the current six-pane dashboard payload.
 - `GET /api/transcript?target=dynamo1:0.0&lines=2000` returns one tmux pane transcript.
 - `GET /api/summary-input?lines=1200` returns the active dashboard panes and container metadata as one JSON payload.
 
-These endpoints do not call an LLM. They are the stable input surface for a later summarizer.
+These wall endpoints do not call an LLM. They are the stable input surface for a later summarizer.
