@@ -37,6 +37,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from datetime import timedelta
 from datetime import timezone
+from email.message import Message
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler
 from http.server import ThreadingHTTPServer
@@ -94,6 +95,13 @@ def config_string(config: dict[str, Any], key: str, default: str) -> str:
 AUTH_CONFIG = read_config_object(AUTH_CONFIG_PATH)
 AUTH_USERNAME = os.environ.get("CONDUCTOR_AUTH_USER") or config_string(AUTH_CONFIG, "user", "dynamo")
 AUTH_PASSWORD = os.environ.get("CONDUCTOR_AUTH_PASSWORD") or config_string(AUTH_CONFIG, "password", "conductor")
+AUTH_COOKIE_NAME = "conductor_auth"
+AUTH_COOKIE_SECRET = os.urandom(32)
+AUTH_COOKIE_VALUE = hmac.new(
+    AUTH_COOKIE_SECRET,
+    f"{AUTH_USERNAME}:{AUTH_PASSWORD}".encode("utf-8"),
+    hashlib.sha256,
+).hexdigest()
 XTERM_ASSET_ROOTS = [
     Path.home()
     / ".cursor-server"
@@ -104,6 +112,22 @@ XTERM_ASSET_ROOTS = [
     / "@xterm"
     / "xterm",
 ]
+
+
+def positive_env_int(name: str, default: int) -> int:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    parsed = int(value)
+    if parsed <= 0:
+        raise ValueError(f"{name} must be a positive integer")
+    return parsed
+
+
+UPLOAD_MAX_BYTES = positive_env_int("CONDUCTOR_UPLOAD_MAX_BYTES", 100 * 1024 * 1024)
+UPLOAD_MAX_FILES = positive_env_int("CONDUCTOR_UPLOAD_MAX_FILES", 16)
+UPLOAD_SAFE_NAME_RE = re.compile(r"[^A-Za-z0-9._ -]+")
+PASTE_UPLOAD_NAME_RE = re.compile(r"^(?P<date>\d{8})-paste-(?P<index>\d{3})(?P<suffix>\.[A-Za-z0-9]{1,8})$")
 
 
 @dataclass(frozen=True)
@@ -146,6 +170,12 @@ class SessionInfo:
     panes: list[PaneInfo]
     selected_pane: PaneInfo | None
     agents: list[AgentInfo]
+
+
+@dataclass(frozen=True)
+class UploadedFile:
+    filename: str
+    content: bytes
 
 
 def run_cmd(args: list[str], timeout: float = 5.0) -> subprocess.CompletedProcess[str]:
@@ -1428,6 +1458,81 @@ class TmuxWebtermApp:
             "ok": True,
         }, HTTPStatus.OK
 
+    def upload_files(self, session: str, files: list[UploadedFile]) -> tuple[dict[str, Any], HTTPStatus]:
+        if session not in self.sessions:
+            return {"error": f"unknown session: {session}"}, HTTPStatus.NOT_FOUND
+        if not files:
+            return {"session": session, "error": "no files supplied"}, HTTPStatus.BAD_REQUEST
+        if len(files) > UPLOAD_MAX_FILES:
+            return {
+                "session": session,
+                "error": f"too many files; limit is {UPLOAD_MAX_FILES}",
+            }, HTTPStatus.REQUEST_ENTITY_TOO_LARGE
+
+        target_dir, target_source = self.upload_target_dir(session)
+        if target_dir is None:
+            return {
+                "session": session,
+                "error": f"upload target not found for {session}",
+                "target_source": target_source,
+            }, HTTPStatus.NOT_FOUND
+        if not target_dir.is_dir():
+            return {"session": session, "error": f"upload target is not a directory: {target_dir}"}, HTTPStatus.NOT_FOUND
+
+        saved: list[dict[str, Any]] = []
+        for upload in files:
+            safe_name = sanitize_upload_filename(upload.filename)
+            path = unique_upload_path(target_dir, safe_name)
+            try:
+                path.write_bytes(upload.content)
+            except OSError as exc:
+                return {
+                    "session": session,
+                    "error": f"failed to save {safe_name}: {exc}",
+                    "target_dir": str(target_dir),
+                }, HTTPStatus.INTERNAL_SERVER_ERROR
+            saved.append(
+                {
+                    "name": upload.filename,
+                    "saved_name": path.name,
+                    "path": str(path),
+                    "size": len(upload.content),
+                }
+            )
+        return {
+            "session": session,
+            "target_dir": str(target_dir),
+            "target_source": target_source,
+            "files": saved,
+        }, HTTPStatus.OK
+
+    def upload_target_dir(self, session: str) -> tuple[Path | None, str]:
+        focus_root = focus_root_for_session(session)
+        if focus_root:
+            return Path(focus_root), "session_workdir"
+        workdir = session_workdir(session)
+        resolved, ok = resolved_upload_dir(workdir)
+        if ok:
+            return resolved, "session_workdir"
+
+        sessions, _ = discover_sessions([session])
+        info = sessions.get(session)
+        if info is None:
+            return None, "session_workdir"
+        git_data = session_git_inventory(info)
+        if git_data is not None:
+            for key in ("root", "cwd"):
+                value = git_data.get(key)
+                if isinstance(value, str):
+                    resolved, ok = resolved_upload_dir(Path(value))
+                    if ok:
+                        return resolved, f"git_{key}"
+        for cwd in candidate_session_cwds(info):
+            resolved, ok = resolved_upload_dir(Path(cwd))
+            if ok:
+                return resolved, "pane_current_path"
+        return None, "session_workdir"
+
     def set_auto_approve(self, session: str, enabled: bool, persist: bool = True) -> tuple[dict[str, Any], HTTPStatus]:
         if session not in self.sessions:
             return {"error": f"unknown session: {session}"}, HTTPStatus.NOT_FOUND
@@ -1482,6 +1587,15 @@ class TmuxWebtermApp:
         self.auto_workers.clear()
 
 
+def resolved_upload_dir(path: Path) -> tuple[Path | None, bool]:
+    try:
+        resolved = path.expanduser().resolve()
+        home = Path.home().resolve()
+    except OSError:
+        return None, False
+    return resolved, resolved.is_dir() and resolved != home
+
+
 def session_to_json(info: SessionInfo, metadata_cache: MetadataCache) -> dict[str, Any]:
     return {
         "session": info.session,
@@ -1499,6 +1613,106 @@ def session_workdir(session: str) -> Path:
             return dev_path
     repo_path = Path.home() / "dynamo" / session
     return repo_path if repo_path.is_dir() else Path.home()
+
+
+def sanitize_upload_filename(filename: str) -> str:
+    name = Path(filename.replace("\\", "/")).name.strip()
+    name = UPLOAD_SAFE_NAME_RE.sub("_", name)
+    name = re.sub(r"\s+", " ", name).strip()
+    if not name or name in {".", ".."}:
+        return "upload.bin"
+    return name[:180]
+
+
+def unique_upload_path(target_dir: Path, filename: str) -> Path:
+    paste_path = unique_paste_upload_path(target_dir, filename)
+    if paste_path is not None:
+        return paste_path
+    path = target_dir / filename
+    if not path.exists():
+        return path
+    stem = path.stem or "upload"
+    suffix = path.suffix
+    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    for index in range(1, 1000):
+        candidate = target_dir / f"{stem}-{timestamp}-{index}{suffix}"
+        if not candidate.exists():
+            return candidate
+    raise OSError(f"failed to choose unique upload name for {filename}")
+
+
+def unique_paste_upload_path(target_dir: Path, filename: str) -> Path | None:
+    match = PASTE_UPLOAD_NAME_RE.fullmatch(filename)
+    if not match:
+        return None
+    date_text = match.group("date")
+    suffix = match.group("suffix")
+    for index in range(1, 1000):
+        candidate = target_dir / f"{date_text}-paste-{index:03d}{suffix}"
+        if not candidate.exists():
+            return candidate
+    raise OSError(f"failed to choose unique paste upload name for {date_text}{suffix}")
+
+
+def header_value_and_params(header_name: str, value: str) -> tuple[str, dict[str, str]]:
+    message = Message()
+    message[header_name] = value
+    params = message.get_params(header=header_name) or []
+    if not params:
+        return "", {}
+    primary = str(params[0][0]).lower()
+    parsed_params: dict[str, str] = {}
+    for key, param_value in params[1:]:
+        if not key:
+            continue
+        parsed_params[str(key).lower()] = str(param_value)
+    return primary, parsed_params
+
+
+def parse_multipart_headers(header_block: bytes) -> dict[str, str]:
+    headers: dict[str, str] = {}
+    for line in header_block.decode("utf-8", errors="replace").split("\r\n"):
+        name, separator, value = line.partition(":")
+        if separator:
+            headers[name.strip().lower()] = value.strip()
+    return headers
+
+
+def parse_multipart_upload(content_type: str, body: bytes) -> list[UploadedFile]:
+    media_type, params = header_value_and_params("content-type", content_type)
+    if media_type != "multipart/form-data":
+        raise ValueError("expected multipart/form-data")
+    boundary = params.get("boundary")
+    if not boundary:
+        raise ValueError("missing multipart boundary")
+
+    boundary_bytes = f"--{boundary}".encode("utf-8")
+    files: list[UploadedFile] = []
+    for raw_part in body.split(boundary_bytes):
+        if not raw_part or raw_part in {b"--", b"--\r\n"}:
+            continue
+        if raw_part.startswith(b"--"):
+            continue
+        part = raw_part[2:] if raw_part.startswith(b"\r\n") else raw_part
+        if part.endswith(b"\r\n"):
+            part = part[:-2]
+        header_block, separator, content = part.partition(b"\r\n\r\n")
+        if not separator:
+            continue
+        headers = parse_multipart_headers(header_block)
+        disposition, disposition_params = header_value_and_params(
+            "content-disposition",
+            headers.get("content-disposition", ""),
+        )
+        if disposition != "form-data":
+            continue
+        filename = disposition_params.get("filename") or disposition_params.get("filename*") or ""
+        if not filename:
+            continue
+        files.append(UploadedFile(filename=filename, content=content))
+        if len(files) > UPLOAD_MAX_FILES:
+            raise ValueError(f"too many files; limit is {UPLOAD_MAX_FILES}")
+    return files
 
 
 def parse_bool(value: str) -> bool:
@@ -1853,6 +2067,7 @@ def make_ws_frame(payload: bytes, opcode: int = 2) -> bytes:
 
 def html_page(sessions: list[str]) -> str:
     sessions_json = html.escape(json.dumps(sessions), quote=False)
+    home_path_json = html.escape(json.dumps(str(Path.home())), quote=False)
     return f"""<!doctype html>
 <html lang="en">
 <head>
@@ -2007,7 +2222,7 @@ body {{
   background: #263044;
   border-color: #7282a0;
   border-bottom-color: rgba(245, 197, 66, 0.55);
-  box-shadow: inset 0 -1px 0 rgba(245, 197, 66, 0.55);
+  box-shadow: inset 0 -3px 0 rgba(245, 197, 66, 0.55);
 }}
 .session-button.auto {{
   color: #ffd6dc;
@@ -2294,6 +2509,21 @@ button:disabled:hover {{ border-color: var(--line); }}
   grid-template-rows: auto auto minmax(0, 1fr);
   overflow: hidden;
 }}
+.panel.file-drag-over::before {{
+  content: "Drop files to upload";
+  position: absolute;
+  inset: 44px 10px 10px 10px;
+  z-index: 7;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #f8dfa3;
+  background: rgba(17, 23, 34, 0.84);
+  border: 2px dashed rgba(245, 197, 66, 0.92);
+  border-radius: 8px;
+  font-weight: 700;
+  pointer-events: none;
+}}
 .panel.expanded {{
   position: fixed;
   z-index: 30;
@@ -2387,6 +2617,9 @@ button:disabled:hover {{ border-color: var(--line); }}
 }}
 .meta-branch {{
   color: #d7dde5;
+}}
+.meta-path {{
+  color: #dfe6ef;
 }}
 .meta-desc {{
   color: #b7c0ce;
@@ -2486,6 +2719,7 @@ button:disabled:hover {{ border-color: var(--line); }}
   border-color: #ff6673;
 }}
 .tab-pane {{
+  position: relative;
   min-height: 0;
   display: none;
   overflow: hidden;
@@ -2520,6 +2754,38 @@ button:disabled:hover {{ border-color: var(--line); }}
   background: #11151d;
   white-space: pre-wrap;
   font: 12px/1.35 ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+}}
+.upload-result {{
+  position: absolute;
+  left: 10px;
+  right: 10px;
+  top: 10px;
+  z-index: 8;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 34px;
+  padding: 6px 7px 6px 10px;
+  color: #dfe6ef;
+  background: #17202c;
+  border: 1px solid #4b5a70;
+  border-radius: 6px;
+  box-shadow: 0 14px 36px rgba(0, 0, 0, 0.34);
+}}
+.upload-result[hidden] {{
+  display: none;
+}}
+.upload-result-text {{
+  min-width: 0;
+  flex: 1 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font: 12px/1.25 ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+}}
+.upload-result button {{
+  min-width: 28px;
+  padding: 4px 7px;
 }}
 .tmux-snapshot {{
   height: 100%;
@@ -2672,6 +2938,7 @@ button:disabled:hover {{ border-color: var(--line); }}
 </section>
 <script>
 const sessions = {sessions_json};
+const homePath = {home_path_json};
 const grid = document.getElementById('grid');
 const panelPool = document.getElementById('panelPool');
 const sessionButtons = document.getElementById('sessionButtons');
@@ -2682,6 +2949,9 @@ const resizeObservers = new Map();
 const transcriptStreams = new Map();
 const summaryStreams = new Map();
 const autoApproveStates = new Map();
+const uploadHideTimers = new Map();
+const pasteCounters = new Map();
+const pasteLockStorageKey = 'conductor.pasteUploadLock.v1';
 const transcriptPreviewMessages = 200;
 const remoteResizeDelayMs = 220;
 const metadataRefreshMs = 15000;
@@ -2696,6 +2966,8 @@ let dragSourceSlot = null;
 let openPopoverSession = null;
 let popoverHideTimer = null;
 let sessionButtonsRenderDeferred = false;
+let clipboardPasteBound = false;
+let pasteUploadInFlight = false;
 
 function setFocusedTerminal(session) {{
   focusedTerminal = session;
@@ -3264,11 +3536,28 @@ function linkHtml(url, label, title = '') {{
   return `<a href="${{esc(url)}}" target="_blank" rel="noreferrer noopener" draggable="false"${{titleAttr}}>${{esc(label)}}</a>`;
 }}
 
-function projectMetaHtml(info) {{
+function panelFullPath(session, info) {{
   const project = info?.project || {{}};
   const git = project.git;
-  if (!git) return '<span class="meta-muted">no git checkout detected</span>';
+  const panes = Array.isArray(info?.panes) ? info.panes : [];
+  const nonHomePane = panes.find(pane => pane?.current_path && pane.current_path !== homePath && !['claude', 'codex'].includes(String(pane.command || '').toLowerCase()));
+  if (nonHomePane?.current_path) return nonHomePane.current_path;
+  if (git?.cwd) return git.cwd;
+  if (git?.root) return git.root;
+  if (info?.selected_pane?.current_path) return info.selected_pane.current_path;
+  return '';
+}}
+
+function projectMetaHtml(session, info) {{
+  const project = info?.project || {{}};
+  const git = project.git;
   const parts = [];
+  const fullPath = panelFullPath(session, info);
+  if (fullPath) parts.push(`<span class="meta-path">${{esc(fullPath)}}</span>`);
+  if (!git) {{
+    parts.push('<span class="meta-muted">no git checkout detected</span>');
+    return parts.join('<span class="meta-sep"> · </span>');
+  }}
   if (git.branch) parts.push(`<span class="meta-branch">${{esc(shortBranch(git.branch))}}</span>`);
   if (Number.isFinite(git.behind) && git.behind > 0) parts.push(`<span class="meta-muted">behind ${{git.behind}}</span>`);
   if (Number.isFinite(git.ahead) && git.ahead > 0) parts.push(`<span class="meta-muted">ahead ${{git.ahead}}</span>`);
@@ -3287,11 +3576,16 @@ function projectMetaHtml(info) {{
   return parts.length ? parts.join('<span class="meta-sep"> · </span>') : '<span class="meta-muted">git checkout detected</span>';
 }}
 
-function projectMetaTitle(info) {{
+function projectMetaTitle(session, info) {{
   const project = info?.project || {{}};
   const git = project.git;
-  if (!git) return 'no git checkout detected';
   const lines = [];
+  const fullPath = panelFullPath(session, info);
+  if (fullPath) lines.push(`path: ${{fullPath}}`);
+  if (!git) {{
+    lines.push('no git checkout detected');
+    return lines.join('\\n');
+  }}
   if (git.branch) lines.push(`branch: ${{git.branch}}`);
   if (git.upstream) lines.push(`upstream: ${{git.upstream}}`);
   if (Number.isFinite(git.ahead) || Number.isFinite(git.behind)) lines.push(`ahead/behind: ${{git.ahead || 0}}/${{git.behind || 0}}`);
@@ -3703,6 +3997,7 @@ function createPanel(session) {{
       </div>
       <div id="terminal-pane-${{session}}" class="tab-pane active">
         <div id="term-${{session}}" class="terminal"></div>
+        <div id="upload-${{session}}" class="upload-result" hidden></div>
       </div>
       <div id="transcript-pane-${{session}}" class="tab-pane">
         <div class="transcript">
@@ -3763,6 +4058,216 @@ function bindPanelControls(panel, session) {{
   panel.querySelectorAll('[data-quick-session]').forEach(button => {{
     button.addEventListener('click', () => quickSwitchSession(session, button.dataset.quickSession));
   }});
+  bindFileUpload(panel, session);
+}}
+
+function hasFileDrag(event) {{
+  const types = Array.from(event.dataTransfer?.types || []);
+  return types.includes('Files') || Boolean(event.dataTransfer?.files?.length);
+}}
+
+function bindFileUpload(panel, session) {{
+  panel.addEventListener('dragenter', event => {{
+    if (!hasFileDrag(event)) return;
+    event.preventDefault();
+    event.stopPropagation();
+    panel.classList.add('file-drag-over');
+  }});
+  panel.addEventListener('dragover', event => {{
+    if (!hasFileDrag(event)) return;
+    event.preventDefault();
+    event.stopPropagation();
+    event.dataTransfer.dropEffect = 'copy';
+    panel.classList.add('file-drag-over');
+  }});
+  panel.addEventListener('dragleave', event => {{
+    if (!hasFileDrag(event)) return;
+    if (panel.contains(event.relatedTarget)) return;
+    panel.classList.remove('file-drag-over');
+  }});
+  panel.addEventListener('drop', event => {{
+    if (!hasFileDrag(event)) return;
+    event.preventDefault();
+    event.stopPropagation();
+    panel.classList.remove('file-drag-over');
+    uploadFiles(session, event.dataTransfer?.files || []);
+  }});
+}}
+
+function bindClipboardPaste() {{
+  if (clipboardPasteBound) return;
+  clipboardPasteBound = true;
+  document.addEventListener('paste', event => {{
+    const file = pastedImageFile(event);
+    if (!file) return;
+    const session = pasteTargetSession(event);
+    if (!session) {{
+      statusEl.innerHTML = '<span class="err">select a Conductor pane before pasting an image</span>';
+      return;
+    }}
+    event.preventDefault();
+    event.stopPropagation();
+    if (!beginPasteUpload(session)) return;
+    uploadFiles(session, [file], {{source: 'paste'}}).finally(() => {{
+      pasteUploadInFlight = false;
+    }});
+  }}, {{capture: true}});
+}}
+
+function pastedImageFile(event) {{
+  const items = Array.from(event.clipboardData?.items || []);
+  const imageItems = items.filter(item => item.kind === 'file' && String(item.type || '').startsWith('image/'));
+  const item = imageItems.find(candidate => candidate.type === 'image/png') || imageItems[0];
+  if (!item) return null;
+  const file = item.getAsFile();
+  if (!file) return null;
+  return new File([file], nextPasteFilename(file.type || item.type || 'image/png'), {{type: file.type || item.type || 'image/png'}});
+}}
+
+function beginPasteUpload(session) {{
+  const now = Date.now();
+  if (pasteUploadInFlight) return false;
+  try {{
+    const existing = JSON.parse(localStorage.getItem(pasteLockStorageKey) || 'null');
+    if (existing?.expiresAt && existing.expiresAt > now) return false;
+    localStorage.setItem(pasteLockStorageKey, JSON.stringify({{session, expiresAt: now + 1500}}));
+  }} catch (_) {{
+    // Clipboard events can arrive as a burst; the in-memory flag is the fallback.
+  }}
+  pasteUploadInFlight = true;
+  return true;
+}}
+
+function pasteTargetSession(event) {{
+  const panel = event.target?.closest?.('.panel');
+  const panelSession = panel?.id?.startsWith('panel-') ? panel.id.slice('panel-'.length) : '';
+  if (sessions.includes(panelSession) && activeSessions.includes(panelSession)) return panelSession;
+  if (focusedTerminal && activeSessions.includes(focusedTerminal)) return focusedTerminal;
+  return activeSessions.length === 1 ? activeSessions[0] : null;
+}}
+
+function nextPasteFilename(mimeType) {{
+  const stamp = pacificDateStamp();
+  const suffix = imageSuffix(mimeType);
+  const key = `${{stamp}}:${{suffix}}`;
+  const next = (pasteCounters.get(key) || 0) + 1;
+  pasteCounters.set(key, next);
+  return `${{stamp}}-paste-${{String(next).padStart(3, '0')}}${{suffix}}`;
+}}
+
+function pacificDateStamp() {{
+  const parts = new Intl.DateTimeFormat('en-CA', {{
+    timeZone: 'America/Los_Angeles',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }}).formatToParts(new Date());
+  const values = Object.fromEntries(parts.map(part => [part.type, part.value]));
+  return `${{values.year}}${{values.month}}${{values.day}}`;
+}}
+
+function imageSuffix(mimeType) {{
+  const value = String(mimeType || '').toLowerCase();
+  if (value.includes('jpeg') || value.includes('jpg')) return '.jpg';
+  if (value.includes('gif')) return '.gif';
+  if (value.includes('webp')) return '.webp';
+  if (value.includes('bmp')) return '.bmp';
+  return '.png';
+}}
+
+async function uploadFiles(session, fileList, options = {{}}) {{
+  const files = Array.from(fileList || []);
+  if (!files.length) return;
+  const formData = new FormData();
+  for (const file of files) {{
+    formData.append('files', file, file.name || 'upload.bin');
+  }}
+  const sourceLabel = options.source === 'paste' ? 'pasted image' : 'upload';
+  statusEl.innerHTML = `<span class="ok">uploading ${{files.length === 1 ? esc(files[0].name || sourceLabel) : `${{files.length}} files`}} to ${{esc(sessionLabel(session))}}</span>`;
+  try {{
+    const response = await fetch(`/api/upload?session=${{encodeURIComponent(session)}}`, {{
+      method: 'POST',
+      credentials: 'same-origin',
+      body: formData,
+    }});
+    const payload = await response.json();
+    if (!response.ok) {{
+      statusEl.innerHTML = `<span class="err">upload failed: ${{esc(payload.error || response.statusText)}}</span>`;
+      return;
+    }}
+    const paths = (payload.files || []).map(file => file.path).filter(Boolean);
+    activateTab(session, 'terminal');
+    const inserted = insertUploadPaths(session, paths, {{silent: true}});
+    showUploadResult(session, payload, inserted);
+    refreshTranscripts();
+  }} catch (error) {{
+    statusEl.innerHTML = `<span class="err">upload failed: ${{esc(error)}}</span>`;
+  }}
+}}
+
+function insertUploadPaths(session, paths, options = {{}}) {{
+  if (!paths.length) return false;
+  const inserted = insertIntoTerminal(session, `${{paths.map(shellQuote).join(' ')}} `);
+  if (!options.silent) {{
+    statusEl.innerHTML = inserted
+      ? `<span class="ok">inserted upload path into ${{esc(sessionLabel(session))}}</span>`
+      : `<span class="err">${{esc(sessionLabel(session))}} terminal is not connected</span>`;
+  }}
+  return inserted;
+}}
+
+function insertIntoTerminal(session, text) {{
+  const item = terminals.get(session);
+  if (!item || item.socket.readyState !== WebSocket.OPEN) return false;
+  const filtered = stripTerminalQueryResponses(text);
+  if (!filtered) return false;
+  item.socket.send(JSON.stringify({{type: 'input', data: filtered}}));
+  item.term?.focus?.();
+  setFocusedTerminal(session);
+  return true;
+}}
+
+function shellQuote(value) {{
+  return "'" + String(value).replace(/'/g, "'\\\\''") + "'";
+}}
+
+function showUploadResult(session, payload, inserted) {{
+  const node = document.getElementById(`upload-${{session}}`);
+  if (!node) return;
+  const files = payload.files || [];
+  const paths = files.map(file => file.path).filter(Boolean);
+  const label = files.length === 1 ? (files[0].saved_name || files[0].name || 'file') : `${{files.length}} files`;
+  const target = payload.target_dir || '';
+  const insertedText = inserted ? '; path inserted' : '; terminal not connected';
+  node.hidden = false;
+  node.innerHTML = `<div class="upload-result-text" title="${{esc(paths.join('\\n'))}}">uploaded ${{esc(label)}} to ${{esc(pathBasename(target) || target)}}${{insertedText}}</div>
+    <button type="button" data-upload-insert>Insert</button>
+    <button type="button" data-upload-copy>Copy</button>
+    <button type="button" data-upload-close aria-label="Hide upload status">x</button>`;
+  node.querySelector('[data-upload-insert]')?.addEventListener('click', () => insertUploadPaths(session, paths));
+  node.querySelector('[data-upload-copy]')?.addEventListener('click', () => copyUploadPaths(session, paths));
+  node.querySelector('[data-upload-close]')?.addEventListener('click', () => hideUploadResult(session));
+  statusEl.innerHTML = `<span class="ok">uploaded ${{esc(label)}} to ${{esc(target)}}${{inserted ? '; path inserted' : ''}}</span>`;
+  if (uploadHideTimers.has(session)) clearTimeout(uploadHideTimers.get(session));
+  uploadHideTimers.set(session, setTimeout(() => hideUploadResult(session), 30000));
+}}
+
+async function copyUploadPaths(session, paths) {{
+  try {{
+    await navigator.clipboard.writeText(paths.join('\\n'));
+    statusEl.innerHTML = `<span class="ok">copied upload path for ${{esc(sessionLabel(session))}}</span>`;
+  }} catch (error) {{
+    statusEl.innerHTML = `<span class="err">copy failed: ${{esc(error)}}</span>`;
+  }}
+}}
+
+function hideUploadResult(session) {{
+  if (uploadHideTimers.has(session)) {{
+    clearTimeout(uploadHideTimers.get(session));
+    uploadHideTimers.delete(session);
+  }}
+  const node = document.getElementById(`upload-${{session}}`);
+  if (node) node.hidden = true;
 }}
 
 function updatePanelSlot(panel, session, slot) {{
@@ -4000,6 +4505,7 @@ async function setAutoApprove(session, enabled) {{
 
 async function refreshAutoStatuses() {{
   await loadAutoStatuses();
+  bindClipboardPaste();
   renderSessionButtons();
   renderAutoApproveButtons();
 }}
@@ -4113,8 +4619,8 @@ async function refreshTranscripts() {{
       const agent = info?.agents?.find(item => item.transcript) || info?.agents?.[0];
       updatePanelHeader(session, info);
       if (meta) {{
-        meta.innerHTML = projectMetaHtml(info);
-        meta.title = projectMetaTitle(info);
+        meta.innerHTML = projectMetaHtml(session, info);
+        meta.title = projectMetaTitle(session, info);
       }}
       renderSummaryContext(session, info, agent);
       if (agent?.transcript) {{
@@ -4143,7 +4649,7 @@ function updatePanelHeader(session, info) {{
   const auto = autoApproveStates.get(session)?.enabled === true;
   tab.className = `panel-session-label ${{auto ? 'auto' : ''}}`;
   tab.innerHTML = sessionLabelHtml(session, info, agentKind);
-  tab.title = projectMetaTitle(info);
+  tab.title = projectMetaTitle(session, info);
 }}
 
 function renderSummaryContext(session, info, agent) {{
@@ -4325,19 +4831,41 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt: str, *args: Any) -> None:
         sys.stderr.write("%s - - [%s] %s\n" % (self.client_address[0], self.log_date_time_string(), fmt % args))
 
-    def is_authorized(self) -> bool:
+    def has_valid_basic_auth(self) -> bool:
         header = self.headers.get("Authorization", "")
         expected = "Basic " + base64.b64encode(f"{AUTH_USERNAME}:{AUTH_PASSWORD}".encode("utf-8")).decode("ascii")
         return hmac.compare_digest(header, expected)
 
+    def has_valid_auth_cookie(self) -> bool:
+        for item in self.headers.get("Cookie", "").split(";"):
+            name, separator, value = item.strip().partition("=")
+            if separator and name == AUTH_COOKIE_NAME:
+                return hmac.compare_digest(value, AUTH_COOKIE_VALUE)
+        return False
+
+    def auth_cookie_header(self) -> str:
+        return f"{AUTH_COOKIE_NAME}={AUTH_COOKIE_VALUE}; Path=/; HttpOnly; SameSite=Lax"
+
+    def send_auth_cookie_if_needed(self) -> None:
+        if getattr(self, "_refresh_auth_cookie", False):
+            self.send_header("Set-Cookie", self.auth_cookie_header())
+
     def require_auth(self) -> bool:
-        if self.is_authorized():
+        self._refresh_auth_cookie = False
+        if self.has_valid_auth_cookie():
             return True
+        if self.has_valid_basic_auth():
+            self._refresh_auth_cookie = True
+            return True
+        if self.command in {"POST", "PUT", "PATCH"} and self.headers.get("Content-Length"):
+            self.close_connection = True
         self.send_response(HTTPStatus.UNAUTHORIZED)
         self.send_header("WWW-Authenticate", 'Basic realm="Conductor"')
         self.send_header("Content-Type", "text/plain; charset=utf-8")
         self.send_header("Content-Length", str(len("authentication required\n")))
         self.send_header("Cache-Control", "no-store")
+        if self.close_connection:
+            self.send_header("Connection", "close")
         self.end_headers()
         self.wfile.write(b"authentication required\n")
         return False
@@ -4419,6 +4947,12 @@ class Handler(BaseHTTPRequestHandler):
             payload, status = self.server.app.ensure_session(session)
             self.write_json(payload, status=status)
             return
+        if parsed.path == "/api/upload":
+            qs = parse_qs(parsed.query)
+            session = qs.get("session", [""])[0]
+            payload, status = self.handle_upload(session)
+            self.write_json(payload, status=status)
+            return
         if parsed.path == "/api/auto-approve":
             qs = parse_qs(parsed.query)
             session = qs.get("session", [""])[0]
@@ -4434,6 +4968,28 @@ class Handler(BaseHTTPRequestHandler):
             return
         self.write_json({"error": "not found"}, status=HTTPStatus.NOT_FOUND)
 
+    def handle_upload(self, session: str) -> tuple[dict[str, Any], HTTPStatus]:
+        content_length_text = self.headers.get("Content-Length")
+        if not content_length_text:
+            return {"session": session, "error": "missing Content-Length"}, HTTPStatus.LENGTH_REQUIRED
+        try:
+            content_length = int(content_length_text)
+        except ValueError:
+            return {"session": session, "error": "invalid Content-Length"}, HTTPStatus.BAD_REQUEST
+        if content_length > UPLOAD_MAX_BYTES:
+            self.close_connection = True
+            return {
+                "session": session,
+                "error": f"upload is too large; limit is {UPLOAD_MAX_BYTES} bytes",
+            }, HTTPStatus.REQUEST_ENTITY_TOO_LARGE
+
+        body = self.rfile.read(content_length)
+        try:
+            files = parse_multipart_upload(self.headers.get("Content-Type", ""), body)
+        except ValueError as exc:
+            return {"session": session, "error": str(exc)}, HTTPStatus.BAD_REQUEST
+        return self.server.app.upload_files(session, files)
+
     def do_HEAD(self) -> None:
         if not self.require_auth():
             return
@@ -4444,6 +5000,7 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Content-Length", str(len(data)))
             self.send_header("Cache-Control", "no-store")
+            self.send_auth_cookie_if_needed()
             self.end_headers()
             return
         if parsed.path == "/static/xterm.js":
@@ -4476,6 +5033,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Cache-Control", "no-store")
         self.send_header("Connection", "keep-alive")
         self.send_header("X-Accel-Buffering", "no")
+        self.send_auth_cookie_if_needed()
         self.end_headers()
 
         try:
@@ -4515,6 +5073,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Cache-Control", "no-store")
         self.send_header("Connection", "keep-alive")
         self.send_header("X-Accel-Buffering", "no")
+        self.send_auth_cookie_if_needed()
         self.end_headers()
 
         meta = {key: value for key, value in payload.items() if key != "prompt"}
@@ -4669,6 +5228,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(data)))
         self.send_header("Cache-Control", "no-store")
+        self.send_auth_cookie_if_needed()
         self.end_headers()
         self.wfile.write(data)
 
@@ -4686,6 +5246,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(data)))
         self.send_header("Cache-Control", "no-store")
+        self.send_auth_cookie_if_needed()
         self.end_headers()
         self.wfile.write(data)
 
@@ -4699,6 +5260,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(path.stat().st_size))
         self.send_header("Cache-Control", "no-store")
+        self.send_auth_cookie_if_needed()
         self.end_headers()
 
     def write_json(self, value: Any, status: HTTPStatus = HTTPStatus.OK) -> None:
@@ -4707,6 +5269,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(data)))
         self.send_header("Cache-Control", "no-store")
+        self.send_auth_cookie_if_needed()
         self.end_headers()
         self.wfile.write(data)
 
@@ -4715,6 +5278,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(status)
         self.send_header("Content-Type", "text/plain; charset=utf-8")
         self.send_header("Content-Length", str(len(data)))
+        self.send_auth_cookie_if_needed()
         self.end_headers()
         self.wfile.write(data)
 
@@ -4732,6 +5296,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Upgrade", "websocket")
         self.send_header("Connection", "Upgrade")
         self.send_header("Sec-WebSocket-Accept", accept)
+        self.send_auth_cookie_if_needed()
         self.end_headers()
         self.bridge_tmux(session)
 
