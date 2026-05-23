@@ -30,6 +30,8 @@ import sys
 import termios
 import threading
 import time
+import urllib.error
+import urllib.request
 from dataclasses import asdict
 from dataclasses import dataclass
 from datetime import datetime
@@ -41,6 +43,8 @@ from http.server import ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs
+from urllib.parse import quote
+from urllib.parse import urlencode
 from urllib.parse import urlparse
 
 
@@ -63,6 +67,15 @@ WEBSOCKET_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 AGENT_COMMANDS = {"claude", "codex"}
 AUTO_APPROVE_SCRIPT = Path(__file__).resolve().parents[1] / "auto_approve_tmux.py"
 TERMINAL_QUERY_RESPONSE_RE = re.compile(r"(?:\x1b\[[?>]?[0-9;]*c|\x1bP[>|!][^\x1b]*(?:\x1b\\|\x9c))")
+LINEAR_ID_RE = re.compile(r"(?<![A-Za-z0-9])(?:DIS|DGH|DYN|OPS|INFRA)-\d{1,6}(?![A-Za-z0-9])")
+MAIN_BRANCHES = {"main", "master"}
+METADATA_CACHE_TTL_SECONDS = 300
+HTTP_METADATA_TIMEOUT_SECONDS = 2.0
+GITHUB_API_ROOT = "https://api.github.com"
+LINEAR_API_URL = "https://api.linear.app/graphql"
+DEFAULT_LINEAR_ISSUE_BASE_URL = "https://linear.app/nvidia/issue"
+OTHER_BRANCH_LIMIT = 8
+_CACHE_MISS = object()
 
 
 def read_config_object(path: Path) -> dict[str, Any]:
@@ -487,8 +500,8 @@ def project_inventory(sessions: dict[str, SessionInfo], current_session: str) ->
 
 
 def focus_root_for_session(session: str) -> str | None:
-    workdir = Path.home() / "dynamo" / session
-    if workdir.is_dir():
+    workdir = session_workdir(session)
+    if workdir.is_dir() and workdir.resolve() != Path.home().resolve():
         return str(workdir.resolve())
     return None
 
@@ -544,18 +557,435 @@ def git_inventory(cwd: str | None) -> dict[str, Any] | None:
     if root.returncode != 0:
         return None
     branch = git(["rev-parse", "--abbrev-ref", "HEAD"], cwd)
+    head_sha = git(["rev-parse", "HEAD"], cwd)
     head = git(["log", "-1", "--pretty=%h %s"], cwd)
     upstream = git(["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"], cwd)
     status = git(["status", "--short"], cwd)
+    origin_url = git(["config", "--get", "remote.origin.url"], cwd)
+    upstream_name = upstream.stdout.strip() if upstream.returncode == 0 else None
+    branch_name = branch.stdout.strip() if branch.returncode == 0 else None
+    ahead, behind = git_ahead_behind(cwd, upstream_name)
     status_lines = [line for line in status.stdout.splitlines() if line.strip()] if status.returncode == 0 else []
     return {
         "root": root.stdout.strip(),
-        "branch": branch.stdout.strip() if branch.returncode == 0 else None,
-        "upstream": upstream.stdout.strip() if upstream.returncode == 0 else None,
+        "branch": branch_name,
+        "upstream": upstream_name,
         "head": head.stdout.strip() if head.returncode == 0 else None,
+        "head_sha": head_sha.stdout.strip() if head_sha.returncode == 0 else None,
+        "ahead": ahead,
+        "behind": behind,
         "dirty_count": len(status_lines),
         "status": status_lines[:30],
+        "github_repo": parse_github_remote(origin_url.stdout.strip()) if origin_url.returncode == 0 else None,
+        "other_branches": local_branch_inventory(cwd, branch_name),
     }
+
+
+def git_ahead_behind(cwd: str, upstream: str | None) -> tuple[int | None, int | None]:
+    if not upstream:
+        return None, None
+    result = git(["rev-list", "--left-right", "--count", f"{upstream}...HEAD"], cwd)
+    if result.returncode != 0:
+        return None, None
+    parts = result.stdout.split()
+    if len(parts) != 2:
+        return None, None
+    try:
+        behind = int(parts[0])
+        ahead = int(parts[1])
+    except ValueError:
+        return None, None
+    return ahead, behind
+
+
+def local_branch_inventory(cwd: str, current_branch: str | None) -> dict[str, Any]:
+    result = git(
+        [
+            "for-each-ref",
+            "--sort=-committerdate",
+            "--format=%(refname:short)\t%(objectname)\t%(committerdate:relative)\t%(subject)",
+            "refs/heads",
+        ],
+        cwd,
+    )
+    if result.returncode != 0:
+        return {"branches": [], "hidden_count": 0}
+    pr_by_sha = local_pull_request_by_sha(cwd)
+    branches: list[dict[str, Any]] = []
+    hidden_count = 0
+    for line in result.stdout.splitlines():
+        name, _, rest = line.partition("\t")
+        sha, _, rest = rest.partition("\t")
+        updated, _, subject = rest.partition("\t")
+        if not name or name == current_branch:
+            continue
+        if len(branches) >= OTHER_BRANCH_LIMIT:
+            hidden_count += 1
+            continue
+        local_pr = pr_by_sha.get(sha)
+        branches.append(
+            {
+                "name": name,
+                "updated": updated or None,
+                "head": sha[:12] if sha else None,
+                "subject": subject or None,
+                "pull_request": local_pr,
+                "linear_ids": extract_linear_ids(name, subject),
+            }
+        )
+    return {"branches": branches, "hidden_count": hidden_count}
+
+
+def local_pull_request_by_sha(cwd: str) -> dict[str, dict[str, Any]]:
+    result = git(
+        ["for-each-ref", "--format=%(refname:short)\t%(objectname)\t%(subject)", "refs/remotes/origin/pull-request"],
+        cwd,
+    )
+    if result.returncode != 0:
+        return {}
+    mapping: dict[str, dict[str, Any]] = {}
+    for line in result.stdout.splitlines():
+        ref, _, rest = line.partition("\t")
+        sha, _, subject = rest.partition("\t")
+        match = re.search(r"(?:^|/)pull-request/(\d+)$", ref)
+        if not match or not sha:
+            continue
+        number = int(match.group(1))
+        mapping[sha] = {"number": number, "title": subject.strip() or None}
+    return mapping
+
+
+def parse_github_remote(remote_url: str) -> dict[str, str] | None:
+    if not remote_url:
+        return None
+    if remote_url.startswith("git@github.com:"):
+        remote_path = remote_url.split(":", 1)[1]
+    else:
+        parsed = urlparse(remote_url)
+        if (parsed.hostname or "").lower() != "github.com":
+            return None
+        remote_path = parsed.path.lstrip("/")
+    if remote_path.endswith(".git"):
+        remote_path = remote_path[:-4]
+    parts = [part for part in remote_path.split("/") if part]
+    if len(parts) < 2:
+        return None
+    owner, name = parts[0], parts[1]
+    return {
+        "owner": owner,
+        "name": name,
+        "url": f"https://github.com/{quote(owner)}/{quote(name)}",
+    }
+
+
+class MetadataCache:
+    def __init__(self, ttl_seconds: int = METADATA_CACHE_TTL_SECONDS):
+        self.ttl_seconds = ttl_seconds
+        self.lock = threading.Lock()
+        self.values: dict[str, tuple[float, Any]] = {}
+
+    def get(self, key: str) -> Any:
+        with self.lock:
+            item = self.values.get(key)
+            if item is None:
+                return _CACHE_MISS
+            expires_at, value = item
+            if expires_at <= time.time():
+                self.values.pop(key, None)
+                return _CACHE_MISS
+            return value
+
+    def set(self, key: str, value: Any) -> None:
+        with self.lock:
+            self.values[key] = (time.time() + self.ttl_seconds, value)
+
+
+def session_project_metadata(info: SessionInfo, cache: MetadataCache) -> dict[str, Any]:
+    git_data = session_git_inventory(info)
+    if git_data is None:
+        return {"git": None, "pull_request": None, "linear": []}
+
+    pull_request = project_pull_request(git_data, cache)
+    linear_ids = extract_linear_ids(
+        git_data.get("branch"),
+        git_data.get("upstream"),
+        git_data.get("head"),
+        pull_request.get("title") if pull_request else None,
+        pull_request.get("description") if pull_request else None,
+        " ".join(pull_request.get("linear_ids", [])) if pull_request else None,
+    )
+    return {
+        "git": git_data,
+        "pull_request": pull_request,
+        "linear": [linear_issue_metadata(identifier, cache) for identifier in linear_ids],
+    }
+
+
+def session_git_inventory(info: SessionInfo) -> dict[str, Any] | None:
+    for cwd in candidate_session_cwds(info):
+        git_data = git_inventory(cwd)
+        if git_data is not None:
+            git_data["cwd"] = cwd
+            return git_data
+    return None
+
+
+def candidate_session_cwds(info: SessionInfo) -> list[str]:
+    paths: list[str] = []
+    default_workdir = session_workdir(info.session)
+    if default_workdir.is_dir():
+        paths.append(str(default_workdir))
+    if info.selected_pane:
+        paths.append(info.selected_pane.current_path)
+    paths.extend(agent.cwd for agent in info.agents if agent.cwd)
+    paths.extend(pane.current_path for pane in info.panes if pane.current_path)
+    return unique_existing_paths(paths)
+
+
+def unique_existing_paths(paths: list[str]) -> list[str]:
+    result: list[str] = []
+    seen: set[str] = set()
+    for raw_path in paths:
+        try:
+            path = str(Path(raw_path).expanduser().resolve())
+        except OSError:
+            continue
+        if path in seen:
+            continue
+        seen.add(path)
+        result.append(path)
+    return result
+
+
+def project_pull_request(git_data: dict[str, Any], cache: MetadataCache) -> dict[str, Any] | None:
+    repo = git_data.get("github_repo")
+    if not isinstance(repo, dict):
+        return None
+    cwd = git_data.get("root") or git_data.get("cwd")
+    head_sha = git_data.get("head_sha")
+    local_pr = local_pull_request_info(cwd, head_sha) if isinstance(cwd, str) and isinstance(head_sha, str) else None
+    if local_pr is not None:
+        number = local_pr["number"]
+        return github_pull_request_by_number(repo, number, cache) or fallback_pull_request(
+            repo,
+            number,
+            "local-ref",
+            title=local_pr.get("title"),
+        )
+
+    branch = git_data.get("branch")
+    if not isinstance(branch, str) or branch in MAIN_BRANCHES or branch == "HEAD":
+        return None
+    return github_pull_request_by_branch(repo, branch, cache)
+
+
+def local_pull_request_info(cwd: str, head_sha: str) -> dict[str, Any] | None:
+    return local_pull_request_by_sha(cwd).get(head_sha)
+
+
+def fallback_pull_request(repo: dict[str, str], number: int, source: str, title: str | None = None) -> dict[str, Any]:
+    return {
+        "number": number,
+        "title": title,
+        "state": None,
+        "url": github_pull_request_url(repo, number),
+        "description": title,
+        "linear_ids": extract_linear_ids(title),
+        "source": source,
+    }
+
+
+def github_pull_request_url(repo: dict[str, str], number: int) -> str:
+    return f"{repo['url']}/pull/{number}"
+
+
+def github_pull_request_by_number(repo: dict[str, str], number: int, cache: MetadataCache) -> dict[str, Any] | None:
+    key = f"github-pr:{repo['owner']}/{repo['name']}:{number}"
+    cached = cache.get(key)
+    if cached is not _CACHE_MISS:
+        return cached
+    path = f"/repos/{quote(repo['owner'])}/{quote(repo['name'])}/pulls/{number}"
+    payload = github_api_get(path)
+    value = normalize_github_pull_request(payload, repo, "github-api") if isinstance(payload, dict) else None
+    cache.set(key, value)
+    return value
+
+
+def github_pull_request_by_branch(repo: dict[str, str], branch: str, cache: MetadataCache) -> dict[str, Any] | None:
+    key = f"github-pr-branch:{repo['owner']}/{repo['name']}:{branch}"
+    cached = cache.get(key)
+    if cached is not _CACHE_MISS:
+        return cached
+    query = urlencode({"head": f"{repo['owner']}:{branch}", "state": "all", "per_page": "10"})
+    payload = github_api_get(f"/repos/{quote(repo['owner'])}/{quote(repo['name'])}/pulls?{query}")
+    value = None
+    if isinstance(payload, list):
+        pull_requests = [item for item in payload if isinstance(item, dict)]
+        selected = next((item for item in pull_requests if item.get("state") == "open"), None)
+        if selected is None and pull_requests:
+            selected = pull_requests[0]
+        if selected is not None:
+            value = normalize_github_pull_request(selected, repo, "github-api")
+    cache.set(key, value)
+    return value
+
+
+def normalize_github_pull_request(payload: dict[str, Any], repo: dict[str, str], source: str) -> dict[str, Any] | None:
+    number = payload.get("number")
+    if not isinstance(number, int):
+        return None
+    title = payload.get("title") if isinstance(payload.get("title"), str) else None
+    body = payload.get("body") if isinstance(payload.get("body"), str) else None
+    state = payload.get("state") if isinstance(payload.get("state"), str) else None
+    url = payload.get("html_url") if isinstance(payload.get("html_url"), str) else github_pull_request_url(repo, number)
+    return {
+        "number": number,
+        "title": title,
+        "state": state,
+        "url": url,
+        "description": compact_description(body),
+        "linear_ids": extract_linear_ids(title, body),
+        "source": source,
+    }
+
+
+def github_api_get(path: str) -> Any:
+    headers = {
+        "Accept": "application/vnd.github+json",
+        "User-Agent": "Conductor",
+    }
+    token = github_token()
+    if token:
+        headers["Authorization"] = f"token {token}"
+    return http_json(f"{GITHUB_API_ROOT}{path}", headers=headers, timeout=HTTP_METADATA_TIMEOUT_SECONDS)
+
+
+def github_token() -> str | None:
+    token = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN")
+    if token:
+        return token
+    path = Path.home() / ".config" / "gh" / "hosts.yml"
+    try:
+        for line in path.read_text(encoding="utf-8").splitlines():
+            stripped = line.strip()
+            if stripped.startswith("oauth_token:"):
+                value = stripped.split(":", 1)[1].strip()
+                if value:
+                    return value
+    except OSError:
+        return None
+    return None
+
+
+def linear_issue_metadata(identifier: str, cache: MetadataCache) -> dict[str, Any]:
+    key = f"linear:{identifier}"
+    cached = cache.get(key)
+    if cached is not _CACHE_MISS:
+        return cached
+    value = linear_issue_from_api(identifier) or fallback_linear_issue(identifier)
+    cache.set(key, value)
+    return value
+
+
+def linear_issue_from_api(identifier: str) -> dict[str, Any] | None:
+    token = linear_key()
+    if not token:
+        return None
+    payload = {
+        "query": (
+            "query($id: String!) { issue(id: $id) { "
+            "identifier title url state { name } "
+            "} }"
+        ),
+        "variables": {"id": identifier},
+    }
+    response = http_json(
+        LINEAR_API_URL,
+        headers={"Authorization": token, "Content-Type": "application/json"},
+        payload=payload,
+        timeout=HTTP_METADATA_TIMEOUT_SECONDS,
+    )
+    if not isinstance(response, dict):
+        return None
+    data = response.get("data")
+    issue = data.get("issue") if isinstance(data, dict) else None
+    if not isinstance(issue, dict):
+        return None
+    state = issue.get("state")
+    return {
+        "identifier": issue.get("identifier") if isinstance(issue.get("identifier"), str) else identifier,
+        "title": issue.get("title") if isinstance(issue.get("title"), str) else None,
+        "state": state.get("name") if isinstance(state, dict) and isinstance(state.get("name"), str) else None,
+        "url": issue.get("url") if isinstance(issue.get("url"), str) else linear_issue_url(identifier),
+        "source": "linear-api",
+    }
+
+
+def fallback_linear_issue(identifier: str) -> dict[str, Any]:
+    return {
+        "identifier": identifier,
+        "title": None,
+        "state": None,
+        "url": linear_issue_url(identifier),
+        "source": "local-id",
+    }
+
+
+def linear_issue_url(identifier: str) -> str:
+    base_url = os.environ.get("CONDUCTOR_LINEAR_ISSUE_BASE_URL", DEFAULT_LINEAR_ISSUE_BASE_URL).rstrip("/")
+    return f"{base_url}/{quote(identifier)}"
+
+
+def linear_key() -> str | None:
+    token = os.environ.get("LINEAR_KEY")
+    if token:
+        return token.strip()
+    path = Path.home() / ".config" / "linear.key"
+    try:
+        token = path.read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    return token or None
+
+
+def http_json(
+    url: str,
+    headers: dict[str, str],
+    timeout: float,
+    payload: dict[str, Any] | None = None,
+) -> Any:
+    data = json.dumps(payload).encode("utf-8") if payload is not None else None
+    request = urllib.request.Request(url, data=data, headers=headers)
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            return json.loads(response.read().decode("utf-8"))
+    except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError, OSError, json.JSONDecodeError):
+        return None
+
+
+def extract_linear_ids(*texts: str | None) -> list[str]:
+    identifiers: list[str] = []
+    seen: set[str] = set()
+    for text in texts:
+        if not text:
+            continue
+        for match in LINEAR_ID_RE.finditer(text):
+            identifier = match.group(0)
+            if identifier in seen:
+                continue
+            seen.add(identifier)
+            identifiers.append(identifier)
+    return identifiers
+
+
+def compact_description(text: str | None, limit: int = 480) -> str | None:
+    if not text:
+        return None
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped and not stripped.startswith("<!--"):
+            return truncate_text(re.sub(r"\s+", " ", stripped), limit)
+    return None
 
 
 class AutoApproveWorker:
@@ -742,6 +1172,7 @@ class TmuxWebtermApp:
     def __init__(self, sessions: list[str]):
         self.sessions = sessions
         self.auto_workers: dict[str, AutoApproveWorker] = {}
+        self.metadata_cache = MetadataCache()
 
     def persisted_auto_sessions(self) -> list[str]:
         enabled = read_conductor_state().get("auto_approve_enabled", [])
@@ -765,7 +1196,7 @@ class TmuxWebtermApp:
         sessions, errors = discover_sessions(self.sessions)
         return {
             "server_time": time.strftime("%Y-%m-%d %H:%M:%S %Z"),
-            "sessions": {name: session_to_json(info) for name, info in sessions.items()},
+            "sessions": {name: session_to_json(info, self.metadata_cache) for name, info in sessions.items()},
             "errors": errors,
         }
 
@@ -1051,16 +1482,21 @@ class TmuxWebtermApp:
         self.auto_workers.clear()
 
 
-def session_to_json(info: SessionInfo) -> dict[str, Any]:
+def session_to_json(info: SessionInfo, metadata_cache: MetadataCache) -> dict[str, Any]:
     return {
         "session": info.session,
         "panes": [asdict(pane) for pane in info.panes],
         "selected_pane": asdict(info.selected_pane) if info.selected_pane else None,
         "agents": [asdict(agent) for agent in info.agents],
+        "project": session_project_metadata(info, metadata_cache),
     }
 
 
 def session_workdir(session: str) -> Path:
+    if session == "dynamo6":
+        dev_path = Path.home() / "dynamo" / "dynamo-utils.dev"
+        if dev_path.is_dir():
+            return dev_path
     repo_path = Path.home() / "dynamo" / session
     return repo_path if repo_path.is_dir() else Path.home()
 
@@ -1447,6 +1883,8 @@ body {{
 }}
 .topbar {{
   height: 54px;
+  position: relative;
+  z-index: 60;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -1469,40 +1907,273 @@ body {{
   gap: 8px;
 }}
 .session-buttons {{
+  flex: 1 1 auto;
+  min-width: 0;
   display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 6px;
+  align-items: flex-end;
+  justify-content: center;
+  flex-wrap: nowrap;
+  gap: 4px;
+  height: 100%;
 }}
 .session-buttons.drag-over {{
   outline: 1px dashed #f5c542;
   outline-offset: 3px;
 }}
+.session-button-wrap {{
+  position: relative;
+  flex: 1 1 96px;
+  min-width: 76px;
+  max-width: 134px;
+}}
+.session-button-wrap:hover::after,
+.session-button-wrap:focus-within::after {{
+  content: "";
+  position: absolute;
+  top: 100%;
+  left: 0;
+  right: 0;
+  height: 12px;
+  z-index: 79;
+}}
 .session-button {{
+  width: 100%;
+  min-width: 0;
+  height: 31px;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 7px;
   white-space: nowrap;
+  text-align: left;
+  line-height: 1.05;
+  border-radius: 8px 8px 0 0;
+  background: #111722;
+  border: 1px solid #2f394a;
+  border-color: #2f394a;
+  border-bottom-color: #465267;
+}}
+.session-button:hover {{
+  background: #1a2230;
+  border-color: #657084;
+}}
+.session-button-number {{
+  width: 18px;
+  height: 18px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 5px;
+  color: #f3f6fb;
+  background: #202938;
+  border: 1px solid #3c4657;
+  font-weight: 700;
+}}
+.session-button-text {{
+  min-width: 0;
+}}
+.session-button-dir,
+.session-button-detail {{
+  display: inline-block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}}
+.session-button-dir {{
+  color: #e7ecf3;
+  font-size: 12px;
+  font-weight: 700;
+}}
+.session-button-detail {{
+  max-width: 52px;
+  color: #9ea8b7;
+  font: 11px/1 ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+}}
+.session-button.active .session-button-number {{
+  color: #111827;
+  background: #f5c542;
+  border-color: #ffe58a;
+}}
+.session-button.auto .session-button-number {{
+  color: #fff;
+  background: #9f1d2e;
+  border-color: #ff6673;
 }}
 .session-button.dragging {{
   opacity: 0.55;
 }}
 .session-button.active {{
   color: var(--text);
-  background: #2b3a55;
+  background: #263044;
   border-color: #7282a0;
+  border-bottom-color: rgba(245, 197, 66, 0.55);
+  box-shadow: inset 0 -1px 0 rgba(245, 197, 66, 0.55);
 }}
 .session-button.auto {{
   color: #ffd6dc;
-  background: #4a2028;
+  background: #2b1920;
   border-color: #aa4b5a;
 }}
 .session-button.active.auto {{
   color: #fff;
-  background: #8f1d2d;
+  background: #55303a;
   border-color: #ff6673;
+  border-bottom-color: rgba(245, 197, 66, 0.55);
 }}
 .session-button.auto:disabled {{
   opacity: 0.85;
   color: #ffd6dc;
   border-color: #8b3d49;
+}}
+.session-popover {{
+  visibility: hidden;
+  opacity: 0;
+  pointer-events: none;
+  position: absolute;
+  top: calc(100% + 2px);
+  left: 0;
+  z-index: 80;
+  width: min(560px, 88vw);
+  max-height: calc(100vh - 78px);
+  overflow: auto;
+  padding: 12px;
+  color: #dfe6ef;
+  background: #10151e;
+  border: 1px solid #3a4658;
+  border-radius: 8px;
+  box-shadow: 0 18px 50px rgba(0, 0, 0, 0.42);
+  transform: translateY(-2px);
+  transition:
+    opacity 90ms ease 500ms,
+    transform 90ms ease 500ms,
+    visibility 0s linear 590ms;
+}}
+.session-button-wrap:nth-last-child(-n + 2) .session-popover {{
+  right: 0;
+  left: auto;
+}}
+.session-button-wrap.popover-open .session-popover {{
+  visibility: visible;
+  opacity: 1;
+  pointer-events: auto;
+  transform: translateY(0);
+  transition-delay: 0s;
+}}
+.session-popover::before {{
+  content: "";
+  position: absolute;
+  top: -6px;
+  left: 18px;
+  width: 10px;
+  height: 10px;
+  transform: rotate(45deg);
+  background: #10151e;
+  border-left: 1px solid #3a4658;
+  border-top: 1px solid #3a4658;
+}}
+.session-button-wrap:nth-last-child(-n + 2) .session-popover::before {{
+  right: 18px;
+  left: auto;
+}}
+.popover-head {{
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 8px;
+}}
+.popover-title {{
+  font-weight: 700;
+  font-size: 13px;
+}}
+.popover-subtitle {{
+  margin-top: 2px;
+  color: #9ea8b7;
+  font: 12px/1.25 ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+  overflow-wrap: anywhere;
+}}
+.popover-badge {{
+  flex: 0 0 auto;
+  color: #181100;
+  background: #f5c542;
+  border: 1px solid #ffe58a;
+  border-radius: 5px;
+  padding: 3px 6px;
+  font: 700 11px/1 ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+}}
+.popover-row {{
+  display: grid;
+  grid-template-columns: 70px minmax(0, 1fr);
+  gap: 8px;
+  padding: 4px 0;
+  border-top: 1px solid rgba(82, 95, 116, 0.42);
+}}
+.popover-label {{
+  color: #8b95a5;
+}}
+.popover-value {{
+  min-width: 0;
+  overflow-wrap: anywhere;
+}}
+.popover-desc {{
+  color: #cbd5e1;
+  line-height: 1.35;
+}}
+.popover-desc-title {{
+  font-weight: 700;
+}}
+.popover-desc-body {{
+  margin-top: 4px;
+  color: #aeb8c7;
+}}
+.popover-desc-line + .popover-desc-line {{
+  margin-top: 4px;
+}}
+.popover-value a,
+.branch-link {{
+  color: #93c5fd;
+  text-decoration: none;
+}}
+.popover-value a:hover,
+.branch-link:hover {{
+  color: #bfdbfe;
+  text-decoration: underline;
+}}
+.branch-list {{
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid rgba(82, 95, 116, 0.42);
+}}
+.branch-list-title {{
+  color: #cbd5e1;
+  font-weight: 700;
+  font-size: 12px;
+  margin-bottom: 6px;
+}}
+.branch-item {{
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  padding: 4px 0;
+  font: 12px/1.25 ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+}}
+.branch-name {{
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}}
+.branch-meta {{
+  color: #8b95a5;
+  white-space: nowrap;
+}}
+.branch-subject {{
+  grid-column: 1 / -1;
+  color: #9ea8b7;
+  overflow-wrap: anywhere;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
 }}
 .agent-icon {{
   display: inline-flex;
@@ -1612,6 +2283,7 @@ button:disabled:hover {{ border-color: var(--line); }}
   font: 12px/1.3 ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
 }}
 .panel {{
+  position: relative;
   min-width: 0;
   min-height: 0;
   height: 100%;
@@ -1629,29 +2301,101 @@ button:disabled:hover {{ border-color: var(--line); }}
   border-radius: 8px;
 }}
 .panel-head {{
-  min-height: 60px;
+  min-height: 36px;
   display: grid;
   grid-template-columns: auto minmax(0, 1fr);
   align-items: center;
   gap: 8px;
-  padding: 8px 10px;
+  padding: 6px 9px;
   border-bottom: 1px solid var(--line);
   background: var(--panel2);
 }}
+.panel.active-window {{
+  border-color: #465267;
+  box-shadow: none;
+}}
+.panel.typing-ready-window {{
+  border-color: #465267;
+  box-shadow: none;
+}}
+.panel.typing-ready-window::after {{
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: 6;
+  pointer-events: none;
+  border: 3px solid rgba(245, 197, 66, 0.96);
+  border-radius: 8px;
+}}
+.panel.active-window .panel-head {{
+  background: #1e2430;
+  box-shadow: none;
+}}
 .panel-copy {{
   min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }}
-.panel-title {{
-  font-weight: 700;
-  font-size: 14px;
+.panel-session-label {{
+  flex: 0 0 auto;
+  min-width: 0;
+  display: inline-grid;
+  grid-template-columns: auto auto auto auto;
+  align-items: center;
+  gap: 5px;
+  height: 28px;
+  padding-right: 4px;
+  white-space: nowrap;
+}}
+.panel-session-label .session-button-dir {{
+  max-width: 104px;
+}}
+.panel-session-label .session-button-detail {{
+  max-width: 58px;
+}}
+.panel-session-label.auto .session-button-number {{
+  color: #fff;
+  background: #9f1d2e;
+  border-color: #ff6673;
+}}
+.panel-session-label .agent-icon {{
+  margin-left: 0;
+}}
+.panel-session-tab {{
+  cursor: default;
+  pointer-events: none;
 }}
 .meta {{
-  margin-top: 2px;
+  min-width: 0;
+  margin-top: 0;
   color: var(--muted);
   font: 12px/1.3 ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}}
+.meta a,
+.summary-context a {{
+  color: #93c5fd;
+  text-decoration: none;
+}}
+.meta a:hover,
+.summary-context a:hover {{
+  color: #bfdbfe;
+  text-decoration: underline;
+}}
+.meta-branch {{
+  color: #d7dde5;
+}}
+.meta-desc {{
+  color: #b7c0ce;
+}}
+.meta-muted {{
+  color: #8b95a5;
+}}
+.meta-sep {{
+  color: #5e6878;
 }}
 .panel-buttons {{
   display: flex;
@@ -1759,8 +2503,8 @@ button:disabled:hover {{ border-color: var(--line); }}
   border-radius: 6px;
 }}
 .terminal.typing-ready {{
-  border-color: #f5c542;
-  box-shadow: inset 0 0 0 1px rgba(245, 197, 66, 0.45), 0 0 0 1px rgba(245, 197, 66, 0.35);
+  border-color: transparent;
+  box-shadow: none;
 }}
 .terminal .xterm {{
   height: 100%;
@@ -1835,8 +2579,25 @@ button:disabled:hover {{ border-color: var(--line); }}
   height: 100%;
   min-height: 0;
   display: grid;
-  grid-template-rows: auto minmax(0, 1fr);
+  grid-template-rows: auto auto minmax(0, 1fr);
   background: #11151d;
+}}
+.summary-context {{
+  padding: 7px 10px;
+  color: #b7c0ce;
+  background: #141b25;
+  border-bottom: 1px solid var(--line);
+  font: 12px/1.35 ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+  overflow: hidden;
+}}
+.summary-context-line {{
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}}
+.summary-context-label {{
+  color: #d7dde5;
+  font-weight: 700;
 }}
 .summary-preview {{
   min-height: 0;
@@ -1923,6 +2684,7 @@ const summaryStreams = new Map();
 const autoApproveStates = new Map();
 const transcriptPreviewMessages = 200;
 const remoteResizeDelayMs = 220;
+const metadataRefreshMs = 15000;
 const layoutStorageKey = 'conductor.layoutSlots.v1';
 const layoutSlotKeys = ['leftTop', 'rightTop', 'leftBottom', 'rightBottom'];
 let layoutSlots = initialLayoutSlots();
@@ -1931,6 +2693,9 @@ let transcriptMeta = {{}};
 let focusedTerminal = null;
 let dragSession = null;
 let dragSourceSlot = null;
+let openPopoverSession = null;
+let popoverHideTimer = null;
+let sessionButtonsRenderDeferred = false;
 
 function setFocusedTerminal(session) {{
   focusedTerminal = session;
@@ -2029,6 +2794,7 @@ function saveLayoutSlots() {{
 }}
 
 function applyLayoutSlots(nextSlots, options = {{}}) {{
+  closeOpenSessionPopover({{renderDeferred: false}});
   const previousActive = activeSessions.slice();
   layoutSlots = normalizeLayoutSlots(nextSlots);
   activeSessions = sessionsFromLayout();
@@ -2059,6 +2825,10 @@ function updateActiveSessionParam() {{
 }}
 
 function renderSessionButtons() {{
+  if (openPopoverSession) {{
+    sessionButtonsRenderDeferred = true;
+    return;
+  }}
   sessionButtons.innerHTML = '';
   sessionButtons.ondragover = event => {{
     const payload = dragPayload(event);
@@ -2081,19 +2851,242 @@ function renderSessionButtons() {{
   for (const session of sessions) {{
     const active = activeSessions.includes(session);
     const auto = autoApproveStates.get(session)?.enabled === true;
+    const info = transcriptMeta.sessions?.[session];
     const agentKind = sessionAgentKind(session);
+    const wrapper = document.createElement('div');
+    wrapper.className = 'session-button-wrap';
+    wrapper.dataset.session = session;
     const button = document.createElement('button');
     button.className = `session-button ${{active ? 'active' : ''}} ${{auto ? 'auto' : ''}}`;
     button.draggable = true;
-    button.innerHTML = `${{esc(sessionLabel(session))}}${{agentIcon(agentKind)}}`;
+    button.innerHTML = sessionButtonHtml(session, info, agentKind);
     const autoText = auto ? '; AUTO on' : '';
     const agentText = agentKind ? `; ${{agentName(agentKind)}}` : '';
-    button.title = `${{sessionLabel(session)}}${{active ? ' is shown; drag to tray to remove' : '; drag into left or right'}}${{agentText}}${{autoText}}`;
+    button.title = `${{sessionLabel(session)}} ${{projectDirName(session, info)}}${{active ? ' is shown; drag to tray to remove' : '; drag into left or right'}}${{agentText}}${{autoText}}`;
     button.addEventListener('click', () => selectSession(session));
     button.addEventListener('dragstart', event => startSessionDrag(event, session, null));
     button.addEventListener('dragend', endSessionDrag);
-    sessionButtons.appendChild(button);
+    wrapper.appendChild(button);
+    wrapper.insertAdjacentHTML('beforeend', sessionPopoverHtml(session, info, agentKind, auto));
+    bindSessionPopover(wrapper);
+    sessionButtons.appendChild(wrapper);
   }}
+}}
+
+function bindSessionPopover(wrapper) {{
+  const session = wrapper.dataset.session;
+  wrapper.addEventListener('pointerenter', () => openSessionPopover(session));
+  wrapper.addEventListener('pointerleave', () => closeSessionPopoverSoon(session));
+  wrapper.addEventListener('focusin', () => openSessionPopover(session));
+  wrapper.addEventListener('focusout', event => {{
+    if (wrapper.contains(event.relatedTarget)) return;
+    closeSessionPopoverSoon(session);
+  }});
+  const popover = wrapper.querySelector('.session-popover');
+  popover?.addEventListener('pointerenter', () => openSessionPopover(session));
+  popover?.addEventListener('pointerleave', () => closeSessionPopoverSoon(session));
+  popover?.querySelectorAll('a').forEach(link => {{
+    link.addEventListener('pointerenter', () => openSessionPopover(session));
+    link.addEventListener('click', event => event.stopPropagation());
+  }});
+}}
+
+function openSessionPopover(session) {{
+  if (!session) return;
+  if (popoverHideTimer) clearTimeout(popoverHideTimer);
+  popoverHideTimer = null;
+  for (const node of sessionButtons.querySelectorAll('.session-button-wrap.popover-open')) {{
+    if (node.dataset.session !== session) node.classList.remove('popover-open');
+  }}
+  openPopoverSession = session;
+  sessionButtons.querySelector(`.session-button-wrap[data-session="${{cssEscape(session)}}"]`)?.classList.add('popover-open');
+}}
+
+function closeSessionPopoverSoon(session) {{
+  if (!session || openPopoverSession !== session) return;
+  if (popoverHideTimer) clearTimeout(popoverHideTimer);
+  popoverHideTimer = setTimeout(() => closeOpenSessionPopover(), 500);
+}}
+
+function closeOpenSessionPopover(options = {{}}) {{
+  if (popoverHideTimer) clearTimeout(popoverHideTimer);
+  popoverHideTimer = null;
+  const session = openPopoverSession;
+  openPopoverSession = null;
+  for (const node of sessionButtons.querySelectorAll('.session-button-wrap.popover-open')) {{
+    node.classList.remove('popover-open');
+  }}
+  if (options.renderDeferred === false) return;
+  if (session || sessionButtonsRenderDeferred) {{
+    const shouldRender = sessionButtonsRenderDeferred;
+    sessionButtonsRenderDeferred = false;
+    if (shouldRender) {{
+      renderSessionButtons();
+      renderAutoApproveButtons();
+    }}
+  }}
+}}
+
+function cssEscape(value) {{
+  if (window.CSS?.escape) return CSS.escape(value);
+  return String(value).replace(/["\\\\]/g, '\\\\$&');
+}}
+
+function sessionButtonHtml(session, info, agentKind) {{
+  return sessionLabelHtml(session, info, agentKind);
+}}
+
+function sessionLabelHtml(session, info, agentKind) {{
+  const detail = sessionButtonDetail(info);
+  return `<span class="session-button-number">${{esc(sessionLabel(session))}}</span>
+    <span class="session-button-dir">${{esc(projectDirName(session, info))}}</span>
+    ${{detail ? `<span class="session-button-detail">${{esc(detail)}}</span>` : '<span></span>'}}
+    ${{agentIcon(agentKind)}}`;
+}}
+
+function sessionButtonDetail(info) {{
+  const project = info?.project || {{}};
+  const pr = project.pull_request;
+  if (pr?.number) return `PR #${{pr.number}}`;
+  return '';
+}}
+
+function projectDirName(session, info) {{
+  if (!info) return 'loading';
+  const project = info?.project || {{}};
+  const git = project.git;
+  const path = git?.root || git?.cwd || info?.selected_pane?.current_path || '';
+  return pathBasename(path) || 'no path';
+}}
+
+function pathBasename(path) {{
+  const text = String(path || '').replace(/\\/+$/, '');
+  if (!text) return '';
+  const parts = text.split('/');
+  return parts[parts.length - 1] || '';
+}}
+
+function sessionPopoverHtml(session, info, agentKind, autoEnabled) {{
+  const project = info?.project || {{}};
+  const git = project.git;
+  const pr = project.pull_request;
+  const linear = project.linear || [];
+  const pane = info?.selected_pane;
+  const title = `${{sessionLabel(session)}} · ${{projectDirName(session, info)}}`;
+  const subtitle = git?.branch || pane?.current_path || 'no checkout detected';
+  const rows = [];
+  rows.push(popoverRow('agent', agentKind ? `${{agentName(agentKind)}}${{autoEnabled ? ' · AUTO' : ''}}` : `${{autoEnabled ? 'AUTO' : 'not detected'}}`));
+  if (git?.root) rows.push(popoverRow('repo', git.root));
+  if (git?.branch) rows.push(popoverRow('branch', branchLinkHtml(git, git.branch)));
+  if (git?.upstream) rows.push(popoverRow('upstream', git.upstream));
+  if (Number.isFinite(git?.dirty_count) || Number.isFinite(git?.ahead) || Number.isFinite(git?.behind)) {{
+    rows.push(popoverRow('status', gitStatusText(git)));
+  }}
+  if (pr?.number) {{
+    rows.push(popoverRow('github', linkHtml(pr.url, `PR #${{pr.number}}${{pr.state ? ` ${{pr.state}}` : ''}}`, pr.title || pr.description || '')));
+    const prDesc = pullRequestDescriptionHtml(pr);
+    if (prDesc) rows.push(popoverRow('desc', prDesc));
+  }}
+  if (linear.length) {{
+    rows.push(popoverRow('linear', linear.map(issue => linearIssueHtml(issue)).join('<span class="meta-sep"> · </span>')));
+    const linearDesc = linearDescriptionsHtml(linear);
+    if (linearDesc) rows.push(popoverRow('details', linearDesc));
+  }}
+  if (git?.head) rows.push(popoverRow('head', git.head));
+  if (!git) rows.push(popoverRow('path', pane?.current_path || 'not available'));
+  return `<div class="session-popover" role="tooltip">
+    <div class="popover-head">
+      <div>
+        <div class="popover-title">${{esc(title)}}</div>
+        <div class="popover-subtitle">${{esc(subtitle)}}</div>
+      </div>
+      <div class="popover-badge">${{esc(sessionLabel(session))}}</div>
+    </div>
+    ${{rows.join('')}}
+    ${{otherBranchesHtml(git)}}
+  </div>`;
+}}
+
+function popoverRow(label, valueHtml) {{
+  return `<div class="popover-row"><div class="popover-label">${{esc(label)}}</div><div class="popover-value">${{valueHtml}}</div></div>`;
+}}
+
+function popoverMutedText(value) {{
+  const text = shortText(value, 116);
+  return text ? ` <span class="meta-muted">${{esc(text)}}</span>` : '';
+}}
+
+function pullRequestDescriptionHtml(pr) {{
+  const title = String(pr?.title || '').trim();
+  const description = String(pr?.description || '').trim();
+  const body = description && description !== title ? description : '';
+  const lines = [];
+  if (title) lines.push(`<div class="popover-desc-title">${{esc(title)}}</div>`);
+  if (body) lines.push(`<div class="popover-desc-body">${{esc(body)}}</div>`);
+  return lines.length ? `<div class="popover-desc">${{lines.join('')}}</div>` : '';
+}}
+
+function linearDescriptionsHtml(issues) {{
+  const lines = [];
+  for (const issue of issues || []) {{
+    if (!issue?.title) continue;
+    lines.push(`<div class="popover-desc-line"><strong>${{esc(issue.identifier)}}</strong> ${{esc(issue.title)}}</div>`);
+  }}
+  return lines.length ? `<div class="popover-desc">${{lines.join('')}}</div>` : '';
+}}
+
+function gitStatusText(git) {{
+  const parts = [];
+  if (Number.isFinite(git.dirty_count)) parts.push(`${{git.dirty_count}} dirty`);
+  if (Number.isFinite(git.ahead) && git.ahead > 0) parts.push(`${{git.ahead}} ahead`);
+  if (Number.isFinite(git.behind) && git.behind > 0) parts.push(`${{git.behind}} behind`);
+  return esc(parts.length ? parts.join(' · ') : 'clean');
+}}
+
+function branchLinkHtml(git, branchName) {{
+  const repoUrl = git?.github_repo?.url;
+  if (!repoUrl || !branchName || branchName === 'HEAD') return esc(branchName || '');
+  return linkHtml(`${{repoUrl}}/tree/${{encodeURIComponent(branchName)}}`, branchName, branchName);
+}}
+
+function linearIssueHtml(issue) {{
+  const label = `${{issue.identifier}}${{issue.state ? ` ${{issue.state}}` : ''}}`;
+  return linkHtml(issue.url, label, issue.title || '');
+}}
+
+function linearIssueLinkHtml(identifier) {{
+  if (!identifier) return '';
+  return linkHtml(`https://linear.app/nvidia/issue/${{encodeURIComponent(identifier)}}`, identifier, identifier);
+}}
+
+function pullRequestLinkForBranch(git, branch) {{
+  const pr = branch?.pull_request;
+  const repoUrl = git?.github_repo?.url;
+  if (!pr?.number || !repoUrl) return '';
+  return linkHtml(`${{repoUrl}}/pull/${{pr.number}}`, `#${{pr.number}}`, pr.title || branch.subject || '');
+}}
+
+function otherBranchesHtml(git) {{
+  const inventory = git?.other_branches || {{}};
+  const branches = inventory.branches || [];
+  if (!branches.length) {{
+    return `<div class="branch-list"><div class="branch-list-title">Other branches</div><div class="meta-muted">none found in this checkout</div></div>`;
+  }}
+  const items = branches.map(branch => {{
+    const branchLink = branchLinkHtml(git, branch.name);
+    const prLink = pullRequestLinkForBranch(git, branch);
+    const linearLinks = (branch.linear_ids || []).map(linearIssueLinkHtml).filter(Boolean).join(' ');
+    const meta = [prLink, linearLinks, esc(branch.updated || '')].filter(Boolean).join(' ');
+    return `<div class="branch-item">
+      <div class="branch-name">${{branchLink}}</div>
+      <div class="branch-meta">${{meta}}</div>
+      <div class="branch-subject">${{esc(shortText(branch.subject || '', 240))}}</div>
+    </div>`;
+  }}).join('');
+  const hidden = Number(inventory.hidden_count || 0) > 0
+    ? `<div class="meta-muted">+ ${{inventory.hidden_count}} more</div>`
+    : '';
+  return `<div class="branch-list"><div class="branch-list-title">Other branches</div>${{items}}${{hidden}}</div>`;
 }}
 
 function dragPayload(event) {{
@@ -2251,6 +3244,104 @@ function sessionNumber(session) {{
 function sessionLabel(session) {{
   const value = sessionNumber(session);
   return Number.isFinite(value) && value !== Number.MAX_SAFE_INTEGER ? String(value) : String(session);
+}}
+
+function shortText(value, limit = 96) {{
+  const text = String(value || '').replace(/\\s+/g, ' ').trim();
+  if (text.length <= limit) return text;
+  return `${{text.slice(0, Math.max(0, limit - 3))}}...`;
+}}
+
+function shortBranch(value) {{
+  const text = String(value || '');
+  if (text.length <= 46) return text;
+  return `${{text.slice(0, 18)}}...${{text.slice(-25)}}`;
+}}
+
+function linkHtml(url, label, title = '') {{
+  if (!url) return `<span>${{esc(label)}}</span>`;
+  const titleAttr = title ? ` title="${{esc(title)}}"` : '';
+  return `<a href="${{esc(url)}}" target="_blank" rel="noreferrer noopener" draggable="false"${{titleAttr}}>${{esc(label)}}</a>`;
+}}
+
+function projectMetaHtml(info) {{
+  const project = info?.project || {{}};
+  const git = project.git;
+  if (!git) return '<span class="meta-muted">no git checkout detected</span>';
+  const parts = [];
+  if (git.branch) parts.push(`<span class="meta-branch">${{esc(shortBranch(git.branch))}}</span>`);
+  if (Number.isFinite(git.behind) && git.behind > 0) parts.push(`<span class="meta-muted">behind ${{git.behind}}</span>`);
+  if (Number.isFinite(git.ahead) && git.ahead > 0) parts.push(`<span class="meta-muted">ahead ${{git.ahead}}</span>`);
+  if (Number.isFinite(git.dirty_count) && git.dirty_count > 0) parts.push(`<span class="meta-muted">dirty ${{git.dirty_count}}</span>`);
+  const pr = project.pull_request;
+  if (pr?.number) {{
+    const state = pr.state ? ` ${{pr.state}}` : '';
+    parts.push(linkHtml(pr.url, `PR #${{pr.number}}${{state}}`, pr.title || pr.description || ''));
+  }}
+  for (const issue of project.linear || []) {{
+    const state = issue.state ? ` ${{issue.state}}` : '';
+    parts.push(linkHtml(issue.url, `${{issue.identifier}}${{state}}`, issue.title || ''));
+  }}
+  const desc = pr?.title || pr?.description || (project.linear || []).find(issue => issue.title)?.title || '';
+  if (desc) parts.push(`<span class="meta-desc">${{esc(shortText(desc, 160))}}</span>`);
+  return parts.length ? parts.join('<span class="meta-sep"> · </span>') : '<span class="meta-muted">git checkout detected</span>';
+}}
+
+function projectMetaTitle(info) {{
+  const project = info?.project || {{}};
+  const git = project.git;
+  if (!git) return 'no git checkout detected';
+  const lines = [];
+  if (git.branch) lines.push(`branch: ${{git.branch}}`);
+  if (git.upstream) lines.push(`upstream: ${{git.upstream}}`);
+  if (Number.isFinite(git.ahead) || Number.isFinite(git.behind)) lines.push(`ahead/behind: ${{git.ahead || 0}}/${{git.behind || 0}}`);
+  if (Number.isFinite(git.dirty_count)) lines.push(`dirty files: ${{git.dirty_count}}`);
+  const pr = project.pull_request;
+  if (pr?.number) lines.push(`PR #${{pr.number}}${{pr.state ? ` ${{pr.state}}` : ''}}: ${{pr.title || pr.description || pr.url || ''}}`);
+  for (const issue of project.linear || []) {{
+    lines.push(`${{issue.identifier}}${{issue.state ? ` ${{issue.state}}` : ''}}: ${{issue.title || issue.url || ''}}`);
+  }}
+  return lines.join('\\n');
+}}
+
+function summaryContextHtml(session, info, agent) {{
+  const lines = [];
+  const pane = info?.selected_pane;
+  if (agent) {{
+    lines.push(summaryContextLine('agent', `${{agent.kind || 'agent'}} pid=${{agent.pid || ''}}${{agent.status ? ` status=${{agent.status}}` : ''}}`));
+    if (agent.transcript) lines.push(summaryContextLine('transcript', agent.transcript));
+    if (agent.error && !agent.transcript) lines.push(summaryContextLine('transcript', agent.error));
+  }} else {{
+    lines.push(summaryContextLine('agent', 'not detected'));
+  }}
+  if (pane) lines.push(summaryContextLine('pane', `${{pane.command || 'tmux'}} ${{pane.target || session}} in ${{pane.current_path || ''}}`));
+
+  const project = info?.project || {{}};
+  const git = project.git;
+  if (git) {{
+    lines.push(summaryContextLine('branch', `${{git.branch || 'unknown'}}${{git.upstream ? ` -> ${{git.upstream}}` : ''}}`));
+    if (git.root) lines.push(summaryContextLine('repo', git.root));
+    if (git.head) lines.push(summaryContextLine('head', git.head));
+  }} else {{
+    lines.push(summaryContextLine('repo', 'no git checkout detected'));
+  }}
+  const pr = project.pull_request;
+  if (pr?.number) {{
+    const label = `PR #${{pr.number}}${{pr.state ? ` ${{pr.state}}` : ''}}`;
+    lines.push(summaryContextLine('github', `${{label}} ${{pr.title || pr.description || ''}}`, pr.url, label));
+  }}
+  for (const issue of project.linear || []) {{
+    const label = `${{issue.identifier}}${{issue.state ? ` ${{issue.state}}` : ''}}`;
+    lines.push(summaryContextLine('linear', `${{label}} ${{issue.title || ''}}`, issue.url, issue.identifier));
+  }}
+  return lines.join('');
+}}
+
+function summaryContextLine(label, text, url = '', linkLabel = '') {{
+  const value = url && linkLabel
+    ? `${{linkHtml(url, linkLabel, text)}} ${{esc(text.replace(linkLabel, '').trim())}}`
+    : esc(text);
+  return `<div class="summary-context-line"><span class="summary-context-label">${{esc(label)}}:</span> ${{value}}</div>`;
 }}
 
 async function ensureSession(session) {{
@@ -2530,6 +3621,7 @@ function movePanelsToPool() {{
   for (const session of sessions) {{
     const panel = getOrCreatePanel(session);
     panel.classList.remove('expanded');
+    panel.classList.remove('active-window');
     panel.dataset.slot = '';
     panelPool.appendChild(panel);
   }}
@@ -2596,8 +3688,8 @@ function createPanel(session) {{
           <button class="traffic-light zoom" data-expand="${{esc(session)}}" title="expand" aria-label="Expand ${{esc(sessionLabel(session))}}"></button>
         </div>
         <div class="panel-copy">
-          <div class="panel-title">${{esc(sessionLabel(session))}}</div>
-          <div id="meta-${{session}}" class="meta">finding transcript...</div>
+          <div id="panel-tab-${{session}}" class="panel-session-label">${{sessionLabelHtml(session, transcriptMeta.sessions?.[session], sessionAgentKind(session))}}</div>
+          <div id="meta-${{session}}" class="meta">finding branch...</div>
         </div>
       </div>
       <div class="tabs" role="tablist">
@@ -2621,6 +3713,7 @@ function createPanel(session) {{
       <div id="summary-pane-${{session}}" class="tab-pane">
         <div class="summary">
           <div class="transcript-head">AI summary</div>
+          <div id="summary-context-${{session}}" class="summary-context">loading session context...</div>
           <pre id="summary-${{session}}" class="summary-preview">click AI summary to generate a Codex summary of the last hour</pre>
         </div>
       </div>`;
@@ -2665,6 +3758,8 @@ function bindPanelControls(panel, session) {{
   }});
   panel.querySelector('[data-context]')?.addEventListener('click', () => showContext(session));
   panel.querySelector('[data-auto-session]')?.addEventListener('click', () => toggleAutoApprove(session));
+  panel.querySelector('.meta')?.addEventListener('click', event => event.stopPropagation());
+  panel.querySelector('.meta')?.addEventListener('dragstart', event => event.stopPropagation());
   panel.querySelectorAll('[data-quick-session]').forEach(button => {{
     button.addEventListener('click', () => quickSwitchSession(session, button.dataset.quickSession));
   }});
@@ -2672,6 +3767,7 @@ function bindPanelControls(panel, session) {{
 
 function updatePanelSlot(panel, session, slot) {{
   panel.dataset.slot = slot;
+  panel.classList.toggle('active-window', activeSessions.includes(session));
   const head = panel.querySelector('.panel-head');
   if (head) head.dataset.dragSlot = slot;
 }}
@@ -2855,12 +3951,14 @@ function updateTypingIndicator(session) {{
   const item = terminals.get(session);
   const container = item?.container || document.getElementById(`term-${{session}}`);
   const pane = document.getElementById(`terminal-pane-${{session}}`);
+  const panel = document.getElementById(`panel-${{session}}`);
   const ready = Boolean(
     item?.socket?.readyState === WebSocket.OPEN
     && focusedTerminal === session
     && pane?.classList.contains('active')
   );
   container?.classList.toggle('typing-ready', ready);
+  panel?.classList.toggle('typing-ready-window', ready);
 }}
 
 function updateStatus() {{
@@ -2934,14 +4032,16 @@ function renderAutoApproveButtons() {{
 
 function renderAutoApproveButton(session, payload) {{
   const button = document.querySelector(`[data-auto-session="${{session}}"]`);
-  if (!button) return;
   const enabled = payload?.enabled === true;
-  button.classList.toggle('active', enabled);
-  button.textContent = enabled ? 'AUTO' : 'AUTO';
-  const action = payload?.last_action ? `; ${{payload.last_action}}` : '';
-  button.title = enabled
-    ? `AUTO on for ${{sessionLabel(session)}}${{action}}`
-    : `AUTO off for ${{sessionLabel(session)}}`;
+  if (button) {{
+    button.classList.toggle('active', enabled);
+    button.textContent = enabled ? 'AUTO' : 'AUTO';
+    const action = payload?.last_action ? `; ${{payload.last_action}}` : '';
+    button.title = enabled
+      ? `AUTO on for ${{sessionLabel(session)}}${{action}}`
+      : `AUTO off for ${{sessionLabel(session)}}`;
+  }}
+  updatePanelHeader(session, transcriptMeta.sessions?.[session]);
 }}
 
 function startSummaryStream(session) {{
@@ -3011,17 +4111,18 @@ async function refreshTranscripts() {{
       const preview = document.getElementById(`transcript-${{session}}`);
       const info = transcriptMeta.sessions?.[session];
       const agent = info?.agents?.find(item => item.transcript) || info?.agents?.[0];
+      updatePanelHeader(session, info);
+      if (meta) {{
+        meta.innerHTML = projectMetaHtml(info);
+        meta.title = projectMetaTitle(info);
+      }}
+      renderSummaryContext(session, info, agent);
       if (agent?.transcript) {{
-        const line = `${{agent.kind}} pid=${{agent.pid}} ${{agent.transcript}}`;
-        meta.textContent = line;
-        meta.title = line;
         preview.textContent = `path: ${{agent.transcript}}\\nsession_id: ${{agent.session_id || ''}}\\nstatus: ${{agent.status || ''}}\\n\\nloading recent transcript context...`;
         refreshTranscriptPreview(session, preview, {{preserveScroll: false}});
       }} else if (agent?.error) {{
-        meta.innerHTML = `<span class="err">${{esc(agent.error)}}</span>`;
         preview.textContent = agent.error;
       }} else {{
-        meta.innerHTML = '<span class="err">no agent transcript found</span>';
         preview.textContent = 'no agent transcript found';
       }}
     }}
@@ -3033,6 +4134,22 @@ async function refreshTranscripts() {{
       if (preview) preview.textContent = `transcript lookup failed: ${{error}}`;
     }}
   }}
+}}
+
+function updatePanelHeader(session, info) {{
+  const tab = document.getElementById(`panel-tab-${{session}}`);
+  if (!tab) return;
+  const agentKind = sessionAgentKind(session);
+  const auto = autoApproveStates.get(session)?.enabled === true;
+  tab.className = `panel-session-label ${{auto ? 'auto' : ''}}`;
+  tab.innerHTML = sessionLabelHtml(session, info, agentKind);
+  tab.title = projectMetaTitle(info);
+}}
+
+function renderSummaryContext(session, info, agent) {{
+  const node = document.getElementById(`summary-context-${{session}}`);
+  if (!node) return;
+  node.innerHTML = summaryContextHtml(session, info, agent);
 }}
 
 async function refreshTranscriptPreview(session, preview, options = {{}}) {{
@@ -3144,6 +4261,8 @@ function normalizeRole(role) {{
 }}
 
 function refreshAll() {{
+  closeOpenSessionPopover({{renderDeferred: false}});
+  sessionButtonsRenderDeferred = false;
   refreshTranscripts();
   refreshAutoStatuses();
 }}
@@ -3157,6 +4276,7 @@ async function boot() {{
   refreshTranscripts();
   renderAutoApproveButtons();
   setInterval(refreshAutoStatuses, 3000);
+  setInterval(refreshTranscripts, metadataRefreshMs);
 }}
 
 function refreshVisibleTranscripts() {{
