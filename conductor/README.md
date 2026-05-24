@@ -38,8 +38,8 @@ Conductor serves xterm.js from a local editor install when available. It checks 
 ## Webterm features
 
 - The page title is `Conductor - AI webterm`.
-- By default, Conductor shows the existing tmux sessions, capped at nine visible session tabs. Tabs are numbered by display order, so tab `1` is the first tmux session, tab `2` is the second, and so on.
-- The `+` tab creates the next numbered tmux session, such as `7` when six sessions already exist. Conductor does not create default `conductorN` sessions.
+- By default, Conductor shows the existing tmux sessions, capped at ten visible session tabs. Tabs are numbered by display order from `0` through `9`, so tab `0` is the first tmux session, tab `1` is the second, and so on.
+- The `+` tab creates the next numbered tmux session, such as `6` when six sessions already exist. Conductor does not create default `conductorN` sessions.
 - The visible workspace has left and right sides. Each side can show one full-height pane or two stacked panes, for up to four visible panes total.
 - Session panels are created once at page boot. Hidden sessions live in an off-screen panel pool instead of being destroyed, so drag/drop and quick switching do not restart unchanged terminals.
 - The layout is stored in browser `localStorage` under `conductor.layoutSlots.v1`, so it survives browser reloads and Conductor server restarts for the same browser/profile/origin.
@@ -80,7 +80,7 @@ AUTO uses `auto_approve_tmux.py` workers behind `/api/auto-approve`. The browser
 - `GET /api/summary-stream?session=dynamo1&lookback=3600` streams a Codex-generated summary with Server-Sent Events.
 - `GET /api/auto-approve` returns AUTO status for all sessions.
 - `GET /api/auto-approve?session=dynamo1` returns AUTO status for one session.
-- `POST /api/create-session` creates the next numbered tmux session, capped at nine visible sessions.
+- `POST /api/create-session` creates the next numbered tmux session, capped at ten visible sessions.
 - `POST /api/ensure-session?session=dynamo1` checks that a tmux session still exists.
 - `POST /api/auto-approve?session=dynamo1&enabled=1` enables or disables AUTO for a session.
 - `POST /api/tmux-next?session=dynamo1` moves the session to the next tmux window.

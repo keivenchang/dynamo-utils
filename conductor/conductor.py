@@ -54,7 +54,7 @@ DEFAULT_COLS = 120
 DEFAULT_ROWS = 36
 MAX_TRANSCRIPT_TAIL_LINES = 5000
 MAX_COMPACT_TRANSCRIPT_ITEMS = 200
-MAX_CONDUCTOR_SESSION_TABS = 9
+MAX_CONDUCTOR_SESSION_TABS = 10
 SUMMARY_LOOKBACK_SECONDS = 3600
 SUMMARY_MAX_PROMPT_CHARS = 100_000
 SUMMARY_CODEX_TIMEOUT_SECONDS = 600
@@ -105,6 +105,12 @@ AUTH_COOKIE_VALUE = hmac.new(
 XTERM_ASSET_ROOTS = [
     *(Path(item).expanduser() for item in os.environ.get("CONDUCTOR_XTERM_ROOTS", "").split(os.pathsep) if item),
     Path(__file__).resolve().parent / "static" / "xterm",
+    Path.cwd() / "node_modules" / "@xterm" / "xterm",
+    Path(__file__).resolve().parents[1] / "node_modules" / "@xterm" / "xterm",
+    Path("/Applications") / "Cursor.app" / "Contents" / "Resources" / "app" / "node_modules" / "@xterm" / "xterm",
+    Path("/Applications") / "Visual Studio Code.app" / "Contents" / "Resources" / "app" / "node_modules" / "@xterm" / "xterm",
+    Path("/Applications") / "Visual Studio Code - Insiders.app" / "Contents" / "Resources" / "app" / "node_modules" / "@xterm" / "xterm",
+    Path("/Applications") / "Windsurf.app" / "Contents" / "Resources" / "app" / "node_modules" / "@xterm" / "xterm",
 ]
 
 
@@ -1704,7 +1710,7 @@ class TmuxWebtermApp:
                 "sessions": self.sessions,
             }, HTTPStatus.CONFLICT
         existing = set(self.sessions)
-        index = len(self.sessions) + 1
+        index = len(self.sessions)
         while str(index) in existing:
             index += 1
         session = str(index)
@@ -3545,7 +3551,7 @@ function resolveLayoutItem(value) {{
   const text = String(value || '');
   if (sessions.includes(text)) return text;
   const ordinal = Number(text);
-  if (Number.isInteger(ordinal) && ordinal > 0) return visibleSessions[ordinal - 1] || null;
+  if (Number.isInteger(ordinal) && ordinal >= 0) return visibleSessions[ordinal] || null;
   return text;
 }}
 
@@ -4065,7 +4071,7 @@ function sessionNumber(session) {{
 
 function sessionLabel(session) {{
   const index = visibleSessions.indexOf(session);
-  if (index >= 0) return String(index + 1);
+  if (index >= 0) return String(index);
   return String(session);
 }}
 
