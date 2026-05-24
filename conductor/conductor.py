@@ -49,12 +49,12 @@ from urllib.parse import urlencode
 from urllib.parse import urlparse
 
 
-DEFAULT_CONDUCTOR_SESSIONS = tuple(f"conductor{index}" for index in range(1, 7))
-DEFAULT_SESSIONS = DEFAULT_CONDUCTOR_SESSIONS
+DEFAULT_SESSIONS: tuple[str, ...] = ()
 DEFAULT_COLS = 120
 DEFAULT_ROWS = 36
 MAX_TRANSCRIPT_TAIL_LINES = 5000
 MAX_COMPACT_TRANSCRIPT_ITEMS = 200
+MAX_CONDUCTOR_SESSION_TABS = 9
 SUMMARY_LOOKBACK_SECONDS = 3600
 SUMMARY_MAX_PROMPT_CHARS = 100_000
 SUMMARY_CODEX_TIMEOUT_SECONDS = 600
@@ -93,8 +93,8 @@ def config_string(config: dict[str, Any], key: str, default: str) -> str:
 
 
 AUTH_CONFIG = read_config_object(AUTH_CONFIG_PATH)
-AUTH_USERNAME = os.environ.get("CONDUCTOR_AUTH_USER") or config_string(AUTH_CONFIG, "user", "dynamo")
-AUTH_PASSWORD = os.environ.get("CONDUCTOR_AUTH_PASSWORD") or config_string(AUTH_CONFIG, "password", "conductor")
+AUTH_USERNAME = os.environ.get("CONDUCTOR_AUTH_USER") or config_string(AUTH_CONFIG, "user", "conductor")
+AUTH_PASSWORD = os.environ.get("CONDUCTOR_AUTH_PASSWORD") or config_string(AUTH_CONFIG, "password", "password")
 AUTH_COOKIE_NAME = "conductor_auth"
 AUTH_COOKIE_SECRET = os.urandom(32)
 AUTH_COOKIE_VALUE = hmac.new(
@@ -103,14 +103,8 @@ AUTH_COOKIE_VALUE = hmac.new(
     hashlib.sha256,
 ).hexdigest()
 XTERM_ASSET_ROOTS = [
-    Path.home()
-    / ".cursor-server"
-    / "bin"
-    / "linux-x64"
-    / "d5b2fc092e16007956c9e5047f76097b9e626ca0"
-    / "node_modules"
-    / "@xterm"
-    / "xterm",
+    *(Path(item).expanduser() for item in os.environ.get("CONDUCTOR_XTERM_ROOTS", "").split(os.pathsep) if item),
+    Path(__file__).resolve().parent / "static" / "xterm",
 ]
 
 
@@ -207,7 +201,7 @@ def session_sort_key(session: str) -> tuple[int, str, int]:
 
 def default_session_names() -> list[str]:
     tmux_sessions, _ = list_tmux_session_names()
-    return unique_session_names([*DEFAULT_SESSIONS, *tmux_sessions])
+    return unique_session_names(tmux_sessions)
 
 
 def unique_session_names(values: list[str] | tuple[str, ...]) -> list[str]:
@@ -255,9 +249,13 @@ def xterm_asset_path(asset: str) -> Path | None:
         path = root / relpath
         if path.exists():
             return path
-    for path in Path.home().glob(f".cursor-server/bin/linux-x64/*/node_modules/@xterm/xterm/{relpath}"):
-        if path.exists():
-            return path
+    for server_dir in (".cursor-server", ".vscode-server", ".vscode-server-insiders", ".windsurf-server"):
+        for path in Path.home().glob(f"{server_dir}/bin/*/*/node_modules/@xterm/xterm/{relpath}"):
+            if path.exists():
+                return path
+        for path in Path.home().glob(f"{server_dir}/bin/*/node_modules/@xterm/xterm/{relpath}"):
+            if path.exists():
+                return path
     return None
 
 
@@ -1455,6 +1453,13 @@ class TmuxWebtermApp:
         self.auto_workers: dict[str, AutoApproveWorker] = {}
         self.metadata_cache = MetadataCache()
 
+    def refresh_sessions(self) -> list[str]:
+        sessions, error = list_tmux_session_names()
+        if error is None:
+            self.sessions = sessions
+            return []
+        return [error]
+
     def persisted_auto_sessions(self) -> list[str]:
         enabled = read_conductor_state().get("auto_approve_enabled", [])
         if not isinstance(enabled, list):
@@ -1474,11 +1479,13 @@ class TmuxWebtermApp:
         return restored
 
     def transcripts_payload(self) -> dict[str, Any]:
+        refresh_errors = self.refresh_sessions()
         sessions, errors = discover_sessions(self.sessions)
         return {
             "server_time": time.strftime("%Y-%m-%d %H:%M:%S %Z"),
+            "session_order": self.sessions,
             "sessions": {name: session_to_json(info, self.metadata_cache) for name, info in sessions.items()},
-            "errors": errors,
+            "errors": [*refresh_errors, *errors],
         }
 
     def tmux_snapshot(self, session: str, lines: int) -> tuple[dict[str, Any], HTTPStatus]:
@@ -1678,6 +1685,7 @@ class TmuxWebtermApp:
         tmux(["send-keys", "-t", session, "-X", "-N", bounded_lines, command], timeout=1.0)
 
     def ensure_session(self, session: str) -> tuple[dict[str, Any], HTTPStatus]:
+        self.refresh_sessions()
         if session not in self.sessions:
             return {"error": f"unknown session: {session}"}, HTTPStatus.NOT_FOUND
 
@@ -1685,9 +1693,21 @@ class TmuxWebtermApp:
         if exists.returncode == 0:
             return {"session": session, "created": False, "ok": True}, HTTPStatus.OK
 
-        if not re.fullmatch(r"conductor\d+", session):
-            return {"error": f"session does not exist and cannot be auto-created: {session}"}, HTTPStatus.NOT_FOUND
+        self.sessions = [item for item in self.sessions if item != session]
+        return {"error": f"session no longer exists: {session}"}, HTTPStatus.NOT_FOUND
 
+    def create_next_session(self) -> tuple[dict[str, Any], HTTPStatus]:
+        self.refresh_sessions()
+        if len(self.sessions) >= MAX_CONDUCTOR_SESSION_TABS:
+            return {
+                "error": f"maximum session tabs reached: {MAX_CONDUCTOR_SESSION_TABS}",
+                "sessions": self.sessions,
+            }, HTTPStatus.CONFLICT
+        existing = set(self.sessions)
+        index = len(self.sessions) + 1
+        while str(index) in existing:
+            index += 1
+        session = str(index)
         cwd = session_workdir(session)
         result = tmux(
             [
@@ -1704,8 +1724,10 @@ class TmuxWebtermApp:
         if result.returncode != 0:
             error = (result.stderr or result.stdout or "tmux new-session failed").strip()
             return {"session": session, "created": False, "error": error}, HTTPStatus.INTERNAL_SERVER_ERROR
+        self.refresh_sessions()
         return {
             "session": session,
+            "sessions": self.sessions,
             "created": True,
             "cwd": str(cwd),
             "command": "claude --dangerously-skip-permissions",
@@ -2331,8 +2353,8 @@ def html_page(sessions: list[str]) -> str:
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Conductor - AI webterm</title>
-<link rel="stylesheet" href="/static/xterm.css">
-<script src="/static/xterm.js"></script>
+<link rel="stylesheet" href="/static/xterm.css" onerror="this.onerror=null;this.href='https://cdn.jsdelivr.net/npm/@xterm/xterm/css/xterm.css';">
+<script src="/static/xterm.js" onerror="this.onerror=null;this.src='https://cdn.jsdelivr.net/npm/@xterm/xterm/lib/xterm.js';"></script>
 <style>
 :root {{
   color-scheme: dark;
@@ -2383,7 +2405,12 @@ body {{
   color: var(--muted);
   font-size: 12px;
 }}
+.brand {{
+  flex: 0 0 auto;
+  min-width: 230px;
+}}
 .actions {{
+  flex: 0 0 auto;
   display: flex;
   align-items: center;
   gap: 8px;
@@ -2393,10 +2420,14 @@ body {{
   min-width: 0;
   display: flex;
   align-items: flex-end;
-  justify-content: center;
+  justify-content: flex-start;
   flex-wrap: nowrap;
   gap: 4px;
   height: 100%;
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding-bottom: 2px;
+  scrollbar-width: thin;
 }}
 .session-buttons.drag-over {{
   outline: 1px dashed #f5c542;
@@ -2404,9 +2435,14 @@ body {{
 }}
 .session-button-wrap {{
   position: relative;
-  flex: 1 1 96px;
+  flex: 0 0 128px;
   min-width: 76px;
   max-width: 134px;
+}}
+.session-button-wrap.add-session {{
+  flex-basis: 44px;
+  min-width: 44px;
+  max-width: 44px;
 }}
 .session-button-wrap.popover-open::after,
 .session-button-wrap:focus-within::after {{
@@ -2439,6 +2475,15 @@ body {{
 .session-button:hover {{
   background: #1a2230;
   border-color: #657084;
+}}
+.session-button.add-session {{
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  grid-template-columns: none;
+  color: #dfe6ef;
+  font-size: 18px;
+  font-weight: 700;
 }}
 .session-button-number {{
   width: 18px;
@@ -3072,6 +3117,11 @@ button:disabled:hover {{ border-color: var(--line); }}
 .terminal .xterm {{
   height: 100%;
 }}
+.terminal .xterm-screen,
+.terminal .xterm-screen canvas,
+.terminal .xterm-accessibility-tree {{
+  box-sizing: content-box;
+}}
 .terminal .xterm-viewport {{
   overflow-y: auto;
 }}
@@ -3331,7 +3381,7 @@ button:disabled:hover {{ border-color: var(--line); }}
 </head>
 <body>
 <header class="topbar">
-  <div>
+  <div class="brand">
     <div class="title">Conductor - AI webterm</div>
     <div class="sub">Interactive tmux clients for local sessions. Default binding is local-only.</div>
   </div>
@@ -3351,7 +3401,7 @@ button:disabled:hover {{ border-color: var(--line); }}
   <pre id="modalBody"></pre>
 </section>
 <script>
-const sessions = {sessions_json};
+let sessions = {sessions_json};
 const homePath = {home_path_json};
 const grid = document.getElementById('grid');
 const panelPool = document.getElementById('panelPool');
@@ -3370,10 +3420,12 @@ const transcriptPreviewMessages = 200;
 const remoteResizeDelayMs = 220;
 const metadataRefreshMs = 15000;
 const terminalFitBottomReservePx = 6;
+const maxSessionTabs = {MAX_CONDUCTOR_SESSION_TABS};
 const layoutStorageKey = 'conductor.layoutSlots.v1';
 const layoutSlotKeys = ['leftTop', 'rightTop', 'leftBottom', 'rightBottom'];
 const infoItemId = '__info__';
-const layoutItems = [infoItemId, ...sessions];
+let visibleSessions = sessions.slice(0, maxSessionTabs);
+let layoutItems = [infoItemId, ...visibleSessions];
 let layoutSlots = initialLayoutSlots();
 let activeSessions = sessionsFromLayout();
 let transcriptMeta = {{}};
@@ -3421,7 +3473,7 @@ function normalizeLayoutSlots(value) {{
   const seen = new Set();
   if (!value || typeof value !== 'object') return next;
   for (const slot of layoutSlotKeys) {{
-    const item = value[slot];
+    const item = resolveLayoutItem(value[slot]);
     if (isLayoutItem(item) && !seen.has(item)) {{
       next[slot] = item;
       seen.add(item);
@@ -3450,11 +3502,7 @@ function initialLayoutSlots() {{
   for (const part of raw.split(',')) {{
     const value = part.trim();
     if (!value) continue;
-    const item = value === 'info'
-      ? infoItemId
-      : value.startsWith('conductor') || value.startsWith('dynamo')
-        ? value
-        : `conductor${{value}}`;
+    const item = resolveLayoutItem(value);
     if (isLayoutItem(item) && !selected.includes(item)) selected.push(item);
     if (selected.length >= layoutSlotKeys.length) break;
   }}
@@ -3492,14 +3540,40 @@ function isLayoutItem(item) {{
   return layoutItems.includes(item);
 }}
 
+function resolveLayoutItem(value) {{
+  if (value === 'info') return infoItemId;
+  const text = String(value || '');
+  if (sessions.includes(text)) return text;
+  const ordinal = Number(text);
+  if (Number.isInteger(ordinal) && ordinal > 0) return visibleSessions[ordinal - 1] || null;
+  return text;
+}}
+
 function itemLabel(item) {{
   return isInfoItem(item) ? 'Branches' : sessionLabel(item);
 }}
 
 function itemParam(item) {{
   if (isInfoItem(item)) return 'info';
-  const match = String(item).match(/^conductor(\\d+)$/);
-  return match ? match[1] : String(item);
+  return String(item);
+}}
+
+function updateSessionList(nextSessions) {{
+  if (!Array.isArray(nextSessions)) return false;
+  const next = [];
+  for (const session of nextSessions) {{
+    if (typeof session === 'string' && session && !next.includes(session)) next.push(session);
+  }}
+  const changed = next.length !== sessions.length || next.some((session, index) => session !== sessions[index]);
+  if (!changed) return false;
+  sessions = next;
+  visibleSessions = sessions.slice(0, maxSessionTabs);
+  layoutItems = [infoItemId, ...visibleSessions];
+  layoutSlots = normalizeLayoutSlots(layoutSlots);
+  activeSessions = sessionsFromLayout();
+  saveLayoutSlots();
+  updateActiveSessionParam();
+  return true;
 }}
 
 function saveLayoutSlots() {{
@@ -3580,7 +3654,7 @@ function renderSessionButtons() {{
     const agentText = agentKind ? `; ${{agentName(agentKind)}}` : '';
     button.title = isInfo
       ? `Branches${{active ? ' is shown; drag to tray to remove' : '; drag into left or right'}}`
-      : `${{sessionLabel(session)}} ${{projectDirName(session, info)}}${{active ? ' is shown; drag to tray to remove' : '; drag into left or right'}}${{agentText}}${{autoText}}`;
+      : `${{sessionLabel(session)}}: ${{session}} ${{projectDirName(session, info)}}${{active ? ' is shown; drag to tray to remove' : '; drag into left or right'}}${{agentText}}${{autoText}}`;
     button.addEventListener('click', () => selectSession(session));
     button.addEventListener('dragstart', event => startSessionDrag(event, session, null));
     button.addEventListener('dragend', endSessionDrag);
@@ -3592,6 +3666,18 @@ function renderSessionButtons() {{
       wrapper.addEventListener('pointerenter', () => closeOpenSessionPopover({{renderDeferred: false}}));
     }}
     sessionButtons.appendChild(wrapper);
+  }}
+  if (visibleSessions.length < maxSessionTabs) {{
+    const addWrapper = document.createElement('div');
+    addWrapper.className = 'session-button-wrap add-session';
+    const addButton = document.createElement('button');
+    addButton.className = 'session-button add-session';
+    addButton.type = 'button';
+    addButton.textContent = '+';
+    addButton.title = 'create next numbered tmux session';
+    addButton.addEventListener('click', createNextSession);
+    addWrapper.appendChild(addButton);
+    sessionButtons.appendChild(addWrapper);
   }}
 }}
 
@@ -3978,8 +4064,9 @@ function sessionNumber(session) {{
 }}
 
 function sessionLabel(session) {{
-  const match = String(session).match(/^conductor(\\d+)$/);
-  return match ? match[1] : String(session);
+  const index = visibleSessions.indexOf(session);
+  if (index >= 0) return String(index + 1);
+  return String(session);
 }}
 
 function shortText(value, limit = 96) {{
@@ -4187,6 +4274,29 @@ async function ensureSession(session) {{
   }} catch (error) {{
     statusEl.innerHTML = `<span class="err">session check failed: ${{esc(error)}}</span>`;
     return false;
+  }}
+}}
+
+async function createNextSession() {{
+  statusEl.textContent = 'creating session...';
+  try {{
+    const response = await fetch('/api/create-session', {{method: 'POST'}});
+    const payload = await response.json();
+    if (!response.ok) {{
+      statusEl.innerHTML = `<span class="err">${{esc(payload.error || 'session create failed')}}</span>`;
+      return;
+    }}
+    const previousActive = activeSessions.slice();
+    updateSessionList(payload.sessions || []);
+    renderSessionButtons();
+    renderPanels(previousActive);
+    await moveSessionToSlot(payload.session, firstEmptySlot(), null);
+    await ensureTerminalRunning(payload.session);
+    refreshTranscripts();
+    renderAutoApproveButtons();
+    statusEl.innerHTML = `<span class="ok">created ${{esc(sessionLabel(payload.session))}} (${{esc(payload.session)}})</span>`;
+  }} catch (error) {{
+    statusEl.innerHTML = `<span class="err">session create failed: ${{esc(error)}}</span>`;
   }}
 }}
 
@@ -4690,7 +4800,7 @@ function infoBranchRows() {{
 }}
 
 function quickSwitchButtonsHtml(currentSession) {{
-  const buttons = sessions.map(session => {{
+  const buttons = visibleSessions.map(session => {{
     const active = session === currentSession ? ' active' : '';
     return `<button class="quick-switch-button${{active}}" data-quick-session="${{esc(session)}}" title="show ${{esc(sessionLabel(session))}} here">${{sessionLabel(session)}}</button>`;
   }}).join('');
@@ -5056,6 +5166,10 @@ function startTerminal(session) {{
     }}
   }});
   term.open(container);
+  const openedSize = estimateTerminalSize(container, term);
+  if (term.cols !== openedSize.cols || term.rows !== openedSize.rows) {{
+    term.resize(openedSize.cols, openedSize.rows);
+  }}
   const socket = new WebSocket(wsUrl(session));
   socket.binaryType = 'arraybuffer';
   const item = {{term, socket, container, manualClose: false, reconnectAttempt, reconnectTimer: null, resizeTimer: null, scrollTimer: null, pendingScrollLines: 0}};
@@ -5274,6 +5388,9 @@ async function refreshTranscripts() {{
   try {{
     const response = await fetch('/api/transcripts');
     transcriptMeta = await response.json();
+    const previousActive = activeSessions.slice();
+    const sessionsChanged = updateSessionList(transcriptMeta.session_order || []);
+    if (sessionsChanged) renderPanels(previousActive);
     renderSessionButtons();
     renderInfoPanel();
     for (const session of activeSessions.filter(isTmuxSession)) {{
@@ -5442,7 +5559,7 @@ async function boot() {{
   await loadAutoStatuses();
   renderSessionButtons();
   renderPanels();
-  await Promise.all(sessions.map(session => ensureTerminalRunning(session)));
+  await Promise.all(visibleSessions.map(session => ensureTerminalRunning(session)));
   refreshTranscripts();
   renderAutoApproveButtons();
   setInterval(refreshAutoStatuses, 3000);
@@ -5535,17 +5652,17 @@ class Handler(BaseHTTPRequestHandler):
         return False
 
     def do_GET(self) -> None:
-        if not self.require_auth():
-            return
         parsed = urlparse(self.path)
-        if parsed.path == "/":
-            self.write_html(html_page(self.server.app.sessions))
-            return
         if parsed.path == "/static/xterm.js":
             self.write_static_asset("xterm.js", "application/javascript; charset=utf-8")
             return
         if parsed.path == "/static/xterm.css":
             self.write_static_asset("xterm.css", "text/css; charset=utf-8")
+            return
+        if not self.require_auth():
+            return
+        if parsed.path == "/":
+            self.write_html(html_page(self.server.app.sessions))
             return
         if parsed.path == "/api/transcripts":
             self.write_json(self.server.app.transcripts_payload())
@@ -5611,6 +5728,10 @@ class Handler(BaseHTTPRequestHandler):
             payload, status = self.server.app.ensure_session(session)
             self.write_json(payload, status=status)
             return
+        if parsed.path == "/api/create-session":
+            payload, status = self.server.app.create_next_session()
+            self.write_json(payload, status=status)
+            return
         if parsed.path == "/api/upload":
             qs = parse_qs(parsed.query)
             session = qs.get("session", [""])[0]
@@ -5655,9 +5776,15 @@ class Handler(BaseHTTPRequestHandler):
         return self.server.app.upload_files(session, files)
 
     def do_HEAD(self) -> None:
+        parsed = urlparse(self.path)
+        if parsed.path == "/static/xterm.js":
+            self.write_static_head("xterm.js", "application/javascript; charset=utf-8")
+            return
+        if parsed.path == "/static/xterm.css":
+            self.write_static_head("xterm.css", "text/css; charset=utf-8")
+            return
         if not self.require_auth():
             return
-        parsed = urlparse(self.path)
         if parsed.path == "/":
             data = html_page(self.server.app.sessions).encode("utf-8")
             self.send_response(HTTPStatus.OK)
@@ -5666,12 +5793,6 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Cache-Control", "no-store")
             self.send_auth_cookie_if_needed()
             self.end_headers()
-            return
-        if parsed.path == "/static/xterm.js":
-            self.write_static_head("xterm.js", "application/javascript; charset=utf-8")
-            return
-        if parsed.path == "/static/xterm.css":
-            self.write_static_head("xterm.css", "text/css; charset=utf-8")
             return
         self.send_response(HTTPStatus.NOT_FOUND)
         self.end_headers()
@@ -6097,7 +6218,7 @@ def parse_args() -> argparse.Namespace:
         "--sessions",
         nargs="*",
         default=None,
-        help='tmux sessions, comma-separated or separate args. Default: all tmux sessions plus "conductor1,...,conductor6"',
+        help="tmux sessions, comma-separated or separate args. Default: current tmux sessions",
     )
     parser.add_argument("--print-transcripts", action="store_true")
     return parser.parse_args()
@@ -6122,8 +6243,6 @@ def print_transcripts(app: TmuxWebtermApp) -> int:
 def main() -> int:
     args = parse_args()
     sessions = unique_session_names(split_csv(args.sessions)) if args.sessions is not None else default_session_names()
-    if not sessions:
-        sessions = list(DEFAULT_SESSIONS)
     app = TmuxWebtermApp(sessions)
 
     if args.print_transcripts:
@@ -6131,7 +6250,8 @@ def main() -> int:
 
     server = TmuxWebtermHTTPServer((args.host, args.port), app)
     url_host = "localhost" if args.host in {"0.0.0.0", "::"} else args.host
-    print(f"Serving Conductor - AI webterm on http://{url_host}:{args.port}/ for {', '.join(sessions)}")
+    session_text = ", ".join(sessions) if sessions else "no tmux sessions"
+    print(f"Serving Conductor - AI webterm on http://{url_host}:{args.port}/ for {session_text}")
     restored_auto = app.restore_auto_approve()
     if restored_auto:
         print(f"Restored AUTO for {', '.join(restored_auto)}")
