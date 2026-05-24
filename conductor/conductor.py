@@ -23,6 +23,7 @@ import os
 import pty
 import re
 import select
+import shutil
 import signal
 import struct
 import subprocess
@@ -54,7 +55,7 @@ DEFAULT_COLS = 120
 DEFAULT_ROWS = 36
 MAX_TRANSCRIPT_TAIL_LINES = 5000
 MAX_COMPACT_TRANSCRIPT_ITEMS = 200
-MAX_CONDUCTOR_SESSION_TABS = 10
+MAX_CONDUCTOR_SESSION_TABS = 9
 SUMMARY_LOOKBACK_SECONDS = 3600
 SUMMARY_MAX_PROMPT_CHARS = 100_000
 SUMMARY_CODEX_TIMEOUT_SECONDS = 600
@@ -1702,15 +1703,24 @@ class TmuxWebtermApp:
         self.sessions = [item for item in self.sessions if item != session]
         return {"error": f"session no longer exists: {session}"}, HTTPStatus.NOT_FOUND
 
-    def create_next_session(self) -> tuple[dict[str, Any], HTTPStatus]:
+    def create_next_session(self, agent: str) -> tuple[dict[str, Any], HTTPStatus]:
         self.refresh_sessions()
+        agent = agent if agent in AGENT_COMMANDS else "claude"
+        available_agents = available_agent_commands()
+        if agent not in available_agents:
+            return {
+                "error": f"{agent} is not available on this server PATH",
+                "agent": agent,
+                "available_agents": available_agents,
+                "sessions": self.sessions,
+            }, HTTPStatus.NOT_FOUND
         if len(self.sessions) >= MAX_CONDUCTOR_SESSION_TABS:
             return {
                 "error": f"maximum session tabs reached: {MAX_CONDUCTOR_SESSION_TABS}",
                 "sessions": self.sessions,
             }, HTTPStatus.CONFLICT
         existing = set(self.sessions)
-        index = len(self.sessions)
+        index = len(self.sessions) + 1
         while str(index) in existing:
             index += 1
         session = str(index)
@@ -1723,7 +1733,7 @@ class TmuxWebtermApp:
                 session,
                 "-c",
                 str(cwd),
-                "claude --dangerously-skip-permissions",
+                agent_command(agent),
             ],
             timeout=5.0,
         )
@@ -1734,9 +1744,10 @@ class TmuxWebtermApp:
         return {
             "session": session,
             "sessions": self.sessions,
+            "agent": agent,
             "created": True,
             "cwd": str(cwd),
-            "command": "claude --dangerously-skip-permissions",
+            "command": agent_command(agent),
             "ok": True,
         }, HTTPStatus.OK
 
@@ -1898,6 +1909,16 @@ def session_workdir(session: str) -> Path:
     repo_name = f"dynamo{session_index}" if session_index else session
     repo_path = Path.home() / "dynamo" / repo_name
     return repo_path if repo_path.is_dir() else Path.home()
+
+
+def agent_command(agent: str) -> str:
+    if agent == "codex":
+        return "codex"
+    return "claude --dangerously-skip-permissions"
+
+
+def available_agent_commands() -> list[str]:
+    return [agent for agent in ("claude", "codex") if shutil.which(agent)]
 
 
 def sanitize_upload_filename(filename: str) -> str:
@@ -2352,6 +2373,7 @@ def make_ws_frame(payload: bytes, opcode: int = 2) -> bytes:
 
 def html_page(sessions: list[str]) -> str:
     sessions_json = html.escape(json.dumps(sessions), quote=False)
+    available_agents_json = html.escape(json.dumps(available_agent_commands()), quote=False)
     home_path_json = html.escape(json.dumps(str(Path.home())), quote=False)
     return f"""<!doctype html>
 <html lang="en">
@@ -2446,9 +2468,9 @@ body {{
   max-width: 134px;
 }}
 .session-button-wrap.add-session {{
-  flex-basis: 44px;
-  min-width: 44px;
-  max-width: 44px;
+  flex-basis: 86px;
+  min-width: 76px;
+  max-width: 96px;
 }}
 .session-button-wrap.popover-open::after,
 .session-button-wrap:focus-within::after {{
@@ -2487,9 +2509,17 @@ body {{
   align-items: center;
   justify-content: center;
   grid-template-columns: none;
+  gap: 5px;
   color: #dfe6ef;
-  font-size: 18px;
+  font-size: 12px;
   font-weight: 700;
+}}
+.session-button.add-session .add-plus {{
+  font-size: 18px;
+  line-height: 1;
+}}
+.session-button.add-session .agent-icon {{
+  margin-left: 0;
 }}
 .session-button-number {{
   width: 18px;
@@ -3408,6 +3438,7 @@ button:disabled:hover {{ border-color: var(--line); }}
 </section>
 <script>
 let sessions = {sessions_json};
+const availableAgents = new Set({available_agents_json});
 const homePath = {home_path_json};
 const grid = document.getElementById('grid');
 const panelPool = document.getElementById('panelPool');
@@ -3551,7 +3582,7 @@ function resolveLayoutItem(value) {{
   const text = String(value || '');
   if (sessions.includes(text)) return text;
   const ordinal = Number(text);
-  if (Number.isInteger(ordinal) && ordinal >= 0) return visibleSessions[ordinal] || null;
+  if (Number.isInteger(ordinal) && ordinal > 0) return visibleSessions[ordinal - 1] || null;
   return text;
 }}
 
@@ -3674,17 +3705,23 @@ function renderSessionButtons() {{
     sessionButtons.appendChild(wrapper);
   }}
   if (visibleSessions.length < maxSessionTabs) {{
-    const addWrapper = document.createElement('div');
-    addWrapper.className = 'session-button-wrap add-session';
-    const addButton = document.createElement('button');
-    addButton.className = 'session-button add-session';
-    addButton.type = 'button';
-    addButton.textContent = '+';
-    addButton.title = 'create next numbered tmux session';
-    addButton.addEventListener('click', createNextSession);
-    addWrapper.appendChild(addButton);
-    sessionButtons.appendChild(addWrapper);
+    for (const agent of ['claude', 'codex']) {{
+      if (availableAgents.has(agent)) sessionButtons.appendChild(createAddSessionButton(agent));
+    }}
   }}
+}}
+
+function createAddSessionButton(agent) {{
+  const wrapper = document.createElement('div');
+  wrapper.className = 'session-button-wrap add-session';
+  const button = document.createElement('button');
+  button.className = `session-button add-session ${{agent}}`;
+  button.type = 'button';
+  button.innerHTML = `<span class="add-plus">+</span>${{agentIcon(agent)}}<span>${{esc(agentName(agent))}}</span>`;
+  button.title = `create next numbered tmux session with ${{agentName(agent)}}`;
+  button.addEventListener('click', () => createNextSession(agent));
+  wrapper.appendChild(button);
+  return wrapper;
 }}
 
 function bindSessionPopover(wrapper) {{
@@ -4071,7 +4108,7 @@ function sessionNumber(session) {{
 
 function sessionLabel(session) {{
   const index = visibleSessions.indexOf(session);
-  if (index >= 0) return String(index);
+  if (index >= 0) return String(index + 1);
   return String(session);
 }}
 
@@ -4283,10 +4320,11 @@ async function ensureSession(session) {{
   }}
 }}
 
-async function createNextSession() {{
-  statusEl.textContent = 'creating session...';
+async function createNextSession(agent) {{
+  const agentLabel = agentName(agent) || 'agent';
+  statusEl.textContent = `creating ${{agentLabel}} session...`;
   try {{
-    const response = await fetch('/api/create-session', {{method: 'POST'}});
+    const response = await fetch(`/api/create-session?agent=${{encodeURIComponent(agent)}}`, {{method: 'POST'}});
     const payload = await response.json();
     if (!response.ok) {{
       statusEl.innerHTML = `<span class="err">${{esc(payload.error || 'session create failed')}}</span>`;
@@ -4300,7 +4338,7 @@ async function createNextSession() {{
     await ensureTerminalRunning(payload.session);
     refreshTranscripts();
     renderAutoApproveButtons();
-    statusEl.innerHTML = `<span class="ok">created ${{esc(sessionLabel(payload.session))}} (${{esc(payload.session)}})</span>`;
+    statusEl.innerHTML = `<span class="ok">created ${{esc(sessionLabel(payload.session))}} (${{esc(payload.session)}}) with ${{esc(agentName(payload.agent) || agentLabel)}}</span>`;
   }} catch (error) {{
     statusEl.innerHTML = `<span class="err">session create failed: ${{esc(error)}}</span>`;
   }}
@@ -5735,7 +5773,9 @@ class Handler(BaseHTTPRequestHandler):
             self.write_json(payload, status=status)
             return
         if parsed.path == "/api/create-session":
-            payload, status = self.server.app.create_next_session()
+            qs = parse_qs(parsed.query)
+            agent = qs.get("agent", ["claude"])[0]
+            payload, status = self.server.app.create_next_session(agent)
             self.write_json(payload, status=status)
             return
         if parsed.path == "/api/upload":
