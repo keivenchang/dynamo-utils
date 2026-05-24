@@ -66,7 +66,7 @@ CONFIG_DIR = Path(os.environ.get("CONDUCTOR_CONFIG_DIR", str(Path.home() / ".con
 STATE_PATH = CONFIG_DIR / "state.json"
 AUTH_CONFIG_PATH = CONFIG_DIR / "auth.json"
 WEBSOCKET_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
-AGENT_COMMANDS = {"claude", "codex"}
+AGENT_COMMANDS = {"claude", "codex", "term"}
 AUTO_APPROVE_SCRIPT = Path(__file__).resolve().parents[1] / "auto_approve_tmux.py"
 TERMINAL_QUERY_RESPONSE_RE = re.compile(r"(?:\x1b\[[?>]?[0-9;]*c|\x1bP[>|!][^\x1b]*(?:\x1b\\|\x9c))")
 LINEAR_ID_RE = re.compile(r"(?<![A-Za-z0-9])(?:DIS|DGH|DYN|OPS|INFRA)-\d{1,6}(?![A-Za-z0-9])")
@@ -1914,11 +1914,14 @@ def session_workdir(session: str) -> Path:
 def agent_command(agent: str) -> str:
     if agent == "codex":
         return "codex"
+    if agent == "term":
+        return os.environ.get("SHELL") or "bash"
     return "claude --dangerously-skip-permissions"
 
 
 def available_agent_commands() -> list[str]:
-    return [agent for agent in ("claude", "codex") if shutil.which(agent)]
+    agents = [agent for agent in ("claude", "codex") if shutil.which(agent)]
+    return agents or ["term"]
 
 
 def sanitize_upload_filename(filename: str) -> str:
@@ -2442,6 +2445,39 @@ body {{
   display: flex;
   align-items: center;
   gap: 8px;
+}}
+.latency-meter {{
+  height: 28px;
+  min-width: 92px;
+  display: inline-grid;
+  grid-template-columns: 44px auto;
+  align-items: center;
+  gap: 7px;
+  padding: 3px 7px;
+  color: var(--muted);
+  border: 1px solid #273142;
+  border-radius: 8px;
+  background: #10151d;
+}}
+.latency-meter.good {{ color: var(--good); }}
+.latency-meter.warn {{ color: #f5c542; }}
+.latency-meter.bad {{ color: var(--bad); }}
+.latency-graph {{
+  width: 44px;
+  height: 18px;
+  display: block;
+}}
+.latency-line {{
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}}
+.latency-number {{
+  min-width: 34px;
+  font: 11px/1 ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+  text-align: right;
 }}
 .session-buttons {{
   flex: 1 1 auto;
@@ -3419,10 +3455,15 @@ button:disabled:hover {{ border-color: var(--line); }}
 <header class="topbar">
   <div class="brand">
     <div class="title">Conductor - AI webterm</div>
-    <div class="sub">Interactive tmux clients for local sessions. Default binding is local-only.</div>
   </div>
   <div id="sessionButtons" class="session-buttons" aria-label="Sessions"></div>
   <div class="actions">
+    <div id="latencyMeter" class="latency-meter" title="Browser to Conductor latency">
+      <svg class="latency-graph" viewBox="0 0 44 18" aria-hidden="true">
+        <polyline id="latencyLine" class="latency-line" points=""></polyline>
+      </svg>
+      <span id="latencyNumber" class="latency-number">-- ms</span>
+    </div>
     <button id="refreshMeta">Refresh state</button>
     <span id="status" class="sub">starting</span>
   </div>
@@ -3444,6 +3485,9 @@ const grid = document.getElementById('grid');
 const panelPool = document.getElementById('panelPool');
 const sessionButtons = document.getElementById('sessionButtons');
 const statusEl = document.getElementById('status');
+const latencyMeter = document.getElementById('latencyMeter');
+const latencyLine = document.getElementById('latencyLine');
+const latencyNumber = document.getElementById('latencyNumber');
 const terminals = new Map();
 const panelNodes = new Map();
 const resizeObservers = new Map();
@@ -3456,6 +3500,8 @@ const pasteLockStorageKey = 'conductor.pasteUploadLock.v1';
 const transcriptPreviewMessages = 200;
 const remoteResizeDelayMs = 220;
 const metadataRefreshMs = 15000;
+const latencyRefreshMs = 3000;
+const latencySamplesMax = 24;
 const terminalFitBottomReservePx = 6;
 const maxSessionTabs = {MAX_CONDUCTOR_SESSION_TABS};
 const layoutStorageKey = 'conductor.layoutSlots.v1';
@@ -3474,6 +3520,7 @@ let popoverHideTimer = null;
 let sessionButtonsRenderDeferred = false;
 let clipboardPasteBound = false;
 let pasteUploadInFlight = false;
+let latencySamples = [];
 
 function setFocusedTerminal(session) {{
   focusedTerminal = session;
@@ -3705,7 +3752,7 @@ function renderSessionButtons() {{
     sessionButtons.appendChild(wrapper);
   }}
   if (visibleSessions.length < maxSessionTabs) {{
-    for (const agent of ['claude', 'codex']) {{
+    for (const agent of ['claude', 'codex', 'term']) {{
       if (availableAgents.has(agent)) sessionButtons.appendChild(createAddSessionButton(agent));
     }}
   }}
@@ -4098,7 +4145,7 @@ function sparkIcon() {{
 }}
 
 function agentName(kind) {{
-  return kind === 'codex' ? 'Codex' : kind === 'claude' ? 'Claude' : '';
+  return kind === 'codex' ? 'Codex' : kind === 'claude' ? 'Claude' : kind === 'term' ? 'Term' : '';
 }}
 
 function sessionNumber(session) {{
@@ -5591,6 +5638,52 @@ function normalizeRole(role) {{
   return 'system';
 }}
 
+function renderLatency(latestMs) {{
+  const samples = latencySamples.slice(-latencySamplesMax);
+  if (samples.length === 0) {{
+    latencyLine.setAttribute('points', '');
+  }} else {{
+    const maxMs = Math.max(100, ...samples);
+    const width = 44;
+    const height = 18;
+    const points = samples.map((value, index) => {{
+      const x = samples.length === 1 ? width : (index / (samples.length - 1)) * width;
+      const y = height - 1 - (Math.min(value, maxMs) / maxMs) * (height - 2);
+      return `${{x.toFixed(1)}},${{y.toFixed(1)}}`;
+    }});
+    latencyLine.setAttribute('points', points.join(' '));
+  }}
+
+  latencyMeter.classList.remove('good', 'warn', 'bad');
+  if (latestMs == null) {{
+    latencyMeter.classList.add('bad');
+    latencyNumber.textContent = '-- ms';
+    return;
+  }}
+  latencyNumber.textContent = `${{latestMs}} ms`;
+  if (latestMs <= 80) {{
+    latencyMeter.classList.add('good');
+  }} else if (latestMs <= 200) {{
+    latencyMeter.classList.add('warn');
+  }} else {{
+    latencyMeter.classList.add('bad');
+  }}
+}}
+
+async function updateLatency() {{
+  const startedAt = performance.now();
+  try {{
+    const response = await fetch(`/api/ping?t=${{Date.now()}}`, {{cache: 'no-store'}});
+    if (!response.ok) throw new Error(response.statusText || `HTTP ${{response.status}}`);
+    await response.json();
+    const elapsedMs = Math.max(1, Math.round(performance.now() - startedAt));
+    latencySamples = [...latencySamples, elapsedMs].slice(-latencySamplesMax);
+    renderLatency(elapsedMs);
+  }} catch (_) {{
+    renderLatency(null);
+  }}
+}}
+
 function refreshAll() {{
   closeOpenSessionPopover({{renderDeferred: false}});
   sessionButtonsRenderDeferred = false;
@@ -5606,8 +5699,10 @@ async function boot() {{
   await Promise.all(visibleSessions.map(session => ensureTerminalRunning(session)));
   refreshTranscripts();
   renderAutoApproveButtons();
+  updateLatency();
   setInterval(refreshAutoStatuses, 3000);
   setInterval(refreshTranscripts, metadataRefreshMs);
+  setInterval(updateLatency, latencyRefreshMs);
 }}
 
 function refreshVisibleTranscripts() {{
@@ -5704,6 +5799,9 @@ class Handler(BaseHTTPRequestHandler):
             self.write_static_asset("xterm.css", "text/css; charset=utf-8")
             return
         if not self.require_auth():
+            return
+        if parsed.path == "/api/ping":
+            self.write_json({"ok": True, "time": time.time()})
             return
         if parsed.path == "/":
             self.write_html(html_page(self.server.app.sessions))
