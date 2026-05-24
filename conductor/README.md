@@ -1,10 +1,10 @@
 # Conductor
 
-Browser tools for watching, driving, and summarizing Dynamo tmux sessions.
+Browser tools for watching, driving, and summarizing tmux sessions.
 
 ## Conductor - AI webterm
 
-`conductor.py` serves the interactive Conductor UI. It attaches browser xterm.js terminals to the local `dynamo1` through `dynamo6` tmux sessions and adds agent-aware controls around them.
+`conductor.py` serves the interactive Conductor UI. It attaches browser xterm.js terminals to local tmux sessions and adds agent-aware controls around them.
 
 Run:
 
@@ -36,14 +36,14 @@ Auth defaults to `dynamo` / `conductor`. Override it with `CONDUCTOR_AUTH_USER` 
 ## Webterm features
 
 - The page title is `Conductor - AI webterm`.
-- The top tray displays sessions as `1` through `6`; internally these map to tmux sessions `dynamo1` through `dynamo6`.
+- By default, Conductor shows every existing tmux session plus `conductor1` through `conductor6`. The numbered tabs `1` through `6` map to `conductor1` through `conductor6`.
 - The visible workspace has left and right sides. Each side can show one full-height pane or two stacked panes, for up to four visible panes total.
-- All six session panels are created once at page boot. Hidden sessions live in an off-screen panel pool instead of being destroyed, so drag/drop and quick switching do not restart unchanged terminals.
+- Session panels are created once at page boot. Hidden sessions live in an off-screen panel pool instead of being destroyed, so drag/drop and quick switching do not restart unchanged terminals.
 - The layout is stored in browser `localStorage` under `conductor.layoutSlots.v1`, so it survives browser reloads and Conductor server restarts for the same browser/profile/origin.
 - AUTO state is stored server-side in `~/.config/conductor/state.json`, so it survives page reloads and server restarts.
 - The red mac-style circle hides a pane. The green circle expands or collapses a pane.
 - Drag a top-tray session or a pane header into a visible slot. Dropping a pane in the middle of another pane swaps them. Dropping near the top or bottom stacks into that side when a slot is available.
-- Each pane tab row has `AUTO`, previous/next tmux-window controls, `Terminal`, `Transcript`, `AI summary`, and a right-aligned `1 2 3 4 5 6` quick switch for replacing that pane with another session. Clicking the lit number hides that pane.
+- Each pane tab row has `AUTO`, previous/next tmux-window controls, `Terminal`, `Transcript`, `AI summary`, and right-aligned quick-switch buttons for replacing that pane with another session. Clicking the lit session hides that pane.
 - The terminal border turns yellow only for the pane that is currently focused and ready for typing.
 - Browser resize fits xterm immediately, but the tmux resize message is debounced so tmux is resized after the browser resize settles.
 - Mouse wheel scrolling in a terminal sends tmux copy-mode scroll commands instead of scrolling the AI input area.
@@ -52,7 +52,7 @@ Auth defaults to `dynamo` / `conductor`. Override it with `CONDUCTOR_AUTH_USER` 
 
 The server is a dependency-light Python `ThreadingHTTPServer`. It serves one HTML page, local xterm.js assets, JSON APIs, Server-Sent Events streams, and a WebSocket endpoint.
 
-For each terminal connection, the browser opens `/ws?session=dynamoN`. The server creates a PTY, runs `tmux attach-session -t dynamoN` on the PTY slave, reads terminal bytes from the PTY master, and sends those bytes to xterm.js as WebSocket binary frames.
+For each terminal connection, the browser opens `/ws?session=<tmux-session>`. The server creates a PTY, runs `tmux attach-session -t <tmux-session>` on the PTY slave, reads terminal bytes from the PTY master, and sends those bytes to xterm.js as WebSocket binary frames.
 
 Browser input is sent as JSON messages over the same WebSocket. Normal keyboard data becomes `{"type": "input", "data": "..."}`. Resize messages become `{"type": "resize", "cols": ..., "rows": ...}`. Scroll messages become `{"type": "tmux-scroll", "direction": "up|down", "lines": ...}`.
 
@@ -69,18 +69,18 @@ AUTO uses `auto_approve_tmux.py` workers behind `/api/auto-approve`. The browser
 ## Webterm API
 
 - `GET /api/transcripts` returns pane, process, and transcript-path metadata.
-- `GET /api/tmux?session=dynamo1&lines=90` returns a tmux capture-pane snapshot.
-- `GET /api/transcript?session=dynamo1&lines=120` returns the transcript tail for one session.
-- `GET /api/context?session=dynamo1&messages=40` returns a compact, message-oriented transcript tail.
-- `GET /api/context-items?session=dynamo1&messages=40` returns structured transcript items.
-- `GET /api/context-stream?session=dynamo1&messages=200` streams structured transcript items with Server-Sent Events.
-- `GET /api/summary-stream?session=dynamo1&lookback=3600` streams a Codex-generated summary with Server-Sent Events.
+- `GET /api/tmux?session=conductor1&lines=90` returns a tmux capture-pane snapshot.
+- `GET /api/transcript?session=conductor1&lines=120` returns the transcript tail for one session.
+- `GET /api/context?session=conductor1&messages=40` returns a compact, message-oriented transcript tail.
+- `GET /api/context-items?session=conductor1&messages=40` returns structured transcript items.
+- `GET /api/context-stream?session=conductor1&messages=200` streams structured transcript items with Server-Sent Events.
+- `GET /api/summary-stream?session=conductor1&lookback=3600` streams a Codex-generated summary with Server-Sent Events.
 - `GET /api/auto-approve` returns AUTO status for all sessions.
-- `GET /api/auto-approve?session=dynamo1` returns AUTO status for one session.
-- `POST /api/ensure-session?session=dynamo1` creates a missing `dynamoN` tmux session in `~/dynamo/dynamoN` when possible.
-- `POST /api/auto-approve?session=dynamo1&enabled=1` enables or disables AUTO for a session.
-- `POST /api/tmux-next?session=dynamo1` moves the session to the next tmux window.
-- `GET /ws?session=dynamo1` attaches a browser terminal to tmux.
+- `GET /api/auto-approve?session=conductor1` returns AUTO status for one session.
+- `POST /api/ensure-session?session=conductor1` creates a missing `conductorN` tmux session in the matching `~/dynamo/dynamoN` checkout when possible.
+- `POST /api/auto-approve?session=conductor1&enabled=1` enables or disables AUTO for a session.
+- `POST /api/tmux-next?session=conductor1` moves the session to the next tmux window.
+- `GET /ws?session=conductor1` attaches a browser terminal to tmux.
 
 Inspect the transcript mapping without starting the server:
 
