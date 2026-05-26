@@ -578,6 +578,20 @@ run_show_commit_history() {
     else
         echo "$(date '+%Y-%m-%d %H:%M:%S') - SKIP: parser-parity generator not present (older main)" >> "$LOG_FILE"
     fi
+
+    # Reasoning-parity table piggyback. Same generator, `reasoning` stage.
+    REASONING_HTML="$DYNAMO_REPO/tests/parity/reasoning/index.html"
+    if [ -f "$PARITY_TABLE_GEN" ] && [ -d "$DYNAMO_REPO/tests/parity/reasoning" ]; then
+        REASONING_TMP="$(mktemp -p "$DYNAMO_REPO/tests/parity/reasoning" .parity-XXXX.html)"
+        if python3 "$PARITY_TABLE_GEN" reasoning --html > "$REASONING_TMP" 2>>"$COMMIT_HISTORY_LOG"; then
+            chmod 644 "$REASONING_TMP"
+            \mv -f "$REASONING_TMP" "$REASONING_HTML"
+            echo "$(date '+%Y-%m-%d %H:%M:%S') - Updated $REASONING_HTML" >> "$LOG_FILE"
+        else
+            rm -f "$REASONING_TMP"
+            echo "$(date '+%Y-%m-%d %H:%M:%S') - WARNING: reasoning-parity table regen failed (see $COMMIT_HISTORY_LOG)" >> "$LOG_FILE"
+        fi
+    fi
 }
 
 if [ "$RUN_SHOW_REMOTE_BRANCHES" = true ]; then
