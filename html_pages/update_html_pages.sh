@@ -547,51 +547,37 @@ run_show_commit_history() {
         exit 1
     fi
 
-    # Parser-parity table piggyback. Cheap (~1s reading YAML fixtures),
+    # Parity table piggyback. Cheap (~1s reading YAML fixtures),
     # so run unconditionally on every commit-history refresh. Lives at the
     # same repo path the script is cwd'd to ($DYNAMO_REPO), so the HTML's
     # relative <a href="fixtures/..."> links resolve when opened in a browser.
     # Fail soft: if the generator script is missing or breaks, log and continue.
     PARITY_TABLE_GEN="$DYNAMO_REPO/tests/parity/generate_parity_table.py"
-    PARITY_CHART_GEN="$DYNAMO_REPO/tests/parity/parser/generate_parity_chart.py"
-    PARITY_HTML="$DYNAMO_REPO/tests/parity/parser/index.html"
-    if [ -f "$PARITY_TABLE_GEN" ]; then
-        PARITY_TMP="$(mktemp -p "$DYNAMO_REPO/tests/parity/parser" .parity-XXXX.html)"
-        if python3 "$PARITY_TABLE_GEN" parser --html > "$PARITY_TMP" 2>>"$COMMIT_HISTORY_LOG"; then
-            chmod 644 "$PARITY_TMP"
-            \mv -f "$PARITY_TMP" "$PARITY_HTML"
-            echo "$(date '+%Y-%m-%d %H:%M:%S') - Updated $PARITY_HTML" >> "$LOG_FILE"
-        else
-            rm -f "$PARITY_TMP"
-            echo "$(date '+%Y-%m-%d %H:%M:%S') - WARNING: parser-parity table regen failed (see $COMMIT_HISTORY_LOG)" >> "$LOG_FILE"
-        fi
-    elif [ -f "$PARITY_CHART_GEN" ]; then
-        PARITY_TMP="$(mktemp -p "$DYNAMO_REPO/tests/parity/parser" .parity-XXXX.html)"
-        if python3 "$PARITY_CHART_GEN" --html > "$PARITY_TMP" 2>>"$COMMIT_HISTORY_LOG"; then
-            chmod 644 "$PARITY_TMP"
-            \mv -f "$PARITY_TMP" "$PARITY_HTML"
-            echo "$(date '+%Y-%m-%d %H:%M:%S') - Updated $PARITY_HTML" >> "$LOG_FILE"
-        else
-            rm -f "$PARITY_TMP"
-            echo "$(date '+%Y-%m-%d %H:%M:%S') - WARNING: parser-parity chart regen failed (see $COMMIT_HISTORY_LOG)" >> "$LOG_FILE"
-        fi
-    else
-        echo "$(date '+%Y-%m-%d %H:%M:%S') - SKIP: parser-parity generator not present (older main)" >> "$LOG_FILE"
-    fi
 
-    # Reasoning-parity table piggyback. Same generator, `reasoning` stage.
-    REASONING_HTML="$DYNAMO_REPO/tests/parity/reasoning/index.html"
-    if [ -f "$PARITY_TABLE_GEN" ] && [ -d "$DYNAMO_REPO/tests/parity/reasoning" ]; then
-        REASONING_TMP="$(mktemp -p "$DYNAMO_REPO/tests/parity/reasoning" .parity-XXXX.html)"
-        if python3 "$PARITY_TABLE_GEN" reasoning --html > "$REASONING_TMP" 2>>"$COMMIT_HISTORY_LOG"; then
-            chmod 644 "$REASONING_TMP"
-            \mv -f "$REASONING_TMP" "$REASONING_HTML"
-            echo "$(date '+%Y-%m-%d %H:%M:%S') - Updated $REASONING_HTML" >> "$LOG_FILE"
-        else
-            rm -f "$REASONING_TMP"
-            echo "$(date '+%Y-%m-%d %H:%M:%S') - WARNING: reasoning-parity table regen failed (see $COMMIT_HISTORY_LOG)" >> "$LOG_FILE"
+    generate_parity_html() {
+        local stage="$1"
+        local parity_dir="$DYNAMO_REPO/tests/parity/$stage"
+        local parity_html="$parity_dir/index.html"
+        local parity_tmp
+
+        if [ ! -f "$PARITY_TABLE_GEN" ] || [ ! -d "$parity_dir" ]; then
+            echo "$(date '+%Y-%m-%d %H:%M:%S') - SKIP: $stage parity generator not present" >> "$LOG_FILE"
+            return 0
         fi
-    fi
+
+        parity_tmp="$(mktemp -p "$parity_dir" .parity-XXXX.html)"
+        if python3 "$PARITY_TABLE_GEN" "$stage" --html > "$parity_tmp" 2>>"$COMMIT_HISTORY_LOG"; then
+            chmod 644 "$parity_tmp"
+            \mv -f "$parity_tmp" "$parity_html"
+            echo "$(date '+%Y-%m-%d %H:%M:%S') - Updated $parity_html" >> "$LOG_FILE"
+        else
+            rm -f "$parity_tmp"
+            echo "$(date '+%Y-%m-%d %H:%M:%S') - WARNING: $stage-parity table regen failed (see $COMMIT_HISTORY_LOG)" >> "$LOG_FILE"
+        fi
+    }
+
+    generate_parity_html toolcalling
+    generate_parity_html reasoning
 }
 
 if [ "$RUN_SHOW_REMOTE_BRANCHES" = true ]; then
