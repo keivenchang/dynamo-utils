@@ -513,9 +513,13 @@ run_show_commit_history() {
     if [ "$DRY_RUN" = true ]; then
         echo "[DRY-RUN] Would generate commit history dashboard:"
         echo "[DRY-RUN]   Output: $COMMIT_HISTORY_HTML"
+        echo "[DRY-RUN]   Parity output: $DYNAMO_REPO/tests/parity/index.html"
         echo "[DRY-RUN]   Max commits: $MAX_COMMITS"
         echo "[DRY-RUN]   Command: cd $DYNAMO_REPO && git checkout main && git pull origin main"
         echo "[DRY-RUN]   Command: python3 $SCRIPT_DIR/show_commit_history.py --repo-path . --max-commits $MAX_COMMITS --output $COMMIT_HISTORY_HTML $OUTPUT_JSON_FLAG $SKIP_FLAG $MAX_GH_FLAG $PARALLEL_FLAG $SUCCESS_BUILD_TEST_FLAG $VERIFIER_FLAG"
+        echo "[DRY-RUN]   Command: python3 $DYNAMO_REPO/tests/parity/generate_parity_table.py all --html > $DYNAMO_REPO/tests/parity/index.html"
+        echo "[DRY-RUN]   Redirect: $DYNAMO_REPO/tests/parity/toolcalling/index.html -> ../index.html"
+        echo "[DRY-RUN]   Redirect: $DYNAMO_REPO/tests/parity/reasoning/index.html -> ../index.html"
         return 0
     fi
 
@@ -548,36 +552,57 @@ run_show_commit_history() {
     fi
 
     # Parity table piggyback. Cheap (~1s reading YAML fixtures),
-    # so run unconditionally on every commit-history refresh. Lives at the
-    # same repo path the script is cwd'd to ($DYNAMO_REPO), so the HTML's
-    # relative <a href="fixtures/..."> links resolve when opened in a browser.
+    # so run unconditionally on every commit-history refresh. Write the combined
+    # dashboard into the same repo path the script is cwd'd to ($DYNAMO_REPO),
+    # so the HTML's relative fixture links resolve when opened in a browser.
     # Fail soft: if the generator script is missing or breaks, log and continue.
     PARITY_TABLE_GEN="$DYNAMO_REPO/tests/parity/generate_parity_table.py"
+    PARITY_DIR="$DYNAMO_REPO/tests/parity"
+    PARITY_HTML="$PARITY_DIR/index.html"
+    PARITY_TMP=""
 
-    generate_parity_html() {
-        local stage="$1"
-        local parity_dir="$DYNAMO_REPO/tests/parity/$stage"
-        local parity_html="$parity_dir/index.html"
-        local parity_tmp
+    if [ ! -f "$PARITY_TABLE_GEN" ] || [ ! -d "$PARITY_DIR" ]; then
+        echo "$(date '+%Y-%m-%d %H:%M:%S') - SKIP: combined parity generator not present" >> "$LOG_FILE"
+        return 0
+    fi
 
-        if [ ! -f "$PARITY_TABLE_GEN" ] || [ ! -d "$parity_dir" ]; then
-            echo "$(date '+%Y-%m-%d %H:%M:%S') - SKIP: $stage parity generator not present" >> "$LOG_FILE"
-            return 0
-        fi
+    PARITY_TMP="$(mktemp -p "$PARITY_DIR" .parity-XXXX.html)"
+    if python3 "$PARITY_TABLE_GEN" all --html > "$PARITY_TMP" 2>>"$COMMIT_HISTORY_LOG"; then
+        chmod 644 "$PARITY_TMP"
+        \mv -f "$PARITY_TMP" "$PARITY_HTML"
+        echo "$(date '+%Y-%m-%d %H:%M:%S') - Updated $PARITY_HTML" >> "$LOG_FILE"
+    else
+        rm -f "$PARITY_TMP"
+        echo "$(date '+%Y-%m-%d %H:%M:%S') - WARNING: combined parity table regen failed (see $COMMIT_HISTORY_LOG)" >> "$LOG_FILE"
+    fi
 
-        parity_tmp="$(mktemp -p "$parity_dir" .parity-XXXX.html)"
-        if python3 "$PARITY_TABLE_GEN" "$stage" --html > "$parity_tmp" 2>>"$COMMIT_HISTORY_LOG"; then
-            chmod 644 "$parity_tmp"
-            \mv -f "$parity_tmp" "$parity_html"
-            echo "$(date '+%Y-%m-%d %H:%M:%S') - Updated $parity_html" >> "$LOG_FILE"
-        else
-            rm -f "$parity_tmp"
-            echo "$(date '+%Y-%m-%d %H:%M:%S') - WARNING: $stage-parity table regen failed (see $COMMIT_HISTORY_LOG)" >> "$LOG_FILE"
-        fi
+    write_parity_redirect() {
+        local redirect_html="$1"
+        local redirect_tmp
+
+        redirect_tmp="$(mktemp -p "$(dirname "$redirect_html")" .parity-redirect-XXXX.html)"
+        {
+            printf '%s\n' '<html lang="en">'
+            printf '%s\n' '<head>'
+            printf '%s\n' '<meta charset="utf-8">'
+            printf '%s\n' '<meta http-equiv="refresh" content="10; url=../index.html">'
+            printf '%s\n' '<title>Dynamo Parser Parity page moved</title>'
+            printf '%s\n' '</head>'
+            printf '%s\n' '<body>'
+            printf '%s\n' '<h1>Dynamo Parser Parity page moved</h1>'
+            printf '%s\n' '<p>This page has moved to the combined parser parity dashboard.</p>'
+            printf '%s\n' '<p>You will be redirected in 10 seconds.</p>'
+            printf '%s\n' '<p><a href="../index.html">Open the combined parser parity dashboard</a></p>'
+            printf '%s\n' '</body>'
+            printf '%s\n' '</html>'
+        } > "$redirect_tmp"
+        chmod 644 "$redirect_tmp"
+        \mv -f "$redirect_tmp" "$redirect_html"
+        echo "$(date '+%Y-%m-%d %H:%M:%S') - Updated redirect $redirect_html -> ../index.html" >> "$LOG_FILE"
     }
 
-    generate_parity_html toolcalling
-    generate_parity_html reasoning
+    write_parity_redirect "$PARITY_DIR/toolcalling/index.html"
+    write_parity_redirect "$PARITY_DIR/reasoning/index.html"
 }
 
 if [ "$RUN_SHOW_REMOTE_BRANCHES" = true ]; then
