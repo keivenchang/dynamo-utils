@@ -70,7 +70,6 @@ TARGETS_6H=(
     "$HOME/.cursor|.cursor"
     "$HOME/.tsh|.tsh"
     "$HOME/.slack|.slack"
-    "$HOME/nvsec-env|nvsec-env"
 )
 
 # Daily-only targets: large or slowly-changing data where a 24h-resolution
@@ -562,7 +561,7 @@ remove_old_history() {
         local backup_dirname backup_date
         backup_dirname=$(basename "$backup_dir")
         backup_date=$(echo "$backup_dirname" | cut -d'_' -f1)
-        if [[ "$backup_date" -lt "$cutoff_date" ]]; then
+        if [[ "$backup_date" -le "$cutoff_date" ]]; then
             if [[ "$DRY_RUN" == true ]]; then
                 echo "[DRY RUN] Would remove directory: $backup_dir"
             else
@@ -578,7 +577,7 @@ remove_old_history() {
         local backup_filename backup_date archive_size
         backup_filename=$(basename "$backup_archive" .tgz)
         backup_date=$(echo "$backup_filename" | cut -d'_' -f1)
-        if [[ "$backup_date" -lt "$cutoff_date" ]]; then
+        if [[ "$backup_date" -le "$cutoff_date" ]]; then
             if [[ "$DRY_RUN" == true ]]; then
                 echo "[DRY RUN] Would remove archive: $backup_archive"
             else
