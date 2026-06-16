@@ -1727,8 +1727,8 @@ class CommitHistoryGenerator:
                         f" && curl -sL {BUILD_LOCAL_DEV_SCRIPT_URL} | python3 - --skip-pull $L)"
                     )
                     image_name_html = html.escape(registry_image_name)
-                    image_name_html = re.sub(r'-local-dev-', '-<b>local-dev</b>-', image_name_html)
-                    image_name_html = re.sub(r'-dev-', '-<b>dev</b>-', image_name_html)
+                    image_name_html = re.sub(r'-local-dev(?=-|$)', '-<b>local-dev</b>', image_name_html)
+                    image_name_html = re.sub(r'-dev(?=-|$)', '-<b>dev</b>', image_name_html)
                     image_name_html = re.sub(r'-amd64\b', r'-<b style="color:#76b900">amd64</b> [x86]', image_name_html)
                     image_name_html = re.sub(r'-arm64\b', r'-<b style="color:#e91e8c">arm64</b> [ARM]', image_name_html)
                     formatted.append({
@@ -1751,6 +1751,11 @@ class CommitHistoryGenerator:
         ECR_CACHE_FILE = Path.home() / ".cache" / "dynamo-utils" / "aws-ecr-registry-cache" / "aws-ecr-ai-dynamo-dynamo-details.json"
         self.logger.info(f"ECR: cache file={ECR_CACHE_FILE}, exists={ECR_CACHE_FILE.exists()}, commit_data has {len(commit_data)} entries")
         ecr_images_by_sha: Dict[str, List[Dict[str, str]]] = {}
+        commit_image_sha_by_sha = {
+            str(c.get("sha_full") or ""): str(c.get("image_sha_6") or "").upper()
+            for c in commit_data
+            if c.get("sha_full") and c.get("image_sha_6")
+        }
         if ECR_CACHE_FILE.exists():
             try:
                 ecr_data = json.loads(ECR_CACHE_FILE.read_text())
@@ -1806,8 +1811,8 @@ class CommitHistoryGenerator:
                         else:
                             created_display = ""
                         tag_html = html.escape(tag)
-                        tag_html = re.sub(r'-local-dev-', '-<b>local-dev</b>-', tag_html)
-                        tag_html = re.sub(r'-dev-', '-<b>dev</b>-', tag_html)
+                        tag_html = re.sub(r'-local-dev(?=-|$)', '-<b>local-dev</b>', tag_html)
+                        tag_html = re.sub(r'-dev(?=-|$)', '-<b>dev</b>', tag_html)
                         tag_html = re.sub(r'-amd64\b', r'-<b style="color:#76b900">amd64</b> [x86]', tag_html)
                         tag_html = re.sub(r'-arm64\b', r'-<b style="color:#e91e8c">arm64</b> [ARM]', tag_html)
                         formatted_ecr.append({
@@ -1823,6 +1828,8 @@ class CommitHistoryGenerator:
                             "size_display": size_display,
                             "created_display": created_display,
                             "digest": detail["digest"],
+                            "source_commit_sha": sha_full,
+                            "source_commit_sha_9": sha_full[:9],
                         })
                     formatted_ecr.sort(key=lambda x: (
                         _ECR_ARCH_ORDER.get(x["arch"], 99),
@@ -1888,8 +1895,8 @@ class CommitHistoryGenerator:
                             except (ValueError, TypeError):
                                 created_display = pushed_at[:19]
                         tag_html = html.escape(tag)
-                        tag_html = re.sub(r'-local-dev-', '-<b>local-dev</b>-', tag_html)
-                        tag_html = re.sub(r'-dev-', '-<b>dev</b>-', tag_html)
+                        tag_html = re.sub(r'-local-dev(?=-|$)', '-<b>local-dev</b>', tag_html)
+                        tag_html = re.sub(r'-dev(?=-|$)', '-<b>dev</b>', tag_html)
                         tag_html = re.sub(r'-amd64\b', r'-<b style="color:#76b900">amd64</b> [x86]', tag_html)
                         formatted_acr.append({
                             "tag": tag,
@@ -1903,6 +1910,8 @@ class CommitHistoryGenerator:
                             "local_dev_cmd": local_dev_cmd,
                             "created_display": created_display,
                             "digest": detail["digest"],
+                            "source_commit_sha": sha_full,
+                            "source_commit_sha_9": sha_full[:9],
                         })
                     formatted_acr.sort(key=lambda x: (
                         _ACR_TYPE_ORDER.get(x["image_type"], 99),
@@ -1912,6 +1921,32 @@ class CommitHistoryGenerator:
                 self.logger.info(f"ACR cache: {len(acr_images_by_sha)} commits with images (from {len(acr_details)} details)")
             except (OSError, json.JSONDecodeError, ValueError) as e:
                 self.logger.warning(f"Failed to load ACR cache {ACR_CACHE_FILE}: {e}")
+
+        def _build_images_by_image_sha(images_by_sha: Dict[str, List[Dict[str, str]]]) -> Dict[str, List[Dict[str, str]]]:
+            images_by_image_sha: Dict[str, List[Dict[str, str]]] = {}
+            seen_by_image_sha: Dict[str, set[str]] = {}
+            for source_sha, imgs in images_by_sha.items():
+                image_sha_6 = commit_image_sha_by_sha.get(source_sha, "")
+                if not image_sha_6:
+                    continue
+                seen = seen_by_image_sha.setdefault(image_sha_6, set())
+                for img in imgs:
+                    dedup_key = str(img.get("full_image") or img.get("tag") or "")
+                    if dedup_key in seen:
+                        continue
+                    seen.add(dedup_key)
+                    fallback_img = dict(img)
+                    fallback_img["image_sha_fallback"] = True
+                    images_by_image_sha.setdefault(image_sha_6, []).append(fallback_img)
+            return images_by_image_sha
+
+        ecr_images_by_image_sha = _build_images_by_image_sha(ecr_images_by_sha)
+        acr_images_by_image_sha = _build_images_by_image_sha(acr_images_by_sha)
+        self.logger.info(
+            "ImageSHA fallback registry maps: ECR=%d ImageSHAs, ACR=%d ImageSHAs",
+            len(ecr_images_by_image_sha),
+            len(acr_images_by_image_sha),
+        )
 
         # Generate timestamp (PT)
         generated_time = datetime.now(ZoneInfo('America/Los_Angeles')).strftime('%Y-%m-%d %H:%M:%S PT')
@@ -2966,6 +3001,8 @@ class CommitHistoryGenerator:
             "gitlab_dev_images": gitlab_dev_images,
             "ecr_images": ecr_images_by_sha,
             "acr_images": acr_images_by_sha,
+            "ecr_images_by_image_sha": ecr_images_by_image_sha,
+            "acr_images_by_image_sha": acr_images_by_image_sha,
             "gitlab_images": gitlab_images,
             "gitlab_pipelines": gitlab_pipelines,
             "mr_pipelines": mr_pipelines,
@@ -3238,8 +3275,8 @@ class CommitHistoryGenerator:
                     for sha in sha_list:
                         if sha in tag:
                             tag_html_val = html.escape(tag)
-                            tag_html_val = re.sub(r'-local-dev-', '-<b>local-dev</b>-', tag_html_val)
-                            tag_html_val = re.sub(r'-dev-', '-<b>dev</b>-', tag_html_val)
+                            tag_html_val = re.sub(r'-local-dev(?=-|$)', '-<b>local-dev</b>', tag_html_val)
+                            tag_html_val = re.sub(r'-dev(?=-|$)', '-<b>dev</b>', tag_html_val)
                             tag_html_val = re.sub(r'-amd64\b', r'-<b style="color:#76b900">amd64</b> [x86]', tag_html_val)
                             tag_html_val = re.sub(r'-arm64\b', r'-<b style="color:#e91e8c">arm64</b> [ARM]', tag_html_val)
                             sha_to_images[sha].append({
