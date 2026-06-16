@@ -17,6 +17,10 @@
 #   MAX_COMMITS         - If set, cap commits for commit-history (default: 100; 25 for --debug-html).
 #   DYNAMO_UTILS_CACHE_DIR - If set, overrides ~/.cache/dynamo-utils for the resource report DB lookup.
 #   RESOURCE_DB         - If set, explicit SQLite path for resource report (default: $DYNAMO_UTILS_CACHE_DIR/resource_monitor.sqlite).
+#   FRONTEND_CRATES_REPO - If set, checkout used for parser conformance HTML generation
+#                          (default: $DYNAMO_HOME/frontend-crates).
+#   FRONTEND_CRATES_REMOTE - If set, remote used when cloning FRONTEND_CRATES_REPO
+#                            (default: git@github.com:ai-dynamo/frontend-crates.git).
 #
 # Remote PRs (optional; used by --show-remote-branches):
 #   REMOTE_GITHUB_USERS - Space-separated GitHub usernames to render.
@@ -79,6 +83,8 @@ Flags:
   --show-local-branches     Write: $DYNAMO_HOME/speedoflight/dynamo/users/<user>/local.html (or local-debug.html in --debug-html)
   --show-remote-branches    Write: $DYNAMO_HOME/speedoflight/dynamo/users/<user>/index.html (or debug.html in --debug-html)
   --show-commit-history     Write: $DYNAMO_HOME/commits/index.html (or debug.html in --debug-html)
+  --show-frontend-crates-conformance
+                             Update $DYNAMO_HOME/frontend-crates and write conformance/PARITY.html + conformance/CONFORMANCE_v2.html
 
   --debug-html              Debug mode: outputs to debug.html, enables verification passes, smaller commit window (25 commits), shorter resource window
   --enable-success-build-test-logs  Opt-in: cache raw logs for successful *-build-test jobs to parse pytest slowest tests under "Run tests" (slower)
@@ -106,6 +112,7 @@ RUN_SHOW_DYNAMO_BRANCHES=false
 RUN_SHOW_COMMIT_HISTORY=false
 RUN_RESOURCE_REPORT=false
 RUN_SHOW_REMOTE_BRANCHES=false
+RUN_FRONTEND_CRATES_CONFORMANCE=false
 ANY_FLAG=false
 IGNORE_LOCK=false
 DRY_RUN=false
@@ -131,6 +138,8 @@ while [ "$#" -gt 0 ]; do
             RUN_SHOW_DYNAMO_BRANCHES=true; ANY_FLAG=true; shift ;;
         --show-commit-history)
             RUN_SHOW_COMMIT_HISTORY=true; ANY_FLAG=true; shift ;;
+        --show-frontend-crates-conformance)
+            RUN_FRONTEND_CRATES_CONFORMANCE=true; ANY_FLAG=true; shift ;;
         --show-local-resources)
             RUN_RESOURCE_REPORT=true; ANY_FLAG=true; shift ;;
         --show-remote-branches)
@@ -170,6 +179,7 @@ if [ "$ANY_FLAG" = false ]; then
     RUN_SHOW_COMMIT_HISTORY=true
     RUN_RESOURCE_REPORT=true
     RUN_SHOW_REMOTE_BRANCHES=true
+    RUN_FRONTEND_CRATES_CONFORMANCE=true
 fi
 
 # Determine whether to skip GitLab fetching (commit-history only).
@@ -513,13 +523,9 @@ run_show_commit_history() {
     if [ "$DRY_RUN" = true ]; then
         echo "[DRY-RUN] Would generate commit history dashboard:"
         echo "[DRY-RUN]   Output: $COMMIT_HISTORY_HTML"
-        echo "[DRY-RUN]   Parity output: $DYNAMO_REPO/tests/parity/index.html"
         echo "[DRY-RUN]   Max commits: $MAX_COMMITS"
         echo "[DRY-RUN]   Command: cd $DYNAMO_REPO && git checkout main && git pull origin main"
         echo "[DRY-RUN]   Command: python3 $SCRIPT_DIR/show_commit_history.py --repo-path . --max-commits $MAX_COMMITS --output $COMMIT_HISTORY_HTML $OUTPUT_JSON_FLAG $SKIP_FLAG $MAX_GH_FLAG $PARALLEL_FLAG $SUCCESS_BUILD_TEST_FLAG $VERIFIER_FLAG"
-        echo "[DRY-RUN]   Command: python3 $DYNAMO_REPO/tests/parity/generate_parity_table.py all --html > $DYNAMO_REPO/tests/parity/index.html"
-        echo "[DRY-RUN]   Redirect: $DYNAMO_REPO/tests/parity/toolcalling/index.html -> ../index.html"
-        echo "[DRY-RUN]   Redirect: $DYNAMO_REPO/tests/parity/reasoning/index.html -> ../index.html"
         return 0
     fi
 
@@ -550,59 +556,74 @@ run_show_commit_history() {
         echo "See log for details: $COMMIT_HISTORY_LOG" >&2
         exit 1
     fi
+}
 
-    # Parity table piggyback. Cheap (~1s reading YAML fixtures),
-    # so run unconditionally on every commit-history refresh. Write the combined
-    # dashboard into the same repo path the script is cwd'd to ($DYNAMO_REPO),
-    # so the HTML's relative fixture links resolve when opened in a browser.
-    # Fail soft: if the generator script is missing or breaks, log and continue.
-    PARITY_TABLE_GEN="$DYNAMO_REPO/tests/parity/generate_parity_table.py"
-    PARITY_DIR="$DYNAMO_REPO/tests/parity"
-    PARITY_HTML="$PARITY_DIR/index.html"
-    PARITY_TMP=""
+update_frontend_crates_conformance() {
+    local frontend_repo="${FRONTEND_CRATES_REPO:-$DYNAMO_HOME/frontend-crates}"
+    local frontend_remote="${FRONTEND_CRATES_REMOTE:-git@github.com:ai-dynamo/frontend-crates.git}"
+    local parity_html="$frontend_repo/conformance/PARITY.html"
+    local conformance_html="$frontend_repo/conformance/CONFORMANCE_v2.html"
+    local parity_tmp=""
+    local conformance_tmp=""
 
-    if [ ! -f "$PARITY_TABLE_GEN" ] || [ ! -d "$PARITY_DIR" ]; then
-        echo "$(date '+%Y-%m-%d %H:%M:%S') - SKIP: combined parity generator not present" >> "$LOG_FILE"
+    if [ "$DRY_RUN" = true ]; then
+        echo "[DRY-RUN] Would generate frontend-crates conformance HTML:"
+        echo "[DRY-RUN]   Frontend-crates checkout: $frontend_repo"
+        echo "[DRY-RUN]   v1 output: $parity_html"
+        echo "[DRY-RUN]   v2 output: $conformance_html"
+        echo "[DRY-RUN]   Command: cd $frontend_repo && git checkout main && git pull --ff-only origin main"
+        echo "[DRY-RUN]   Command: cd $frontend_repo && conformance/utils/render_table_v1.sh && \\cp -f conformance/utils/.stage/tests/parity/PARITY_v1.html $parity_html"
+        echo "[DRY-RUN]   Command: cd $frontend_repo && conformance/utils/render_table_v2.sh --output $conformance_html"
         return 0
     fi
 
-    PARITY_TMP="$(mktemp -p "$PARITY_DIR" .parity-XXXX.html)"
-    if python3 "$PARITY_TABLE_GEN" all --html > "$PARITY_TMP" 2>>"$COMMIT_HISTORY_LOG"; then
-        chmod 644 "$PARITY_TMP"
-        \mv -f "$PARITY_TMP" "$PARITY_HTML"
-        echo "$(date '+%Y-%m-%d %H:%M:%S') - Updated $PARITY_HTML" >> "$LOG_FILE"
-    else
-        rm -f "$PARITY_TMP"
-        echo "$(date '+%Y-%m-%d %H:%M:%S') - WARNING: combined parity table regen failed (see $COMMIT_HISTORY_LOG)" >> "$LOG_FILE"
+    if [ ! -d "$frontend_repo/.git" ]; then
+        echo "$(date '+%Y-%m-%d %H:%M:%S') - Cloning frontend-crates into $frontend_repo" >> "$LOG_FILE"
+        mkdir -p "$(dirname "$frontend_repo")"
+        if ! run_cmd_to_log_ts "$GIT_UPDATE_LOG" git clone "$frontend_remote" "$frontend_repo"; then
+            echo "$(date '+%Y-%m-%d %H:%M:%S') - WARNING: failed to clone frontend-crates (see $GIT_UPDATE_LOG)" >> "$LOG_FILE"
+            return 0
+        fi
     fi
 
-    write_parity_redirect() {
-        local redirect_html="$1"
-        local redirect_tmp
+    if [ ! -x "$frontend_repo/conformance/utils/render_table_v1.sh" ] || [ ! -x "$frontend_repo/conformance/utils/render_table_v2.sh" ]; then
+        echo "$(date '+%Y-%m-%d %H:%M:%S') - SKIP: frontend-crates conformance render scripts not present in $frontend_repo" >> "$LOG_FILE"
+        return 0
+    fi
 
-        redirect_tmp="$(mktemp -p "$(dirname "$redirect_html")" .parity-redirect-XXXX.html)"
-        {
-            printf '%s\n' '<html lang="en">'
-            printf '%s\n' '<head>'
-            printf '%s\n' '<meta charset="utf-8">'
-            printf '%s\n' '<meta http-equiv="refresh" content="10; url=../index.html">'
-            printf '%s\n' '<title>Dynamo Parser Parity page moved</title>'
-            printf '%s\n' '</head>'
-            printf '%s\n' '<body>'
-            printf '%s\n' '<h1>Dynamo Parser Parity page moved</h1>'
-            printf '%s\n' '<p>This page has moved to the combined parser parity dashboard.</p>'
-            printf '%s\n' '<p>You will be redirected in 10 seconds.</p>'
-            printf '%s\n' '<p><a href="../index.html">Open the combined parser parity dashboard</a></p>'
-            printf '%s\n' '</body>'
-            printf '%s\n' '</html>'
-        } > "$redirect_tmp"
-        chmod 644 "$redirect_tmp"
-        \mv -f "$redirect_tmp" "$redirect_html"
-        echo "$(date '+%Y-%m-%d %H:%M:%S') - Updated redirect $redirect_html -> ../index.html" >> "$LOG_FILE"
-    }
+    echo "$(date '+%Y-%m-%d %H:%M:%S') - Updating $frontend_repo to latest main" >> "$LOG_FILE"
+    if git -C "$frontend_repo" diff --quiet && git -C "$frontend_repo" diff --cached --quiet; then
+        if run_cmd_to_log_ts "$GIT_UPDATE_LOG" git -C "$frontend_repo" checkout main && run_cmd_to_log_ts "$GIT_UPDATE_LOG" git -C "$frontend_repo" pull --ff-only origin main; then
+            echo "$(date '+%Y-%m-%d %H:%M:%S') - Successfully updated frontend-crates to latest main" >> "$LOG_FILE"
+        else
+            echo "$(date '+%Y-%m-%d %H:%M:%S') - WARNING: failed to update frontend-crates; rendering current checkout" >> "$LOG_FILE"
+        fi
+    else
+        echo "$(date '+%Y-%m-%d %H:%M:%S') - WARNING: frontend-crates checkout is dirty; skipping pull and rendering current checkout" >> "$LOG_FILE"
+    fi
 
-    write_parity_redirect "$PARITY_DIR/toolcalling/index.html"
-    write_parity_redirect "$PARITY_DIR/reasoning/index.html"
+    echo "$(date '+%Y-%m-%d %H:%M:%S') - Generating frontend-crates parser conformance HTML" >> "$LOG_FILE"
+    # v1 is rendered as legacy input for comparison only. v2-owned behavior stays
+    # in parsers_v2/ and the v2 fixture overlays in frontend-crates.
+    parity_tmp="$(mktemp -p "$(dirname "$parity_html")" .PARITY-XXXXXX.html)"
+    if run_cmd_to_log_ts "$COMMIT_HISTORY_LOG" bash -lc 'cd "$1" && conformance/utils/render_table_v1.sh && \cp -f conformance/utils/.stage/tests/parity/PARITY_v1.html "$2"' _ "$frontend_repo" "$parity_tmp"; then
+        chmod 644 "$parity_tmp"
+        \mv -f "$parity_tmp" "$parity_html"
+        echo "$(date '+%Y-%m-%d %H:%M:%S') - Updated $parity_html" >> "$LOG_FILE"
+    else
+        rm -f "$parity_tmp"
+        echo "$(date '+%Y-%m-%d %H:%M:%S') - WARNING: frontend-crates v1 parity regen failed (see $COMMIT_HISTORY_LOG)" >> "$LOG_FILE"
+    fi
+
+    conformance_tmp="$(mktemp -p "$(dirname "$conformance_html")" .CONFORMANCE_v2-XXXXXX.html)"
+    if run_cmd_to_log_ts "$COMMIT_HISTORY_LOG" bash -lc 'cd "$1" && conformance/utils/render_table_v2.sh --output "$2"' _ "$frontend_repo" "$conformance_tmp"; then
+        chmod 644 "$conformance_tmp"
+        \mv -f "$conformance_tmp" "$conformance_html"
+        echo "$(date '+%Y-%m-%d %H:%M:%S') - Updated $conformance_html" >> "$LOG_FILE"
+    else
+        rm -f "$conformance_tmp"
+        echo "$(date '+%Y-%m-%d %H:%M:%S') - WARNING: frontend-crates v2 conformance regen failed (see $COMMIT_HISTORY_LOG)" >> "$LOG_FILE"
+    fi
 }
 
 if [ "$RUN_SHOW_REMOTE_BRANCHES" = true ]; then
@@ -613,6 +634,9 @@ if [ "$RUN_SHOW_DYNAMO_BRANCHES" = true ]; then
 fi
 if [ "$RUN_SHOW_COMMIT_HISTORY" = true ]; then
     run_show_commit_history
+fi
+if [ "$RUN_FRONTEND_CRATES_CONFORMANCE" = true ]; then
+    update_frontend_crates_conformance
 fi
 if [ "$RUN_RESOURCE_REPORT" = true ]; then
     run_resource_report
