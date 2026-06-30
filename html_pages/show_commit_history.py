@@ -1922,26 +1922,50 @@ class CommitHistoryGenerator:
             except (OSError, json.JSONDecodeError, ValueError) as e:
                 self.logger.warning(f"Failed to load ACR cache {ACR_CACHE_FILE}: {e}")
 
-        def _build_images_by_image_sha(images_by_sha: Dict[str, List[Dict[str, str]]]) -> Dict[str, List[Dict[str, str]]]:
-            images_by_image_sha: Dict[str, List[Dict[str, str]]] = {}
-            seen_by_image_sha: Dict[str, set[str]] = {}
+        # Cap the build-context fallback. image_sha_6 is sha256(git ls-tree -r <commit> -- container/)[:6],
+        # i.e. a hash of ONLY the container/ tree, so it stays identical across every commit that did
+        # not touch container/ (typically ~17 of every 250 commits change it). Grouping the fallback by
+        # image_sha_6 therefore collapses ~20 sibling commits into one bucket, and without a cap any
+        # commit that wasn't itself tagged shows every sibling's images (200+ rows of unrelated commits).
+        # Keep only the few most-recently-built source commits, and report how many were collapsed so the
+        # template can say so honestly.
+        MAX_FALLBACK_SOURCE_COMMITS = 3
+
+        def _build_images_by_image_sha(
+            images_by_sha: Dict[str, List[Dict[str, str]]]
+        ) -> Tuple[Dict[str, List[Dict[str, str]]], Dict[str, Dict[str, int]]]:
+            # image_sha_6 -> {source_sha: (recency_key, [imgs])}
+            grouped: Dict[str, Dict[str, Tuple[str, List[Dict[str, str]]]]] = {}
             for source_sha, imgs in images_by_sha.items():
                 image_sha_6 = commit_image_sha_by_sha.get(source_sha, "")
                 if not image_sha_6:
                     continue
-                seen = seen_by_image_sha.setdefault(image_sha_6, set())
-                for img in imgs:
-                    dedup_key = str(img.get("full_image") or img.get("tag") or "")
-                    if dedup_key in seen:
-                        continue
-                    seen.add(dedup_key)
-                    fallback_img = dict(img)
-                    fallback_img["image_sha_fallback"] = True
-                    images_by_image_sha.setdefault(image_sha_6, []).append(fallback_img)
-            return images_by_image_sha
+                # Recency = newest image push time for this source commit (sortable ISO string).
+                recency = max((str(img.get("pushed_at") or "") for img in imgs), default="")
+                grouped.setdefault(image_sha_6, {})[source_sha] = (recency, imgs)
 
-        ecr_images_by_image_sha = _build_images_by_image_sha(ecr_images_by_sha)
-        acr_images_by_image_sha = _build_images_by_image_sha(acr_images_by_sha)
+            images_by_image_sha: Dict[str, List[Dict[str, str]]] = {}
+            fallback_counts: Dict[str, Dict[str, int]] = {}
+            for image_sha_6, per_source in grouped.items():
+                ranked = sorted(per_source.values(), key=lambda rv: rv[0], reverse=True)
+                kept = ranked[:MAX_FALLBACK_SOURCE_COMMITS]
+                fallback_counts[image_sha_6] = {"total": len(per_source), "shown": len(kept)}
+                seen: set[str] = set()
+                out: List[Dict[str, str]] = []
+                for _recency, imgs in kept:
+                    for img in imgs:
+                        dedup_key = str(img.get("full_image") or img.get("tag") or "")
+                        if dedup_key in seen:
+                            continue
+                        seen.add(dedup_key)
+                        fallback_img = dict(img)
+                        fallback_img["image_sha_fallback"] = True
+                        out.append(fallback_img)
+                images_by_image_sha[image_sha_6] = out
+            return images_by_image_sha, fallback_counts
+
+        ecr_images_by_image_sha, ecr_fallback_counts = _build_images_by_image_sha(ecr_images_by_sha)
+        acr_images_by_image_sha, acr_fallback_counts = _build_images_by_image_sha(acr_images_by_sha)
         self.logger.info(
             "ImageSHA fallback registry maps: ECR=%d ImageSHAs, ACR=%d ImageSHAs",
             len(ecr_images_by_image_sha),
@@ -3003,6 +3027,8 @@ class CommitHistoryGenerator:
             "acr_images": acr_images_by_sha,
             "ecr_images_by_image_sha": ecr_images_by_image_sha,
             "acr_images_by_image_sha": acr_images_by_image_sha,
+            "ecr_fallback_counts": ecr_fallback_counts,
+            "acr_fallback_counts": acr_fallback_counts,
             "gitlab_images": gitlab_images,
             "gitlab_pipelines": gitlab_pipelines,
             "mr_pipelines": mr_pipelines,

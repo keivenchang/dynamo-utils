@@ -1085,11 +1085,13 @@ window.__dashboardOnReadyQueue.push(function() {
 {%- set ecr_imgs_fallback = [] if ecr_imgs_exact else ecr_images_by_image_sha.get(image_sha_6|upper, []) -%}
 {%- set ecr_imgs = ecr_imgs_exact if ecr_imgs_exact else ecr_imgs_fallback -%}
 {%- set ecr_images_from_image_sha = (not ecr_imgs_exact) and (ecr_imgs_fallback|length > 0) -%}
+{%- set ecr_fallback_count = ecr_fallback_counts.get(image_sha_6|upper, {}) -%}
 {%- set has_ecr_images = ecr_imgs | length > 0 -%}
 {%- set acr_imgs_exact = acr_images.get(sha_full, []) -%}
 {%- set acr_imgs_fallback = [] if acr_imgs_exact else acr_images_by_image_sha.get(image_sha_6|upper, []) -%}
 {%- set acr_imgs = acr_imgs_exact if acr_imgs_exact else acr_imgs_fallback -%}
 {%- set acr_images_from_image_sha = (not acr_imgs_exact) and (acr_imgs_fallback|length > 0) -%}
+{%- set acr_fallback_count = acr_fallback_counts.get(image_sha_6|upper, {}) -%}
 {%- set has_acr_images = acr_imgs | length > 0 -%}
 {%- set has_gitlab = sha_full in gitlab_images and gitlab_images[sha_full] -%}
 {%- set gitlab_imgs = gitlab_images.get(sha_full, []) -%}
@@ -1651,7 +1653,7 @@ Framework: {{ img.framework }}">{{ display_tag }}</td>
 <div style="margin-bottom: 12px; padding: 8px; background-color: white; border: 1px solid #d0d7de; border-radius: 4px;">
 <div style="font-weight: 600; margin-bottom: 4px; font-size: 13px;">Azure ACR Registry Images: ({{ acr_imgs|length }}) <span style="font-weight: 400; font-size: 11px; color: #57606a;">Requires <a href="container_registry_auth_azure_acr.html" target="_blank" style="color: #0969da; text-decoration: none;">Azure ACR authentication</a></span></div>
 {% if acr_images_from_image_sha %}
-<div style="font-size: 11px; color: #57606a; margin-bottom: 6px;">No registry tag matched this commit SHA. Showing images from commits with the same ImageSHA256 {{ image_sha_6|upper }}.</div>
+<div style="font-size: 11px; color: #57606a; margin-bottom: 6px;">No ACR tag matched this commit SHA. {% if acr_fallback_count.total and acr_fallback_count.total > acr_fallback_count.shown %}Showing images from the {{ acr_fallback_count.shown }} most recent of {{ acr_fallback_count.total }} commits{% else %}Showing images from {{ acr_fallback_count.total }} commit{% if acr_fallback_count.total != 1 %}s{% endif %}{% endif %} that share the same <code>container/</code> build context (id {{ image_sha_6|upper }}).</div>
 {% endif %}
 <table style="border: none; background-color: white; border-collapse: collapse;">
 <thead>
@@ -1684,7 +1686,7 @@ Framework: {{ img.framework }}">{{ display_tag }}</td>
 <div style="margin-bottom: 12px; padding: 8px; background-color: white; border: 1px solid #d0d7de; border-radius: 4px;">
 <div style="font-weight: 600; margin-bottom: 4px; font-size: 13px;">AWS ECR Registry Images: ({{ ecr_imgs|length }}) <span style="font-weight: 400; font-size: 11px; color: #57606a;">Requires <a href="container_registry_auth_aws_ecr.html" target="_blank" style="color: #0969da; text-decoration: none;">nvsec and AWS ECR authentication</a></span></div>
 {% if ecr_images_from_image_sha %}
-<div style="font-size: 11px; color: #57606a; margin-bottom: 6px;">No registry tag matched this commit SHA. Showing images from commits with the same ImageSHA256 {{ image_sha_6|upper }}.</div>
+<div style="font-size: 11px; color: #57606a; margin-bottom: 6px;">No ECR tag matched this commit SHA. {% if ecr_fallback_count.total and ecr_fallback_count.total > ecr_fallback_count.shown %}Showing images from the {{ ecr_fallback_count.shown }} most recent of {{ ecr_fallback_count.total }} commits{% else %}Showing images from {{ ecr_fallback_count.total }} commit{% if ecr_fallback_count.total != 1 %}s{% endif %}{% endif %} that share the same <code>container/</code> build context (id {{ image_sha_6|upper }}).</div>
 {% endif %}
 <table style="border: none; background-color: white; border-collapse: collapse;">
 <thead>
