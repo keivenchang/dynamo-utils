@@ -227,6 +227,11 @@ mkdir -p "$LOGS_DIR"
 TODAY="$(date +%Y-%m-%d)"
 DAY_LOG_DIR="$LOGS_DIR/$TODAY"
 mkdir -p "$DAY_LOG_DIR"
+# Cron's umask creates this dir 0700, which blocks the nginx/php-fpm user (www-data) from
+# traversing it -- so http://speedoflight.nvidia.com/dynamo/logs/<date>/ would 403. Force the
+# dated dir world-traversable+listable so the SpeedOfLight logs browser can descend into it.
+# (Individual sensitive logs like backup.log keep their own 0600 and stay private regardless.)
+chmod 755 "$DAY_LOG_DIR" 2>/dev/null || true
 
 # Log file for this run (rotated by day directory).
 LOG_FILE="$DAY_LOG_DIR/cron.log"
