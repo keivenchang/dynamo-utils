@@ -106,6 +106,20 @@ test_image() {
         fi
     fi
     
+    # Guard against the venv-shadowing PATH regression (bare `python` escaping the venv).
+    # `python3` alone won't catch it: /usr/local/bin has no python3, so python3 falls
+    # through to the venv, but /usr/local/bin/python -> system python3 shadows the venv's
+    # `python` whenever /usr/local/bin precedes ${VIRTUAL_ENV}/bin in PATH. Require the
+    # bare `python` interpreter's sys.prefix to equal ${VIRTUAL_ENV}.
+    log_info "Checking bare 'python' resolves to the venv..."
+    if "${RUN_SH}" --image "${image_tag}" --mount-workspace -- -c 'test "$(python -c "import sys; print(sys.prefix)")" = "${VIRTUAL_ENV}"'; then
+        log_success "'python' resolves to the venv for ${test_name}"
+    else
+        log_error "'python' does not resolve to the venv for ${test_name} (PATH regression)"
+        TEST_RESULTS["${test_name}"]="FAILED (python not in venv)"
+        return 1
+    fi
+
     # Run compilation
     log_info "Running compilation inside container..."
     if "${RUN_SH}" --image "${image_tag}" --mount-workspace -- -c "${COMPILE_CMD}"; then
