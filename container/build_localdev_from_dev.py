@@ -58,7 +58,10 @@ ARG DEVICE
 # with --chown=dynamo:0 --chmod=775), so no re-copy needed here.
 ENV RUSTUP_HOME=/home/${USERNAME}/.rustup
 ENV CARGO_HOME=/home/${USERNAME}/.cargo
-ENV PATH=/usr/local/cargo/bin:/usr/local/bin:${CARGO_HOME}/bin:${PATH}
+# ${VIRTUAL_ENV}/bin MUST lead: /usr/local/bin has a `python` -> system python3
+# symlink (from the runtime stage) that otherwise shadows the venv's `python`, so
+# bare `python` would escape the venv (no `dynamo`). Matches upstream local_dev.Dockerfile.
+ENV PATH=${VIRTUAL_ENV}/bin:/usr/local/cargo/bin:/usr/local/bin:${CARGO_HOME}/bin:${PATH}
 
 # https://code.visualstudio.com/remote/advancedcontainers/add-nonroot-user
 # Configure user with sudo access for Dev Container workflows
