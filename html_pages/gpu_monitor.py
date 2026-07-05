@@ -1535,7 +1535,11 @@ HTML_PAGE = r"""<!DOCTYPE html>
         layout[memYName].rangemode = 'tozero';
         layout[memYName].autorange = true;
         layout[utilYName].title = {text: '<span style="color:#76b900">GPU ' + gi + ' %-util</span>', font: {size: 10}};
-        layout[utilYName].range = [0, 105];
+        // Keep zero inside the plot so an idle GPU trace does not disappear
+        // behind the bottom axis. Labels still use normal percentage values.
+        layout[utilYName].range = [-5, 105];
+        layout[utilYName].tick0 = 0;
+        layout[utilYName].dtick = 20;
       }
       // PCIe secondary axes (one per GPU mem row)
       for (const pci of pcieYIdxPerGpu_mem) {
@@ -1843,6 +1847,10 @@ def build_server(collector: MetricsCollector, args):
         app,
         cors_allowed_origins="*",
         async_mode="threading",
+        # Werkzeug 3.1's WebSocket upgrade fails with flask-socketio and
+        # simple-websocket, leaving the dashboard without live samples.
+        # Long-polling delivers the same events without that server error.
+        allow_upgrades=False,
         ping_timeout=60,
         ping_interval=25,
         max_http_buffer_size=50 * 1024 * 1024,
