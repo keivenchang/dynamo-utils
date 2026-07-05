@@ -1189,7 +1189,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
     }
   }
 
-  const socket = io({transports: ['websocket', 'polling'], reconnection: true, reconnectionDelay: 500, reconnectionAttempts: Infinity, timeout: 60000});
+  const socket = io({transports: ['polling'], reconnection: true, reconnectionDelay: 500, reconnectionAttempts: Infinity, timeout: 60000});
 
   socket.on('connect', function() {
     document.getElementById('status').textContent = 'Connected. Waiting for data...';
@@ -1863,7 +1863,8 @@ def build_server(collector: MetricsCollector, args):
         return Response(HTML_PAGE, mimetype="text/html")
 
     @socketio.on("connect")
-    def handle_connect():
+    def handle_connect(auth=None):
+        del auth
         sid = flask_request.sid
 
         def send_init():
