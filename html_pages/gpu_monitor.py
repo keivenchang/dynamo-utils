@@ -466,6 +466,26 @@ class ProcessTracker:
         return self.series_for_ids(self.ranked_ids(n, sort_by))
 
 
+class ConnectedClients:
+    """Track live dashboard sessions without racing Socket.IO handlers."""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._sids: set[str] = set()
+
+    def add(self, sid: str):
+        with self._lock:
+            self._sids.add(sid)
+
+    def remove(self, sid: str):
+        with self._lock:
+            self._sids.discard(sid)
+
+    def any(self) -> bool:
+        with self._lock:
+            return bool(self._sids)
+
+
 # ---------------------------------------------------------------------------
 # Multiprocess workers (each gets its own GIL)
 # ---------------------------------------------------------------------------
@@ -1265,7 +1285,25 @@ HTML_PAGE = r"""<!DOCTYPE html>
     }
   }
 
-  const socket = io({transports: ['polling'], reconnection: true, reconnectionDelay: 500, reconnectionAttempts: Infinity, timeout: 60000});
+  const socket = io({
+    transports: ['polling'],
+    autoConnect: !document.hidden,
+    reconnection: true,
+    reconnectionDelay: 500,
+    reconnectionAttempts: Infinity,
+    timeout: 60000
+  });
+
+  function updateVisibilityConnection() {
+    if (document.hidden) {
+      socket.disconnect();
+      document.getElementById('status').textContent = 'Paused while hidden';
+      return;
+    }
+    socket.connect();
+  }
+
+  document.addEventListener('visibilitychange', updateVisibilityConnection);
 
   socket.on('connect', function() {
     document.getElementById('status').textContent = 'Connected. Waiting for data...';
@@ -1280,7 +1318,8 @@ HTML_PAGE = r"""<!DOCTYPE html>
   });
 
   socket.on('disconnect', function() {
-    document.getElementById('status').textContent = 'Disconnected -- reconnecting...';
+    document.getElementById('status').textContent = document.hidden ?
+      'Paused while hidden' : 'Disconnected -- reconnecting...';
   });
 
   socket.on('init', function(msg) {
@@ -1933,6 +1972,7 @@ def build_server(collector: MetricsCollector, args):
     )
 
     ui_state = {"paused": False}
+    clients = ConnectedClients()
 
     @app.route("/")
     def index():
@@ -1942,6 +1982,7 @@ def build_server(collector: MetricsCollector, args):
     def handle_connect(auth=None):
         del auth
         sid = flask_request.sid
+        clients.add(sid)
 
         def send_init():
             for _ in range(50):
@@ -1953,6 +1994,10 @@ def build_server(collector: MetricsCollector, args):
             socketio.emit("init", data, to=sid)
 
         threading.Thread(target=send_init, daemon=True).start()
+
+    @socketio.on("disconnect")
+    def handle_disconnect():
+        clients.remove(flask_request.sid)
 
     @socketio.on("request_init")
     def handle_request_init():
@@ -1990,6 +2035,13 @@ def build_server(collector: MetricsCollector, args):
                 cm = collector.counter_main
                 cp = list(collector.counter_pcie)
                 cd = collector.counter_disk
+            if not clients.any():
+                # A visible client receives a full init after reconnecting, so
+                # discard missed counters instead of serializing unused deltas.
+                last_main = cm
+                last_pcie = cp
+                last_disk = cd
+                continue
             if cm <= last_main and cp == last_pcie and cd <= last_disk:
                 continue
             try:
