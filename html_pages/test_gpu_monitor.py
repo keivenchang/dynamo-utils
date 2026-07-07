@@ -33,6 +33,21 @@ def test_delta_other_only_aggregates_requested_samples():
     ]
 
 
+def test_gpu_other_aggregate_is_restored_from_cached_series():
+    tracker = ProcessTracker(maxlen=5, prune=False)
+    tracker.record({1: 1.0, 2: 2.0}, _name)
+    tracker.record({1: 4.0, 2: 5.0}, _name)
+    restored = ProcessTracker(maxlen=5, prune=False)
+    restored.load_dict(tracker.to_dict())
+
+    series = restored.series_for_ids([1])
+
+    assert [(pid, values) for pid, _, _, values in series] == [
+        (1, [1.0, 4.0]),
+        (-1, [2.0, 5.0]),
+    ]
+
+
 def test_pruning_uses_cached_last_active_index():
     tracker = ProcessTracker(maxlen=300, prune=True)
 

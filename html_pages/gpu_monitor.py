@@ -291,6 +291,11 @@ class ProcessTracker:
         # delta must not rescan the whole 15-minute rolling window.
         self._series_total: dict[int, float] = {}
         self._last_active: dict[int, int] = {}
+        # GPU trackers retain exited PIDs for the rolling history. Keep their
+        # aggregate so an initial "Other" trace does not rescan every PID.
+        self._aggregate_history: deque[float] | None = (
+            deque(maxlen=maxlen) if not prune else None
+        )
 
     def new_pids(self, data: dict[int, float]) -> set[int]:
         """Return PIDs in data that aren't tracked yet (call outside lock)."""
@@ -329,6 +334,8 @@ class ProcessTracker:
             self._series_total[pid] += value - dropped
             if value > 0:
                 self._last_active[pid] = self._len
+        if self._aggregate_history is not None:
+            self._aggregate_history.append(sum(data.values()))
         self._len += 1
         if self._prune_enabled:
             membership_changed |= self._prune_dead()
@@ -378,14 +385,20 @@ class ProcessTracker:
     def _rebuild_ranking_metadata(self):
         self._series_total = {}
         self._last_active = {}
+        aggregate_values = [0.0] * min(self._len, self.maxlen)
         for pid, values in self.series.items():
             self._series_total[pid] = sum(values)
+            if self._aggregate_history is not None:
+                for index, value in enumerate(values):
+                    aggregate_values[index] += value
             first_index = self._len - len(values)
             self._last_active[pid] = -1
             for offset in range(len(values) - 1, -1, -1):
                 if values[offset] > 0:
                     self._last_active[pid] = first_index + offset
                     break
+        if self._aggregate_history is not None:
+            self._aggregate_history = deque(aggregate_values, maxlen=self.maxlen)
 
     def _color_for(self, pid: int) -> str:
         slot = self._pid_slot.get(pid, 0)
@@ -420,10 +433,16 @@ class ProcessTracker:
         if not rest or not any(self._series_total.get(pid, 0) > 0 for pid in rest):
             return result
 
-        other_values = [0.0] * (len(result[0][3]) if result else len(self._values(self.series[rest[0]], value_slice)))
-        for pid in rest:
-            for index, value in enumerate(self._values(self.series[pid], value_slice)):
-                other_values[index] += value
+        if self._aggregate_history is not None:
+            other_values = self._values(self._aggregate_history, value_slice)
+            for _, _, _, values in result:
+                for index, value in enumerate(values):
+                    other_values[index] -= value
+        else:
+            other_values = [0.0] * (len(result[0][3]) if result else len(self._values(self.series[rest[0]], value_slice)))
+            for pid in rest:
+                for index, value in enumerate(self._values(self.series[pid], value_slice)):
+                    other_values[index] += value
         return [*result, (-1, "Other", OTHER_COLOR, other_values)]
 
     def get_all_sorted(self) -> list[tuple[int, str, str, list[float]]]:
