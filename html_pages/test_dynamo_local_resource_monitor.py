@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-from html_pages.gpu_monitor import ConnectedClients, MetricsCollector, ProcessTracker
+from html_pages.dynamo_local_resource_monitor import MetricsCollector, ProcessTracker
 
 
 def _name(pid: int) -> str:
@@ -84,13 +84,3 @@ def test_top_selection_refreshes_on_interval_or_membership_change():
     collector.counter_main = 6
     collector._refresh_top_ids()
     assert collector._gpu_top_ids == [[2]]
-
-
-def test_connected_clients_only_reports_live_sessions():
-    clients = ConnectedClients()
-
-    assert not clients.any()
-    clients.add("visible")
-    assert clients.any()
-    clients.remove("visible")
-    assert not clients.any()

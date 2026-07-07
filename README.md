@@ -113,8 +113,9 @@ dynamo-utils/
 ├── common_gitlab/                # GitLab API client with caching
 ├── container/                    # Docker build/test/cleanup tools (see container/README.md)
 ├── html_pages/                   # HTML dashboard generators (see html_pages/README.md)
-│   ├── gpu_monitor.py            # Real-time GPU/CPU/disk/network web dashboard (WebSocket + Plotly)
-│   └── gpu_monitor_start.sh      # Launcher wrapper for gpu_monitor.py
+│   ├── dynamo_local_resource_monitor.py      # Real-time GPU/CPU/disk/network web dashboard (Socket.IO + Plotly)
+│   ├── dynamo_local_resource_monitor.html.j2 # Dashboard template
+│   └── gpu_monitor_start.sh      # Launcher wrapper for dynamo_local_resource_monitor.py
 └── reports/                      # Repository and CI analytics
     ├── analyze_repo.py           # Repository analysis
     ├── contributor_stats.py      # Contributor statistics
@@ -255,15 +256,15 @@ Launches Dynamo inference services (frontend and backend).
 
 ### Monitoring
 
-#### `html_pages/gpu_monitor.py`
+#### `html_pages/dynamo_local_resource_monitor.py`
 Real-time GPU/CPU/disk/network monitor served as a web dashboard. Uses multiprocessing to sample
-at different rates (PCIe at max speed, GPU/CPU at 5/s, disk at 1/s), WebSocket push to the browser,
+at different rates (PCIe at max speed, GPU/CPU at 5/s, disk at 1/s), Socket.IO push to the browser,
 and Plotly.js for interactive time-series charts. Tracks per-process GPU memory and CPU usage with
 automatic top-N pruning.
 
 ```bash
 # Start the monitor (default port 8051)
-python3 html_pages/gpu_monitor.py --host 0.0.0.0 --port 9999
+python3 html_pages/dynamo_local_resource_monitor.py --host 0.0.0.0 --port 9999
 
 # Or use the launcher wrapper
 html_pages/gpu_monitor_start.sh
