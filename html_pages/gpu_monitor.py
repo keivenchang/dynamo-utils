@@ -32,6 +32,7 @@ import signal
 import threading
 import time
 from collections import deque
+from itertools import islice
 from pathlib import Path
 
 import socketserver
@@ -286,6 +287,10 @@ class ProcessTracker:
         self._pid_slot: dict[int, int] = {}
         self._free_slots: list[int] = []
         self._next_slot: int = 0
+        # Keep ranking data alongside the series. Ranking on every 100 ms
+        # delta must not rescan the whole 15-minute rolling window.
+        self._series_total: dict[int, float] = {}
+        self._last_active: dict[int, int] = {}
 
     def new_pids(self, data: dict[int, float]) -> set[int]:
         """Return PIDs in data that aren't tracked yet (call outside lock)."""
@@ -297,11 +302,14 @@ class ProcessTracker:
         name_resolver,
         timestamp: float = 0,
         pre_resolved: dict[int, str] | None = None,
-    ):
+    ) -> bool:
+        membership_changed = False
         for pid in data:
             if pid not in self.series:
                 backfill = min(self._len, self.maxlen)
                 self.series[pid] = deque([0.0] * backfill, maxlen=self.maxlen)
+                self._series_total[pid] = 0.0
+                self._last_active[pid] = -1
                 if pre_resolved and pid in pre_resolved:
                     self.names[pid] = pre_resolved[pid]
                 else:
@@ -313,24 +321,34 @@ class ProcessTracker:
                     slot = self._next_slot
                     self._next_slot += 1
                 self._pid_slot[pid] = slot
+                membership_changed = True
         for pid, dq in self.series.items():
-            dq.append(data.get(pid, 0.0))
+            dropped = dq[0] if len(dq) == self.maxlen else 0.0
+            value = data.get(pid, 0.0)
+            dq.append(value)
+            self._series_total[pid] += value - dropped
+            if value > 0:
+                self._last_active[pid] = self._len
         self._len += 1
         if self._prune_enabled:
-            self._prune_dead()
+            membership_changed |= self._prune_dead()
+        return membership_changed
 
-    def _prune_dead(self):
+    def _prune_dead(self) -> bool:
         window = min(200, self._len)
         dead = [
             pid
-            for pid, dq in self.series.items()
-            if all(v == 0.0 for v in list(dq)[-window:])
+            for pid in self.series
+            if self._last_active.get(pid, -1) < self._len - window
         ]
         for pid in dead:
             del self.series[pid]
             del self.names[pid]
+            del self._series_total[pid]
+            del self._last_active[pid]
             if pid in self._pid_slot:
                 self._free_slots.append(self._pid_slot.pop(pid))
+        return bool(dead)
 
     def to_dict(self) -> dict:
         return {
@@ -355,10 +373,58 @@ class ProcessTracker:
         self._pid_slot = {int(k): v for k, v in d.get("_pid_slot", {}).items()}
         self._free_slots = d.get("_free_slots", [])
         self._next_slot = d.get("_next_slot", 0)
+        self._rebuild_ranking_metadata()
+
+    def _rebuild_ranking_metadata(self):
+        self._series_total = {}
+        self._last_active = {}
+        for pid, values in self.series.items():
+            self._series_total[pid] = sum(values)
+            first_index = self._len - len(values)
+            self._last_active[pid] = -1
+            for offset in range(len(values) - 1, -1, -1):
+                if values[offset] > 0:
+                    self._last_active[pid] = first_index + offset
+                    break
 
     def _color_for(self, pid: int) -> str:
         slot = self._pid_slot.get(pid, 0)
         return PROCESS_COLORS[slot % len(PROCESS_COLORS)]
+
+    def ranked_ids(self, n: int = 20, sort_by: str = "recency") -> list[int]:
+        """Return active IDs using metadata maintained during record()."""
+        active = [pid for pid in self.series if self._series_total.get(pid, 0) > 0]
+        if sort_by == "recency":
+            key = lambda pid: (self._last_active[pid], self._series_total[pid])
+        else:
+            key = lambda pid: self._series_total[pid]
+        return sorted(active, key=key, reverse=True)[:n]
+
+    @staticmethod
+    def _values(values: deque[float], value_slice: slice | None) -> list[float]:
+        if value_slice is None:
+            return list(values)
+        start, stop, step = value_slice.indices(len(values))
+        return list(islice(values, start, stop, step))
+
+    def series_for_ids(
+        self, selected_ids: list[int], value_slice: slice | None = None
+    ) -> list[tuple[int, str, str, list[float]]]:
+        """Build selected series plus Other for either an init or a delta."""
+        selected = [pid for pid in selected_ids if pid in self.series]
+        result = [
+            (pid, self.names[pid], self._color_for(pid), self._values(self.series[pid], value_slice))
+            for pid in selected
+        ]
+        rest = [pid for pid in self.series if pid not in selected]
+        if not rest or not any(self._series_total.get(pid, 0) > 0 for pid in rest):
+            return result
+
+        other_values = [0.0] * (len(result[0][3]) if result else len(self._values(self.series[rest[0]], value_slice)))
+        for pid in rest:
+            for index, value in enumerate(self._values(self.series[pid], value_slice)):
+                other_values[index] += value
+        return [*result, (-1, "Other", OTHER_COLOR, other_values)]
 
     def get_all_sorted(self) -> list[tuple[int, str, str, list[float]]]:
         """Return (pid, name, color, values) sorted by peak desc."""
@@ -378,44 +444,7 @@ class ProcessTracker:
     def get_top_sorted(
         self, n=20, sort_by: str = "recency"
     ) -> list[tuple[int, str, str, list[float]]]:
-        if not self.series:
-            return []
-
-        if sort_by == "recency":
-
-            def _key(p):
-                s = self.series[p]
-                last_active = -1
-                for i in range(len(s) - 1, -1, -1):
-                    if s[i] > 0:
-                        last_active = i
-                        break
-                return (last_active, max(s) if s else 0)
-        else:
-
-            def _key(p):
-                return sum(self.series[p])
-
-        sorted_pids = sorted(self.series.keys(), key=_key, reverse=True)
-        top = sorted_pids[:n]
-        rest = sorted_pids[n:]
-        result = [
-            (pid, self.names[pid], self._color_for(pid), list(self.series[pid]))
-            for pid in top
-            if max(self.series[pid]) > 0
-        ]
-        if rest:
-            length = len(next(iter(self.series.values())))
-            rest_vals = [0.0] * length
-            has_data = False
-            for pid in rest:
-                for i, v in enumerate(self.series[pid]):
-                    rest_vals[i] += v
-                    if v > 0:
-                        has_data = True
-            if has_data:
-                result.append((-1, "Other", OTHER_COLOR, rest_vals))
-        return result
+        return self.series_for_ids(self.ranked_ids(n, sort_by))
 
 
 # ---------------------------------------------------------------------------
@@ -568,6 +597,11 @@ class MetricsCollector:
         self._cpu_name_to_id: dict[str, int] = {}
         self._cpu_next_id: int = 1
         self._cpu_top_n: int = 5
+        self._top_refresh_samples = max(1, round(1000 / main_interval_ms))
+        self._top_cache_counter = -self._top_refresh_samples
+        self._top_cache_dirty = True
+        self._cpu_top_ids: list[int] = []
+        self._gpu_top_ids: list[list[int]] = []
         # Disk group: aggregate disk I/O (1/s)
         self.ts_disk: deque[float] = deque(maxlen=maxlen_disk)
         self.counter_disk: int = 0
@@ -588,6 +622,7 @@ class MetricsCollector:
                 mem = pynvml.nvmlDeviceGetMemoryInfo(handle)
                 self.gpu_mem_total_gib.append(mem.total / (1024**3))
                 self.proc_gpu_mem.append(ProcessTracker(maxlen_main, prune=False))
+                self._gpu_top_ids.append([])
                 self.gpu_util.append(deque(maxlen=maxlen_main))
                 self.gpu_pcie_tx.append(deque(maxlen=maxlen_pcie))
                 self.gpu_pcie_rx.append(deque(maxlen=maxlen_pcie))
@@ -689,6 +724,23 @@ class MetricsCollector:
             flush=True,
         )
 
+    def _refresh_top_ids(self, force: bool = False):
+        """Refresh chart membership only when new membership can be visible."""
+        if (
+            not force
+            and not self._top_cache_dirty
+            and self.counter_main - self._top_cache_counter < self._top_refresh_samples
+        ):
+            return
+        self._cpu_top_ids = self.proc_cpu.ranked_ids(
+            self._cpu_top_n, sort_by="total"
+        )
+        self._gpu_top_ids = [
+            tracker.ranked_ids(self.top_n) for tracker in self.proc_gpu_mem
+        ]
+        self._top_cache_counter = self.counter_main
+        self._top_cache_dirty = False
+
     def ingest_pcie(self, now: float, gpu_idx: int, tx_val: float, rx_val: float):
         """Store PCIe data for one GPU received from its worker process."""
         with self.lock:
@@ -730,14 +782,14 @@ class MetricsCollector:
             self.ts_main.append(now)
             self.counter_main += 1
             self.cpu_pct.append(cpu)
-            self.proc_cpu.record(
+            membership_changed = self.proc_cpu.record(
                 cpu_id_data,
                 lambda sid: cpu_id_names.get(sid, f"pid:{sid}"),
                 now,
                 pre_resolved=cpu_id_names,
             )
             for i, (gpu_proc_mem, util, temp) in enumerate(gpu_data):
-                self.proc_gpu_mem[i].record(
+                membership_changed |= self.proc_gpu_mem[i].record(
                     gpu_proc_mem,
                     _resolve_process_name,
                     now,
@@ -745,6 +797,7 @@ class MetricsCollector:
                 )
                 self.gpu_util[i].append(util)
                 self.gpu_temp[i].append(temp)
+            self._top_cache_dirty |= membership_changed
             alpha_net = 0.15
             prev_sent = self.net_sent_mbps[-1] if self.net_sent_mbps else 0.0
             prev_recv = self.net_recv_mbps[-1] if self.net_recv_mbps else 0.0
@@ -787,14 +840,15 @@ class MetricsCollector:
         with self.lock:
             # --- Main group: CPU + CPU procs + GPU mem/util/temp + network ---
             main_vals = [list(self.cpu_pct)]
-            cpu_procs_full = self.proc_cpu.get_top_sorted(
-                self._cpu_top_n, sort_by="total"
-            )
+            self._refresh_top_ids(force=True)
+            cpu_procs_full = self.proc_cpu.series_for_ids(self._cpu_top_ids)
             for _, _, _, v in cpu_procs_full:
                 main_vals.append(v)
             gpu_mem_per_gpu_full = []
             for gi in range(self.gpu_count):
-                procs = self.proc_gpu_mem[gi].get_top_sorted(self.top_n)
+                procs = self.proc_gpu_mem[gi].series_for_ids(
+                    self._gpu_top_ids[gi]
+                )
                 gpu_mem_per_gpu_full.append(procs)
                 for _, _, _, v in procs:
                     main_vals.append(v)
@@ -906,6 +960,7 @@ class MetricsCollector:
     ) -> dict:
         """Return new data since the given counters, subsampled by step."""
         with self.lock:
+            self._refresh_top_ids()
             # Main group
             new_main = self.counter_main - since_main
             main_len = len(self.ts_main)
@@ -913,13 +968,13 @@ class MetricsCollector:
             sl_m = slice(main_idx, None, step)
             new_ts_main = list(self.ts_main)[sl_m]
             cpu = list(self.cpu_pct)[sl_m]
-            cpu_procs = self.proc_cpu.get_top_sorted(self._cpu_top_n, sort_by="total")
+            cpu_procs = self.proc_cpu.series_for_ids(self._cpu_top_ids, sl_m)
             cpu_procs_delta = [
                 {
                     "id": p,
                     "name": n,
                     "color": c,
-                    "vals": v[sl_m] if main_idx < len(v) else [],
+                    "vals": v,
                 }
                 for p, n, c, v in cpu_procs
             ]
@@ -927,14 +982,16 @@ class MetricsCollector:
             gpu_mem_per_gpu = []
             gpu_mem_keys_per_gpu = []
             for gi in range(self.gpu_count):
-                gm = self.proc_gpu_mem[gi].get_top_sorted(self.top_n)
+                gm = self.proc_gpu_mem[gi].series_for_ids(
+                    self._gpu_top_ids[gi], sl_m
+                )
                 gpu_mem_per_gpu.append(
                     [
                         {
                             "pid": p,
                             "name": n,
                             "color": c,
-                            "vals": v[sl_m] if main_idx < len(v) else [],
+                            "vals": v,
                         }
                         for p, n, c, v in gm
                     ]
