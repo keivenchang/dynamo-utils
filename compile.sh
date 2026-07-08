@@ -242,13 +242,40 @@ elif [ -n "${SGLANG_IMAGE_TAG:-}${SGLANG_BUILD_COMMIT:-}" ]; then
     IS_SGLANG=1
 fi
 
+# uv cache: local-dev images ship /opt/uv/cache owned by root with root-only
+# subdirs, which the UID-remapped container user cannot write — `uv` and
+# `maturin develop --uv` then fail with "Failed to initialize cache at
+# /opt/uv/cache". If the active uv cache isn't owned by us, fall back to a
+# per-user cache so the build proceeds.
+_uv_cache="${UV_CACHE_DIR:-/opt/uv/cache}"
+if [ -d "$_uv_cache" ] && [ ! -O "$_uv_cache" ]; then
+    export UV_CACHE_DIR="${HOME}/.cache/uv"
+    mkdir -p "$UV_CACHE_DIR"
+    echo "INFO: uv cache $_uv_cache not owned by $(id -un); using UV_CACHE_DIR=$UV_CACHE_DIR"
+fi
+
+# NIXL C++ SDK detection. Local-dev images ship NIXL at /opt/dynamo/nixl and
+# export NIXL_LIB_DIR / NIXL_PREFIX / LD_LIBRARY_PATH; classic (root) dev images
+# use /opt/nvidia/nvda_nixl. Trust the env vars first (if set, the image already
+# configured the linker), then fall back to a file search across both locations.
+# The old path-only check looked solely under /opt/nvidia/nvda_nixl and bailed in
+# local-dev even though cargo could link fine against /opt/dynamo/nixl.
 NIXL_SDK_LIB=""
-for candidate in /opt/nvidia/nvda_nixl/lib64/libnixl.so /opt/nvidia/nvda_nixl/lib/libnixl.so /opt/nvidia/nvda_nixl/lib/x86_64-linux-gnu/libnixl.so; do
-    if [ -f "$candidate" ]; then
-        NIXL_SDK_LIB="$candidate"
-        break
-    fi
-done
+if [ -n "${NIXL_LIB_DIR:-}" ] && [ -f "${NIXL_LIB_DIR}/libnixl.so" ]; then
+    NIXL_SDK_LIB="${NIXL_LIB_DIR}/libnixl.so"
+elif [ -n "${NIXL_PREFIX:-}" ] && [ -f "${NIXL_PREFIX}/libnixl.so" ]; then
+    NIXL_SDK_LIB="${NIXL_PREFIX}/libnixl.so"
+fi
+if [ -z "$NIXL_SDK_LIB" ]; then
+    for candidate in \
+        /opt/dynamo/nixl/libnixl.so /opt/dynamo/nixl/lib64/libnixl.so /opt/dynamo/nixl/lib/libnixl.so \
+        /opt/nvidia/nvda_nixl/lib64/libnixl.so /opt/nvidia/nvda_nixl/lib/libnixl.so /opt/nvidia/nvda_nixl/lib/x86_64-linux-gnu/libnixl.so; do
+        if [ -f "$candidate" ]; then
+            NIXL_SDK_LIB="$candidate"
+            break
+        fi
+    done
+fi
 
 if [ "$IS_SGLANG" = "1" ] && [ "${ALLOW_MISSING_NIXL_SDK:-0}" != "1" ]; then
     echo "================================================================="
@@ -269,7 +296,7 @@ fi
 
 if [ -z "$NIXL_SDK_LIB" ] && [ "${ALLOW_MISSING_NIXL_SDK:-0}" != "1" ]; then
     echo "================================================================="
-    echo "WARN: NIXL C++ SDK not found under /opt/nvidia/nvda_nixl/"
+    echo "WARN: NIXL C++ SDK not found (searched \$NIXL_LIB_DIR, \$NIXL_PREFIX, /opt/dynamo/nixl, /opt/nvidia/nvda_nixl)"
     echo "      cargo build will fail with 'unable to find library -lnixl'"
     echo "      (lib/memory has unconditional nixl-sys dep)."
     echo "      Skipping cleanly to avoid corrupting target/."
