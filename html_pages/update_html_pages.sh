@@ -567,7 +567,7 @@ update_frontend_crates_conformance() {
     local frontend_repo="${FRONTEND_CRATES_REPO:-$DYNAMO_HOME/frontend-crates}"
     local frontend_remote="${FRONTEND_CRATES_REMOTE:-git@github.com:ai-dynamo/frontend-crates.git}"
     # The v1 page is published as PARITY_v1.html; PARITY.html is a legacy stable URL
-    # symlinked to it (bookmarks / speedoflight links keep working).
+    # that now redirects to CONFORMANCE_v2.html (the canonical page).
     local parity_v1_html="$frontend_repo/conformance/PARITY_v1.html"
     local parity_html="$frontend_repo/conformance/PARITY.html"
     local conformance_html="$frontend_repo/conformance/CONFORMANCE_v2.html"
@@ -577,10 +577,10 @@ update_frontend_crates_conformance() {
     if [ "$DRY_RUN" = true ]; then
         echo "[DRY-RUN] Would generate frontend-crates conformance HTML:"
         echo "[DRY-RUN]   Frontend-crates checkout: $frontend_repo"
-        echo "[DRY-RUN]   v1 output: $parity_v1_html (PARITY.html -> PARITY_v1.html symlink)"
+        echo "[DRY-RUN]   v1 output: $parity_v1_html (PARITY.html -> meta-refresh redirect to CONFORMANCE_v2.html)"
         echo "[DRY-RUN]   v2 output: $conformance_html"
         echo "[DRY-RUN]   Command: cd $frontend_repo && git checkout main && git pull --ff-only origin main"
-        echo "[DRY-RUN]   Command: cd $frontend_repo && export HF_TOKEN=<~/.cache/huggingface/token> && conformance/utils/render_table_v1.sh && \\cp -f conformance/PARITY_v1.html $parity_v1_html && ln -sfn PARITY_v1.html $parity_html"
+        echo "[DRY-RUN]   Command: cd $frontend_repo && export HF_TOKEN=<~/.cache/huggingface/token> && conformance/utils/render_table_v1.sh && \\cp -f conformance/PARITY_v1.html $parity_v1_html && write meta-refresh redirect > $parity_html"
         echo "[DRY-RUN]   Command: cd $frontend_repo && export HF_TOKEN=<~/.cache/huggingface/token> && conformance/utils/render_table_v2.sh --output $conformance_html"
         return 0
     fi
@@ -620,8 +620,24 @@ update_frontend_crates_conformance() {
     if run_cmd_to_log_ts "$COMMIT_HISTORY_LOG" bash -lc 'export HF_TOKEN="${HF_TOKEN:-$(cat "$HOME/.cache/huggingface/token" 2>/dev/null)}"; cd "$1" && conformance/utils/render_table_v1.sh && \cp -f conformance/PARITY_v1.html "$2"' _ "$frontend_repo" "$parity_tmp"; then
         chmod 644 "$parity_tmp"
         \mv -f "$parity_tmp" "$parity_v1_html"
-        ln -sfn PARITY_v1.html "$parity_html"
-        echo "$(date '+%Y-%m-%d %H:%M:%S') - Updated $parity_v1_html (PARITY.html -> PARITY_v1.html)" >> "$LOG_FILE"
+        cat > "$parity_html" << 'PARITY_REDIRECT_EOF'
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="refresh" content="10;url=CONFORMANCE_v2.html">
+<title>Moved - CONFORMANCE_v2.html</title>
+<style>body{font-family:-apple-system,system-ui,sans-serif;margin:3em;color:#24324a}</style>
+</head>
+<body>
+<h1>This page has moved</h1>
+<p>The Dynamo parser conformance table now lives at
+<a href="CONFORMANCE_v2.html"><strong>CONFORMANCE_v2.html</strong></a>.</p>
+<p>Redirecting in 10 seconds... (or click the link above).</p>
+</body>
+</html>
+PARITY_REDIRECT_EOF
+        echo "$(date '+%Y-%m-%d %H:%M:%S') - Updated $parity_v1_html (PARITY.html -> meta-refresh redirect to CONFORMANCE_v2.html)" >> "$LOG_FILE"
     else
         rm -f "$parity_tmp"
         echo "$(date '+%Y-%m-%d %H:%M:%S') - WARNING: frontend-crates v1 parity regen failed (see $COMMIT_HISTORY_LOG)" >> "$LOG_FILE"
