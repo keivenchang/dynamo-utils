@@ -564,19 +564,24 @@ run_show_commit_history() {
 }
 
 update_frontend_crates_conformance() {
-    local frontend_repo="${FRONTEND_CRATES_REPO:-$DYNAMO_HOME/frontend-crates}"
+    # Render from an isolated checkout of main. The nginx-served frontend-crates checkout is
+    # also an active development worktree, so using it as the renderer can leave this page
+    # pinned to a dirty feature branch.
+    local frontend_repo="${FRONTEND_CRATES_REPO:-$DYNAMO_HOME/frontend-crates-conformance}"
     local frontend_remote="${FRONTEND_CRATES_REMOTE:-git@github.com:ai-dynamo/frontend-crates.git}"
+    local publish_dir="${FRONTEND_CRATES_PUBLISH_DIR:-$DYNAMO_HOME/frontend-crates/conformance}"
     # The v1 page is published as PARITY_v1.html; PARITY.html is a legacy stable URL
     # that now redirects to CONFORMANCE_v2.html (the canonical page).
-    local parity_v1_html="$frontend_repo/conformance/PARITY_v1.html"
-    local parity_html="$frontend_repo/conformance/PARITY.html"
-    local conformance_html="$frontend_repo/conformance/CONFORMANCE_v2.html"
+    local parity_v1_html="$publish_dir/PARITY_v1.html"
+    local parity_html="$publish_dir/PARITY.html"
+    local conformance_html="$publish_dir/CONFORMANCE_v2.html"
     local parity_tmp=""
     local conformance_tmp=""
 
     if [ "$DRY_RUN" = true ]; then
         echo "[DRY-RUN] Would generate frontend-crates conformance HTML:"
-        echo "[DRY-RUN]   Frontend-crates checkout: $frontend_repo"
+        echo "[DRY-RUN]   Clean renderer checkout: $frontend_repo"
+        echo "[DRY-RUN]   nginx publish directory: $publish_dir"
         echo "[DRY-RUN]   v1 output: $parity_v1_html (PARITY.html -> meta-refresh redirect to CONFORMANCE_v2.html)"
         echo "[DRY-RUN]   v2 output: $conformance_html"
         echo "[DRY-RUN]   Command: cd $frontend_repo && git checkout main && git pull --ff-only origin main"
@@ -615,9 +620,11 @@ update_frontend_crates_conformance() {
     # in parsers_v2/ and the v2 fixture overlays in frontend-crates.
     # Fixtures live on the PRIVATE HuggingFace dataset; the render downloads them.
     # download_fixtures.py already falls back to ~/.cache/huggingface/token, but export
-    # it explicitly so the token is unambiguous in the login-shell render subprocess.
+    # it explicitly. Do not use a login shell here: its background startup programs can
+    # inherit this logger's stdout pipe and permanently hold the cron lock.
+    mkdir -p "$publish_dir"
     parity_tmp="$(mktemp -p "$(dirname "$parity_v1_html")" .PARITY_v1-XXXXXX.html)"
-    if run_cmd_to_log_ts "$COMMIT_HISTORY_LOG" bash -lc 'export HF_TOKEN="${HF_TOKEN:-$(cat "$HOME/.cache/huggingface/token" 2>/dev/null)}"; cd "$1" && conformance/utils/render_table_v1.sh && \cp -f conformance/PARITY_v1.html "$2"' _ "$frontend_repo" "$parity_tmp"; then
+    if run_cmd_to_log_ts "$COMMIT_HISTORY_LOG" bash -c 'export HF_TOKEN="${HF_TOKEN:-$(cat "$HOME/.cache/huggingface/token" 2>/dev/null)}"; cd "$1" && conformance/utils/render_table_v1.sh && \cp -f conformance/PARITY_v1.html "$2"' _ "$frontend_repo" "$parity_tmp"; then
         chmod 644 "$parity_tmp"
         \mv -f "$parity_tmp" "$parity_v1_html"
         cat > "$parity_html" << 'PARITY_REDIRECT_EOF'
@@ -644,7 +651,7 @@ PARITY_REDIRECT_EOF
     fi
 
     conformance_tmp="$(mktemp -p "$(dirname "$conformance_html")" .CONFORMANCE_v2-XXXXXX.html)"
-    if run_cmd_to_log_ts "$COMMIT_HISTORY_LOG" bash -lc 'export HF_TOKEN="${HF_TOKEN:-$(cat "$HOME/.cache/huggingface/token" 2>/dev/null)}"; cd "$1" && conformance/utils/render_table_v2.sh --output "$2"' _ "$frontend_repo" "$conformance_tmp"; then
+    if run_cmd_to_log_ts "$COMMIT_HISTORY_LOG" bash -c 'export HF_TOKEN="${HF_TOKEN:-$(cat "$HOME/.cache/huggingface/token" 2>/dev/null)}"; cd "$1" && conformance/utils/render_table_v2.sh --output "$2"' _ "$frontend_repo" "$conformance_tmp"; then
         chmod 644 "$conformance_tmp"
         \mv -f "$conformance_tmp" "$conformance_html"
         echo "$(date '+%Y-%m-%d %H:%M:%S') - Updated $conformance_html" >> "$LOG_FILE"
