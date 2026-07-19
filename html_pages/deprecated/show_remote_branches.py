@@ -2,6 +2,11 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+# DEPRECATED 2026-07-19: the /dynamo/users/ per-user branches dashboards are retired.
+# The remote_prs cron jobs are disabled, the ~/nvidia/users/ pages and their nginx
+# location blocks were removed, and update_html_pages.sh run_show_remote_branches is a
+# no-op. Kept here for reference only -- do NOT run it.
+
 """
 Generate a "remote" branches/PR dashboard for a GitHub user.
 
@@ -40,13 +45,15 @@ from pathlib import Path
 from typing import List, Optional, Tuple
 from zoneinfo import ZoneInfo
 
-# Ensure we can import sibling utilities (common.py) from the parent dynamo-utils directory
+# This file lives in html_pages/deprecated/; its sibling modules (common_lock.py, common*.py)
+# stay in html_pages/, and common.py lives at the repo root -- put both on sys.path.
 _THIS_DIR = Path(__file__).resolve().parent
-_UTILS_DIR = _THIS_DIR.parent
+_HTML_PAGES_DIR = _THIS_DIR.parent
+_UTILS_DIR = _HTML_PAGES_DIR.parent
 if str(_UTILS_DIR) not in sys.path:
     sys.path.insert(0, str(_UTILS_DIR))
-if str(_THIS_DIR) not in sys.path:
-    sys.path.insert(0, str(_THIS_DIR))
+if str(_HTML_PAGES_DIR) not in sys.path:
+    sys.path.insert(0, str(_HTML_PAGES_DIR))
 
 from common_github import GitHubAPIClient, PRInfo  # noqa: E402
 from html_pages.common_dashboard_runtime import prune_dashboard_raw_logs, prune_partial_raw_log_caches  # noqa: E402

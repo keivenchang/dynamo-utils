@@ -32,7 +32,7 @@
 # Args (optional; can be combined):
 #   --show-local-resources  Update the resource report ($NVIDIA_HOME/speedoflight/stats/index.html)
 #   --show-local-branches   [DEPRECATED 2026-07-19] no-op; branches dashboard retired
-#   --show-remote-branches  Update remote PR dashboards for selected GitHub users (IDENTICAL UI to local branches)
+#   --show-remote-branches  [DEPRECATED 2026-07-19] no-op; /dynamo/users/ dashboards retired
 #   --show-commit-history   Update the commit history dashboard ($NVIDIA_HOME/commits/index.html)
 #   --debug-html                   Faster runs: outputs to debug.html instead of index.html, uses smaller commit window (25 commits), enables verification passes
 #   --github-token <token>  GitHub token to pass to all show_*.py scripts (preferred).
@@ -81,7 +81,7 @@ If no args are provided, ALL tasks run.
 Flags:
   --show-local-resources    Write: $NVIDIA_HOME/speedoflight/stats/index.html (or debug.html in --debug-html)
   --show-local-branches     [DEPRECATED 2026-07-19] no-op; branches dashboard retired
-  --show-remote-branches    Write: $NVIDIA_HOME/speedoflight/dynamo/users/<user>/index.html (or debug.html in --debug-html)
+  --show-remote-branches    [DEPRECATED 2026-07-19] no-op; /dynamo/users/ dashboards retired
   --show-commit-history     Write: $NVIDIA_HOME/commits/index.html (or debug.html in --debug-html)
   --show-frontend-crates-conformance
                              Update $NVIDIA_HOME/frontend-crates and write conformance/PARITY.html + conformance/CONFORMANCE_v2.html
@@ -351,102 +351,16 @@ run_show_local_branches() {
 }
 
 run_show_remote_branches() {
-    # Optional: generate a "remote PRs for user" page (IDENTICAL UI to local branches).
-    # Shows UserNode (GitHub user) → branches with full CI hierarchy.
-    # This task is opt-in and ONLY runs when `--show-remote-branches` is passed.
-    #
-    # Users list:
-    #   REMOTE_GITHUB_USERS="keivenchang"
-    # Back-compat:
-    #   REMOTE_GITHUB_USER=keivenchang
-    #
-    # Default output root:
-    #   $NVIDIA_HOME/speedoflight/dynamo/users/<user>/index.html
-
-    USERS_LIST="${REMOTE_GITHUB_USERS:-${REMOTE_GITHUB_USER:-}}"
-    if [ -z "${USERS_LIST:-}" ]; then
-        # Default: a single user (requested).
-        USERS_LIST="keivenchang"
-    fi
-
-    MAX_GH_FLAG=""
-    if [ -n "${MAX_GITHUB_API_CALLS:-}" ]; then
-        MAX_GH_FLAG="--max-github-api-calls ${MAX_GITHUB_API_CALLS}"
-    fi
-    TOKEN_FLAG=""
-    if [ -n "${GITHUB_TOKEN_ARG:-}" ]; then
-        TOKEN_FLAG="--github-token ${GITHUB_TOKEN_ARG}"
-    fi
-    # Always enable: fetch/cache successful *-build-test raw logs so we can parse pytest test timings.
-    SUCCESS_BUILD_TEST_FLAG="--enable-success-build-test-logs"
-
-    # Base dir for remote PRs generation: needs a local repo clone for workflow YAML inference.
-    # Default to $NVIDIA_HOME/dynamo_latest (requested). Fallback to $NVIDIA_HOME/commits if needed.
-    REMOTE_BASE_DIR="${REMOTE_PRS_BASE_DIR:-}"
-    if [ -z "${REMOTE_BASE_DIR:-}" ]; then
-        if [ -d "$NVIDIA_HOME/dynamo_latest" ]; then
-            REMOTE_BASE_DIR="$NVIDIA_HOME/dynamo_latest"
-        else
-            REMOTE_BASE_DIR="$NVIDIA_HOME/commits"
-        fi
-    fi
-
+    # DEPRECATED 2026-07-19: the per-user /dynamo/users/ dashboards are retired. The remote_prs
+    # cron jobs are disabled, the ~/nvidia/users/ pages and their nginx location blocks were
+    # removed, and show_remote_branches.py moved to html_pages/deprecated/ -- do NOT run it.
+    # Kept as a no-op so a stray --show-remote-branches flag does not error out.
+    local msg="run_show_remote_branches: DEPRECATED, skipping (see html_pages/deprecated/show_remote_branches.py)"
+    echo "$(date '+%Y-%m-%d %H:%M:%S') - $msg" >> "$LOG_FILE"
     if [ "$DRY_RUN" = true ]; then
-        echo "[DRY-RUN] Would generate remote PRs dashboards for users: $USERS_LIST"
-        for U in $USERS_LIST; do
-            if [ -z "${U:-}" ]; then
-                continue
-            fi
-            OUT_DIR="${REMOTE_PRS_OUT_DIR:-$NVIDIA_HOME/speedoflight/dynamo/users/${U}}"
-            OUT_FILE="${REMOTE_PRS_OUT_FILE:-$OUT_DIR/index.html}"
-            if [ "$FAST_DEBUG" = true ]; then
-                OUT_FILE="${REMOTE_PRS_OUT_FILE:-$OUT_DIR/debug.html}"
-            fi
-            echo "[DRY-RUN]   User: $U"
-            echo "[DRY-RUN]     Output: $OUT_FILE"
-            echo "[DRY-RUN]     Command: python3 $SCRIPT_DIR/show_remote_branches.py --github-user $U --base-dir $REMOTE_BASE_DIR --output $OUT_FILE $TOKEN_FLAG $MAX_GH_FLAG $SUCCESS_BUILD_TEST_FLAG"
-        done
-        return 0
+        echo "[DRY-RUN] $msg"
     fi
-
-    # Iterate space-separated list.
-    for U in $USERS_LIST; do
-        if [ -z "${U:-}" ]; then
-            continue
-        fi
-        OUT_DIR="${REMOTE_PRS_OUT_DIR:-$NVIDIA_HOME/speedoflight/dynamo/users/${U}}"
-        OUT_FILE="${REMOTE_PRS_OUT_FILE:-$OUT_DIR/index.html}"
-        if [ "$FAST_DEBUG" = true ]; then
-            OUT_FILE="${REMOTE_PRS_OUT_FILE:-$OUT_DIR/debug.html}"
-        fi
-        mkdir -p "$(dirname "$OUT_FILE")"
-        
-        # Copy shared tree-view.css and debug-tree.html to speedoflight
-        cp -f "$SCRIPT_DIR/tree-view.css" "$NVIDIA_HOME/speedoflight/dynamo/tree-view.css" 2>/dev/null || true
-        cp -f "$SCRIPT_DIR/debug-tree.html" "$NVIDIA_HOME/speedoflight/dynamo/users/${U}/debug-tree.html" 2>/dev/null || true
-
-        echo "$(date '+%Y-%m-%d %H:%M:%S') - Generating remote PRs dashboard (user=${U} output=$OUT_FILE)" >> "$LOG_FILE"
-        log_line_ts "$REMOTE_PRS_LOG" "===== run_show_remote_branches start (user=${U} output=$OUT_FILE) ====="
-
-        # Use a local repo clone as base-dir so we can locate workflow YAML for inference.
-        # Div trees are now default (no flag needed)
-        
-        if run_cmd_to_log_ts "$REMOTE_PRS_LOG" python3 "$SCRIPT_DIR/show_remote_branches.py" \
-            --github-user "${U}" \
-            --base-dir "$REMOTE_BASE_DIR" \
-            --output "$OUT_FILE" \
-                $TOKEN_FLAG \
-                $MAX_GH_FLAG \
-                $SUCCESS_BUILD_TEST_FLAG \
-                $LOCK_FLAG; then
-            echo "$(date '+%Y-%m-%d %H:%M:%S') - Updated $OUT_FILE" >> "$LOG_FILE"
-        else
-            echo "$(date '+%Y-%m-%d %H:%M:%S') - ERROR: Failed to update $OUT_FILE" >> "$LOG_FILE"
-            echo "ERROR: Failed to update $OUT_FILE" >&2
-            echo "See log for details: $REMOTE_PRS_LOG" >&2
-            exit 1
-        fi
-    done
+    return 0
 }
 
 run_show_commit_history() {
