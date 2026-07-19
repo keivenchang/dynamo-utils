@@ -1,6 +1,6 @@
 # Container utilities (`dynamo-utils.PRODUCTION/container/`)
 
-Scripts in this directory are focused on **Docker image build/test**, **retagging**, and **cleanup/monitoring** for the Dynamo repos under your workspace (commonly `~/dynamo`).
+Scripts in this directory are focused on **Docker image build/test**, **retagging**, and **cleanup/monitoring** for the Dynamo repos under your workspace (commonly `~/nvidia`).
 
 ## Directory structure
 
@@ -46,16 +46,16 @@ Common flags: `--repo-path` (required), `--commit-sha`, `--parallel`, `--skip`, 
 
 ```bash
 # Quick test (single framework)
-python3 container/build_images.py --repo-path ~/dynamo/dynamo_ci --sanity-check-only --framework sglang --run-no-matter-what
+python3 container/build_images.py --repo-path ~/nvidia/dynamo_ci --sanity-check-only --framework sglang --run-no-matter-what
 
 # Parallel build with skip
-python3 container/build_images.py --repo-path ~/dynamo/dynamo_ci --skip-action-if-already-passed --parallel --run-no-matter-what
+python3 container/build_images.py --repo-path ~/nvidia/dynamo_ci --skip-action-if-already-passed --parallel --run-no-matter-what
 
 # Full build
-python3 container/build_images.py --repo-path ~/dynamo/dynamo_ci --parallel --run-no-matter-what
+python3 container/build_images.py --repo-path ~/nvidia/dynamo_ci --parallel --run-no-matter-what
 
 # Without upload and compress (both are on by default)
-python3 container/build_images.py --repo-path ~/dynamo/dynamo_ci --parallel --skip --run-no-matter-what --no-upload --no-compress
+python3 container/build_images.py --repo-path ~/nvidia/dynamo_ci --parallel --skip --run-no-matter-what --no-upload --no-compress
 ```
 
 ### Commit SHA and image SHA
@@ -81,10 +81,10 @@ If you pass `--commit-sha <commit>` (e.g. `--commit-sha 6d3e0137c`), the script 
 
 ```bash
 # Build at image-SHA origin (default: use HEAD, resolve to introducing commit, then build)
-python3 container/build_images.py --repo-path ~/dynamo/dynamo_ci --parallel --skip --run-no-matter-what -v
+python3 container/build_images.py --repo-path ~/nvidia/dynamo_ci --parallel --skip --run-no-matter-what -v
 
 # Build a specific commit as-is (no traverse-back)
-python3 container/build_images.py --repo-path ~/dynamo/dynamo_ci --commit-sha 6d3e0137c --parallel --skip --run-no-matter-what -v
+python3 container/build_images.py --repo-path ~/nvidia/dynamo_ci --commit-sha 6d3e0137c --parallel --skip --run-no-matter-what -v
 ```
 
 ### Reuse dev images (`--reuse-dev-if-image-exists`)
@@ -100,7 +100,7 @@ Use this for a fast compile/sanity pass when container/ has not changed and you 
 
 ```bash
 # Reuse local-dev if image exists; otherwise full build
-python3 container/build_images.py --repo-path ~/dynamo/dynamo_ci --commit-sha fd839b8d5 --reuse-dev-if-image-exists --parallel --skip -v
+python3 container/build_images.py --repo-path ~/nvidia/dynamo_ci --commit-sha fd839b8d5 --reuse-dev-if-image-exists --parallel --skip -v
 ```
 
 ### Dev upload and compress
@@ -131,7 +131,7 @@ This means a re-run of the same commit does nothing, and a re-run after a code-o
 - **HTML report generation**:
   - Automatic report generation with clickable links
   - Two versions: file paths vs absolute URLs (for email)
-  - Log file paths: `~/dynamo/dynamo_ci/logs/YYYY-MM-DD/{image_sha}.{commit_sha}/`
+  - Log file paths: `~/nvidia/dynamo_ci/logs/YYYY-MM-DD/{image_sha}.{commit_sha}/`
   - Report: `{image_sha}.{commit_sha}/report.html`
 - **Email notifications**:
   - SMTP server: `smtp.nvidia.com:25`
@@ -209,11 +209,11 @@ curl --request DELETE \
 
 **Calculate image SHA for a commit**:
 ```bash
-cd ~/dynamo
+cd ~/nvidia
 python3 -c "
 import sys; sys.path.insert(0, 'dynamo-utils.dev')
 from common import DynamoRepositoryUtils
-repo = DynamoRepositoryUtils('/home/keivenc/dynamo/dynamo4')
+repo = DynamoRepositoryUtils('/home/keivenc/nvidia/dynamo4')
 print(repo.generate_docker_image_sha_for_commit('COMMIT_SHA', full_hash=False))
 "
 ```

@@ -7,7 +7,7 @@
 #
 # Environment Variables (optional):
 #   NVIDIA_HOME         - Base directory for logs and output files
-#                        (default: parent of script dir; for this repo layout that is typically ~/dynamo)
+#                        (default: parent of script dir; for this repo layout that is typically ~/nvidia)
 #                        Note: GitHub fetching is independently capped/cached by the Python scripts.
 #   REFRESH_CLOSED_PRS  - If set, refresh cached closed/merged PR mappings (more GitHub API calls)
 #   MAX_GITHUB_API_CALLS - If set, pass --max-github-api-calls to the Python generators.
@@ -47,11 +47,11 @@
 #
 # Cron Example:
 #   # Full fetch every 30 minutes (minute 0 and 30)
-#   0,30 * * * * NVIDIA_HOME=$HOME/dynamo /path/to/update_html_pages.sh
+#   0,30 * * * * NVIDIA_HOME=$HOME/nvidia /path/to/update_html_pages.sh
 #   # Cache-only between full runs (every 4 minutes from minute 8..56)
-#   8-59/4 * * * * NVIDIA_HOME=$HOME/dynamo /path/to/update_html_pages.sh --skip-gitlab-api
+#   8-59/4 * * * * NVIDIA_HOME=$HOME/nvidia /path/to/update_html_pages.sh --skip-gitlab-api
 #   # Resource report every minute
-#   * * * * * NVIDIA_HOME=$HOME/dynamo /path/to/update_html_pages.sh --show-local-resources
+#   * * * * * NVIDIA_HOME=$HOME/nvidia /path/to/update_html_pages.sh --show-local-resources
 
 set -euo pipefail
 if [ -n "${DYNAMO_UTILS_TRACE:-}" ]; then

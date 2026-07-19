@@ -21,7 +21,7 @@ How to generate, update, and maintain the weekly `.txt` stat files and the
 ## Quick Start
 
 ```bash
-cd ~/dynamo/dynamo-utils.dev
+cd ~/nvidia/dynamo-utils.dev
 
 # Generate one week (Monday date):
 python3 -u ci_log_errors/gen_weekly_stats.py --week 2026-03-23
@@ -33,7 +33,7 @@ python3 -u ci_log_errors/gen_weekly_stats.py --week 2026-03-09 --week 2026-03-16
 nohup python3 -u ci_log_errors/gen_weekly_stats.py --week 2026-03-23 \
     > /tmp/gen_weekly_stats.log 2>&1 &
 CMD_PID=$!
-~/dynamo/dynamo-utils.dev/await_output.sh -t 600 \
+~/nvidia/dynamo-utils.dev/await_output.sh -t 600 \
     -s "Written to" -s "Traceback" -p $CMD_PID \
     -l /tmp/await_weekly.log -- tail -f /tmp/gen_weekly_stats.log
 ```
@@ -310,9 +310,9 @@ commands (no checkout required for LoC/Rust; worktrees needed for pytest collect
 ### LoC + Rust Tests + Commits (monthly)
 
 ```bash
-cd ~/dynamo/dynamo-utils.dev
+cd ~/nvidia/dynamo-utils.dev
 python3 -u reports/analyze_repo.py \
-    --repo ~/dynamo/dynamo3 --start 2025-01-01 \
+    --repo ~/nvidia/dynamo3 --start 2025-01-01 \
     --loc --rust --commits
 ```
 
@@ -323,7 +323,7 @@ Rust Files, Rust Tests, Commits, Cumulative commits, Authors.
 
 ```bash
 python3 -u reports/analyze_repo.py \
-    --repo ~/dynamo/dynamo3 --start 2026-02-08 --daily \
+    --repo ~/nvidia/dynamo3 --start 2026-02-08 --daily \
     --loc --rust --commits
 ```
 
@@ -337,12 +337,12 @@ which undercounts parametrized tests.
 
 ```bash
 # 1. Make sure dynamo3 is up to date
-cd ~/dynamo/dynamo3 && git checkout main && git pull
+cd ~/nvidia/dynamo3 && git checkout main && git pull
 
 # 2. Start a temporary vllm container with the repo mounted read-write
 docker run -d --name analyze_vllm \
-    -v ~/dynamo/dynamo3:/workspace/dynamo \
-    -v ~/dynamo/dynamo-utils.dev:/utils \
+    -v ~/nvidia/dynamo3:/workspace/dynamo \
+    -v ~/nvidia/dynamo-utils.dev:/utils \
     -v ~/.cache/dynamo-utils:/root/.cache/dynamo-utils \
     dynamo:9BEBB9.06f17011b-vllm-local-dev-cuda12.9-amd64 \
     sleep 3600

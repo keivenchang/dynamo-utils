@@ -19,13 +19,13 @@ files that should have been excluded.
 
 Options:
     --backup-history <path>     Path to backup_history directory (e.g., /mnt/sda/keivenc/backup_history)
-    --rsyncrules <path>         Path to .rsyncrules file (e.g., ~/dynamo/.rsyncrules)
+    --rsyncrules <path>         Path to .rsyncrules file (e.g., ~/nvidia/.rsyncrules)
     --dry-run, --dryrun         Show what would be done without making changes
     -h, --help                  Show this help message
 
 Example:
-    $0 --backup-history /mnt/sda/keivenc/backup_history --rsyncrules ~/dynamo/.rsyncrules
-    $0 --backup-history /mnt/sda/keivenc/backup_history --rsyncrules ~/dynamo/.rsyncrules --dry-run
+    $0 --backup-history /mnt/sda/keivenc/backup_history --rsyncrules ~/nvidia/.rsyncrules
+    $0 --backup-history /mnt/sda/keivenc/backup_history --rsyncrules ~/nvidia/.rsyncrules --dry-run
 EOF
     exit 1
 }

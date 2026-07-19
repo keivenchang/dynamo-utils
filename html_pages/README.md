@@ -22,7 +22,7 @@ HTML dashboard generators and shared UI utilities for monitoring Dynamo CI/CD.
 - GitHub token: `~/.config/github-token` or `~/.config/gh/hosts.yml`
 
 **Outputs:**
-- Local branches: `$HOME/dynamo/speedoflight/dynamo/users/<user>/local.html`
+- Local branches: `$HOME/nvidia/speedoflight/dynamo/users/<user>/local.html`
 - Commit history: `$DYNAMO_REPO/index.html`  
 - Resource report: `$DYNAMO_HOME/resource_report.html`
 
@@ -91,8 +91,8 @@ See module docstring in `common_dashboard_lib.py` for complete node hierarchy an
 
 ```bash
 python3 html_pages/show_local_branches.py \
-  --repo-path ~/dynamo \
-  --output ~/dynamo/speedoflight/dynamo/users/keivenchang/local.html \
+  --repo-path ~/nvidia \
+  --output ~/nvidia/speedoflight/dynamo/users/keivenchang/local.html \
   --max-github-api-calls 100
 ```
 
@@ -144,7 +144,7 @@ UserNode (github-username)
 ```bash
 python3 show_remote_branches.py \
   --github-user keivenchang \
-  --repo-root ~/dynamo \
+  --repo-root ~/nvidia \
   --output speedoflight/users/keivenchang/index.html
 ```
 
@@ -153,23 +153,23 @@ python3 show_remote_branches.py \
 **Working hours (8am-6pm PT):** Every 1 minute
 ```cron
 # Working hours: 16:00-23:59 UTC + 00:00-01:59 UTC
-* 16-23 * * * DYNAMO_HOME=$HOME/dynamo REMOTE_GITHUB_USERS="kthui keivenchang" $HOME/dynamo/dynamo-utils.dev/cron_log.sh remote_prs_working $HOME/dynamo/dynamo-utils.dev/html_pages/update_html_pages.sh --show-remote-branches
-* 0-1 * * * DYNAMO_HOME=$HOME/dynamo REMOTE_GITHUB_USERS="kthui keivenchang" $HOME/dynamo/dynamo-utils.dev/cron_log.sh remote_prs_working $HOME/dynamo/dynamo-utils.dev/html_pages/update_html_pages.sh --show-remote-branches
+* 16-23 * * * DYNAMO_HOME=$HOME/nvidia REMOTE_GITHUB_USERS="kthui keivenchang" $HOME/nvidia/dynamo-utils.dev/cron_log.sh remote_prs_working $HOME/nvidia/dynamo-utils.dev/html_pages/update_html_pages.sh --show-remote-branches
+* 0-1 * * * DYNAMO_HOME=$HOME/nvidia REMOTE_GITHUB_USERS="kthui keivenchang" $HOME/nvidia/dynamo-utils.dev/cron_log.sh remote_prs_working $HOME/nvidia/dynamo-utils.dev/html_pages/update_html_pages.sh --show-remote-branches
 ```
 
 **Off hours (6pm-8am PT):** Every 20 minutes
 ```cron
 # Off hours: 02:00-15:59 UTC
-*/20 2-15 * * * DYNAMO_HOME=$HOME/dynamo REMOTE_GITHUB_USERS="kthui keivenchang" $HOME/dynamo/dynamo-utils.dev/cron_log.sh remote_prs_offhours $HOME/dynamo/dynamo-utils.dev/html_pages/update_html_pages.sh --show-remote-branches
+*/20 2-15 * * * DYNAMO_HOME=$HOME/nvidia REMOTE_GITHUB_USERS="kthui keivenchang" $HOME/nvidia/dynamo-utils.dev/cron_log.sh remote_prs_offhours $HOME/nvidia/dynamo-utils.dev/html_pages/update_html_pages.sh --show-remote-branches
 ```
 
 **Output locations:**
-- `$HOME/dynamo/speedoflight/users/kthui/index.html`
-- `$HOME/dynamo/speedoflight/users/keivenchang/index.html`
+- `$HOME/nvidia/speedoflight/users/kthui/index.html`
+- `$HOME/nvidia/speedoflight/users/keivenchang/index.html`
 
 **Logs:**
-- Working hours: `~/dynamo/logs/YYYY-MM-DD/remote_prs_working.log`
-- Off hours: `~/dynamo/logs/YYYY-MM-DD/remote_prs_offhours.log`
+- Working hours: `~/nvidia/logs/YYYY-MM-DD/remote_prs_working.log`
+- Off hours: `~/nvidia/logs/YYYY-MM-DD/remote_prs_offhours.log`
 
 ---
 
@@ -190,15 +190,15 @@ Shows recent commits with expandable GitHub checks.
 ```bash
 # Full refresh
 python3 html_pages/show_commit_history.py \
-  --repo-path ~/dynamo/commits \
+  --repo-path ~/nvidia/commits \
   --max-commits 100 \
-  --output ~/dynamo/commits/index.html
+  --output ~/nvidia/commits/index.html
 
 # Cache-only (skip GitLab)
 python3 html_pages/show_commit_history.py \
-  --repo-path ~/dynamo/commits \
+  --repo-path ~/nvidia/commits \
   --skip-gitlab-api \
-  --output ~/dynamo/commits/index.html
+  --output ~/nvidia/commits/index.html
 ```
 
 ---
@@ -273,25 +273,25 @@ Instead of fetching job details individually (500+ calls):
 
 ```cron
 # Full update every 30 minutes
-0,30 * * * * DYNAMO_HOME=$HOME/dynamo $HOME/dynamo/dynamo-utils.dev/cron_log.sh update_html_pages_full $HOME/dynamo/dynamo-utils.dev/html_pages/update_html_pages.sh --show-local-branches --show-commit-history
+0,30 * * * * DYNAMO_HOME=$HOME/nvidia $HOME/nvidia/dynamo-utils.dev/cron_log.sh update_html_pages_full $HOME/nvidia/dynamo-utils.dev/html_pages/update_html_pages.sh --show-local-branches --show-commit-history
 
 # Cache-heavy between full updates (every 4 minutes)
-8-59/4 * * * * DYNAMO_HOME=$HOME/dynamo $HOME/dynamo/dynamo-utils.dev/cron_log.sh update_html_pages_cached $HOME/dynamo/dynamo-utils.dev/html_pages/update_html_pages.sh --show-local-branches --show-commit-history --skip-gitlab-api
+8-59/4 * * * * DYNAMO_HOME=$HOME/nvidia $HOME/nvidia/dynamo-utils.dev/cron_log.sh update_html_pages_cached $HOME/nvidia/dynamo-utils.dev/html_pages/update_html_pages.sh --show-local-branches --show-commit-history --skip-gitlab-api
 
 # Resource report (every minute)
-* * * * * DYNAMO_HOME=$HOME/dynamo $HOME/dynamo/dynamo-utils.dev/cron_log.sh resource_report $HOME/dynamo/dynamo-utils.dev/html_pages/update_html_pages.sh --show-local-resources
+* * * * * DYNAMO_HOME=$HOME/nvidia $HOME/nvidia/dynamo-utils.dev/cron_log.sh resource_report $HOME/nvidia/dynamo-utils.dev/html_pages/update_html_pages.sh --show-local-resources
 
 # Remote PRs - working hours (8am-6pm PT): every minute
-* 16-23 * * * DYNAMO_HOME=$HOME/dynamo REMOTE_GITHUB_USERS="kthui keivenchang" $HOME/dynamo/dynamo-utils.dev/cron_log.sh remote_prs_working $HOME/dynamo/dynamo-utils.dev/html_pages/update_html_pages.sh --show-remote-branches
-* 0-1 * * * DYNAMO_HOME=$HOME/dynamo REMOTE_GITHUB_USERS="kthui keivenchang" $HOME/dynamo/dynamo-utils.dev/cron_log.sh remote_prs_working $HOME/dynamo/dynamo-utils.dev/html_pages/update_html_pages.sh --show-remote-branches
+* 16-23 * * * DYNAMO_HOME=$HOME/nvidia REMOTE_GITHUB_USERS="kthui keivenchang" $HOME/nvidia/dynamo-utils.dev/cron_log.sh remote_prs_working $HOME/nvidia/dynamo-utils.dev/html_pages/update_html_pages.sh --show-remote-branches
+* 0-1 * * * DYNAMO_HOME=$HOME/nvidia REMOTE_GITHUB_USERS="kthui keivenchang" $HOME/nvidia/dynamo-utils.dev/cron_log.sh remote_prs_working $HOME/nvidia/dynamo-utils.dev/html_pages/update_html_pages.sh --show-remote-branches
 
 # Remote PRs - off hours (6pm-8am PT): every 20 minutes
-*/20 2-15 * * * DYNAMO_HOME=$HOME/dynamo REMOTE_GITHUB_USERS="kthui keivenchang" $HOME/dynamo/dynamo-utils.dev/cron_log.sh remote_prs_offhours $HOME/dynamo/dynamo-utils.dev/html_pages/update_html_pages.sh --show-remote-branches
+*/20 2-15 * * * DYNAMO_HOME=$HOME/nvidia REMOTE_GITHUB_USERS="kthui keivenchang" $HOME/nvidia/dynamo-utils.dev/cron_log.sh remote_prs_offhours $HOME/nvidia/dynamo-utils.dev/html_pages/update_html_pages.sh --show-remote-branches
 ```
 
 ### Logs
 
-- Per-run logs: `~/dynamo/logs/YYYY-MM-DD/<job>.log`
+- Per-run logs: `~/nvidia/logs/YYYY-MM-DD/<job>.log`
 - Generator logs: `html_pages/show_*.log`
 
 ### Troubleshooting
@@ -301,14 +301,14 @@ Instead of fetching job details individually (500+ calls):
 Example output:
 ```bash
 $ ./html_pages/update_html_pages.sh --show-local-branches
-ERROR: Failed to update /home/keivenc/dynamo/speedoflight/dynamo/users/keivenchang/local.html
-See log for details: /home/keivenc/dynamo/logs/2026-01-23/show_local_branches.log
+ERROR: Failed to update /home/keivenc/nvidia/speedoflight/dynamo/users/keivenchang/local.html
+See log for details: /home/keivenc/nvidia/logs/2026-01-23/show_local_branches.log
 ```
 
 1. Check the log file path shown in the error message
 2. Look for Python tracebacks or error messages:
    ```bash
-   tail -50 /home/keivenc/dynamo/logs/2026-01-23/show_local_branches.log
+   tail -50 /home/keivenc/nvidia/logs/2026-01-23/show_local_branches.log
    ```
 
 3. Run with --debug-html for faster iteration:
@@ -317,7 +317,7 @@ See log for details: /home/keivenc/dynamo/logs/2026-01-23/show_local_branches.lo
    ```
 
 **Notes:**
-- If running from cron, expect most output to go to files under `~/dynamo/logs/<YYYY-MM-DD>/` (not stdout)
+- If running from cron, expect most output to go to files under `~/nvidia/logs/<YYYY-MM-DD>/` (not stdout)
 - Use `--run-ignore-lock` only if you're sure another run isn't actively writing outputs/caches
 - Default behavior (no flags): Runs all tasks (local branches + commit history + resource report + remote PRs)
 
@@ -334,9 +334,9 @@ See log for details: /home/keivenc/dynamo/logs/2026-01-23/show_local_branches.lo
 
 **Quick "did it actually update?" checks:**
 ```bash
-ls -lah ~/dynamo/speedoflight/dynamo/users/keivenchang/local.html       # local branches dashboard
-ls -lah ~/dynamo/commits/index.html       # commit history dashboard
-ls -lah ~/dynamo/speedoflight/stats/index.html  # stats landing page
+ls -lah ~/nvidia/speedoflight/dynamo/users/keivenchang/local.html       # local branches dashboard
+ls -lah ~/nvidia/commits/index.html       # commit history dashboard
+ls -lah ~/nvidia/speedoflight/stats/index.html  # stats landing page
 ```
 
 **Common foot-guns:**
@@ -349,9 +349,9 @@ ls -lah ~/dynamo/speedoflight/stats/index.html  # stats landing page
 
 Check logs first (common root cause: generator crashed early due to ImportError):
 ```bash
-tail -n 200 ~/dynamo/logs/$(date +%Y-%m-%d)/cron.log
-tail -n 200 ~/dynamo/logs/$(date +%Y-%m-%d)/show_commit_history.log
-tail -n 200 ~/dynamo/logs/$(date +%Y-%m-%d)/show_local_branches.log
+tail -n 200 ~/nvidia/logs/$(date +%Y-%m-%d)/cron.log
+tail -n 200 ~/nvidia/logs/$(date +%Y-%m-%d)/show_commit_history.log
+tail -n 200 ~/nvidia/logs/$(date +%Y-%m-%d)/show_local_branches.log
 ```
 
 ### Common UI Pitfalls

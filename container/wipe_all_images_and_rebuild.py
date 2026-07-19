@@ -10,16 +10,16 @@ the git history.
 
 Usage:
     # Build last 2 image SHAs
-    python3 container/wipe_all_images_and_rebuild.py --repo-path ~/dynamo/dynamo_ci --num-image-sha-to-build 2
+    python3 container/wipe_all_images_and_rebuild.py --repo-path ~/nvidia/dynamo_ci --num-image-sha-to-build 2
 
     # Build specific commit SHAs
-    python3 container/wipe_all_images_and_rebuild.py --repo-path ~/dynamo/dynamo_ci --commit-sha 90ed9ab0e --commit-sha 34c4882d8
+    python3 container/wipe_all_images_and_rebuild.py --repo-path ~/nvidia/dynamo_ci --commit-sha 90ed9ab0e --commit-sha 34c4882d8
 
     # Cleanup only, no builds
-    python3 container/wipe_all_images_and_rebuild.py --repo-path ~/dynamo/dynamo_ci --num-image-sha-to-build 0 --prune-builder-cache
+    python3 container/wipe_all_images_and_rebuild.py --repo-path ~/nvidia/dynamo_ci --num-image-sha-to-build 0 --prune-builder-cache
 
     # Dry run (show what would be done)
-    python3 container/wipe_all_images_and_rebuild.py --repo-path ~/dynamo/dynamo_ci --num-image-sha-to-build 2 --dry-run
+    python3 container/wipe_all_images_and_rebuild.py --repo-path ~/nvidia/dynamo_ci --num-image-sha-to-build 2 --dry-run
 """
 
 import argparse
@@ -317,16 +317,16 @@ def parse_args():
         epilog="""
 Examples:
   # Build last 2 image SHAs
-  python3 container/wipe_all_images_and_rebuild.py --repo-path ~/dynamo/dynamo_ci --num-image-sha-to-build 2
+  python3 container/wipe_all_images_and_rebuild.py --repo-path ~/nvidia/dynamo_ci --num-image-sha-to-build 2
 
   # Build specific commit SHAs
-  python3 container/wipe_all_images_and_rebuild.py --repo-path ~/dynamo/dynamo_ci --commit-sha 90ed9ab0e --commit-sha 34c4882d8
+  python3 container/wipe_all_images_and_rebuild.py --repo-path ~/nvidia/dynamo_ci --commit-sha 90ed9ab0e --commit-sha 34c4882d8
 
   # Cleanup only (no builds), also prune builder cache
-  python3 container/wipe_all_images_and_rebuild.py --repo-path ~/dynamo/dynamo_ci --num 0 --prune-builder-cache
+  python3 container/wipe_all_images_and_rebuild.py --repo-path ~/nvidia/dynamo_ci --num 0 --prune-builder-cache
 
   # Dry run
-  python3 container/wipe_all_images_and_rebuild.py --repo-path ~/dynamo/dynamo_ci --num-image-sha-to-build 2 --dry-run
+  python3 container/wipe_all_images_and_rebuild.py --repo-path ~/nvidia/dynamo_ci --num-image-sha-to-build 2 --dry-run
         """
     )
 

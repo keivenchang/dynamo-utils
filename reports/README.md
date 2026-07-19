@@ -17,7 +17,7 @@ Uses read-only git plumbing (no checkout). Safe to run on bare repos.
 
 ```bash
 python3 reports/analyze_repo.py \
-    --repo-path ~/dynamo/dynamo_ci \
+    --repo-path ~/nvidia/dynamo_ci \
     --loc --rust --commits \
     --start 2024-06-01 --end 2026-03-01 \
     --interval month
@@ -31,7 +31,7 @@ Per-contributor breakdown for a time window:
 - Averages per contributor
 
 ```bash
-python3 reports/contributor_stats.py --repo ~/dynamo/dynamo_ci --days 90
+python3 reports/contributor_stats.py --repo ~/nvidia/dynamo_ci --days 90
 ```
 
 ### `pr_ci_report.py` — PR and CI health
@@ -50,7 +50,7 @@ Second runs for the same window cost zero API calls.
 python3 reports/pr_ci_report.py \
     --repo ai-dynamo/dynamo \
     --days 60 --bucket week \
-    --output-dir ~/dynamo/temp \
+    --output-dir ~/nvidia/temp \
     --max-github-api-calls 5000
 ```
 

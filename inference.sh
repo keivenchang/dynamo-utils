@@ -543,12 +543,12 @@ fi
 
 # Clean up any existing dynamo processes before starting
 cleanup_dynamo_processes
-if [ -d "~/dynamo" ]; then
-    WORKSPACE_DIR="~/dynamo"
+if [ -d "~/nvidia" ]; then
+    WORKSPACE_DIR="~/nvidia"
 elif [ -d "/workspace" ]; then
     WORKSPACE_DIR="/workspace"
 else
-    echo "Error: Neither ~/dynamo nor /workspace directory exists."
+    echo "Error: Neither ~/nvidia nor /workspace directory exists."
     exit 1
 fi
 
@@ -620,7 +620,7 @@ else
     cmd trap 'echo "[DRY RUN] Would clean up and kill background processes on exit"; exit' INT TERM EXIT
 fi
 
-#cmd export PYTHONPATH="$HOME/dynamo/components/router/src:$HOME/dynamo/components/frontend/src:$HOME/dynamo/components/planner/src:$HOME/dynamo/components/backends/mocker/src:$HOME/dynamo/components/backends/trtllm/src:$HOME/dynamo/components/backends/vllm/src:$HOME/dynamo/components/backends/sglang/src:$HOME/dynamo/components/backends/llama_cpp/src"
+#cmd export PYTHONPATH="$HOME/nvidia/components/router/src:$HOME/nvidia/components/frontend/src:$HOME/nvidia/components/planner/src:$HOME/nvidia/components/backends/mocker/src:$HOME/nvidia/components/backends/trtllm/src:$HOME/nvidia/components/backends/vllm/src:$HOME/nvidia/components/backends/sglang/src:$HOME/nvidia/components/backends/llama_cpp/src"
 
 # Check torch import and CUDA availability after PYTHONPATH is set (only if backend will be started)
 if [ "$RUN_BACKEND" = true ]; then

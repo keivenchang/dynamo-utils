@@ -33,11 +33,11 @@
 # REQUIREMENTS:
 #   - Docker container environment
 #   - Python >= 3.10 with maturin and uv
-#   - Workspace at $HOME/dynamo or /workspace
+#   - Workspace at $HOME/nvidia or /workspace
 #
 # PYTHONPATH SETUP:
 #   For development, Python searches these paths before site-packages:
-#   export PYTHONPATH="$HOME/dynamo/components/*/src:$PYTHONPATH"
+#   export PYTHONPATH="$HOME/nvidia/components/*/src:$PYTHONPATH"
 #
 #   This enables importing components directly from source for hot-reload development.
 #
@@ -157,7 +157,7 @@ PACKAGES BUILT:
 REQUIREMENTS:
   - Docker container environment
   - Python >= 3.10 with maturin and uv
-  - Workspace at $HOME/dynamo or /workspace
+  - Workspace at $HOME/nvidia or /workspace
 EOF
             exit 0
             ;;
@@ -176,8 +176,8 @@ done
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-if [ -d "$HOME/dynamo" ] && [ -f "$HOME/dynamo/README.md" ]; then
-    WORKSPACE_DIR=$HOME/dynamo
+if [ -d "$HOME/nvidia" ] && [ -f "$HOME/nvidia/README.md" ]; then
+    WORKSPACE_DIR=$HOME/nvidia
 elif [ -d "/workspace" ] && [ -f "/workspace/README.md" ]; then
     WORKSPACE_DIR=/workspace
 else
@@ -185,7 +185,7 @@ else
         WORKSPACE_DIR=""
     else
         echo "❌ ERROR: Could not find Dynamo workspace in expected locations"
-        echo "   Checked: $HOME/dynamo and /workspace"
+        echo "   Checked: $HOME/nvidia and /workspace"
         echo "   Please ensure the Dynamo source code is properly mounted in the container:"
         echo "   docker run -v /path/to/dynamo:/workspace dynamo-container"
         exit 1

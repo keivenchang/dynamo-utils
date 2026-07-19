@@ -14,13 +14,13 @@
 #
 # Options:
 #   --dry-run           Show what would run without executing
-#   --build-repo PATH   Repo to build in (default: ~/dynamo/dynamo_ci2)
-#   --log-repo PATH     Repo to move logs to (default: ~/dynamo/dynamo_ci)
+#   --build-repo PATH   Repo to build in (default: ~/nvidia/dynamo_ci2)
+#   --log-repo PATH     Repo to move logs to (default: ~/nvidia/dynamo_ci)
 #
 # Examples:
 #   ./backfill.sh 12785247c                              # dynamo_ci2 -> dynamo_ci
-#   ./backfill.sh --build-repo ~/dynamo/dynamo_ci 12785247c
-#   ./backfill.sh --build-repo ~/dynamo/dynamo_ci2 --log-repo ~/dynamo/dynamo_ci 52b460e4c dcbccbcd2
+#   ./backfill.sh --build-repo ~/nvidia/dynamo_ci 12785247c
+#   ./backfill.sh --build-repo ~/nvidia/dynamo_ci2 --log-repo ~/nvidia/dynamo_ci 52b460e4c dcbccbcd2
 #   ./backfill.sh --dry-run 12785247c
 
 set -euo pipefail

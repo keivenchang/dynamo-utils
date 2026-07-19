@@ -1017,10 +1017,10 @@ Analysis flags (at least one required):
   --commits   Commit volume per period
 
 Examples:
-  %(prog)s --repo ~/dynamo/dynamo3 --months 6 --python
-  %(prog)s --repo ~/dynamo/dynamo3 --weeks 12 --loc
-  %(prog)s --repo ~/dynamo/dynamo3 --months 14 --python --loc --rust --commits
-  %(prog)s --repo ~/dynamo/dynamo3 --start 2025-01-01 --weekly --loc --commits
+  %(prog)s --repo ~/nvidia/dynamo3 --months 6 --python
+  %(prog)s --repo ~/nvidia/dynamo3 --weeks 12 --loc
+  %(prog)s --repo ~/nvidia/dynamo3 --months 14 --python --loc --rust --commits
+  %(prog)s --repo ~/nvidia/dynamo3 --start 2025-01-01 --weekly --loc --commits
         """,
     )
 
