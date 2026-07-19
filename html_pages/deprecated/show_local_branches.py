@@ -2,6 +2,9 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+# DEPRECATED 2026-07-19: no longer scheduled via cron, no longer served on speedoflight.
+# Kept for reference only.
+
 """
 Show dynamo branches with PR information using a node-based tree structure.
 Supports parallel data gathering for improved performance.
@@ -51,17 +54,20 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 from zoneinfo import ZoneInfo
 
-from common_lock import ComponentLock
-
-logger = logging.getLogger(__name__)
-
-# Ensure we can import sibling utilities (common.py) from the parent dynamo-utils directory
+# This file lives in html_pages/deprecated/; its sibling modules (common_lock.py, common*.py)
+# and show_local_branches.j2 stay in html_pages/, and common.py lives at the repo root —
+# put both on sys.path before any local import.
 _THIS_DIR = Path(__file__).resolve().parent
-_UTILS_DIR = _THIS_DIR.parent
+_HTML_PAGES_DIR = _THIS_DIR.parent
+_UTILS_DIR = _HTML_PAGES_DIR.parent
 if str(_UTILS_DIR) not in sys.path:
     sys.path.insert(0, str(_UTILS_DIR))
-if str(_THIS_DIR) not in sys.path:
-    sys.path.insert(0, str(_THIS_DIR))
+if str(_HTML_PAGES_DIR) not in sys.path:
+    sys.path.insert(0, str(_HTML_PAGES_DIR))
+
+from common_lock import ComponentLock  # noqa: E402
+
+logger = logging.getLogger(__name__)
 
 import git  # type: ignore[import-not-found]
 
@@ -719,7 +725,7 @@ def generate_html(
         tree_html = tree_html + ("\n" if not tree_html.endswith("\n") else "")
 
     env = Environment(
-        loader=FileSystemLoader(str(_THIS_DIR)),
+        loader=FileSystemLoader(str(_HTML_PAGES_DIR)),
         autoescape=select_autoescape(["html", "xml"]),
     )
     template = env.get_template("show_local_branches.j2")

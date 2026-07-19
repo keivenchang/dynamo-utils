@@ -31,7 +31,7 @@
 #
 # Args (optional; can be combined):
 #   --show-local-resources  Update the resource report ($NVIDIA_HOME/speedoflight/stats/index.html)
-#   --show-local-branches   Update the branches dashboard (speedoflight/dynamo/users/<user>/local.html)
+#   --show-local-branches   [DEPRECATED 2026-07-19] no-op; branches dashboard retired
 #   --show-remote-branches  Update remote PR dashboards for selected GitHub users (IDENTICAL UI to local branches)
 #   --show-commit-history   Update the commit history dashboard ($NVIDIA_HOME/commits/index.html)
 #   --debug-html                   Faster runs: outputs to debug.html instead of index.html, uses smaller commit window (25 commits), enables verification passes
@@ -80,7 +80,7 @@ If no args are provided, ALL tasks run.
 
 Flags:
   --show-local-resources    Write: $NVIDIA_HOME/speedoflight/stats/index.html (or debug.html in --debug-html)
-  --show-local-branches     Write: $NVIDIA_HOME/speedoflight/dynamo/users/<user>/local.html (or local-debug.html in --debug-html)
+  --show-local-branches     [DEPRECATED 2026-07-19] no-op; branches dashboard retired
   --show-remote-branches    Write: $NVIDIA_HOME/speedoflight/dynamo/users/<user>/index.html (or debug.html in --debug-html)
   --show-commit-history     Write: $NVIDIA_HOME/commits/index.html (or debug.html in --debug-html)
   --show-frontend-crates-conformance
@@ -338,41 +338,16 @@ dry_echo() {
 }
 
 run_show_local_branches() {
-    cd "$NVIDIA_HOME" || exit 1
-    
-    # Ensure output directory exists
-    mkdir -p "$(dirname "$BRANCHES_OUTPUT_FILE")"
-    REFRESH_CLOSED_FLAG="${REFRESH_CLOSED_PRS:+--refresh-closed-prs}"
-    MAX_GH_FLAG=""
-    if [ -n "${MAX_GITHUB_API_CALLS:-}" ]; then
-        MAX_GH_FLAG="--max-github-api-calls ${MAX_GITHUB_API_CALLS}"
-    fi
-    TOKEN_FLAG=""
-    if [ -n "${GITHUB_TOKEN_ARG:-}" ]; then
-        TOKEN_FLAG="--github-token ${GITHUB_TOKEN_ARG}"
-    fi
-    SUCCESS_BUILD_TEST_FLAG=""
-    # Always enable: fetch/cache successful *-build-test raw logs so we can parse pytest test timings.
-    # NOTE: This can be slower; this is intentional per user request.
-    SUCCESS_BUILD_TEST_FLAG="--enable-success-build-test-logs"
-    
+    # DEPRECATED 2026-07-19: the local-branches dashboard is retired. Its cron job is disabled,
+    # the local.html / local-debug.html pages were removed from speedoflight, and the script now
+    # lives in html_pages/deprecated/show_local_branches.py for reference only -- do NOT run it.
+    # This function is kept as a no-op so a stray --show-local-branches flag does not error out.
+    local msg="run_show_local_branches: DEPRECATED, skipping (see html_pages/deprecated/show_local_branches.py)"
+    echo "$(date '+%Y-%m-%d %H:%M:%S') - $msg" >> "$LOG_FILE"
     if [ "$DRY_RUN" = true ]; then
-        echo "[DRY-RUN] Would generate branches dashboard:"
-        echo "[DRY-RUN]   Output: $BRANCHES_OUTPUT_FILE"
-        echo "[DRY-RUN]   Command: python3 $SCRIPT_DIR/show_local_branches.py --repo-path $NVIDIA_HOME --output $BRANCHES_OUTPUT_FILE $TOKEN_FLAG $REFRESH_CLOSED_FLAG $MAX_GH_FLAG $SUCCESS_BUILD_TEST_FLAG"
-        return 0
+        echo "[DRY-RUN] $msg"
     fi
-    
-    echo "$(date '+%Y-%m-%d %H:%M:%S') - Generating branches dashboard" >> "$LOG_FILE"
-    log_line_ts "$BRANCHES_LOG" "===== run_show_local_branches start (output=$BRANCHES_OUTPUT_FILE) ====="
-    if run_cmd_to_log_ts "$BRANCHES_LOG" python3 "$SCRIPT_DIR/show_local_branches.py" --repo-path "$NVIDIA_HOME" --output "$BRANCHES_OUTPUT_FILE" $TOKEN_FLAG $REFRESH_CLOSED_FLAG $MAX_GH_FLAG $SUCCESS_BUILD_TEST_FLAG $LOCK_FLAG; then
-        echo "$(date '+%Y-%m-%d %H:%M:%S') - Updated $BRANCHES_OUTPUT_FILE" >> "$LOG_FILE"
-    else
-        echo "$(date '+%Y-%m-%d %H:%M:%S') - ERROR: Failed to update $BRANCHES_OUTPUT_FILE" >> "$LOG_FILE"
-        echo "ERROR: Failed to update $BRANCHES_OUTPUT_FILE" >&2
-        echo "See log for details: $BRANCHES_LOG" >&2
-        exit 1
-    fi
+    return 0
 }
 
 run_show_remote_branches() {

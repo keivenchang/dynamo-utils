@@ -40,6 +40,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 from ci_lib import (  # noqa: E402
     HB_CSS,
+    PT,
     REPO,
     THEME_BOOTSTRAP_SCRIPT,
     THEME_CONTROL_HTML,
@@ -1073,6 +1074,8 @@ def _render_summary(kind: str, entries_by_sha: dict, page_paths: dict) -> str:
 </style>
 """
 
+    generated_time = datetime.now(PT).strftime("%Y-%m-%d %H:%M:%S PT")
+
     return "\n".join([
         "<!DOCTYPE html>",
         f"<html><head><meta charset='utf-8'><title>{kind} report</title>",
@@ -1083,9 +1086,10 @@ def _render_summary(kind: str, entries_by_sha: dict, page_paths: dict) -> str:
         "</head><body class='report-body'>",
         f"<h1><span>Last {len(items)} {kind.capitalize()} Report &mdash; main branch</span>{THEME_CONTROL_HTML}</h1>",
         f"<div class='meta'>"
-        f"Aggregated across {len(items)} cached commit(s); "
+        f"<span>Report generated: {generated_time}</span>"
+        f"<span>Aggregated across {len(items)} cached commit(s); "
         f"{n_attempts} run(s) total, {n_with_failures} commit(s) with at least "
-        f"one failure ({n_failed_jobs} failed job-run(s))."
+        f"one failure ({n_failed_jobs} failed job-run(s)).</span>"
         f"</div>",
         f"<h2>Failing tests <small style='color:#586069;font-weight:400'>"
         f"(pytest test-id occurrences across all cached commits; count / total)</small></h2>",
@@ -1233,7 +1237,7 @@ def main() -> int:
     )
     p_rh.add_argument(
         "--output-root",
-        default=str(Path.home() / "dynamo" / "commits" / "logs"),
+        default=str(Path.home() / "nvidia" / "commits" / "logs"),
     )
     p_rh.set_defaults(func=cmd_render_html)
 
