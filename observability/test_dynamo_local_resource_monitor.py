@@ -1,7 +1,14 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-from html_pages.dynamo_local_resource_monitor import MetricsCollector, ProcessTracker
+import pytest
+
+pytest.importorskip("pynvml")
+
+from observability.dynamo_local_resource_monitor import (  # noqa: E402
+    MetricsCollector,
+    ProcessTracker,
+)
 
 
 def _name(pid: int) -> str:
@@ -17,6 +24,16 @@ def test_ranked_ids_use_cached_recency_and_rolling_total():
 
     assert list(tracker.series[2]) == [2.0, 0.0]
     assert tracker.ranked_ids(2) == [2]
+
+
+def test_ranked_ids_exclude_floating_point_residuals():
+    tracker = ProcessTracker(maxlen=2, prune=False)
+
+    tracker.record({1: 1.0}, _name)
+    tracker._series_total[1] = 1e-12
+
+    assert tracker.ranked_ids() == []
+    assert tracker.series_for_ids([]) == []
 
 
 def test_delta_other_only_aggregates_requested_samples():
@@ -48,12 +65,39 @@ def test_gpu_other_aggregate_is_restored_from_cached_series():
     ]
 
 
+def test_restored_other_matches_the_retained_series_length():
+    tracker = ProcessTracker(maxlen=2, prune=False)
+    tracker.record({1: 1.0, 2: 2.0}, _name)
+    for _ in range(7):
+        tracker.record({}, _name)
+    tracker.record({1: 4.0, 2: 5.0}, _name)
+    tracker.record({1: 7.0, 2: 8.0}, _name)
+
+    restored = ProcessTracker(maxlen=5, prune=False)
+    restored.load_dict(tracker.to_dict())
+
+    assert [(pid, values) for pid, _, _, values in restored.series_for_ids([1])] == [
+        (1, [4.0, 7.0]),
+        (-1, [5.0, 8.0]),
+    ]
+
+
 def test_pruning_uses_cached_last_active_index():
     tracker = ProcessTracker(maxlen=300, prune=True)
 
     tracker.record({1: 1.0}, _name)
     for _ in range(200):
         tracker.record({}, _name)
+
+    assert tracker.series == {}
+
+
+def test_pruning_drops_inactive_series_after_the_retained_window():
+    tracker = ProcessTracker(maxlen=2, prune=True)
+
+    tracker.record({1: 1.0}, _name)
+    tracker.record({}, _name)
+    tracker.record({}, _name)
 
     assert tracker.series == {}
 

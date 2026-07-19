@@ -113,6 +113,7 @@ PROCESS_COLORS = [
     "#ff8a80",
 ]
 OTHER_COLOR = "#9e9e9e"
+ACTIVE_TOTAL_EPSILON = 1e-9
 CACHE_DIR = Path.home() / ".cache" / "dynamo_local_resource_monitor"
 CACHE_FILE = CACHE_DIR / "metrics.json"
 
@@ -398,7 +399,7 @@ class ProcessTracker:
         return changed
 
     def _prune_dead(self) -> bool:
-        window = min(200, self._len)
+        window = min(200, self._len, self.maxlen)
         dead = [
             pid
             for pid in self.series
@@ -437,9 +438,7 @@ class ProcessTracker:
         self._pid_slot = {int(k): v for k, v in data.get("_pid_slot", {}).items()}
         self._free_slots = data.get("_free_slots", [])
         self._next_slot = data.get("_next_slot", 0)
-        self._series_total = {
-            pid: sum(values) for pid, values in self.series.items()
-        }
+        self._series_total = {pid: sum(values) for pid, values in self.series.items()}
         self._last_active = {}
         for pid, values in self.series.items():
             first_index = self._len - len(values)
@@ -449,7 +448,10 @@ class ProcessTracker:
                     self._last_active[pid] = first_index + index
                     break
         if self._aggregate_history is not None:
-            aggregate = [0.0] * min(self._len, self.maxlen)
+            aggregate_len = max(
+                (len(values) for values in self.series.values()), default=0
+            )
+            aggregate = [0.0] * aggregate_len
             for values in self.series.values():
                 for i, value in enumerate(values):
                     aggregate[i] += value
@@ -461,7 +463,9 @@ class ProcessTracker:
 
     def ranked_ids(self, n: int = 20, sort_by: str = "recency") -> list[int]:
         active = [
-            pid for pid in self.series if self._series_total.get(pid, 0.0) > 0
+            pid
+            for pid in self.series
+            if self._series_total.get(pid, 0.0) > ACTIVE_TOTAL_EPSILON
         ]
         if sort_by == "recency":
             return sorted(
@@ -496,7 +500,7 @@ class ProcessTracker:
         ]
         rest = [pid for pid in self.series if pid not in selected]
         if not rest or not any(
-            self._series_total.get(pid, 0.0) > 0 for pid in rest
+            self._series_total.get(pid, 0.0) > ACTIVE_TOTAL_EPSILON for pid in rest
         ):
             return result
         if self._aggregate_history is not None:
@@ -507,9 +511,7 @@ class ProcessTracker:
         else:
             other = [0.0] * len(self._values(self.series[rest[0]], value_slice))
             for pid in rest:
-                for i, value in enumerate(
-                    self._values(self.series[pid], value_slice)
-                ):
+                for i, value in enumerate(self._values(self.series[pid], value_slice)):
                     other[i] += value
         return [*result, (-1, "Other", OTHER_COLOR, other)]
 
@@ -724,13 +726,10 @@ class MetricsCollector:
         if (
             not force
             and not self._top_cache_dirty
-            and self.counter_main - self._top_cache_counter
-            < self._top_refresh_samples
+            and self.counter_main - self._top_cache_counter < self._top_refresh_samples
         ):
             return
-        self._cpu_top_ids = self.proc_cpu.ranked_ids(
-            self._cpu_top_n, sort_by="total"
-        )
+        self._cpu_top_ids = self.proc_cpu.ranked_ids(self._cpu_top_n, sort_by="total")
         self._gpu_top_ids = [
             tracker.ranked_ids(self.top_n) for tracker in self.proc_gpu_mem
         ]
@@ -953,9 +952,7 @@ class MetricsCollector:
 
             gpu_mem_per_gpu_full = []
             for gi in range(self.gpu_count):
-                procs = self.proc_gpu_mem[gi].series_for_ids(
-                    self._gpu_top_ids[gi]
-                )
+                procs = self.proc_gpu_mem[gi].series_for_ids(self._gpu_top_ids[gi])
                 gpu_mem_per_gpu_full.append(procs)
                 for _, _, _, values in procs:
                     main_vals.append(values)
