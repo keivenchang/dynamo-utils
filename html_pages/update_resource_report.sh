@@ -8,7 +8,7 @@
 #   update_html_pages.sh --show-local-resources
 #
 # Cron Example:
-#   * * * * * DYNAMO_HOME=$HOME/nvidia /path/to/update_resource_report.sh
+#   * * * * * NVIDIA_HOME=$HOME/nvidia /path/to/update_resource_report.sh
 
 set -euo pipefail
 

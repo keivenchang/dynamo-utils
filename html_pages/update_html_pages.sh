@@ -6,7 +6,7 @@
 # This script is designed to be run by cron.
 #
 # Environment Variables (optional):
-#   DYNAMO_HOME         - Base directory for logs and output files
+#   NVIDIA_HOME         - Base directory for logs and output files
 #                        (default: parent of script dir; for this repo layout that is typically ~/dynamo)
 #                        Note: GitHub fetching is independently capped/cached by the Python scripts.
 #   REFRESH_CLOSED_PRS  - If set, refresh cached closed/merged PR mappings (more GitHub API calls)
@@ -18,7 +18,7 @@
 #   DYNAMO_UTILS_CACHE_DIR - If set, overrides ~/.cache/dynamo-utils for the resource report DB lookup.
 #   RESOURCE_DB         - If set, explicit SQLite path for resource report (default: $DYNAMO_UTILS_CACHE_DIR/resource_monitor.sqlite).
 #   FRONTEND_CRATES_REPO - If set, checkout used for parser conformance HTML generation
-#                          (default: $DYNAMO_HOME/frontend-crates).
+#                          (default: $NVIDIA_HOME/frontend-crates).
 #   FRONTEND_CRATES_REMOTE - If set, remote used when cloning FRONTEND_CRATES_REPO
 #                            (default: git@github.com:ai-dynamo/frontend-crates.git).
 #
@@ -26,14 +26,14 @@
 #   REMOTE_GITHUB_USERS - Space-separated GitHub usernames to render.
 #                         Back-compat: REMOTE_GITHUB_USER
 #   REMOTE_PRS_OUT_DIR  - Output directory root for each user.
-#                         Default: $DYNAMO_HOME/speedoflight/dynamo/users/<user>/
+#                         Default: $NVIDIA_HOME/speedoflight/dynamo/users/<user>/
 #   REMOTE_PRS_OUT_FILE - Full output filename override (rare; if set, used for every user).
 #
 # Args (optional; can be combined):
-#   --show-local-resources  Update the resource report ($DYNAMO_HOME/speedoflight/stats/index.html)
+#   --show-local-resources  Update the resource report ($NVIDIA_HOME/speedoflight/stats/index.html)
 #   --show-local-branches   Update the branches dashboard (speedoflight/dynamo/users/<user>/local.html)
 #   --show-remote-branches  Update remote PR dashboards for selected GitHub users (IDENTICAL UI to local branches)
-#   --show-commit-history   Update the commit history dashboard ($DYNAMO_HOME/commits/index.html)
+#   --show-commit-history   Update the commit history dashboard ($NVIDIA_HOME/commits/index.html)
 #   --debug-html                   Faster runs: outputs to debug.html instead of index.html, uses smaller commit window (25 commits), enables verification passes
 #   --github-token <token>  GitHub token to pass to all show_*.py scripts (preferred).
 #   --skip-gitlab-api     Skip fetching from GitLab API (commit-history only); use cached data only (faster).
@@ -47,11 +47,11 @@
 #
 # Cron Example:
 #   # Full fetch every 30 minutes (minute 0 and 30)
-#   0,30 * * * * DYNAMO_HOME=$HOME/dynamo /path/to/update_html_pages.sh
+#   0,30 * * * * NVIDIA_HOME=$HOME/dynamo /path/to/update_html_pages.sh
 #   # Cache-only between full runs (every 4 minutes from minute 8..56)
-#   8-59/4 * * * * DYNAMO_HOME=$HOME/dynamo /path/to/update_html_pages.sh --skip-gitlab-api
+#   8-59/4 * * * * NVIDIA_HOME=$HOME/dynamo /path/to/update_html_pages.sh --skip-gitlab-api
 #   # Resource report every minute
-#   * * * * * DYNAMO_HOME=$HOME/dynamo /path/to/update_html_pages.sh --show-local-resources
+#   * * * * * NVIDIA_HOME=$HOME/dynamo /path/to/update_html_pages.sh --show-local-resources
 
 set -euo pipefail
 if [ -n "${DYNAMO_UTILS_TRACE:-}" ]; then
@@ -63,9 +63,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # Base directory - can be overridden by environment variable
 # Default: parent of dynamo-utils.PRODUCTION/ (i.e. .../nvidia) because this script lives in dynamo-utils.PRODUCTION/html_pages/
 UTILS_DIR="$(dirname "$SCRIPT_DIR")"
-DYNAMO_HOME="${DYNAMO_HOME:-$(dirname "$UTILS_DIR")}"
+NVIDIA_HOME="${NVIDIA_HOME:-$(dirname "$UTILS_DIR")}"
 
-LOGS_DIR="$DYNAMO_HOME/logs"
+LOGS_DIR="$NVIDIA_HOME/logs"
 FAST_DEBUG="${FAST_DEBUG:-false}"
 # Back-compat: treat env var like --debug-html.
 if [ -n "${DYNAMO_UTILS_TESTING:-}" ]; then
@@ -79,12 +79,12 @@ Usage: update_html_pages.sh [FLAGS]
 If no args are provided, ALL tasks run.
 
 Flags:
-  --show-local-resources    Write: $DYNAMO_HOME/speedoflight/stats/index.html (or debug.html in --debug-html)
-  --show-local-branches     Write: $DYNAMO_HOME/speedoflight/dynamo/users/<user>/local.html (or local-debug.html in --debug-html)
-  --show-remote-branches    Write: $DYNAMO_HOME/speedoflight/dynamo/users/<user>/index.html (or debug.html in --debug-html)
-  --show-commit-history     Write: $DYNAMO_HOME/commits/index.html (or debug.html in --debug-html)
+  --show-local-resources    Write: $NVIDIA_HOME/speedoflight/stats/index.html (or debug.html in --debug-html)
+  --show-local-branches     Write: $NVIDIA_HOME/speedoflight/dynamo/users/<user>/local.html (or local-debug.html in --debug-html)
+  --show-remote-branches    Write: $NVIDIA_HOME/speedoflight/dynamo/users/<user>/index.html (or debug.html in --debug-html)
+  --show-commit-history     Write: $NVIDIA_HOME/commits/index.html (or debug.html in --debug-html)
   --show-frontend-crates-conformance
-                             Update $DYNAMO_HOME/frontend-crates and write conformance/PARITY.html + conformance/CONFORMANCE_v2.html
+                             Update $NVIDIA_HOME/frontend-crates and write conformance/PARITY.html + conformance/CONFORMANCE_v2.html
 
   --debug-html              Debug mode: outputs to debug.html, enables verification passes, smaller commit window (25 commits), shorter resource window
   --enable-success-build-test-logs  Opt-in: cache raw logs for successful *-build-test jobs to parse pytest slowest tests under "Run tests" (slower)
@@ -100,7 +100,7 @@ Flags:
 
 Notes:
   - On failure, errors are printed to stderr AND logged to component log files
-  - Logs are written under: $DYNAMO_HOME/logs/<YYYY-MM-DD>/
+  - Logs are written under: $NVIDIA_HOME/logs/<YYYY-MM-DD>/
     - cron.log (high-level), plus show_local_branches.log, show_commit_history.log, show_remote_branches.log, resource_report.log
   - Per-component PID-file locks (in each script's --repo-path) allow parallel execution of different components
   - A background thread in each Python script polls the PID file every 5s; if overwritten, the old process exits
@@ -201,7 +201,7 @@ BRANCHES_BASENAME="${BRANCHES_BASENAME:-local.html}"
 if [ "$FAST_DEBUG" = true ]; then
     BRANCHES_BASENAME="local-debug.html"
 fi
-BRANCHES_OUTPUT_FILE="$DYNAMO_HOME/speedoflight/dynamo/users/$GITHUB_USERNAME/$BRANCHES_BASENAME"
+BRANCHES_OUTPUT_FILE="$NVIDIA_HOME/speedoflight/dynamo/users/$GITHUB_USERNAME/$BRANCHES_BASENAME"
 
 # Locking is now handled by PID files inside each Python script (common_lock.py).
 # --run-ignore-lock is passed through to Python so it can force-acquire the PID lock.
@@ -283,7 +283,7 @@ run_resource_report() {
     RESOURCE_DB="${RESOURCE_DB:-$CACHE_ROOT/resource_monitor.sqlite}"
     # Output to speedoflight/stats/ to match other dashboards
     if [ -z "${RESOURCE_REPORT_HTML:-}" ]; then
-        STATS_DIR="$DYNAMO_HOME/speedoflight/stats"
+        STATS_DIR="$NVIDIA_HOME/speedoflight/stats"
         mkdir -p "$STATS_DIR"
         if [ "$FAST_DEBUG" = true ]; then
             RESOURCE_REPORT_HTML="$STATS_DIR/debug.html"
@@ -338,7 +338,7 @@ dry_echo() {
 }
 
 run_show_local_branches() {
-    cd "$DYNAMO_HOME" || exit 1
+    cd "$NVIDIA_HOME" || exit 1
     
     # Ensure output directory exists
     mkdir -p "$(dirname "$BRANCHES_OUTPUT_FILE")"
@@ -359,13 +359,13 @@ run_show_local_branches() {
     if [ "$DRY_RUN" = true ]; then
         echo "[DRY-RUN] Would generate branches dashboard:"
         echo "[DRY-RUN]   Output: $BRANCHES_OUTPUT_FILE"
-        echo "[DRY-RUN]   Command: python3 $SCRIPT_DIR/show_local_branches.py --repo-path $DYNAMO_HOME --output $BRANCHES_OUTPUT_FILE $TOKEN_FLAG $REFRESH_CLOSED_FLAG $MAX_GH_FLAG $SUCCESS_BUILD_TEST_FLAG"
+        echo "[DRY-RUN]   Command: python3 $SCRIPT_DIR/show_local_branches.py --repo-path $NVIDIA_HOME --output $BRANCHES_OUTPUT_FILE $TOKEN_FLAG $REFRESH_CLOSED_FLAG $MAX_GH_FLAG $SUCCESS_BUILD_TEST_FLAG"
         return 0
     fi
     
     echo "$(date '+%Y-%m-%d %H:%M:%S') - Generating branches dashboard" >> "$LOG_FILE"
     log_line_ts "$BRANCHES_LOG" "===== run_show_local_branches start (output=$BRANCHES_OUTPUT_FILE) ====="
-    if run_cmd_to_log_ts "$BRANCHES_LOG" python3 "$SCRIPT_DIR/show_local_branches.py" --repo-path "$DYNAMO_HOME" --output "$BRANCHES_OUTPUT_FILE" $TOKEN_FLAG $REFRESH_CLOSED_FLAG $MAX_GH_FLAG $SUCCESS_BUILD_TEST_FLAG $LOCK_FLAG; then
+    if run_cmd_to_log_ts "$BRANCHES_LOG" python3 "$SCRIPT_DIR/show_local_branches.py" --repo-path "$NVIDIA_HOME" --output "$BRANCHES_OUTPUT_FILE" $TOKEN_FLAG $REFRESH_CLOSED_FLAG $MAX_GH_FLAG $SUCCESS_BUILD_TEST_FLAG $LOCK_FLAG; then
         echo "$(date '+%Y-%m-%d %H:%M:%S') - Updated $BRANCHES_OUTPUT_FILE" >> "$LOG_FILE"
     else
         echo "$(date '+%Y-%m-%d %H:%M:%S') - ERROR: Failed to update $BRANCHES_OUTPUT_FILE" >> "$LOG_FILE"
@@ -386,7 +386,7 @@ run_show_remote_branches() {
     #   REMOTE_GITHUB_USER=keivenchang
     #
     # Default output root:
-    #   $DYNAMO_HOME/speedoflight/dynamo/users/<user>/index.html
+    #   $NVIDIA_HOME/speedoflight/dynamo/users/<user>/index.html
 
     USERS_LIST="${REMOTE_GITHUB_USERS:-${REMOTE_GITHUB_USER:-}}"
     if [ -z "${USERS_LIST:-}" ]; then
@@ -406,13 +406,13 @@ run_show_remote_branches() {
     SUCCESS_BUILD_TEST_FLAG="--enable-success-build-test-logs"
 
     # Base dir for remote PRs generation: needs a local repo clone for workflow YAML inference.
-    # Default to $DYNAMO_HOME/dynamo_latest (requested). Fallback to $DYNAMO_HOME/commits if needed.
+    # Default to $NVIDIA_HOME/dynamo_latest (requested). Fallback to $NVIDIA_HOME/commits if needed.
     REMOTE_BASE_DIR="${REMOTE_PRS_BASE_DIR:-}"
     if [ -z "${REMOTE_BASE_DIR:-}" ]; then
-        if [ -d "$DYNAMO_HOME/dynamo_latest" ]; then
-            REMOTE_BASE_DIR="$DYNAMO_HOME/dynamo_latest"
+        if [ -d "$NVIDIA_HOME/dynamo_latest" ]; then
+            REMOTE_BASE_DIR="$NVIDIA_HOME/dynamo_latest"
         else
-            REMOTE_BASE_DIR="$DYNAMO_HOME/commits"
+            REMOTE_BASE_DIR="$NVIDIA_HOME/commits"
         fi
     fi
 
@@ -422,7 +422,7 @@ run_show_remote_branches() {
             if [ -z "${U:-}" ]; then
                 continue
             fi
-            OUT_DIR="${REMOTE_PRS_OUT_DIR:-$DYNAMO_HOME/speedoflight/dynamo/users/${U}}"
+            OUT_DIR="${REMOTE_PRS_OUT_DIR:-$NVIDIA_HOME/speedoflight/dynamo/users/${U}}"
             OUT_FILE="${REMOTE_PRS_OUT_FILE:-$OUT_DIR/index.html}"
             if [ "$FAST_DEBUG" = true ]; then
                 OUT_FILE="${REMOTE_PRS_OUT_FILE:-$OUT_DIR/debug.html}"
@@ -439,7 +439,7 @@ run_show_remote_branches() {
         if [ -z "${U:-}" ]; then
             continue
         fi
-        OUT_DIR="${REMOTE_PRS_OUT_DIR:-$DYNAMO_HOME/speedoflight/dynamo/users/${U}}"
+        OUT_DIR="${REMOTE_PRS_OUT_DIR:-$NVIDIA_HOME/speedoflight/dynamo/users/${U}}"
         OUT_FILE="${REMOTE_PRS_OUT_FILE:-$OUT_DIR/index.html}"
         if [ "$FAST_DEBUG" = true ]; then
             OUT_FILE="${REMOTE_PRS_OUT_FILE:-$OUT_DIR/debug.html}"
@@ -447,8 +447,8 @@ run_show_remote_branches() {
         mkdir -p "$(dirname "$OUT_FILE")"
         
         # Copy shared tree-view.css and debug-tree.html to speedoflight
-        cp -f "$SCRIPT_DIR/tree-view.css" "$DYNAMO_HOME/speedoflight/dynamo/tree-view.css" 2>/dev/null || true
-        cp -f "$SCRIPT_DIR/debug-tree.html" "$DYNAMO_HOME/speedoflight/dynamo/users/${U}/debug-tree.html" 2>/dev/null || true
+        cp -f "$SCRIPT_DIR/tree-view.css" "$NVIDIA_HOME/speedoflight/dynamo/tree-view.css" 2>/dev/null || true
+        cp -f "$SCRIPT_DIR/debug-tree.html" "$NVIDIA_HOME/speedoflight/dynamo/users/${U}/debug-tree.html" 2>/dev/null || true
 
         echo "$(date '+%Y-%m-%d %H:%M:%S') - Generating remote PRs dashboard (user=${U} output=$OUT_FILE)" >> "$LOG_FILE"
         log_line_ts "$REMOTE_PRS_LOG" "===== run_show_remote_branches start (user=${U} output=$OUT_FILE) ====="
@@ -475,7 +475,7 @@ run_show_remote_branches() {
 }
 
 run_show_commit_history() {
-    DYNAMO_REPO="$DYNAMO_HOME/commits"
+    DYNAMO_REPO="$NVIDIA_HOME/commits"
     COMMIT_HISTORY_BASENAME="${COMMIT_HISTORY_BASENAME:-index.html}"
     if [ "$FAST_DEBUG" = true ]; then
         COMMIT_HISTORY_BASENAME="debug.html"
@@ -567,9 +567,9 @@ update_frontend_crates_conformance() {
     # Render from an isolated checkout of main. The nginx-served frontend-crates checkout is
     # also an active development worktree, so using it as the renderer can leave this page
     # pinned to a dirty feature branch.
-    local frontend_repo="${FRONTEND_CRATES_REPO:-$DYNAMO_HOME/frontend-crates-conformance}"
+    local frontend_repo="${FRONTEND_CRATES_REPO:-$NVIDIA_HOME/frontend-crates-conformance}"
     local frontend_remote="${FRONTEND_CRATES_REMOTE:-git@github.com:ai-dynamo/frontend-crates.git}"
-    local publish_dir="${FRONTEND_CRATES_PUBLISH_DIR:-$DYNAMO_HOME/frontend-crates/conformance}"
+    local publish_dir="${FRONTEND_CRATES_PUBLISH_DIR:-$NVIDIA_HOME/frontend-crates/conformance}"
     # The v1 page is published as PARITY_v1.html; PARITY.html is a legacy stable URL
     # that now redirects to CONFORMANCE_v2.html (the canonical page).
     local parity_v1_html="$publish_dir/PARITY_v1.html"

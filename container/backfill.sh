@@ -26,9 +26,9 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-DYNAMO_HOME="${DYNAMO_HOME:-$HOME/dynamo}"
-BUILD_REPO="${DYNAMO_HOME}/dynamo_ci2"
-LOG_REPO="${DYNAMO_HOME}/dynamo_ci"
+NVIDIA_HOME="${NVIDIA_HOME:-$HOME/nvidia}"
+BUILD_REPO="${NVIDIA_HOME}/dynamo_ci2"
+LOG_REPO="${NVIDIA_HOME}/dynamo_ci"
 BUILD_SCRIPT="$SCRIPT_DIR/build_images.py"
 DRY_RUN=0
 

@@ -15,7 +15,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-DYNAMO_HOME="${DYNAMO_HOME:-$(dirname "$SCRIPT_DIR")}"
+NVIDIA_HOME="${NVIDIA_HOME:-$(dirname "$SCRIPT_DIR")}"
 
 # Default values for arguments (can be overridden by command line)
 CLEANUP_OLD_DYNAMO_IMAGES_ARGS=("--force")

@@ -6,15 +6,15 @@
 #
 # What it does (by default):
 # - Deletes YYYY-MM-DD/ directories older than <keep-days> (default: 30) from:
-#   - $DYNAMO_HOME/logs/          (cron/dashboard logs)
-#   - $DYNAMO_HOME/dynamo_ci/logs/ (build report logs)
+#   - $NVIDIA_HOME/logs/          (cron/dashboard logs)
+#   - $NVIDIA_HOME/dynamo_ci/logs/ (build report logs)
 #
 # Safety:
 # - Only deletes directories that match regex: ^20[0-9]{2}-[0-9]{2}-[0-9]{2}$
 # - Never deletes today's directory
 #
 # Typical cron (recommended):
-#   0 2 * * * DYNAMO_HOME=$HOME/nvidia $HOME/nvidia/dynamo-utils.PRODUCTION/cron_log.sh clean_log $HOME/nvidia/dynamo-utils.PRODUCTION/clean_log.sh
+#   0 2 * * * NVIDIA_HOME=$HOME/nvidia $HOME/nvidia/dynamo-utils.PRODUCTION/cron_log.sh clean_log $HOME/nvidia/dynamo-utils.PRODUCTION/clean_log.sh
 
 set -euo pipefail
 
@@ -53,11 +53,11 @@ if ! [[ "$KEEP_DAYS" =~ ^[0-9]+$ ]] || [ "$KEEP_DAYS" -lt 1 ]; then
 fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-DYNAMO_HOME="${DYNAMO_HOME:-$(dirname "$SCRIPT_DIR")}"
-LOGS_DIR="${LOGS_DIR:-$DYNAMO_HOME/logs}"
+NVIDIA_HOME="${NVIDIA_HOME:-$(dirname "$SCRIPT_DIR")}"
+LOGS_DIR="${LOGS_DIR:-$NVIDIA_HOME/logs}"
 
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] clean_log.sh starting"
-echo "  DYNAMO_HOME=$DYNAMO_HOME"
+echo "  NVIDIA_HOME=$NVIDIA_HOME"
 echo "  LOGS_DIR=$LOGS_DIR"
 echo "  KEEP_DAYS=$KEEP_DAYS"
 echo "  DRY_RUN=$DRY_RUN"
@@ -127,6 +127,6 @@ cleanup_logs_in_dir() {
 
 mkdir -p "$LOGS_DIR"
 cleanup_logs_in_dir "$LOGS_DIR"
-cleanup_logs_in_dir "$DYNAMO_HOME/dynamo_ci/logs"
+cleanup_logs_in_dir "$NVIDIA_HOME/dynamo_ci/logs"
 
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] clean_log.sh done"
