@@ -82,16 +82,16 @@
             ~/.claude.json               ->   ~/.claude.json
             ~/.cursor/                   ->   ~/.cursor/            (IDE state, MCP, skills-cursor symlink)
 
-            ~/dynamo/.cursorrules        ->   /workspace/.cursorrules   (workspace-level rules)
-            ~/dynamo/.cursorignore       ->   /workspace/.cursorignore  (workspace-level ignores)
+            ~/dev/.cursorrules        ->   /workspace/.cursorrules   (workspace-level rules)
+            ~/dev/.cursorignore       ->   /workspace/.cursorignore  (workspace-level ignores)
 
-            ~/dynamo/<repo>/             ->   /workspace/           (via workspaceMount; includes
+            ~/dev/<repo>/             ->   /workspace/           (via workspaceMount; includes
                                                                      repo .cursorrules, .cursorignore,
                                                                      .cursor/rules/, .claude/skills/,
                                                                      CLAUDE.md)
 
-            ~/dynamo/notes/              ->   ~/notes/              (persistent, read-write)
-            ~/dynamo/dynamo-utils.PROD/  ->   ~/utils/              (read-only)
+            ~/dev/notes/              ->   ~/notes/              (persistent, read-write)
+            ~/dev/dynamo-utils.PROD/  ->   ~/utils/              (read-only)
 
             pyrightconfig.json: symlinked from /workspace/ -> ~/utils/ in postCreateCommand
             (file bind mounts can't overlay paths inside an existing directory mount)
@@ -116,15 +116,15 @@
         "source=${localEnv:HOME}/.cursor,target=/home/dynamo/.cursor,type=bind",
         "source=${localEnv:HOME}/.claude,target=/home/dynamo/.claude,type=bind",
         "source=${localEnv:HOME}/.claude.json,target=/home/dynamo/.claude.json,type=bind",
-        "source=${localEnv:HOME}/ai-config/,target=/home/dynamo/ai-config/,type=bind",
+        "source=${localEnv:HOME}/dev/ai-config/,target=/home/dynamo/ai-config/,type=bind",
 
-        {# --- AI config: workspace-level (~/dynamo/  ->  /home/dynamo/) --- #}
-        "source=${localEnv:HOME}/dynamo/.cursorrules,target=/workspace/.cursorrules,type=bind",
-        "source=${localEnv:HOME}/dynamo/.cursorignore,target=/workspace/.cursorignore,type=bind",
+        {# --- AI config: workspace-level (~/dev/  ->  /home/dynamo/) --- #}
+        "source=${localEnv:HOME}/dev/.cursorrules,target=/workspace/.cursorrules,type=bind",
+        "source=${localEnv:HOME}/dev/.cursorignore,target=/workspace/.cursorignore,type=bind",
 
         {# --- Project data & tooling --- #}
-        "source=${localEnv:HOME}/dynamo/notes,target=/home/dynamo/notes,type=bind",
-        "source=${localEnv:HOME}/dynamo/dynamo-utils.PRODUCTION/,target=/home/dynamo/utils,type=bind,readonly",
+        "source=${localEnv:HOME}/dev/notes,target=/home/dynamo/notes,type=bind",
+        "source=${localEnv:HOME}/dev/dynamo-utils.PRODUCTION/,target=/home/dynamo/utils,type=bind,readonly",
 
         {#
             Per-engine cargo target dir, overlaid at /workspace/target.

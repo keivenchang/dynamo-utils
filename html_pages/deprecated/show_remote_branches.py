@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # DEPRECATED 2026-07-19: the /dynamo/users/ per-user branches dashboards are retired.
-# The remote_prs cron jobs are disabled, the ~/nvidia/users/ pages and their nginx
+# The remote_prs cron jobs are disabled, the ~/dev/users/ pages and their nginx
 # location blocks were removed, and update_html_pages.sh run_show_remote_branches is a
 # no-op. Kept here for reference only -- do NOT run it.
 

@@ -25,10 +25,10 @@ This repository contains essential development tools, build scripts, and configu
 
 ## Development Environment Notes (host vs dev container)
 
-- **Host venv**: On the host machine, activate your local venv before running Python tooling (pre-commit, linters, etc.). On common setups this is typically `<workspace>/venv/bin/activate` (e.g. `~/nvidia/venv/bin/activate`).
+- **Host venv**: On the host machine, activate your local venv before running Python tooling (pre-commit, linters, etc.). On common setups this is typically `<workspace>/venv/bin/activate` (e.g. `~/dev/venv/bin/activate`).
 - **Dev container**: Inside the dev container, the environment is typically pre-configured/activated.
 - **Path mapping (common setup)**:
-  - Host: `~/nvidia/dynamo-utils.PRODUCTION`
+  - Host: `~/dev/dynamo-utils.PRODUCTION`
   - Dev container: `/workspace/.utils`
 
 ---
@@ -90,7 +90,7 @@ dynamo-utils/
 ├── common_build_report.py        # Typed dataclasses for build report JSON serialization
 ├── common_types.py               # Shared enums/types (used by API + dashboards)
 ├── compile.sh                    # Build and install Dynamo Python packages
-├── cron_log.sh                   # Cron wrapper that writes logs to ~/nvidia/logs/YYYY-MM-DD/<job>.log
+├── cron_log.sh                   # Cron wrapper that writes logs to ~/dev/logs/YYYY-MM-DD/<job>.log
 ├── curl.sh                       # Test models via chat completions API
 ├── ddns.py                       # Dynamic DNS updater for *.dyn.nvidia.com hostnames
 ├── devcontainer.json.j2          # VS Code Dev Container template (Jinja2)
@@ -385,7 +385,7 @@ python3 gitlab_pipeline_pr_map.py 40743226 https://gitlab-master.nvidia.com/dl/a
 ```
 
 **Configured targets:**
-- `~/nvidia` -> `/mnt/sda/keivenc.backup/nvidia`
+- `~/dev` -> `/mnt/sda/keivenc.backup/nvidia`
 - `~/.config`
 - `~/.ssh`
 - `~/.claude`
@@ -615,10 +615,10 @@ Re-compress existing `.tgz` backup archives while applying updated `.rsyncrules`
 reducing archive sizes by removing files that should have been excluded.
 
 ```bash
-./recompress_backups.sh --backup-history /mnt/sda/keivenc/backup_history --rsyncrules ~/nvidia/.rsyncrules
+./recompress_backups.sh --backup-history /mnt/sda/keivenc/backup_history --rsyncrules ~/dev/.rsyncrules
 
 # Preview
-./recompress_backups.sh --backup-history /mnt/sda/keivenc/backup_history --rsyncrules ~/nvidia/.rsyncrules --dry-run
+./recompress_backups.sh --backup-history /mnt/sda/keivenc/backup_history --rsyncrules ~/dev/.rsyncrules --dry-run
 ```
 
 ### `update_cron_tail.sh`

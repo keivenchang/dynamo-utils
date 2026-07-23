@@ -14,7 +14,7 @@
 # - Never deletes today's directory
 #
 # Typical cron (recommended):
-#   0 2 * * * NVIDIA_HOME=$HOME/nvidia $HOME/nvidia/dynamo-utils.PRODUCTION/cron_log.sh clean_log $HOME/nvidia/dynamo-utils.PRODUCTION/clean_log.sh
+#   0 2 * * * NVIDIA_HOME=$HOME/dev $HOME/dev/dynamo-utils.PRODUCTION/cron_log.sh clean_log $HOME/dev/dynamo-utils.PRODUCTION/clean_log.sh
 
 set -euo pipefail
 

@@ -14,19 +14,19 @@
 #
 # Options:
 #   --dry-run           Show what would run without executing
-#   --build-repo PATH   Repo to build in (default: ~/nvidia/dynamo_ci2)
-#   --log-repo PATH     Repo to move logs to (default: ~/nvidia/dynamo_ci)
+#   --build-repo PATH   Repo to build in (default: ~/dev/dynamo_ci2)
+#   --log-repo PATH     Repo to move logs to (default: ~/dev/dynamo_ci)
 #
 # Examples:
 #   ./backfill.sh 12785247c                              # dynamo_ci2 -> dynamo_ci
-#   ./backfill.sh --build-repo ~/nvidia/dynamo_ci 12785247c
-#   ./backfill.sh --build-repo ~/nvidia/dynamo_ci2 --log-repo ~/nvidia/dynamo_ci 52b460e4c dcbccbcd2
+#   ./backfill.sh --build-repo ~/dev/dynamo_ci 12785247c
+#   ./backfill.sh --build-repo ~/dev/dynamo_ci2 --log-repo ~/dev/dynamo_ci 52b460e4c dcbccbcd2
 #   ./backfill.sh --dry-run 12785247c
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-NVIDIA_HOME="${NVIDIA_HOME:-$HOME/nvidia}"
+NVIDIA_HOME="${NVIDIA_HOME:-$HOME/dev}"
 BUILD_REPO="${NVIDIA_HOME}/dynamo_ci2"
 LOG_REPO="${NVIDIA_HOME}/dynamo_ci"
 BUILD_SCRIPT="$SCRIPT_DIR/build_images.py"

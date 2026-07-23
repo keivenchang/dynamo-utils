@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# Cron log wrapper: run a command and capture ALL output to ~/nvidia/logs/YYYY-MM-DD/<job>.log
+# Cron log wrapper: run a command and capture ALL output to ~/dev/logs/YYYY-MM-DD/<job>.log
 #
 # Usage:
 #   cron_log.sh <job_name> <command...>
