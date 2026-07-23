@@ -10,7 +10,7 @@ set -euo pipefail
 # (the test import path is the only intentional local delta.)
 
 PORT=9999
-PYTHON=/home/keivenc/dev/Linux.x86_64/venv.3.12/bin/python3
+PYTHON=/home/keivenc/bin/Linux.x86_64/venv.3.12/bin/python3
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 MONITOR="${SCRIPT_DIR}/dynamo_local_resource_monitor.py"
 
