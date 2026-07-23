@@ -1237,7 +1237,7 @@ def main() -> int:
     )
     p_rh.add_argument(
         "--output-root",
-        default=str(Path.home() / "nvidia" / "commits" / "logs"),
+        default=str(Path.home() / "dev" / "commits" / "logs"),
     )
     p_rh.set_defaults(func=cmd_render_html)
 
