@@ -30,7 +30,7 @@ def main():
     print("\nRunning show_commit_history.py with debug...")
     result = subprocess.run([
         'python3', 'html_pages/show_commit_history.py',
-        '--repo-path', '/home/keivenc/nvidia/dynamo_ci',
+        '--repo-path', '/home/keivenc/dev/dynamo_ci',
         '--output', '/tmp/test_commit_history.html',
         '--max-commits', '5',
         '--skip-gitlab-api',

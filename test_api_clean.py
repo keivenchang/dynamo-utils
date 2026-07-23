@@ -38,11 +38,11 @@ def main():
     # Run subprocess (should make N API calls internally)
     result = subprocess.run([
         'python3', 'html_pages/show_commit_history.py',
-        '--repo-path', '/home/keivenc/nvidia/dynamo_ci',
+        '--repo-path', '/home/keivenc/dev/dynamo_ci',
         '--output', '/tmp/test_commits.html',
         '--max-commits', '5',
         '--skip-gitlab-api'
-    ], capture_output=True, text=True, cwd='/home/keivenc/nvidia/dynamo-utils.dev')
+    ], capture_output=True, text=True, cwd='/home/keivenc/dev/dynamo-utils.dev')
     
     if result.returncode != 0:
         print(f'ERROR: Script failed')
