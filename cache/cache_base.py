@@ -17,6 +17,7 @@ import atexit
 import json
 import os
 import random
+import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -27,6 +28,10 @@ try:
     import fcntl  # type: ignore
 except Exception:  # pragma: no cover - best-effort on non-POSIX
     fcntl = None  # type: ignore
+
+# Cache files already swept for stranded temp files this process. Keyed by path so a run
+# touching several caches sweeps each once rather than on every throttled flush.
+_SWEPT_CACHE_FILES: set = set()
 
 
 @dataclass
@@ -168,6 +173,34 @@ class BaseDiskCache:
     _FLUSH_MIN_S: float = 1.0
     _FLUSH_MAX_S: float = 10.0
 
+    def _sweep_stale_tmp(self, *, max_age_s: float = 3600.0) -> None:
+        """Remove temp files stranded by a previous run that died mid-write.
+
+        The try/finally in _persist cannot help when the process is SIGKILLed or OOM-killed:
+        no Python cleanup runs at all. Given these caches are rewritten by cron every few
+        minutes, that path is the main source of leaked temp files, so recovering them needs
+        an explicit sweep.
+
+        Only files older than max_age_s are removed, so a concurrent writer whose lock
+        acquisition timed out (see _acquire_disk_lock returning None) is never disturbed.
+        Runs once per cache file per process; the caller already holds the disk lock.
+        """
+        key = str(self._cache_file)
+        if key in _SWEPT_CACHE_FILES:
+            return
+        _SWEPT_CACHE_FILES.add(key)
+
+        cutoff = time.time() - max_age_s
+        for stale in self._cache_file.parent.glob(f"{self._cache_file.name}.tmp.*"):
+            # Independent units: one unreadable/vanished entry must not abort the sweep.
+            try:
+                if stale.stat().st_mtime < cutoff:
+                    stale.unlink()
+            except FileNotFoundError:
+                pass
+            except OSError:
+                pass
+
     def _persist(self, *, force: bool = False) -> None:
         """Persist cache to disk with inter-process merge (best-effort).
 
@@ -193,6 +226,8 @@ class BaseDiskCache:
 
         lock_fh = self._acquire_disk_lock(timeout_s=10.0)
         try:
+            self._sweep_stale_tmp()
+
             # Merge with disk state (handle concurrent writers)
             disk_data: Dict[str, Any] = {}
             if self._cache_file.exists():
@@ -215,10 +250,33 @@ class BaseDiskCache:
                 "items": merged_items,
             }
 
-            # Atomic write (tmp file + rename)
-            tmp = f"{self._cache_file}.tmp.{os.getpid()}"
-            Path(tmp).write_text(json.dumps(merged, separators=(",", ":")))
-            os.replace(str(tmp), str(self._cache_file))
+            # Atomic write (tmp file + rename).
+            #
+            # The temp file MUST be removed if the rename does not happen, or it leaks forever:
+            # the old code used a PID-suffixed name with no cleanup, so every interrupted run
+            # stranded a fresh copy instead of overwriting the previous one. That leaked 5,877
+            # files / 23 GB into ~/.cache/dynamo-utils between 2026-01 and 2026-08.
+            #
+            # The window is wide because these caches are large (actions_jobs.json ~1 GB), so
+            # serialise straight to the file handle rather than materialising the whole JSON
+            # string in memory first — that alone was a multi-hundred-MB allocation per flush
+            # and made an OOM kill mid-write likely.
+            fd, tmp = tempfile.mkstemp(
+                dir=str(self._cache_file.parent),
+                prefix=f"{self._cache_file.name}.tmp.",
+            )
+            try:
+                with os.fdopen(fd, "w") as fh:
+                    json.dump(merged, fh, separators=(",", ":"))
+                os.replace(tmp, str(self._cache_file))
+                tmp = None  # renamed; nothing left to clean up
+            finally:
+                if tmp is not None:
+                    # Best-effort: the persist error itself is the one worth propagating.
+                    try:
+                        os.unlink(tmp)
+                    except FileNotFoundError:
+                        pass
 
             # Update in-memory view to match what we wrote
             self._data = merged
