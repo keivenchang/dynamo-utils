@@ -646,10 +646,49 @@ class SingleInstanceLock:
 class ResourceDB:
     def __init__(self, db_path: Path):
         self.db_path = db_path
+        self._connect()
+        self._init_schema()
+
+    def _connect(self) -> None:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self.conn = sqlite3.connect(str(self.db_path), timeout=30.0)
         self.conn.row_factory = sqlite3.Row
+        self._file_id = self._path_identity()
+
+    def _path_identity(self) -> Optional[Tuple[int, int]]:
+        """(st_dev, st_ino) of db_path, or None when the path is gone."""
+        try:
+            st = self.db_path.stat()
+        except FileNotFoundError:
+            return None
+        return (st.st_dev, st.st_ino)
+
+    def ensure_live(self) -> bool:
+        """Reopen if the file we hold open is no longer the file at db_path.
+
+        An open fd keeps writing to its inode after that inode is unlinked or
+        replaced, and nothing about the process looks wrong: it samples, it logs,
+        commits succeed. On 2026-08-02 ~/.cache was converted from a symlink into a
+        real directory and the old tree deleted; this daemon wrote 19h of samples
+        into an unlinked inode nobody could read, while the dashboard silently
+        showed an empty window. Comparing (st_dev, st_ino) each cycle is what turns
+        that into a one-line reopen instead of a day of missing data.
+
+        Returns True when a reopen happened.
+        """
+        current = self._path_identity()
+        if current is not None and current == self._file_id:
+            return False
+        LOGGER.warning(
+            "DB identity changed (%s -> %s); reopening %s",
+            self._file_id,
+            current,
+            self.db_path,
+        )
+        self.close()
+        self._connect()
         self._init_schema()
+        return True
 
     def close(self) -> None:
         try:
@@ -861,6 +900,9 @@ class ResourceDB:
         disk_rates: Tuple[Optional[float], Optional[float]],
         extra: Dict[str, Any],
     ) -> int:
+        # Once per cycle, before the write that starts a sample's row set. One stat()
+        # per interval; the alternative is discovering the loss days later.
+        self.ensure_live()
         cur = self.conn.cursor()
         cur.execute(
             """
