@@ -1984,6 +1984,38 @@ def _build_html(payload: Dict[str, Any]) -> str:
     `;
   }}
 
+  // Place the stacked right-hand overlay axes.
+  //
+  // Plotly's yaxis.position is normalized to [0,1] of the paper. A value >1 is out
+  // of range, so Plotly discards the placement and the axis falls back to its
+  // default LEFT side -- silently stacking its ticks on top of yaxis1. That is what
+  // put "net MiB/s" and "disk MiB/s" on top of "CPU% / MEM%" (ticks reading
+  // 100/2500, 80/200/2000, ...) while load1, at the legal boundary value 1.00,
+  // rendered correctly on the right. Reserve a right gutter by shrinking the x
+  // domain, then keep every position inside [0,1].
+  //
+  // One helper, called by every multi-axis chart: the same block used to be
+  // copy-pasted per chart, so fixing one would have left its sibling broken.
+  function applyRightAxes(layout, titles) {{
+    const RIGHT_EDGE = 0.88;                  // plot occupies x domain [0, RIGHT_EDGE]
+    const STEP = (1 - RIGHT_EDGE) / (titles.length - 1 || 1);
+    layout.xaxis = Object.assign({{}}, layout.xaxis || {{}}, {{ domain: [0, RIGHT_EDGE] }});
+    titles.forEach(function (t, i) {{
+      layout['yaxis' + (i + 2)] = {{
+        title: t,
+        overlaying: 'y',
+        side: 'right',
+        anchor: 'free',
+        position: Math.min(1, RIGHT_EDGE + i * STEP),
+        showgrid: false,
+        tickfont: {{ size: 10 }},
+        titlefont: {{ size: 10 }},
+        // No automargin: the gutter is reserved explicitly by the x domain above,
+        // and automargin would fight it and re-introduce drift.
+      }};
+    }});
+  }}
+
   function commonLayout(title) {{
     const grid = 'rgba(255,255,255,0.09)';
     // Default initial view: ALWAYS current last 2 hours (ending at "now").
@@ -2266,41 +2298,8 @@ def _build_html(payload: Dict[str, Any]) -> str:
 
     const layout = commonLayout('');
     layout.yaxis = {{ title: 'CPU% / MEM%', range: [0, 100], gridcolor: 'rgba(255,255,255,0.09)' }};
-    // Push right-side axes *outside* the plot area to prevent tick-label pileups.
-    // Keep tick labels small; hover shows exact values anyway.
-    layout.yaxis2 = {{
-      title: 'load1',
-      overlaying: 'y',
-      side: 'right',
-      anchor: 'free',
-      position: 1.00,
-      showgrid: false,
-      tickfont: {{ size: 10 }},
-      titlefont: {{ size: 10 }},
-      automargin: true,
-    }};
-    layout.yaxis3 = {{
-      title: 'net MiB/s',
-      overlaying: 'y',
-      side: 'right',
-      anchor: 'free',
-      position: 1.06,
-      showgrid: false,
-      tickfont: {{ size: 10 }},
-      titlefont: {{ size: 10 }},
-      automargin: true,
-    }};
-    layout.yaxis4 = {{
-      title: 'disk MiB/s',
-      overlaying: 'y',
-      side: 'right',
-      anchor: 'free',
-      position: 1.12,
-      showgrid: false,
-      tickfont: {{ size: 10 }},
-      titlefont: {{ size: 10 }},
-      automargin: true,
-    }};
+    // Right-side axes live outside the plot area; hover shows exact values anyway.
+    applyRightAxes(layout, ['load1', 'net MiB/s', 'disk MiB/s']);
 
     const config = {{ displayModeBar: true, responsive: true }};
     return Plotly.newPlot('sys_graph', traces, layout, config).then(() => {{
@@ -2742,39 +2741,7 @@ def _build_html(payload: Dict[str, Any]) -> str:
 
     const layout = commonLayout('');
     layout.yaxis = {{ title: 'util %', rangemode: 'tozero', gridcolor: 'rgba(255,255,255,0.09)' }};
-    layout.yaxis2 = {{
-      title: 'mem MB',
-      overlaying: 'y',
-      side: 'right',
-      anchor: 'free',
-      position: 1.00,
-      showgrid: false,
-      tickfont: {{ size: 10 }},
-      titlefont: {{ size: 10 }},
-      automargin: true,
-    }};
-    layout.yaxis3 = {{
-      title: 'temp C',
-      overlaying: 'y',
-      side: 'right',
-      anchor: 'free',
-      position: 1.06,
-      showgrid: false,
-      tickfont: {{ size: 10 }},
-      titlefont: {{ size: 10 }},
-      automargin: true,
-    }};
-    layout.yaxis4 = {{
-      title: 'power W',
-      overlaying: 'y',
-      side: 'right',
-      anchor: 'free',
-      position: 1.12,
-      showgrid: false,
-      tickfont: {{ size: 10 }},
-      titlefont: {{ size: 10 }},
-      automargin: true,
-    }};
+    applyRightAxes(layout, ['mem MB', 'temp C', 'power W']);
 
     const config = {{ displayModeBar: true, responsive: true }};
     if (!keys.length) {{
