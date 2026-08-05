@@ -459,22 +459,19 @@ update_frontend_crates_conformance() {
     local frontend_repo="${FRONTEND_CRATES_REPO:-$NVIDIA_HOME/frontend-crates-conformance}"
     local frontend_remote="${FRONTEND_CRATES_REMOTE:-git@github.com:ai-dynamo/frontend-crates.git}"
     local publish_dir="${FRONTEND_CRATES_PUBLISH_DIR:-$NVIDIA_HOME/frontend-crates/conformance}"
-    # The v1 page is published as PARITY_v1.html; PARITY.html is a legacy stable URL
-    # that now redirects to CONFORMANCE_v2.html (the canonical page).
-    local parity_v1_html="$publish_dir/PARITY_v1.html"
+    # PARITY.html is a legacy stable URL that redirects to CONFORMANCE_v2.html
+    # (the canonical page). The v1 page is no longer generated.
     local parity_html="$publish_dir/PARITY.html"
     local conformance_html="$publish_dir/CONFORMANCE_v2.html"
-    local parity_tmp=""
     local conformance_tmp=""
 
     if [ "$DRY_RUN" = true ]; then
         echo "[DRY-RUN] Would generate frontend-crates conformance HTML:"
         echo "[DRY-RUN]   Clean renderer checkout: $frontend_repo"
         echo "[DRY-RUN]   nginx publish directory: $publish_dir"
-        echo "[DRY-RUN]   v1 output: $parity_v1_html (PARITY.html -> meta-refresh redirect to CONFORMANCE_v2.html)"
+        echo "[DRY-RUN]   legacy URL: $parity_html (meta-refresh redirect to CONFORMANCE_v2.html)"
         echo "[DRY-RUN]   v2 output: $conformance_html"
         echo "[DRY-RUN]   Command: cd $frontend_repo && git checkout main && git pull --ff-only origin main"
-        echo "[DRY-RUN]   Command: cd $frontend_repo && export HF_TOKEN=<~/.cache/huggingface/token> && conformance/utils/render_table_v1.sh && \\cp -f conformance/PARITY_v1.html $parity_v1_html && write meta-refresh redirect > $parity_html"
         echo "[DRY-RUN]   Command: cd $frontend_repo && export HF_TOKEN=<~/.cache/huggingface/token> && conformance/utils/render_table_v2.sh --output $conformance_html"
         return 0
     fi
@@ -488,8 +485,8 @@ update_frontend_crates_conformance() {
         fi
     fi
 
-    if [ ! -x "$frontend_repo/conformance/utils/render_table_v1.sh" ] || [ ! -x "$frontend_repo/conformance/utils/render_table_v2.sh" ]; then
-        echo "$(date '+%Y-%m-%d %H:%M:%S') - SKIP: frontend-crates conformance render scripts not present in $frontend_repo" >> "$LOG_FILE"
+    if [ ! -x "$frontend_repo/conformance/utils/render_table_v2.sh" ]; then
+        echo "$(date '+%Y-%m-%d %H:%M:%S') - SKIP: frontend-crates conformance render script not present in $frontend_repo" >> "$LOG_FILE"
         return 0
     fi
 
@@ -512,11 +509,10 @@ update_frontend_crates_conformance() {
     # it explicitly. Do not use a login shell here: its background startup programs can
     # inherit this logger's stdout pipe and permanently hold the cron lock.
     mkdir -p "$publish_dir"
-    parity_tmp="$(mktemp -p "$(dirname "$parity_v1_html")" .PARITY_v1-XXXXXX.html)"
-    if run_cmd_to_log_ts "$COMMIT_HISTORY_LOG" bash -c 'export HF_TOKEN="${HF_TOKEN:-$(cat "$HOME/.cache/huggingface/token" 2>/dev/null)}"; cd "$1" && conformance/utils/render_table_v1.sh && \cp -f conformance/PARITY_v1.html "$2"' _ "$frontend_repo" "$parity_tmp"; then
-        chmod 644 "$parity_tmp"
-        \mv -f "$parity_tmp" "$parity_v1_html"
-        cat > "$parity_html" << 'PARITY_REDIRECT_EOF'
+    # PARITY_v1.html is no longer generated: frontend-crates #167 (cc35ede4, 2026-07-30)
+    # deleted conformance/utils/render_table_v1.sh. PARITY.html stays as a legacy stable
+    # URL redirecting to the canonical v2 page.
+    cat > "$parity_html" << 'PARITY_REDIRECT_EOF'
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -533,11 +529,6 @@ update_frontend_crates_conformance() {
 </body>
 </html>
 PARITY_REDIRECT_EOF
-        echo "$(date '+%Y-%m-%d %H:%M:%S') - Updated $parity_v1_html (PARITY.html -> meta-refresh redirect to CONFORMANCE_v2.html)" >> "$LOG_FILE"
-    else
-        rm -f "$parity_tmp"
-        echo "$(date '+%Y-%m-%d %H:%M:%S') - WARNING: frontend-crates v1 parity regen failed (see $COMMIT_HISTORY_LOG)" >> "$LOG_FILE"
-    fi
 
     conformance_tmp="$(mktemp -p "$(dirname "$conformance_html")" .CONFORMANCE_v2-XXXXXX.html)"
     if run_cmd_to_log_ts "$COMMIT_HISTORY_LOG" bash -c 'export HF_TOKEN="${HF_TOKEN:-$(cat "$HOME/.cache/huggingface/token" 2>/dev/null)}"; cd "$1" && conformance/utils/render_table_v2.sh --output "$2"' _ "$frontend_repo" "$conformance_tmp"; then
