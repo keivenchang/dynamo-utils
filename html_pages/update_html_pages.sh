@@ -403,7 +403,7 @@ run_show_commit_history() {
 
     # Default: parallelize raw log snippet parsing (CPU-heavy) to speed commit history generation.
     # Set PARALLEL_WORKERS=0 to force single-process, or override to tune.
-    PARALLEL_WORKERS="${PARALLEL_WORKERS:-32}"
+    PARALLEL_WORKERS="${PARALLEL_WORKERS:-16}"
     PARALLEL_FLAG=""
     if [ -n "${PARALLEL_WORKERS:-}" ]; then
         PARALLEL_FLAG="--parallel-workers ${PARALLEL_WORKERS}"
