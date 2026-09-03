@@ -17,8 +17,8 @@
 #   MAX_COMMITS         - If set, cap commits for commit-history (default: 100; 25 for --debug-html).
 #   DYNAMO_UTILS_CACHE_DIR - If set, overrides ~/.cache/dynamo-utils for the resource report DB lookup.
 #   RESOURCE_DB         - If set, explicit SQLite path for resource report (default: $DYNAMO_UTILS_CACHE_DIR/resource_monitor.sqlite).
-#   FRONTEND_CRATES_REPO - If set, checkout used for parser conformance HTML generation
-#                          (default: $NVIDIA_HOME/frontend-crates).
+#   FRONTEND_CRATES_REPO - If set, checkout used to fetch frontend-crates main
+#                          (default: $NVIDIA_HOME/frontend-crates-conformance).
 #   FRONTEND_CRATES_REMOTE - If set, remote used when cloning FRONTEND_CRATES_REPO
 #                            (default: git@github.com:ai-dynamo/frontend-crates.git).
 #
@@ -84,7 +84,7 @@ Flags:
   --show-remote-branches    [DEPRECATED 2026-07-19] no-op; /dynamo/users/ dashboards retired
   --show-commit-history     Write: $NVIDIA_HOME/commits/index.html (or debug.html in --debug-html)
   --show-frontend-crates-conformance
-                             Update $NVIDIA_HOME/frontend-crates and write conformance/PARITY.html + conformance/CONFORMANCE_v2.html
+                              Fetch frontend-crates main and write conformance/PARITY.html + conformance/CONFORMANCE_v2.html
 
   --debug-html              Debug mode: outputs to debug.html, enables verification passes, smaller commit window (25 commits), shorter resource window
   --enable-success-build-test-logs  Opt-in: cache raw logs for successful *-build-test jobs to parse pytest slowest tests under "Run tests" (slower)
@@ -380,8 +380,10 @@ run_show_commit_history() {
         fi
         OUTPUT_JSON_FLAG="--output-json $COMMIT_HISTORY_JSON"
     fi
-    # Always enable: fetch/cache successful *-build-test raw logs so we can parse pytest test timings.
-    SUCCESS_BUILD_TEST_FLAG="--enable-success-build-test-logs"
+    SUCCESS_BUILD_TEST_FLAG=""
+    if [ "$ENABLE_SUCCESS_BUILD_TEST_LOGS" = true ]; then
+        SUCCESS_BUILD_TEST_FLAG="--enable-success-build-test-logs"
+    fi
 
     # Flags (shared by dry-run and real-run paths)
     # MAX_COMMITS: default 100, or 25 in --debug-html mode (unless overridden by env var)
@@ -453,9 +455,9 @@ run_show_commit_history() {
 }
 
 update_frontend_crates_conformance() {
-    # Render from an isolated checkout of main. The nginx-served frontend-crates checkout is
-    # also an active development worktree, so using it as the renderer can leave this page
-    # pinned to a dirty feature branch.
+    # Render from a temporary detached worktree of origin/main. The persistent checkout may be
+    # an active development worktree, so rendering it can publish a dirty feature branch or a
+    # stale clean checkout when its pull is skipped.
     local frontend_repo="${FRONTEND_CRATES_REPO:-$NVIDIA_HOME/frontend-crates-conformance}"
     local frontend_remote="${FRONTEND_CRATES_REMOTE:-git@github.com:ai-dynamo/frontend-crates.git}"
     local publish_dir="${FRONTEND_CRATES_PUBLISH_DIR:-$NVIDIA_HOME/frontend-crates/conformance}"
@@ -463,42 +465,36 @@ update_frontend_crates_conformance() {
     # (the canonical page). The v1 page is no longer generated.
     local parity_html="$publish_dir/PARITY.html"
     local conformance_html="$publish_dir/CONFORMANCE_v2.html"
+    local conformance_json="$publish_dir/CONFORMANCE_v2.json"
+    local render_script=""
     local conformance_tmp=""
+    local conformance_json_tmp=""
 
     if [ "$DRY_RUN" = true ]; then
         echo "[DRY-RUN] Would generate frontend-crates conformance HTML:"
-        echo "[DRY-RUN]   Clean renderer checkout: $frontend_repo"
+        echo "[DRY-RUN]   Source checkout: $frontend_repo (never rendered directly)"
         echo "[DRY-RUN]   nginx publish directory: $publish_dir"
         echo "[DRY-RUN]   legacy URL: $parity_html (meta-refresh redirect to CONFORMANCE_v2.html)"
-        echo "[DRY-RUN]   v2 output: $conformance_html"
-        echo "[DRY-RUN]   Command: cd $frontend_repo && git checkout main && git pull --ff-only origin main"
-        echo "[DRY-RUN]   Command: cd $frontend_repo && export HF_TOKEN=<~/.cache/huggingface/token> && conformance/utils/render_table_v2.sh --output $conformance_html"
+        echo "[DRY-RUN]   v2 outputs: $conformance_html and $conformance_json"
+        echo "[DRY-RUN]   Command: git -C $frontend_repo fetch --prune origin main"
+        echo "[DRY-RUN]   Command: git -C $frontend_repo worktree add --detach <temporary-path> origin/main"
+        echo "[DRY-RUN]   Command: cd <temporary-path> && export HF_TOKEN=<~/.cache/huggingface/token> && conformance/utils/render_table_v2.sh --output $conformance_html"
         return 0
     fi
 
-    if [ ! -d "$frontend_repo/.git" ]; then
+    if ! git -C "$frontend_repo" rev-parse --git-dir >/dev/null 2>&1; then
         echo "$(date '+%Y-%m-%d %H:%M:%S') - Cloning frontend-crates into $frontend_repo" >> "$LOG_FILE"
         mkdir -p "$(dirname "$frontend_repo")"
         if ! run_cmd_to_log_ts "$GIT_UPDATE_LOG" git clone "$frontend_remote" "$frontend_repo"; then
-            echo "$(date '+%Y-%m-%d %H:%M:%S') - WARNING: failed to clone frontend-crates (see $GIT_UPDATE_LOG)" >> "$LOG_FILE"
-            return 0
+            echo "$(date '+%Y-%m-%d %H:%M:%S') - ERROR: failed to clone frontend-crates (see $GIT_UPDATE_LOG)" >> "$LOG_FILE"
+            return 1
         fi
     fi
 
-    if [ ! -x "$frontend_repo/conformance/utils/render_table_v2.sh" ]; then
-        echo "$(date '+%Y-%m-%d %H:%M:%S') - SKIP: frontend-crates conformance render script not present in $frontend_repo" >> "$LOG_FILE"
-        return 0
-    fi
-
-    echo "$(date '+%Y-%m-%d %H:%M:%S') - Updating $frontend_repo to latest main" >> "$LOG_FILE"
-    if git -C "$frontend_repo" diff --quiet && git -C "$frontend_repo" diff --cached --quiet; then
-        if run_cmd_to_log_ts "$GIT_UPDATE_LOG" git -C "$frontend_repo" checkout main && run_cmd_to_log_ts "$GIT_UPDATE_LOG" git -C "$frontend_repo" pull --ff-only origin main; then
-            echo "$(date '+%Y-%m-%d %H:%M:%S') - Successfully updated frontend-crates to latest main" >> "$LOG_FILE"
-        else
-            echo "$(date '+%Y-%m-%d %H:%M:%S') - WARNING: failed to update frontend-crates; rendering current checkout" >> "$LOG_FILE"
-        fi
-    else
-        echo "$(date '+%Y-%m-%d %H:%M:%S') - WARNING: frontend-crates checkout is dirty; skipping pull and rendering current checkout" >> "$LOG_FILE"
+    echo "$(date '+%Y-%m-%d %H:%M:%S') - Fetching frontend-crates main for isolated render" >> "$LOG_FILE"
+    if ! run_cmd_to_log_ts "$GIT_UPDATE_LOG" git -C "$frontend_repo" fetch --prune origin main; then
+        echo "$(date '+%Y-%m-%d %H:%M:%S') - ERROR: failed to fetch frontend-crates main; refusing stale render" >> "$LOG_FILE"
+        return 1
     fi
 
     echo "$(date '+%Y-%m-%d %H:%M:%S') - Generating frontend-crates parser conformance HTML" >> "$LOG_FILE"
@@ -531,13 +527,43 @@ update_frontend_crates_conformance() {
 PARITY_REDIRECT_EOF
 
     conformance_tmp="$(mktemp -p "$(dirname "$conformance_html")" .CONFORMANCE_v2-XXXXXX.html)"
-    if run_cmd_to_log_ts "$COMMIT_HISTORY_LOG" bash -c 'export HF_TOKEN="${HF_TOKEN:-$(cat "$HOME/.cache/huggingface/token" 2>/dev/null)}"; cd "$1" && conformance/utils/render_table_v2.sh --output "$2"' _ "$frontend_repo" "$conformance_tmp"; then
+    conformance_json_tmp="${conformance_tmp%.html}.json"
+    if (
+        set -euo pipefail
+        cleanup_render_worktree() {
+            if [ -n "${render_worktree:-}" ]; then
+                git -C "$frontend_repo" worktree remove --force "$render_worktree" >/dev/null 2>&1 || true
+                rmdir "$render_worktree" >/dev/null 2>&1 || true
+            fi
+            rm -f "$conformance_tmp"
+            rm -f "$conformance_json_tmp"
+        }
+        trap cleanup_render_worktree EXIT
+        render_worktree="$(mktemp -d -p "$(dirname "$frontend_repo")" .frontend-crates-render-XXXXXX)"
+        rmdir "$render_worktree"
+        run_cmd_to_log_ts "$GIT_UPDATE_LOG" git -C "$frontend_repo" worktree add --detach "$render_worktree" origin/main
+        echo "$(date '+%Y-%m-%d %H:%M:%S') - Isolated frontend-crates render worktree: $render_worktree" >> "$LOG_FILE"
+        if [ ! -x "$render_worktree/conformance/utils/render_table_v2.sh" ]; then
+            echo "$(date '+%Y-%m-%d %H:%M:%S') - ERROR: frontend-crates main has no conformance render script" >> "$LOG_FILE"
+            exit 1
+        fi
+        render_script="$render_worktree/conformance/utils/render_table_v2.sh"
+        if [ -n "${HF_TOKEN:-}" ]; then
+            run_cmd_to_log_ts "$COMMIT_HISTORY_LOG" env HF_TOKEN="$HF_TOKEN" "$render_script" --output "$conformance_tmp"
+        else
+            run_cmd_to_log_ts "$COMMIT_HISTORY_LOG" "$render_script" --output "$conformance_tmp"
+        fi
         chmod 644 "$conformance_tmp"
+        chmod 644 "$conformance_json_tmp"
         \mv -f "$conformance_tmp" "$conformance_html"
+        \mv -f "$conformance_json_tmp" "$conformance_json"
+        trap - EXIT
+        cleanup_render_worktree
+    ); then
         echo "$(date '+%Y-%m-%d %H:%M:%S') - Updated $conformance_html" >> "$LOG_FILE"
     else
-        rm -f "$conformance_tmp"
-        echo "$(date '+%Y-%m-%d %H:%M:%S') - WARNING: frontend-crates v2 conformance regen failed (see $COMMIT_HISTORY_LOG)" >> "$LOG_FILE"
+        echo "$(date '+%Y-%m-%d %H:%M:%S') - ERROR: frontend-crates v2 conformance regen failed; previous report retained (see $COMMIT_HISTORY_LOG)" >> "$LOG_FILE"
+        return 1
     fi
 }
 
