@@ -5,11 +5,11 @@
 # clean_system.sh
 #
 # This script orchestrates various cleanup tasks by calling other specialized cleanup scripts.
-# It handles root-disk pressure, dynamo image cleanup, log cleanup, and optional VSC cleanup.
+# It handles root-disk pressure, dynamo image cleanup, log cleanup, and opt-in transcript cleanup.
 #
 # Usage:
 #   ./clean_system.sh [--keep-days N] [--retain-dynamo-images N] [--transcript-keep-days N]
-#       [--opencode-keep-days N] [--clean-vsc] [--pressure-only] [--dry-run]
+#       [--opencode-keep-days N] [--maintenance] [--skip-images] [--pressure-only] [--dry-run]
 #
 # Options are passed through to the relevant sub-scripts.
 
@@ -19,12 +19,13 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 NVIDIA_HOME="${NVIDIA_HOME:-$(dirname "$SCRIPT_DIR")}"
 
 # Default values for arguments (can be overridden by command line)
-CLEANUP_OLD_DYNAMO_IMAGES_ARGS=("--force")
+CLEANUP_OLD_DYNAMO_IMAGES_ARGS=()
 CLEAN_LOG_ARGS=()
 CLEAN_DISK_ARGS=("--skip-transcripts")
 CLEAN_OPENCODE_ARGS=()
 OPENCODE_ENABLED=false
 PRESSURE_ONLY=false
+SKIP_IMAGES=false
 
 USER_NAME="${USER:-${LOGNAME:-}}"
 if [ -z "$USER_NAME" ]; then
@@ -34,7 +35,7 @@ fi
 LOCK_FILE="/tmp/dynamo-utils.clean_system.${USER_NAME}.lock"
 exec 9>"$LOCK_FILE"
 if ! flock -n 9; then
-  echo "Another clean_system.sh is already running; exiting." >&2
+  echo "Another clean_system.sh is already running; lock=$LOCK_FILE; exiting." >&2
   exit 0
 fi
 
@@ -48,10 +49,9 @@ while [[ $# -gt 0 ]]; do
     --retain-dynamo-images)
       CLEANUP_OLD_DYNAMO_IMAGES_ARGS+=("--retain" "$2"); shift 2 ;;
     --clean-vsc)
-      CLEANUP_OLD_DYNAMO_IMAGES_ARGS+=("--clean-vsc"); shift ;;
+      echo "Error: automatic cleanup never stops containers" >&2; exit 2 ;;
     --transcript-keep-days)
       [ "$#" -ge 2 ] || { echo "Error: --transcript-keep-days requires a value" >&2; exit 2; }
-      CLEAN_DISK_ARGS=()
       CLEAN_DISK_ARGS+=("--transcript-keep-days" "$2"); shift 2 ;;
     --opencode-keep-days)
       [ "$#" -ge 2 ] || { echo "Error: --opencode-keep-days requires a value" >&2; exit 2; }
@@ -64,6 +64,16 @@ while [[ $# -gt 0 ]]; do
     --opencode-vacuum)
       OPENCODE_ENABLED=true
       CLEAN_OPENCODE_ARGS+=("--vacuum"); shift ;;
+    --skip-images)
+      SKIP_IMAGES=true; shift ;;
+    --maintenance)
+      CLEAN_DISK_ARGS+=("--maintenance"); shift ;;
+    --min-free-gib|--target-free-gib|--target-min-age-hours|--max-targets|--high-watermark|--low-watermark|--tmp-root)
+      [ "$#" -ge 2 ] || { echo "Error: $1 requires a value" >&2; exit 2; }
+      CLEAN_DISK_ARGS+=("$1" "$2"); shift 2 ;;
+    --min-image-age-days)
+      [ "$#" -ge 2 ] || { echo "Error: $1 requires a value" >&2; exit 2; }
+      CLEANUP_OLD_DYNAMO_IMAGES_ARGS+=("--min-age-days" "$2"); shift 2 ;;
     --pressure-only)
       PRESSURE_ONLY=true
       CLEAN_DISK_ARGS+=("--pressure-only")
@@ -75,10 +85,17 @@ while [[ $# -gt 0 ]]; do
       CLEAN_OPENCODE_ARGS+=("--dry-run")
       shift ;;
     -h|--help)
-      echo "Usage: $0 [--keep-days N] [--retain-dynamo-images N] [--transcript-keep-days N] [--opencode-keep-days N] [--clean-vsc] [--pressure-only] [--dry-run|--dryrun]"
+      echo "Usage: $0 [--keep-days N] [--retain-dynamo-images N] [--transcript-keep-days N] [--opencode-keep-days N] [--maintenance] [--skip-images] [--pressure-only] [--dry-run|--dryrun]"
       echo ""
       echo "Options for root-disk cleanup (passed to clean_disk_pressure.py):"
-      echo "  --pressure-only            Skip Docker/log cleanup and exit when root usage is below 90%"
+      echo "  --maintenance              Also clean build output older than seven days"
+      echo "  --min-free-gib N            Trigger below this free space (default: 200)"
+      echo "  --target-free-gib N         Recover to this free space (default: 350)"
+      echo "  --target-min-age-hours N    Minimum age under pressure (default: 24)"
+      echo "  --max-targets N             Limit directories removed per run (default: 20)"
+      echo "  --high-watermark N / --low-watermark N  Percentage thresholds (90/80)"
+      echo "  --tmp-root PATH             Temporary project discovery root (/tmp)"
+      echo "  --pressure-only            Skip Docker/log cleanup; exit when free space and usage are healthy"
       echo ""
       echo "Options for log cleanup (passed to clean_log.sh):"
       echo "  --keep-days N              Keep log directories for N days (default: 30)"
@@ -91,9 +108,10 @@ while [[ $# -gt 0 ]]; do
       echo "  --opencode-db-path PATH    Override the OpenCode database path"
       echo "  --opencode-vacuum          Compact the database after deleting sessions"
       echo ""
-      echo "Options for dynamo image cleanup (passed to container/cleanup_old_dynamo_images.sh):"
+      echo "Options for dynamo image cleanup (passed to container/clean_old_local_dynamo_images.sh):"
       echo "  --retain-dynamo-images N   Keep top N *most recent* dynamo:* images per variant (default: 2)"
-      echo "  --clean-vsc                Remove all vsc-* containers (stopped+running) and vsc-* images"
+      echo "  --skip-images              Skip image cleanup (used for non-Sunday nightly runs)"
+      echo "  --min-image-age-days N     Minimum image age, at least 30 (default: 30)"
       echo ""
       echo "General options:"
       echo "  --dry-run, --dryrun        Print what would be done without deleting/pruning"
@@ -115,7 +133,7 @@ if [ ! -x "$CLEAN_DISK_SCRIPT" ]; then
   exit 1
 fi
 
-if ! $PRESSURE_ONLY && [ ! -x "$CLEANUP_OLD_DYNAMO_IMAGES_SCRIPT" ]; then
+if ! $PRESSURE_ONLY && ! $SKIP_IMAGES && [ ! -x "$CLEANUP_OLD_DYNAMO_IMAGES_SCRIPT" ]; then
   echo "Error: $CLEANUP_OLD_DYNAMO_IMAGES_SCRIPT not found or not executable." >&2
   exit 1
 fi
@@ -128,6 +146,14 @@ fi
 if $OPENCODE_ENABLED && [ ! -x "$CLEAN_OPENCODE_SCRIPT" ]; then
   echo "Error: $CLEAN_OPENCODE_SCRIPT not found or not executable." >&2
   exit 1
+fi
+
+if [[ " ${CLEAN_DISK_ARGS[*]} " == *" --transcript-keep-days "* ]]; then
+  declare -a filtered_disk_args=()
+  for disk_arg in "${CLEAN_DISK_ARGS[@]}"; do
+    [ "$disk_arg" = "--skip-transcripts" ] || filtered_disk_args+=("$disk_arg")
+  done
+  CLEAN_DISK_ARGS=("${filtered_disk_args[@]}")
 fi
 
 # Root pressure must run first: Docker may live on another filesystem and a full
@@ -160,7 +186,9 @@ fi
 
 # Run dynamo image cleanup
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] Calling $CLEANUP_OLD_DYNAMO_IMAGES_SCRIPT ${CLEANUP_OLD_DYNAMO_IMAGES_ARGS[*]}"
-run_cleanup_step "$CLEANUP_OLD_DYNAMO_IMAGES_SCRIPT" "${CLEANUP_OLD_DYNAMO_IMAGES_ARGS[@]}"
+if ! $SKIP_IMAGES; then
+  run_cleanup_step "$CLEANUP_OLD_DYNAMO_IMAGES_SCRIPT" "${CLEANUP_OLD_DYNAMO_IMAGES_ARGS[@]}"
+fi
 
 # Run log cleanup
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] Calling $CLEAN_LOG_SCRIPT ${CLEAN_LOG_ARGS[*]}"

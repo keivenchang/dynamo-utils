@@ -8,8 +8,9 @@ import subprocess
 import time
 from pathlib import Path
 
-import clean_disk_pressure
 import pytest
+
+import clean_disk_pressure
 
 
 def _old_file(path: Path, size: int = 4096) -> None:
@@ -17,6 +18,13 @@ def _old_file(path: Path, size: int = 4096) -> None:
     path.write_bytes(b"x" * size)
     old = time.time() - 3 * 86400
     os.utime(path, (old, old))
+    for parent in path.parents:
+        if parent.name == "target" or parent.name.startswith("target-"):
+            (parent / ".rustc_info.json").write_text("{}")
+            output = parent / "debug" / "deps"
+            if output.exists():
+                os.utime(output, (old, old))
+            break
 
 
 def test_transcript_cleanup_preserves_open_and_recent_files(
@@ -30,7 +38,9 @@ def test_transcript_cleanup_preserves_open_and_recent_files(
     _old_file(recent_codex)
     os.utime(recent_codex, None)
     monkeypatch.setattr(
-        clean_disk_pressure, "privileged_inode_open_state", lambda _device, _inode: (False, True)
+        clean_disk_pressure,
+        "privileged_inode_open_state",
+        lambda _device, _inode: (False, True),
     )
 
     removed, _, failures = clean_disk_pressure.cleanup_transcripts(
@@ -55,7 +65,9 @@ def test_transcript_cleanup_rechecks_open_inode(
     old_codex = tmp_path / ".codex" / "sessions" / "opened-after-discovery.jsonl"
     _old_file(old_codex)
     monkeypatch.setattr(
-        clean_disk_pressure, "privileged_inode_open_state", lambda _device, _inode: (True, True)
+        clean_disk_pressure,
+        "privileged_inode_open_state",
+        lambda _device, _inode: (True, True),
     )
 
     removed, _, skipped = clean_disk_pressure.cleanup_transcripts(
@@ -78,7 +90,9 @@ def test_transcript_revalidation_rejects_replaced_or_open_inode(tmp_path: Path) 
     _old_file(replaced)
     _old_file(opened)
     cutoff = time.time() - 86400
-    candidates = clean_disk_pressure.transcript_candidates(tmp_path, cutoff, set(), set())
+    candidates = clean_disk_pressure.transcript_candidates(
+        tmp_path, cutoff, set(), set()
+    )
     by_name = {candidate.path.name: candidate for candidate in candidates}
 
     replaced.unlink()
@@ -97,7 +111,9 @@ def test_transcript_revalidation_rejects_replaced_or_open_inode(tmp_path: Path) 
     assert opened.exists()
 
 
-def test_target_candidates_require_git_repo_and_skip_active_repo(tmp_path: Path) -> None:
+def test_target_candidates_require_git_repo_and_skip_active_repo(
+    tmp_path: Path,
+) -> None:
     inactive_repo = tmp_path / "dynamo__inactive"
     active_repo = tmp_path / "frontend-crates__active"
     recently_built_repo = tmp_path / "dynamo__recent-build"
@@ -107,15 +123,15 @@ def test_target_candidates_require_git_repo_and_skip_active_repo(tmp_path: Path)
         subprocess.run(["git", "init", "-q", str(repo)], check=True)
     for repo in (inactive_repo, active_repo, recently_built_repo, not_repo):
         target = repo / "target"
-        target.mkdir(parents=True)
-        _old_file(target / "artifact")
+        (target / "debug" / "deps").mkdir(parents=True)
+        _old_file(target / "debug" / "deps" / "artifact")
         old = time.time() - 3 * 86400
         os.utime(target, (old, old))
-    os.utime(recently_built_repo / "target" / "artifact", None)
+    os.utime(recently_built_repo / "target" / "debug" / "deps" / "artifact", None)
 
     candidates = clean_disk_pressure.target_candidates(
         tmp_path,
-        {active_repo / "src"},
+        {active_repo / "target" / "debug" / "deps" / "artifact"},
         set(),
         True,
         tmp_path.stat().st_dev,
@@ -133,7 +149,7 @@ def test_target_candidates_fail_closed_and_honor_parent_mount(tmp_path: Path) ->
     repo = tmp_path / "dynamo__candidate"
     repo.mkdir()
     subprocess.run(["git", "init", "-q", str(repo)], check=True)
-    _old_file(repo / "target" / "artifact")
+    _old_file(repo / "target" / "debug" / "deps" / "artifact")
     old = time.time() - 3 * 86400
     os.utime(repo / "target", (old, old))
 
@@ -179,7 +195,7 @@ def test_target_candidates_fail_closed_and_honor_parent_mount(tmp_path: Path) ->
         set(),
         True,
         tmp_path.stat().st_dev,
-        {(repo / "target" / "mounted").resolve()},
+        {(repo / "target" / "debug" / "deps" / "mounted").resolve()},
         True,
         time.time(),
         24,
@@ -187,7 +203,9 @@ def test_target_candidates_fail_closed_and_honor_parent_mount(tmp_path: Path) ->
     )
 
     assert incomplete == []
-    assert parent_mounted == []
+    assert (
+        len(parent_mounted) == 1
+    )  # A bind-mounted source alone is not an active build.
     assert wrong_filesystem == []
     assert nested_mount == []
 
@@ -196,7 +214,7 @@ def test_remove_target_rejects_replaced_directory(tmp_path: Path) -> None:
     repo = tmp_path / "dynamo__candidate"
     repo.mkdir()
     subprocess.run(["git", "init", "-q", str(repo)], check=True)
-    _old_file(repo / "target" / "old-artifact")
+    _old_file(repo / "target" / "debug" / "deps" / "old-artifact")
     old = time.time() - 3 * 86400
     os.utime(repo / "target", (old, old))
     candidates = clean_disk_pressure.target_candidates(
@@ -214,11 +232,11 @@ def test_remove_target_rejects_replaced_directory(tmp_path: Path) -> None:
     assert len(candidates) == 1
 
     shutil.rmtree(repo / "target")
-    _old_file(repo / "target" / "replacement-artifact")
-    os.utime(repo / "target", (old + 10, old + 10))
+    _old_file(repo / "target" / "debug" / "deps" / "replacement-artifact")
+    os.utime(repo / "target" / "debug" / "deps", (old + 10, old + 10))
 
     assert not clean_disk_pressure._remove_target(candidates[0], dry_run=False)
-    assert (repo / "target" / "replacement-artifact").exists()
+    assert (repo / "target" / "debug" / "deps" / "replacement-artifact").exists()
 
 
 def test_remove_target_rechecks_identity_after_activity_scan(
@@ -227,7 +245,7 @@ def test_remove_target_rechecks_identity_after_activity_scan(
     repo = tmp_path / "dynamo__candidate"
     repo.mkdir()
     subprocess.run(["git", "init", "-q", str(repo)], check=True)
-    _old_file(repo / "target" / "old-artifact")
+    _old_file(repo / "target" / "debug" / "deps" / "old-artifact")
     old = time.time() - 3 * 86400
     os.utime(repo / "target", (old, old))
     candidate = clean_disk_pressure.target_candidates(
@@ -245,8 +263,8 @@ def test_remove_target_rechecks_identity_after_activity_scan(
 
     def replace_during_activity_scan() -> tuple[set[Path], set[Path], bool]:
         shutil.rmtree(repo / "target")
-        _old_file(repo / "target" / "replacement-artifact")
-        os.utime(repo / "target", (old + 10, old + 10))
+        _old_file(repo / "target" / "debug" / "deps" / "replacement-artifact")
+        os.utime(repo / "target" / "debug" / "deps", (old + 10, old + 10))
         return set(), set(), True
 
     monkeypatch.setattr(
@@ -254,22 +272,28 @@ def test_remove_target_rechecks_identity_after_activity_scan(
     )
 
     assert not clean_disk_pressure._remove_target(candidate, dry_run=False)
-    assert (repo / "target" / "replacement-artifact").exists()
+    assert (repo / "target" / "debug" / "deps" / "replacement-artifact").exists()
 
 
 def test_path_boundary_does_not_treat_similar_prefix_as_child() -> None:
     assert clean_disk_pressure._is_within(Path("/tmp/repo/target/a"), Path("/tmp/repo"))
-    assert not clean_disk_pressure._is_within(Path("/tmp/repo-old/target"), Path("/tmp/repo"))
+    assert not clean_disk_pressure._is_within(
+        Path("/tmp/repo-old/target"), Path("/tmp/repo")
+    )
 
 
-def test_clean_system_retains_pressure_failure_after_other_cleanup(tmp_path: Path) -> None:
+def test_clean_system_retains_pressure_failure_after_other_cleanup(
+    tmp_path: Path,
+) -> None:
     source_root = Path(__file__).parent
     script = tmp_path / "clean_system.sh"
     shutil.copy2(source_root / "clean_system.sh", script)
     (tmp_path / "container").mkdir()
     marker = tmp_path / "steps"
     stubs = {
-        tmp_path / "clean_disk_pressure.py": "#!/bin/sh\nprintf 'disk\\n' >> \"$MARKER\"\nexit 3\n",
+        tmp_path / "clean_disk_pressure.py": (
+            "#!/bin/sh\nprintf 'disk\\n' >> \"$MARKER\"\nexit 3\n"
+        ),
         tmp_path / "container" / "clean_old_local_dynamo_images.sh": (
             "#!/bin/sh\nprintf 'docker\\n' >> \"$MARKER\"\n"
         ),
@@ -295,13 +319,23 @@ def test_unresolved_pressure_returns_nonzero(
     percent: float,
     expected: int,
 ) -> None:
-    state = clean_disk_pressure.DiskState(1000, int(percent * 10), int((100 - percent) * 10), percent)
+    state = clean_disk_pressure.DiskState(
+        1000, int(percent * 10), int((100 - percent) * 10), percent
+    )
     snapshot = clean_disk_pressure.ActivitySnapshot(set(), set(), set(), True)
     monkeypatch.setattr(clean_disk_pressure, "disk_state", lambda _path: state)
-    monkeypatch.setattr(clean_disk_pressure, "privileged_process_references", lambda: snapshot)
-    monkeypatch.setattr(clean_disk_pressure, "cleanup_transcripts", lambda *args, **kwargs: (0, 0, 0))
-    monkeypatch.setattr(clean_disk_pressure, "complete_target_activity", lambda: (set(), set(), False))
-    monkeypatch.setattr(clean_disk_pressure, "cleanup_targets", lambda *args, **kwargs: (0, 0))
+    monkeypatch.setattr(
+        clean_disk_pressure, "privileged_process_references", lambda: snapshot
+    )
+    monkeypatch.setattr(
+        clean_disk_pressure, "cleanup_transcripts", lambda *args, **kwargs: (0, 0, 0)
+    )
+    monkeypatch.setattr(
+        clean_disk_pressure, "complete_target_activity", lambda: (set(), set(), False)
+    )
+    monkeypatch.setattr(
+        clean_disk_pressure, "cleanup_targets", lambda *args, **kwargs: (0, 0)
+    )
     monkeypatch.setattr(
         "sys.argv",
         [

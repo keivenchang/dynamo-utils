@@ -10,6 +10,7 @@ def _make_script_tree(tmp_path: Path) -> tuple[Path, Path]:
     source_root = Path(__file__).parent
     script = tmp_path / "clean_system.sh"
     shutil.copy2(source_root / "clean_system.sh", script)
+    shutil.copy2(source_root / "build_guard.py", tmp_path / "build_guard.py")
     (tmp_path / "container").mkdir()
     stubs = {
         tmp_path / "clean_disk_pressure.py": "#!/bin/sh\nexit 0\n",

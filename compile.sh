@@ -197,6 +197,16 @@ fi
 # ==============================================================================
 # Set up CARGO_TARGET_DIR early so it's available for all operations
 
+# Keep cleanup exclusive while allowing independent backend builds to overlap.
+if [ -n "$WORKSPACE_DIR" ] && [ "$DRY_RUN" = false ]; then
+    BUILD_LEASE_PATH=$(python3 "$SCRIPT_DIR/build_guard.py" --repo "$WORKSPACE_DIR" --prepare-lock)
+    exec 8>"$BUILD_LEASE_PATH"
+    if ! flock -sn 8; then
+        echo "Build blocked: cleanup owns $BUILD_LEASE_PATH" >&2
+        exit 3
+    fi
+fi
+
 if [ -n "$WORKSPACE_DIR" ]; then
     # Per-backend target/ to prevent vllm + sglang containers sharing /workspace
     # from stomping each other's lib_core.so (zero-byte truncation observed
@@ -565,6 +575,10 @@ if [ -n "$BUILD_TYPE" ]; then
         cmd cargo clean
     fi
 
+    if [ "$DRY_RUN" = false ]; then
+        python3 "$SCRIPT_DIR/build_guard.py" --repo "$WORKSPACE_DIR" --check-space
+    fi
+
     # Fix file permissions due to the run.sh running as root, causing countless headaches
     USER_ID=$(stat -c "%u" .)
     GROUP_ID=$(stat -c "%g" .)
@@ -613,6 +627,8 @@ if [ -n "$BUILD_TYPE" ]; then
     # RUST COMPILATION
     # ==============================================================================
     # Build the Rust components that will become the Python extension
+
+
 
     if [ "$BUILD_RUST" = true ]; then
         # Sync Cargo.lock first to ensure it's up-to-date with Cargo.toml

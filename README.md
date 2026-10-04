@@ -509,8 +509,11 @@ Replaces the inefficient `sleep N && grep` pattern. All output is logged to a fi
 - `-q, --quiet`: Suppress terminal output (log only)
 
 ### `clean_system.sh`
-Orchestrates cleanup of old Docker images, log directories, and optionally VS Code containers.
-Delegates to specialized sub-scripts (`clean_old_local_dynamo_images.sh`, `clean_log.sh`).
+Coordinates disk-pressure cleanup, old Dynamo images, and dated log directories through the existing cleanup scripts. Nested Dynamo/frontend-crates worktrees and temporary Rust projects are included. Source, captures, installed shared libraries, Git history, active builds, containers, volumes, and Docker build cache are preserved.
+
+`disk_guard_cron.py` checks pressure every 15 minutes when scheduled. Cleanup triggers below 200 GiB free or at 90% usage and aims for 350 GiB free and 80% usage. Nightly maintenance removes unused compiled output older than seven days; pressure cleanup requires at least 24 hours of inactivity. Sunday maintenance considers unused Dynamo images older than 30 days and retains the newest two per variant. Logs expire after 15 days and are trimmed to 1 MiB when they exceed 10 MiB.
+
+The dev `compile.sh` and `build_guard.py` share a build/cleanup lock and refuse builds below 200 GiB free. Production compilation receives this guard only after the dev changes are promoted. Worktree and branch deletion remains manual.
 
 ```bash
 # Default cleanup
@@ -522,8 +525,8 @@ Delegates to specialized sub-scripts (`clean_old_local_dynamo_images.sh`, `clean
 # Preview what would be deleted
 ./clean_system.sh --dry-run
 
-# Also clean VS Code dev containers
-./clean_system.sh --clean-vsc
+# Nightly compiled-output maintenance without image cleanup
+./clean_system.sh --maintenance --skip-images
 ```
 
 ### `clean_log.sh`
