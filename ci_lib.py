@@ -44,6 +44,8 @@ from pathlib import Path
 from typing import Any, Iterable
 from zoneinfo import ZoneInfo
 
+from common import COMMIT_HISTORY_REPO
+
 PT = ZoneInfo("America/Los_Angeles")
 
 REPO = "ai-dynamo/dynamo"
@@ -54,7 +56,7 @@ RAW_LOG_DIR = Path(
 # Prefer the dashboard's commit checkout (kept up-to-date by update_html_pages.sh)
 # over revalidate's stale /tmp clone.
 _DEFAULT_CLONES = [
-    Path.home() / "dev" / "commits",
+    COMMIT_HISTORY_REPO,
     Path("/tmp/ci_health/repo"),
 ]
 CLONE_PATH = next((p for p in _DEFAULT_CLONES if (p / ".git").exists()), _DEFAULT_CLONES[0])

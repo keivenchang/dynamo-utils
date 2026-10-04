@@ -49,6 +49,8 @@ from common_types import CIStatus, MarkerStatus
 # Global logger for the module
 _logger = logging.getLogger(__name__)
 
+COMMIT_HISTORY_REPO = Path.home() / "dev" / "dynamo" / "commits"
+
 class PhaseTimer:
     """Tiny timing helper for coarse "where is time going?" instrumentation.
 

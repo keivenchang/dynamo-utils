@@ -39,6 +39,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 from ci_lib import (  # noqa: E402
+    COMMIT_HISTORY_REPO,
     HB_CSS,
     PT,
     REPO,
@@ -1237,7 +1238,7 @@ def main() -> int:
     )
     p_rh.add_argument(
         "--output-root",
-        default=str(Path.home() / "dev" / "commits" / "logs"),
+        default=str(COMMIT_HISTORY_REPO / "logs"),
     )
     p_rh.set_defaults(func=cmd_render_html)
 

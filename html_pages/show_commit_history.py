@@ -80,6 +80,7 @@ from cache_commit_history import COMMIT_HISTORY_CACHE
 
 # Import utilities from common and API modules
 from common import (
+    COMMIT_HISTORY_REPO,
     DynamoRepositoryUtils,
     PhaseTimer,
     dynamo_utils_cache_dir,
@@ -769,14 +770,13 @@ class CommitHistoryGenerator:
                     # Auto-detect output path.
                     #
                     # Policy: prefer writing to the web-served dashboard location:
-                    #   <repo_path>/../commits/index.html
+                    #   ~/dev/dynamo/commits/index.html
                     # This keeps manual runs consistent with update_html_pages.sh.
                     #
                     # If that directory doesn't exist, fall back to <repo_path>/logs/commit-history.html
                     # (or ./commit-history.html as a last resort).
                     repo_abs_path = self.repo_path.resolve()
-                    nvidia_home = repo_abs_path.parent
-                    commits_dir = repo_abs_path if repo_abs_path.name == "commits" else (nvidia_home / "commits")
+                    commits_dir = repo_abs_path if repo_abs_path.name == "commits" else COMMIT_HISTORY_REPO
                     logs_dir_temp = self.repo_path / "logs"
 
                     if commits_dir.exists():

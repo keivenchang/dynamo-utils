@@ -33,7 +33,7 @@
 #   --show-local-resources  Update the resource report ($NVIDIA_HOME/speedoflight/stats/index.html)
 #   --show-local-branches   [DEPRECATED 2026-07-19] no-op; branches dashboard retired
 #   --show-remote-branches  [DEPRECATED 2026-07-19] no-op; /dynamo/users/ dashboards retired
-#   --show-commit-history   Update the commit history dashboard ($NVIDIA_HOME/commits/index.html)
+#   --show-commit-history   Update the commit history dashboard ($NVIDIA_HOME/dynamo/commits/index.html)
 #   --debug-html                   Faster runs: outputs to debug.html instead of index.html, uses smaller commit window (25 commits), enables verification passes
 #   --github-token <token>  GitHub token to pass to all show_*.py scripts (preferred).
 #   --skip-gitlab-api     Skip fetching from GitLab API (commit-history only); use cached data only (faster).
@@ -61,9 +61,9 @@ fi
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # Base directory - can be overridden by environment variable
-# Default: parent of dynamo-utils.PRODUCTION/ (i.e. .../nvidia) because this script lives in dynamo-utils.PRODUCTION/html_pages/
+# Default: workspace root; allow cron or manual callers to override it.
 UTILS_DIR="$(dirname "$SCRIPT_DIR")"
-NVIDIA_HOME="${NVIDIA_HOME:-$(dirname "$UTILS_DIR")}"
+NVIDIA_HOME="${NVIDIA_HOME:-$HOME/dev}"
 
 LOGS_DIR="$NVIDIA_HOME/logs"
 FAST_DEBUG="${FAST_DEBUG:-false}"
@@ -82,7 +82,7 @@ Flags:
   --show-local-resources    Write: $NVIDIA_HOME/speedoflight/stats/index.html (or debug.html in --debug-html)
   --show-local-branches     [DEPRECATED 2026-07-19] no-op; branches dashboard retired
   --show-remote-branches    [DEPRECATED 2026-07-19] no-op; /dynamo/users/ dashboards retired
-  --show-commit-history     Write: $NVIDIA_HOME/commits/index.html (or debug.html in --debug-html)
+  --show-commit-history     Write: $NVIDIA_HOME/dynamo/commits/index.html (or debug.html in --debug-html)
   --show-frontend-crates-conformance
                               Fetch frontend-crates main and write conformance/PARITY.html + conformance/CONFORMANCE_v2.html
 
@@ -364,7 +364,7 @@ run_show_remote_branches() {
 }
 
 run_show_commit_history() {
-    DYNAMO_REPO="$NVIDIA_HOME/commits"
+    DYNAMO_REPO="$NVIDIA_HOME/dynamo/commits"
     COMMIT_HISTORY_BASENAME="${COMMIT_HISTORY_BASENAME:-index.html}"
     if [ "$FAST_DEBUG" = true ]; then
         COMMIT_HISTORY_BASENAME="debug.html"
