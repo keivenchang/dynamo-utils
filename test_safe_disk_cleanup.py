@@ -92,6 +92,146 @@ def test_standalone_cargo_target_discovery(tmp_path: Path):
     assert [row.target for row in discover(dev, target.parent)] == [output]
 
 
+def test_plain_target_inside_temporary_evidence_is_discovered(tmp_path: Path):
+    dev = tmp_path / "dev"
+    dev.mkdir()
+    temporary = tmp_path / "tmp" / "evidence"
+    output = rust_project(temporary, git=False)
+    (temporary / "Cargo.toml").unlink()
+    (output.parent / ".cargo-lock").touch()
+    assert [row.target for row in discover(dev, temporary.parent)] == [output]
+    assert (temporary / "target" / ".rustc_info.json").exists()
+
+
+def capacity_snapshot(tmp: Path, name: str, age_days: float) -> Path:
+    path = tmp / "job" / "capacity" / name
+    path.mkdir(parents=True)
+    old = time.time() - age_days * 86400
+    for name in ("nodes.json", "nodes.exit", "pods.json", "verdict.json"):
+        file = path / name
+        file.write_bytes(b"snapshot")
+        os.utime(file, (old, old))
+    os.utime(path, (old, old))
+    return path
+
+
+@pytest.fixture
+def capacity_activity(monkeypatch):
+    monkeypatch.setattr(cleaner, "filesystem_mount_points", lambda: (set(), True))
+    monkeypatch.setattr(cleaner, "docker_mount_sources", lambda: (set(), True))
+    monkeypatch.setattr(
+        cleaner, "privileged_process_references",
+        lambda: cleaner.ActivitySnapshot(set(), set(), set(), True),
+    )
+    monkeypatch.setattr(cleaner, "privileged_inode_open_state", lambda *_: (False, True))
+
+
+def test_capacity_cleanup_skips_missing_tmp_root(tmp_path: Path, capacity_activity):
+    root = tmp_path / "root"
+    root.mkdir()
+    missing = tmp_path / "missing"
+    assert cleaner.cleanup_capacity_snapshots(missing, root, 1, 0, 100, False) == (0, 0)
+
+
+def test_capacity_retains_newest_and_recent_snapshots(tmp_path: Path, capacity_activity):
+    root = tmp_path / "tmp"
+    old = capacity_snapshot(root, "20260101T010000000000", 3)
+    retained = capacity_snapshot(root, "20260102T010000000000", 2)
+    recent = capacity_snapshot(root, "20260103T010000000000", 0.1)
+    result = cleaner.cleanup_capacity_snapshots(root, root, 1, 2, 100, True)
+    assert result[0] == 1 and old.exists()
+    result = cleaner.cleanup_capacity_snapshots(root, root, 1, 2, 100, False)
+    assert result[0] == 1 and result[1] > 0
+    assert not old.exists() and retained.exists() and recent.exists()
+
+
+def test_capacity_age_and_budget(tmp_path: Path, capacity_activity):
+    root = tmp_path / "tmp"
+    old = capacity_snapshot(root, "20260101T010000000000", 3)
+    other = capacity_snapshot(root, "20260102T010000000000", 2)
+    recent = capacity_snapshot(root, "20260103T010000000000", 0.1)
+    assert cleaner.cleanup_capacity_snapshots(root, root, 1, 0, 0, False) == (0, 0)
+    assert cleaner.cleanup_capacity_snapshots(root, root, 1, 0, 1, False)[0] == 1
+    assert old.exists() and not other.exists() and recent.exists()
+    assert cleaner.cleanup_capacity_snapshots(root, root, 1, 0, 100, False)[0] == 1
+    assert recent.exists()
+
+
+@pytest.mark.parametrize("protection", ["active", "incomplete", "unknown", "symlink", "mount"])
+def test_capacity_safety_preserves_snapshot(tmp_path: Path, capacity_activity, monkeypatch, protection):
+    root = tmp_path / "tmp"
+    old = capacity_snapshot(root, "20260101T010000000000", 3)
+    if protection == "active":
+        monkeypatch.setattr(
+            cleaner, "privileged_process_references",
+            lambda: cleaner.ActivitySnapshot(set(), set(), {old.parent.parent / "running"}, True),
+        )
+    elif protection == "incomplete":
+        monkeypatch.setattr(
+            cleaner, "privileged_process_references",
+            lambda: cleaner.ActivitySnapshot(set(), set(), set(), False),
+        )
+    elif protection == "unknown":
+        (old / "lease.pid").touch()
+    elif protection == "mount":
+        monkeypatch.setattr(cleaner, "filesystem_mount_points", lambda: ({old}, True))
+    else:
+        (old / "pods.json").unlink()
+        (old / "pods.json").symlink_to(old / "nodes.json")
+    assert cleaner.cleanup_capacity_snapshots(root, root, 1, 0, 100, False)[0] == 0
+    assert (old / "nodes.json").exists()
+
+
+def test_capacity_late_open_file_is_preserved(tmp_path: Path, capacity_activity, monkeypatch):
+    root = tmp_path / "tmp"
+    old = capacity_snapshot(root, "20260101T010000000000", 3)
+    monkeypatch.setattr(cleaner, "privileged_inode_open_state", lambda *_: (True, True))
+    assert cleaner.cleanup_capacity_snapshots(root, root, 1, 0, 100, False) == (0, 0)
+    assert (old / "pods.json").exists()
+
+
+@pytest.mark.parametrize("replacement", [False, True])
+def test_capacity_preflights_all_files_and_parent(
+    tmp_path: Path, capacity_activity, monkeypatch, replacement
+):
+    root = tmp_path / "tmp"
+    old = capacity_snapshot(root, "20260101T010000000000", 3)
+    names = {p.name for p in old.iterdir()}
+    pods_inode = (old / "pods.json").stat().st_ino
+    protected = root / "protected"
+    changed = False
+
+    def inspect(device, inode):
+        nonlocal changed
+        if replacement and not changed:
+            old.rename(protected)
+            old.symlink_to(protected)
+            changed = True
+        return (not replacement and inode == pods_inode), True
+
+    monkeypatch.setattr(cleaner, "privileged_inode_open_state", inspect)
+    assert cleaner.cleanup_capacity_snapshots(root, root, 1, 0, 100, False) == (0, 0)
+    assert {p.name for p in (protected if replacement else old).iterdir()} == names
+
+
+def test_capacity_disappearing_parent_is_skipped(
+    tmp_path: Path, capacity_activity, monkeypatch
+):
+    root = tmp_path / "tmp"
+    old = capacity_snapshot(root, "20260101T010000000000", 3)
+    missing = root / "disappeared"
+    original = Path.iterdir
+
+    def entries(path):
+        if path == root:
+            return iter([missing, old.parent.parent])
+        return original(path)
+
+    monkeypatch.setattr(Path, "iterdir", entries)
+    assert cleaner.cleanup_capacity_snapshots(root, root, 1, 0, 100, True)[0] == 1
+    assert old.exists()
+
+
 def test_symlinks_and_tracked_files_are_not_candidates(tmp_path: Path):
     dev = tmp_path / "dev"
     repo = dev / "dynamo" / "dynamo__old"
@@ -194,7 +334,8 @@ def test_free_space_floor_triggers_even_below_percentage_threshold(
         cleaner, "cleanup_targets", lambda *a, **kw: called.append(kw) or (0, 0)
     )
     monkeypatch.setattr(
-        sys, "argv", ["clean_disk_pressure.py", "--pressure-only", "--skip-transcripts"]
+        sys, "argv", ["clean_disk_pressure.py", "--pressure-only", "--skip-transcripts",
+                    "--tmp-root", str(tmp_path)]
     )
     assert cleaner.main() == 3
     assert called[0]["target_free_gib"] == 350
@@ -418,3 +559,54 @@ def test_supervisor_identity_change_blocks_mutation(monkeypatch):
     monkeypatch.setattr(cleaner, "_process_identity", lambda pid: "new-start")
     with pytest.raises(ProcessLookupError):
         cleaner._require_supervisor((123, "old-start"))
+
+
+def test_elevated_secondary_scope_is_owned_and_on_secondary_device(monkeypatch):
+    secondary = Path('/mnt/sda/tmp')
+    repo = secondary / 'job' / 'cargo-target'
+    real_stat = Path.stat
+    real_lstat = Path.lstat
+    owner = Path(cleaner.__file__).stat().st_uid
+    secondary_device = Path('/').stat().st_dev + 1
+
+    def fake_metadata(path, *args, **kwargs):
+        if path in (secondary, repo):
+            return os.stat_result([0o40755, 123, secondary_device, 1, owner, 0, 0, 0, 0, 0])
+        return real_stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, 'stat', fake_metadata)
+    monkeypatch.setattr(Path, 'lstat', lambda p: fake_metadata(p) if p == secondary else real_lstat(p))
+    monkeypatch.setattr(Path, 'resolve', lambda p: p)
+    monkeypatch.setattr(os, 'geteuid', lambda: 0)
+    monkeypatch.setattr(cleaner, '_require_supervisor', lambda _: None)
+    removed = []
+    monkeypatch.setattr(cleaner, '_remove_target', lambda candidate, *a: removed.append(candidate) or True)
+    payload = dict(repo=str(repo), target=str(repo / 'debug/deps'), size=1, age_hours=48,
+                   device=secondary_device, inode=123, mtime=0, target_root=str(repo),
+                   profile=str(repo / 'debug'), cutoff=time.time() - 48 * 3600,
+                   supervisor=[1, 'test'])
+    monkeypatch.setattr(sys, 'argv', ['clean_disk_pressure.py', '--remove-target', json.dumps(payload)])
+    assert cleaner.main() == 0
+    assert len(removed) == 1
+    secondary_device = Path('/').stat().st_dev
+    with pytest.raises(PermissionError):
+        cleaner.main()
+    assert len(removed) == 1
+
+
+def test_bad_capacity_snapshot_does_not_block_older_valid_snapshot(tmp_path, capacity_activity):
+    root = tmp_path / 'tmp'
+    old = capacity_snapshot(root, '20260101T010000000000', 3)
+    bad = capacity_snapshot(root, '20260102T010000000000', 2)
+    (bad / 'nodes.exit').unlink()
+    assert cleaner.cleanup_capacity_snapshots(root, root, 1, 0, 100, False)[0] == 1
+    assert not old.exists() and bad.exists()
+
+
+def test_secondary_scheduler_routes_only_validated_scratch(monkeypatch):
+    monkeypatch.setattr(disk_guard_cron.socket, 'gethostname', lambda: 'keivenc-linux1')
+    monkeypatch.setattr(subprocess, 'run', lambda *a, **kw: subprocess.CompletedProcess(a[0], 0, '/mnt/sda/tmp\n', ''))
+    command = disk_guard_cron.secondary_cleanup_command(True, True)
+    assert command[command.index('--root-path') + 1] == '/mnt/sda/tmp'
+    assert command[command.index('--tmp-root') + 1] == '/mnt/sda/tmp'
+    assert '--skip-transcripts' in command and '--maintenance' in command and '--dry-run' in command

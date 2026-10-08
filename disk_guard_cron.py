@@ -8,6 +8,7 @@ import datetime
 import fcntl
 import os
 import signal
+import socket
 import stat
 import subprocess
 import sys
@@ -46,6 +47,27 @@ def trim_log(log) -> None:
         log.write(retained)
         log.truncate()
     log.seek(0, os.SEEK_END)
+
+
+def secondary_cleanup_command(maintenance: bool, dry_run: bool) -> list[str] | None:
+    if socket.gethostname() != "keivenc-linux1" and "DYN_SCRATCH_ROOT" not in os.environ:
+        return None
+    helper = Path.home() / "dev/ai-config/agents/skills/dyn-shell-execution/scripts/scratch_job.py"
+    # Cleanup must still work when the disk is below the job admission free-space floor.
+    validation = subprocess.run(
+        [sys.executable, str(helper), "--check-root", "--min-free-gib", "0"],
+        check=True, capture_output=True, text=True,
+    )
+    scratch = Path(validation.stdout.strip())
+    command = [
+        sys.executable, str(Path(__file__).parent / "clean_disk_pressure.py"),
+        "--root-path", str(scratch), "--tmp-root", str(scratch),
+        "--dev-root", str(scratch), "--skip-transcripts",
+        "--maintenance" if maintenance else "--pressure-only",
+    ]
+    if dry_run:
+        command.append("--dry-run")
+    return command
 
 
 def main() -> int:
@@ -98,6 +120,13 @@ def main() -> int:
             if args.dry_run:
                 command.append("--dry-run")
             result = run_cleanup(command, log)
+            secondary = secondary_cleanup_command(args.maintenance, args.dry_run)
+            if secondary is not None:
+                log.write(b"SECONDARY SCRATCH CLEANUP\n")
+                log.flush()
+                secondary_result = run_cleanup(secondary, log)
+                if secondary_result:
+                    result = secondary_result
             log.write(f"END rc={result}\n".encode())
             log.flush()
             trim_log(log)

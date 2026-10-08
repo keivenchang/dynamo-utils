@@ -103,7 +103,7 @@ def main() -> int:
             "--github-token",
             token,
         ],
-        cwd="/home/keivenc/dev/dynamo-utils.dev",
+        cwd="/home/keivenc/dev/dynamo-utils/dynamo-utils.dev",
         env=env,
         capture_output=True,
         text=True,

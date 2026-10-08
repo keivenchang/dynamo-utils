@@ -64,7 +64,11 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # Base directory - can be overridden by environment variable
 # Default: workspace root; allow cron or manual callers to override it.
 UTILS_DIR="$(dirname "$SCRIPT_DIR")"
-NVIDIA_HOME="${NVIDIA_HOME:-$HOME/dev}"
+DEFAULT_NVIDIA_HOME="$(dirname "$UTILS_DIR")"
+if [ ! -d "$DEFAULT_NVIDIA_HOME/commits/.git" ] && [ -d "$(dirname "$DEFAULT_NVIDIA_HOME")/commits/.git" ]; then
+    DEFAULT_NVIDIA_HOME="$(dirname "$DEFAULT_NVIDIA_HOME")"
+fi
+NVIDIA_HOME="${NVIDIA_HOME:-$DEFAULT_NVIDIA_HOME}"
 
 LOGS_DIR="$NVIDIA_HOME/logs"
 FAST_DEBUG="${FAST_DEBUG:-false}"

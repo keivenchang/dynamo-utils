@@ -69,7 +69,7 @@ class TargetCandidate:
 
 
 @dataclass(frozen=True)
-class TranscriptCandidate:
+class FileCandidate:
     path: Path
     device: int
     inode: int
@@ -521,8 +521,8 @@ def transcript_candidates(
     cutoff: float,
     open_files: set[Path],
     open_inodes: set[tuple[int, int]],
-) -> list[TranscriptCandidate]:
-    candidates: list[TranscriptCandidate] = []
+) -> list[FileCandidate]:
+    candidates: list[FileCandidate] = []
     roots = (home / ".codex" / "sessions", home / ".claude" / "projects")
     for root in roots:
         if not root.is_dir():
@@ -542,15 +542,15 @@ def transcript_candidates(
                 and inode not in open_inodes
             ):
                 candidates.append(
-                    TranscriptCandidate(
+                    FileCandidate(
                         path, metadata.st_dev, metadata.st_ino, metadata.st_mtime
                     )
                 )
     return sorted(candidates, key=lambda candidate: candidate.mtime)
 
 
-def _remove_transcript_candidate(
-    candidate: TranscriptCandidate,
+def _remove_file_candidate(
+    candidate: FileCandidate,
     cutoff: float,
     open_files: set[Path],
     open_inodes: set[tuple[int, int]],
@@ -607,7 +607,7 @@ def cleanup_transcripts(
     reclaimed = 0
     skipped = 0
     for candidate in selected:
-        removed_candidate, allocated = _remove_transcript_candidate(
+        removed_candidate, allocated = _remove_file_candidate(
             candidate,
             cutoff,
             open_files,
@@ -656,16 +656,24 @@ def discover_repositories(dev_root: Path, tmp_root: Path | None = None) -> list[
                 continue
             try:
                 children = list(directory.iterdir())
-            except PermissionError:
+            except OSError as error:
+                print(f"targets: skipped discovery {directory}: {error}", file=sys.stderr)
                 continue
             for child in children:
-                if child.is_symlink() or not child.is_dir():
+                try:
+                    metadata = child.lstat()
+                except OSError as error:
+                    print(f"targets: skipped discovery {child}: {error}", file=sys.stderr)
                     continue
-                if child.stat().st_uid != os.getuid() or child.name.startswith(
+                if not stat.S_ISDIR(metadata.st_mode):
+                    continue
+                if metadata.st_uid != os.getuid() or child.name.startswith(
                     ("yolo", "yomux", "yo7", "Chrome", ".")
                 ):
                     continue
-                if child.name in ("target", "node_modules", "venv", "__pycache__"):
+                if child.name in ("node_modules", "venv", "__pycache__"):
+                    continue
+                if child.name == "target" and not (child / ".rustc_info.json").is_file():
                     continue
                 pending.append((child, depth + 1))
     return sorted({p.resolve() for p in roots if _verified_target_owner(p)})
@@ -1125,6 +1133,159 @@ def cleanup_targets(
     return removed, estimated_reclaimed
 
 
+CAPACITY_FILES = frozenset(
+    f"{kind}.{suffix}"
+    for kind in ("nodes", "pods")
+    for suffix in ("json", "exit", "stderr")
+) | {"verdict.json"}
+
+
+def _capacity_files(path: Path, device: int) -> list[FileCandidate]:
+    metadata = path.lstat()
+    if (
+        not stat.S_ISDIR(metadata.st_mode)
+        or metadata.st_uid != os.getuid()
+        or metadata.st_dev != device
+        or path.resolve() != path.absolute()
+    ):
+        raise ValueError(f"unsafe snapshot directory {path}")
+    files = []
+    names = set()
+    for child in sorted(path.iterdir()):
+        info = child.lstat()
+        if (
+            child.name not in CAPACITY_FILES
+            or not stat.S_ISREG(info.st_mode)
+            or info.st_uid != os.getuid()
+            or info.st_dev != device
+        ):
+            raise ValueError(f"unrecognized snapshot entry {child}")
+        names.add(child.name)
+        files.append(FileCandidate(child, info.st_dev, info.st_ino, info.st_mtime))
+    if not {"nodes.json", "nodes.exit"} <= names:
+        raise ValueError(f"missing capacity snapshot identity {path}")
+    return files
+
+
+def cleanup_capacity_snapshots(
+    tmp_root: Path,
+    root_path: Path,
+    keep_days: float,
+    retain: int,
+    max_snapshots: int,
+    dry_run: bool,
+) -> tuple[int, int]:
+    """Expire recognized cluster dumps; other temporary evidence stays untouched."""
+    device = root_path.stat().st_dev
+    if tmp_root.is_symlink():
+        return 0, 0
+    try:
+        tmp_metadata = tmp_root.stat()
+    except FileNotFoundError:
+        return 0, 0
+    if not stat.S_ISDIR(tmp_metadata.st_mode) or tmp_metadata.st_dev != device:
+        return 0, 0
+    points, complete = filesystem_mount_points()
+    if not complete:
+        print("capacity: skipped because mount inspection was incomplete", file=sys.stderr)
+        return 0, 0
+    cutoff = time.time() - keep_days * 86400
+    removed = 0
+    reclaimed = 0
+    for parent in sorted(tmp_root.iterdir()):
+        capacity = parent / "capacity"
+        try:
+            info = parent.lstat()
+            if (
+                not stat.S_ISDIR(info.st_mode)
+                or info.st_uid != os.getuid()
+                or info.st_dev != device
+                or parent.name.startswith(("yolo", "yomux", "yo7", "Chrome", "."))
+            ):
+                continue
+            if not capacity.is_dir() or capacity.is_symlink():
+                continue
+            if capacity.lstat().st_uid != os.getuid():
+                continue
+            snapshots = sorted(
+                (p for p in capacity.iterdir() if re.fullmatch(r"\d{8}T\d{12}", p.name)),
+                reverse=True,
+            )
+            for path in snapshots[retain:]:
+                if removed >= max_snapshots:
+                    break
+                try:
+                    files = _capacity_files(path, device)
+                    if any(f.mtime >= cutoff for f in files) or path.stat().st_mtime >= cutoff:
+                        continue
+                    directory_identity = path.stat()
+                    # A live sibling protects the entire temporary job, not just its dumps.
+                    snapshot = privileged_process_references()
+                    sources, mounts_complete = docker_mount_sources()
+                    if not snapshot.complete or not mounts_complete:
+                        print("capacity: skipped because activity inspection was incomplete", file=sys.stderr)
+                        return removed, reclaimed
+                    if any(_is_within(p, parent) for p in snapshot.process_references | sources | points):
+                        break
+                    fresh = _capacity_files(path, device)
+                    if files != fresh or path.stat() != directory_identity:
+                        continue
+                    action = "would remove" if dry_run else "removing"
+                    print(f"capacity: {action} {path}")
+                    # Pin the inspected directory so a replaced parent cannot redirect unlink.
+                    descriptor = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+                    try:
+                        pinned = os.fstat(descriptor)
+                        identity = (directory_identity.st_dev, directory_identity.st_ino)
+                        if (pinned.st_dev, pinned.st_ino) != identity:
+                            continue
+                        eligible = True
+                        allocated = 0
+                        for candidate in files:
+                            current = os.stat(
+                                candidate.path.name, dir_fd=descriptor, follow_symlinks=False
+                            )
+                            inode = (current.st_dev, current.st_ino)
+                            if (
+                                not stat.S_ISREG(current.st_mode)
+                                or inode != (candidate.device, candidate.inode)
+                                or current.st_mtime != candidate.mtime
+                                or inode in snapshot.open_inodes
+                                or candidate.path in snapshot.open_files
+                            ):
+                                eligible = False
+                                break
+                            if not dry_run:
+                                is_open, inspection_complete = privileged_inode_open_state(*inode)
+                                if is_open or not inspection_complete:
+                                    eligible = False
+                                    break
+                            allocated += current.st_blocks * 512
+                        # Preflight the whole snapshot before removing even one file.
+                        if not eligible or _capacity_files(path, device) != files:
+                            continue
+                        current_directory = path.lstat()
+                        if (current_directory.st_dev, current_directory.st_ino) != identity:
+                            continue
+                        if not dry_run:
+                            for candidate in files:
+                                os.unlink(candidate.path.name, dir_fd=descriptor)
+                            current_directory = path.lstat()
+                            if (current_directory.st_dev, current_directory.st_ino) != identity:
+                                raise ValueError(f"snapshot directory changed: {path}")
+                            path.rmdir()
+                        reclaimed += allocated
+                        removed += 1
+                    finally:
+                        os.close(descriptor)
+                except (OSError, ValueError) as error:
+                    print(f"capacity: skipped {path}: {error}", file=sys.stderr)
+        except (OSError, ValueError) as error:
+            print(f"capacity: skipped {capacity}: {error}", file=sys.stderr)
+    print(f"capacity: {'would remove' if dry_run else 'removed'} {removed}, reclaimed={_format_bytes(reclaimed)}")
+    return removed, reclaimed
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
@@ -1185,6 +1346,9 @@ def parse_args() -> argparse.Namespace:
         "--max-transcript-files", type=int, default=DEFAULT_MAX_TRANSCRIPT_FILES
     )
     parser.add_argument("--max-targets", type=int, default=DEFAULT_MAX_TARGETS)
+    parser.add_argument("--capacity-keep-days", type=float, default=1.0)
+    parser.add_argument("--retain-capacity-snapshots", type=int, default=20)
+    parser.add_argument("--max-capacity-snapshots", type=int, default=100)
     parser.add_argument("--remove-target", help=argparse.SUPPRESS)
     parser.add_argument(
         "--activity-snapshot", action="store_true", help=argparse.SUPPRESS
@@ -1224,6 +1388,18 @@ def main() -> int:
             _is_within(candidate.repo, Path("/tmp"))
             and len(candidate.repo.relative_to("/tmp").parts) <= 3
         )
+        # Elevation accepts only this machine's fixed secondary root, never caller env.
+        secondary = Path("/mnt/sda/tmp")
+        if _is_within(candidate.repo, secondary):
+            metadata = secondary.lstat()
+            approved = (
+                secondary.resolve() == secondary
+                and stat.S_ISDIR(metadata.st_mode)
+                and metadata.st_uid == owner
+                and not metadata.st_mode & 0o022
+                and metadata.st_dev != Path("/").stat().st_dev
+                and len(candidate.repo.relative_to(secondary).parts) <= 3
+            )
         if (
             not approved
             or candidate.repo.stat().st_uid != owner
@@ -1262,6 +1438,7 @@ def main() -> int:
         args.pressure_transcript_keep_hours,
         args.min_free_gib,
         args.target_free_gib,
+        args.capacity_keep_days,
     )
     if not all(math.isfinite(value) for value in numeric):
         print("error: numeric cleanup limits must be finite", file=sys.stderr)
@@ -1289,6 +1466,9 @@ def main() -> int:
             args.max_targets,
             args.min_free_gib,
             args.target_free_gib,
+            args.capacity_keep_days,
+            args.retain_capacity_snapshots,
+            args.max_capacity_snapshots,
         )
         < 0
     ):
@@ -1366,6 +1546,16 @@ def main() -> int:
             tmp_root=args.tmp_root,
             maintenance=args.maintenance and not under_pressure,
             target_free_gib=args.target_free_gib,
+        )
+
+    if args.maintenance or under_pressure:
+        cleanup_capacity_snapshots(
+            args.tmp_root,
+            args.root_path,
+            args.capacity_keep_days,
+            args.retain_capacity_snapshots,
+            args.max_capacity_snapshots,
+            args.dry_run,
         )
 
     after = disk_state(args.root_path)

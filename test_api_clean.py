@@ -42,7 +42,7 @@ def main():
         '--output', '/tmp/test_commits.html',
         '--max-commits', '5',
         '--skip-gitlab-api'
-    ], capture_output=True, text=True, cwd='/home/keivenc/dev/dynamo-utils.dev')
+    ], capture_output=True, text=True, cwd='/home/keivenc/dev/dynamo-utils/dynamo-utils.dev')
     
     if result.returncode != 0:
         print(f'ERROR: Script failed')

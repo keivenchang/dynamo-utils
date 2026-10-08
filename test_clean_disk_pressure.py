@@ -97,11 +97,11 @@ def test_transcript_revalidation_rejects_replaced_or_open_inode(tmp_path: Path) 
 
     replaced.unlink()
     _old_file(replaced)
-    replaced_result = clean_disk_pressure._remove_transcript_candidate(
+    replaced_result = clean_disk_pressure._remove_file_candidate(
         by_name["replaced.jsonl"], cutoff, set(), set(), dry_run=False
     )
     open_inode = {(by_name["opened.jsonl"].device, by_name["opened.jsonl"].inode)}
-    opened_result = clean_disk_pressure._remove_transcript_candidate(
+    opened_result = clean_disk_pressure._remove_file_candidate(
         by_name["opened.jsonl"], cutoff, set(), open_inode, dry_run=False
     )
 
@@ -343,6 +343,8 @@ def test_unresolved_pressure_returns_nonzero(
             "--home",
             str(tmp_path),
             "--dev-root",
+            str(tmp_path),
+            "--tmp-root",
             str(tmp_path),
         ],
     )

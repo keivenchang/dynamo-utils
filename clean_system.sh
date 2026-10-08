@@ -68,7 +68,7 @@ while [[ $# -gt 0 ]]; do
       SKIP_IMAGES=true; shift ;;
     --maintenance)
       CLEAN_DISK_ARGS+=("--maintenance"); shift ;;
-    --min-free-gib|--target-free-gib|--target-min-age-hours|--max-targets|--high-watermark|--low-watermark|--tmp-root)
+    --min-free-gib|--target-free-gib|--target-min-age-hours|--max-targets|--high-watermark|--low-watermark|--tmp-root|--capacity-keep-days|--retain-capacity-snapshots|--max-capacity-snapshots)
       [ "$#" -ge 2 ] || { echo "Error: $1 requires a value" >&2; exit 2; }
       CLEAN_DISK_ARGS+=("$1" "$2"); shift 2 ;;
     --min-image-age-days)
@@ -95,6 +95,9 @@ while [[ $# -gt 0 ]]; do
       echo "  --max-targets N             Limit directories removed per run (default: 20)"
       echo "  --high-watermark N / --low-watermark N  Percentage thresholds (90/80)"
       echo "  --tmp-root PATH             Temporary project discovery root (/tmp)"
+      echo "  --capacity-keep-days N     Preserve capacity snapshots newer than N days (default: 1)"
+      echo "  --retain-capacity-snapshots N  Always keep newest N snapshots per job (default: 20)"
+      echo "  --max-capacity-snapshots N  Maximum expired snapshots removed per run (default: 100)"
       echo "  --pressure-only            Skip Docker/log cleanup; exit when free space and usage are healthy"
       echo ""
       echo "Options for log cleanup (passed to clean_log.sh):"

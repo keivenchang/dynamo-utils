@@ -23,7 +23,7 @@ HTML dashboard generators and shared UI utilities for monitoring Dynamo CI/CD.
 
 **Outputs:**
 - Local branches: `$HOME/dev/speedoflight/dynamo/users/<user>/local.html`
-- Commit history: `$DYNAMO_REPO/index.html`  
+- Commit history: `$NVIDIA_HOME/commits/index.html`
 - Resource report: `$DYNAMO_HOME/resource_report.html`
 
 ---
@@ -153,14 +153,14 @@ python3 show_remote_branches.py \
 **Working hours (8am-6pm PT):** Every 1 minute
 ```cron
 # Working hours: 16:00-23:59 UTC + 00:00-01:59 UTC
-* 16-23 * * * DYNAMO_HOME=$HOME/dev REMOTE_GITHUB_USERS="kthui keivenchang" $HOME/dev/dynamo-utils.dev/cron_log.sh remote_prs_working $HOME/dev/dynamo-utils.dev/html_pages/update_html_pages.sh --show-remote-branches
-* 0-1 * * * DYNAMO_HOME=$HOME/dev REMOTE_GITHUB_USERS="kthui keivenchang" $HOME/dev/dynamo-utils.dev/cron_log.sh remote_prs_working $HOME/dev/dynamo-utils.dev/html_pages/update_html_pages.sh --show-remote-branches
+* 16-23 * * * DYNAMO_HOME=$HOME/dev REMOTE_GITHUB_USERS="kthui keivenchang" $HOME/dev/dynamo-utils/dynamo-utils.dev/cron_log.sh remote_prs_working $HOME/dev/dynamo-utils/dynamo-utils.dev/html_pages/update_html_pages.sh --show-remote-branches
+* 0-1 * * * DYNAMO_HOME=$HOME/dev REMOTE_GITHUB_USERS="kthui keivenchang" $HOME/dev/dynamo-utils/dynamo-utils.dev/cron_log.sh remote_prs_working $HOME/dev/dynamo-utils/dynamo-utils.dev/html_pages/update_html_pages.sh --show-remote-branches
 ```
 
 **Off hours (6pm-8am PT):** Every 20 minutes
 ```cron
 # Off hours: 02:00-15:59 UTC
-*/20 2-15 * * * DYNAMO_HOME=$HOME/dev REMOTE_GITHUB_USERS="kthui keivenchang" $HOME/dev/dynamo-utils.dev/cron_log.sh remote_prs_offhours $HOME/dev/dynamo-utils.dev/html_pages/update_html_pages.sh --show-remote-branches
+*/20 2-15 * * * DYNAMO_HOME=$HOME/dev REMOTE_GITHUB_USERS="kthui keivenchang" $HOME/dev/dynamo-utils/dynamo-utils.dev/cron_log.sh remote_prs_offhours $HOME/dev/dynamo-utils/dynamo-utils.dev/html_pages/update_html_pages.sh --show-remote-branches
 ```
 
 **Output locations:**
@@ -273,20 +273,20 @@ Instead of fetching job details individually (500+ calls):
 
 ```cron
 # Full update every 30 minutes
-0,30 * * * * DYNAMO_HOME=$HOME/dev $HOME/dev/dynamo-utils.dev/cron_log.sh update_html_pages_full $HOME/dev/dynamo-utils.dev/html_pages/update_html_pages.sh --show-local-branches --show-commit-history
+0,30 * * * * NVIDIA_HOME=$HOME/dev $HOME/dev/dynamo-utils/dynamo-utils.PRODUCTION/cron_log.sh update_html_pages_full $HOME/dev/dynamo-utils/dynamo-utils.PRODUCTION/html_pages/update_html_pages.sh --show-commit-history
 
 # Cache-heavy between full updates (every 4 minutes)
-8-59/4 * * * * DYNAMO_HOME=$HOME/dev $HOME/dev/dynamo-utils.dev/cron_log.sh update_html_pages_cached $HOME/dev/dynamo-utils.dev/html_pages/update_html_pages.sh --show-local-branches --show-commit-history --skip-gitlab-api
+8-59/4 * * * * NVIDIA_HOME=$HOME/dev $HOME/dev/dynamo-utils/dynamo-utils.PRODUCTION/cron_log.sh update_html_pages_cached $HOME/dev/dynamo-utils/dynamo-utils.PRODUCTION/html_pages/update_html_pages.sh --show-commit-history --skip-gitlab-api
 
 # Resource report (every minute)
-* * * * * DYNAMO_HOME=$HOME/dev $HOME/dev/dynamo-utils.dev/cron_log.sh resource_report $HOME/dev/dynamo-utils.dev/html_pages/update_html_pages.sh --show-local-resources
+* * * * * NVIDIA_HOME=$HOME/dev $HOME/dev/dynamo-utils/dynamo-utils.PRODUCTION/cron_log.sh resource_report $HOME/dev/dynamo-utils/dynamo-utils.PRODUCTION/html_pages/update_html_pages.sh --show-local-resources
 
 # Remote PRs - working hours (8am-6pm PT): every minute
-* 16-23 * * * DYNAMO_HOME=$HOME/dev REMOTE_GITHUB_USERS="kthui keivenchang" $HOME/dev/dynamo-utils.dev/cron_log.sh remote_prs_working $HOME/dev/dynamo-utils.dev/html_pages/update_html_pages.sh --show-remote-branches
-* 0-1 * * * DYNAMO_HOME=$HOME/dev REMOTE_GITHUB_USERS="kthui keivenchang" $HOME/dev/dynamo-utils.dev/cron_log.sh remote_prs_working $HOME/dev/dynamo-utils.dev/html_pages/update_html_pages.sh --show-remote-branches
+* 16-23 * * * DYNAMO_HOME=$HOME/dev REMOTE_GITHUB_USERS="kthui keivenchang" $HOME/dev/dynamo-utils/dynamo-utils.dev/cron_log.sh remote_prs_working $HOME/dev/dynamo-utils/dynamo-utils.dev/html_pages/update_html_pages.sh --show-remote-branches
+* 0-1 * * * DYNAMO_HOME=$HOME/dev REMOTE_GITHUB_USERS="kthui keivenchang" $HOME/dev/dynamo-utils/dynamo-utils.dev/cron_log.sh remote_prs_working $HOME/dev/dynamo-utils/dynamo-utils.dev/html_pages/update_html_pages.sh --show-remote-branches
 
 # Remote PRs - off hours (6pm-8am PT): every 20 minutes
-*/20 2-15 * * * DYNAMO_HOME=$HOME/dev REMOTE_GITHUB_USERS="kthui keivenchang" $HOME/dev/dynamo-utils.dev/cron_log.sh remote_prs_offhours $HOME/dev/dynamo-utils.dev/html_pages/update_html_pages.sh --show-remote-branches
+*/20 2-15 * * * DYNAMO_HOME=$HOME/dev REMOTE_GITHUB_USERS="kthui keivenchang" $HOME/dev/dynamo-utils/dynamo-utils.dev/cron_log.sh remote_prs_offhours $HOME/dev/dynamo-utils/dynamo-utils.dev/html_pages/update_html_pages.sh --show-remote-branches
 ```
 
 ### Logs
@@ -335,12 +335,12 @@ See log for details: /home/keivenc/dev/logs/2026-01-23/show_local_branches.log
 **Quick "did it actually update?" checks:**
 ```bash
 ls -lah ~/dev/speedoflight/dynamo/users/keivenchang/local.html       # local branches dashboard
-ls -lah ~/dev/dynamo/commits/index.html       # commit history dashboard
+ls -lah ~/dev/commits/index.html             # commit history dashboard
 ls -lah ~/dev/speedoflight/stats/index.html  # stats landing page
 ```
 
 **Common foot-guns:**
-- There are **two repos**: `dynamo-utils.dev/` (dev) and `dynamo-utils.PRODUCTION/` (prod). If working on dev only, run the dev script: `dynamo-utils.dev/html_pages/update_html_pages.sh`
+- There are **two repos**: `dynamo-utils.dev/` (dev) and `dynamo-utils.PRODUCTION/` (prod), under `~/dev/dynamo-utils/`. If working on dev only, run the dev script: `~/dev/dynamo-utils/dynamo-utils.dev/html_pages/update_html_pages.sh`
 - `update_html_pages.sh --fast` is intentionally **removed**; use `--debug-html` instead
 - Per-component logs are **append-only** and may contain older, non-prefixed lines from previous runs
 - If a log message is missing commit SHA context, the caller didn't pass `commit_sha` through to helpers
