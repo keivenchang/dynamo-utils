@@ -17,6 +17,7 @@
 #   MAX_COMMITS         - If set, cap commits for commit-history (default: 100; 25 for --debug-html).
 #   DYNAMO_UTILS_CACHE_DIR - If set, overrides ~/.cache/dynamo-utils for the resource report DB lookup.
 #   RESOURCE_DB         - If set, explicit SQLite path for resource report (default: $DYNAMO_UTILS_CACHE_DIR/resource_monitor.sqlite).
+#   COMMIT_HISTORY_REPO - Source checkout for commit history (default: $NVIDIA_HOME/dynamo/commits-source).
 #   FRONTEND_CRATES_REPO - If set, checkout used to fetch frontend-crates main
 #                          (default: $NVIDIA_HOME/frontend-crates-conformance).
 #   FRONTEND_CRATES_REMOTE - If set, remote used when cloning FRONTEND_CRATES_REPO
@@ -33,7 +34,7 @@
 #   --show-local-resources  Update the resource report ($NVIDIA_HOME/speedoflight/stats/index.html)
 #   --show-local-branches   [DEPRECATED 2026-07-19] no-op; branches dashboard retired
 #   --show-remote-branches  [DEPRECATED 2026-07-19] no-op; /dynamo/users/ dashboards retired
-#   --show-commit-history   Update the commit history dashboard ($NVIDIA_HOME/dynamo/commits/index.html)
+#   --show-commit-history   Update the commit history dashboard ($NVIDIA_HOME/commits/index.html)
 #   --debug-html                   Faster runs: outputs to debug.html instead of index.html, uses smaller commit window (25 commits), enables verification passes
 #   --github-token <token>  GitHub token to pass to all show_*.py scripts (preferred).
 #   --skip-gitlab-api     Skip fetching from GitLab API (commit-history only); use cached data only (faster).
@@ -82,7 +83,7 @@ Flags:
   --show-local-resources    Write: $NVIDIA_HOME/speedoflight/stats/index.html (or debug.html in --debug-html)
   --show-local-branches     [DEPRECATED 2026-07-19] no-op; branches dashboard retired
   --show-remote-branches    [DEPRECATED 2026-07-19] no-op; /dynamo/users/ dashboards retired
-  --show-commit-history     Write: $NVIDIA_HOME/dynamo/commits/index.html (or debug.html in --debug-html)
+  --show-commit-history     Write: $NVIDIA_HOME/commits/index.html (or debug.html in --debug-html)
   --show-frontend-crates-conformance
                               Fetch frontend-crates main and write conformance/PARITY.html + conformance/CONFORMANCE_v2.html
 
@@ -364,19 +365,20 @@ run_show_remote_branches() {
 }
 
 run_show_commit_history() {
-    DYNAMO_REPO="$NVIDIA_HOME/dynamo/commits"
+    DYNAMO_REPO="${COMMIT_HISTORY_REPO:-$NVIDIA_HOME/dynamo/commits-source}"
+    COMMIT_HISTORY_OUTPUT_DIR="$NVIDIA_HOME/commits"
     COMMIT_HISTORY_BASENAME="${COMMIT_HISTORY_BASENAME:-index.html}"
     if [ "$FAST_DEBUG" = true ]; then
         COMMIT_HISTORY_BASENAME="debug.html"
     fi
-    COMMIT_HISTORY_HTML="$DYNAMO_REPO/$COMMIT_HISTORY_BASENAME"
+    COMMIT_HISTORY_HTML="$COMMIT_HISTORY_OUTPUT_DIR/$COMMIT_HISTORY_BASENAME"
     # JSON output: always generated alongside HTML (opt-out via OUTPUT_JSON=false).
     OUTPUT_JSON_FLAG=""
     if [ "${OUTPUT_JSON:-true}" != "false" ]; then
         if [ "$FAST_DEBUG" = true ]; then
-            COMMIT_HISTORY_JSON="$DYNAMO_REPO/debug.json"
+            COMMIT_HISTORY_JSON="$COMMIT_HISTORY_OUTPUT_DIR/debug.json"
         else
-            COMMIT_HISTORY_JSON="$DYNAMO_REPO/index.json"
+            COMMIT_HISTORY_JSON="$COMMIT_HISTORY_OUTPUT_DIR/index.json"
         fi
         OUTPUT_JSON_FLAG="--output-json $COMMIT_HISTORY_JSON"
     fi
@@ -420,31 +422,31 @@ run_show_commit_history() {
         echo "[DRY-RUN] Would generate commit history dashboard:"
         echo "[DRY-RUN]   Output: $COMMIT_HISTORY_HTML"
         echo "[DRY-RUN]   Max commits: $MAX_COMMITS"
-        echo "[DRY-RUN]   Command: cd $DYNAMO_REPO && git checkout main && git pull origin main"
-        echo "[DRY-RUN]   Command: python3 $SCRIPT_DIR/show_commit_history.py --repo-path . --max-commits $MAX_COMMITS --output $COMMIT_HISTORY_HTML $OUTPUT_JSON_FLAG $SKIP_FLAG $MAX_GH_FLAG $PARALLEL_FLAG $SUCCESS_BUILD_TEST_FLAG $VERIFIER_FLAG"
+        echo "[DRY-RUN]   Command: git -C $DYNAMO_REPO fetch origin +refs/heads/main:refs/remotes/origin/main && git -C $DYNAMO_REPO checkout --detach origin/main"
+        echo "[DRY-RUN]   Command: python3 $SCRIPT_DIR/show_commit_history.py --repo-path $DYNAMO_REPO --max-commits $MAX_COMMITS --output $COMMIT_HISTORY_HTML $OUTPUT_JSON_FLAG $SKIP_FLAG $MAX_GH_FLAG $PARALLEL_FLAG $SUCCESS_BUILD_TEST_FLAG $VERIFIER_FLAG"
         return 0
     fi
 
-    if [ ! -d "$DYNAMO_REPO/.git" ]; then
+    if ! git -C "$DYNAMO_REPO" rev-parse --git-dir >/dev/null 2>&1; then
         echo "$(date '+%Y-%m-%d %H:%M:%S') - ERROR: Not a git repository: $DYNAMO_REPO" >> "$LOG_FILE"
         exit 1
     fi
 
-    cd "$DYNAMO_REPO" || exit 1
-
-    # Checkout main and pull latest
+    # Use a dedicated clean worktree so generated pages and user files in the served
+    # commits directory cannot block updates to the source history.
     echo "$(date '+%Y-%m-%d %H:%M:%S') - Updating $DYNAMO_REPO to latest main" >> "$LOG_FILE"
     log_line_ts "$GIT_UPDATE_LOG" "===== update commits start ====="
-    if run_cmd_to_log_ts "$GIT_UPDATE_LOG" git checkout main && run_cmd_to_log_ts "$GIT_UPDATE_LOG" git pull origin main; then
-        echo "$(date '+%Y-%m-%d %H:%M:%S') - Successfully updated to latest main" >> "$LOG_FILE"
-    else
-        echo "$(date '+%Y-%m-%d %H:%M:%S') - WARNING: Failed to update git repository" >> "$LOG_FILE"
-        # Continue anyway - use whatever is currently checked out
+    if ! run_cmd_to_log_ts "$GIT_UPDATE_LOG" git -C "$DYNAMO_REPO" fetch origin +refs/heads/main:refs/remotes/origin/main || ! run_cmd_to_log_ts "$GIT_UPDATE_LOG" git -C "$DYNAMO_REPO" checkout --detach origin/main; then
+        echo "$(date '+%Y-%m-%d %H:%M:%S') - ERROR: Failed to update git repository; refusing to publish stale history" >> "$LOG_FILE"
+        echo "ERROR: Failed to update commit-history source repository: $DYNAMO_REPO" >&2
+        echo "See log for details: $GIT_UPDATE_LOG" >&2
+        exit 1
     fi
+    echo "$(date '+%Y-%m-%d %H:%M:%S') - Successfully updated to latest main" >> "$LOG_FILE"
 
     echo "$(date '+%Y-%m-%d %H:%M:%S') - Generating commit history dashboard (max_commits=$MAX_COMMITS)" >> "$LOG_FILE"
     log_line_ts "$COMMIT_HISTORY_LOG" "===== run_show_commit_history start (max_commits=$MAX_COMMITS output=$COMMIT_HISTORY_HTML) ====="
-    if run_cmd_to_log_ts "$COMMIT_HISTORY_LOG" python3 "$SCRIPT_DIR/show_commit_history.py" --repo-path . --max-commits "$MAX_COMMITS" --output "$COMMIT_HISTORY_HTML" $OUTPUT_JSON_FLAG $SKIP_FLAG $MAX_GH_FLAG $PARALLEL_FLAG $SUCCESS_BUILD_TEST_FLAG $VERIFIER_FLAG $LOCK_FLAG; then
+    if run_cmd_to_log_ts "$COMMIT_HISTORY_LOG" python3 "$SCRIPT_DIR/show_commit_history.py" --repo-path "$DYNAMO_REPO" --max-commits "$MAX_COMMITS" --output "$COMMIT_HISTORY_HTML" $OUTPUT_JSON_FLAG $SKIP_FLAG $MAX_GH_FLAG $PARALLEL_FLAG $SUCCESS_BUILD_TEST_FLAG $VERIFIER_FLAG $LOCK_FLAG; then
         echo "$(date '+%Y-%m-%d %H:%M:%S') - Updated $COMMIT_HISTORY_HTML" >> "$LOG_FILE"
     else
         echo "$(date '+%Y-%m-%d %H:%M:%S') - ERROR: Failed to update commit-history.html" >> "$LOG_FILE"

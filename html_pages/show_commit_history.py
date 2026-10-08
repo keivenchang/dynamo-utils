@@ -3472,12 +3472,14 @@ Environment Variables:
     if not lock.acquire():
         return 0
 
+    page_root_dir = (args.output.parent if args.output else args.repo_path).resolve()
+
     # Prune locally-served raw logs to avoid unbounded growth and delete any partial/unverified artifacts.
     # We only render `[raw log]` links when the local file exists (or was materialized),
     # so pruning won't produce dead links on a freshly generated page.
-    _ = prune_dashboard_raw_logs(page_root_dir=args.repo_path, max_age_days=90)
+    _ = prune_dashboard_raw_logs(page_root_dir=page_root_dir, max_age_days=90)
     # Also remove any partial/unverified raw logs (legacy cache artifacts, missing completed=true, etc).
-    _ = prune_partial_raw_log_caches(page_root_dirs=[args.repo_path])
+    _ = prune_partial_raw_log_caches(page_root_dirs=[page_root_dir])
 
     # Create generator and run
     generator = CommitHistoryGenerator(
