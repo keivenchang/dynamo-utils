@@ -23,7 +23,7 @@ HTML dashboard generators and shared UI utilities for monitoring Dynamo CI/CD.
 
 **Outputs:**
 - Local branches: `$HOME/dev/speedoflight/dynamo/users/<user>/local.html`
-- Commit history: `$NVIDIA_HOME/dynamo/commits/index.html`
+- Commit history: `$NVIDIA_HOME/commits/index.html`
 - Resource report: `$DYNAMO_HOME/resource_report.html`
 
 ---
