@@ -23,7 +23,7 @@ HTML dashboard generators and shared UI utilities for monitoring Dynamo CI/CD.
 
 **Outputs:**
 - Local branches: `$HOME/dev/speedoflight/dynamo/users/<user>/local.html`
-- Commit history: `$NVIDIA_HOME/commits/index.html`
+- Commit history: `$NVIDIA_HOME/dynamo/commits/index.html`
 - Resource report: `$DYNAMO_HOME/resource_report.html`
 
 ---
@@ -177,6 +177,8 @@ python3 show_remote_branches.py \
 
 Shows recent commits with expandable GitHub checks.
 
+The updater fetches latest Dynamo main into `~/dev/dynamo/commits-source` and writes served HTML/JSON into `~/dev/dynamo/commits`. The served directory is plain output; source and review worktrees share the bare repository at `~/dev/dynamo/commit-history.git`. A zero GitHub API budget uses complete cached CI results and leaves uncached results unavailable.
+
 ### Features
 
 - Recent commits from local git
@@ -190,14 +192,15 @@ Shows recent commits with expandable GitHub checks.
 ```bash
 # Full refresh
 python3 html_pages/show_commit_history.py \
-  --repo-path ~/dev/dynamo/commits \
+  --repo-path ~/dev/dynamo/commits-source \
   --max-commits 100 \
   --output ~/dev/dynamo/commits/index.html
 
 # Cache-only (skip GitLab)
 python3 html_pages/show_commit_history.py \
-  --repo-path ~/dev/dynamo/commits \
+  --repo-path ~/dev/dynamo/commits-source \
   --skip-gitlab-api \
+  --max-github-api-calls 0 \
   --output ~/dev/dynamo/commits/index.html
 ```
 
@@ -335,7 +338,7 @@ See log for details: /home/keivenc/dev/logs/2026-01-23/show_local_branches.log
 **Quick "did it actually update?" checks:**
 ```bash
 ls -lah ~/dev/speedoflight/dynamo/users/keivenchang/local.html       # local branches dashboard
-ls -lah ~/dev/commits/index.html             # commit history dashboard
+ls -lah ~/dev/dynamo/commits/index.html             # commit history dashboard
 ls -lah ~/dev/speedoflight/stats/index.html  # stats landing page
 ```
 

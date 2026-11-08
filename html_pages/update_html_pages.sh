@@ -19,7 +19,7 @@
 #   RESOURCE_DB         - If set, explicit SQLite path for resource report (default: $DYNAMO_UTILS_CACHE_DIR/resource_monitor.sqlite).
 #   COMMIT_HISTORY_REPO - Source checkout for commit history (default: $NVIDIA_HOME/dynamo/commits-source).
 #   FRONTEND_CRATES_REPO - If set, checkout used to fetch frontend-crates main
-#                          (default: $NVIDIA_HOME/frontend-crates-conformance).
+#                          (default: $NVIDIA_HOME/frontend-crates/conformance).
 #   FRONTEND_CRATES_REMOTE - If set, remote used when cloning FRONTEND_CRATES_REPO
 #                            (default: git@github.com:ai-dynamo/frontend-crates.git).
 #
@@ -34,7 +34,7 @@
 #   --show-local-resources  Update the resource report ($NVIDIA_HOME/speedoflight/stats/index.html)
 #   --show-local-branches   [DEPRECATED 2026-07-19] no-op; branches dashboard retired
 #   --show-remote-branches  [DEPRECATED 2026-07-19] no-op; /dynamo/users/ dashboards retired
-#   --show-commit-history   Update the commit history dashboard ($NVIDIA_HOME/commits/index.html)
+#   --show-commit-history   Update the commit history dashboard ($NVIDIA_HOME/dynamo/commits/index.html)
 #   --debug-html                   Faster runs: outputs to debug.html instead of index.html, uses smaller commit window (25 commits), enables verification passes
 #   --github-token <token>  GitHub token to pass to all show_*.py scripts (preferred).
 #   --skip-gitlab-api     Skip fetching from GitLab API (commit-history only); use cached data only (faster).
@@ -65,7 +65,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # Default: workspace root; allow cron or manual callers to override it.
 UTILS_DIR="$(dirname "$SCRIPT_DIR")"
 DEFAULT_NVIDIA_HOME="$(dirname "$UTILS_DIR")"
-if [ ! -d "$DEFAULT_NVIDIA_HOME/commits/.git" ] && [ -d "$(dirname "$DEFAULT_NVIDIA_HOME")/commits/.git" ]; then
+if [ "$(basename "$DEFAULT_NVIDIA_HOME")" = "dynamo-utils" ]; then
     DEFAULT_NVIDIA_HOME="$(dirname "$DEFAULT_NVIDIA_HOME")"
 fi
 NVIDIA_HOME="${NVIDIA_HOME:-$DEFAULT_NVIDIA_HOME}"
@@ -87,7 +87,7 @@ Flags:
   --show-local-resources    Write: $NVIDIA_HOME/speedoflight/stats/index.html (or debug.html in --debug-html)
   --show-local-branches     [DEPRECATED 2026-07-19] no-op; branches dashboard retired
   --show-remote-branches    [DEPRECATED 2026-07-19] no-op; /dynamo/users/ dashboards retired
-  --show-commit-history     Write: $NVIDIA_HOME/commits/index.html (or debug.html in --debug-html)
+  --show-commit-history     Write: $NVIDIA_HOME/dynamo/commits/index.html (or debug.html in --debug-html)
   --show-frontend-crates-conformance
                               Fetch frontend-crates main and write conformance/PARITY.html + conformance/CONFORMANCE_v2.html
 
@@ -370,7 +370,7 @@ run_show_remote_branches() {
 
 run_show_commit_history() {
     DYNAMO_REPO="${COMMIT_HISTORY_REPO:-$NVIDIA_HOME/dynamo/commits-source}"
-    COMMIT_HISTORY_OUTPUT_DIR="$NVIDIA_HOME/commits"
+    COMMIT_HISTORY_OUTPUT_DIR="$NVIDIA_HOME/dynamo/commits"
     COMMIT_HISTORY_BASENAME="${COMMIT_HISTORY_BASENAME:-index.html}"
     if [ "$FAST_DEBUG" = true ]; then
         COMMIT_HISTORY_BASENAME="debug.html"
@@ -461,114 +461,98 @@ run_show_commit_history() {
 }
 
 update_frontend_crates_conformance() {
-    # Render from a temporary detached worktree of origin/main. The persistent checkout may be
-    # an active development worktree, so rendering it can publish a dirty feature branch or a
-    # stale clean checkout when its pull is skipped.
-    local frontend_repo="${FRONTEND_CRATES_REPO:-$NVIDIA_HOME/frontend-crates-conformance}"
+    # Always publish fetched main, never the potentially dirty source checkout.
+    local frontend_repo="${FRONTEND_CRATES_REPO:-$NVIDIA_HOME/frontend-crates/conformance}"
     local frontend_remote="${FRONTEND_CRATES_REMOTE:-git@github.com:ai-dynamo/frontend-crates.git}"
     local publish_dir="${FRONTEND_CRATES_PUBLISH_DIR:-$NVIDIA_HOME/frontend-crates/conformance}"
-    # PARITY.html is a legacy stable URL that redirects to CONFORMANCE_v2.html
-    # (the canonical page). The v1 page is no longer generated.
-    local parity_html="$publish_dir/PARITY.html"
-    local conformance_html="$publish_dir/CONFORMANCE_v2.html"
-    local conformance_json="$publish_dir/CONFORMANCE_v2.json"
-    local render_script=""
-    local conformance_tmp=""
-    local conformance_json_tmp=""
+    local scratch_helper="$HOME/dev/ai-config/agents/skills/dyn-shell-execution/scripts/scratch_job.py"
+    local revision publication job
+    local publication_policy="native-history-v1"
+    local publication_log="$DAY_LOG_DIR/frontend_crates_publication.log"
 
     if [ "$DRY_RUN" = true ]; then
-        echo "[DRY-RUN] Would generate frontend-crates conformance HTML:"
-        echo "[DRY-RUN]   Source checkout: $frontend_repo (never rendered directly)"
-        echo "[DRY-RUN]   nginx publish directory: $publish_dir"
-        echo "[DRY-RUN]   legacy URL: $parity_html (meta-refresh redirect to CONFORMANCE_v2.html)"
-        echo "[DRY-RUN]   v2 outputs: $conformance_html and $conformance_json"
-        echo "[DRY-RUN]   Command: git -C $frontend_repo fetch --prune origin main"
-        echo "[DRY-RUN]   Command: git -C $frontend_repo worktree add --detach <temporary-path> origin/main"
-        echo "[DRY-RUN]   Command: cd <temporary-path> && export HF_TOKEN=<~/.cache/huggingface/token> && conformance/utils/render_table_v2.sh --output $conformance_html"
+        echo "[DRY-RUN] Fetch frontend-crates main from $frontend_repo"
+        echo "[DRY-RUN] Build cargo package conformance-publisher in isolated secondary-disk scratch"
+        echo "[DRY-RUN] Install locked viewer bundler with npm ci --ignore-scripts"
+        echo "[DRY-RUN] Run conformance-publish --root <snapshot> --output <site> --revision <fetched-main> --include-history"
+        echo "[DRY-RUN] Publish immutable site under $publish_dir/publications/<revision>"
+        echo "[DRY-RUN] Atomically replace $publish_dir/CONFORMANCE_v2.html after successful generation"
         return 0
     fi
 
     if ! git -C "$frontend_repo" rev-parse --git-dir >/dev/null 2>&1; then
-        echo "$(date '+%Y-%m-%d %H:%M:%S') - Cloning frontend-crates into $frontend_repo" >> "$LOG_FILE"
-        mkdir -p "$(dirname "$frontend_repo")"
-        if ! run_cmd_to_log_ts "$GIT_UPDATE_LOG" git clone "$frontend_remote" "$frontend_repo"; then
-            echo "$(date '+%Y-%m-%d %H:%M:%S') - ERROR: failed to clone frontend-crates (see $GIT_UPDATE_LOG)" >> "$LOG_FILE"
-            return 1
-        fi
+        mkdir -p "$(dirname "$frontend_repo")" || return 1
+        git clone "$frontend_remote" "$frontend_repo" >>"$publication_log" 2>&1 || return 1
     fi
-
-    echo "$(date '+%Y-%m-%d %H:%M:%S') - Fetching frontend-crates main for isolated render" >> "$LOG_FILE"
-    if ! run_cmd_to_log_ts "$GIT_UPDATE_LOG" git -C "$frontend_repo" fetch --prune origin main; then
-        echo "$(date '+%Y-%m-%d %H:%M:%S') - ERROR: failed to fetch frontend-crates main; refusing stale render" >> "$LOG_FILE"
+    if ! git -C "$frontend_repo" fetch origin main >>"$publication_log" 2>&1; then
+        echo "ERROR: frontend-crates fetch failed; previous report retained ($publication_log)" >&2
         return 1
     fi
-
-    echo "$(date '+%Y-%m-%d %H:%M:%S') - Generating frontend-crates parser conformance HTML" >> "$LOG_FILE"
-    # v1 is rendered as legacy input for comparison only. v2-owned behavior stays
-    # in parsers_v2/ and the v2 fixture overlays in frontend-crates.
-    # Fixtures live on the PRIVATE HuggingFace dataset; the render downloads them.
-    # download_fixtures.py already falls back to ~/.cache/huggingface/token, but export
-    # it explicitly. Do not use a login shell here: its background startup programs can
-    # inherit this logger's stdout pipe and permanently hold the cron lock.
-    mkdir -p "$publish_dir"
-    # PARITY_v1.html is no longer generated: frontend-crates #167 (cc35ede4, 2026-07-30)
-    # deleted conformance/utils/render_table_v1.sh. PARITY.html stays as a legacy stable
-    # URL redirecting to the canonical v2 page.
-    cat > "$parity_html" << 'PARITY_REDIRECT_EOF'
-<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta http-equiv="refresh" content="10;url=CONFORMANCE_v2.html">
-<title>Moved - CONFORMANCE_v2.html</title>
-<style>body{font-family:-apple-system,system-ui,sans-serif;margin:3em;color:#24324a}</style>
-</head>
-<body>
-<h1>This page has moved</h1>
-<p>The Dynamo parser conformance table now lives at
-<a href="CONFORMANCE_v2.html"><strong>CONFORMANCE_v2.html</strong></a>.</p>
-<p>Redirecting in 10 seconds... (or click the link above).</p>
-</body>
-</html>
-PARITY_REDIRECT_EOF
-
-    conformance_tmp="$(mktemp -p "$(dirname "$conformance_html")" .CONFORMANCE_v2-XXXXXX.html)"
-    conformance_json_tmp="${conformance_tmp%.html}.json"
+    revision="$(git -C "$frontend_repo" rev-parse FETCH_HEAD)" || return 1
+    publication="$publish_dir/publications/$revision"
+    if [ -s "$publish_dir/CONFORMANCE_v2.html" ] &&
+       [ -s "$publication/conformance/viewer-publication.json" ] &&
+       [ "$(cat "$publish_dir/.frontend-crates-publication" 2>/dev/null)" = "$publication_policy $revision" ]; then
+        log_line_ts "$publication_log" "Already published frontend-crates $revision ($publication_policy)"
+        return 0
+    fi
+    job="$(python3 "$scratch_helper" --label frontend-conformance --create)" || return 1
+    log_line_ts "$publication_log" "Generating $revision; full output: $job/generation.log"
     if (
-        set -euo pipefail
-        cleanup_render_worktree() {
-            if [ -n "${render_worktree:-}" ]; then
-                git -C "$frontend_repo" worktree remove --force "$render_worktree" >/dev/null 2>&1 || true
-                rmdir "$render_worktree" >/dev/null 2>&1 || true
-            fi
-            rm -f "$conformance_tmp"
-            rm -f "$conformance_json_tmp"
-        }
-        trap cleanup_render_worktree EXIT
-        render_worktree="$(mktemp -d -p "$(dirname "$frontend_repo")" .frontend-crates-render-XXXXXX)"
-        rmdir "$render_worktree"
-        run_cmd_to_log_ts "$GIT_UPDATE_LOG" git -C "$frontend_repo" worktree add --detach "$render_worktree" origin/main
-        echo "$(date '+%Y-%m-%d %H:%M:%S') - Isolated frontend-crates render worktree: $render_worktree" >> "$LOG_FILE"
-        if [ ! -x "$render_worktree/conformance/utils/render_table_v2.sh" ]; then
-            echo "$(date '+%Y-%m-%d %H:%M:%S') - ERROR: frontend-crates main has no conformance render script" >> "$LOG_FILE"
-            exit 1
+        # Every critical operation has an explicit failure check: callers invoke
+        # this subshell in an if condition, where Bash disables implicit errexit.
+        export PATH="$HOME/.cargo/bin:$HOME/.local/bin:$PATH"
+        export TMPDIR="$job/tmp" TMP="$job/tmp" TEMP="$job/tmp"
+        export CARGO_TARGET_DIR="$job/cargo-target"
+        export CONFORMANCE_PYTHON=/usr/bin/python3
+        export CONFORMANCE_ESBUILD_ROOT="$job/viewer-build"
+        git -C "$frontend_repo" worktree add --detach "$job/source" "$revision" || exit 1
+        mkdir -p "$CONFORMANCE_ESBUILD_ROOT" || exit 1
+        \cp -f "$job/source/conformance/viewer/package.json" "$job/source/conformance/viewer/package-lock.json" "$CONFORMANCE_ESBUILD_ROOT/" || exit 1
+        npm ci --prefix "$CONFORMANCE_ESBUILD_ROOT" --ignore-scripts || exit 1
+        cd "$job/source" || exit 1
+        cargo build --locked --release -p conformance-publisher || exit 1
+        "$CARGO_TARGET_DIR/release/conformance-publish" --help || exit 1
+        "$CARGO_TARGET_DIR/release/conformance-publish" --root "$job/source" --output "$job/site" --revision "$revision" --include-history || exit 1
+        [ -s "$job/site/index.html" ] && [ -s "$job/site/conformance/viewer-publication.json" ] || exit 1
+        mkdir -p "$publish_dir/publications" || exit 1
+        # Immutable site paths keep an open browser tied to its matching history.
+        # No maintained source files in the persistent checkout are overwritten.
+        if [ ! -e "$publication" ]; then
+            installation="$(mktemp -d "$publish_dir/publications/.install-XXXXXX")" || exit 1
+            rsync -a --chmod=D755,F644 "$job/site/" "$installation/" || exit 1
+            \mv -f "$installation" "$publication" || exit 1
         fi
-        render_script="$render_worktree/conformance/utils/render_table_v2.sh"
-        if [ -n "${HF_TOKEN:-}" ]; then
-            run_cmd_to_log_ts "$COMMIT_HISTORY_LOG" env HF_TOKEN="$HF_TOKEN" "$render_script" --output "$conformance_tmp"
-        else
-            run_cmd_to_log_ts "$COMMIT_HISTORY_LOG" "$render_script" --output "$conformance_tmp"
-        fi
-        chmod 644 "$conformance_tmp"
-        chmod 644 "$conformance_json_tmp"
-        \mv -f "$conformance_tmp" "$conformance_html"
-        \mv -f "$conformance_json_tmp" "$conformance_json"
-        trap - EXIT
-        cleanup_render_worktree
-    ); then
-        echo "$(date '+%Y-%m-%d %H:%M:%S') - Updated $conformance_html" >> "$LOG_FILE"
+        /usr/bin/python3 - "$publication" "$publish_dir" "$revision" "$publication_policy" <<'PUBLISH_PY'
+import os
+import sys
+import tempfile
+from pathlib import Path
+
+publication, destination = map(Path, sys.argv[1:3])
+revision, policy = sys.argv[3:5]
+page = (publication / 'index.html').read_text()
+if page.count('<head>') != 1 or 'id="conformance-embedded"' not in page:
+    raise RuntimeError('Publisher produced an unexpected page; previous report retained')
+page = page.replace('<head>', f'<head><base href="publications/{revision}/">', 1)
+redirect = '<!doctype html><meta http-equiv="refresh" content="0;url=CONFORMANCE_v2.html"><a href="CONFORMANCE_v2.html">Parser conformance</a>\n'
+for name, body in [('CONFORMANCE_v2.html', page), ('PARITY.html', redirect), ('.frontend-crates-publication', f'{policy} {revision}\n')]:
+    with tempfile.NamedTemporaryFile(mode='w', dir=destination, prefix='.publication-', delete=False) as output:
+        output.write(body)
+        output.flush()
+        os.fsync(output.fileno())
+        os.fchmod(output.fileno(), 0o644)
+    os.replace(output.name, destination / name)
+PUBLISH_PY
+        [ "$?" -eq 0 ] || exit 1
+        # Retain the exact source and generated evidence in job scratch. No
+        # forced removal of a checkout containing generated files is needed.
+    ) >"$job/generation.log" 2>&1; then
+        log_line_ts "$publication_log" "Published frontend-crates $revision at $publish_dir/CONFORMANCE_v2.html"
+        return 0
     else
-        echo "$(date '+%Y-%m-%d %H:%M:%S') - ERROR: frontend-crates v2 conformance regen failed; previous report retained (see $COMMIT_HISTORY_LOG)" >> "$LOG_FILE"
+        echo "ERROR: native conformance publication failed; previous report retained. See $job/generation.log" >&2
+        log_line_ts "$publication_log" "FAILED $revision; see $job/generation.log"
         return 1
     fi
 }

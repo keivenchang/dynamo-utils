@@ -151,6 +151,21 @@ class GHPRChecksCacheEntry:
         repr=False,
     )
 
+    def can_use_without_fetch(self, *, now: int, ttl_s: int, min_version: int, cache_only: bool) -> bool:
+        """Offline rendering retains complete cached checks even when ETags require online validation."""
+        return bool(
+            self.ts
+            and self.ver >= min_version
+            and not self.incomplete
+            and (
+                cache_only
+                or (
+                    now - self.ts <= max(0, ttl_s)
+                    and not (self.check_runs_etag or self.status_etag)
+                )
+            )
+        )
+
     def to_disk_dict(self) -> Dict[str, Any]:
         return {
             "ts": int(self.ts),

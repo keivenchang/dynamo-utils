@@ -1169,8 +1169,8 @@ class GitHubAPIClient:
         # Cache for Actions job details (steps, timestamps) (two-tier: memory + disk, short TTL).
         self._actions_job_details_mem_cache: Dict[str, Dict[str, Any]] = {}
         self._actions_job_cache_dir = dynamo_utils_cache_dir() / "actions-jobs"
-        # When True, avoid any network fetches and rely on caches only (best-effort).
-        self.cache_only_mode: bool = False
+        # A zero network budget must use cached-resource paths even when an entry is missing.
+        self.cache_only_mode: bool = self._rest_budget_max == 0
 
         # Cached rate limit info from response headers (used when cache-only mode prevents fresh API calls)
         # Format: {"remaining": 1234, "limit": 5000, "reset_epoch": 1766947200, ...}

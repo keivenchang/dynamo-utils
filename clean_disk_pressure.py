@@ -8,6 +8,7 @@ from __future__ import annotations
 import argparse
 import errno
 import fcntl
+import hashlib
 import json
 import math
 import os
@@ -20,6 +21,7 @@ import subprocess
 import sys
 import time
 from dataclasses import asdict, dataclass
+from collections import deque
 from pathlib import Path
 from typing import Callable
 
@@ -77,6 +79,20 @@ class FileCandidate:
 
 
 @dataclass(frozen=True)
+class PinnedOutputFile:
+    path: Path
+    device: int
+    inode: int
+    mode: int
+    uid: int
+    size: int
+    mtime_ns: int
+    nlink: int
+    allocated_bytes: int
+    preserve_library: bool
+
+
+@dataclass(frozen=True)
 class ActivitySnapshot:
     open_files: set[Path]
     open_inodes: set[tuple[int, int]]
@@ -106,9 +122,8 @@ def _normalized_proc_target(raw_target: str) -> Path | None:
         raw_target = raw_target[: -len(deleted_suffix)]
     if not raw_target.startswith("/"):
         return None
-    return Path(
-        raw_target
-    )  # procfs already resolves symlinks; avoid restatting every mapped library.
+    # Linux treats repeated leading slashes as the same filesystem root.
+    return Path("/" + raw_target.lstrip("/"))
 
 
 def _process_disappeared(error: OSError) -> bool:
@@ -125,20 +140,93 @@ def _process_path(raw: str, mounts: list[tuple[Path, Path]]) -> Path | None:
     return path
 
 
-def _process_bind_mounts(process_dir: Path) -> list[tuple[Path, Path]]:
-    # mountinfo's root records host bind sources even when a process sees /workspace.
-    mappings = []
-    for line in (process_dir / "mountinfo").read_text().splitlines():
+def _mount_records(path: Path) -> list[tuple[str, Path, Path]]:
+    records = []
+    for line in path.read_text().splitlines():
         fields = line.split()
         if len(fields) < 5:
             raise ValueError("malformed process mount record")
-        root, destination = fields[3:5]
-        for escape, value in (("\\040", " "), ("\\011", "\t"), ("\\134", "\\")):
-            root = root.replace(escape, value)
-            destination = destination.replace(escape, value)
-        if root.startswith("/") and root != "/":
-            mappings.append((Path(destination), Path(root)))
-    return sorted(mappings, key=lambda pair: len(pair[0].parts), reverse=True)
+        root, destination = (
+            Path(re.sub(r"\\([0-7]{3})", lambda m: chr(int(m[1], 8)), value))
+            for value in fields[3:5]
+        )
+        if fields[fields.index("-") + 1] == "nsfs":
+            # Namespace handles have roots such as mnt:[4026533398], not files.
+            continue
+        if not root.is_absolute() or not destination.is_absolute():
+            raise ValueError("non-absolute mount record")
+        records.append((fields[2], root, destination))
+    return sorted(records, key=lambda row: len(row[2].parts), reverse=True)
+
+
+def _process_paths(
+    raw: str,
+    mounts: list[tuple[str, Path, Path]],
+    host_mounts: list[tuple[str, Path, Path]],
+) -> set[Path]:
+    path = _process_path(raw, [])
+    if path is None:
+        return set()
+    for device, root, destination in mounts:
+        if _is_within(path, destination):
+            filesystem_path = Path(
+                os.path.normpath(root / path.relative_to(destination))
+            )
+            # The mount root is filesystem-relative, not an absolute host path.
+            # Emit all host aliases so /mnt/nvme-stage and /mnt/sda agree.
+            aliases = {
+                host_target / filesystem_path.relative_to(host_root)
+                for host_device, host_root, host_target in host_mounts
+                if device == host_device and _is_within(filesystem_path, host_root)
+            }
+            return aliases
+    raise ValueError(f"no mount record covers process path {path}")
+
+
+def _resolve_process_path(raw: str, process_dir: Path) -> Path:
+    """Resolve links against the process root, including absolute link targets."""
+    anchor = process_dir / "root"
+    anchor.stat()
+    pending = deque(Path(raw).parts[1:])
+    resolved: list[str] = []
+    links = 0
+    while pending:
+        part = pending.popleft()
+        if part == "..":
+            if resolved:
+                resolved.pop()
+            continue
+        if part == ".":
+            continue
+        path = anchor.joinpath(*resolved, part)
+        try:
+            metadata = path.lstat()
+        except OSError as error:
+            invalid_component = error.errno == errno.ENAMETOOLONG and len(
+                os.fsencode(part)
+            ) > os.pathconf(anchor.joinpath(*resolved), "PC_NAME_MAX")
+            if (
+                error.errno not in (errno.ENOENT, errno.ENOTDIR)
+                and not invalid_component
+            ):
+                raise
+            # Missing/invalid tails cannot name existing files. Chromium also
+            # combines its executable and flags into one oversized argv field;
+            # the separately parsed path tokens still receive full inspection.
+            return Path(os.path.normpath("/" + "/".join([*resolved, part, *pending])))
+        if stat.S_ISLNK(metadata.st_mode):
+            links += 1
+            if links > 40:
+                raise OSError(errno.ELOOP, "process path has too many symbolic links")
+            link = Path(os.readlink(path))
+            if link.is_absolute():
+                resolved.clear()
+            pending.extendleft(
+                reversed(link.parts[1:] if link.is_absolute() else link.parts)
+            )
+        else:
+            resolved.append(part)
+    return Path("/").joinpath(*resolved)
 
 
 def process_references(proc_root: Path = Path("/proc")) -> ActivitySnapshot:
@@ -148,6 +236,22 @@ def process_references(proc_root: Path = Path("/proc")) -> ActivitySnapshot:
     references: set[Path] = set()
     complete = True
     bind_cache = {}
+    host_mounts = None
+
+    def inspection_failed(error: OSError | ValueError, pid: str, source: str) -> None:
+        nonlocal complete
+        if isinstance(error, ValueError) or not _process_disappeared(error):
+            complete = False
+            reason = (
+                type(error).__name__
+                if isinstance(error, ValueError)
+                else f"errno={error.errno}"
+            )
+            print(
+                f"warning: process inspection pid={pid} source={source} {reason}",
+                file=sys.stderr,
+            )
+
     try:
         process_dirs = list(proc_root.iterdir())
     except OSError as error:
@@ -162,57 +266,83 @@ def process_references(proc_root: Path = Path("/proc")) -> ActivitySnapshot:
             if status == "Z":
                 # Zombies have released their files and mount namespace.
                 continue
+            if host_mounts is None:
+                host_mounts = _mount_records(proc_root / "self" / "mountinfo")
             namespace = (process_dir / "ns" / "mnt").stat()
             namespace_key = (namespace.st_dev, namespace.st_ino)
             if namespace_key not in bind_cache:
-                bind_cache[namespace_key] = _process_bind_mounts(process_dir)
+                bind_cache[namespace_key] = _mount_records(process_dir / "mountinfo")
             bind_mounts = bind_cache[namespace_key]
         except (OSError, ValueError) as error:
-            if isinstance(error, ValueError) or not _process_disappeared(error):
-                complete = False
+            inspection_failed(error, process_dir.name, "mount namespace")
             continue
         for link_name in ("cwd", "exe"):
             try:
-                target = _process_path(
-                    os.readlink(process_dir / link_name), bind_mounts
+                targets = _process_paths(
+                    os.readlink(process_dir / link_name), bind_mounts, host_mounts
                 )
             except OSError as error:
-                if not _process_disappeared(error):
-                    complete = False
+                inspection_failed(error, process_dir.name, link_name)
                 continue
-            if target is not None and target != Path("/"):
-                references.add(target)
+            references.update(targets - {Path("/")})
+        for name in ("cmdline", "environ"):
+            try:
+                for field in (
+                    (process_dir / name)
+                    .read_bytes()
+                    .decode(errors="replace")
+                    .split("\0")
+                ):
+                    tokens = {
+                        field,
+                        field.partition("=")[2],
+                        *re.split(r"[\s=:,;\"']+", field),
+                    }
+                    for token in tokens:
+                        if token.startswith("/"):
+                            references.update(
+                                _process_paths(token, bind_mounts, host_mounts)
+                                - {Path("/")}
+                            )
+                            # mountinfo already identifies an exact mount root;
+                            # probing it can fail for root-squashed FUSE portals.
+                            if Path(token) not in {mount[2] for mount in bind_mounts}:
+                                resolved = _resolve_process_path(token, process_dir)
+                                references.update(
+                                    _process_paths(
+                                        str(resolved), bind_mounts, host_mounts
+                                    )
+                                    - {Path("/")}
+                                )
+            except OSError as error:
+                inspection_failed(error, process_dir.name, name)
         fd_dir = process_dir / "fd"
         try:
             fd_links = list(fd_dir.iterdir())
         except OSError as error:
-            if not _process_disappeared(error):
-                complete = False
+            inspection_failed(error, process_dir.name, "fd inventory")
             continue
         for fd_link in fd_links:
             try:
-                target = _process_path(os.readlink(fd_link), bind_mounts)
+                targets = _process_paths(os.readlink(fd_link), bind_mounts, host_mounts)
                 metadata = fd_link.stat()
             except OSError as error:
-                if not _process_disappeared(error):
-                    complete = False
+                inspection_failed(error, process_dir.name, "fd")
                 continue
-            if target is None:
+            if not targets:
                 continue
-            open_files.add(target)
+            open_files.update(targets)
             open_inodes.add((metadata.st_dev, metadata.st_ino))
-            if target != Path("/"):
-                references.add(target)
+            references.update(targets - {Path("/")})
         try:
             for line in (process_dir / "maps").read_text().splitlines():
                 fields = line.split(None, 5)
                 if len(fields) == 6:
-                    target = _process_path(fields[5], bind_mounts)
-                    if target is not None:
-                        references.add(target)
+                    references.update(
+                        _process_paths(fields[5], bind_mounts, host_mounts)
+                    )
         except OSError as error:
-            if not _process_disappeared(error):
-                complete = False
+            inspection_failed(error, process_dir.name, "maps")
     return ActivitySnapshot(open_files, open_inodes, references, complete)
 
 
@@ -657,13 +787,17 @@ def discover_repositories(dev_root: Path, tmp_root: Path | None = None) -> list[
             try:
                 children = list(directory.iterdir())
             except OSError as error:
-                print(f"targets: skipped discovery {directory}: {error}", file=sys.stderr)
+                print(
+                    f"targets: skipped discovery {directory}: {error}", file=sys.stderr
+                )
                 continue
             for child in children:
                 try:
                     metadata = child.lstat()
                 except OSError as error:
-                    print(f"targets: skipped discovery {child}: {error}", file=sys.stderr)
+                    print(
+                        f"targets: skipped discovery {child}: {error}", file=sys.stderr
+                    )
                     continue
                 if not stat.S_ISDIR(metadata.st_mode):
                     continue
@@ -673,7 +807,10 @@ def discover_repositories(dev_root: Path, tmp_root: Path | None = None) -> list[
                     continue
                 if child.name in ("node_modules", "venv", "__pycache__"):
                     continue
-                if child.name == "target" and not (child / ".rustc_info.json").is_file():
+                if (
+                    child.name == "target"
+                    and not (child / ".rustc_info.json").is_file()
+                ):
                     continue
                 pending.append((child, depth + 1))
     return sorted({p.resolve() for p in roots if _verified_target_owner(p)})
@@ -887,6 +1024,82 @@ def _delete_output_contents(
             raise OSError("refusing to delete non-file runtime artifact")
 
 
+def _pinned_file_matches(
+    expected: PinnedOutputFile, current: os.stat_result, removed_links: int = 0
+) -> bool:
+    return stat.S_ISREG(current.st_mode) and (
+        current.st_dev,
+        current.st_ino,
+        current.st_mode,
+        current.st_uid,
+        current.st_size,
+        current.st_mtime_ns,
+        current.st_nlink,
+    ) == (
+        expected.device,
+        expected.inode,
+        expected.mode,
+        expected.uid,
+        expected.size,
+        expected.mtime_ns,
+        expected.nlink - removed_links,
+    )
+
+
+def _validate_pinned_output_files(
+    fd: int, files: list[PinnedOutputFile], cutoff: float
+) -> None:
+    if len({item.path.name for item in files}) != len(files):
+        raise ValueError("duplicate pinned file name")
+    if set(os.listdir(fd)) != {item.path.name for item in files}:
+        raise ValueError("pinned output inventory changed")
+    for item in files:
+        if (
+            item.preserve_library != _installed_library(item.path.name)
+            or not stat.S_ISREG(item.mode)
+            or (
+                not item.preserve_library
+                and item.path.suffix.lower() in (".md", ".txt")
+            )
+        ):
+            raise ValueError(f"not a supported pinned compiler file: {item.path}")
+        current = os.stat(item.path.name, dir_fd=fd, follow_symlinks=False)
+        if not _pinned_file_matches(item, current):
+            raise ValueError(f"pinned file changed: {item.path}")
+        if not item.preserve_library and current.st_mtime >= cutoff:
+            raise ValueError(f"pinned file is too recent: {item.path}")
+
+
+def _delete_pinned_output_files(
+    fd: int,
+    files: list[PinnedOutputFile],
+    cutoff: float,
+    check_ownership: Callable[[], None],
+    removed: list[str],
+) -> None:
+    # Reject drift before the first mutation, then revalidate each pinned name.
+    _validate_pinned_output_files(fd, files, cutoff)
+    removed_links: dict[tuple[int, int], int] = {}
+    for item in files:
+        if item.preserve_library:
+            continue
+        check_ownership()
+        key = (item.device, item.inode)
+        current = os.stat(item.path.name, dir_fd=fd, follow_symlinks=False)
+        if not _pinned_file_matches(item, current, removed_links.get(key, 0)):
+            raise ValueError(f"pinned file changed before unlink: {item.path}")
+        os.unlink(item.path.name, dir_fd=fd)
+        removed.append(str(item.path))
+        removed_links[key] = removed_links.get(key, 0) + 1
+    for item in files:
+        if item.preserve_library:
+            current = os.stat(item.path.name, dir_fd=fd, follow_symlinks=False)
+            if not _pinned_file_matches(
+                item, current, removed_links.get((item.device, item.inode), 0)
+            ):
+                raise ValueError(f"retained library changed: {item.path}")
+
+
 def _process_identity(pid: int) -> str:
     fields = Path(f"/proc/{pid}/stat").read_text().rpartition(") ")[2].split()
     if fields[0] == "Z":
@@ -943,8 +1156,19 @@ def _elevated_remove_target(candidate: TargetCandidate) -> bool:
 
 
 def _remove_target(
-    candidate: TargetCandidate, dry_run: bool, supervisor: tuple[int, str] | None = None
+    candidate: TargetCandidate,
+    dry_run: bool,
+    supervisor: tuple[int, str] | None = None,
+    pinned_files: list[PinnedOutputFile] | None = None,
+    removed_paths: list[str] | None = None,
 ) -> bool:
+    if pinned_files is not None and any(
+        item.path.parent != candidate.target
+        or item.device != candidate.device
+        or item.uid != candidate.repo.stat().st_uid
+        for item in pinned_files
+    ):
+        raise ValueError("pinned files do not belong to the selected output")
     if not _target_identity_matches(candidate) or not _verified_target_owner(
         candidate.repo
     ):
@@ -956,6 +1180,10 @@ def _remove_target(
     if dry_run:
         return True
     if os.geteuid() != 0 and not _writable_output(candidate.target):
+        if pinned_files is not None:
+            raise PermissionError(
+                "pinned cleanup requires write access; cannot widen via elevation"
+            )
         return _elevated_remove_target(candidate)
     _require_supervisor(supervisor)
     try:
@@ -1026,12 +1254,25 @@ def _remove_target(
                         ):
                             return False
                         check_ownership()
-                        _delete_output_contents(
-                            output_fd,
-                            candidate.device,
-                            candidate.cutoff,
-                            check_ownership,
-                        )
+                        if pinned_files is None:
+                            _delete_output_contents(
+                                output_fd,
+                                candidate.device,
+                                candidate.cutoff,
+                                check_ownership,
+                            )
+                        else:
+                            if removed_paths is None:
+                                raise ValueError(
+                                    "pinned cleanup requires a removal receipt"
+                                )
+                            _delete_pinned_output_files(
+                                output_fd,
+                                pinned_files,
+                                candidate.cutoff,
+                                check_ownership,
+                                removed_paths,
+                            )
                     finally:
                         os.close(output_fd)
                     return True
@@ -1039,7 +1280,8 @@ def _remove_target(
                 os.close(fd)
     except (BlockingIOError, PermissionError) as error:
         print(
-            f"target: busy or inaccessible {candidate.target}: {error}", file=sys.stderr
+            f"target: busy or inaccessible {candidate.target}: {error}",
+            file=sys.stderr,
         )
         return False
 
@@ -1187,7 +1429,9 @@ def cleanup_capacity_snapshots(
         return 0, 0
     points, complete = filesystem_mount_points()
     if not complete:
-        print("capacity: skipped because mount inspection was incomplete", file=sys.stderr)
+        print(
+            "capacity: skipped because mount inspection was incomplete", file=sys.stderr
+        )
         return 0, 0
     cutoff = time.time() - keep_days * 86400
     removed = 0
@@ -1208,7 +1452,11 @@ def cleanup_capacity_snapshots(
             if capacity.lstat().st_uid != os.getuid():
                 continue
             snapshots = sorted(
-                (p for p in capacity.iterdir() if re.fullmatch(r"\d{8}T\d{12}", p.name)),
+                (
+                    p
+                    for p in capacity.iterdir()
+                    if re.fullmatch(r"\d{8}T\d{12}", p.name)
+                ),
                 reverse=True,
             )
             for path in snapshots[retain:]:
@@ -1216,16 +1464,25 @@ def cleanup_capacity_snapshots(
                     break
                 try:
                     files = _capacity_files(path, device)
-                    if any(f.mtime >= cutoff for f in files) or path.stat().st_mtime >= cutoff:
+                    if (
+                        any(f.mtime >= cutoff for f in files)
+                        or path.stat().st_mtime >= cutoff
+                    ):
                         continue
                     directory_identity = path.stat()
                     # A live sibling protects the entire temporary job, not just its dumps.
                     snapshot = privileged_process_references()
                     sources, mounts_complete = docker_mount_sources()
                     if not snapshot.complete or not mounts_complete:
-                        print("capacity: skipped because activity inspection was incomplete", file=sys.stderr)
+                        print(
+                            "capacity: skipped because activity inspection was incomplete",
+                            file=sys.stderr,
+                        )
                         return removed, reclaimed
-                    if any(_is_within(p, parent) for p in snapshot.process_references | sources | points):
+                    if any(
+                        _is_within(p, parent)
+                        for p in snapshot.process_references | sources | points
+                    ):
                         break
                     fresh = _capacity_files(path, device)
                     if files != fresh or path.stat() != directory_identity:
@@ -1233,17 +1490,24 @@ def cleanup_capacity_snapshots(
                     action = "would remove" if dry_run else "removing"
                     print(f"capacity: {action} {path}")
                     # Pin the inspected directory so a replaced parent cannot redirect unlink.
-                    descriptor = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+                    descriptor = os.open(
+                        path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+                    )
                     try:
                         pinned = os.fstat(descriptor)
-                        identity = (directory_identity.st_dev, directory_identity.st_ino)
+                        identity = (
+                            directory_identity.st_dev,
+                            directory_identity.st_ino,
+                        )
                         if (pinned.st_dev, pinned.st_ino) != identity:
                             continue
                         eligible = True
                         allocated = 0
                         for candidate in files:
                             current = os.stat(
-                                candidate.path.name, dir_fd=descriptor, follow_symlinks=False
+                                candidate.path.name,
+                                dir_fd=descriptor,
+                                follow_symlinks=False,
                             )
                             inode = (current.st_dev, current.st_ino)
                             if (
@@ -1256,7 +1520,9 @@ def cleanup_capacity_snapshots(
                                 eligible = False
                                 break
                             if not dry_run:
-                                is_open, inspection_complete = privileged_inode_open_state(*inode)
+                                is_open, inspection_complete = (
+                                    privileged_inode_open_state(*inode)
+                                )
                                 if is_open or not inspection_complete:
                                     eligible = False
                                     break
@@ -1265,13 +1531,19 @@ def cleanup_capacity_snapshots(
                         if not eligible or _capacity_files(path, device) != files:
                             continue
                         current_directory = path.lstat()
-                        if (current_directory.st_dev, current_directory.st_ino) != identity:
+                        if (
+                            current_directory.st_dev,
+                            current_directory.st_ino,
+                        ) != identity:
                             continue
                         if not dry_run:
                             for candidate in files:
                                 os.unlink(candidate.path.name, dir_fd=descriptor)
                             current_directory = path.lstat()
-                            if (current_directory.st_dev, current_directory.st_ino) != identity:
+                            if (
+                                current_directory.st_dev,
+                                current_directory.st_ino,
+                            ) != identity:
                                 raise ValueError(f"snapshot directory changed: {path}")
                             path.rmdir()
                         reclaimed += allocated
@@ -1282,8 +1554,106 @@ def cleanup_capacity_snapshots(
                     print(f"capacity: skipped {path}: {error}", file=sys.stderr)
         except (OSError, ValueError) as error:
             print(f"capacity: skipped {capacity}: {error}", file=sys.stderr)
-    print(f"capacity: {'would remove' if dry_run else 'removed'} {removed}, reclaimed={_format_bytes(reclaimed)}")
+    print(
+        f"capacity: {'would remove' if dry_run else 'removed'} {removed}, reclaimed={_format_bytes(reclaimed)}"
+    )
     return removed, reclaimed
+
+
+def _run_pinned_manifest(args: argparse.Namespace) -> int:
+    raw = args.pinned_manifest.read_bytes()
+    if hashlib.sha256(raw).hexdigest() != args.pinned_manifest_sha256:
+        raise ValueError("action manifest hash mismatch")
+    plan = json.loads(raw)
+    target = Path(plan["target"]["path"])
+    root = Path(plan["repo"])
+    profile = Path(plan["profile"])
+    secondary = Path("/mnt/sda/tmp")
+    if (
+        not target.is_absolute()
+        or target.resolve() != target
+        or not _is_within(root, secondary)
+        or root.resolve() != root
+        or root.stat().st_uid != os.getuid()
+        or root.stat().st_dev == Path("/").stat().st_dev
+        or target.parent != profile
+        or profile.parent != root
+        or profile.name not in ("debug", "release")
+        or target.name != "deps"
+    ):
+        raise ValueError("pinned action is outside the supported compiler output scope")
+    minimum_age = float(plan["minimum_age_hours"])
+    if not math.isfinite(minimum_age) or minimum_age < 24:
+        raise ValueError("pinned compiler cleanup requires at least 24 hours")
+    nested_raw = Path(plan["file_manifest"]).read_bytes()
+    if hashlib.sha256(nested_raw).hexdigest() != plan["file_manifest_sha256"]:
+        raise ValueError("nested file manifest hash mismatch")
+    files = [
+        PinnedOutputFile(**(row | {"path": Path(row["path"])}))
+        for row in json.loads(nested_raw)
+        if Path(row["path"]).parent == target
+    ]
+    if sum(not item.preserve_library for item in files) != plan["deletion_file_count"]:
+        raise ValueError("pinned action file count mismatch")
+    metadata = target.lstat()
+    if (metadata.st_dev, metadata.st_ino, metadata.st_mtime_ns) != (
+        plan["target"]["device"],
+        plan["target"]["inode"],
+        plan["target"]["mtime_ns"],
+    ):
+        raise ValueError("pinned target identity changed")
+    candidate = TargetCandidate(
+        root,
+        target,
+        plan["target"]["allocated_candidate_bytes"],
+        (time.time() - metadata.st_mtime) / 3600,
+        metadata.st_dev,
+        metadata.st_ino,
+        metadata.st_mtime,
+        root,
+        profile,
+        time.time() - minimum_age * 3600,
+    )
+    fd = os.open(target, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        _validate_pinned_output_files(fd, files, candidate.cutoff)
+    finally:
+        os.close(fd)
+    stream = args.pinned_receipt.open("x")
+    removed: list[str] = []
+    before = shutil.disk_usage(target).free
+    success = False
+    try:
+        if args.apply_pinned_manifest:
+            success = _remove_target(
+                candidate, False, pinned_files=files, removed_paths=removed
+            )
+        else:
+            success = _remove_target(candidate, True, pinned_files=files)
+        return 0 if success else 5
+    finally:
+        receipt = {
+            "manifest_sha256": args.pinned_manifest_sha256,
+            "file_manifest_sha256": plan["file_manifest_sha256"],
+            "applied": args.apply_pinned_manifest,
+            "success": success,
+            "removed_count": len(removed),
+            "removed_paths": removed,
+            "free_bytes_before": before,
+            "free_bytes_after": shutil.disk_usage(target).free,
+        }
+        try:
+            json.dump(receipt, stream, indent=2)
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        finally:
+            stream.close()
+        print(
+            json.dumps(
+                {key: value for key, value in receipt.items() if key != "removed_paths"}
+            )
+        )
 
 
 def parse_args() -> argparse.Namespace:
@@ -1351,6 +1721,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-capacity-snapshots", type=int, default=100)
     parser.add_argument("--remove-target", help=argparse.SUPPRESS)
     parser.add_argument(
+        "--pinned-manifest", type=Path, help="Reviewed exact-file compiler cleanup plan"
+    )
+    parser.add_argument(
+        "--pinned-manifest-sha256", help="Expected SHA256 of the action plan"
+    )
+    parser.add_argument("--pinned-receipt", type=Path, help="New JSON receipt path")
+    parser.add_argument(
+        "--apply-pinned-manifest",
+        action="store_true",
+        help="Apply the exact plan; default is preview",
+    )
+    parser.add_argument(
         "--activity-snapshot", action="store_true", help=argparse.SUPPRESS
     )
     parser.add_argument(
@@ -1370,6 +1752,16 @@ def _terminate(signum: int, frame) -> None:
 def main() -> int:
     signal.signal(signal.SIGTERM, _terminate)
     args = parse_args()
+    if args.pinned_manifest is not None:
+        if args.apply_pinned_manifest and args.dry_run:
+            raise ValueError("cannot combine --dry-run and --apply-pinned-manifest")
+        if not args.pinned_manifest_sha256 or args.pinned_receipt is None:
+            raise ValueError("pinned cleanup requires a plan hash and receipt path")
+        if args.pinned_receipt.exists() or args.pinned_receipt.suffix != ".json":
+            raise ValueError("pinned cleanup requires a new JSON receipt")
+        return _run_pinned_manifest(args)
+    if args.apply_pinned_manifest:
+        raise ValueError("--apply-pinned-manifest requires a pinned manifest")
     if args.remove_target is not None:
         if os.geteuid() != 0:
             raise PermissionError("exact-candidate mutator requires elevation")

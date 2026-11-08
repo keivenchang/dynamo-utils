@@ -91,7 +91,7 @@
                                                                      CLAUDE.md)
 
             ~/dev/notes/              ->   ~/notes/              (persistent, read-write)
-            ~/dev/dynamo-utils.PROD/  ->   ~/utils/              (read-only)
+            ~/dev/dynamo-utils/dynamo-utils.PRODUCTION/  ->   ~/utils/              (read-only)
 
             pyrightconfig.json: symlinked from /workspace/ -> ~/utils/ in postCreateCommand
             (file bind mounts can't overlay paths inside an existing directory mount)
@@ -124,7 +124,7 @@
 
         {# --- Project data & tooling --- #}
         "source=${localEnv:HOME}/dev/notes,target=/home/dynamo/notes,type=bind",
-        "source=${localEnv:HOME}/dev/dynamo-utils.PRODUCTION/,target=/home/dynamo/utils,type=bind,readonly",
+        "source=${localEnv:HOME}/dev/dynamo-utils/dynamo-utils.PRODUCTION/,target=/home/dynamo/utils,type=bind,readonly",
 
         {#
             Per-engine cargo target dir, overlaid at /workspace/target.

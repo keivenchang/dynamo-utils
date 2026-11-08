@@ -219,7 +219,6 @@ class CommitChecksCached(CachedResourceBase[List[GHPRCheckRow]]):
         MIN_CACHE_VER = 1
 
         cached_entry_dict = _CACHE.get_entry_dict(key)
-        has_etag = False
         if cached_entry_dict is not None:
             try:
                 ent = GHPRChecksCacheEntry.from_disk_dict_strict(
@@ -227,15 +226,14 @@ class CommitChecksCached(CachedResourceBase[List[GHPRCheckRow]]):
                     cache_file=_CACHE._cache_file,
                     entry_key=key,
                 )
-                ts = int(ent.ts)
-                ver = int(ent.ver)
-                incomplete = bool(ent.incomplete)
-                has_etag = bool(ent.check_runs_etag or ent.status_etag)
-
-                if ts and ((now - ts) <= max(0, int(effective_ttl_s)) or self.api.cache_only_mode) and not incomplete and not has_etag:
-                    if ver >= MIN_CACHE_VER:
-                        self.api._cache_hit(cn)
-                        return list(ent.rows)
+                if ent.can_use_without_fetch(
+                    now=now,
+                    ttl_s=effective_ttl_s,
+                    min_version=MIN_CACHE_VER,
+                    cache_only=self.api.cache_only_mode,
+                ):
+                    self.api._cache_hit(cn)
+                    return list(ent.rows)
             except (ValueError, TypeError, RuntimeError):
                 pass
 
